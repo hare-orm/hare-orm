@@ -6,6 +6,8 @@ from typing import Any
 
 import pytest
 
+from hare.models.instances.dirty_fields import DirtyFields
+from hare.native.native_modules import NativeModules
 from hare.query.rows.model_rows.model_columns import ModelColumns
 from tests.utils.database_under_test import DatabaseUnderTest
 from tests.utils.model_rows_queries import get_model_rows_query
@@ -79,8 +81,12 @@ class PgResultReading:
         named_reader = ModelColumns(
             model, reader.entries, tuple(model._meta.fields_db_projection[name] for name in names), reader.is_partial
         )
-        from_result = [reader.hydrate(row, None) for row in rows]
-        from_row_objects = [named_reader.hydrate(row, None) for row in rows]
+        from_result = NativeModules.rows.ModelResultLayout([reader], ()).read_batch(
+            rows, 0, len(rows), None, DirtyFields.snapshot_dirty_fields
+        )
+        from_row_objects = NativeModules.rows.ModelResultLayout([named_reader], ()).read_batch(
+            rows, 0, len(rows), None, DirtyFields.snapshot_dirty_fields
+        )
         assert len(from_result) == len(from_row_objects)
         for result_instance, row_instance in zip(from_result, from_row_objects, strict=True):
             for name in names:

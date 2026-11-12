@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import copy
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.exceptions import QueryError
 from hare.fields.field import Field
@@ -30,7 +30,7 @@ class InstanceCopies:
             attributes.pop("_pending_rollback_restore_stack", None)
             slots.pop("_pending_rollback_restore_stack", None)
             return attributes, slots
-        attributes = dict(cast("dict[str, Any] | None", state) or {})
+        attributes = dict(state or {})  # type: ignore[call-overload]
         attributes.pop("_pending_rollback_restore_stack", None)
         return attributes
 
@@ -109,7 +109,7 @@ class InstanceCopies:
             elif pk_field.default is None and not pk_field.has_db_default():
                 raise QueryError(f"{meta.full_name} requires explicit primary key. Please use .clone(pk=<value>)")
             else:
-                InstanceCopies.apply_clone_pk_component_default(obj, cast("str", meta.primary_key_attribute), pk_field)
+                InstanceCopies.apply_clone_pk_component_default(obj, meta.primary_key_attribute, pk_field)  # type: ignore[arg-type]
         return obj
 
     @staticmethod

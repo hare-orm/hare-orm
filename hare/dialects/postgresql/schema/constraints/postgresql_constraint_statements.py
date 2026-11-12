@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.ddl.conditions.constraint_condition import ConstraintCondition
 from hare.ddl.constraints.check_constraint import CheckConstraint
@@ -84,7 +84,7 @@ class PostgresqlConstraintStatements(ConstraintStatements):
             self.editor.ADD_CONSTRAINT_TEMPLATE.format(
                 table=self.editor.qualify_table_name(model._meta.db_table, model._meta.schema),
                 constraint=(
-                    f"CONSTRAINT {self.editor.quote(cast('str', constraint.name))} UNIQUE USING INDEX "
+                    f"CONSTRAINT {self.editor.quote(constraint.name)} UNIQUE USING INDEX "  # type: ignore[arg-type]
                     f"{self.editor.quote(index_name)}{deferrable_sql}"
                 ),
             )

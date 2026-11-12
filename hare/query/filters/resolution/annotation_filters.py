@@ -192,7 +192,7 @@ class AnnotationFilters:
         field_lookup: FieldLookup,
         annotation_output_field: Field[Any] | None,
         value: Any,
-    ) -> tuple[Callable[[Any], Any] | None, Field[Any] | None]:
+    ) -> tuple[Callable[[Any], Any] | None, Field[Any] | None, Callable[..., Any] | None]:
         """How the value of a filter on an annotation becomes the bound one - the same conversion
         for a later value.
 
@@ -203,45 +203,57 @@ class AnnotationFilters:
             value: The value given.
 
         Returns:
-            The conversion, None for a value bound as it is; and the field the lookup's own
-            encoder converts by, None when no encoder does.
+            The conversion (None for a value bound as given), the field of a lookup encoder
+            and that encoder itself. The last two are None for field-only conversion.
         """
         if annotation_output_field is None or isinstance(value, Term):
-            return None, None
-        if field_lookup.value_encoder is not None:
+            return None, None, None
+        if field_lookup.value_encoder is not None or field_lookup.value_encoder_builder is not None:
             # A field-aware lookup takes an encoded value, as for a model field. The field-blind
             # __in/__isnull entries get the raw value.
             encoder_field = GeneratedField.get_effective_field(annotation_output_field)
-            return partial(
-                AnnotationFilters.encode_annotation_filter_value,
-                field_lookup.value_encoder,
-                expression_context.model,
+            value_encoder = field_lookup.get_value_encoder(encoder_field, expression_context.dialect)
+            assert value_encoder is not None  # nosec B101
+            return (
+                partial(
+                    AnnotationFilters.encode_annotation_filter_value,
+                    value_encoder,
+                    expression_context.model,
+                    encoder_field,
+                    expression_context.dialect,
+                ),
                 encoder_field,
-                expression_context.dialect,
-            ), encoder_field
+                value_encoder,
+            )
         if FilterValues.is_container_field(annotation_output_field):
             # An array/JSON/range lookup with no value_encoder of its own (`__contains` of an aggregate
             # collecting JSON) binds the value in the field's stored form, as the plain-field branch does.
-            return partial(
-                expression_context.dialect.types.get_lookup_value,
-                annotation_output_field,
-                instance=expression_context.model,
-            ), None
+            return (
+                expression_context.dialect.types.get_lookup_encoder(annotation_output_field, expression_context.model),
+                None,
+                None,
+            )
         if isinstance(annotation_output_field, TimeDeltaField) and isinstance(value, timedelta):
             # A comparison operator with no value_encoder of its own binds the raw value - a
             # timedelta is stored as whole microseconds, and no driver accepts it as a parameter
             # for that column type (`.annotate(span=F("end") - F("start")).filter(span__gt=...)`).
-            return expression_context.dialect.types.get_field_encoder(TemporalArithmetic.TIMEDELTA_OUTPUT_FIELD), None
+            return (
+                expression_context.dialect.types.get_field_encoder(TemporalArithmetic.TIMEDELTA_OUTPUT_FIELD),
+                None,
+                None,
+            )
         if value is not None:
             # A comparison operator with no value_encoder of its own binds the value as the
             # annotation's field takes a value of a filter on it - an int of an integer, a naive
             # datetime in the configured zone, a date's string parsed.
-            return partial(
-                expression_context.dialect.types.get_lookup_value,
-                GeneratedField.get_effective_field(annotation_output_field),
-                instance=expression_context.model,
-            ), None
-        return None, None
+            return (
+                expression_context.dialect.types.get_lookup_encoder(
+                    GeneratedField.get_effective_field(annotation_output_field), expression_context.model
+                ),
+                None,
+                None,
+            )
+        return None, None, None
 
     @staticmethod
     def get_value_reference(
@@ -250,7 +262,7 @@ class AnnotationFilters:
         operator: Callable[..., Any],
         raw_value: Any,
         value: Any,
-        field_lookup: FieldLookup,
+        value_encoder: Callable[..., Any] | None,
         encoder_field: Field[Any] | None,
         parameter_converter: Callable[[Any], Any] | None,
     ) -> LiteralValueReference | ListValueReference | ListParameterValueReference | None:
@@ -262,7 +274,7 @@ class AnnotationFilters:
             operator: The operator that built it.
             raw_value: The value given.
             value: The value bound.
-            field_lookup: The lookup.
+            value_encoder: The selected lookup encoder used to convert the value.
             encoder_field: The field the lookup's own encoder converted the value by, None for none.
             parameter_converter: How the given value became the bound one, None for as it is.
 
@@ -273,10 +285,10 @@ class AnnotationFilters:
             return None
         if not isinstance(raw_value, (list, tuple, set)):
             return AnnotationFilters.get_annotation_value_reference(criterion, value, parameter_converter)
-        if field_lookup.value_encoder is None or encoder_field is None:
+        if value_encoder is None or encoder_field is None:
             return None
         list_reference = FilterValues.get_value_reference(
-            expression_context, criterion, operator, raw_value, value, encoder_field, field_lookup.value_encoder
+            expression_context, criterion, operator, raw_value, value, encoder_field, value_encoder
         )
         if isinstance(list_reference, (ListValueReference, ListParameterValueReference)):
             return list_reference

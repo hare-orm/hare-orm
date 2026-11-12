@@ -34,7 +34,7 @@ class ClickhouseGlobalLookups:
         Returns:
             The container.
         """
-        if isinstance(value, list | tuple | set):
+        if isinstance(value, (list, tuple, set)):
             return Tuple(*Lookups.get_in_list_terms(list(value)))
         return value
 
@@ -50,7 +50,7 @@ class ClickhouseGlobalLookups:
         Returns:
             The criterion.
         """
-        if not isinstance(value, list | tuple | set):
+        if not isinstance(value, (list, tuple, set)):
             return GlobalContainsCriterion(term, value)
         non_null_values = [item for item in value if item is not None]
         if not non_null_values:
@@ -70,7 +70,7 @@ class ClickhouseGlobalLookups:
         Returns:
             The criterion.
         """
-        if not isinstance(value, list | tuple | set):
+        if not isinstance(value, (list, tuple, set)):
             return GlobalContainsCriterion(term, value).is_not_true()
         non_null_values = [item for item in value if item is not None]
         if not non_null_values:

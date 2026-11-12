@@ -42,3 +42,9 @@ CONNECTION_DATABASE_ON_ANOTHER_LOOP_MESSAGE = (
 
 RESOURCE_COMPLETION_FAILED = "Resource release failed while its caller was cancelled"
 INITIALIZATION_RELEASE_FAILED = "Application initialization and resource release failed"
+
+
+#: A scalar swappable reference cannot select several model labels.
+SWAPPABLE_SETTING_MULTIPLE_MODELS_MESSAGE = (
+    "Swappable setting {setting!r} names several models - only a GenericForeignKeyField takes it"
+)

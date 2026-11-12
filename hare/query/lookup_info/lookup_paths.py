@@ -14,6 +14,7 @@ from hare.fields.field import Field
 from hare.fields.relations.fields.backward_foreign_key_relation import BackwardForeignKeyRelation
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.fields.relations.fields.relational_field import RelationalField
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.expressions.expression_result import TableCriterionTuple
 from hare.query.key_columns import KeyColumns
 from hare.query.lookup_info.lookup_path import LookupPath
@@ -50,7 +51,7 @@ class LookupPaths:
         return f"{prefix}.{field_name}"
 
     @staticmethod
-    def crosses_connections(related_field: RelationalField[Model]) -> bool:
+    def crosses_connections(related_field: RelationalField[Any]) -> bool:
         """Whether a relation joins its model to one on another connection.
 
         Args:
@@ -229,7 +230,7 @@ class LookupPaths:
             raise FieldError(f"{lookup_expression} not resolvable")
         model = lookup_path.model
         last_field_name = lookup_path.rest[0]
-        if last_field_name == "pk" and isinstance(model._meta.primary_key_attribute, str):
+        if last_field_name == PRIMARY_KEY_ALIAS and isinstance(model._meta.primary_key_attribute, str):
             last_field_name = model._meta.primary_key_attribute
         last_field = model._meta.fields_map.get(last_field_name)
         if last_field is None:

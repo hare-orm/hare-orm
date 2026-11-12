@@ -1,10 +1,10 @@
+use crate::asyncio::future_into_py;
 use crate::pg::error::{to_pyerr, DriverError};
 use crate::pg::first_row::FirstRow;
 use crate::pg::result::PgResult;
 use crate::pg::result_columns::ResultColumns;
 use crate::pg::result_data::ResultData;
 use crate::pg::value::Value;
-use pyo3_async_runtimes::tokio::future_into_py;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;

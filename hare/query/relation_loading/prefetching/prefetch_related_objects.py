@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.core.connections.connections import Connections
-from hare.fields.relations.fields.relational_field import RelationalField
 from hare.models.instances.instance_connections import InstanceConnections
 
 if TYPE_CHECKING:
@@ -40,9 +40,9 @@ async def prefetch_related_objects(
     from hare.query.relation_loading.prefetching.prefetch_result import PrefetchResult
     from hare.query.relation_loading.prefetching.prefetcher import Prefetcher
 
-    instances_by_model: dict[type[Model], list[Model]] = {}
+    instances_by_model: defaultdict[type[Model], list[Model]] = defaultdict(list)
     for instance in objs:
-        instances_by_model.setdefault(type(instance), []).append(instance)
+        instances_by_model[type(instance)].append(instance)
     if not instances_by_model:
         return
     first_instance = next(iter(instances_by_model.values()))[0]
@@ -53,7 +53,7 @@ async def prefetch_related_objects(
         )
         return
     # Every model's lookups are checked before any query - a lookup another model lacks loads nothing.
-    compatible_instances: dict[tuple[Any, ...], tuple[type[Model], list[Model]]] = {}
+    compatible_instances: dict[tuple[Any, ...], tuple[type[Model], list[Model], PrefetchRequest]] = {}
     for model in instances_by_model:
         prefetch_map: dict[str, set[str | Prefetch]] = {}
         prefetch_queries: dict[str, list[tuple[str | None, QuerySet[Any]]]] = {}
@@ -67,9 +67,7 @@ async def prefetch_related_objects(
                 (
                     name,
                     name in forward_fields,
-                    cast("RelationalField[Any]", meta.fields_map[name]).related_model
-                    if name in forward_fields
-                    else model,
+                    meta.fields_map[name].related_model if name in forward_fields else model,  # type: ignore[attr-defined]
                 )
                 for name in sorted(prefetch_map.keys() | prefetch_queries.keys())
                 # Dependent to_attribute paths belong to their explicit source
@@ -80,18 +78,19 @@ async def prefetch_related_objects(
         if signature in compatible_instances:
             compatible_instances[signature][1].extend(instances_by_model[model])
         else:
-            compatible_instances[signature] = (model, instances_by_model[model])
+            compatible_instances[signature] = (
+                model,
+                instances_by_model[model],
+                PrefetchRequest(prefetch_map, prefetch_queries, db_explicitly_chosen=using is not None),
+            )
     # Forward relations to the same model share a query; reverse relations keep their source model.
     plans = []
-    for model, model_instances in compatible_instances.values():
-        prefetch_map = {}
-        prefetch_queries = {}
-        Prefetch.add_lookups(model, prefetch_map, prefetch_queries, lookups)
+    for model, model_instances, request in compatible_instances.values():
         plans.append(
             PrefetchPlan.prepare(
                 Prefetcher(model, connection),
                 model_instances,
-                PrefetchRequest(prefetch_map, prefetch_queries, db_explicitly_chosen=using is not None),
+                request,
             )
         )
     result = PrefetchResult()

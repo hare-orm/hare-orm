@@ -98,7 +98,11 @@ class VectorDistanceExpression(Expression):
         self, expression_context: ExpressionContext, target_field: Field[Any] | None
     ) -> ExpressionResult:
         # Converted and validated through the target field when that is a VectorField.
-        encoder = partial(self.get_vector_literal, target_field, expression_context.dialect, expression_context.model)
+        encoder = (
+            expression_context.dialect.types.get_field_encoder(target_field, expression_context.model)
+            if isinstance(target_field, VectorField)
+            else partial(self.get_vector_literal, target_field, expression_context.dialect, expression_context.model)
+        )
         result = ExpressionArguments.get_result(
             self, "vector", self.vector, expression_context, encoder=encoder, binds_whole=True
         )

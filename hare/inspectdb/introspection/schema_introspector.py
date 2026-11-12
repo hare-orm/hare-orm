@@ -14,10 +14,10 @@ from hare.inspectdb.constants import (
     INT_LITERAL_RE,
     QUOTED_STRING_RE,
 )
+from hare.inspectdb.enums import SchemaPartType
 from hare.inspectdb.generation.model_naming import ModelNaming
 from hare.inspectdb.introspection.catalog_sql import CatalogSql
 from hare.inspectdb.introspection.column_info import ColumnInfo
-from hare.inspectdb.introspection.enums import SchemaPartType
 from hare.inspectdb.introspection.schema_part import SchemaPart
 from hare.inspectdb.introspection.table_info import TableInfo
 from hare.inspectdb.introspection.table_parts import TableParts

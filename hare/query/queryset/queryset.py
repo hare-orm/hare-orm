@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable, Generator, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Coroutine, Generator, Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import tzinfo as TzInfo
 from functools import partial
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, NoReturn, Self, cast, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, NoReturn, Self, overload
 
 from typing_extensions import TypeVar
 
@@ -26,8 +26,14 @@ from hare.models.write.rules.enums import WriteType
 from hare.models.write.rules.row_write_rules import RowWriteRules
 from hare.models.write.rules.tenant_write_rules import TenantWriteRules
 from hare.models.write.rules.written_target_checks import WrittenTargetChecks
-from hare.query.constants import AGGREGATE_OVER_DISTINCT_ON_MESSAGE, GET_FETCH_LIMIT_FOR_MULTIPLICITY_CHECK
+from hare.query.constants import (
+    AGGREGATE_OVER_DISTINCT_ON_MESSAGE,
+    GET_FETCH_LIMIT_FOR_MULTIPLICITY_CHECK,
+    PRIMARY_KEY_ALIAS,
+    PRIMARY_KEY_IN_FILTER,
+)
 from hare.query.enums import GetException, RowShape, TableSampleMethod
+from hare.query.execution.query_execution import QueryExecution
 from hare.query.expressions import ConditionValue, Exists, Expression, F, Ordering, Q
 from hare.query.expressions.joins.named_join import NamedJoin
 from hare.query.expressions.subqueries.recursive_rows import RecursiveRows
@@ -93,6 +99,7 @@ if TYPE_CHECKING:
     from hare.ddl.raw_sql_term import RawSQLTerm
     from hare.dialects.base.dialect import Dialect
     from hare.models import Model
+    from hare.query.managers.manager import Manager
     from hare.query.queryset.single_rows.get_exception_argument import GetExceptionArgument
     from hare.query.statements.select.values_query import ValuesQuery
 
@@ -126,12 +133,16 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         # The values of the signature's filter calls, in call order.
         "_call_values",
         # The object this queryset, made again for each description or build of a query it is
-        # part of, stands for - unset otherwise (PlanOrigins).
+        # part of, stands for - None otherwise (PlanOrigins).
         "_plan_origin",
+        # The manager this queryset is the unchanged base of - None for any other; copies clear it.
+        "_unchanged_base_manager",
     )
 
     # Mutable settings are copied centrally; nested prefetch containers are independent too.
     mutable_clone_slots: ClassVar[dict[str, Callable[[], Any]]] = QuerySpecification.MUTABLE_SPECIFICATION_SLOTS
+    #: ``StatementPlanRuns.read_queryset()`` - taken at the first run, as its module imports this one.
+    read_queryset: ClassVar[Callable[[QuerySet[Any, Any, Any]], Coroutine[Any, Any, Any]] | None] = None
 
     def __init__(self, model: type[TModel]) -> None:
         model._meta.check_not_swapped()
@@ -139,6 +150,8 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         self._annotation_descriptions: CacheBucket[Any] | None = None
         self._call_signature: tuple[Any, ...] | None = None
         self._call_values: tuple[Any, ...] = ()
+        self._unchanged_base_manager: Manager[Any] | None = None
+        self._plan_origin: Any = None
 
     def __copy__(self) -> Self:
         queryset = super().__copy__()
@@ -211,7 +224,7 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         model and for the tenant-scoped models the query reaches through relations.
         """
         QuerySetCombination.raise_if_combined(self, "all_tenants")
-        queryset = self._clone()
+        queryset = self._clone_keeping_calls()
         queryset._visibility = replace(queryset._visibility, all_tenants=True)
         return queryset
 
@@ -246,7 +259,8 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         QuerySetCombination.raise_if_combined(self, "only_deleted" if only_deleted else "include_deleted")
         if not self.model._meta.soft_delete_field:
             raise QueryError(f"{self.model.__name__} has no Meta.soft_delete_field configured")
-        queryset = self._clone()
+        # Visibility is part of the plan key, not an unrecorded filter call.
+        queryset = self._clone_keeping_calls()
         queryset._visibility = replace(queryset._visibility, include_deleted=True, only_deleted=only_deleted)
         return queryset
 
@@ -261,6 +275,12 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         Returns:
             The clone.
         """
+        manager = self._unchanged_base_manager
+        if manager is not None and type(self) is QuerySet:
+            queryset: Self = manager.create_queryset()  # type: ignore[assignment]
+            queryset._call_signature = self._call_signature
+            queryset._call_values = self._call_values
+            return queryset
         return QuerySpecification.__copy__(self)
 
     def _append_filters(self, negate: bool, args: tuple[Q | Exists, ...], kwargs: dict[str, Any]) -> None:
@@ -280,44 +300,44 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
     def _filter_or_exclude(self, negate: bool, args: tuple[Q | Exists, ...], kwargs: dict[str, Any]) -> Self:
         FilterArguments.raise_if_slice_taken(self, "Cannot filter a query once a slice has been taken.")
         args, kwargs = GenericForeignKeyFilters.rewrite_arguments(self.model, args, kwargs)
-        FilterArguments.check_filter_keys(self, args, kwargs, "exclude" if negate else "filter")
-        # An iterable __in value is read once - the filter and the call signature share the list. A list,
-        # set or dict is taken as it is now: the caller changing it later changes no query.
-        kwargs = {
-            key: FilterValues.get_list_lookup_value(key, FilterValues.get_detached_value(value))
-            for key, value in kwargs.items()
-        }
+        return self._with_filter_arguments(negate, args, kwargs)
+
+    def _with_filter_arguments(self, negate: bool, args: tuple[Q | Exists, ...], kwargs: dict[str, Any]) -> Self:
+        """Apply normalized filters once, retaining deferred conditions and call descriptions."""
+        method_name = "exclude" if negate else "filter"
+        if args:
+            FilterArguments.check_filter_keys(self, args, method_name)
+        # One pass over the keyword filters: each key checked, each value taken as it is now (an iterable
+        # __in value read once - the filter and the call signature share the list).
+        kwargs, takes_pending_filters = FilterArguments.get_checked_filters(self, kwargs, method_name)
         if (
-            self._call_signature is not None
+            takes_pending_filters
+            and self._call_signature is not None
             and (not args or FilterArguments.takes_pending_conditions(self, args))
-            and FilterArguments.takes_pending_filters(self, kwargs)
         ):
-            for value in kwargs.values():
-                # A SQL term built by hand describes itself by its rendered text alone.
-                if isinstance(value, Term) and not isinstance(value, Plannable):
-                    break
-            else:
-                # Built only when a query of the queryset doesn't run on the plan of its calls.
-                queryset = self._clone_keeping_calls()
-                queryset._filter_call_counter += 1
-                generation = queryset._filter_call_counter
-                conditions = tuple(
+            # Built only when a query of the queryset doesn't run on the plan of its calls.
+            queryset = self._clone_keeping_calls()
+            queryset._filter_call_counter += 1
+            generation = queryset._filter_call_counter
+            conditions = (
+                tuple(
                     [(arg if isinstance(arg, Q) else Q(arg))._with_filter_call_generation(generation) for arg in args]
                 )
-                queryset._pending_filter_calls = (
-                    *self._pending_filter_calls,
-                    (negate, generation, conditions, kwargs),
-                )
-                if not conditions:
-                    return self._continue_call_signature(
-                        queryset, ("exclude" if negate else "filter", tuple(kwargs)), tuple(kwargs.values())
-                    )
-                # The conditions come first - each is described by its tree in the key of the calls.
-                return self._continue_call_signature(
-                    queryset,
-                    ("exclude_conditions" if negate else "filter_conditions", tuple(kwargs), len(conditions)),
-                    (*conditions, *kwargs.values()),
-                )
+                if args
+                else ()
+            )
+            queryset._pending_filter_calls = (
+                *self._pending_filter_calls,
+                (negate, generation, conditions, kwargs),
+            )
+            if not conditions:
+                return self._continue_call_signature(queryset, (method_name, tuple(kwargs)), tuple(kwargs.values()))
+            # The conditions come first - each is described by its tree in the key of the calls.
+            return self._continue_call_signature(
+                queryset,
+                (f"{method_name}_conditions", tuple(kwargs), len(conditions)),
+                (*conditions, *kwargs.values()),
+            )
         queryset = self._clone()
         queryset._append_filters(negate, args, kwargs)
         return queryset
@@ -497,35 +517,33 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
                 ordering by position; call ``.order_by()`` first.
         """
         if self._combination is not None:
-            return cast(
-                "Self",
-                CombinedDerivedQueries.get_ordered_queryset(QuerySetCombination.get_combined_query(self), orderings),
-            )
+            return CombinedDerivedQueries.get_ordered_queryset(QuerySetCombination.get_combined_query(self), orderings)  # type: ignore[return-value]
         FilterArguments.raise_if_slice_taken(self, "Cannot reorder a query once a slice has been taken.")
-        # A loop, not any(): every order_by() runs it, and a generator is a call more.
+        source = self
         is_plain = True
+        has_random = False
         for ordering in orderings:
             if type(ordering) is not str:
                 is_plain = False
             elif ordering == RANDOM_ORDERING:
-                return self._alias({RANDOM_ORDERING_ALIAS: Random()}).order_by(
-                    *(
-                        RANDOM_ORDERING_ALIAS if type(ordering) is str and ordering == RANDOM_ORDERING else ordering
-                        for ordering in orderings
-                    )
-                )
+                has_random = True
+        if has_random:
+            source = source._alias({RANDOM_ORDERING_ALIAS: Random()})
+            orderings = tuple(
+                RANDOM_ORDERING_ALIAS if type(ordering) is str and ordering == RANDOM_ORDERING else ordering
+                for ordering in orderings
+            )
         if not is_plain:
             expression_aliases, orderings = OrderingArguments.get_expression_aliases(orderings)
             if expression_aliases:
-                # An expression is ordered by an alias of its own, never selected.
-                return self._alias(expression_aliases).order_by(*orderings)
-        if type_aliases := GenericForeignKeyTypes.get_pending_type_aliases(self, orderings):
-            return self.alias(**type_aliases).order_by(*orderings)
-        OrderingArguments.forbid_reordering_after_cursor(self, "order_by")
-        queryset = self._with_orderings(*orderings)
+                source = source._alias(expression_aliases)
+        if type_aliases := GenericForeignKeyTypes.get_pending_type_aliases(source, orderings):
+            source = source.alias(**type_aliases)
+        OrderingArguments.forbid_reordering_after_cursor(source, "order_by")
+        queryset = source._with_orderings(*orderings)
         queryset._default_ordering_disabled = not orderings
         if is_plain:
-            return self._continue_call_signature(queryset, ("order_by", orderings))
+            return source._continue_call_signature(queryset, ("order_by", orderings))
         return queryset
 
     def _with_orderings(self, *orderings: str | Expression | Ordering) -> Self:
@@ -605,9 +623,11 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
             queryset._orderings = [(field_name, order.get_reversed()) for field_name, order in self._orderings]
             # A lower boundary from an earlier .after_cursor() becomes the upper one in the
             # reversed ordering.
-            queryset._before_cursor_values = self._cursor_values
-            queryset._reverse_result_order = True
-        queryset._cursor_values = values
+            queryset._options = queryset._options.updated(
+                before_cursor_values=self._cursor_values, reverse_result_order=True, cursor_values=values
+            )
+        else:
+            queryset._cursor_values = values
         return queryset
 
     def cursor_values(self, obj: TModel) -> tuple[Any, ...]:
@@ -661,7 +681,7 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
             The single-row queryset.
         """
         args, kwargs = GenericForeignKeyFilters.rewrite_arguments(self.model, args, kwargs)
-        get_call = FilterArguments.get_get_call(self, kwargs) if kwargs and not args else None
+        get_call = FilterArguments.describe_get_call(self, kwargs) if kwargs and not args else None
         if get_call is not None:
             # Its queries run on the plan of the call; the filters are built only when the
             # queryset is built after all.
@@ -671,7 +691,16 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
             queryset._call_signature = (type(self), get_call)
             queryset._call_values = tuple(kwargs.values())
         else:
-            filtered_queryset = self.filter(*args, **kwargs) if args or kwargs else self
+            if not args and not kwargs:
+                filtered_queryset = self
+            elif (
+                getattr(self.filter, "__func__", None) is QuerySet.filter
+                and getattr(self._filter_or_exclude, "__func__", None) is QuerySet._filter_or_exclude
+            ):
+                FilterArguments.raise_if_slice_taken(self, "Cannot filter a query once a slice has been taken.")
+                filtered_queryset = self._with_filter_arguments(False, args, kwargs)
+            else:
+                filtered_queryset = self.filter(*args, **kwargs)
             queryset = SingleRow.with_rows_as_subquery(filtered_queryset)
             filtered_queryset._continue_call_signature(queryset, ("single_row",))
         queryset._limit = 1 if multiple_objects_returned_exception is None else GET_FETCH_LIMIT_FOR_MULTIPLICITY_CHECK
@@ -695,7 +724,7 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         """
         if self._selection is not None:
             return StatementSelection.get_values_query(self)
-        return self._get_field_values_query("pk")
+        return self._get_field_values_query(PRIMARY_KEY_ALIAS)
 
     def _get_filter_value_compiler(self) -> AwaitableQuery[Any]:
         """The query a filter compares with when this queryset is its value, as the filter builds
@@ -767,7 +796,7 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         queryset._orderings = [(field_name, order.get_reversed()) for field_name, order in current]
         return queryset
 
-    def dates(self, field_name: str, trunc_type: str, order: str = "ASC") -> Self:
+    def dates(self, field_name: str, trunc_type: str, order: str = Order.ASC) -> Self:
         """The distinct dates of a date or datetime field, truncated to ``trunc_type`` - a datetime's in the
         current zone - NULLs left out.
 
@@ -792,7 +821,7 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         return DateLists.get_distinct_dates(self, truncated, order)
 
     def datetimes(
-        self, field_name: str, trunc_type: str, order: str = "ASC", tzinfo: str | TzInfo | None = None
+        self, field_name: str, trunc_type: str, order: str = Order.ASC, tzinfo: str | TzInfo | None = None
     ) -> Self:
         """The distinct values of a datetime field, truncated to ``trunc_type`` in ``tzinfo`` (the current
         zone by default), NULLs left out.
@@ -871,7 +900,7 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
             single_queryset._is_single_row_of_slice = True
             single_queryset._raise_does_not_exist = True
             single_queryset._does_not_exist_exception = IndexError(f"Index {key} is out of range")
-            return cast("QuerySetSingle[TRow]", single_queryset)
+            return single_queryset
         if not isinstance(key, slice):
             raise QueryError("QuerySet indices must be slices or non-negative integers.")
 
@@ -1041,6 +1070,7 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         queryset._with_ctes = (*queryset._with_ctes, (name, cte_body))
         return queryset
 
+    @CallsBeforeSetup.recorded
     def with_recursive(self, relation: str, *, max_depth: int | None = None) -> QuerySet[TModel, TModel]:
         """The rows reachable from this queryset's rows through ``relation`` - a relation of the model
         to itself - followed again and again, these rows included, in one ``WITH RECURSIVE`` query:
@@ -1062,20 +1092,17 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
                 queryset is combined (``union()``...).
             FieldError: When run - ``relation`` isn't a relation of the model to itself.
         """
-        if not self.model._meta._inited:
-            return cast(
-                "QuerySet[TModel, TModel]",
-                CallsBeforeSetup.keep(self, "with_recursive", (relation,), {"max_depth": max_depth}),
-            )
         QuerySetCombination.raise_if_combined(self, "with_recursive")
         reachable_keys = RecursiveRows(self, relation, max_depth=max_depth)
         self.model._meta.raise_if_no_primary_key("with_recursive()")
-        rows = cast("QuerySet[TModel, TModel]", self.model._meta.manager.create_queryset())
+        rows: QuerySet[TModel, TModel] = self.model._meta.manager.create_queryset()
         rows._apply_connection(self._connection)
         rows._connection_explicitly_chosen = self._connection_explicitly_chosen
         rows._visibility = self._visibility
         primary_key_attribute = self.model._meta.primary_key_attribute
-        key_filter = "pk__in" if isinstance(primary_key_attribute, tuple) else f"{primary_key_attribute}__in"
+        key_filter = (
+            PRIMARY_KEY_IN_FILTER if isinstance(primary_key_attribute, tuple) else f"{primary_key_attribute}__in"
+        )
         return rows.filter(**{key_filter: reachable_keys})
 
     @CallsBeforeSetup.recorded
@@ -1136,11 +1163,13 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
             raise QueryError("select_for_update() takes one of no_key, share and key_share")
         of = tuple(of)
         queryset = self._clone()
-        queryset._select_for_update = True
-        queryset._select_for_update_nowait = nowait
-        queryset._select_for_update_skip_locked = skip_locked
-        queryset._select_for_update_of = set(of)
-        queryset._select_for_update_strength = strengths[0] if strengths else None
+        queryset._options = queryset._options.updated(
+            select_for_update=True,
+            select_for_update_nowait=nowait,
+            select_for_update_skip_locked=skip_locked,
+            select_for_update_of=of,
+            select_for_update_strength=strengths[0] if strengths else None,
+        )
         return queryset
 
     @CallsBeforeSetup.recorded
@@ -1167,24 +1196,10 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
             The annotated queryset.
         """
         QuerySetCombination.raise_if_combined(self, "annotate")
-        kwargs = AnnotationArguments.get_annotations(kwargs)
-        relation_aliases = {key: value for key, value in kwargs.items() if isinstance(value, NamedJoin)}
-        if relation_aliases:
-            # A named JOIN (FilteredRelation, Lateral) is never a selected value - annotated, it is an alias.
-            other_annotations = {key: value for key, value in kwargs.items() if key not in relation_aliases}
-            aliased = self._alias(relation_aliases)
-            return aliased._annotate(other_annotations) if other_annotations else aliased
-        AnnotationArguments.raise_if_annotation_names_collide_with_fields(self, kwargs)
-        queryset = self._clone_keeping_calls()
-        AnnotationArguments.detach_annotation_descriptions(queryset, kwargs)
-        for key, annotation in kwargs.items():
-            queryset._annotations[key] = annotation
-            # A previous .alias(key=...) on this same key is superseded by a real .annotate() -
-            # the key should now behave like an ordinary annotation (selected by default).
-            queryset._alias_keys = queryset._alias_keys - {key}
-        if queryset._selection is not None:
-            queryset._selection = queryset._selection.with_added_names(kwargs)
-        return self._continue_annotation_call_signature(queryset, "annotate", kwargs)
+        annotations = AnnotationArguments.get_annotations(kwargs)
+        aliases = {key: value for key, value in annotations.items() if isinstance(value, NamedJoin)}
+        selected = {key: value for key, value in annotations.items() if key not in aliases} if aliases else annotations
+        return self._publish_annotations(selected, aliases, selected_call=bool(selected) or not aliases)
 
     @CallsBeforeSetup.recorded
     def alias(self, **kwargs: Expression | Term | Q) -> Self:
@@ -1211,21 +1226,44 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
             The queryset with the aliases.
         """
         QuerySetCombination.raise_if_combined(self, "alias")
-        kwargs = AnnotationArguments.get_annotations(kwargs)
-        AnnotationArguments.raise_if_annotation_names_collide_with_fields(self, kwargs)
-        queryset = self._clone_keeping_calls()
-        AnnotationArguments.detach_annotation_descriptions(queryset, kwargs)
-        for key, annotation in kwargs.items():
+        return self._publish_annotations({}, AnnotationArguments.get_annotations(kwargs), selected_call=False)
+
+    def _publish_annotations(
+        self,
+        selected: dict[str, Any],
+        aliases: dict[str, Any],
+        *,
+        selected_call: bool,
+    ) -> Self:
+        """Publish normalized aliases and selected expressions in one independent branch.
+
+        Named joins see the original annotation context. Mixed annotate calls retain
+        alias-then-annotation descriptions without creating an intermediate queryset.
+        """
+        AnnotationArguments.raise_if_annotation_names_collide_with_fields(self, aliases)
+        AnnotationArguments.raise_if_annotation_names_collide_with_fields(self, selected)
+        published_aliases = {}
+        for key, annotation in aliases.items():
             if isinstance(annotation, NamedJoin):
                 annotation.check_for_model(self._get_probe_expression_context(self._annotations))
                 annotation = annotation.with_name(key)
-            queryset._annotations[key] = annotation
-            queryset._alias_keys = queryset._alias_keys | {key}
+            published_aliases[key] = annotation
+        queryset = self._clone_keeping_calls()
+        AnnotationArguments.detach_annotation_descriptions(queryset, (*aliases, *selected))
+        queryset._annotations.update(published_aliases)
+        queryset._annotations.update(selected)
+        queryset._alias_keys = queryset._alias_keys.union(aliases).difference(selected)
         if queryset._selection is not None:
-            queryset._selection = queryset._selection.with_added_names((), kwargs)
-        return self._continue_annotation_call_signature(
-            queryset, "alias", {key: queryset._annotations[key] for key in kwargs}
-        )
+            if aliases or not selected_call:
+                queryset._selection = queryset._selection.with_added_names((), aliases)
+            if selected_call:
+                queryset._selection = queryset._selection.with_added_names(selected)
+        if aliases or not selected_call:
+            self._continue_annotation_call_signature(queryset, "alias", published_aliases)
+        if selected_call:
+            source = queryset if aliases else self
+            source._continue_annotation_call_signature(queryset, "annotate", selected)
+        return queryset
 
     def _continue_annotation_call_signature(self, queryset: Self, call_name: str, annotations: dict[str, Any]) -> Self:
         """Gives a queryset ``annotate()``/``alias()`` made this one's call signature with the call
@@ -1265,29 +1303,21 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         grouping_set = grouping_sets[0] if grouping_sets else None
         # Checked as names below - an expression is refused, not left out.
         plain_names = tuple(field for field in fields if not isinstance(field, GroupingSet))
-        if type_aliases := GenericForeignKeyTypes.get_pending_type_aliases(
-            self, (*plain_names, *(grouping_set.field_names if grouping_set is not None else ()))
-        ):
-            return self.alias(**type_aliases).group_by(*fields)
-        # A path into a JSON field or a date groups by an alias of its own, as in values() and order_by().
+        names = (*plain_names, *(grouping_set.field_names if grouping_set is not None else ()))
+        source = self
+        if type_aliases := GenericForeignKeyTypes.get_pending_type_aliases(source, names):
+            source = source.alias(**type_aliases)
         if path_annotations := AnnotationArguments.get_path_annotations(
-            self,
-            [
-                name
-                for name in (*plain_names, *(grouping_set.field_names if grouping_set is not None else ()))
-                if isinstance(name, str)
-            ],
+            source, [name for name in names if isinstance(name, str)]
         ):
-            return self._alias(path_annotations).group_by(*fields)
-        FilterArguments.raise_if_not_names(
-            self, (*plain_names, *(grouping_set.field_names if grouping_set is not None else ())), "group_by"
+            source = source._alias(path_annotations)
+        FilterArguments.raise_if_not_names(source, names, "group_by")
+        queryset = source._clone_keeping_calls()
+        queryset._options = queryset._options.updated(
+            group_bys=plain_names if grouping_set is None else tuple(dict.fromkeys(names)),
+            grouping_set=grouping_set,
         )
-        queryset = self._clone_keeping_calls()
-        queryset._group_bys = (
-            plain_names if grouping_set is None else tuple(dict.fromkeys((*plain_names, *grouping_set.field_names)))
-        )
-        queryset._grouping_set = grouping_set
-        return self._continue_call_signature(
+        return source._continue_call_signature(
             queryset, ("group_by", plain_names, None if grouping_set is None else grouping_set.get_plan_key())
         )
 
@@ -1331,28 +1361,23 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
             )
         if flat and named:
             raise QueryError(".values_list() can't use flat=True and named=True together.")
+        source = self
         if type_aliases := GenericForeignKeyTypes.get_pending_type_aliases(
-            self, (*field_names, *expressions.values())
+            source, (*field_names, *expressions.values())
         ):
-            return self.alias(**type_aliases).values_list(*field_names, flat=flat, named=named, **expressions)
-        queryset = self._get_values_source_queryset()
-        FilterArguments.check_selected_names(queryset, field_names, "values_list")
-        expressions = {key: ConditionValue.get_value_expression(value) for key, value in expressions.items()}
-        ValuesArguments.raise_if_values_unusable(
-            queryset, ".values_list()", field_names, expressions, allow_field_name_kwargs=False
+            source = source.alias(**type_aliases)
+        queryset = source._get_values_source_queryset()
+        expressions = ValuesArguments.get_checked_expressions(
+            queryset, "values_list", field_names, expressions, allow_field_name_kwargs=False
         )
         names = (*field_names, *expressions)
         if flat and len(names or ValuesArguments.get_every_selected_name(queryset)) != 1:
             raise QueryError(".values_list(flat=True) selects exactly one field")
-        queryset = queryset.alias(**expressions) if expressions else queryset._clone()
         shape = RowShape.FLAT if flat else RowShape.NAMED if named else RowShape.TUPLE
-        queryset._selection = ValuesSelection(shape, field_names=names)
-        if self._selection is None and not expressions:
-            self._continue_call_signature(queryset, ("values_list", field_names, flat, named))
-        else:
-            # The calls of the alias() above select none of it - they key no plan of these rows.
-            queryset._call_signature = None
-        return queryset  # type: ignore[return-value]
+        call = ("values_list", field_names, flat, named) if self._selection is None and not expressions else None
+        return queryset._with_values_selection(  # type: ignore[return-value]
+            ValuesSelection(shape, field_names=names), expressions, call
+        )
 
     @CallsBeforeSetup.recorded
     def values(
@@ -1374,15 +1399,14 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
             return CombinedDerivedQueries.get_values_queryset(  # type: ignore[return-value]
                 QuerySetCombination.get_combined_query(self), lambda branch: branch.values(*field_names, **expressions)
             )
+        source = self
         if type_aliases := GenericForeignKeyTypes.get_pending_type_aliases(
-            self, (*field_names, *expressions.values())
+            source, (*field_names, *expressions.values())
         ):
-            return self.alias(**type_aliases).values(*field_names, **expressions)
-        queryset = self._get_values_source_queryset()
-        FilterArguments.check_selected_names(queryset, field_names, "values")
-        expressions = {key: ConditionValue.get_value_expression(value) for key, value in expressions.items()}
-        ValuesArguments.raise_if_values_unusable(
-            queryset, ".values()", field_names, expressions, allow_field_name_kwargs=True
+            source = source.alias(**type_aliases)
+        queryset = source._get_values_source_queryset()
+        expressions = ValuesArguments.get_checked_expressions(
+            queryset, "values", field_names, expressions, allow_field_name_kwargs=True
         )
         selected_keys: set[str] = set()
         for key in (*field_names, *expressions):
@@ -1399,24 +1423,34 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
             (key, F(value))
             for key, value in expressions.items()
             if isinstance(value, str)
-            and key not in (value, "pk")
+            and key not in (value, PRIMARY_KEY_ALIAS)
             and key not in self.model._meta.fields_map
             and key not in queryset._annotations
         )
-        queryset = queryset.alias(**aliases) if aliases else queryset._clone()
-        queryset._selection = ValuesSelection(
+        selection = ValuesSelection(
             RowShape.DICT,
             field_names=field_names,
             renamed_fields=tuple(
                 (key, value if isinstance(value, str) else key) for key, value in expressions.items()
             ),
         )
-        if self._selection is None and not expressions:
-            self._continue_call_signature(queryset, ("values", field_names))
-        else:
-            # The calls of the alias() above select none of it - they key no plan of these rows.
+        call = ("values", field_names) if self._selection is None and not expressions else None
+        return queryset._with_values_selection(selection, aliases, call)  # type: ignore[return-value]
+
+    def _with_values_selection(
+        self,
+        selection: ValuesSelection,
+        aliases: dict[str, Any],
+        call: tuple[Any, ...] | None,
+    ) -> Self:
+        """Publish one projection after argument checks, preserving the public alias hook."""
+        queryset = self.alias(**aliases) if aliases else self._clone()
+        queryset._selection = selection
+        if call is None:
             queryset._call_signature = None
-        return queryset  # type: ignore[return-value]
+        else:
+            self._continue_call_signature(queryset, call)
+        return queryset
 
     def _get_values_source_queryset(self) -> QuerySet[TModel, TModel]:
         """The queryset a ``.values()``/``.values_list()`` call selects from - this one, or, when it
@@ -1441,7 +1475,7 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         """
         queryset = self._clone()
         queryset._selection = selection
-        return cast("QuerySet[TModel, Any]", queryset)
+        return queryset
 
     def _get_compiler(self) -> AwaitableQuery[Any]:
         """A fresh statement building this queryset's SQL for its selected row shape.
@@ -1467,7 +1501,7 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
                 "not model instances, so there's nothing to attach a prefetched relation to."
             )
 
-    def _get_count_query(self) -> CountQuery:
+    def _get_count_source(self) -> SummarySource:
         """The number of rows - counted as returned when a primary key can repeat.
 
         Raises:
@@ -1475,12 +1509,9 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         """
         self._raise_if_prefetching("count", "a plain int")
         rows_query = StatementSelection.get_rows_query_if_rows_repeat(self)
-        count_query = CountQuery(self, rows_query=rows_query)
-        if rows_query is None and not self._extension_calls:
-            self._hand_call_signature(count_query)
-        return count_query
+        return SummarySource(self, rows_query, keeps_calls=rows_query is None and not self._extension_calls)
 
-    def _get_exists_query(self) -> ExistsQuery:
+    def _get_exists_source(self) -> SummarySource:
         """Whether any row matches.
 
         Raises:
@@ -1490,21 +1521,19 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         # Without an offset the repeated rows can't change whether any row exists - a call of the
         # dialect's QuerySet method changing the rows can.
         rows_query = StatementSelection.get_rows_query_if_rows_repeat(self) if self._offset else None
-        exists_query = ExistsQuery(self, rows_query=rows_query)
-        if rows_query is None and not self._extension_calls:
-            self._hand_call_signature(exists_query)
-        return exists_query
+        return SummarySource(self, rows_query, keeps_calls=rows_query is None and not self._extension_calls)
 
-    def _get_aggregate_query(self, **kwargs: Expression | Term) -> AggregateQuery:
+    def _get_aggregate_source(self) -> SummarySource:
         """Aggregates over the rows - of a slice, restricted to them by their primary key.
 
         Raises:
             QueryError: The query is sliced and its rows can repeat a primary key.
             QueryError: ``prefetch_related()`` was called.
         """
+        self._check_aggregate_allowed()
         if self._limit is not None or self._offset:
             if RowMultiplication.rows_repeat_per_primary_key(ModelRowsQuery(self)) or (
-                not self._distinct_on and StatementSelection.get_rows_query_if_rows_repeat(self) is not None
+                not self._distinct_on and StatementSelection.rows_repeat_for_summary(self)
             ):
                 raise QueryError(
                     "aggregate() can't be used on a sliced queryset whose rows can repeat a primary key (a filter, "
@@ -1518,11 +1547,18 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
             # A .distinct() slice's filters can still join a to-many relation: its rows are then
             # reduced to one per primary key before the metrics run, as an unsliced .distinct().
             rows_queryset._distinct = self._distinct and not self._distinct_on
-            return rows_queryset.aggregate(**kwargs)
+            return rows_queryset._get_aggregate_source()
         self._raise_if_prefetching("aggregate", "a plain dict")
-        aggregate_query = AggregateQuery(self, kwargs)
-        self._hand_call_signature(aggregate_query)
-        return aggregate_query
+        return SummarySource(self, keeps_calls=True)
+
+    def _check_aggregate_allowed(self) -> None:
+        """Reject declarations that cannot be summarized by aggregate()."""
+        if self._select_for_update:
+            raise QueryError(LOCKED_SUMMARY_MESSAGE.format(method_name="aggregate"))
+        if self._distinct_on:
+            raise QueryError(AGGREGATE_OVER_DISTINCT_ON_MESSAGE)
+        if self._grouping_set is not None:
+            raise QueryError(AGGREGATE_OVER_GROUPING_SETS_MESSAGE.format(grouping_set=self._grouping_set))
 
     def _get_update_query(self, **kwargs: Any) -> UpdateQuery:
         """Updates the rows.
@@ -1590,8 +1626,9 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
             QueryError: The queryset selects values - call ``delete()`` before ``.values()``, like Django.
         """
         WrittenTargetChecks.raise_if_refused(self, "delete")
-
-        return DeleteQuery(self)
+        delete_query = DeleteQuery(self)
+        self._hand_call_signature(delete_query)
+        return delete_query
 
     @CallsBeforeSetup.recorded_result
     def hard_delete(self) -> HardDeleteQuery:
@@ -1603,8 +1640,9 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
             QueryError: The queryset selects values.
         """
         WrittenTargetChecks.raise_if_refused(self, "hard_delete")
-
-        return HardDeleteQuery(self)
+        delete_query = HardDeleteQuery(self)
+        self._hand_call_signature(delete_query)
+        return delete_query
 
     def restore(self, *, cascade: bool = False) -> RestoreQuery:
         """Reverses the soft delete of the queryset's rows - of those among them that are
@@ -1671,7 +1709,10 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         """
         if self._select_for_update:
             raise QueryError(LOCKED_SUMMARY_MESSAGE.format(method_name="count"))
-        return StatementSelection.get_rows_source(self)._get_count_query()
+        if self._combination is None and self._selection is None:
+            return CountQuery.from_source(self._get_count_source())
+        # The rows of .values() or a set operation are made into their query at the first build.
+        return CountQuery(self, selected_rows=self)
 
     @CallsBeforeSetup.recorded_result
     def aggregate(self, **kwargs: Expression | Term) -> AggregateQuery:
@@ -1690,13 +1731,10 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
                 ``.distinct(<fields>)``, or locks its rows (``select_for_update()``).
             QueryError: prefetch_related() was called earlier in the chain.
         """
-        if self._select_for_update:
-            raise QueryError(LOCKED_SUMMARY_MESSAGE.format(method_name="aggregate"))
-        if self._distinct_on:
-            raise QueryError(AGGREGATE_OVER_DISTINCT_ON_MESSAGE)
-        if self._grouping_set is not None:
-            raise QueryError(AGGREGATE_OVER_GROUPING_SETS_MESSAGE.format(grouping_set=self._grouping_set))
-        return StatementSelection.get_rows_source(self)._get_aggregate_query(**kwargs)
+        if self._combination is None and self._selection is None:
+            return AggregateQuery.from_source(self._get_aggregate_source(), metrics=kwargs)
+        self._check_aggregate_allowed()
+        return AggregateQuery(self, kwargs, selected_rows=self)
 
     @CallsBeforeSetup.recorded_result
     def exists(self) -> ExistsQuery:
@@ -1709,7 +1747,9 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         """
         if self._select_for_update:
             raise QueryError(LOCKED_SUMMARY_MESSAGE.format(method_name="exists"))
-        return StatementSelection.get_rows_source(self)._get_exists_query()
+        if self._combination is None and self._selection is None:
+            return ExistsQuery.from_source(self._get_exists_source())
+        return ExistsQuery(self, selected_rows=self)
 
     @CallsBeforeSetup.recorded_result
     def contains(self, obj: TModel) -> ContainsQuery:
@@ -1737,7 +1777,9 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
 
         return ContainsQuery(self, obj)
 
-    async def in_bulk(self, id_list: Iterable[Any] | None = None, *, field_name: str = "pk") -> dict[Any, TModel]:
+    async def in_bulk(
+        self, id_list: Iterable[Any] | None = None, *, field_name: str = PRIMARY_KEY_ALIAS
+    ) -> dict[Any, TModel]:
         """The objects of the queryset by their value of a unique field.
 
         Args:
@@ -1805,8 +1847,8 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         rows_source = StatementSelection.get_rows_source(self)
         last_queryset = rows_source._get_first(reverse=True)
         if rows_source is self:
-            self._continue_call_signature(cast("Self", last_queryset), ("last",))
-        return cast("QuerySetSingle[TRow | None]", last_queryset)
+            self._continue_call_signature(last_queryset, ("last",))  # type: ignore[type-var]
+        return last_queryset  # type: ignore[return-value]
 
     @overload
     def get(
@@ -1852,14 +1894,11 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
             QueryError: Conditions are given for a sliced queryset.
         """
         if self._combination is not None:
-            return cast(
-                "QuerySetSingle[TRow]",
-                QuerySetCombination.get_combined_query(self)._get_single_queryset(
-                    args,
-                    kwargs,
-                    does_not_exist_exception=does_not_exist_exception,
-                    multiple_objects_returned_exception=multiple_objects_returned_exception,
-                ),
+            return QuerySetCombination.get_combined_query(self)._get_single_queryset(  # type: ignore[return-value]
+                args,
+                kwargs,
+                does_not_exist_exception=does_not_exist_exception,
+                multiple_objects_returned_exception=multiple_objects_returned_exception,
             )
         if self._selection is not None:
             SingleRow.raise_if_sliced_values_rows_differ(self, "get")
@@ -2218,12 +2257,12 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         # Pinned to the write connection: the SELECT FOR UPDATE and the UPDATE after it must
         # land on one connection for the lock to mean anything.
         queryset = CreateOrUpdate.pinned_for_write(self)
-        write_connection = cast("DatabaseClient", queryset._connection)
+        write_connection: DatabaseClient = queryset._connection  # type: ignore[assignment]
         async with write_connection._in_transaction() as connection:
             matching = TableOptions.get_key_read_queryset(queryset.using(connection).filter(**kwargs))
             if connection.features.supports_select_for_update:
                 matching = matching.select_for_update()
-            instance = cast("TModel | None", await matching.get(does_not_exist_exception=None))
+            instance = await matching.get(does_not_exist_exception=None)
             if instance is not None:
                 # The lock field is refused only here, for an existing row - a created row may
                 # set its initial version.
@@ -2374,12 +2413,17 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         return self._share_default_scope(query)
 
     def __await__(self) -> Generator[Any, None, list[TRow]]:
-        query = StatementSelection.get_select_query(self)
-        if self._combination is None:
-            self._hand_call_signature(query)
-        # Made for this run alone - built and run as it is, not copied first.
-        query._is_execution_query = True
-        return query.__await__()
+        return QueryExecution.run(self).__await__()
+
+    def _execute_bound(self) -> Coroutine[Any, Any, Any]:
+        """Choose and execute the row plan after the shared execution context is installed."""
+        read_queryset = QuerySet.read_queryset
+        if read_queryset is None:
+            # Deferred import: the plan runs import the statements, which import this module.
+            from hare.query.plans.statement.statement_plan_runs import StatementPlanRuns
+
+            read_queryset = QuerySet.read_queryset = StatementPlanRuns.read_queryset
+        return read_queryset(self)
 
     async def __aiter__(self) -> AsyncIterator[TRow]:
         for row in await self:
@@ -2441,19 +2485,26 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         args = GenericForeignKeyPaths.expand_relation_paths(self.model, args, "select_related")
 
         queryset = self._clone()
+        if not args:
+            return self._continue_call_signature(queryset, ("select_related", args))
+        explicit_relations = set(queryset._explicitly_select_related)
+        extra_conditions = None
         for arg in args:
-            self._check_select_related_path(arg.relation if isinstance(arg, Select) else arg)
-            if isinstance(arg, Select):
-                queryset._select_related.add(arg.relation)
-                queryset._explicitly_select_related = queryset._explicitly_select_related | {arg.relation}
-                if arg.extra_condition is not None:
-                    queryset._select_related_extra_conditions = {
-                        **queryset._select_related_extra_conditions,
-                        arg.relation: arg.extra_condition,
-                    }
-            else:
-                queryset._select_related.add(arg)
-                queryset._explicitly_select_related = queryset._explicitly_select_related | {arg}
+            relation = arg.relation if isinstance(arg, Select) else arg
+            self._check_select_related_path(relation)
+            queryset._select_related.add(relation)
+            explicit_relations.add(relation)
+            if isinstance(arg, Select) and arg.extra_condition is not None:
+                if extra_conditions is None:
+                    extra_conditions = dict(queryset._select_related_extra_conditions)
+                extra_conditions[relation] = arg.extra_condition
+        if extra_conditions is None:
+            queryset._options = queryset._options.updated(explicitly_select_related=explicit_relations)
+        else:
+            queryset._options = queryset._options.updated(
+                explicitly_select_related=explicit_relations,
+                select_related_extra_conditions=extra_conditions,
+            )
         if all(type(arg) is str for arg in args):
             return self._continue_call_signature(queryset, ("select_related", args))
         return queryset
@@ -2502,13 +2553,10 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
             queryset._prefetch_map = {}
             queryset._prefetch_queries = {}
             return self._continue_call_signature(queryset, ("prefetch_related", ()))
-        relation_args = cast("tuple[str | Prefetch, ...]", args)
+        relation_args: tuple[str | Prefetch, ...] = args  # type: ignore[assignment]
         args = GenericForeignKeyPaths.expand_relation_paths(self.model, relation_args, "prefetch_related")
         if self._combination is not None:
-            return cast(
-                "Self",
-                CombinedDerivedQueries.get_prefetching_queryset(QuerySetCombination.get_combined_query(self), args),
-            )
+            return CombinedDerivedQueries.get_prefetching_queryset(QuerySetCombination.get_combined_query(self), args)  # type: ignore[return-value]
         ValuesArguments.raise_if_values_selected(self, "prefetch_related")
         queryset = self._clone_keeping_calls()
         Prefetch.add_lookups(self.model, queryset._prefetch_map, queryset._prefetch_queries, args)
@@ -2537,6 +2585,7 @@ from hare.query.statements.summary.aggregate_query import AggregateQuery  # noqa
 from hare.query.statements.summary.contains_query import ContainsQuery  # noqa: E402
 from hare.query.statements.summary.count_query import CountQuery  # noqa: E402
 from hare.query.statements.summary.exists_query import ExistsQuery  # noqa: E402
+from hare.query.statements.summary.summary_source import SummarySource  # noqa: E402
 from hare.query.statements.write.bulk.bulk_update_query import BulkUpdateQuery  # noqa: E402
 from hare.query.statements.write.bulk.create.bulk_create_query import BulkCreateQuery  # noqa: E402
 from hare.query.statements.write.declarations import HardDeleteQuery  # noqa: E402

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import re
 
+from hare.inspectdb.enums import CatalogDiagnosticCode, SchemaPartType
+from hare.sql.order import Order
+
 #: Dotted path of the field class a JSON column maps to.
 JSON_FIELD_PATH = "hare.fields.data.json.JSONField"
 
@@ -37,7 +40,7 @@ ENUM_MEMBER_NAME_PATTERN = re.compile(r"\W+")
 
 #: An index key's order when it places NULLs as its direction does by default (last ascending, first
 #: descending) - declarable as a plain or ``"-"``-prefixed field name.
-DEFAULT_KEY_ORDERS = frozenset({"ASC NULLS LAST", "DESC NULLS FIRST"})
+DEFAULT_KEY_ORDERS = frozenset({Order.ASC_NULLS_LAST, Order.DESC_NULLS_FIRST})
 
 INT_LITERAL_RE = re.compile(r"^-?\d+$")
 FLOAT_LITERAL_RE = re.compile(r"^-?\d+\.\d+$")
@@ -87,15 +90,14 @@ CATALOG_SQL_POSITIONAL_DECLARATIONS = frozenset(
         "hare.fields.db_defaults.sql_default.SqlDefault",
     }
 )
-CATALOG_SQL_TEXT_PARTS = frozenset({"index", "constraint", "trigger", "unparsed_partitioning"})
 
 CATALOG_DIAGNOSTIC_PART_TYPES = {
-    "generated_column": "column",
-    "foreign_key": "foreign_key",
-    "index": "index",
-    "exclusion_constraint": "constraint",
-    "check_constraint": "constraint",
-    "trigger": "trigger",
-    "partitioning": "unparsed_partitioning",
-    "grant": "grant",
+    CatalogDiagnosticCode.GENERATED_COLUMN: SchemaPartType.COLUMN,
+    CatalogDiagnosticCode.FOREIGN_KEY: SchemaPartType.FOREIGN_KEY,
+    CatalogDiagnosticCode.INDEX: SchemaPartType.INDEX,
+    CatalogDiagnosticCode.EXCLUSION_CONSTRAINT: SchemaPartType.CONSTRAINT,
+    CatalogDiagnosticCode.CHECK_CONSTRAINT: SchemaPartType.CONSTRAINT,
+    CatalogDiagnosticCode.TRIGGER: SchemaPartType.TRIGGER,
+    CatalogDiagnosticCode.PARTITIONING: SchemaPartType.UNPARSED_PARTITIONING,
+    CatalogDiagnosticCode.GRANT: SchemaPartType.GRANT,
 }

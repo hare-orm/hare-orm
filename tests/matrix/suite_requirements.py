@@ -4,7 +4,7 @@ import tomllib
 from pathlib import Path
 from typing import ClassVar
 
-from tests.matrix.constants import NATIVE_REQUIREMENT, SUITE_ENVIRONMENTS
+from tests.matrix.constants import SUITE_ENVIRONMENTS
 from tests.matrix.paths import REPOSITORY_DIRECTORY
 from tests.matrix.suite_environment import SuiteEnvironment
 from tests.matrix.test_selection_manifest import TestSelectionManifest
@@ -80,6 +80,5 @@ class SuiteRequirements:
             path
             for path, module in sorted(cls.manifest.modules.items())
             if (module.cells | cls.get_path_requirements(REPOSITORY_DIRECTORY / path)) & environment_names
-            and cls.get_installed(cls.get_path_requirements(REPOSITORY_DIRECTORY / path) - {NATIVE_REQUIREMENT})
-            <= installed
+            and cls.get_installed(cls.get_path_requirements(REPOSITORY_DIRECTORY / path)) <= installed
         )

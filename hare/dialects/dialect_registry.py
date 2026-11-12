@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import importlib
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from hare.core.extensions.declarations import ExtensionContribution
 from hare.core.extensions.extension_loader import ExtensionLoader
@@ -52,7 +52,7 @@ class DialectRegistry:
             The dialect.
         """
         module_name, attribute_name = BUILTIN_DIALECTS_BY_NAME[name]
-        return cast("Dialect", getattr(importlib.import_module(module_name), attribute_name))
+        return getattr(importlib.import_module(module_name), attribute_name)
 
     @classmethod
     def load_builtin_dialects(cls) -> None:
@@ -94,7 +94,7 @@ class DialectRegistry:
                 try:
 
                     def load_contribution(entry: EntryPoint = entry_point) -> ExtensionContribution:
-                        return cast("ExtensionContribution", entry.load()())
+                        return entry.load()()
 
                     cls.extensions.load(name, load_contribution)
                 except Exception as error:

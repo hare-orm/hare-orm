@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -141,7 +141,7 @@ def test_add_model_two_simple_models_fields_in_one_app_with_fk(
     assert len(state.apps.apps[second_app]) == models_in_second_app
 
     model2 = state.apps.get_model(f"{second_app}.TestModel2")
-    fk_field = cast(RelationalFieldInstance, model2._meta.fields_map["reference"])
+    fk_field: RelationalFieldInstance = model2._meta.fields_map["reference"]
     assert isinstance(fk_field, field_class)
     assert fk_field.related_model.__name__ == "TestModel"
 
@@ -183,7 +183,7 @@ def test_create_model_with_fk_to_not_yet_created_model(
     assert len(state.models) == 2
 
     model_alert = state.apps.get_model("models.Alert")
-    fk_field = cast(RelationalFieldInstance, model_alert._meta.fields_map["reference"])
+    fk_field: RelationalFieldInstance = model_alert._meta.fields_map["reference"]
     assert isinstance(fk_field, field_class)
     assert fk_field.related_model.__name__ == "Warehouse"
 
@@ -250,7 +250,7 @@ def test_rename_with_fk(
     operation.state_forward("models", state)
 
     model_state = state.models[(second_app, "TestModel2")]
-    field = cast(RelationalFieldInstance, model_state.fields["reference"])
+    field: RelationalFieldInstance = model_state.fields["reference"]
     assert isinstance(field, field_class)
     assert field.model_name == "models.NewName"
 
@@ -368,7 +368,7 @@ def test_create_model_with_m2m_through_model(empty_state: State):
     group = state.apps.get_model("models.Group")
     membership = state.apps.get_model("models.Membership")
 
-    m2m_field = cast(ManyToManyFieldInstance, person._meta.fields_map["groups"])
+    m2m_field: ManyToManyFieldInstance = person._meta.fields_map["groups"]
     assert m2m_field.through == "membership"
     # NOT resolved to the live `membership` class - kept as the original "app.Model" string the
     # field was declared with, the same way `model_name` is never overwritten with
@@ -377,8 +377,8 @@ def test_create_model_with_m2m_through_model(empty_state: State):
     assert m2m_field.forward_keys == ("group_id",)
     assert m2m_field.backward_keys == ("person_id",)
 
-    person_fk = cast(ForeignKeyFieldInstance, membership._meta.fields_map["person"])
-    group_fk = cast(ForeignKeyFieldInstance, membership._meta.fields_map["group"])
+    person_fk: ForeignKeyFieldInstance = membership._meta.fields_map["person"]
+    group_fk: ForeignKeyFieldInstance = membership._meta.fields_map["group"]
     assert person_fk.related_model is person
     assert group_fk.related_model is group
 
@@ -423,7 +423,7 @@ def test_a_relation_to_a_model_class_links_to_the_states_model(empty_state: Stat
     ).state_forward("models", empty_state)
 
     novel = empty_state.apps.get_model("models.Novel")
-    writer_field = cast(ForeignKeyFieldInstance, novel._meta.fields_map["writer"])
+    writer_field: ForeignKeyFieldInstance = novel._meta.fields_map["writer"]
     assert writer_field.related_model is empty_state.apps.get_model("models.Writer")
     assert "novels" not in Writer._meta.fields_map
 
@@ -473,8 +473,144 @@ def test_rename_model_with_related_name_relations_re_renders_the_targets(empty_s
 
     tag = empty_state.apps.get_model("models.Tag")
     writer = empty_state.apps.get_model("models.Writer")
-    assert cast(RelationalField, tag._meta.fields_map["authors"]).related_model is writer
-    assert cast(RelationalField, tag._meta.fields_map["tagged_authors"]).related_model is writer
+    assert tag._meta.fields_map["authors"].related_model is writer
+    assert tag._meta.fields_map["tagged_authors"].related_model is writer
+
+
+@pytest.mark.parametrize("composite", [False, True])
+@pytest.mark.parametrize("object_type", [Index, UniqueConstraint])
+@pytest.mark.parametrize("same_table", [False, True])
+def test_moved_models_share_schema_objects_only_for_the_same_table(composite, object_type, same_table):
+    state = State()
+    key_name = "number" if composite else "id"
+    for app_label in ("books", "library"):
+        model_fields = (
+            [
+                ("section", fields.IntField()),
+                ("number", fields.IntField()),
+                ("pk", fields.CompositePrimaryKey("section", "number")),
+            ]
+            if composite
+            else [("id", fields.IntField(primary_key=True))]
+        )
+        option_name = "indexes" if object_type is Index else "constraints"
+        CreateModel(
+            name="Book",
+            fields=model_fields,
+            options={
+                "table": "book" if same_table else f"{app_label}_book",
+                option_name: (object_type(fields=(key_name,), name="book_key"),),
+            },
+        ).state_forward(app_label, state)
+    if not same_table:
+        with pytest.raises(ConfigurationError, match="both declare a constraint/index named 'book_key'"):
+            state.apps
+        return
+    previous = state.apps.get_model("books.Book")
+    moved = state.apps.get_model("library.Book")
+    assert previous is not moved
+    assert previous._meta.db_table == moved._meta.db_table == "book"
+    assert getattr(previous._meta, option_name)[0].name == "book_key"
+    assert getattr(moved._meta, option_name)[0].name == "book_key"
+
+
+@pytest.mark.parametrize("composite", [False, True])
+@pytest.mark.parametrize("move_target", [False, True])
+@pytest.mark.parametrize("relation_type", [fields.ForeignKeyField, fields.OneToOneField, fields.ManyToManyField])
+def test_moved_model_relations_keep_their_physical_links(composite, move_target, relation_type):
+    state = State()
+    for app_label in ("books", "library") if move_target else ("books",):
+        CreateModel(
+            name="Tag",
+            fields=(
+                [
+                    ("section", fields.IntField()),
+                    ("number", fields.IntField()),
+                    ("pk", fields.CompositePrimaryKey("section", "number")),
+                ]
+                if composite
+                else [("id", fields.IntField(primary_key=True))]
+            ),
+            options={"table": "tag"},
+        ).state_forward(app_label, state)
+    for app_label in ("books", "library"):
+        target_app = app_label if move_target else "books"
+        model_fields = (
+            [
+                ("section", fields.IntField()),
+                ("number", fields.IntField()),
+                ("pk", fields.CompositePrimaryKey("section", "number")),
+            ]
+            if composite
+            else [("id", fields.IntField(primary_key=True))]
+        )
+        model_fields.append(("tags", relation_type(f"{target_app}.Tag", related_name="books")))
+        CreateModel("Book", model_fields, options={"table": "book"}).state_forward(app_label, state)
+    previous = state.apps.get_model("books.Book")
+    moved = state.apps.get_model("library.Book")
+    previous_link = previous._meta.fields_map["tags"]
+    moved_link = moved._meta.fields_map["tags"]
+    assert previous_link.related_model._meta.db_table == moved_link.related_model._meta.db_table == "tag"
+    if relation_type is fields.ManyToManyField:
+        assert previous_link.through == moved_link.through == "book_tag"
+        assert previous_link.forward_keys == moved_link.forward_keys
+        assert previous_link.backward_keys == moved_link.backward_keys
+    else:
+        assert previous_link.source_fields == moved_link.source_fields
+        assert previous_link.db_column_names == moved_link.db_column_names
+    for app_label in ("books", "library") if move_target else ("books",):
+        target = state.apps.get_model(f"{app_label}.Tag")
+        backward = target._meta.fields_map["books"]
+        assert backward.related_model._meta.db_table == "book"
+    # Re-rendering without the old app must leave the remaining relation intact.
+    DeleteModel("Book").state_forward("books", state)
+    remaining = state.apps.get_model("library.Book")
+    target = remaining._meta.fields_map["tags"].related_model
+    assert target._meta.db_table == "tag"
+    assert target._meta.fields_map["books"].related_model is remaining
+
+
+@pytest.mark.parametrize("composite", [False, True])
+def test_a_moved_model_uses_the_through_models_physical_foreign_key(composite):
+    state = State()
+    CreateModel("Tag", [("id", fields.IntField(primary_key=True))], options={"table": "tag"}).state_forward(
+        "books", state
+    )
+    for app_label in ("books", "library"):
+        model_fields = (
+            [
+                ("section", fields.IntField()),
+                ("number", fields.IntField()),
+                ("pk", fields.CompositePrimaryKey("section", "number")),
+            ]
+            if composite
+            else [("id", fields.IntField(primary_key=True))]
+        )
+        model_fields.append(
+            ("tags", fields.ManyToManyField("books.Tag", through="books.BookTag", related_name="books"))
+        )
+        CreateModel("Book", model_fields, options={"table": "book"}).state_forward(app_label, state)
+    CreateModel(
+        "BookTag",
+        [
+            ("id", fields.IntField(primary_key=True)),
+            ("book", fields.ForeignKeyField("books.Book", related_name=False)),
+            ("tag", fields.ForeignKeyField("books.Tag", related_name=False)),
+        ],
+        options={"table": "book_tag"},
+    ).state_forward("books", state)
+    previous = state.apps.get_model("books.Book")._meta.fields_map["tags"]
+    moved = state.apps.get_model("library.Book")._meta.fields_map["tags"]
+    assert previous.through == moved.through == "book_tag"
+    assert previous.backward_keys == moved.backward_keys
+    AlterField("BookTag", "book", fields.ForeignKeyField("library.Book", related_name=False)).state_forward(
+        "books", state
+    )
+    DeleteModel("Book").state_forward("books", state)
+    remaining = state.apps.get_model("library.Book")
+    through = remaining._meta.fields_map["tags"].through_model_class
+    assert through is state.apps.get_model("books.BookTag")
+    assert through._meta.fields_map["book"].related_model is remaining
 
 
 def test_add_field(state_with_model: State):
@@ -511,13 +647,13 @@ def test_add_field_relational(
     operation.state_forward("models", state)
 
     model_state = state.models["models", "TestModel2"]
-    field = cast(RelationalFieldInstance, model_state.fields["ref"])
+    field: RelationalFieldInstance = model_state.fields["ref"]
     assert isinstance(field, field_class)
     assert field.model_name == "models.TestModel"
 
     model = state.apps.get_model("models.TestModel")
     model2 = state.apps.get_model("models.TestModel2")
-    field_on_model = cast(RelationalField, model2._meta.fields_map["ref"])
+    field_on_model: RelationalField = model2._meta.fields_map["ref"]
     assert field_on_model.related_model == model
 
     backward_field = model._meta.fields_map["child"]

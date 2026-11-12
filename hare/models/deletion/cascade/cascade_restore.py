@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime
 from contextlib import nullcontext
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.fields.enums import OnDelete
 from hare.models.deletion.cascade.deletion_graph import DeletionGraph
@@ -76,7 +76,7 @@ class CascadeRestore:
             model, self.connection, leaves_constrained=False
         ):
             return
-        connection = cast("DatabaseClient", self.connection)
+        connection: DatabaseClient = self.connection  # type: ignore[assignment]
         for schema_name, tenant in await TenantSchemaVisits.get_other_schemas(connection):
             async with TenantSchemaVisits.visit(connection, schema_name, tenant) as scope:
                 await CascadeRestore(scope.connection, self.deleted_at, writes_tenant_rows_only=True).run(model, pks)
@@ -131,7 +131,7 @@ class CascadeRestore:
         from hare.models import Model
         from hare.query.statements.write.update_query import UpdateQuery
 
-        soft_delete_field = cast("str", model._meta.soft_delete_field)
+        soft_delete_field: str = model._meta.soft_delete_field  # type: ignore[assignment]
         model_connection = RelatedRows.get_connection_for(model, self.connection)
         lookup_connection = model_connection or model.get_connection(for_write=True)
         for batch in RelatedRows.split_into_batches(

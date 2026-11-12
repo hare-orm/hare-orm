@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from copy import copy
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import FieldError, UnSupportedError
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
@@ -20,7 +20,6 @@ from hare.sql.terms.term import Term
 if TYPE_CHECKING:
     from hare.query.statements.awaitable_query import AwaitableQuery
     from hare.sql.builder.tables.declarations import SourceBinding
-    from hare.sql.builder.tables.table import Table
 
 
 class QueryGrouping:
@@ -359,5 +358,5 @@ class QueryGrouping:
                 for join in bound_path.joins:
                     QueryJoins.join_table(query, join)
                 column = bound_path.columns[0]
-                group_bys.append(column.as_(f"{cast('Table', column.table).get_table_name()}__{concrete_field_name}"))
+                group_bys.append(column.as_(f"{column.table.get_table_name()}__{concrete_field_name}"))  # type: ignore[union-attr]
         return group_bys

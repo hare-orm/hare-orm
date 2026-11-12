@@ -11,7 +11,7 @@ from hare.dialects.postgresql.introspection.constants import (
     POSTGRESQL_CATALOG_FOREIGN_KEY_NONCOMPARABLE_MEMBERS,
 )
 from hare.dialects.postgresql.introspection.postgresql_definitions import PostgresqlDefinitions
-from hare.inspectdb.introspection.enums import SchemaPartType
+from hare.inspectdb.enums import SchemaPartType
 from hare.inspectdb.introspection.schema_part import SchemaPart
 from hare.inspectdb.introspection.table_parts import TableParts
 

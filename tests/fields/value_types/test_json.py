@@ -1,4 +1,6 @@
 import enum
+import json
+import math
 from decimal import Decimal
 from typing import Any
 
@@ -13,9 +15,59 @@ from hare.exceptions import (
     ValidationError,
 )
 from hare.fields import JSONField
+from hare.fields.data.json.json_codec import JsonCodec
 from hare.query.functions import Max, Min
 from hare.transactions.transactions import Transactions
 from tests.shared_models import testmodels
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"n":123456789012345678901234567890,"n":-123456789012345678901234567891}',
+        '{"$serde_json::private::Number":"123456789012345678901234567890"}',
+        '{"a":1.234567890123456789e-50,"b":-0.0,"c":-0,"s":"\\u00e9\\ud83d\\ude00"}',
+        "[null,true,false,[],{},1,2.0]",
+    ],
+)
+def test_native_json_preserves_exact_numbers_objects_and_duplicate_keys(text):
+    for value in (text, text.encode()):
+        actual = JsonCodec.loads(value)
+        assert actual == json.loads(value)
+        if isinstance(actual, dict) and "b" in actual:
+            assert math.copysign(1.0, actual["b"]) == -1.0
+            assert type(actual["c"]) is int
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("number", ["NaN", "Infinity", "-Infinity", "1e9999"])
+@pytest.mark.parametrize("prefix", ["", '"big":123456789012345678901234567890,'])
+def test_native_json_rejects_nonfinite_values_independently_of_large_integers(number, prefix):
+    with pytest.raises(ValueError):
+        JsonCodec.loads("{" + prefix + '"value":' + number + "}")
+
+
+@pytest.mark.database_independent
+def test_native_json_rejects_trailing_input_and_preserves_custom_decoder():
+    for text in ("{} true", "{", "[1,]", b'"\xff"', '"\\ud800"'):
+        with pytest.raises(ValueError):
+            JsonCodec.loads(text)
+    seen = []
+    field = JSONField(decoder=lambda text: seen.append(text) or {"custom": True})
+    assert field.from_db_value("NaN") == {"custom": True}
+    assert seen == ["NaN"]
+
+
+@pytest.mark.database_independent
+def test_native_json_accepts_field_depth_and_bounds_deeper_inputs():
+    text = "[" * 254 + "0" + "]" * 254
+    value = JsonCodec.loads(text)
+    for _ in range(254):
+        value = value[0]
+    assert value == 0
+    with pytest.raises(ValueError):
+        JsonCodec.loads("[" * 1100 + "0" + "]" * 1100)
 
 
 @pytest.mark.database_independent
@@ -589,45 +641,46 @@ async def test_sqlite_json_column_has_text_affinity(db):
 
 
 @pytest.mark.database_independent
-def test_native_storable_value_check_matches_the_python_walk(monkeypatch):
-    """rust.hydrate walks a JSON value before it is written, instead of an isinstance chain per
-    node in Python - it finds the same first problem the Python walk finds, and the same long
-    integers."""
-    from hare.fields.data.json.json_codec import JsonCodec
+def test_the_storable_value_check_finds_the_first_problem_and_the_long_integers():
+    """rust.native walks a JSON value before it is written: it refuses a value holding itself and a
+    NaN/Infinity float, and tells whether an integer is past orjson's 64-bit range - a list or dict
+    met twice without holding itself is no circular reference."""
+    from hare.fields.data.constants import JSON_CIRCULAR_REFERENCE_MESSAGE
 
-    if JsonCodec.storable_value_checker is None:
-        pytest.skip("this rust.hydrate build predates check_json_storable")
     field = JSONField()
     field.model_field_name = "payload"
+    label = field.get_field_label()
+
+    def get_non_finite_message(number: float) -> str:
+        return f"{label}: value {field.get_value_for_message(number)} is not a finite number, which JSON can't store"
+
     circular_list: list[Any] = [1]
     circular_list.append(circular_list)
     circular_dict: dict[str, Any] = {}
     circular_dict["self"] = {"inner": [circular_dict]}
     shared = ["shared"]
-    samples = [
-        circular_list,
-        circular_dict,
-        {"twice": [shared, shared], "again": shared},
-        {"tags": ["a", "b"], "nested": {"deep": [1, 2.5, None, True]}},
-        {"big": 2**64, "small": -(2**63) - 1},
-        {"edge": [2**64 - 1, -(2**63)]},
-        ("tuple", ["x", {"k": "v"}]),
-        {"bad key\x00": 1},
-        ["fine", float("nan")],
-        [float("inf"), "null\x00byte"],
-        ["null\x00byte", float("-inf")],
-        {"a": float("nan"), "b": "x\x00"},
+    circular_message = f"{label}: {JSON_CIRCULAR_REFERENCE_MESSAGE}"
+    expected_outcomes = [
+        (circular_list, circular_message),
+        (circular_dict, circular_message),
+        ({"twice": [shared, shared], "again": shared}, False),
+        ({"tags": ["a", "b"], "nested": {"deep": [1, 2.5, None, True]}}, False),
+        ({"big": 2**64, "small": -(2**63) - 1}, True),
+        ({"edge": [2**64 - 1, -(2**63)]}, False),
+        (("tuple", ["x", {"k": "v"}]), False),
+        ({"bad key\x00": 1}, False),
+        (["fine", float("nan")], get_non_finite_message(float("nan"))),
+        ([float("inf"), "null\x00byte"], get_non_finite_message(float("inf"))),
+        (["null\x00byte", float("-inf")], get_non_finite_message(float("-inf"))),
+        ({"a": float("nan"), "b": "x\x00"}, get_non_finite_message(float("nan"))),
     ]
-    for sample in samples:
-        outcomes = []
-        for checker in (JsonCodec.storable_value_checker, None):
-            monkeypatch.setattr(JsonCodec, "storable_value_checker", checker)
-            try:
-                outcomes.append(field.check_storable_value(sample))
-            except ValidationError as error:
-                outcomes.append(str(error))
-        monkeypatch.undo()
-        assert outcomes[0] == outcomes[1], sample
+    for sample, expected in expected_outcomes:
+        if isinstance(expected, str):
+            with pytest.raises(ValidationError) as error:
+                field.check_storable_value(sample)
+            assert str(error.value) == str(ValidationError(expected)), sample
+        else:
+            assert field.check_storable_value(sample) is expected, sample
 
 
 @pytest.mark.database_independent

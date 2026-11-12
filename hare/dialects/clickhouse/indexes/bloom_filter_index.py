@@ -30,7 +30,7 @@ class BloomFilterIndex(ClickhouseIndex):
         super().__init__(*args, **kwargs)
         if (
             isinstance(false_positive, bool)
-            or not isinstance(false_positive, int | float)
+            or not isinstance(false_positive, (int, float))
             or not 0 < false_positive < 1
         ):
             raise ConfigurationError(

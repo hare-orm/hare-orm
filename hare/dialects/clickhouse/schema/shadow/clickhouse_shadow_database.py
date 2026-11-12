@@ -5,7 +5,7 @@ import secrets
 from collections.abc import Collection
 from contextlib import AsyncExitStack
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Self, cast
+from typing import TYPE_CHECKING, Any, Self
 
 from hare.core.resource_completion import ResourceCompletion
 from hare.ddl.raw_sql_term import RawSQLTerm
@@ -93,7 +93,7 @@ class ClickhouseShadowDatabase(ShadowDatabase):
             database: The database it stands for.
             engine_rows: The database's row of ``system.databases`` - none when it doesn't exist.
         """
-        client = cast("ClickhouseClient", self.connection)
+        client: ClickhouseClient = self.connection  # type: ignore[assignment]
         engine_sql = ""
         if engine_rows and engine_rows[0]["engine"] == CLICKHOUSE_REPLICATED_DATABASE_ENGINE:
             engine_sql = ClickhouseCatalogEngine.get_shadow_database_sql(

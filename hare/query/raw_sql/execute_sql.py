@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from typing import TYPE_CHECKING, Any, cast, overload
+from typing import TYPE_CHECKING, Any, overload
 
 from hare.core.connections.connections import Connections
 from hare.dialects.base.client.database_client import DatabaseClient
@@ -47,15 +47,15 @@ async def execute_sql(
     schema: type[SchemaT] | PydanticTypeAdapter[SchemaT] | Any | None = None,
 ) -> SqlQueryResult[SchemaT] | SqlQueryResult[dict[str, Any]]:
     if using is not None:
-        connection = cast("DatabaseClient", Connections.get_client(using))
+        connection = Connections.get_client(using)
     else:
         connection_handler = Connections.current()
         single_client = connection_handler.get_single_client()
         if single_client is None:
             raise connection_handler.get_ambiguous_connection_error()
         connection = single_client
-    sql, parameters = query.get_parameterized_sql(connection.sql_context)
-    statement_result = await connection.execute(sql, parameters, rows_by_position=True)
+    sql, parameters = query.get_parameterized_sql(connection.sql_context)  # type: ignore[union-attr]
+    statement_result = await connection.execute(sql, parameters, rows_by_position=True)  # type: ignore[union-attr]
     column_names = statement_result.column_names
     if len(set(column_names)) != len(column_names):
         repeated_names = sorted(name for name, count in Counter(column_names).items() if count > 1)

@@ -13,8 +13,8 @@ from hare.dialects.clickhouse.introspection.constants import (
     CLICKHOUSE_DISTRIBUTED_ENGINE_NAME,
     CLICKHOUSE_ENGINE_CLAUSES,
 )
+from hare.inspectdb.enums import SchemaPartType
 from hare.inspectdb.introspection.catalog_identities import CatalogIdentities
-from hare.inspectdb.introspection.enums import SchemaPartType
 
 if TYPE_CHECKING:
     from hare.dialects.base.literals.sql_literals import SqlLiterals

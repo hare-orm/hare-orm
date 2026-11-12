@@ -205,9 +205,7 @@ class StateApps(Apps):
             if app_label is None:
                 raise ConfigurationError(f"Model {model_class} is not registered in any app")
             return app_label, model_class.__name__
-        if len(items := reference.split(".")) != 2:
-            raise ConfigurationError(f"{reference!r} is not a valid model reference. Should be <app>.<model>.")
-        return items[0], items[1]
+        return Apps.split_validated_reference(reference)
 
     def clone(
         self,

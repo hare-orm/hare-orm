@@ -1,6 +1,6 @@
 """A lightweight override of the currently-active HareContext's use_timezone/timezone settings.
 
-Timezone.get_use_timezone()/name() read whichever HareContext is currently active (a contextvar, so
+ZoneSettings.get_use_timezone()/name() read whichever HareContext is currently active (a contextvar, so
 naturally isolated per task) instead of a process-global os.environ var - tests that need a
 specific timezone config no longer mutate os.environ, they enter a temporary child context with
 different timezone settings instead. This reuses the current context's own connections/apps/

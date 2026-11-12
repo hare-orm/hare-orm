@@ -370,7 +370,6 @@ async def test_init_config_file_wrong_extension():
 
 
 @pytest.mark.parametrize("file_name", ["init.json", pytest.param("init.yaml", marks=pytest.mark.requires("yaml"))])
-@pytest.mark.skipif(os.name == "nt", reason="path issue on Windows")
 @pytest.mark.asyncio
 async def test_init_config_file(file_name):
     async with HareContext():

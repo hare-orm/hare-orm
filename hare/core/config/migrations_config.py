@@ -33,7 +33,7 @@ class MigrationsConfig(ConfigSection):
         lock_timeout: Any = self.lock_timeout
         if lock_timeout is None:
             return
-        if isinstance(lock_timeout, bool) or not isinstance(lock_timeout, int | float):
+        if isinstance(lock_timeout, bool) or not isinstance(lock_timeout, (int, float)):
             raise ConfigurationError(
                 f'Config "migrations.lock_timeout" must be a number of seconds, got {lock_timeout!r}'
             )

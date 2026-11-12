@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from hare.core.resource_completion import ResourceCompletion
 from hare.dialects.clickhouse.client.constants import (
@@ -42,7 +42,7 @@ class ClickhouseMutationRecovery:
         )
 
     async def recover(self, client: DatabaseClient, error: BaseException) -> None:
-        connection = cast("ClickhouseClient", client)
+        connection: ClickhouseClient = client  # type: ignore[assignment]
         if connection.is_transaction_client or not isinstance(error, connection.driver_errors.driver):
             return
         match = CLICKHOUSE_FAILED_MUTATIONS_PATTERN.search(str(error))

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -226,7 +225,7 @@ async def test_add_index_generates_gin_tsvector_sql() -> None:
     client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
 
-    index = cast(Index, Document._meta.indexes[0])
+    index: Index = Document._meta.indexes[0]
     await editor.add_index(Document, index)
 
     assert client.executed
@@ -256,7 +255,7 @@ async def test_add_index_renders_with_storage_params_before_where_condition() ->
     client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
 
-    index = cast(Index, Item._meta.indexes[0])
+    index: Index = Item._meta.indexes[0]
     await editor.add_index(Item, index)
 
     assert client.executed

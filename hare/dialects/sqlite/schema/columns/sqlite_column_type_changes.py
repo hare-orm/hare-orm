@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.dialect import Dialect
 from hare.dialects.base.schema.columns.column_type_changes import ColumnTypeChanges
@@ -39,7 +39,7 @@ class SqliteColumnTypeChanges(ColumnTypeChanges):
         if isinstance(old_field, ForeignKeyFieldInstance):
             return type(old_field) is type(new_field) and cls.get_relation_declaration(
                 old_field, dialect
-            ) == cls.get_relation_declaration(cast("ForeignKeyFieldInstance[Any]", new_field), dialect)
+            ) == cls.get_relation_declaration(new_field, dialect)  # type: ignore[arg-type]
         return (
             not isinstance(old_field, ManyToManyFieldInstance)
             and type(old_field) is type(new_field)

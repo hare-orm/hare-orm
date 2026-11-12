@@ -53,8 +53,8 @@ class ExclusionConstraint:
 
     def __post_init__(self) -> None:
         DeclaredNames.raise_if_not_name(self.name, "ExclusionConstraint.name")
-        if not isinstance(self.expressions, tuple | list) or not all(
-            isinstance(element, tuple | list)
+        if not isinstance(self.expressions, (tuple, list)) or not all(
+            isinstance(element, (tuple, list))
             and len(element) == 2
             and DeclaredExpressions.is_declared_expression(element[0])
             and isinstance(element[1], str)

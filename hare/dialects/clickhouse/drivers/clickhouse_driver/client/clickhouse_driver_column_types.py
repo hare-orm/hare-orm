@@ -33,11 +33,8 @@ from hare.dialects.clickhouse.drivers.clickhouse_driver.constants import (
     CLICKHOUSE_DRIVER_GEOMETRY_ALIASES,
     CLICKHOUSE_DRIVER_VARIANT_PREFIX,
 )
-from hare.dialects.clickhouse.types.constants import (
-    CLICKHOUSE_DYNAMIC_TYPE,
-    CLICKHOUSE_ESCAPED_JSON_KEY_DOT,
-    CLICKHOUSE_JSON_KEY_DOT,
-)
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
+from hare.dialects.clickhouse.types.constants import CLICKHOUSE_ESCAPED_JSON_KEY_DOT, CLICKHOUSE_JSON_KEY_DOT
 
 
 class ClickhouseDriverColumnTypes:
@@ -67,13 +64,15 @@ class ClickhouseDriverColumnTypes:
         for alias, primitive in CLICKHOUSE_DRIVER_GEOMETRY_ALIASES:
             if specification == alias:
                 return child(primitive)
-        is_dynamic = specification == CLICKHOUSE_DYNAMIC_TYPE or specification.startswith(
+        is_dynamic = specification == ClickhouseTypeName.DYNAMIC or specification.startswith(
             CLICKHOUSE_DRIVER_DYNAMIC_PREFIX
         )
         if is_dynamic:
             return ClickhouseDriverDynamicColumn(child, **options)
         if specification.startswith(CLICKHOUSE_DRIVER_VARIANT_PREFIX):
-            types = [part.strip() for part in get_inner_columns(get_inner_spec("Variant", specification))]
+            types = [
+                part.strip() for part in get_inner_columns(get_inner_spec(ClickhouseTypeName.VARIANT, specification))
+            ]
             return ClickhouseDriverVariantColumn(types, child, **options)
         if specification.startswith("Map("):
             return ClickhouseDriverMapColumns.create_map_column(specification, child, options)
@@ -91,7 +90,7 @@ class ClickhouseDriverColumnTypes:
             column = service.create_low_cardinality_column(specification, child, options)
         elif specification.startswith("Object('json')"):
             column = service.create_json_column(specification, child, options)
-        elif specification.startswith("JSON"):
+        elif specification.startswith(ClickhouseTypeName.JSON):
             column = service.create_newjson_column(specification, child, options)
         else:
             # Geometry aliases supplied by the library can also contain hare's codecs.

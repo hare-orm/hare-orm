@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from contextvars import ContextVar, copy_context
+from contextvars import Context, ContextVar, copy_context
+from functools import cached_property
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.caching.cache import Cache
@@ -23,9 +24,15 @@ class RowScopeBinding:
     current: ClassVar[ContextVar[RowScopeBinding | None]] = ContextVar("hare_row_scope_binding", default=None)
     conditions: ClassVar[Cache[tuple[RowScopeProvider, RowVisibility, Q | None]]] = Cache(holds_sql=False)
 
-    def __init__(self) -> None:
-        self.cache_buckets: dict[int, Any] = {}
-        self.context = copy_context()
+    @cached_property
+    def cache_buckets(self) -> dict[int, Any]:
+        """Allocate storage only when a provider participates in this execution."""
+        return {}
+
+    @cached_property
+    def context(self) -> Context:
+        """Capture the provider context on its first use and reuse it for nested queries."""
+        return copy_context()
 
     @classmethod
     def get_condition(

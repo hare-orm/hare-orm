@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime
 from contextlib import nullcontext
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.routing.written_connections import WrittenConnections
 from hare.exceptions import ConfigurationError, IntegrityError, ProtectedError, StaleObjectError, UnSupportedError
@@ -194,7 +194,7 @@ class CascadeDeletion:
             leaves_constrained=self.persist_as_hard_delete and self.policy.only_unconstrained,
         ):
             return
-        connection = cast("DatabaseClient", self.connection)
+        connection: DatabaseClient = self.connection  # type: ignore[assignment]
         for schema_name, tenant in await TenantSchemaVisits.get_other_schemas(connection):
             async with TenantSchemaVisits.visit(connection, schema_name, tenant) as scope:
                 await DeletionCollector.check_protected(self.model, root_pks, scope.connection)
@@ -625,7 +625,7 @@ class CascadeDeletion:
         else:
             return None
         if len(foreign_key_field.source_fields) == 1:
-            return {cast("str", foreign_key_field.source_field): value}
+            return {foreign_key_field.source_field: value}  # type: ignore[dict-item]
         if not isinstance(value, (tuple, list)) or len(value) != len(foreign_key_field.source_fields):
             raise ConfigurationError(
                 f"on_delete=SET_DEFAULT for composite-target FK "
@@ -663,9 +663,8 @@ class CascadeDeletion:
                 and root_instance is not None
                 and type(root_instance) is model
             ):
-                many_to_many_relation = cast(
-                    "ManyToManyRelation[Any]",
-                    RelationAccessors.get_relation(root_instance, many_to_many_field.model_field_name),
+                many_to_many_relation: ManyToManyRelation[Any] = RelationAccessors.get_relation(  # type: ignore[assignment]
+                    root_instance, many_to_many_field.model_field_name
                 )
                 many_to_many_relation._reset_cache_on_rollback(chosen_connection)
                 many_to_many_relation._invalidate_local_cache()
@@ -690,7 +689,7 @@ class CascadeDeletion:
 
     async def _read_root_versions(self, root_pks: list[Any]) -> None:
         """Reads the version of every root row, for the soft-delete write's stale check."""
-        optimistic_lock_field = cast("str", self.model._meta.optimistic_lock_field)
+        optimistic_lock_field: str = self.model._meta.optimistic_lock_field  # type: ignore[assignment]
         primary_key_attribute_names = self.model._meta.primary_key_attribute_names
         pk_column_count = len(primary_key_attribute_names)
         for batch in self._split_into_batches(self.model, root_pks):
@@ -719,7 +718,7 @@ class CascadeDeletion:
         from hare.query.statements.write.update_query import UpdateQuery
 
         meta = model._meta
-        soft_delete_field = cast("str", meta.soft_delete_field)
+        soft_delete_field: str = meta.soft_delete_field  # type: ignore[assignment]
         optimistic_lock_field = meta.optimistic_lock_field
         write_connection = model_connection or self._get_model_connection(model)
         pks_by_version: dict[Any, list[Any]] = {}
@@ -755,8 +754,8 @@ class CascadeDeletion:
         primary_key_attribute_names = meta.primary_key_attribute_names
         pk_column_count = len(primary_key_attribute_names)
         written_pks = set()
-        queryset = self._get_written_rows_queryset(model, batch, write_connection).filter(
-            **{cast("str", meta.soft_delete_field): self.deleted_at}
+        queryset = self._get_written_rows_queryset(model, batch, write_connection).filter(  # type: ignore[misc]
+            **{meta.soft_delete_field: self.deleted_at}
         )
         if optimistic_lock_field and version is not None:
             queryset = queryset.filter(**{optimistic_lock_field: version + 1})

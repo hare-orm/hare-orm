@@ -5,7 +5,7 @@ import typing
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from contextlib import asynccontextmanager
 from functools import partial, wraps
-from typing import Any, ParamSpec, TypeVar, cast
+from typing import Any, ParamSpec, TypeVar
 
 from hare import Hare
 from hare.contrib.test.constants import MEMORY_DATABASE
@@ -82,8 +82,8 @@ def init_memory_database(
     elif isinstance(models, str):
         models = [models]
     else:
-        models = cast("list[str]", models)
-    return partial(wrapper, model_modules=models)
+        models = models
+    return partial(wrapper, model_modules=models)  # type: ignore[arg-type]
 
 
 @asynccontextmanager

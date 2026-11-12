@@ -587,7 +587,8 @@ class DjangoSuite:
         results["json_read"] = await measure(json_read, 5)
 
     async def get_load_ids(self) -> list[int]:
-        return [widget.id async for widget in self.widget.objects.all()[:200]]
+        """Use the same first keys even after earlier scenarios updated the table."""
+        return [widget.id async for widget in self.widget.objects.order_by("id")[:200]]
 
     async def run_load_test(self) -> dict[str, Measurement]:
         widgets, ids = self.widget.objects, await self.get_load_ids()

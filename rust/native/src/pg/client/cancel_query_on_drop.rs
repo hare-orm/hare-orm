@@ -34,6 +34,12 @@ impl CancelQueryOnDrop {
         }
         outcome
     }
+
+    /// The leased connection is being disconnected; no later SQL may reuse this session.
+    pub(crate) fn discard(&mut self) {
+        self.completed = true;
+        self.connection_poisoned.store(true, Ordering::Release);
+    }
 }
 
 impl Drop for CancelQueryOnDrop {

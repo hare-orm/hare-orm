@@ -12,13 +12,14 @@ from hare.dialects.sqlite.functions.datetime.date_truncation import DateTruncati
 from hare.dialects.sqlite.functions.sqlite_function_errors import SqliteFunctionErrors
 from hare.dialects.sqlite.functions.sqlite_native_functions import SqliteNativeFunctions
 from hare.sql.enums import DatetimeCastTarget
-from hare.time import Timezone
+from hare.time.system_zone import SystemZone
+from hare.time.zone_names import ZoneNames
 
 
 class SqliteDatePartExtraction:
     """SQLite's user-defined function extracting a part of a date, time or datetime text."""
 
-    #: Keeps the owner bucket of ``Timezone.ZONES`` the native function reads its zones from.
+    #: Keeps the owner bucket of ``ZoneNames.ZONES`` the native function reads its zones from.
     cache_buckets: ClassVar[dict[int, Any]] = {}
 
     @staticmethod
@@ -41,7 +42,7 @@ class SqliteDatePartExtraction:
         if zone_name:
             if parsed.tzinfo is None:
                 parsed = (
-                    Timezone.make_system_local_aware(parsed)
+                    SystemZone.make_system_local_aware(parsed)
                     if len(value) > DATE_TEXT_LENGTH
                     else parsed.replace(tzinfo=datetime.UTC)
                 )
@@ -65,13 +66,10 @@ class SqliteDatePartExtraction:
             connection: The SQLite connection.
             function_errors: The connection's function errors.
         """
-        native_functions = SqliteNativeFunctions.module
-        extract: Any = function_errors.wrap(SqliteDatePartExtraction.extract)
-        if native_functions is not None:
-            extract = native_functions.DateFunctions(
-                ZoneInfo,
-                Timezone.ZONES.get_bucket(SqliteDatePartExtraction),
-                extract,
-                function_errors.wrap(DateTruncation.truncate),
-            ).extract
+        extract = SqliteNativeFunctions.module.DateFunctions(
+            ZoneInfo,
+            ZoneNames.ZONES.get_bucket(SqliteDatePartExtraction),
+            function_errors.wrap(SqliteDatePartExtraction.extract),
+            function_errors.wrap(DateTruncation.truncate),
+        ).extract
         await connection.create_function(SQLITE_EXTRACT_FUNCTION_NAME, 3, extract)

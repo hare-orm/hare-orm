@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.core.routing.written_connections import WrittenConnections
 from hare.ddl.raw_sql_term import RawSQLTerm
@@ -22,6 +22,7 @@ from hare.models.write.update.expression_assignment import ExpressionAssignment
 from hare.models.write.update.update_parameter_slot import UpdateParameterSlot
 from hare.models.write.write_finalizer import WriteFinalizer
 from hare.models.write.write_steps import WriteSteps
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.execution.bound_write import BoundWrite
 from hare.query.execution.write_statements import WriteStatement
 from hare.query.expressions import Expression, ExpressionContext
@@ -52,6 +53,8 @@ class InstanceWriter:
         connection: The connection.
     """
 
+    __slots__ = ("model", "connection", "captures_changes", "statements_key", "templates")
+
     def __init__(self, model: type[Model], connection: DatabaseClient) -> None:
         self.model = model
         self.connection: DatabaseClient = connection
@@ -75,7 +78,7 @@ class InstanceWriter:
         #: The writer's key in ``StatementPlans.instance_writes`` - what its UPDATEs and DELETEs of
         #: other shapes are kept under too.
         self.statements_key = key
-        bucket = StatementPlans.instance_writes.get_model_bucket(model)
+        bucket = StatementPlans.instance_writes.get_bucket(model)
         templates = bucket.get(key)
         self.templates = bucket.store(key, self._prepare_templates()) if templates is None else templates
 
@@ -110,6 +113,7 @@ class InstanceWriter:
             delete_sql=delete_builder.delete().get_sql(self.connection.sql_context),
             delete_without_tenant_scope_sql=delete_without_tenant_scope_sql,
             insert_rules=RowWriteRules.get(self.model, WriteType.INSERT, None, SAVE_METHOD_NAME),
+            update_rules=RowWriteRules.get(self.model, WriteType.UPDATE, None, SAVE_METHOD_NAME),
         )
 
     def _where_by_columns(self, builder: QueryBuilder, db_columns: Iterable[str]) -> QueryBuilder:
@@ -221,8 +225,8 @@ class InstanceWriter:
         if tenant_values is None:
             return 1, [None, None]
         field = self.model._meta.fields_map[tenant_field]
-        get_db_value = self.connection.dialect.types.get_db_value
-        db_values = [get_db_value(field, value, self.model) for value in tenant_values]
+        write = self.connection.dialect.types.get_db_writer(field)
+        db_values = [write(value, self.model) for value in tenant_values]
         if len(db_values) > 1:
             return len(db_values), db_values
         return 1, db_values * 2
@@ -312,7 +316,7 @@ class InstanceWriter:
         if not hasattr(results, "keys"):
             # The key of a row inserted without RETURNING - set when the database generated it.
             pk_field = meta.pk
-            primary_key_attribute = cast("str", meta.primary_key_attribute)
+            primary_key_attribute: str = meta.primary_key_attribute  # type: ignore[assignment]
             if pk_field is not None and pk_field.generated and getattr(obj, primary_key_attribute) is None:
                 setattr(obj, primary_key_attribute, self.connection.dialect.types.get_python_value(pk_field, results))
             return
@@ -369,7 +373,7 @@ class InstanceWriter:
         """
         capture_needs = self.model._meta.change_capture_needs
         if capture_needs is not None and self.captures_changes and capture_needs.captures(RowOperation.INSERT):
-            return await WriteSteps.run_whole(self.connection, InstanceCapture.insert(self, obj, capture_needs))
+            return await WriteSteps.get_whole_run(self.connection, InstanceCapture.insert(self, obj, capture_needs))
         if self.connection.is_transaction_client:
             WriteFinalizer.remember_persistence(obj, self.connection)
         features = self.connection.features
@@ -379,7 +383,7 @@ class InstanceWriter:
         try:
             self.templates.insert_rules.stamp((obj,), stamped_values)
             if features.takes_keys_before_insert and not obj._custom_generated_pk:
-                stamped_values.capture((obj,), ("_custom_generated_pk", "pk"))
+                stamped_values.capture((obj,), ("_custom_generated_pk", PRIMARY_KEY_ALIAS))
                 await GeneratedKeys.assign(self.model, self.connection, (obj,))
             primary_key_given = obj._custom_generated_pk
             field_names, insert_sql, returns_rows = (
@@ -495,7 +499,7 @@ class InstanceWriter:
             guarded_value_count = tenant_value_count if tenant_value_count > 1 else 1
             statement_key = (self.statements_key, False, True, guarded_value_count, fields_tuple)
         if not expressions:
-            cached_sql = StatementPlans.instance_updates.get_model_bucket(self.model).get(statement_key)
+            cached_sql = StatementPlans.instance_updates.get_bucket(self.model).get(statement_key)
             if cached_sql is not None:
                 return cached_sql, None
         query = self._build_update_query(
@@ -507,7 +511,7 @@ class InstanceWriter:
         )
         if not expressions:
             sql = query.get_sql(self.connection.sql_context)
-            StatementPlans.instance_updates.get_model_bucket(self.model)[statement_key] = sql
+            StatementPlans.instance_updates.get_bucket(self.model)[statement_key] = sql
             return sql, None
         sql, parameter_layout = query.get_parameterized_sql(self.connection.sql_context)
         return sql, parameter_layout
@@ -579,7 +583,7 @@ class InstanceWriter:
             if tenant_condition is not None:
                 query = query.where(tenant_condition)
         if only_live_row:
-            soft_delete_field = cast("str", meta.soft_delete_field)
+            soft_delete_field: str = meta.soft_delete_field  # type: ignore[assignment]
             query = query.where(table[meta.fields_db_projection[soft_delete_field]].isnull())
 
         # A generated column is recomputed by the UPDATE - read back so the instance doesn't keep a
@@ -619,7 +623,7 @@ class InstanceWriter:
         """
         capture_needs = self.model._meta.change_capture_needs
         if capture_needs is not None and self.captures_changes and capture_needs.captures(RowOperation.UPDATE):
-            return await WriteSteps.run_whole(
+            return await WriteSteps.get_whole_run(
                 self.connection,
                 InstanceCapture.update(
                     self,
@@ -632,11 +636,15 @@ class InstanceWriter:
                 ),
             )
         rules = self.get_update_rules(update_fields, write_type)
+        field_names = rules.field_names
         # A field left to the database's default isn't written.
-        effective_fields = [
-            field for field in rules.field_names if not isinstance(getattr(instance, field), DatabaseDefault)
-        ]
-        effective_fields = await self._get_fields_without_fixed(instance, effective_fields, update_fields)
+        effective_fields: Sequence[str] = (
+            [field for field in field_names if not isinstance(getattr(instance, field), DatabaseDefault)]
+            if self._has_db_default_values(instance, field_names)
+            else field_names
+        )
+        if self.model._meta.get_table_options(self.connection.dialect) is not None:
+            effective_fields = await self._get_fields_without_fixed(instance, list(effective_fields), update_fields)
         if not effective_fields:
             return WriteOutcome(RowOperation.UPDATE, None, performed=False)
 
@@ -646,18 +654,23 @@ class InstanceWriter:
         changed_values = InstanceValues()
         try:
             rules.stamp((instance,), changed_values)
-            # auto_now fields are written on every save(), whatever update_fields names.
-            effective_fields.extend(name for name in rules.stamped_names if name not in effective_fields)
             optimistic_lock_field = rules.version_field_name
             old_version_value = None
             if optimistic_lock_field:
                 # Bumped on every update - the old value, bound as an extra WHERE parameter by
                 # get_update_sql(), makes the UPDATE match only a row nothing changed since.
                 old_version_value = changed_values.bump_optimistic_lock(instance, optimistic_lock_field)
-                if optimistic_lock_field not in effective_fields:
-                    effective_fields.append(optimistic_lock_field)
+            if effective_fields is field_names:
+                written_fields: Sequence[str] = rules.updated_names
+            else:
+                # auto_now fields are written on every save(), whatever update_fields names.
+                updated_fields = list(effective_fields)
+                updated_fields.extend(name for name in rules.stamped_names if name not in updated_fields)
+                if optimistic_lock_field and optimistic_lock_field not in updated_fields:
+                    updated_fields.append(optimistic_lock_field)
+                written_fields = tuple(updated_fields)
             command = self._get_update_statement(
-                instance, effective_fields, old_version_value, apply_active_tenant_scope_guard, only_live_row
+                instance, written_fields, old_version_value, apply_active_tenant_scope_guard, only_live_row
             )
             result = await BoundWrite.execute_command(self.connection, command)
         except BaseException as error:
@@ -728,14 +741,20 @@ class InstanceWriter:
         Raises:
             QueryError, FieldError: ``update_fields`` names a field the update can't set.
         """
+        if update_fields is None and write_type is WriteType.UPDATE:
+            return self.templates.update_rules
         version_field = self.model._meta.optimistic_lock_field
-        field_names = None if update_fields is None else [name for name in update_fields if name != version_field]
+        field_names = (
+            update_fields
+            if update_fields is None or version_field is None
+            else [name for name in update_fields if name != version_field]
+        )
         return RowWriteRules.get(self.model, write_type, field_names, SAVE_METHOD_NAME)
 
     def _get_update_statement(
         self,
         instance: Model,
-        effective_fields: list[str],
+        effective_fields: Sequence[str],
         old_version_value: Any,
         apply_active_tenant_scope_guard: bool,
         only_live_row: bool,
@@ -835,7 +854,7 @@ class InstanceWriter:
         """
         capture_needs = self.model._meta.change_capture_needs
         if capture_needs is not None and self.captures_changes and capture_needs.captures(RowOperation.DELETE):
-            return await WriteSteps.run_whole(
+            return await WriteSteps.get_whole_run(
                 self.connection,
                 InstanceCapture.delete(
                     self,
@@ -854,7 +873,7 @@ class InstanceWriter:
             values = self._deleted_row_where_values(instance)
             query = self.templates.delete_without_tenant_scope_sql
         if self.model._meta.sensitive_fields:
-            values = self.hide_sensitive_values(values, list(self.model._meta.primary_key_attribute_names))
+            values = self.hide_sensitive_values(values, self.model._meta.primary_key_attribute_names)
         return (
             await self.connection.execute(
                 query,
@@ -874,7 +893,7 @@ class InstanceWriter:
             The statement.
         """
         statement_key = (self.statements_key, tenant_value_count)
-        query: str | None = StatementPlans.instance_deletes.get_model_bucket(self.model).get(statement_key)
+        query: str | None = StatementPlans.instance_deletes.get_bucket(self.model).get(statement_key)
         if query is None:
             row_columns = self._deleted_row_db_columns()
             basequery = self.connection.query_class.from_(self.model._meta.basetable)
@@ -885,7 +904,7 @@ class InstanceWriter:
             if tenant_condition is not None:
                 builder = builder.where(tenant_condition)
             query = builder.delete().get_sql(self.connection.sql_context)
-            StatementPlans.instance_deletes.get_model_bucket(self.model)[statement_key] = query
+            StatementPlans.instance_deletes.get_bucket(self.model)[statement_key] = query
         return query
 
 

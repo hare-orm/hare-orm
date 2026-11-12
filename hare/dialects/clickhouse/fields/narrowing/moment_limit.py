@@ -2,15 +2,12 @@ from __future__ import annotations
 
 import datetime
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from hare.fields.narrowing.narrowing_limit import NarrowingLimit
 
 if TYPE_CHECKING:
     from hare.dialects.base.schema.columns.column_narrowing_check import ColumnNarrowingCheck
-    from hare.dialects.clickhouse.schema.columns.clickhouse_column_narrowing_check import (
-        ClickhouseColumnNarrowingCheck,
-    )
 
 
 @dataclass(frozen=True)
@@ -24,4 +21,4 @@ class MomentLimit(NarrowingLimit):
 
     def get_overflow_predicate_sql(self, check: ColumnNarrowingCheck, quoted_column: str) -> str:
         # Only a ClickHouse field has such a limit - the check is ClickHouse's.
-        return cast("ClickhouseColumnNarrowingCheck", check).get_moment_overflow_predicate_sql(self, quoted_column)
+        return check.get_moment_overflow_predicate_sql(self, quoted_column)  # type: ignore[attr-defined]

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from copy import copy
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -227,13 +227,18 @@ class QueryOptions:
             setattr(options, name, value)
         return options
 
-    def is_default(self) -> bool:
-        """Whether every setting holds its unset value.
+    def is_default(self, names: Iterable[str] | None = None) -> bool:
+        """Whether the selected settings hold their unset values.
+
+        Args:
+            names: The settings to check; None checks every declared setting.
 
         Returns:
             True when none is set.
         """
-        return self is QueryOptions.DEFAULT or not any(getattr(self, name) for name in QueryOptions.__slots__)
+        return self is QueryOptions.DEFAULT or not any(
+            getattr(self, name) for name in (QueryOptions.__slots__ if names is None else names)
+        )
 
     def get_plan_key_part(self) -> tuple[Any, ...]:
         """The part of a plan key these settings make - the value of each setting written into the

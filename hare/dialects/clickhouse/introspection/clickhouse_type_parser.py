@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import replace
 from enum import Enum, IntEnum, StrEnum
-from typing import Any, cast
+from typing import Any
 
 from hare.dialects.clickhouse.constants import (
     CLICKHOUSE_DATETIME_COLUMN_TYPE,
@@ -11,6 +11,7 @@ from hare.dialects.clickhouse.constants import (
     CLICKHOUSE_DEFAULT_DATETIME_FIELD_PATH,
     CLICKHOUSE_TYPE_MAP,
 )
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.clickhouse.schema.constants import (
     CLICKHOUSE_ARRAY_FIELD_PATH,
     CLICKHOUSE_CHAR_ENUM_FIELD_PATH,
@@ -28,7 +29,6 @@ from hare.dialects.clickhouse.schema.constants import (
 )
 from hare.dialects.clickhouse.types.clickhouse_enum_types import ClickhouseEnumTypes
 from hare.dialects.clickhouse.types.clickhouse_physical_type import ClickhousePhysicalType
-from hare.dialects.clickhouse.types.constants import CLICKHOUSE_NULLABLE_TYPE
 from hare.inspectdb.constants import INSPECTED_ENUM_MODULE_NAME
 from hare.inspectdb.generation.model_naming import ModelNaming
 from hare.inspectdb.introspection.inspected_field_specification import InspectedFieldSpecification
@@ -53,7 +53,7 @@ class ClickhouseTypeParser:
             The type, and whether it is nullable.
         """
         physical_type = ClickhousePhysicalType.from_sql(type_sql)
-        if physical_type.name == CLICKHOUSE_NULLABLE_TYPE and len(physical_type.elements) == 1:
+        if physical_type.name == ClickhouseTypeName.NULLABLE and len(physical_type.elements) == 1:
             return physical_type.elements[0].sql, True
         return type_sql, False
 
@@ -65,7 +65,7 @@ class ClickhouseTypeParser:
         if not physical_type.elements or not all(name is not None for name in physical_type.element_names):
             return None
         return {
-            cast(str, name): cls.get_physical_specification(element, enum_name)
+            name: cls.get_physical_specification(element, enum_name)  # type: ignore[misc]
             for name, element in zip(physical_type.element_names, physical_type.elements, strict=True)
         }
 
@@ -89,7 +89,7 @@ class ClickhouseTypeParser:
         cls, physical_type: ClickhousePhysicalType, enum_name: str
     ) -> InspectedFieldSpecification:
         """Map an existing type tree without reparsing each container's declaration."""
-        if physical_type.name == CLICKHOUSE_NULLABLE_TYPE and len(physical_type.elements) == 1:
+        if physical_type.name == ClickhouseTypeName.NULLABLE and len(physical_type.elements) == 1:
             specification = cls.get_physical_specification(physical_type.elements[0], enum_name)
             return replace(specification, kwargs={**specification.kwargs, "null": True})
         return cls.get_unwrapped_specification(physical_type, enum_name)
@@ -99,7 +99,7 @@ class ClickhouseTypeParser:
         cls, element_type: ClickhousePhysicalType, enum_name: str
     ) -> InspectedFieldSpecification:
         """Named tuple arrays map to NestedField; other arrays retain their element field."""
-        if element_type.name == "Tuple":
+        if element_type.name == ClickhouseTypeName.TUPLE:
             named = cls.get_named_elements(element_type, enum_name)
             if named is not None:
                 return InspectedFieldSpecification(CLICKHOUSE_NESTED_FIELD_PATH, {"element_fields": named})
@@ -122,13 +122,13 @@ class ClickhouseTypeParser:
         """
         type_name, arguments = physical_type.name, physical_type.arguments
         elements = physical_type.elements
-        if type_name == "Array" and len(arguments) == 1:
+        if type_name == ClickhouseTypeName.ARRAY and len(arguments) == 1:
             return cls.get_array_specification(elements[0], enum_name)
-        if type_name == "Nested" and arguments:
+        if type_name == ClickhouseTypeName.NESTED and arguments:
             named = cls.get_named_elements(physical_type, enum_name)
             if named is not None:
                 return InspectedFieldSpecification(CLICKHOUSE_NESTED_FIELD_PATH, {"element_fields": named})
-        if type_name == "Map" and len(arguments) == 2:
+        if type_name == ClickhouseTypeName.MAP and len(arguments) == 2:
             return InspectedFieldSpecification(
                 CLICKHOUSE_MAP_FIELD_PATH,
                 {
@@ -136,7 +136,7 @@ class ClickhouseTypeParser:
                     "value_field": cls.get_physical_specification(elements[1], enum_name),
                 },
             )
-        if type_name == "LowCardinality" and len(arguments) == 1:
+        if type_name == ClickhouseTypeName.LOW_CARDINALITY and len(arguments) == 1:
             base_specification = cls.get_physical_specification(elements[0], enum_name)
             base_kwargs = {name: value for name, value in base_specification.kwargs.items() if name != "null"}
             return InspectedFieldSpecification(
@@ -146,9 +146,9 @@ class ClickhouseTypeParser:
                     **({"null": True} if base_specification.kwargs.get("null") else {}),
                 },
             )
-        if type_name in {"Enum8", "Enum16"} and arguments:
+        if type_name in {ClickhouseTypeName.ENUM8, ClickhouseTypeName.ENUM16} and arguments:
             return cls.get_enum_specification(type_name, arguments, enum_name)
-        if type_name == "Dynamic":
+        if type_name == ClickhouseTypeName.DYNAMIC:
             max_types = [
                 int(argument.removeprefix(CLICKHOUSE_DYNAMIC_MAX_TYPES_ARGUMENT).strip())
                 for argument in arguments
@@ -157,12 +157,12 @@ class ClickhouseTypeParser:
             return InspectedFieldSpecification(
                 CLICKHOUSE_DYNAMIC_FIELD_PATH, {"max_types": max_types[0]} if max_types else {}
             )
-        if type_name == "Variant" and arguments:
+        if type_name == ClickhouseTypeName.VARIANT and arguments:
             return InspectedFieldSpecification(
                 CLICKHOUSE_VARIANT_FIELD_PATH,
                 {"variant_fields": [cls.get_physical_specification(element, enum_name) for element in elements]},
             )
-        if type_name == "Tuple" and arguments:
+        if type_name == ClickhouseTypeName.TUPLE and arguments:
             named = cls.get_named_elements(physical_type, enum_name)
             element_fields: Any = (
                 named
@@ -190,7 +190,7 @@ class ClickhouseTypeParser:
         if physical_type.sql == CLICKHOUSE_DATETIME_COLUMN_TYPE:
             return InspectedFieldSpecification(CLICKHOUSE_DEFAULT_DATETIME_FIELD_PATH, {})
         kwargs: dict[str, Any] = {}
-        if physical_type.name == "DateTime64" and physical_type.precision is not None:
+        if physical_type.name == ClickhouseTypeName.DATETIME64 and physical_type.precision is not None:
             kwargs["precision"] = physical_type.precision
         if physical_type.timezone != "UTC":
             kwargs["timezone"] = physical_type.timezone
@@ -218,14 +218,14 @@ class ClickhouseTypeParser:
         enum_field: tuple[str, type[Enum]] | None = None
         if numbers_by_label == ClickhouseEnumTypes.get_label_numbers(labels):
             member_names = ModelNaming.get_enum_member_names(labels)
-            enum_field = (
+            enum_field = (  # type: ignore[assignment]
                 CLICKHOUSE_CHAR_ENUM_FIELD_PATH,
-                cast("type[Enum]", StrEnum(class_name, member_names, module=INSPECTED_ENUM_MODULE_NAME)),
+                StrEnum(class_name, member_names, module=INSPECTED_ENUM_MODULE_NAME),
             )
         elif all(label.isidentifier() and not label.startswith("_") for label in labels):
-            enum_field = (
+            enum_field = (  # type: ignore[assignment]
                 CLICKHOUSE_INT_ENUM_FIELD_PATH,
-                cast("type[Enum]", IntEnum(class_name, numbers_by_label, module=INSPECTED_ENUM_MODULE_NAME)),
+                IntEnum(class_name, numbers_by_label, module=INSPECTED_ENUM_MODULE_NAME),
             )
         written_type_name = ClickhouseEnumTypes.get_enum_type(numbers_by_label).partition("(")[0]
         if enum_field is None or written_type_name != type_name:

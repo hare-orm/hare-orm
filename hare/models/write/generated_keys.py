@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import UnSupportedError, ValidationError
 
@@ -69,7 +69,7 @@ class GeneratedKeys:
         Raises:
             ValidationError: A key is beyond the key field's range - the series outgrew the field.
         """
-        key_field_name = cast("str", model._meta.generated_pk_field_name)
+        key_field_name: str = model._meta.generated_pk_field_name  # type: ignore[assignment]
         keys = await connection.take_generated_keys(model, count)
         key_field = model._meta.fields_map[key_field_name]
         for key in keys:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from collections.abc import Iterator
+from typing import TYPE_CHECKING
 
 from hare.dialects.base.client.constants import TRANSACTION_BEGIN_ABANDONED_MESSAGE
 from hare.dialects.base.client.transaction_lifecycle.transaction_ending import TransactionEnding
@@ -59,19 +60,26 @@ class PendingStatements:
         Args:
             client: The transaction's client.
         """
+        for nested_client in PendingStatements.get_pending_savepoints(client):
+            await TransactionEnding.run_shielded_from_cancellation(
+                nested_client._driver_savepoint(nested_client._savepoint_name),  # type: ignore[arg-type]
+                on_landed=nested_client._drop_pending_savepoint,
+            )
+
+    @staticmethod
+    def get_pending_savepoints(client: TransactionClient) -> Iterator[TransactionClient]:
+        """The unsent savepoints enclosing this call, outermost first.
+
+        Iteration snapshots the pending list because each confirmed SAVEPOINT removes
+        its client. Only savepoints enclosing the current span are sent, never a sibling's.
+        """
         current_span = current_savepoint_span.get()
-        if current_span is None:
-            return
-        # Only the savepoints the calling context runs in - a statement without a span of its own
-        # (a stream's fetch) may run beside a sibling's savepoint.
-        for nested_client in list(client._get_top_level_transaction()._pending_savepoints):
-            savepoint_span = nested_client._savepoint_span
-            if (
-                nested_client._savepoint_pending
-                and savepoint_span is not None
-                and current_span.is_within(savepoint_span)
-            ):
-                await TransactionEnding.run_shielded_from_cancellation(
-                    nested_client._driver_savepoint(cast("str", nested_client._savepoint_name)),
-                    on_landed=nested_client._drop_pending_savepoint,
-                )
+        if current_span is not None:
+            for nested_client in tuple(client._get_top_level_transaction()._pending_savepoints):
+                savepoint_span = nested_client._savepoint_span
+                if (
+                    nested_client._savepoint_pending
+                    and savepoint_span is not None
+                    and current_span.is_within(savepoint_span)
+                ):
+                    yield nested_client

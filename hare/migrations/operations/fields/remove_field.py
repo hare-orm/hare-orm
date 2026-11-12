@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.ddl.conditions.field_condition import FieldCondition
 from hare.ddl.constraints.check_constraint import CheckConstraint
@@ -91,7 +91,7 @@ class RemoveField(FieldAddRemoveOperation):
         removed_names = {self.name}
         if isinstance(model_state.fields.get(self.name), ForeignKeyFieldInstance):
             model = state.apps.get_model(f"{app_label}.{self.model_name}")
-            relation = cast("ForeignKeyFieldInstance[Any]", model._meta.fields_map[self.name])
+            relation: ForeignKeyFieldInstance[Any] = model._meta.fields_map[self.name]  # type: ignore[assignment]
             removed_names.update(relation.source_fields)
         self._remove_meta_field_references(model_state, app_label, removed_names)
 

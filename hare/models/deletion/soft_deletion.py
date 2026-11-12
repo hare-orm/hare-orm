@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from hare.exceptions import QueryError
 from hare.fields.constants import ROLLBACK_RESTORE_UNSET
@@ -70,7 +70,7 @@ class SoftDeletion:
                 concurrently.
             IntegrityError: The row doesn't exist.
         """
-        soft_delete_field = cast("str", obj._meta.soft_delete_field)
+        soft_delete_field: str = obj._meta.soft_delete_field  # type: ignore[assignment]
         had_soft_delete_value = hasattr(obj, soft_delete_field)
         old_soft_delete_value = getattr(obj, soft_delete_field) if had_soft_delete_value else None
         SoftDeletion.set_soft_delete_field(obj, value)
@@ -147,7 +147,7 @@ class SoftDeletion:
             connection: Connection of the running transaction.
             value: The row's soft-delete value.
         """
-        soft_delete_field = cast("str", obj._meta.soft_delete_field)
+        soft_delete_field: str = obj._meta.soft_delete_field  # type: ignore[assignment]
         had_soft_delete_value = hasattr(obj, soft_delete_field)
         old_soft_delete_value = getattr(obj, soft_delete_field) if had_soft_delete_value else None
         SoftDeletion.set_soft_delete_field(obj, value)
@@ -164,7 +164,7 @@ class SoftDeletion:
         _setattr = object.__setattr__
         _setattr(obj, "_allow_soft_delete_write", True)
         try:
-            setattr(obj, cast("str", obj._meta.soft_delete_field), value)
+            setattr(obj, obj._meta.soft_delete_field, value)  # type: ignore[arg-type]
         finally:
             _setattr(obj, "_allow_soft_delete_write", False)
 
@@ -181,7 +181,7 @@ class SoftDeletion:
         if had_value:
             SoftDeletion.set_soft_delete_field(obj, old_value)
         else:
-            object.__delattr__(obj, cast("str", obj._meta.soft_delete_field))
+            object.__delattr__(obj, obj._meta.soft_delete_field)  # type: ignore[arg-type]
 
     @staticmethod
     def check_soft_delete_write_allowed(obj: Model, key: str) -> None:

@@ -1,5 +1,10 @@
 # Writing a dialect: the driver and the client
 
+The client is the public connection facade. `TenantClients` manages schema clients,
+`ClientPoolStatus` assembles pool observations, and `ClientSchema` coordinates schema creation.
+Driver hooks supply schema settings, occupancy, error translation and wire operations.
+Value adaptation lives separately in `AsyncpgParameters` and `ClickhouseInsertValues`.
+
 Steps 1 and 2 of [Writing a dialect](index.md): connecting through the database's driver, and the client
 that runs statements on it.
 
@@ -129,7 +134,8 @@ of its drivers (`@ColstoreClient.translate_exceptions(StatementForm.SQL)`). `Sta
 from `hare.dialects.base.client.enums`: `SQL` accepts query/values, `BULK_LOAD` accepts table/columns,
 `MANY` and `SCRIPT` execute batches or scripts, and `CONTROL` has no SQL. Stream cursor operations
 are observed and translated by the outer stream boundary.
-The method name only labels the observer call. `StatementExecution` binds a `StatementRequest`,
+The method name only labels the observer call. `StatementExecution` reads the call's SQL and
+parameters (`retry_read=` and `recovery=` are the wrapper's own keywords, never passed to the driver),
 places active query tags through `QueryClauses.get_tagged_statement_sql(sql, comment)`, and runs the call
 inside the query wrappers when any is
 installed (`Observers.run_wrapped(QueryCall(...), proceed)`), reports it to the observers once it has

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.core.connections.connections import Connections
 from hare.core.routing.written_connections import WrittenConnections
@@ -30,7 +30,6 @@ if TYPE_CHECKING:
 
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.types.type_registry import TypeRegistry
-    from hare.fields.relations.fields.relational_field import RelationalField
     from hare.models import Model
     from hare.query.queryset.relations.many_to_many_relation import ManyToManyRelation
     from hare.sql.terms.field import Field as SqlField
@@ -80,10 +79,7 @@ class ThroughRowInserting:
         await ManyToManyScopeChecks.check_visible_scope(relation, instances, connection)
         # The fetched rows are dropped up front - every exit below then leaves no stale snapshot.
         relation._invalidate_local_cache()
-        forward_key_values: list[tuple[Any, ...]] = [
-            KeyColumns.get_db_values(related_meta, instance_to_add, connection.dialect.types)
-            for instance_to_add in instances
-        ]
+        forward_key_values = KeyColumns.get_db_rows(related_meta, instances, connection.dialect.types)
         through_table = Table(relation.field.through, schema=relation.field.through_schema)
         backward_columns = [through_table[column] for column in relation.field.backward_keys]
         forward_columns = [through_table[column] for column in relation.field.forward_keys]
@@ -106,7 +102,7 @@ class ThroughRowInserting:
                 # The single-row statement of .add(one_instance) is the same on every call -
                 # rendered once per field and dialect.
                 statement_key = (relation.field.model, relation.field.model_field_name, connection.query_class)
-                cached_sql = StatementPlans.many_to_many_add_statements.get_model_bucket(relation.field.model).get(
+                cached_sql = StatementPlans.many_to_many_add_statements.get_bucket(relation.field.model).get(
                     statement_key
                 )
                 if cached_sql is None:
@@ -115,9 +111,9 @@ class ThroughRowInserting:
                     query = query.insert(*placeholder_row)  # placeholder values - only the SQL text is kept
                     query = query.on_conflict(*backward_columns, *forward_columns).do_nothing()
                     cached_sql, _ = query.get_parameterized_sql()
-                    StatementPlans.many_to_many_add_statements.get_model_bucket(relation.field.model)[
-                        statement_key
-                    ] = cached_sql
+                    StatementPlans.many_to_many_add_statements.get_bucket(relation.field.model)[statement_key] = (
+                        cached_sql
+                    )
                 (single_forward_key_value,) = unique_forward_key_values
                 inserted_count, _ = await BoundWrite.execute_command(
                     connection,
@@ -167,18 +163,17 @@ class ThroughRowInserting:
         )
         # The related model's key fields convert a related instance's values - instances[0], not
         # relation.instance.
-        related_pk_fields = related_meta.pk_fields if related_meta.has_composite_primary_key else (related_meta.pk,)
-        already_existing_forward_pks = {
-            tuple(
-                connection.dialect.types.get_db_value(
-                    field,
-                    connection.dialect.types.get_python_value(field, existing_relation[forward_column]),
-                    instances[0],
-                )
-                for field, forward_column in zip(related_pk_fields, relation.field.forward_keys, strict=True)
+        related_pk_fields = related_meta.pk_fields
+        already_existing_forward_pks = set(
+            KeyColumns.transfer_rows(
+                related_pk_fields,
+                relation.field.forward_keys,
+                already_existing_relations_raw,
+                connection.dialect.types,
+                connection.dialect.types,
+                instances[0],
             )
-            for existing_relation in already_existing_relations_raw
-        }
+        )
 
         forward_key_values_to_insert = set(forward_key_values) - already_existing_forward_pks
         # The pairs linked by the call - inserted, or restored from a soft delete.
@@ -195,6 +190,7 @@ class ThroughRowInserting:
         if forward_key_values_to_insert:
             ThroughDefaults.raise_if_required_fields_missing(relation, through_defaults)
             default_fields = ThroughDefaults.through_model_default_fields(relation, through_defaults)
+            default_writers = tuple(connection.dialect.types.get_db_writer(field) for _column, field in default_fields)
             default_columns = [through_table[column_name] for column_name, _ in default_fields]
             key_columns, keys = await ThroughRowInserting.take_through_keys(
                 relation, connection, through_table, len(forward_key_values_to_insert), extra_columns
@@ -205,7 +201,7 @@ class ThroughRowInserting:
                     *backward_key_values,
                     *extra_values,
                     *await ThroughDefaults.through_model_default_values(
-                        relation, default_fields, connection.dialect.types
+                        relation, default_fields, writers=default_writers
                     ),
                     *key,
                 )
@@ -321,15 +317,16 @@ class ThroughRowInserting:
         bound = BoundWrite(statements)
         written_count: int | None = 0
         if capture_needs is not None:
-            captured_model = cast("type[Model]", captured_model)
-            captured = CapturedWrite(captured_model, capture_needs, connection, RowOperation.INSERT)
+            captured_model = captured_model
+            captured = CapturedWrite(captured_model, capture_needs, connection, RowOperation.INSERT)  # type: ignore[arg-type]
             async for result in bound.execute(connection):
                 written_count = ThroughRowInserting.get_count_sum(written_count, result.row_count)
                 if connection.features.supports_returning:
                     await captured.capture_returned(result.rows)
             if not connection.features.supports_returning:
                 await captured.capture_read(
-                    {}, ThroughRowInserting.get_row_keys(captured_model, columns, rows, connection.dialect.types)
+                    {},
+                    ThroughRowInserting.get_row_keys(captured_model, columns, rows, connection.dialect.types),  # type: ignore[arg-type]
                 )
             return written_count
         if not bound.requires_transaction:
@@ -383,14 +380,10 @@ class ThroughRowInserting:
                 "without their keys, which the database returns none of"
             )
         positions = [column_names.index(column) for column in key_columns]
-        keys = []
-        for row in rows:
-            values = [
-                types.get_python_value(field, row[position])
-                for field, position in zip(key_fields, positions, strict=True)
-            ]
-            keys.append(values[0] if len(values) == 1 else tuple(values))
-        return keys
+        return [
+            values[0] if len(values) == 1 else values
+            for values in KeyColumns.read_rows(key_fields, positions, rows, types)
+        ]
 
     @staticmethod
     async def take_through_keys(
@@ -424,7 +417,7 @@ class ThroughRowInserting:
             return [], [()] * count
         keys = await GeneratedKeys.take(through_model, connection, count)
         types = connection.dialect.types
-        return [through_table[key_column]], [(types.get_db_value(key_field, key, None),) for key in keys]
+        return [through_table[key_column]], KeyColumns.write_rows((key_field,), ((key,) for key in keys), types, None)
 
     @staticmethod
     def restores_soft_deleted_links(relation: ManyToManyRelation[Any]) -> bool:
@@ -480,9 +473,9 @@ class ThroughRowInserting:
         # Local import: the row scopes import the query package.
         from hare.query.scopes.row_scopes import RowScopes
 
-        through_model = cast("type[Model]", relation.field.through_model_class)
+        through_model: type[Model] = relation.field.through_model_class  # type: ignore[assignment]
         meta = through_model._meta
-        soft_delete_field = cast("str", meta.soft_delete_field)
+        soft_delete_field: str = meta.soft_delete_field  # type: ignore[assignment]
         soft_delete_column = meta.fields_map[soft_delete_field].source_field or soft_delete_field
         key_fields = [meta.fields_map[name] for name in meta.primary_key_attribute_names]
         key_columns = [meta.fields_db_projection[name] for name in meta.primary_key_attribute_names]
@@ -496,7 +489,7 @@ class ThroughRowInserting:
                 *(
                     name
                     for name in meta.foreign_key_fields | meta.one_to_one_fields
-                    if list(cast("RelationalField[Any]", meta.fields_map[name]).source_fields) == [meta.tenant_field]
+                    if list(meta.fields_map[name].source_fields) == [meta.tenant_field]  # type: ignore[attr-defined]
                 ),
             }
             tenant_values = ThroughDefaults.through_defaults_with_active_tenant(relation, through_defaults) or {}
@@ -518,21 +511,15 @@ class ThroughRowInserting:
             return set()
         types = connection.dialect.types
         related_meta = type(related_instance)._meta
-        related_key_fields = related_meta.pk_fields if related_meta.has_composite_primary_key else (related_meta.pk,)
+        related_key_fields = related_meta.pk_fields
+        key_readers = tuple(types.get_python_reader(field) for field in key_fields)
+        transfer_key = KeyColumns.get_transfer_encoder(related_key_fields, relation.field.forward_keys, types, types)
         keys = []
         restored: set[tuple[Any, ...]] = set()
         for row in rows:
-            key = tuple(
-                types.get_python_value(field, row[column])
-                for field, column in zip(key_fields, key_columns, strict=True)
-            )
+            key = tuple(read(row[column]) for read, column in zip(key_readers, key_columns, strict=True))
             keys.append(key[0] if len(key) == 1 else key)
-            restored.add(
-                tuple(
-                    types.get_db_value(field, types.get_python_value(field, row[column]), related_instance)
-                    for field, column in zip(related_key_fields, relation.field.forward_keys, strict=True)
-                )
-            )
+            restored.add(transfer_key(row, related_instance))
         restored_rows = (
             RowScopes.get_base_queryset(through_model, RowVisibility(all_tenants=True, include_deleted=True))
             .using(connection)

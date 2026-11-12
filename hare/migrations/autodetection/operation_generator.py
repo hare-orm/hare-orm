@@ -5,7 +5,7 @@ from collections.abc import Collection, Iterable, Sequence
 from contextlib import suppress
 from copy import copy
 from graphlib import CycleError, TopologicalSorter
-from typing import Any, cast
+from typing import Any
 
 from hare.core.apps.relation_linking import RelationLinking
 from hare.ddl.schema_objects.enum_type import EnumType
@@ -273,7 +273,7 @@ class OperationGenerator:
         """
         through_reference = state.get_model_reference(many_to_many_field.through_model)
         if isinstance(through_reference, str):
-            return cast("ModelKey", tuple(through_reference.split(".", 1)))
+            return state.get_model_key(through_reference)
         if through_reference is not None:
             return (through_reference._meta.app or "", through_reference.__name__)
         return None
@@ -388,8 +388,10 @@ class OperationGenerator:
         if not reference:
             return None
         if isinstance(reference, str):
-            parts = reference.split(".")
-            return (parts[0], parts[1]) if len(parts) == 2 else None
+            try:
+                return state.get_model_key(reference)
+            except ConfigurationError:
+                return None
         return (getattr(reference._meta, ModelOption.APP, ""), reference.__name__)
 
     @classmethod
@@ -429,7 +431,6 @@ class OperationGenerator:
         Returns:
             True when another model's FK/O2O/M2M (or an M2M's through model) is `key`.
         """
-        model_reference = f"{key[0]}.{key[1]}"
         for other_key, model_state in self.old_state.models.items():
             if other_key == key:
                 continue
@@ -438,17 +439,16 @@ class OperationGenerator:
                     continue
                 if self._get_relation_target_key(field, self.old_state) == key:
                     return True
-                through_reference = (
-                    self.old_state.get_model_reference(field.through_model)
-                    if isinstance(field, ManyToManyFieldInstance)
-                    else None
-                )
-                if through_reference == model_reference or (
-                    through_reference is not None
-                    and not isinstance(through_reference, str)
-                    and (through_reference._meta.app, through_reference.__name__) == key
-                ):
-                    return True
+                if isinstance(field, ManyToManyFieldInstance):
+                    reference = self.old_state.get_model_reference(field.through_model)
+                    if reference is None:
+                        continue
+                    # Dependency probing ignores malformed strings and unregistered classes.
+                    if not isinstance(reference, str) and reference._meta.app is None:
+                        continue
+                    with suppress(ConfigurationError):
+                        if self.old_state.get_model_key(reference) == key:
+                            return True
         return False
 
     def _get_backward_relation_conflicts(
@@ -753,9 +753,7 @@ class OperationGenerator:
             )
             for operation in operations
         ]
-        return [
-            cast("HareOperation", operation) for _app_label, operation in OperationSorter(self.old_state).sort(entries)
-        ]
+        return [operation for _app_label, operation in OperationSorter(self.old_state).sort(entries)]  # type: ignore[misc]
 
     def _add_removals_of_relations_through_changed_keys(
         self, operations: list[HareOperation], old_keys: list[ModelKey], renamed_models: dict[ModelKey, ModelKey]

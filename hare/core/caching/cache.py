@@ -4,7 +4,7 @@ import os
 from collections.abc import Iterator, MutableMapping
 from itertools import count
 from threading import RLock
-from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 from weakref import WeakValueDictionary
 
 from hare.core.caching.cache_bucket import CacheBucket
@@ -28,12 +28,14 @@ class Cache(MutableMapping[tuple[Any, ...], TCacheValue]):
     """Registered bounded storage with explicit lifetime holders.
 
     The mapping interface addresses global entries only. Use get_bucket(holder)
-    or get_model_bucket(model) for values whose lifetime follows an object. Those
+    for values whose lifetime follows an object (a model, a class). Those
     buckets stay on their holders; the registry keeps only weak references to
     buckets, so a cached value may refer back to its model without retaining it.
 
     All entries use CacheBucket, including shared storage. Invalidating a cache
     clears retained buckets in place. No key is inspected to infer its lifetime.
+    A cache holding SQL (``holds_sql``) drops a model's bucket when the model is bound
+    to another query builder (``Caches.forget_model_sql()``).
     """
 
     __eq__ = object.__eq__
@@ -59,12 +61,14 @@ class Cache(MutableMapping[tuple[Any, ...], TCacheValue]):
         if dropped_with is not None:
             dropped_with.dependent_caches.append(self)
         Caches.register(self)
+        if holds_sql:
+            Caches.sql_caches.append(self)
 
     @staticmethod
     def _get_buckets(holder: Any) -> dict[int, CacheBucket[Any]]:
         meta = getattr(holder, "_meta", None)
         if meta is not None:
-            return cast("dict[int, CacheBucket[Any]]", meta.plan_cache_buckets)
+            return meta.plan_cache_buckets
         buckets = (
             vars(holder).get("cache_buckets") if isinstance(holder, type) else getattr(holder, "cache_buckets", None)
         )
@@ -77,29 +81,25 @@ class Cache(MutableMapping[tuple[Any, ...], TCacheValue]):
                 )
                 if buckets is None:
                     buckets = holder.cache_buckets = {}
-        return cast("dict[int, CacheBucket[Any]]", buckets)
+        return buckets
 
     def get_bucket(self, holder: Any) -> CacheBucket[TCacheValue]:
-        """Get bounded storage attached to this lifetime holder."""
+        """Get bounded storage attached to this lifetime holder - read without the lock, which only
+        guards making it."""
         buckets = self._get_buckets(holder)
-        with self.lock:
-            bucket = buckets.get(self.bucket_id)
-            if bucket is None:
-                bucket = buckets[self.bucket_id] = self.new_shared_bucket()
-            return bucket
+        bucket = buckets.get(self.bucket_id)
+        if bucket is None:
+            with self.lock:
+                bucket = buckets.get(self.bucket_id)
+                if bucket is None:
+                    bucket = buckets[self.bucket_id] = self.new_shared_bucket()
+        return bucket
 
     def new_shared_bucket(self) -> CacheBucket[TCacheValue]:
         """Create storage retained by its callers and weakly tracked for invalidation."""
         bucket: CacheBucket[TCacheValue] = CacheBucket(self.max_size or MAX_PLAIN_BUCKET_ENTRIES)
         with self.lock:
             self.buckets[id(bucket)] = bucket
-        return bucket
-
-    def get_model_bucket(self, model: type[Model]) -> CacheBucket[TCacheValue]:
-        """Get storage bound to a model and, for SQL, its current query builder."""
-        bucket = self.get_bucket(model)
-        if self.holds_sql:
-            bucket.bind(model._meta.query_class)
         return bucket
 
     @staticmethod
@@ -110,6 +110,22 @@ class Cache(MutableMapping[tuple[Any, ...], TCacheValue]):
 
     def get_value(self, holder: Any, default: Any = None) -> Any:
         return self.get_bucket(holder).get(None, default)
+
+    def get_model_value(self, model: type[Model], default: Any = None) -> Any:
+        """The one value kept for ``model`` - its bucket read straight from the model's metadata, holding
+        that one entry, so the read leaves the LRU order as it is.
+
+        Args:
+            model: The model.
+            default: Returned when no value is kept.
+
+        Returns:
+            The value or ``default``.
+        """
+        bucket = model._meta.plan_cache_buckets.get(self.bucket_id)
+        if bucket is None:
+            return default
+        return bucket.peek(None, default)
 
     def set_value(self, holder: Any, value: TCacheValue) -> None:
         self.get_bucket(holder)[None] = value

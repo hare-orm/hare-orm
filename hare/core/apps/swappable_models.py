@@ -5,6 +5,7 @@ from inspect import isclass
 from types import ModuleType
 from typing import TYPE_CHECKING
 
+from hare.core.constants import SWAPPABLE_SETTING_MULTIPLE_MODELS_MESSAGE
 from hare.exceptions import ConfigurationError
 from hare.models import Model
 
@@ -16,6 +17,24 @@ class SwappableModels:
     """Swappable models: the settings checked to name models of the right apps, every model declaring
     Meta.swappable marked with the label its setting points at, and the settings naming the targets
     of a generic foreign key."""
+
+    @staticmethod
+    def get_single_model_label(setting: str, value: str | dict[str, str]) -> str:
+        """Read the configured value of a setting that names one model.
+
+        Args:
+            setting: The configured setting's name, used in an error message.
+            value: Its model label or its generic-reference mapping.
+
+        Returns:
+            The scalar label without conversion.
+
+        Raises:
+            ConfigurationError: The value is a generic-reference mapping instead of a scalar label.
+        """
+        if isinstance(value, dict):
+            raise ConfigurationError(SWAPPABLE_SETTING_MULTIPLE_MODELS_MESSAGE.format(setting=setting))
+        return value
 
     @staticmethod
     def check_swappable_settings(apps: Apps) -> None:

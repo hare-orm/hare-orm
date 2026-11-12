@@ -8,7 +8,6 @@ from typing import Any, ClassVar
 import hare
 from hare.fields.field import Field
 from tests.contracts.constants import FIELD_PACKAGES
-from tests.matrix.constants import NATIVE_REQUIREMENT
 from tests.matrix.suite_environments import SuiteEnvironments
 from tests.utils.package_requirements import PackageRequirements
 
@@ -46,10 +45,7 @@ class HareRegistry:
         Returns:
             True when it can import.
         """
-        requirements = PackageRequirements.get(module_name)
-        if NATIVE_REQUIREMENT in requirements and not SuiteEnvironments.current_native:
-            return False
-        return all(SuiteEnvironments.installs(name) for name in requirements if name != NATIVE_REQUIREMENT)
+        return all(SuiteEnvironments.installs(name) for name in PackageRequirements.get(module_name))
 
     @classmethod
     def get_installed_modules(cls) -> list[Any]:

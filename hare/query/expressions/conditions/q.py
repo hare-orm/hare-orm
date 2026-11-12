@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import dataclasses
 from copy import copy
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.classes.deferred_import import DeferredImport
 from hare.ddl.conditions.field_condition import FieldCondition
 from hare.exceptions import QueryError
 from hare.fields.data.boolean_field import BooleanField
@@ -35,6 +36,7 @@ from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
     from hare.models import Model
+    from hare.query.generic_foreign_keys.generic_foreign_key_paths import GenericForeignKeyPaths
 
 
 class Q(Plannable, FieldCondition):
@@ -46,6 +48,11 @@ class Q(Plannable, FieldCondition):
         conditions: Inner ``Q`` expressions or ``Exists(...)`` conditions.
         filters: The filters of this node.
     """
+
+    #: ``GenericForeignKeyPaths`` - imported at its first read, as its module imports this one.
+    generic_foreign_key_paths: ClassVar[DeferredImport[type[GenericForeignKeyPaths]]] = DeferredImport(
+        "hare.query.generic_foreign_keys.generic_foreign_key_paths", "GenericForeignKeyPaths"
+    )
 
     __slots__ = (
         "_children",
@@ -222,8 +229,8 @@ class Q(Plannable, FieldCondition):
             extensions: list[Q] = []
             node: Q = self
             while node._children is None:
-                extensions.append(cast("Q", node._extension))
-                node = cast("Q", node._extended_from)
+                extensions.append(node._extension)  # type: ignore[arg-type]
+                node = node._extended_from  # type: ignore[assignment]
             children = self._children = (*node._children, *reversed(extensions))
             self._extended_from = self._extension = None
         return children
@@ -312,9 +319,7 @@ class Q(Plannable, FieldCondition):
         Returns:
             True when a key names a generic foreign key, directly or through relations.
         """
-        from hare.query.generic_foreign_keys.generic_foreign_key_paths import GenericForeignKeyPaths
-
-        return any(GenericForeignKeyPaths.get_generic_path(model, key) is not None for key in self.filters)
+        return any(Q.generic_foreign_key_paths.get_generic_path(model, key) is not None for key in self.filters)
 
     def get_negation_prefix(self) -> str:
         """The ``~`` operators that rebuild this node's negation from a plain ``Q(...)``."""
@@ -363,7 +368,7 @@ class Q(Plannable, FieldCondition):
     def rebuild_expression(self, children: tuple[ExpressionChild, ...]) -> Q:
         result = copy(self)
         for child in children:
-            setattr(result, cast("str", child.argument), child.value)
+            setattr(result, child.argument, child.value)  # type: ignore[arg-type]
         return result
 
     def with_renamed_field(self, old_name: str, new_name: str) -> Q:
@@ -533,7 +538,7 @@ class Q(Plannable, FieldCondition):
         Returns:
             The expression as the criterion - in HAVING when it reads an aggregate.
         """
-        expression = cast("Expression", self.expression)
+        expression: Expression = self.expression  # type: ignore[assignment]
         result = expression.get_result(expression_context)
         field = expression.get_value_field(result)
         criterion: Criterion

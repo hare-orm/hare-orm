@@ -6,6 +6,8 @@ from typing import Any
 from clickhouse_driver.columns.mapcolumn import MapColumn
 from clickhouse_driver.columns.util import get_inner_columns, get_inner_spec
 
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
+
 
 class ClickhouseDriverMapColumns:
     """The reading of a ``Map(K, V)`` type by clickhouse-driver, made exact at any depth. The library
@@ -28,7 +30,7 @@ class ClickhouseDriverMapColumns:
             The column.
         """
         key_specification, value_specification = (
-            part.strip() for part in get_inner_columns(get_inner_spec("Map", specification))
+            part.strip() for part in get_inner_columns(get_inner_spec(ClickhouseTypeName.MAP, specification))
         )
         return MapColumn(
             column_by_specification_getter(key_specification),

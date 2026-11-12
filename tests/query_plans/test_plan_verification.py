@@ -62,7 +62,7 @@ def broken_plans_of(model: type):
     for the block."""
     original_sqls = {
         id(plan): (plan, plan.sql)
-        for plan in StatementPlans.plans.get_model_bucket(model).values()
+        for plan in StatementPlans.plans.get_bucket(model).values()
         if plan.sql is not None and model._meta.db_table in plan.sql
     }
     for plan, sql in original_sqls.values():

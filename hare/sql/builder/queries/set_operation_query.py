@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.sql.builder.queries.query_sql_rendering import QuerySqlRendering
 from hare.sql.builder.tables.cte import Cte
@@ -107,12 +107,12 @@ class SetOperationQuery(Selectable, Term):  # type: ignore[misc]
 
     @BuilderMethods.builder
     def limit(self, limit: int) -> Self:
-        self._limit = cast("ValueWrapper", self.wrap_constant(limit))
+        self._limit = self.wrap_constant(limit)  # type: ignore[assignment]
         return self
 
     @BuilderMethods.builder
     def offset(self, offset: int) -> Self:
-        self._offset = cast("ValueWrapper", self.wrap_constant(offset))
+        self._offset = self.wrap_constant(offset)  # type: ignore[assignment]
         return self
 
     @BuilderMethods.builder

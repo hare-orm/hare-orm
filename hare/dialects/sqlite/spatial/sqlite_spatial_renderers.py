@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from hare.dialects.sqlite.indexes.spatialite_index import SpatialiteIndex
 from hare.dialects.sqlite.spatial.constants import (
@@ -137,9 +137,7 @@ class SqliteSpatialRenderers:
         model = field.model
         if SpatialiteIndex.get_covering(model, field.model_field_name) is None:
             return None
-        row_key = SqlField(
-            model._meta.get_column_names([cast("str", model._meta.primary_key_attribute)])[0], table=column.table
-        )
+        row_key = SqlField(model._meta.get_column_names([model._meta.primary_key_attribute])[0], table=column.table)  # type: ignore[list-item]
         row_key_sql = Function.get_arg_sql(row_key, sql_context)
         table_sql = Function.get_arg_sql(ValueWrapper(model._meta.db_table), sql_context)
         column_sql = Function.get_arg_sql(ValueWrapper(column.name), sql_context)

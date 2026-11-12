@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.exceptions import QueryError
@@ -117,8 +117,7 @@ class ReturnedRowsMatching:
                 matches = ReturnedValues.match_rows_by_stored_values(
                     bulk_create.model, types, objects_item, returned_rows, written_field_names
                 )
-            for obj, row in matches:
-                ReturnedRowsMatching.apply_returning_row(bulk_create, obj, row, applied_columns)
+            ReturnedRowsMatching.apply_returning_rows(bulk_create, matches, applied_columns)
             return
         if len(returned_rows) != len(objects_item) and not conflict_field_names and bulk_create._ignore_conflicts:
             # Without on_conflict every object carries its key - checked before the insert.
@@ -148,12 +147,31 @@ class ReturnedRowsMatching:
             )
         else:
             matches = zip(objects_item, returned_rows, strict=True)
+        ReturnedRowsMatching.apply_returning_rows(bulk_create, matches)
+
+    @staticmethod
+    def apply_returning_rows(
+        bulk_create: BulkCreateQuery[Any],
+        matches: Iterable[tuple[TModel, Any]],
+        columns: Collection[str] | None = None,
+    ) -> None:
+        """Share projection readers while preserving lazy matching and per-object publication."""
+        readers = None
         for obj, row in matches:
-            ReturnedRowsMatching.apply_returning_row(bulk_create, obj, row)
+            if readers is None:
+                readers = ReturnedValues.get_returning_readers(
+                    bulk_create.model, bulk_create.dialect.types, row.keys() if columns is None else columns
+                )
+            ReturnedRowsMatching.apply_returning_row(bulk_create, obj, row, columns, readers=readers)
 
     @staticmethod
     def apply_returning_row(
-        bulk_create: BulkCreateQuery[Any], obj: TModel, row: Any, columns: Collection[str] | None = None
+        bulk_create: BulkCreateQuery[Any],
+        obj: TModel,
+        row: Any,
+        columns: Collection[str] | None = None,
+        *,
+        readers: Sequence[tuple[str, str, Callable[[Any], Any]]] | None = None,
     ) -> None:
         """Marks ``obj`` saved and sets every field ``row`` carries a column for.
 
@@ -168,7 +186,13 @@ class ReturnedRowsMatching:
             bulk_create._inserted_objects.append(obj)
         WrittenInstances.mark_saved((obj,), bulk_create._connection)
         ReturnedValues.apply_row(
-            bulk_create.model, bulk_create.dialect.types, obj, row, columns, connection=bulk_create._connection
+            bulk_create.model,
+            bulk_create.dialect.types,
+            obj,
+            row,
+            columns,
+            connection=bulk_create._connection,
+            readers=readers,
         )
         # Assigning the pk on a saved instance clears the flag - a caller-supplied pk stays marked so.
         object.__setattr__(obj, "_custom_generated_pk", custom_generated_pk)

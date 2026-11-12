@@ -4,8 +4,11 @@ from copy import copy
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.exceptions import QueryError
+from hare.query.execution.query_execution import QueryExecution
 from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
+from hare.query.plans.constants import NO_CALL_PLAN
 from hare.query.plans.enums import PlanKeyForm
+from hare.query.plans.statement.declarations import CallPlanHit
 from hare.query.plans.statement.declared_plan_slots import DeclaredPlanSlots
 from hare.query.plans.statement.statement_plan_descriptions import StatementPlanDescriptions
 from hare.query.statements.awaitable_query import AwaitableQuery
@@ -16,11 +19,14 @@ from hare.sql.functions.count import Count as DistinctCount
 from hare.sql.terms.star import Star
 
 if TYPE_CHECKING:
+    from hare.dialects.base.client.database_client import DatabaseClient
     from hare.sql.builder.queries.query_builder import QueryBuilder
 
 
 class CountQuery(RowsSummaryQuery):
     """``queryset.count()`` - the number of the queryset's rows."""
+
+    rows_source_method_name = "_get_count_source"
 
     #: A plain SELECT COUNT(*) - see AwaitableQuery.is_read_only.
     is_read_only: ClassVar[bool] = True
@@ -89,18 +95,37 @@ class CountQuery(RowsSummaryQuery):
     async def _execute_bound(self) -> int:
         if self._is_none:
             return await self._execute_none()
-        query = self._get_execution_query()
-        query._make_query_to_run()
-        return await query._execute_reading(query._execute())
+        lookup = NO_CALL_PLAN
+        connection: DatabaseClient | None = None
+        if self._call_signature is not None:
+            connection = self.get_connection()
+            call_plan = self._find_call_plan(connection)
+            if isinstance(call_plan, CallPlanHit):
+                return await QueryExecution.read(
+                    self, connection, self._count(connection, call_plan.sql, call_plan.parameters)
+                )
+            lookup = call_plan
+        query = self._get_execution_query_to_build(lookup, connection)
+        statement = query._make_query_to_run()
+        return await QueryExecution.read(query, query._connection, query._count(query._connection, *statement))
 
     async def _execute_none(self) -> int:
         return 0
 
-    async def _execute(self) -> int:
-        connection = self._connection
+    async def _count(self, connection: DatabaseClient, sql: str, parameters: list[Any]) -> int:
+        """Runs the ``COUNT`` and applies the slice to it.
+
+        Args:
+            connection: This execution's connection.
+            sql: The statement.
+            parameters: Its parameters.
+
+        Returns:
+            The number of rows.
+        """
         by_position = connection.features.supports_positional_rows
         _, result = await connection.execute(
-            *self._get_parameterized_sql(), returns_rows=True, rows_by_position=by_position, retry_read=True
+            sql, parameters, returns_rows=True, rows_by_position=by_position, retry_read=True
         )
         if not result:
             return 0

@@ -7,7 +7,7 @@ import uuid
 import zoneinfo
 from collections.abc import Callable, Sequence
 from decimal import Decimal
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar
 
 from hare.core.caching.cache import Cache
 from hare.dialects.clickhouse.drivers.constants import (
@@ -32,6 +32,7 @@ from hare.dialects.clickhouse.drivers.constants import (
     CLICKHOUSE_BINARY_ZONED_DATETIME64_TAG,
     CLICKHOUSE_BINARY_ZONED_DATETIME_TAG,
 )
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.clickhouse.introspection.clickhouse_sql_parts import ClickhouseSqlParts
 from hare.dialects.clickhouse.types.clickhouse_physical_type import ClickhousePhysicalType
 from hare.exceptions import UnSupportedError
@@ -148,9 +149,9 @@ class ClickhouseSharedVariantValues:
             arguments: Its arguments.
             blob: The bytes written into.
         """
-        zone_position = 0 if name == "DateTime" else 1
+        zone_position = 0 if name == ClickhouseTypeName.DATETIME else 1
         is_zoned = len(arguments) > zone_position
-        if name == "DateTime":
+        if name == ClickhouseTypeName.DATETIME:
             blob.append(CLICKHOUSE_BINARY_ZONED_DATETIME_TAG if is_zoned else CLICKHOUSE_BINARY_DATETIME_TAG)
         else:
             blob.append(CLICKHOUSE_BINARY_ZONED_DATETIME64_TAG if is_zoned else CLICKHOUSE_BINARY_DATETIME64_TAG)
@@ -168,7 +169,7 @@ class ClickhouseSharedVariantValues:
             arguments: Its arguments.
             blob: The bytes written into.
         """
-        if name == "FixedString":
+        if name == ClickhouseTypeName.FIXED_STRING:
             blob.append(CLICKHOUSE_BINARY_FIXED_STRING_TAG)
             ClickhouseSharedVariantValues.write_varint(int(arguments[0]), blob)
             return
@@ -186,7 +187,7 @@ class ClickhouseSharedVariantValues:
             arguments: Its arguments.
             blob: The bytes written into.
         """
-        if name == "Map":
+        if name == ClickhouseTypeName.MAP:
             blob.append(CLICKHOUSE_BINARY_MAP_TAG)
             ClickhouseSharedVariantValues.write_type(arguments[0], blob)
             ClickhouseSharedVariantValues.write_type(arguments[1], blob)
@@ -222,12 +223,12 @@ class ClickhouseSharedVariantValues:
             arguments: Its arguments.
             blob: The bytes written into.
         """
-        blob.append(CLICKHOUSE_BINARY_ENUM8_TAG if name == "Enum8" else CLICKHOUSE_BINARY_ENUM16_TAG)
+        blob.append(CLICKHOUSE_BINARY_ENUM8_TAG if name == ClickhouseTypeName.ENUM8 else CLICKHOUSE_BINARY_ENUM16_TAG)
         members = ClickhousePhysicalType.get_enum_members(arguments)
         ClickhouseSharedVariantValues.write_varint(len(members), blob)
         for label, number in members.items():
             ClickhouseSharedVariantValues.write_bytes(label.encode(), blob)
-            blob += number.to_bytes(1 if name == "Enum8" else 2, "little", signed=True)
+            blob += number.to_bytes(1 if name == ClickhouseTypeName.ENUM8 else 2, "little", signed=True)
 
     @classmethod
     def write_value(cls, value: Any, type_text: str, blob: bytearray) -> None:
@@ -263,9 +264,9 @@ class ClickhouseSharedVariantValues:
             arguments: Its arguments.
             blob: The bytes written into.
         """
-        if name == "Nothing":
+        if name == ClickhouseTypeName.NOTHING:
             return
-        if name == "Nullable":
+        if name == ClickhouseTypeName.NULLABLE:
             blob.append(1 if value is None else 0)
             if value is None:
                 return
@@ -281,11 +282,11 @@ class ClickhouseSharedVariantValues:
             arguments: Its arguments.
             blob: The bytes written into.
         """
-        if name == "Bool":
+        if name == ClickhouseTypeName.BOOL:
             blob.append(1 if value else 0)
-        elif name == "Float32":
+        elif name == ClickhouseTypeName.FLOAT32:
             blob += struct.pack("<f", value)
-        elif name == "Float64":
+        elif name == ClickhouseTypeName.FLOAT64:
             blob += struct.pack("<d", value)
         else:
             width, signed = CLICKHOUSE_BINARY_INTEGER_WIDTHS[name]
@@ -302,7 +303,7 @@ class ClickhouseSharedVariantValues:
             blob: The bytes written into.
         """
         data = value.encode() if isinstance(value, str) else bytes(value)
-        if name == "String":
+        if name == ClickhouseTypeName.STRING:
             ClickhouseSharedVariantValues.write_bytes(data, blob)
         else:
             blob += data.ljust(int(arguments[0]), b"\x00")
@@ -317,14 +318,16 @@ class ClickhouseSharedVariantValues:
             arguments: Its arguments.
             blob: The bytes written into.
         """
-        if name in {"Date", "Date32"}:
+        if name in {ClickhouseTypeName.DATE, ClickhouseTypeName.DATE32}:
             days = (value - CLICKHOUSE_BINARY_EPOCH_DATE).days
-            blob += days.to_bytes(2 if name == "Date" else 4, "little", signed=name == "Date32")
+            blob += days.to_bytes(
+                2 if name == ClickhouseTypeName.DATE else 4, "little", signed=name == ClickhouseTypeName.DATE32
+            )
             return
         moment = value if value.tzinfo is not None else value.replace(tzinfo=datetime.UTC)
         elapsed = moment - CLICKHOUSE_BINARY_EPOCH_MOMENT
         microseconds = (elapsed.days * 86_400 + elapsed.seconds) * 1_000_000 + elapsed.microseconds
-        if name == "DateTime":
+        if name == ClickhouseTypeName.DATETIME:
             blob += (microseconds // 1_000_000).to_bytes(4, "little")
         else:
             ticks = microseconds * 10 ** int(arguments[0]) // 1_000_000
@@ -342,7 +345,7 @@ class ClickhouseSharedVariantValues:
         """
         precision, scale = int(arguments[0]), int(arguments[1])
         parts = Decimal(value).as_tuple()
-        unscaled = int(Decimal((parts.sign, parts.digits, cast(int, parts.exponent) + scale)))
+        unscaled = int(Decimal((parts.sign, parts.digits, parts.exponent + scale)))  # type: ignore[operator]
         width = ClickhouseSharedVariantValues.get_decimal_width(precision)[1]
         blob += unscaled.to_bytes(width, "little", signed=True)
 
@@ -356,10 +359,10 @@ class ClickhouseSharedVariantValues:
             arguments: Its arguments.
             blob: The bytes written into.
         """
-        if name == "UUID":
+        if name == ClickhouseTypeName.UUID:
             number = uuid.UUID(str(value)).int
             blob += (number >> 64).to_bytes(8, "little") + (number & (2**64 - 1)).to_bytes(8, "little")
-        elif name == "IPv4":
+        elif name == ClickhouseTypeName.IPV4:
             blob += int(ipaddress.IPv4Address(value)).to_bytes(4, "little")
         else:
             address = ipaddress.ip_address(value)
@@ -378,11 +381,11 @@ class ClickhouseSharedVariantValues:
             blob: The bytes written into.
         """
         write_value = ClickhouseSharedVariantValues.write_value
-        if name == "Array":
+        if name == ClickhouseTypeName.ARRAY:
             ClickhouseSharedVariantValues.write_varint(len(value), blob)
             for element in value:
                 write_value(element, arguments[0], blob)
-        elif name == "Tuple":
+        elif name == ClickhouseTypeName.TUPLE:
             for element, argument in zip(value, arguments, strict=True):
                 write_value(element, ClickhousePhysicalType.get_element(argument)[1].sql, blob)
         else:
@@ -402,7 +405,7 @@ class ClickhouseSharedVariantValues:
             blob: The bytes written into.
         """
         number = ClickhousePhysicalType.get_enum_members(arguments)[value] if isinstance(value, str) else int(value)
-        blob += number.to_bytes(1 if name == "Enum8" else 2, "little", signed=True)
+        blob += number.to_bytes(1 if name == ClickhouseTypeName.ENUM8 else 2, "little", signed=True)
 
     @staticmethod
     def read_varint(blob: bytes, position: int) -> tuple[int, int]:
@@ -472,7 +475,7 @@ class ClickhouseSharedVariantValues:
         if plain_type is not None:
             return plain_type, position
         if tag == CLICKHOUSE_BINARY_DATETIME_TAG:
-            return "DateTime", position
+            return ClickhouseTypeName.DATETIME, position
         if tag == CLICKHOUSE_BINARY_ZONED_DATETIME_TAG:
             zone, position = cls.read_bytes(blob, position)
             return f"DateTime('{zone.decode()}')", position
@@ -590,9 +593,9 @@ class ClickhouseSharedVariantValues:
         Returns:
             The value, and where the bytes after it start.
         """
-        if name == "Nothing":
+        if name == ClickhouseTypeName.NOTHING:
             return None, position
-        if name == "Nullable":
+        if name == ClickhouseTypeName.NULLABLE:
             if blob[position]:
                 return None, position + 1
             position += 1
@@ -611,11 +614,11 @@ class ClickhouseSharedVariantValues:
         Returns:
             The value, and where the bytes after it start.
         """
-        if name == "Bool":
+        if name == ClickhouseTypeName.BOOL:
             return bool(blob[position]), position + 1
-        if name == "Float32":
+        if name == ClickhouseTypeName.FLOAT32:
             return struct.unpack_from("<f", blob, position)[0], position + 4
-        if name == "Float64":
+        if name == ClickhouseTypeName.FLOAT64:
             return struct.unpack_from("<d", blob, position)[0], position + 8
         width, signed = CLICKHOUSE_BINARY_INTEGER_WIDTHS[name]
         return int.from_bytes(blob[position : position + width], "little", signed=signed), position + width
@@ -633,7 +636,7 @@ class ClickhouseSharedVariantValues:
         Returns:
             The value, and where the bytes after it start.
         """
-        if name == "String":
+        if name == ClickhouseTypeName.STRING:
             data, position = ClickhouseSharedVariantValues.read_bytes(blob, position)
         else:
             length = int(arguments[0])
@@ -656,17 +659,19 @@ class ClickhouseSharedVariantValues:
         Returns:
             The value, and where the bytes after it start.
         """
-        if name in {"Date", "Date32"}:
-            width = 2 if name == "Date" else 4
-            days = int.from_bytes(blob[position : position + width], "little", signed=name == "Date32")
+        if name in {ClickhouseTypeName.DATE, ClickhouseTypeName.DATE32}:
+            width = 2 if name == ClickhouseTypeName.DATE else 4
+            days = int.from_bytes(
+                blob[position : position + width], "little", signed=name == ClickhouseTypeName.DATE32
+            )
             return CLICKHOUSE_BINARY_EPOCH_DATE + datetime.timedelta(days=days), position + width
-        zone_position = 0 if name == "DateTime" else 1
+        zone_position = 0 if name == ClickhouseTypeName.DATETIME else 1
         zone = (
             zoneinfo.ZoneInfo(ClickhouseSqlParts.get_string_text(arguments[zone_position].strip()))
             if len(arguments) > zone_position
             else datetime.UTC
         )
-        if name == "DateTime":
+        if name == ClickhouseTypeName.DATETIME:
             seconds = int.from_bytes(blob[position : position + 4], "little")
             microseconds, position = seconds * 1_000_000, position + 4
         else:
@@ -706,11 +711,11 @@ class ClickhouseSharedVariantValues:
         Returns:
             The value, and where the bytes after it start.
         """
-        if name == "UUID":
+        if name == ClickhouseTypeName.UUID:
             high = int.from_bytes(blob[position : position + 8], "little")
             low = int.from_bytes(blob[position + 8 : position + 16], "little")
             return uuid.UUID(int=(high << 64) | low), position + 16
-        if name == "IPv4":
+        if name == ClickhouseTypeName.IPV4:
             return ipaddress.IPv4Address(int.from_bytes(blob[position : position + 4], "little")), position + 4
         return ipaddress.IPv6Address(bytes(blob[position : position + 16])), position + 16
 
@@ -728,14 +733,14 @@ class ClickhouseSharedVariantValues:
             The value, and where the bytes after it start.
         """
         read_value = ClickhouseSharedVariantValues.read_value
-        if name == "Tuple":
+        if name == ClickhouseTypeName.TUPLE:
             elements = []
             for argument in arguments:
                 element, position = read_value(ClickhousePhysicalType.get_element(argument)[1].sql, blob, position)
                 elements.append(element)
             return tuple(elements), position
         count, position = ClickhouseSharedVariantValues.read_varint(blob, position)
-        if name == "Array":
+        if name == ClickhouseTypeName.ARRAY:
             elements = []
             for _ in range(count):
                 element, position = read_value(arguments[0], blob, position)
@@ -761,7 +766,7 @@ class ClickhouseSharedVariantValues:
         Returns:
             The value, and where the bytes after it start.
         """
-        width = 1 if name == "Enum8" else 2
+        width = 1 if name == ClickhouseTypeName.ENUM8 else 2
         number = int.from_bytes(blob[position : position + width], "little", signed=True)
         labels = {
             member_number: label for label, member_number in ClickhousePhysicalType.get_enum_members(arguments).items()
@@ -770,31 +775,85 @@ class ClickhouseSharedVariantValues:
 
     #: What writes the binary encoding of each type taking arguments, by the type's name.
     TYPE_WRITERS: ClassVar[dict[str, Callable[[str, Sequence[str], bytearray], None]]] = {
-        **dict.fromkeys(("DateTime", "DateTime64"), write_datetime_type),
-        **dict.fromkeys(("Decimal", "FixedString"), write_sized_type),
-        **dict.fromkeys(("Array", "Nullable", "LowCardinality", "Map"), write_wrapper_type),
-        "Tuple": write_tuple_type,
-        **dict.fromkeys(("Enum8", "Enum16"), write_enum_type),
+        **dict.fromkeys((ClickhouseTypeName.DATETIME, ClickhouseTypeName.DATETIME64), write_datetime_type),
+        **dict.fromkeys((ClickhouseTypeName.DECIMAL, ClickhouseTypeName.FIXED_STRING), write_sized_type),
+        **dict.fromkeys(
+            (
+                ClickhouseTypeName.ARRAY,
+                ClickhouseTypeName.NULLABLE,
+                ClickhouseTypeName.LOW_CARDINALITY,
+                ClickhouseTypeName.MAP,
+            ),
+            write_wrapper_type,
+        ),
+        ClickhouseTypeName.TUPLE: write_tuple_type,
+        **dict.fromkeys((ClickhouseTypeName.ENUM8, ClickhouseTypeName.ENUM16), write_enum_type),
     }
     #: What writes a value of each type, by the type's name.
     VALUE_WRITERS: ClassVar[dict[str, Callable[[Any, str, Sequence[str], bytearray], None]]] = {
-        **dict.fromkeys(("Nullable", "LowCardinality", "Nothing"), write_wrapped_value),
-        **dict.fromkeys((*CLICKHOUSE_BINARY_INTEGER_WIDTHS, "Bool", "Float32", "Float64"), write_number_value),
-        **dict.fromkeys(("String", "FixedString"), write_text_value),
-        **dict.fromkeys(("Date", "Date32", "DateTime", "DateTime64"), write_temporal_value),
-        "Decimal": write_decimal_value,
-        **dict.fromkeys(("UUID", "IPv4", "IPv6"), write_identifier_value),
-        **dict.fromkeys(("Array", "Tuple", "Map"), write_container_value),
-        **dict.fromkeys(("Enum8", "Enum16"), write_enum_value),
+        **dict.fromkeys(
+            (ClickhouseTypeName.NULLABLE, ClickhouseTypeName.LOW_CARDINALITY, ClickhouseTypeName.NOTHING),
+            write_wrapped_value,
+        ),
+        **dict.fromkeys(
+            (
+                *CLICKHOUSE_BINARY_INTEGER_WIDTHS,
+                ClickhouseTypeName.BOOL,
+                ClickhouseTypeName.FLOAT32,
+                ClickhouseTypeName.FLOAT64,
+            ),
+            write_number_value,
+        ),
+        **dict.fromkeys((ClickhouseTypeName.STRING, ClickhouseTypeName.FIXED_STRING), write_text_value),
+        **dict.fromkeys(
+            (
+                ClickhouseTypeName.DATE,
+                ClickhouseTypeName.DATE32,
+                ClickhouseTypeName.DATETIME,
+                ClickhouseTypeName.DATETIME64,
+            ),
+            write_temporal_value,
+        ),
+        ClickhouseTypeName.DECIMAL: write_decimal_value,
+        **dict.fromkeys(
+            (ClickhouseTypeName.UUID, ClickhouseTypeName.IPV4, ClickhouseTypeName.IPV6), write_identifier_value
+        ),
+        **dict.fromkeys(
+            (ClickhouseTypeName.ARRAY, ClickhouseTypeName.TUPLE, ClickhouseTypeName.MAP), write_container_value
+        ),
+        **dict.fromkeys((ClickhouseTypeName.ENUM8, ClickhouseTypeName.ENUM16), write_enum_value),
     }
     #: What reads a value of each type, by the type's name.
     VALUE_READERS: ClassVar[dict[str, Callable[[str, Sequence[str], bytes, int], tuple[Any, int]]]] = {
-        **dict.fromkeys(("Nullable", "LowCardinality", "Nothing"), read_wrapped_value),
-        **dict.fromkeys((*CLICKHOUSE_BINARY_INTEGER_WIDTHS, "Bool", "Float32", "Float64"), read_number_value),
-        **dict.fromkeys(("String", "FixedString"), read_text_value),
-        **dict.fromkeys(("Date", "Date32", "DateTime", "DateTime64"), read_temporal_value),
-        "Decimal": read_decimal_value,
-        **dict.fromkeys(("UUID", "IPv4", "IPv6"), read_identifier_value),
-        **dict.fromkeys(("Array", "Tuple", "Map"), read_container_value),
-        **dict.fromkeys(("Enum8", "Enum16"), read_enum_value),
+        **dict.fromkeys(
+            (ClickhouseTypeName.NULLABLE, ClickhouseTypeName.LOW_CARDINALITY, ClickhouseTypeName.NOTHING),
+            read_wrapped_value,
+        ),
+        **dict.fromkeys(
+            (
+                *CLICKHOUSE_BINARY_INTEGER_WIDTHS,
+                ClickhouseTypeName.BOOL,
+                ClickhouseTypeName.FLOAT32,
+                ClickhouseTypeName.FLOAT64,
+            ),
+            read_number_value,
+        ),
+        **dict.fromkeys((ClickhouseTypeName.STRING, ClickhouseTypeName.FIXED_STRING), read_text_value),
+        **dict.fromkeys(
+            (
+                ClickhouseTypeName.DATE,
+                ClickhouseTypeName.DATE32,
+                ClickhouseTypeName.DATETIME,
+                ClickhouseTypeName.DATETIME64,
+            ),
+            read_temporal_value,
+        ),
+        ClickhouseTypeName.DECIMAL: read_decimal_value,
+        **dict.fromkeys(
+            (ClickhouseTypeName.UUID, ClickhouseTypeName.IPV4, ClickhouseTypeName.IPV6), read_identifier_value
+        ),
+        **dict.fromkeys(
+            (ClickhouseTypeName.ARRAY, ClickhouseTypeName.TUPLE, ClickhouseTypeName.MAP), read_container_value
+        ),
+        **dict.fromkeys((ClickhouseTypeName.ENUM8, ClickhouseTypeName.ENUM16), read_enum_value),
     }

@@ -14,9 +14,10 @@
 //! (the `rust_pg` driver's own `RustPgTransactionClient`) - this type only executes the
 //! three savepoint SQL forms against whatever name it's given.
 //!
-//! BEGIN completes before this transaction is returned. Every later operation therefore runs
-//! in an established transaction, including preparation and declaration of cursors.
+//! BEGIN is queued until the first operation. Its control messages are sent before that
+//! operation on the same leased connection; empty transactions send no control statements.
 
+use crate::asyncio::future_into_py;
 use crate::pg::client::{CancelTarget, StatementCaching};
 use crate::pg::connection_executor::PgConnectionExecutor;
 use crate::pg::described_rows::DescribedRows;
@@ -26,13 +27,13 @@ use crate::pg::error::DriverError;
 use crate::pg::error::TransactionFinishedError;
 use crate::pg::parameter_value_rows::ParameterValueRows;
 use crate::pg::parameter_values::ParameterValues;
+use crate::pg::pending_statements::PendingStatements;
 use crate::pg::result::PgResult;
 use crate::pg::result_columns::ResultColumns;
 use crate::pg::timed_manager::Object;
 use crate::pg::tls::PgTls;
 use crate::pg::value::Value;
 use pyo3::prelude::*;
-use pyo3_async_runtimes::tokio::future_into_py;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 
@@ -99,7 +100,7 @@ pub struct Transaction {
 }
 
 impl Transaction {
-    pub(crate) async fn begin(
+    pub(crate) fn begin(
         client: Object,
         isolation: Option<&str>,
         statement_caching: StatementCaching,
@@ -110,16 +111,11 @@ impl Transaction {
             Some(level) => format!("BEGIN ISOLATION LEVEL {}", validate_isolation_level(level)?),
             None => "BEGIN".to_string(),
         };
-        let transaction = Transaction {
-            executor: PgConnectionExecutor::new(client, statement_caching, tls, cancel_target),
-            open_streams: Arc::new(StdMutex::new(Vec::new())),
-        };
-        {
-            let mut lease = transaction.executor.acquire().await?.expect("new transaction connection");
-            let outcome = lease.client().batch_execute(&begin_sql).await.map_err(DriverError::from);
-            lease.finish(outcome)?;
-        }
-        Ok(transaction)
+        let mut executor = PgConnectionExecutor::new(client, statement_caching, tls, cancel_target);
+        let pending = Arc::new(PendingStatements::default());
+        pending.begin(begin_sql);
+        executor.pending = Some(pending);
+        Ok(Transaction { executor, open_streams: Arc::new(StdMutex::new(Vec::new())) })
     }
 
     /// Closes every registered iterator, discarding buffered rows and marking future fetches
@@ -175,12 +171,15 @@ impl Drop for Transaction {
     fn drop(&mut self) {
         let inner = self.executor.connection.clone();
         let pinned = self.executor.state.clone();
+        let pending = self.executor.pending.clone();
         Transaction::close_open_streams(&self.open_streams);
         pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
             if let Some(client) = inner.lock().await.take() {
                 let closing = ClosingTransaction::new(client, pinned.pending_cancels.clone());
                 pinned.pending_cancels.wait_until_delivered().await;
-                if pinned.connection_poisoned.load(Ordering::Acquire) {
+                if pinned.connection_poisoned.load(Ordering::Acquire)
+                    || pending.as_ref().is_some_and(|pending| pending.has_begin())
+                {
                     // Closing the connection aborts the transaction server-side.
                     closing.release(&pinned.connection_poisoned);
                     return;
@@ -260,15 +259,14 @@ impl Transaction {
         future_into_py(py, async move {
             let mut lease = executor.acquire().await.map_err(to_pyerr)?.ok_or_else(tx_finished)?;
             let client = lease.client();
-            let outcome: Result<_, DriverError> = async {
+            let outcome: Result<_, DriverError> = PendingStatements::run(executor.pending.as_deref(), client, async {
                 let statement = caching.prepare_values(client, &sql, &params).await?;
                 let columns = ResultColumns::of_statement(&statement);
-                let bound = ParameterValues::as_sql_refs(&params);
                 let declare_sql = format!("DECLARE \"{cursor_name}\" NO SCROLL CURSOR FOR {sql}");
                 let declare = client.prepare_typed(&declare_sql, statement.params()).await?;
-                client.execute(&declare, &bound).await?;
+                client.execute_raw(&declare, params.iter()).await?;
                 Ok(columns)
-            }
+            })
             .await;
             let columns = lease.finish(outcome).map_err(to_pyerr)?;
             let rows = CursorRows::new(cursor_name, executor.clone());
@@ -306,12 +304,12 @@ impl Transaction {
             let types = ParameterValues::batch_types(&rows).map_err(to_pyerr)?;
             let mut lease = executor.acquire().await.map_err(to_pyerr)?.ok_or_else(tx_finished)?;
             let client = lease.client();
-            let outcome: Result<(), DriverError> = async {
+            let outcome: Result<(), DriverError> = PendingStatements::run(executor.pending.as_deref(), client, async {
                 let statement = caching.prepare(client, &sql, &types).await?;
                 let futures = rows.iter().map(|row| client.execute_raw(&statement, row.iter()));
                 futures_util::future::try_join_all(futures).await?;
                 Ok(())
-            }
+            })
             .await;
             lease.finish(outcome).map_err(to_pyerr)
         })
@@ -337,14 +335,18 @@ impl Transaction {
         future_into_py(py, async move {
             let mut lease = executor.acquire().await.map_err(to_pyerr)?.ok_or_else(tx_finished)?;
             let client = lease.client();
-            let result = crate::pg::copy::copy_in_records(
+            let result = PendingStatements::run(
+                executor.pending.as_deref(),
                 client,
-                &table,
-                schema.as_deref(),
-                &columns,
-                &column_types,
-                records,
-                &tags_comment,
+                crate::pg::copy::copy_in_records(
+                    client,
+                    &table,
+                    schema.as_deref(),
+                    &columns,
+                    &column_types,
+                    records,
+                    &tags_comment,
+                ),
             )
             .await;
             lease.finish(result).map_err(to_pyerr)
@@ -362,6 +364,7 @@ impl Transaction {
         let inner = self.executor.connection.clone();
         let pinned = self.executor.state.clone();
         let open_streams = self.open_streams.clone();
+        let pending = self.executor.pending.clone();
         // Stop existing iterators before waiting; repeat under the lock to catch a stream whose
         // declaration was still in flight when this transaction began closing.
         Transaction::close_open_streams(&open_streams);
@@ -373,6 +376,10 @@ impl Transaction {
             let client = closing.connection();
             Transaction::close_open_streams(&open_streams);
             pinned.pending_cancels.wait_until_delivered().await;
+            if pending.as_ref().is_some_and(|pending| pending.has_begin()) {
+                closing.release(&pinned.connection_poisoned);
+                return Ok(());
+            }
             if client.is_closed() {
                 // Certainly never reached the server - unlike an error while the COMMIT is in
                 // flight, which leaves its outcome unknown.
@@ -413,6 +420,7 @@ impl Transaction {
         let inner = self.executor.connection.clone();
         let pinned = self.executor.state.clone();
         let open_streams = self.open_streams.clone();
+        let pending = self.executor.pending.clone();
         // See commit() for why this also runs before the lock is taken.
         Transaction::close_open_streams(&open_streams);
         future_into_py(py, async move {
@@ -423,6 +431,10 @@ impl Transaction {
             let client = closing.connection();
             Transaction::close_open_streams(&open_streams);
             pinned.pending_cancels.wait_until_delivered().await;
+            if pending.as_ref().is_some_and(|pending| pending.has_begin()) {
+                closing.release(&pinned.connection_poisoned);
+                return Ok(());
+            }
             if pinned.connection_poisoned.load(Ordering::Acquire) {
                 // Closing the connection aborts the transaction server-side - no ROLLBACK for a
                 // CancelRequest whose delivery was never confirmed to hit.
@@ -456,13 +468,14 @@ impl Transaction {
 
 impl Transaction {
     /// Runs one simple-protocol statement (a savepoint statement, a script) on the pinned
-    /// connection. BEGIN has already completed.
+    /// connection, following pending control statements through the same leased operation.
     fn run_on_connection<'py>(&self, py: Python<'py>, sql: String) -> PyResult<Bound<'py, PyAny>> {
         let executor = self.executor.clone();
         future_into_py(py, async move {
             let mut lease = executor.acquire().await.map_err(to_pyerr)?.ok_or_else(tx_finished)?;
             let client = lease.client();
-            lease.finish(client.batch_execute(&sql).await.map_err(DriverError::from)).map_err(to_pyerr)
+            let outcome = PendingStatements::run(executor.pending.as_deref(), client, client.batch_execute(&sql)).await;
+            lease.finish(outcome.map_err(DriverError::from)).map_err(to_pyerr)
         })
     }
 }

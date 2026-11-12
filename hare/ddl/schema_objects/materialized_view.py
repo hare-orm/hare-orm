@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 from hare.ddl.schema_objects.view import View
 from hare.exceptions import ConfigurationError
@@ -32,7 +32,7 @@ class MaterializedView(View):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if isinstance(cast("object", self.unique_columns), str) or not all(
+        if isinstance(self.unique_columns, str) or not all(  # type: ignore[unreachable]
             isinstance(column, str) and column for column in self.unique_columns
         ):
             raise ConfigurationError(

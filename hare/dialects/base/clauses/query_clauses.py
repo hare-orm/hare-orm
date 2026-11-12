@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.dialects.base.clauses.constants import JOIN_KEYWORDS
 from hare.dialects.base.clauses.enums import MergeAction, MergeMatch
@@ -124,7 +124,7 @@ class QueryClauses:
             The source as written - a dialect of such a database writes an aliased table so that
             its name is the enclosing query's.
         """
-        return cast("str", source.get_sql(sql_context))
+        return source.get_sql(sql_context)
 
     def get_joined_source_sql(self, source: Any, sql_context: SqlContext) -> str:
         """A table or query a subquery joins, on a database whose table alias doesn't hide the
@@ -138,7 +138,7 @@ class QueryClauses:
             The source as written - a dialect of such a database writes an aliased table so that
             its name is the enclosing query's.
         """
-        return cast("str", source.get_sql(sql_context))
+        return source.get_sql(sql_context)
 
     def get_main_table_suffix_sql(self, builder: QueryBuilder, sql_context: SqlContext) -> str:
         """What follows the first table of ``FROM`` - its sample (``sample()``,

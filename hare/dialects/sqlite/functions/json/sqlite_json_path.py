@@ -111,6 +111,5 @@ class SqliteJsonPath:
     @classmethod
     async def install(cls, connection: aiosqlite.Connection) -> None:
         """Registers ``extract`` on ``connection`` as ``SQLITE_JSON_PATH_FUNCTION_NAME``."""
-        native_functions = SqliteNativeFunctions.module
-        extract: Any = cls.extract if native_functions is None else native_functions.JsonPath(cls.extract).extract
+        extract = SqliteNativeFunctions.module.JsonPath(cls.extract).extract
         await connection.create_function(SQLITE_JSON_PATH_FUNCTION_NAME, 3, extract, deterministic=True)

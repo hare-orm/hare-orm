@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Self
 
 from hare.exceptions import QueryError
 from hare.models.write.rules.written_target_checks import WrittenTargetChecks
@@ -11,16 +11,17 @@ from hare.query.expressions.value_references.value_reference_types import Record
 from hare.query.key_columns import KeyColumns
 from hare.query.plans.description.plan_description import PlanDescription
 from hare.query.plans.enums import PlanKeyForm
+from hare.query.plans.statement.declarations import CallPlanHit
 from hare.query.plans.statement.declared_plan_slots import DeclaredPlanSlots
 from hare.query.plans.statement.statement_plan_descriptions import StatementPlanDescriptions
+from hare.query.plans.statement.statement_plan_runs import StatementPlanRuns
 from hare.query.plans.statement.statement_plans import StatementPlans
-from hare.query.queryset.pending_calls.pending_filter_calls import PendingFilterCalls
 from hare.query.queryset.query_specification import QuerySpecification
 from hare.query.queryset.specification_copying import SpecificationCopying
-from hare.query.statements.awaitable_query import AwaitableQuery
 from hare.query.statements.building.query_conditions import QueryConditions
 from hare.query.statements.building.query_grouping import QueryGrouping
 from hare.query.statements.building.query_ordering import QueryOrdering
+from hare.query.statements.rows_source_query import RowsSourceQuery
 from hare.sql.builder.queries.query_builder import QueryBuilder
 from hare.sql.identifiers import Identifiers
 from hare.sql.order import Order
@@ -31,12 +32,14 @@ from hare.sql.terms.tuple import Tuple
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
+    from hare.dialects.base.client.database_client import DatabaseClient
     from hare.instrumentation.capture.captured_write import CapturedWrite
+    from hare.query.execution.prepared_write import PreparedWrite
     from hare.query.plans.statement.statement_plan import StatementPlan
     from hare.query.queryset.queryset import QuerySet
 
 
-class MatchingRowsQuery(AwaitableQuery[Any]):
+class MatchingRowsQuery(RowsSourceQuery):
     """Shared base of ``UpdateQuery``/``DeleteQuery`` - both write the rows the originating
     queryset's filters, and a slice of it where the dialect's statement takes a LIMIT, select."""
 
@@ -65,10 +68,38 @@ class MatchingRowsQuery(AwaitableQuery[Any]):
         Args:
             source: The queryset written, or a query made from one.
         """
-        self._take_rows_of(source, keeps_ordering=True)
-        self._init_build_state()
+        super().__init__(source, keeps_ordering=True)
+        self._call_signature = getattr(source, "_call_signature", None)
+        self._call_values = getattr(source, "_call_values", ())
         # The LIMIT the build put in the statement (or its matching-rows subquery).
         self._limit_term: ValueWrapper | None = None
+
+    def _get_statement_on(
+        self,
+        connection: DatabaseClient,
+        source: QuerySet[Any] | None = None,
+        *,
+        type_part: tuple[Any, Sequence[Any]] = ((), []),
+        prepared: PreparedWrite | None = None,
+    ) -> CallPlanHit | tuple[Self, tuple[str, list[Any]]]:
+        """Find SQL before creating build state; only a miss materializes a writable copy."""
+        specification = self if source is None else source
+        lookup = StatementPlanRuns.find_call_plan(type(self), specification, connection, type_part)
+        if isinstance(lookup, CallPlanHit):
+            return lookup
+        query = self.__copy__()
+        if source is not None:
+            query._take_rows_of(source, keeps_ordering=True)
+        query._init_build_state()
+        query._call_signature = specification._call_signature
+        query._call_values = specification._call_values
+        query._apply_connection(connection)
+        query._is_execution_query = True
+        if prepared is not None:
+            # UpdateQuery owns assignments; deletes pass no prepared values.
+            query._prepared_write = prepared  # type: ignore[attr-defined]
+        StatementPlanRuns.prepare_call_plan_record(query, lookup)
+        return query, query._make_query_to_run()
 
     def _build_matching_rows(self, value_wrapper_references: RecordedValueReferences | None) -> None:
         """Build the SELECT whose filters and slice select the rows to write.
@@ -92,24 +123,12 @@ class MatchingRowsQuery(AwaitableQuery[Any]):
         # the whole joined result.
         QueryGrouping.apply_auto_group_by(self)
 
-    def _restrict_to_keys(self, pks: list[Any]) -> None:
-        """Narrows the write to the rows of some primary keys - the rows read before it, so a row
-        committed by another transaction in between is left as it is.
-
-        Args:
-            pks: The primary keys.
-        """
-        self._filter_call_counter += 1
-        generation = self._filter_call_counter
-        PendingFilterCalls.add_filter_conditions(
-            self,
-            False,
-            PendingFilterCalls.get_filter_kwarg_conditions(self, {"pk__in": pks}, generation),
-            generation,
-        )
-
     async def _run_captured_by_reading(
-        self, captured: CapturedWrite, run_statement: Callable[[], Awaitable[int | None]]
+        self,
+        captured: CapturedWrite,
+        run_statement: Callable[[QuerySet[Any]], Awaitable[int | None]],
+        *,
+        get_moved_keys: Callable[[list[Any]], dict[Any, Any]] | None = None,
     ) -> tuple[int | None, list[Any]]:
         """Runs the write of a model with ``Meta.change_capture`` on a database whose writes return no
         rows: the matched rows are read first, locked, the write narrowed to them, and an update's rows
@@ -118,6 +137,7 @@ class MatchingRowsQuery(AwaitableQuery[Any]):
         Args:
             captured: The capture of the write - an update or a delete - on this query's connection.
             run_statement: Builds and runs the write, giving how many rows it wrote.
+            get_moved_keys: Map old keys to written keys using this execution's prepared values.
 
         Returns:
             How many rows the write wrote, and the primary keys of the rows read.
@@ -125,15 +145,13 @@ class MatchingRowsQuery(AwaitableQuery[Any]):
         # Local imports: the queryset package imports the query statements.
         from hare.query.queryset.selection.statement_selection import StatementSelection
 
-        read_before = await captured.read(
-            StatementSelection.get_primary_key_values_query(self._matching_queryset()), lock=True
-        )
+        source = self._matching_queryset(captured.connection)
+        read_before = await captured.read(StatementSelection.get_primary_key_values_query(source), lock=True)
         if not read_before:
             return 0, []
         pks = list(read_before)
-        moved_keys = self._get_moved_keys(pks)
-        self._restrict_to_keys(pks)
-        count = await run_statement()
+        moved_keys = {} if get_moved_keys is None else get_moved_keys(pks)
+        count = await run_statement(self._filter_matching_rows(source, pk__in=pks))
         if moved_keys:
             # The rows are read again by the keys the write gave them.
             read_before = {moved_keys[pk]: values for pk, values in read_before.items()}
@@ -141,18 +159,7 @@ class MatchingRowsQuery(AwaitableQuery[Any]):
         await captured.capture_read(read_before, pks)
         return count, pks
 
-    def _get_moved_keys(self, keys: list[Any]) -> dict[Any, Any]:
-        """The primary key each row of ``keys`` has after the write - for a write moving rows to other keys.
-
-        Args:
-            keys: The keys of the rows written.
-
-        Returns:
-            The key after the write by the key before it; empty for a write keeping the keys.
-        """
-        return {}
-
-    def _matching_queryset(self) -> QuerySet[Any]:
+    def _matching_queryset(self, connection: DatabaseClient | None = None) -> QuerySet[Any]:
         """A plain QuerySet, past the default manager, with this query's filters, slice, ordering and
         ``.distinct()``.
 
@@ -161,11 +168,35 @@ class MatchingRowsQuery(AwaitableQuery[Any]):
         """
         from hare.query.queryset.queryset import QuerySet
 
-        check_query: QuerySet[Any] = QuerySet(self.model)
+        # A write has discarded the source's row-return settings. Copy that declaration, not
+        # the original source, which can still carry only(), prefetches or grouping settings.
+        check_query = QuerySet(self.model)
         SpecificationCopying.copy_specification(self, check_query)
+        check_query._call_signature = self._call_signature
+        check_query._call_values = self._call_values
+        connection = connection if connection is not None else self._connection
+        if connection is not None:
+            check_query._apply_connection(connection)
+            check_query._connection_explicitly_chosen = True
+        check_query._visibility = self._visibility.get_for_active_tenant()
         return check_query
 
-    async def _get_matching_pks(self, *, live_only: bool = False) -> list[Any]:
+    @staticmethod
+    def _filter_matching_rows(source: QuerySet[Any], **filters: Any) -> QuerySet[Any]:
+        """Narrow a write's rows while retaining its supported LIMIT and ordering.
+
+        Public filtering after a slice is refused. This internal narrowing creates a new
+        declaration, adds the predicate, then restores the original write's slice.
+        """
+        if source._limit is None and not source._offset:
+            return source.filter(**filters)
+        rows = source._clone_keeping_calls()
+        rows._limit = rows._offset = None
+        rows = rows.filter(**filters)
+        rows._limit, rows._offset = source._limit, source._offset
+        return rows
+
+    async def _get_matching_pks(self, connection: DatabaseClient, *, live_only: bool = False) -> list[Any]:
         """Primary keys of every row this query's own filters match, each listed once - a
         filter through a to-many relation JOINs, so the matching queryset returns the same parent
         row once per matching child.
@@ -182,20 +213,22 @@ class MatchingRowsQuery(AwaitableQuery[Any]):
 
         # The rows are read by a query of their own here - its methods changing how rows are read
         # aren't refused by the write's own statement.
-        WrittenTargetChecks.raise_if_refused_calls(self)
+        WrittenTargetChecks.raise_if_refused_calls(self, connection.dialect)
         primary_key_attribute_names = self.model._meta.primary_key_attribute_names
         is_single_pk = len(primary_key_attribute_names) == 1
         matching_pks = list(
-            dict.fromkeys(await StatementSelection.get_primary_key_values_query(self._matching_queryset()))
+            dict.fromkeys(await StatementSelection.get_primary_key_values_query(self._matching_queryset(connection)))
         )
         if not live_only or not matching_pks:
             return matching_pks
         from hare.query.queryset.queryset import QuerySet
 
-        soft_delete_field = cast("str", self.model._meta.soft_delete_field)
+        soft_delete_field: str = self.model._meta.soft_delete_field
         live_query = QuerySet(self.model).filter(pk__in=matching_pks, **{f"{soft_delete_field}__isnull": True})
-        live_query._apply_connection(self._connection)
-        live_query._visibility = replace(self._visibility, include_deleted=True, only_deleted=False)
+        live_query._apply_connection(connection)
+        live_query._visibility = replace(
+            self._visibility.get_for_active_tenant(), include_deleted=True, only_deleted=False
+        )
         live_pks = set(await live_query.values_list(*primary_key_attribute_names, flat=is_single_pk))
         return [pk for pk in matching_pks if pk in live_pks]
 
@@ -212,14 +245,6 @@ class MatchingRowsQuery(AwaitableQuery[Any]):
         if description is None or not StatementPlanDescriptions.query_state_is_plannable(self):
             return None
         return description
-
-    def _get_ctes_description(self) -> PlanDescription:
-        """The values of the CTEs of a statement that keeps a plan.
-
-        Returns:
-            The description.
-        """
-        return StatementPlanDescriptions.get_ctes_plan_description(self)  # type: ignore[return-value]
 
     def _record_matching_rows_limit(self, value_wrapper_references: RecordedValueReferences | None) -> None:
         """Records where the LIMIT sits, after the filters' references - the statement's own or
@@ -257,7 +282,7 @@ class MatchingRowsQuery(AwaitableQuery[Any]):
             QueryError: The rows are such rows.
         """
         if self._extension_calls:
-            WrittenTargetChecks.raise_if_refused_calls(self)
+            WrittenTargetChecks.raise_if_refused_calls(self, self.dialect)
         if self._offset or (self._limit is not None and not self.features.supports_update_limit_order_by):
             raise QueryError(f"Cannot {self._get_written_method_name()}() a query once a slice has been taken.")
         if self._distinct_on:

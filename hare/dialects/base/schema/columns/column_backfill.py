@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 from copy import copy
-from typing import Any, cast
+from typing import Any
 
 from hare.dialects.base.schema.constants import BACKFILL_WITHOUT_ROW_IDENTITY_MESSAGE
 from hare.dialects.base.schema.plans.column_default_backfill import ColumnDefaultBackfill
@@ -53,7 +53,7 @@ class ColumnBackfill(SchemaEditorPart):
         Returns:
             True for an auto_now/auto_now_add DatetimeField or TimeField.
         """
-        return isinstance(field, DatetimeField | TimeField) and (field.auto_now or field.auto_now_add)
+        return isinstance(field, (DatetimeField, TimeField)) and (field.auto_now or field.auto_now_add)
 
     @classmethod
     def needs_added_column_backfill(cls, field: Field[Any]) -> bool:
@@ -80,7 +80,7 @@ class ColumnBackfill(SchemaEditorPart):
         Returns:
             The SQL literal.
         """
-        auto_now_field = cast("DatetimeField[Any] | TimeField[Any]", field)
+        auto_now_field: DatetimeField[Any] | TimeField[Any] = field  # type: ignore[assignment]
         return self.editor.client.dialect.literals.get_literal_sql(
             self.editor.client.dialect.types.get_db_value(auto_now_field, auto_now_field.get_auto_now_value(), model)
         )

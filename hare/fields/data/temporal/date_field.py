@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 
 from hare.exceptions import ValidationError
@@ -92,3 +93,14 @@ class DateField(Field[TDate]):
         result = self.get_date_value(value) if value is not None else None
         self.validate(result)
         return result
+
+    def get_unchanged_write_types(self, converter: Callable[..., Any] | None) -> tuple[type, ...] | None:
+        # This class's to_db_value() writes a date as it is.
+        field_class = type(self)
+        if (
+            converter is None
+            and field_class.to_db_value is DateField.to_db_value
+            and field_class.get_date_value is DateField.get_date_value
+        ):
+            return (datetime.date,)
+        return None

@@ -10,6 +10,7 @@ from hare.migrations.operations import AddIndex, HareOperation, RemoveIndex, Ren
 from hare.migrations.operations.schema_objects.object_types.index_object_type import IndexObjectType
 
 if TYPE_CHECKING:
+    from hare.migrations.autodetection.diffs.schema_object_comparison import SchemaObjectComparison
     from hare.migrations.state.model_state import ModelState
 
 
@@ -32,10 +33,10 @@ class IndexDiff(SchemaObjectDiff):
     def can_be_renamed(self, schema_object: Any) -> bool:
         return bool(schema_object.name)
 
-    def is_unchanged(self, old_object: Any, new_object: Any) -> bool:
-        if self.get_signature(old_object) != self.get_signature(new_object):
+    def is_unchanged(self, old_object: SchemaObjectComparison, new_object: SchemaObjectComparison) -> bool:
+        if old_object.signature != new_object.signature:
             return False
-        renames = self.can_be_renamed(old_object) and self.can_be_renamed(new_object)
+        renames = old_object.can_be_renamed and new_object.can_be_renamed
         return not renames or old_object.name == new_object.name
 
     def get_add_operation(self, schema_object: Any) -> HareOperation:

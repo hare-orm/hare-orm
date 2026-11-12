@@ -57,7 +57,7 @@ class SpatialFieldLookups:
         from hare.query.filters.lookups.field_lookups import FieldLookups
 
         generic = FieldLookups.get_generic(field)
-        lookups = {name: generic[name] for name in KEPT_GENERIC_GEOMETRY_LOOKUPS}
+        lookups: dict[str, FieldLookup] = {name: generic[name] for name in KEPT_GENERIC_GEOMETRY_LOOKUPS}
         if field.geography:
             # A geography has an = operator and no <> - the database would compare its text.
             lookups["not"] = dataclasses.replace(lookups["not"], operator=Lookups.not_equal_by_equality)

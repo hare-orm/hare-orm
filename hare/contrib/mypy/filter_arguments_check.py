@@ -7,10 +7,11 @@ from mypy.typeops import make_simplified_union
 from mypy.types import NoneType, Type
 
 from hare.contrib.mypy.annotation_types import AnnotationTypes
-from hare.contrib.mypy.constants import LOOKUP_SEPARATOR, UNSUPPORTED_FIELD_MESSAGE, UNSUPPORTED_LOOKUP_MESSAGE
+from hare.contrib.mypy.constants import UNSUPPORTED_FIELD_MESSAGE, UNSUPPORTED_LOOKUP_MESSAGE
 from hare.contrib.mypy.mypy_types import MypyTypes
 from hare.exceptions import HareError
 from hare.fields.field import Field
+from hare.query.constants import LOOKUP_SEPARATOR
 
 if TYPE_CHECKING:
     from mypy.plugin import MethodSigContext, Plugin

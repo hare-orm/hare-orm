@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -223,7 +223,7 @@ async def test_m2m_through_model_migration_lifecycle_emits_no_extra_through_tabl
     client.executed.clear()
 
     person = state.apps.get_model("models.Person")
-    m2m_field = cast(ManyToManyFieldInstance, person._meta.fields_map["groups"])
+    m2m_field: ManyToManyFieldInstance = person._meta.fields_map["groups"]
     assert m2m_field.through == "membership"
     assert m2m_field.forward_keys == ("group_id",)
     assert m2m_field.backward_keys == ("person_id",)

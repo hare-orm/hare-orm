@@ -5,6 +5,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from hare.dialects.base.dialect import Dialect
     from hare.fields.field import Field
     from hare.sql.terms.term import Term
 
@@ -17,6 +18,8 @@ class FieldLookup:
         operator: Builds the criterion - ``(term, encoded_value) -> Criterion``.
         value_encoder: Encodes the filter value - ``(value, model, field, dialect)``; None to
             convert it as the field converts its values.
+        value_encoder_builder: Optional ``(field, dialect) -> encoder`` preparing fixed conversions
+            while preserving the ordinary encoder's per-value checks and invocation arguments.
         array_element_field: The field each item of a list value is bound as.
         array_element_fields: Per key column, the field each item of a list of key rows is
             bound as.
@@ -43,6 +46,15 @@ class FieldLookup:
     requires_search_query_config: bool = False
     searched_field: Field[Any] | None = None
     required_feature: str | None = None
+    value_encoder_builder: Callable[[Field[Any], Dialect], Callable[..., Any]] | None = None
+
+    def get_value_encoder(self, field: Field[Any], dialect: Dialect) -> Callable[..., Any] | None:
+        """Prepare an opted-in encoder once for a query's field and dialect.
+
+        Plain extension callbacks are returned unchanged. The builder retains only conversion
+        metadata; the model and each value continue to arrive at invocation time.
+        """
+        return self.value_encoder if self.value_encoder_builder is None else self.value_encoder_builder(field, dialect)
 
     def with_changes(self, **changes: Any) -> FieldLookup:
         """A copy with some attributes replaced.

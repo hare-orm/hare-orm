@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import TYPE_CHECKING, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Generic, TypeVar
 
 from hare.dialects.base.client.constants import DISCARDED_CLIENT_MESSAGE
 from hare.dialects.base.client.transaction_lifecycle.pending_statements import PendingStatements
@@ -59,7 +59,7 @@ class ConnectionWrapper(Generic[TConnection]):
         self._span = span
         # The transaction may have started ending (or ended) while this query waited for its turn.
         try:
-            cast("TransactionClient", self.client)._check_statement_allowed()
+            self.client._check_statement_allowed()  # type: ignore[attr-defined]
         except TransactionManagementError:
             savepoint_lock.release(self._span)
             self._span = None
@@ -116,5 +116,5 @@ class ConnectionWrapper(Generic[TConnection]):
         self._lock.release()
         # A span is taken only on a transaction client's savepoint lock.
         if self._span is not None:
-            cast("TransactionClient", self.client)._savepoint_lock.release(self._span)
+            self.client._savepoint_lock.release(self._span)  # type: ignore[attr-defined]
             self._span = None

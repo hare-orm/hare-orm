@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.classes.deferred_import import DeferredImport
 from hare.query.plans.description.plan_context import PlanContext
 
 if TYPE_CHECKING:
     from hare.models import Model
     from hare.query.expressions.conditions.q import Q
+    from hare.query.scopes.row_scopes import RowScopes
     from hare.query.scopes.row_visibility import RowVisibility
 
 
@@ -30,6 +32,9 @@ class ScopeValueSource:
     visibility: RowVisibility
     structure: Any
     value_count: int
+
+    #: The scope class imports plan descriptions, so it is loaded on first use.
+    row_scopes_class: ClassVar[DeferredImport[type[RowScopes]]]
 
     def get_condition_values(self, condition: Q | None, structure: Any) -> list[Any] | None:
         """The values of a condition of the structure it was recorded with.
@@ -59,8 +64,8 @@ class ScopeValueSource:
         Raises:
             QueryError: The model is tenant-scoped and no tenant is active.
         """
-        # Local import: the scopes package imports the plans package.
-        from hare.query.scopes.row_scopes import RowScopes
-
-        condition = RowScopes.of(self.model).get_condition(self.visibility.get_for_active_tenant())
+        condition = self.row_scopes_class.of(self.model).get_condition(self.visibility)
         return self.get_condition_values(condition, self.structure)
+
+
+DeferredImport("hare.query.scopes.row_scopes", "RowScopes").install_on(ScopeValueSource, "row_scopes_class")

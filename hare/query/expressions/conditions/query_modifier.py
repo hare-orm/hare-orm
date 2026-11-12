@@ -65,7 +65,9 @@ class QueryModifier:
         """
         while len(modifiers) > 1:
             modifiers = [
-                combine(*modifiers[position : position + 2]) if position + 1 < len(modifiers) else modifiers[position]
+                combine(modifiers[position], modifiers[position + 1])
+                if position + 1 < len(modifiers)
+                else modifiers[position]
                 for position in range(0, len(modifiers), 2)
             ]
         return modifiers[0] if modifiers else QueryModifier()

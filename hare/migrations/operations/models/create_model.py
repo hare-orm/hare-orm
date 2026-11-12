@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.ddl.indexes.index import Index
 from hare.ddl.raw_sql_term import RawSQLTerm
@@ -63,7 +63,7 @@ class CreateModel(ModelTableOperation):
 
     def snapshot(self) -> CreateModel:
         """Keep the copied declaration independent of a previously rendered model."""
-        result = cast("CreateModel", super().snapshot())
+        result: CreateModel = super().snapshot()  # type: ignore[assignment]
         result._model = None
         return result
 

@@ -89,7 +89,7 @@ class DictGet(Expression):
             raise QueryError(
                 f"DictGet(output_field=...) takes a field, got {ValueDescriptions.get_shown_value(output_field)}"
             )
-        key_parts = list(key) if isinstance(key, list | tuple) else [key]
+        key_parts = list(key) if isinstance(key, (list, tuple)) else [key]
         if not key_parts:
             raise QueryError("DictGet(key=...) takes a field name, an expression, a literal, or a list of them")
         self.dictionary = dictionary

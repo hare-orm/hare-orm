@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Reversible
 from typing import TYPE_CHECKING
 
 from hare.exceptions import ConfigurationError
@@ -133,7 +134,7 @@ class MigrationGraph:
 
     def _raise_if_cyclic(self) -> None:
         """Raises on a cycle, walking from every node - a cycle can leave no leaf node to start from."""
-        self._iterative_dfs(list(self.node_map.values()), forwards=True)
+        self._iterative_dfs(self.node_map.values(), forwards=True)
 
     def root_nodes(self, app_label: str | None = None) -> list[MigrationKey]:
         """Every node with no parent - the first migrations of ``app_label``, or of the whole graph.
@@ -234,7 +235,7 @@ class MigrationGraph:
         return self._iterative_dfs([self.node_map[target] for target in targets], forwards=True)
 
     @staticmethod
-    def _iterative_dfs(starts: list[Node], *, forwards: bool) -> list[MigrationKey]:
+    def _iterative_dfs(starts: Reversible[Node], *, forwards: bool) -> list[MigrationKey]:
         visited: list[MigrationKey] = []
         visited_set: set[Node] = set()
         in_progress: set[Node] = set()

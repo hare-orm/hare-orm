@@ -6,7 +6,6 @@ from __future__ import annotations
 import contextlib
 import importlib
 import sqlite3
-import sys
 from pathlib import Path
 
 import pytest
@@ -42,11 +41,7 @@ class {name}(Model):
     [
         ('{"engine": "hare.dialects.nosuch", "credentials": {}}', "Unknown database engine 'hare.dialects.nosuch'"),
         ('{"engine": "sqlite+aiosqlite", "credentials": {}}', "needs a non-empty file_path"),
-        pytest.param(
-            '{"engine": "postgresql", "credentials": {"port": "abc"}}',
-            "port must be a whole number",
-            marks=pytest.mark.requires("native"),
-        ),
+        ('{"engine": "postgresql", "credentials": {"port": "abc"}}', "port must be a whole number"),
         (
             '"sqlite+aiosqlite://:memory:?jurnal_mode=WAL"',
             "Unknown connection parameter(s) ['jurnal_mode'] for the sqlite driver",
@@ -277,36 +272,3 @@ async def test_single_file_app_keeps_its_inferred_migrations_package(tmp_path, m
 
     assert result.exit_code == 0, result.stderr
     assert (tmp_path / "migrations" / "__init__.py").exists()
-
-
-@pytest.mark.requires("pyright")
-@pytest.mark.database_independent
-@pytest.mark.asyncio
-@pytest.mark.skipif(sys.platform != "win32", reason="'//' is the root of no server on Windows only")
-async def test_stubs_into_a_path_no_stub_name_goes_into_exit_cleanly(tmp_path, monkeypatch):
-    """ "//" made pathlib raise ValueError as a stub's name was put into it - a traceback."""
-    ProjectSources(
-        tmp_path,
-    ).write_module("cfgstubroot_models", MODELS_SOURCE.format(name="CfgStubRootWidget"))
-    ProjectSources(
-        tmp_path,
-    ).write_module(
-        "cfgstubroot_settings",
-        'HARE_ORM = {"connections": {"default": "sqlite+aiosqlite://:memory:"}, '
-        '"apps": {"models": {"models": ["cfgstubroot_models"]}}}',
-    )
-    _use_project(
-        tmp_path,
-        monkeypatch,
-    )
-
-    arguments = ["-c", "cfgstubroot_settings.HARE_ORM", "stubs", "--output", "//"]
-    result = await CliCommands.run(arguments, project=tmp_path)
-    assert result.exit_code == 1
-    assert "Can't write the stubs into '//'" in result.stderr
-    assert "Traceback" not in result.stderr
-
-    checked = await CliCommands.run([*arguments, "--check"], project=tmp_path)
-    assert checked.exit_code == 1
-    assert "Outdated stub:" in checked.stdout or "Can't write the stubs into '//'" in checked.stderr
-    assert "Traceback" not in checked.stderr

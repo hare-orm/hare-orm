@@ -4,7 +4,7 @@ import abc
 import asyncio
 import time
 from itertools import count
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar
 
 from hare.dialects.base.client.constants import DISCARDED_CLIENT_MESSAGE, TRANSACTION_FINALISED_MESSAGE
 from hare.dialects.base.client.enums import StatementForm
@@ -121,10 +121,10 @@ class SqliteTransactionClient(TransactionClient, SqliteClient):
                 self.log.exception("Failed to release the connection after an abandoned BEGIN")
 
     def _mark_transaction_aborted(self) -> None:
-        cast("SqliteTransactionClient", self._get_top_level_transaction())._transaction_aborted = True
+        self._get_top_level_transaction()._transaction_aborted = True  # type: ignore[attr-defined]
 
     def _is_transaction_aborted(self) -> bool:
-        return cast("SqliteTransactionClient", self._get_top_level_transaction())._transaction_aborted
+        return self._get_top_level_transaction()._transaction_aborted  # type: ignore[attr-defined]
 
     async def _disable_query_only(self) -> None:
         """Turns ``PRAGMA query_only`` back off before a read-only top-level transaction ends, so

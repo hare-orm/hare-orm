@@ -6,7 +6,7 @@ import contextvars
 import inspect
 from collections.abc import Awaitable, Callable, Sequence
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.contrib.notify.constants import (
@@ -23,7 +23,6 @@ from hare.exceptions import ConfigurationError, UnSupportedError
 if TYPE_CHECKING:
     from hare.core.connections.connection_handler import ConnectionHandler
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.dialects.base.client.transaction_client import TransactionClient
 
 
 class NotificationListener:
@@ -71,7 +70,7 @@ class NotificationListener:
         self.callback = callback
         self.reconnect_attempts = reconnect_attempts
         self.backoff: float | tuple[float, ...] = (
-            float(backoff) if isinstance(backoff, int | float) else tuple(float(delay) for delay in backoff)
+            float(backoff) if isinstance(backoff, (int, float)) else tuple(float(delay) for delay in backoff)
         )
         self.max_backoff_seconds = max_backoff_seconds
 
@@ -116,7 +115,7 @@ class NotificationListener:
         self._stop_requested.clear()
         self._first_attempt_finished.clear()
         # Never through a transaction start() may be called in - it ends long before the listener.
-        task = cast("ConnectionHandler", self._handler).create_task_outside_transactions(self.run())
+        task = self._handler.create_task_outside_transactions(self.run())  # type: ignore[union-attr]
         self._run_task = task
         self._started_run_task = True
         waiter = asyncio.create_task(self._first_attempt_finished.wait())
@@ -199,7 +198,7 @@ class NotificationListener:
                 else self.connection
             )
             if connection.is_transaction_client:
-                connection = cast("TransactionClient", connection).get_non_transactional_client()
+                connection = connection.get_non_transactional_client()  # type: ignore[attr-defined]
             self._client = connection
             self._handler = connection.connection_handler or Connections.current()
         connection = self._client
@@ -215,7 +214,7 @@ class NotificationListener:
                 f"NotificationListener channel takes at most {max_channel_bytes} bytes on "
                 f"{connection.dialect.name}, got {len(self.channel.encode())}"
             )
-        return cast("Callable[..., Awaitable[Any]]", cast("Any", connection).listen)
+        return connection.listen  # type: ignore[attr-defined]
 
     def _get_backoff_delay(self, attempt: int) -> float:
         """The delay before reconnect attempt number ``attempt`` (0-based)."""
@@ -237,7 +236,7 @@ class NotificationListener:
             ConfigurationError: The connection's configuration can't listen.
         """
         listen = self._get_listen_method()
-        cast("ConnectionHandler", self._handler).register_resource(self, self.stop)
+        self._handler.register_resource(self, self.stop)  # type: ignore[union-attr]
         self._run_task = asyncio.current_task()
         self._stopping = False
         self._stop_requested.clear()

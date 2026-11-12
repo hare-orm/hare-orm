@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.core.connections.connections import Connections
 from hare.exceptions import (
@@ -15,6 +15,7 @@ from hare.fields.relations.relation_values import RelationValues
 from hare.instrumentation.change_events import ChangeEvents
 from hare.instrumentation.enums import RowOperation
 from hare.models.instances.instance_connections import InstanceConnections
+from hare.models.write.instance_snapshot import InstanceSnapshot
 from hare.models.write.rollback_restores import RollbackRestores
 from hare.models.write.write_steps import WriteSteps
 from hare.query.constants import UNSAVED_OWNER_MESSAGE
@@ -23,7 +24,6 @@ from hare.query.queryset.relations.related_queryset.related_query_set import Rel
 if TYPE_CHECKING:
     from hare.ddl.raw_sql_term import RawSQLTerm
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.fields.relations.fields.relational_field import RelationalField
     from hare.models import Model
     from hare.query.expressions import Q
     from hare.query.statements.write.bulk.create.bulk_create_query import BulkCreateQuery
@@ -108,8 +108,8 @@ class ReverseRelation(RelatedQuerySet[TModel]):
         parent_values = self._get_parent_key_values("bulk_create")
         self._validate_instances(tuple(objects), saved=False)
         for obj in objects:
-            object_values = [getattr(obj, field_name) for field_name in self.relation_fields]
-            if object_values != [None] * len(object_values) and object_values != parent_values:
+            object_values = tuple(getattr(obj, field_name) for field_name in self.relation_fields)
+            if object_values != (None,) * len(object_values) and object_values != parent_values:
                 raise QueryError(
                     f"{obj!r} points its foreign key at {', '.join(repr(value) for value in object_values)}, not "
                     f"at the parent instance of this relation ({', '.join(repr(value) for value in parent_values)})"
@@ -218,10 +218,10 @@ class ReverseRelation(RelatedQuerySet[TModel]):
         parent_values = self._get_parent_key_values("remove")
         self._validate_instances(objs, saved=True)
         for instance in objs:
-            if [getattr(instance, field_name) for field_name in self.relation_fields] != parent_values:
+            if tuple(getattr(instance, field_name) for field_name in self.relation_fields) != parent_values:
                 raise DoesNotExist(f"{instance!r} is not related to {self.instance!r}")
         await self._set_relation_key_values(
-            objs, [None] * len(self.relation_fields), bulk, using, current_values=parent_values
+            objs, (None,) * len(self.relation_fields), bulk, using, current_values=parent_values
         )
 
     async def clear(self, bulk: bool = True, using: str | DatabaseClient | None = None) -> None:
@@ -269,7 +269,7 @@ class ReverseRelation(RelatedQuerySet[TModel]):
                 ``objs`` is not saved.
             ValidationError: One of ``objs`` is not an instance of the related model.
         """
-        members = cast("tuple[TModel, ...]", await self._get_set_members(objs))
+        members: tuple[TModel, ...] = await self._get_set_members(objs)
         self._validate_instances(members, saved=bulk)
         connection = self._get_write_connection(using)
         async with connection._in_transaction() as transaction_connection:
@@ -296,7 +296,7 @@ class ReverseRelation(RelatedQuerySet[TModel]):
             "moved to another one meanwhile, or not shown by its default scope; nothing was removed"
         )
 
-    def _get_parent_key_values(self, method_name: str) -> list[Any]:
+    def _get_parent_key_values(self, method_name: str) -> tuple[Any, ...]:
         """The parent instance's value(s) the related elements' foreign key references.
 
         Args:
@@ -318,7 +318,7 @@ class ReverseRelation(RelatedQuerySet[TModel]):
                 f"parent {type(self.instance).__name__}'s {', '.join(self.from_fields)} is NULL, so no row "
                 "can reference it"
             )
-        return list(parent_values)
+        return parent_values
 
     def _get_kwargs_with_parent_key(self, kwargs: dict[str, Any], method_name: str) -> dict[str, Any]:
         """``kwargs`` with the foreign key pointed at the parent instance.
@@ -348,9 +348,9 @@ class ReverseRelation(RelatedQuerySet[TModel]):
             # Compared through the same to_field= attribute(s) the parent is referenced by (not
             # .pk), component by component for a composite target.
             given_values = (
-                [None] * len(self.from_fields)
+                (None,) * len(self.from_fields)
                 if given_relation_value is None
-                else [getattr(given_relation_value, field_name, None) for field_name in self.from_fields]
+                else tuple(getattr(given_relation_value, field_name, None) for field_name in self.from_fields)
             )
             if given_values != parent_values:
                 raise QueryError(
@@ -419,17 +419,17 @@ class ReverseRelation(RelatedQuerySet[TModel]):
         return tuple(
             f"_{name}"
             for name in meta.foreign_key_fields | meta.one_to_one_fields
-            if tuple(cast("RelationalField[Any]", meta.fields_map[name]).source_fields) == tuple(self.relation_fields)
+            if tuple(meta.fields_map[name].source_fields) == tuple(self.relation_fields)  # type: ignore[attr-defined]
         )
 
     async def _set_relation_key_values(
         self,
         instances: tuple[TModel, ...],
-        values: list[Any],
+        values: tuple[Any, ...],
         bulk: bool,
         using: str | DatabaseClient | None,
         *,
-        current_values: list[Any] | None = None,
+        current_values: tuple[Any, ...] | None = None,
     ) -> None:
         """Writes ``values`` into the foreign key of each of ``instances``, in the database and in
         memory.
@@ -493,14 +493,18 @@ class ReverseRelation(RelatedQuerySet[TModel]):
             # ran: only an enclosing transaction rolls them back then.
             if not bulk or connection.is_transaction_client:
                 cache_names = self._get_relation_cache_names()
-                RollbackRestores.register_rollback_restores(
+                RollbackRestores.register_snapshots(
                     transaction_connection,
                     [
-                        (instance, name, instance.__dict__.get(name, ROLLBACK_RESTORE_UNSET))
+                        InstanceSnapshot(
+                            instance,
+                            {
+                                name: instance.__dict__.get(name, ROLLBACK_RESTORE_UNSET)
+                                # Undo runs backwards: keys precede the relation caches they invalidate.
+                                for name in (*cache_names, *relation_values)
+                            },
+                        )
                         for instance in instances
-                        # Undo runs backwards: restore keys before the relation objects
-                        # whose caches a key's setter invalidates.
-                        for name in (*cache_names, *relation_values)
                     ],
                 )
             for instance in instances:

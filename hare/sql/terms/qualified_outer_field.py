@@ -52,7 +52,7 @@ class QualifiedOuterField(Term):
         return self
 
     def get_sql(self, sql_context: SqlContext) -> str:
-        table_name = sql_context.source_aliases.get(self.table.source_binding, self.table.get_table_name())
+        table_name = self.table.get_namespace(sql_context)
         sql = f"{sql_context.quote(table_name)}.{sql_context.quote(self.column)}"
         if sql_context.with_alias and self.alias:
             return sql_context.format_alias_sql(sql, self.alias)

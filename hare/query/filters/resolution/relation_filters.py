@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import QueryError
 from hare.fields.relations.fields.backward_foreign_key_relation import BackwardForeignKeyRelation
@@ -80,7 +80,7 @@ class RelationFilters:
             QueryError: An aggregate over the same to-many relation would see only one of
                 several JOINs, or an extra condition reads a further relation.
         """
-        related_field = cast("RelationalField[Model]", expression_context.model._meta.fields_map[related_field_name])
+        related_field: RelationalField[Model] = expression_context.model._meta.fields_map[related_field_name]  # type: ignore[assignment]
         full_path = RelationFilters.get_relation_path(expression_context, related_field_name)
         # The first generation to touch a to-many path takes the unsuffixed alias; only a later,
         # different generation gets a JOIN of its own.
@@ -253,7 +253,7 @@ class RelationFilters:
         value: Any,
         table: Table,
         join_table: Table | None,
-    ) -> tuple[Criterion, TableCriterionTuple, Callable[..., Any], Any]:
+    ) -> tuple[Criterion, TableCriterionTuple, Callable[..., Any] | None, Callable[..., Any], Any]:
         """Builds the criterion of a lookup on a many-to-many or backward relation itself - the
         related rows' key compared on the through table or the related table, joined by the key
         columns (a row of them for a composite key).
@@ -266,11 +266,12 @@ class RelationFilters:
             join_table: The through or related table, when it is joined already.
 
         Returns:
-            The criterion, the join, the operator and the converted value.
+            The criterion, the join, the encoder actually used (None for a SQL term), the operator
+            and the converted value.
         """
         model = expression_context.model
         relation = lookup_info.relations[-1]
-        field_lookup = cast("FieldLookup", lookup_info.field_lookup)
+        field_lookup: FieldLookup = lookup_info.field_lookup  # type: ignore[assignment]
         compared_term: Term
         if isinstance(relation, ManyToManyFieldInstance):
             related_table = (
@@ -284,7 +285,7 @@ class RelationFilters:
                 else related_table[relation.forward_key]
             )
         else:
-            backward_relation = cast("BackwardForeignKeyRelation[Model]", relation)
+            backward_relation: BackwardForeignKeyRelation[Model] = relation  # type: ignore[assignment]
             owner_meta = backward_relation.related_model._meta
             related_table = (
                 join_table
@@ -313,13 +314,16 @@ class RelationFilters:
                 [table[column] for column in left_columns], [related_table[column] for column in right_columns]
             ),
         )
-        if field_lookup.value_encoder is not None and not isinstance(value, Term):
-            # A value that is a SQL term (OuterReference/Subquery/F()) is compared as it is.
-            value = field_lookup.value_encoder(value, model, relation, expression_context.dialect)
+        value_encoder = None
+        if not isinstance(value, Term):
+            # SQL terms compare as given; plain values use the same encoder selection as other lookups.
+            value_encoder = field_lookup.get_value_encoder(relation, expression_context.dialect)
+            if value_encoder is not None:
+                value = value_encoder(value, model, relation, expression_context.dialect)
         operator = expression_context.dialect.filter_operators.get_operator(
             field_lookup, expression_context.connection
         )
-        return operator(compared_term, value), join, operator, value
+        return operator(compared_term, value), join, value_encoder, operator, value
 
     @staticmethod
     def get_related_instance_key_value(key: str, field_object: RelationalField[Model], obj: Model) -> Any:
@@ -364,7 +368,6 @@ class RelationFilters:
         from hare.models import Model
         from hare.query.queryset import QuerySet
         from hare.query.queryset.combination.queryset_combination import QuerySetCombination
-        from hare.query.statements.select.combined_query import CombinedQuery
 
         to_field_name = field_object.to_field_instance.model_field_name
         related_model = field_object.related_model
@@ -380,7 +383,7 @@ class RelationFilters:
             and value.model is related_model
         ):
             if value._combination is not None:
-                return cast("CombinedQuery", value._get_compiler())._get_field_values_query(to_field_name)
+                return value._get_compiler()._get_field_values_query(to_field_name)  # type: ignore[attr-defined]
             value._build_conditions_for_copies()
             field_values_query = value._get_field_values_query(to_field_name)
             # Made again for each build - its values come from the queryset.
@@ -421,7 +424,7 @@ class RelationFilters:
             return None
         if relation_name not in model._meta.foreign_key_fields and relation_name not in model._meta.one_to_one_fields:
             return None
-        relation_field = cast("RelationalField[Model]", model._meta.fields_map[relation_name])
+        relation_field: RelationalField[Model] = model._meta.fields_map[relation_name]  # type: ignore[assignment]
         related_model = relation_field.related_model
         related_meta = related_model._meta
         table = expression_context.table
@@ -477,14 +480,14 @@ class RelationFilters:
         filter_value: Any = value
         meta = expression_context.model._meta
         if lookup_info.target == LookupTarget.RELATION and len(lookup_info.relations) == 1:
-            relation = cast("RelationalField[Model]", lookup_info.relations[0])
+            relation: RelationalField[Model] = lookup_info.relations[0]  # type: ignore[assignment]
             if (
                 relation.model_field_name in meta.foreign_key_fields
                 or relation.model_field_name in meta.one_to_one_fields
             ):
                 from hare.models import Model
 
-                source_field_name = cast("str", relation.source_field)
+                source_field_name: str = relation.source_field  # type: ignore[assignment]
                 compared_lookup_info = meta._get_lookup_info(
                     f"{source_field_name}__{lookup_info.lookup}" if lookup_info.lookup else source_field_name
                 )

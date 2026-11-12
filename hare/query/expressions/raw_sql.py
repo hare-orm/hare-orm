@@ -146,7 +146,7 @@ class RawSQL(ArithmeticOperators, Plannable, Term):  # type: ignore[misc]
         return sql_context.dialect.literals.get_array_literal_sql(
             [
                 RawSQL._get_array_literal_sql(item, sql_context)
-                if isinstance(item, list | tuple)
+                if isinstance(item, (list, tuple))
                 else ValueWrapper.get_formatted_value(item, sql_context)
                 for item in value
             ]

@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from hare.declarations.declaration_values import DeclarationValues
-from hare.inspectdb.introspection.enums import SchemaPartType
+from hare.inspectdb.enums import SchemaPartType
 
 
 @dataclass(frozen=True)

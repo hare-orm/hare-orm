@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from litestar.exceptions import HTTPException, ValidationException
 from litestar.exceptions.responses import create_exception_response
@@ -35,7 +35,7 @@ class HareExceptionHandlers:
         Returns:
             The answer.
         """
-        status = cast("HTTPStatus", ErrorAnswers.get_status(exception))
+        status: HTTPStatus = ErrorAnswers.get_status(exception)  # type: ignore[assignment]
         extra = {"parameter": exception.parameter} if isinstance(exception, RequestQueryForbidden) else None
         return create_exception_response(
             request,

@@ -48,7 +48,7 @@ class QueryParameters(list[Any]):
             if index < len(self):
                 value = self[index]
                 hidden_values.append(value)
-                if isinstance(value, list | tuple):
+                if isinstance(value, (list, tuple)):
                     hidden_values.extend(value)
         return hidden_values
 

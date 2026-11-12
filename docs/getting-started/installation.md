@@ -4,6 +4,8 @@ hare-orm installs from PyPI with pip; the drivers and integrations it doesn't ne
 extras. Once it is installed, [Your first model](first-model.md) defines a model, creates its table and
 runs the first queries.
 
+Package metadata permits CPython `>=3.12,<3.16`; the current CI matrix covers 3.12, 3.13, 3.14 and 3.15.
+
 ```bash
 pip install hare-orm
 ```
@@ -40,15 +42,20 @@ pip install hare-orm[pyright]        # `hare stubs` - stubs of the models for py
 pip install hare-orm[pytest]         # hare's pytest plugin (pytest, pytest-asyncio)
 ```
 
+Python 3.15 supports the core, asyncpg 0.32+, ClickHouse HTTP 1.12+, Pydantic 2.14+
+and Kafka through aiokafka 0.15+. Robyn 0.88 and ClickHouse TCP (`clickhouse-driver`
+and `clickhouse-cityhash`) currently need Python 3.12–3.14: their current dependencies
+have no compatible 3.15 wheels. On 3.15 choose another web framework or ClickHouse HTTP.
+The matrix tests available integrations there and these two on 3.14.
+
 ## <a id="supported-versions"></a>Supported versions
 
-Full support is promised on Linux only: every database below is tested there. On Windows and macOS
-hare installs and runs for development — the [wheels](#wheels), the CLI and the tests reading no
-database are checked on all three systems.
+The full database matrix below runs on Linux. On macOS and Windows every release's
+[wheels](#wheels) are installed and checked on SQLite and through the CLI.
 
 | Component | Supported | Tested |
 | --- | --- | --- |
-| Python | CPython 3.12, 3.13, 3.14 | each of them |
+| Python | CPython 3.12, 3.13, 3.14, 3.15 | each of them |
 | PostgreSQL | 14 and newer | 14, 15, 16, 17 and 18, through `rust_pg` and through `asyncpg`, on Linux |
 | PgBouncer | 1.22.1 and newer | 1.22, 1.23, 1.24, 1.25 and 1.26 in front of PostgreSQL 18, 1.26 also in front of 14, through both drivers, on Linux |
 | SQLite | 3.35.5 and newer | 3.35.5, 3.37.2, 3.38.0, 3.41.0 and 3.53.4, on Linux |
@@ -75,16 +82,16 @@ verify cached query plans with `--verify-plans`.
 
 The Rust PostgreSQL driver, the native attribute and value-format helpers and the compiled
 [SQLite functions](../dialects/sqlite/functions.md#compiled-functions) (the `rust.native` extension) come
-prebuilt in a wheel per Python version — cp312, cp313 and cp314 — for each platform:
+prebuilt in a wheel per Python version — cp312, cp313, cp314 and cp315 — for each platform. hare needs the
+extension, so it is published as these wheels alone:
 
 | Platform | Architectures | Wheel tag |
 | --- | --- | --- |
 | Linux, glibc 2.17 and newer | x86-64, ARM64 | `manylinux_2_17` (manylinux2014) |
 | Linux, musl 1.2 and newer (Alpine) | x86-64, ARM64 | `musllinux_1_2` |
-| macOS | Intel (x86-64), Apple Silicon (ARM64) | `macosx` |
-| Windows | x64, ARM64 | `win_amd64`, `win_arm64` |
+| macOS | x86-64, ARM64 | `macosx` |
+| Windows | x86-64, ARM64 | `win_amd64`, `win_arm64` |
 
-On any other platform pip installs the pure wheel (`py3-none-any`), without the extension: SQLite (with
-the Python versions of its functions) and `postgresql+asyncpg://` work there, and a `postgresql://`
-connection raises `ConfigurationError`. See [PostgreSQL: the
+The Windows wheels carry no Rust PostgreSQL driver: PostgreSQL there needs the `asyncpg` extra and
+`postgresql+asyncpg://`; a `postgresql://` connection raises `ConfigurationError`. See [PostgreSQL: the
 drivers](../dialects/postgresql/connecting.md#choosing-a-postgres-driver).

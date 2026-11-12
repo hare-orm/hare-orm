@@ -91,7 +91,9 @@ class PlanRecording:
             return
         source = ScopeValueSource(model, visibility, description.structure, len(description.values))
         position_by_origin = {origin: position for position, origin in enumerate(description.origins)}
-        references_by_position = recording.scope_references.setdefault(source, [[] for _origin in description.origins])
+        references_by_position = recording.scope_references.get(source)
+        if references_by_position is None:
+            references_by_position = recording.scope_references[source] = [[] for _origin in description.origins]
         for origin, reference in value_wrapper_references:
             position = position_by_origin.get(origin)
             if reference is None or position is None:

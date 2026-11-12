@@ -44,11 +44,6 @@ PARTIAL_INSTANCE_WITHOUT_KEY_MESSAGE = (
     "{model_name} was loaded by .only()/.defer() without its primary key - name it in .only() to {action} the object"
 )
 
-#: The refusal of a query on a model without a default connection, by the model's name.
-MISSING_DEFAULT_CONNECTION_MESSAGE = (
-    "{model_name} has no default connection - set the apps.<app>.default_connection key of Hare.init()"
-)
-
 
 #: Meta attributes merged across unrelated abstract bases by concatenation - each is a collection of
 #: separately declared entries. Along one ancestor chain a redeclared key still replaces.
@@ -89,6 +84,9 @@ INSTANCE_STATE_ATTRIBUTE_NAMES = frozenset(
         "_allow_soft_delete_write",
     )
 )
+
+#: The persistence state a write's snapshot of an instance holds, in the order undo restores it backwards.
+PERSISTENCE_STATE_ATTRIBUTE_NAMES = ["_saved_in_db", "_custom_generated_pk", "_connection_alias", "_dirty_snapshot"]
 
 WRITE_RESTORE_FAILURES_MESSAGE = "Write failed and instance restoration also failed"
 

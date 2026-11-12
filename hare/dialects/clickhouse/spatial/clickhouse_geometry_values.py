@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.dialects.clickhouse.spatial.constants import CLICKHOUSE_GEOMETRY_COLUMN_TYPES, CLICKHOUSE_OTHER_SRID_MESSAGE
 from hare.dialects.clickhouse.types.declarations import ClickhouseTypedValue
@@ -44,7 +44,7 @@ class ClickhouseGeometryValues:
             UnSupportedError: The field is declared with ``null=True`` - a geometry of ClickHouse is a
                 tuple or an array, which holds no NULL.
         """
-        geometry_field = cast("GeometryField", field)
+        geometry_field: GeometryField = field  # type: ignore[assignment]
         if geometry_field.dimensions != 2:
             return None
         geometry_type = geometry_field.get_geometry_type()
@@ -154,7 +154,7 @@ class ClickhouseGeometryValues:
         Raises:
             ValidationError: The value isn't such a geometry - None among them: the column holds no NULL.
         """
-        geometry_field = cast("GeometryField", field)
+        geometry_field: GeometryField = field  # type: ignore[assignment]
         geometry_field.validate(value)
         if value is None:
             raise ValidationError(f"{field.model_field_name}: a ClickHouse geometry holds no NULL, got None")
@@ -170,7 +170,7 @@ class ClickhouseGeometryValues:
         """
         if value is None:
             return None
-        geometry_field = cast("GeometryField", field)
+        geometry_field: GeometryField = field  # type: ignore[assignment]
         geometry = geometry_field.get_parsed_geometry(value)
         if geometry.srid != geometry_field.srid:
             raise UnSupportedError(
@@ -193,7 +193,7 @@ class ClickhouseGeometryValues:
         """
         if value is None:
             return None
-        geometry_field = cast("GeometryField", field)
+        geometry_field: GeometryField = field  # type: ignore[assignment]
         srid = geometry_field.srid
         geometry_type = geometry_field.get_geometry_type()
         if geometry_type == GeometryType.POINT:

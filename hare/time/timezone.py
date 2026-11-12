@@ -1,153 +1,24 @@
 from __future__ import annotations
 
-from collections.abc import Generator, Mapping
-from contextlib import contextmanager
-from contextvars import ContextVar
+from contextlib import AbstractContextManager
 from datetime import UTC, date, datetime, time, timezone as dt_timezone, tzinfo
-from types import MappingProxyType, ModuleType
-from typing import TYPE_CHECKING, Any, ClassVar, cast
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
+from zoneinfo import ZoneInfo
 
-from hare.core.caching.cache import Cache
-from hare.core.caching.cache_bucket import CacheBucket
-from hare.exceptions import ConfigurationError, NonExistentTimeError, QueryError
-from hare.time.constants import (
-    DEFAULT_TIMEZONE,
-    NAIVE_DATETIMES_ZONE_KEY_MARK,
-    SYSTEM_ZONE_FALLBACK_REFERENCE_MOMENT,
-    ZONE_CACHE_SIZE,
-)
+from hare.exceptions import NonExistentTimeError, QueryError
+from hare.time.constants import DEFAULT_TIMEZONE
 from hare.time.system_clock import SystemClock
-
-if TYPE_CHECKING:
-    from hare.core.hare_context import HareContext
+from hare.time.zone_names import ZoneNames
+from hare.time.zone_settings import ZoneSettings
 
 
 class Timezone:
-    """Timezone handling: reading Hare's configured use_timezone/timezone settings, and
-    converting/checking datetimes against them."""
-
-    #: (zone name,) -> its zone.
-    ZONES: ClassVar[Cache[ZoneInfo]] = Cache(ZONE_CACHE_SIZE)
-    #: Keeps the owner bucket of ``ZONES`` below.
-    cache_buckets: ClassVar[dict[int, Any]] = {}
-    #: A context's configured zone name -> its zone - the owner bucket of ``ZONES`` read for every
-    #: datetime assigned; taken on first use. The names are the few a configuration gives.
-    configured_zones: ClassVar[CacheBucket[ZoneInfo] | None] = None
-    #: The zone of the system's local time when it can't be read - found on first use.
-    system_zone_fallback: ClassVar[tzinfo | None] = None
-
-    #: The zone set for a block of code with ``override()``; None for Hare's configured zone.
-    current_override: ClassVar[ContextVar[Mapping[object | None, str]]] = ContextVar(
-        "hare_timezone_override", default=MappingProxyType({})
-    )
-
-    #: ``hare.core.hare_context.HareContext``, bound on first use by ``get_current_context()`` - that
-    #: package imports this module, so importing it here at module level would be circular.
-    context_class: ClassVar[type[HareContext] | None] = None
-
-    #: The optional ``tzlocal`` module, imported by the first ``get_tzlocal()`` rather than with
-    #: hare; None without it installed.
-    tzlocal: ClassVar[ModuleType | None] = None
-    #: Whether ``tzlocal`` was looked for.
-    tzlocal_loaded: ClassVar[bool] = False
-
-    @staticmethod
-    def get_tzlocal() -> ModuleType | None:
-        """The ``tzlocal`` module, imported now when it wasn't.
-
-        Returns:
-            The module, None without it installed.
-        """
-        if not Timezone.tzlocal_loaded:
-            try:
-                import tzlocal
-            except ImportError:
-                Timezone.tzlocal = None
-            else:
-                Timezone.tzlocal = tzlocal
-            Timezone.tzlocal_loaded = True
-        return Timezone.tzlocal
-
-    @staticmethod
-    def get_local_zone_name() -> str:
-        """The IANA zone name of the machine this process runs on - independent of Hare's own
-        configured ``use_timezone``/``timezone``.
-
-        Raises:
-            ConfigurationError: the optional ``tzlocal`` dependency isn't installed.
-        """
-        tzlocal = Timezone.get_tzlocal()
-        if tzlocal is None:
-            raise ConfigurationError(
-                "Determining the local system time zone requires the optional 'tzlocal' "
-                "dependency - install it (pip install hare-orm[tzlocal]) or set use_timezone=True to "
-                "avoid needing to know the local zone at all."
-            )
-        return cast("str", tzlocal.get_localzone_name())
-
-    @staticmethod
-    def get_system_zone_fallback() -> tzinfo:
-        """The system's local zone for an instant ``datetime.astimezone()`` can't convert (any
-        instant before 1970 on Windows).
-
-        Returns:
-            The IANA zone ``tzlocal`` names, or - without it - a fixed offset: the system's own
-            offset at ``SYSTEM_ZONE_FALLBACK_REFERENCE_MOMENT``.
-        """
-        if Timezone.system_zone_fallback is None:
-            Timezone.system_zone_fallback = Timezone.find_system_zone_fallback()
-        return Timezone.system_zone_fallback
-
-    @staticmethod
-    def find_system_zone_fallback() -> tzinfo:
-        """The zone ``get_system_zone_fallback()`` keeps."""
-        tzlocal = Timezone.get_tzlocal()
-        if tzlocal is not None:
-            try:
-                return Timezone.parse(tzlocal.get_localzone_name())
-            except (LookupError, ValueError, OSError):
-                pass
-        offset = SYSTEM_ZONE_FALLBACK_REFERENCE_MOMENT.astimezone().utcoffset()
-        return dt_timezone(offset) if offset is not None else UTC
-
-    @staticmethod
-    def get_system_local_naive(value: datetime) -> datetime:
-        """An aware datetime as the system's local wall-clock time.
-
-        Args:
-            value: An aware datetime.
-
-        Returns:
-            The naive local wall-clock time of the same instant.
-
-        Raises:
-            OverflowError: The local time falls outside the datetime range.
-        """
-        try:
-            local_value = value.astimezone()
-        except (OSError, OverflowError, ValueError):
-            local_value = value.astimezone(Timezone.get_system_zone_fallback())
-        return local_value.replace(tzinfo=None)
-
-    @staticmethod
-    def make_system_local_aware(value: datetime) -> datetime:
-        """A naive datetime read as the system's local wall-clock time.
-
-        Args:
-            value: A naive datetime.
-
-        Returns:
-            The aware datetime of that local wall-clock time.
-        """
-        try:
-            return value.astimezone()
-        except (OSError, OverflowError, ValueError):
-            return value.replace(tzinfo=Timezone.get_system_zone_fallback())
+    """Datetimes against the configured zone - the current moment, a datetime made aware or naive, a
+    zone's fixed offset and a day's first moment - and the zone names and settings the documentation
+    gives through it."""
 
     @staticmethod
     def parse(zone: str) -> ZoneInfo:
-        """The time zone of a name, kept for the next call - spelled as the zone database spells it.
+        """The time zone of a name - ``ZoneNames.parse()``.
 
         Args:
             zone: The zone's name, in any case.
@@ -158,217 +29,31 @@ class Timezone:
         Raises:
             ZoneInfoNotFoundError: No zone has the name.
         """
-        cache_key = DEFAULT_TIMEZONE if zone == DEFAULT_TIMEZONE or zone.upper() == DEFAULT_TIMEZONE else zone
-        cached = Timezone.ZONES.get((cache_key,))
-        if cached is not None:
-            return cached
-        # Spelled as the zone database spells it, whatever the case it is given in (US/central is
-        # US/Central) - a database reading the name takes it then.
-        zone_info = ZoneInfo(Timezone.get_zone_key(cache_key))
-        Timezone.ZONES[(cache_key,)] = zone_info
-        return zone_info
-
-    @staticmethod
-    def get_zone_key(zone: str) -> str:
-        """The name of a zone as the zone database spells it.
-
-        Args:
-            zone: The name, in any case.
-
-        Returns:
-            The database's name.
-
-        Raises:
-            ZoneInfoNotFoundError: The database has no zone of the name - a file name the file system
-                would read as one (a trailing space, a backslash) included.
-        """
-        if zone == DEFAULT_TIMEZONE:
-            return zone
-        zone_keys = {name.lower(): name for name in available_timezones()}
-        key = zone_keys.get(zone.lower())
-        if key is None:
-            raise ZoneInfoNotFoundError(f"No time zone found with key {zone}")
-        return key
-
-    @staticmethod
-    def validate(zone: str) -> None:
-        """Checks that a configured timezone name is a known IANA zone.
-
-        Args:
-            zone: The configured timezone.
-
-        Raises:
-            ConfigurationError: If the zone is unknown.
-        """
-        if zone.upper() == DEFAULT_TIMEZONE:
-            # Always known - the zone database ships with the system or, on Windows, with hare's
-            # tzdata dependency. Its zone data is read on first use: loading it through tzdata
-            # costs a few milliseconds of every Hare.init().
-            return
-        try:
-            Timezone.parse(zone)
-        except (ZoneInfoNotFoundError, ValueError):
-            raise ConfigurationError(f"Unknown timezone {zone!r}: expected an IANA zone name like 'UTC'") from None
-
-    @staticmethod
-    def get_use_timezone() -> bool:
-        """
-        ``use_timezone`` of the active context - True without one.
-        """
-        context = Timezone.get_current_context()
-        return context._use_timezone if context is not None else True
+        return ZoneNames.parse(zone)
 
     @staticmethod
     def name() -> str:
-        """The current zone's name: the one ``override()`` sets for a block of code, else the
-        active HareContext's configured one, else the default.
+        """The current zone's name - ``ZoneSettings.name()``.
 
         Returns:
             The IANA zone name.
         """
-        context = Timezone.get_current_context()
-        override = Timezone.current_override.get().get(None if context is None else context.identity)
-        if override is not None:
-            return override
-        return context._timezone if context is not None else DEFAULT_TIMEZONE
+        return ZoneSettings.name()
 
     @staticmethod
-    def get_aware_zone_name() -> str | None:
-        """The zone aware datetimes are read and written in: ``name()`` under ``use_timezone``, else None -
-        one lookup of the active HareContext for both.
-
-        Returns:
-            The IANA zone name, or None when datetimes are naive.
-        """
-        # get_current_context(), without its call - read on every query.
-        context_class = Timezone.context_class or Timezone.get_context_class()
-        context = context_class.current_context.get() or context_class.global_context
-        if context is not None and not context._use_timezone:
-            return None
-        override = Timezone.current_override.get().get(None if context is None else context.identity)
-        if override is not None:
-            return override
-        return context._timezone if context is not None else DEFAULT_TIMEZONE
-
-    @staticmethod
-    def get_aware_zone() -> tzinfo | None:
-        """The zone aware datetimes are read and written in - the zone of
-        ``get_aware_zone_name()``, without parsing a configured name again.
-
-        Returns:
-            The zone, or None when datetimes are naive.
-        """
-        context_class = Timezone.context_class or Timezone.get_context_class()
-        context = context_class.current_context.get() or context_class.global_context
-        if context is not None and not context._use_timezone:
-            return None
-        override = Timezone.current_override.get().get(None if context is None else context.identity)
-        if override is not None:
-            return Timezone.parse(override)
-        zone_name = context._timezone if context is not None else DEFAULT_TIMEZONE
-        configured_zones = Timezone.configured_zones
-        if configured_zones is None:
-            configured_zones = Timezone.configured_zones = Timezone.ZONES.get_bucket(Timezone)
-        zone = configured_zones.get(zone_name)
-        if zone is None:
-            zone = configured_zones[zone_name] = Timezone.parse(zone_name)
-        return zone
-
-    @staticmethod
-    def get_rendered_zone_key() -> str | tuple[str, str | None]:
-        """What a query's SQL text depends on of the zone settings: ``name()`` under
-        ``use_timezone`` (a ``field__year`` lookup extracts in it); without it the machine's own
-        zone (a datetime expression is converted from it), marked as that one - the two modes
-        render the same zone's name differently. The machine's zone is None when it can't be known
-        (no ``tzlocal``), and a query rendering it fails anyway.
-
-        Returns:
-            The IANA zone name, or the mark of naive datetimes with the machine's zone name.
-        """
-        # get_current_context(), without its call - read on every query.
-        context_class = Timezone.context_class or Timezone.get_context_class()
-        context = context_class.current_context.get() or context_class.global_context
-        if context is not None and not context._use_timezone:
-            tzlocal = Timezone.get_tzlocal()
-            return (NAIVE_DATETIMES_ZONE_KEY_MARK, tzlocal.get_localzone_name() if tzlocal is not None else None)
-        override = Timezone.current_override.get().get(None if context is None else context.identity)
-        if override is not None:
-            return override
-        return context._timezone if context is not None else DEFAULT_TIMEZONE
-
-    @staticmethod
-    def get_current_context() -> HareContext | None:
-        """The active HareContext - read on every datetime conversion; its ``use_timezone`` and
-        ``timezone`` are read here without their properties' calls.
-
-        Returns:
-            The context, or None when none is active.
-        """
-        context_class = Timezone.context_class or Timezone.get_context_class()
-        # HareContext.get_current(), without its call - read on every query and datetime conversion.
-        return context_class.current_context.get() or context_class.global_context
-
-    @staticmethod
-    def get_context_class() -> type[HareContext]:
-        """``HareContext``, imported on the first read and kept in ``context_class``.
-
-        Returns:
-            The class.
-        """
-        # Imported here: the context module imports this one.
-        from hare.core.hare_context import HareContext
-
-        Timezone.context_class = HareContext
-        return HareContext
-
-    @staticmethod
-    @contextmanager
-    def override(zone: str | tzinfo) -> Generator[None]:
-        """Makes ``zone`` the current zone for a block of code - and the tasks it starts - in place
-        of the configured one, like Django's ``timezone.override()``: the date and time parts of a
-        datetime (``__date``, ``__year``, ``__hour`` lookups, ``Extract*``, ``Trunc*``) are taken in
-        it, and a naive datetime is read in it. Datetimes still come back as the same moments::
-
-            with Timezone.override("Europe/Moscow"):
-                today = await Book.objects.filter(created_at__date=moscow_today).count()
+    def override(zone: str | tzinfo) -> AbstractContextManager[None]:
+        """Makes ``zone`` the current zone for a block of code - ``ZoneSettings.override()``.
 
         Args:
             zone: An IANA zone name or a ``ZoneInfo``.
 
+        Returns:
+            The context manager of the block.
+
         Raises:
             ConfigurationError: The zone isn't a known IANA zone.
         """
-        context = Timezone.get_current_context()
-        application = None if context is None else context.identity
-        token = Timezone.current_override.set(
-            MappingProxyType({**Timezone.current_override.get(), application: Timezone.get_zone_name(zone)})
-        )
-        try:
-            yield
-        finally:
-            Timezone.current_override.reset(token)
-
-    @staticmethod
-    def get_zone_name(zone: str | tzinfo) -> str:
-        """The IANA name of a zone given by name or as a ``ZoneInfo``.
-
-        Args:
-            zone: The zone.
-
-        Returns:
-            Its IANA name, as the zone database spells it.
-
-        Raises:
-            ConfigurationError: The zone is unknown, or a tzinfo without an IANA name (a fixed
-                offset) - the database converts by name.
-        """
-        if isinstance(zone, str):
-            Timezone.validate(zone)
-            return Timezone.parse(zone).key
-        zone_key = getattr(zone, "key", None)
-        if isinstance(zone_key, str):
-            return zone_key
-        raise ConfigurationError(f"A time zone must be an IANA zone name or a ZoneInfo, got {zone!r}")
+        return ZoneSettings.override(zone)
 
     @staticmethod
     def now() -> datetime:
@@ -378,7 +63,7 @@ class Timezone:
         When use_timezone=True, returns an aware datetime in UTC.
         When use_timezone=False, returns a naive datetime.
         """
-        if Timezone.get_use_timezone():
+        if ZoneSettings.get_use_timezone():
             return SystemClock.get_utc_now()
         return SystemClock.get_local_now()
 
@@ -389,7 +74,7 @@ class Timezone:
 
         This is the time zone defined by Hare config.
         """
-        return Timezone.parse(Timezone.name())
+        return ZoneNames.parse(ZoneSettings.name())
 
     @staticmethod
     def get_fixed_offset(timezone: tzinfo | str | None = None, at: datetime | None = None) -> tzinfo:
@@ -430,7 +115,7 @@ class Timezone:
         """
         if timezone is None:
             return Timezone.default()
-        return Timezone.parse(timezone) if isinstance(timezone, str) else timezone
+        return ZoneNames.parse(timezone) if isinstance(timezone, str) else timezone
 
     @staticmethod
     def localtime(value: datetime | None = None, timezone: tzinfo | str | None = None) -> datetime:

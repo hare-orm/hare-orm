@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
 from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
@@ -38,7 +38,7 @@ class HareExceptionHandlers:
         Returns:
             The answer.
         """
-        status = cast("HTTPStatus", ErrorAnswers.get_status(exception))
+        status: HTTPStatus = ErrorAnswers.get_status(exception)  # type: ignore[assignment]
         return await http_exception_handler(
             request, HTTPException(status.value, detail=ErrorAnswers.get_detail(exception, status))
         )

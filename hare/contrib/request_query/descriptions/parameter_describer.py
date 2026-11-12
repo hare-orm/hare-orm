@@ -215,7 +215,7 @@ class ParameterDescriber:
         relation = lookup_info.relations[-1]
         related_model = relation.related_model  # type: ignore[attr-defined]
         related_meta = related_model._meta
-        key_fields = related_meta.pk_fields if related_meta.has_composite_primary_key else (related_meta.pk,)
+        key_fields = related_meta.pk_fields
         compared = lookup_info.field if isinstance(lookup_info.field, tuple) else (lookup_info.field,)
         return RelationDescription(
             path=LOOKUP_SEPARATOR.join(item.model_field_name for item in lookup_info.relations),

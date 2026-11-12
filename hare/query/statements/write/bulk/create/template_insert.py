@@ -55,7 +55,7 @@ class TemplateInsert:
         )
         cacheable = True
         try:
-            template = StatementPlans.insert_templates.get_model_bucket(bulk_create.model).get(key)
+            template = StatementPlans.insert_templates.get_bucket(bulk_create.model).get(key)
         except TypeError:
             # A tenant value the conflict update is limited to that can't be hashed - built each time.
             cacheable = False
@@ -70,7 +70,7 @@ class TemplateInsert:
                 )
                 template = TemplateInsert.get_row_template_sql(query, len(columns))
             if cacheable:
-                StatementPlans.insert_templates.get_model_bucket(bulk_create.model)[key] = template
+                StatementPlans.insert_templates.get_bucket(bulk_create.model)[key] = template
         return template
 
     @staticmethod
@@ -145,6 +145,7 @@ class TemplateInsert:
         """
         sql, statement_values = TemplateInsert.get_row_template(bulk_create, db_columns)
         batches: list[BoundInsertBatch] = []
+        sensitive_positions = BulkWriteBatches.get_sensitive_positions(bulk_create.model, field_names)
         for objects_item in BulkWriteBatches.get_batches(objects, bulk_create._batch_size):
             objects_item = list(objects_item)
             if not objects_item:
@@ -157,10 +158,8 @@ class TemplateInsert:
             )
             if statement_values:
                 rows = [[*row, *statement_values] for row in rows]
-            if bulk_create.model._meta.sensitive_fields:
-                rows = BulkWriteBatches.hide_row_values(
-                    rows, BulkWriteBatches.get_sensitive_positions(bulk_create.model, field_names)
-                )
+            if sensitive_positions:
+                rows = BulkWriteBatches.hide_row_values(rows, sensitive_positions)
             batches.append(BoundInsertBatch(WriteMany(sql, rows), objects_item, inline_statements=inline_statements))
         return batches
 

@@ -6,7 +6,8 @@ from typing import Any
 
 from hare.sql import SqlContext, functions
 from hare.sql.terms.values.value_wrapper import ValueWrapper
-from hare.time import Timezone
+from hare.time.system_zone import SystemZone
+from hare.time.zone_settings import ZoneSettings
 
 
 class ConcatFunction(functions.Concat):
@@ -30,7 +31,9 @@ class ConcatFunction(functions.Concat):
         if isinstance(value, datetime):
             if value.tzinfo is not None:
                 value = (
-                    value.astimezone(UTC) if Timezone.get_use_timezone() else Timezone.get_system_local_naive(value)
+                    value.astimezone(UTC)
+                    if ZoneSettings.get_use_timezone()
+                    else SystemZone.get_system_local_naive(value)
                 )
             return value.isoformat(" ")
         return value.isoformat()

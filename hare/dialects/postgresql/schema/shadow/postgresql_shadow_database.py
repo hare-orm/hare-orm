@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import secrets
 from types import TracebackType
-from typing import TYPE_CHECKING, Self, cast
+from typing import TYPE_CHECKING, Self
 
 from hare.core.resource_completion import ResourceCompletion
 from hare.dialects.base.schema.constants import SCHEMA_CLEANUP_FAILED
@@ -20,7 +20,6 @@ from hare.sql.identifiers import Identifiers
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.dialects.base.client.transaction_client import TransactionClient
     from hare.dialects.base.transactions.contexts.transaction_context import TransactionContext
 
 
@@ -44,7 +43,7 @@ class PostgresqlShadowDatabase(ShadowDatabase):
             self.real_schema_by_shadow_schema = {self.prefix: self.default_schema}
             for schema in self.schemas:
                 if schema != self.default_schema:
-                    self.real_schema_by_shadow_schema[cast("str", self.get_shadow_schema_name(schema))] = schema
+                    self.real_schema_by_shadow_schema[self.get_shadow_schema_name(schema)] = schema  # type: ignore[index]
             quoted_prefix = self.connection.dialect.literals.quote_identifier(self.prefix)
             await self.client.execute_script(POSTGRESQL_SHADOW_SCHEMA_CREATE_TEMPLATE.format(schema=quoted_prefix))
             search_path = SearchPath.parse(rows[0]["search_path"]).prepended(self.prefix)
@@ -65,7 +64,7 @@ class PostgresqlShadowDatabase(ShadowDatabase):
         if self.client is not None and self.transaction is not None:
             cause = exception
             try:
-                await cast("TransactionClient", self.client).rollback()
+                await self.client.rollback()  # type: ignore[attr-defined]
             except BaseException as error:
                 errors.append(error)
                 cause = error

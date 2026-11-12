@@ -75,9 +75,9 @@ class SqliteVersionEnvironment:
         if python_directory is not None:
             search_path = [str(python_directory), os.environ.get("PYTHONPATH")]
             variables["PYTHONPATH"] = os.pathsep.join(filter(None, search_path))
-        if sys.platform != "win32" and library_directory is not None:
-            name = "DYLD_LIBRARY_PATH" if sys.platform == "darwin" else "LD_LIBRARY_PATH"
-            variables[name] = os.pathsep.join(filter(None, [str(library_directory), os.environ.get(name)]))
+        if library_directory is not None:
+            search_path = [str(library_directory), os.environ.get("LD_LIBRARY_PATH")]
+            variables["LD_LIBRARY_PATH"] = os.pathsep.join(filter(None, search_path))
         return variables
 
     def get_loaded_version(self, library_directory: Path | None, python_directory: Path | None) -> str:

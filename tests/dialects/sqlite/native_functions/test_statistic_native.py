@@ -1,11 +1,12 @@
-"""The native variance and standard deviation aggregates give what the Python ones give - as plain
-aggregates and as window functions, over ints, floats, numbers as text and NULLs."""
+"""The native variance and standard deviation aggregates give the statistic of the rows in their
+frame - as plain aggregates and as window functions, over ints, floats, numbers as text and NULLs."""
 
 import random
 from functools import partial
 
 import pytest
 
+from hare.dialects.sqlite.functions.sqlite_math_functions import SqliteMathFunctions
 from hare.dialects.sqlite.functions.sqlite_native_functions import SqliteNativeFunctions
 from hare.dialects.sqlite.functions.statistics.sqlite_statistic import SqliteStatistic
 from hare.dialects.sqlite.functions.statistics.sqlite_statistics import SqliteStatistics
@@ -45,6 +46,19 @@ def run(aggregate_factory, values: list, window: int | None):
     return results, aggregate.finalize()
 
 
+def get_expected(statistic_class, values: list, window: int | None):
+    """The statistic of the frame after every row - the last ``window`` rows, NULLs skipped - and
+    of the whole frame at the end."""
+    results = []
+    for index in range(len(values)):
+        start = 0 if window is None else max(0, index - window + 1)
+        numbers = [SqliteMathFunctions.get_number(value) for value in values[start : index + 1] if value is not None]
+        results.append(SqliteStatistic.get_statistic(numbers, statistic_class.sample, statistic_class.is_deviation))
+    if not results:
+        return results, SqliteStatistic.get_statistic([], statistic_class.sample, statistic_class.is_deviation)
+    return results, results[-1]
+
+
 @pytest.mark.parametrize("statistic_class", list(SqliteStatistics.CLASSES.values()))
 def test_statistics(statistic_class) -> None:
     native = partial(
@@ -55,4 +69,4 @@ def test_statistics(statistic_class) -> None:
     )
     for values in get_series():
         for window in (None, 2, 3):
-            assert run(native, values, window) == run(statistic_class, values, window), (values, window)
+            assert run(native, values, window) == get_expected(statistic_class, values, window), (values, window)

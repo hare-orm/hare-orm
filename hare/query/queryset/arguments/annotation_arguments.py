@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 from hare.core.caching.cache_bucket import CacheBucket
 from hare.exceptions import FieldError
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.expressions import ConditionValue, Expression, F, Q, RawSQL
 from hare.query.expressions.term_expression import TermExpression
 from hare.query.lookup_info.lookup_info_builder import LookupInfoBuilder
@@ -82,7 +83,9 @@ class AnnotationArguments:
         model = queryset.model
         meta = model._meta
         colliding_names = sorted(
-            name for name in annotation_names if name in meta.fields_map or name in meta.fetch_fields or name == "pk"
+            name
+            for name in annotation_names
+            if name in meta.fields_map or name in meta.fetch_fields or name == PRIMARY_KEY_ALIAS
         )
         if colliding_names:
             raise FieldError(

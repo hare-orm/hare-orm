@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 from hare.exceptions import QueryError
 
 if TYPE_CHECKING:
+    from hare.dialects.base.dialect import Dialect
     from hare.query.queryset.query_specification import QuerySpecification
     from hare.query.queryset.queryset import QuerySet
 
@@ -45,12 +46,13 @@ class WrittenTargetChecks:
             ValuesArguments.raise_if_values_selected(queryset, method_name)
 
     @staticmethod
-    def raise_if_refused_calls(query: QuerySpecification[Any]) -> None:
+    def raise_if_refused_calls(query: QuerySpecification[Any], dialect: Dialect) -> None:
         """Rejects a write whose queryset called a method that refuses writes - when the write runs, its
         connection's dialect known.
 
         Args:
-            query: The write's query, on its connection.
+            query: The write's query.
+            dialect: The dialect of the connection the write runs on.
 
         Raises:
             QueryError: A called method refuses writes.
@@ -60,4 +62,4 @@ class WrittenTargetChecks:
         from hare.query.queryset.extensions.query_set_extensions import QuerySetExtensions
 
         if query._extension_calls:
-            QuerySetExtensions.raise_if_refused_in_write(query)
+            QuerySetExtensions.raise_if_refused_in_write(query, dialect)

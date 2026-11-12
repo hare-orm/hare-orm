@@ -486,7 +486,6 @@ async def _init_for_postgres(module: str, safe: bool = False) -> list[str]:
             "tests.shared_models.testmodels",
             '"noid"',
             ('"name" VARCHAR(255)', '"id" SERIAL NOT NULL CONSTRAINT "pk_noid_id_810145db0262" PRIMARY KEY'),
-            marks=pytest.mark.requires("native"),
             id="postgresql_noid",
         ),
     ],
@@ -501,7 +500,6 @@ async def test_the_sql_of_a_table(init, models_module, table_text, fragments):
             assert fragment in sql
 
 
-@pytest.mark.requires("native")
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_postgresql_table_and_row_comment_generation():
@@ -1088,7 +1086,6 @@ COMMENT ON COLUMN "postgres_fields"."real_array" IS 'this is array of real numbe
             "tests.schema.models_no_db_constraint",
             False,
             ASYNCPG_SCHEMA_NO_DB_CONSTRAINT_SQL,
-            marks=pytest.mark.requires("native"),
             id="postgresql_schema_no_db_constraint",
         ),
         pytest.param(
@@ -1096,7 +1093,6 @@ COMMENT ON COLUMN "postgres_fields"."real_array" IS 'this is array of real numbe
             "tests.schema.models_schema_create",
             False,
             ASYNCPG_SCHEMA_SQL,
-            marks=pytest.mark.requires("native"),
             id="postgresql_schema",
         ),
         pytest.param(
@@ -1104,7 +1100,6 @@ COMMENT ON COLUMN "postgres_fields"."real_array" IS 'this is array of real numbe
             "tests.schema.models_schema_create",
             True,
             ASYNCPG_SCHEMA_SAFE_SQL,
-            marks=pytest.mark.requires("native"),
             id="postgresql_schema_safe",
         ),
         pytest.param(
@@ -1112,7 +1107,6 @@ COMMENT ON COLUMN "postgres_fields"."real_array" IS 'this is array of real numbe
             "tests.schema.models_postgres_index",
             False,
             ASYNCPG_INDEX_UNSAFE_SQL,
-            marks=pytest.mark.requires("native"),
             id="postgresql_index_unsafe",
         ),
         pytest.param(
@@ -1120,7 +1114,6 @@ COMMENT ON COLUMN "postgres_fields"."real_array" IS 'this is array of real numbe
             "tests.schema.models_postgres_index",
             True,
             ASYNCPG_INDEX_SAFE_SQL,
-            marks=pytest.mark.requires("native"),
             id="postgresql_index_safe",
         ),
         pytest.param(
@@ -1128,7 +1121,6 @@ COMMENT ON COLUMN "postgres_fields"."real_array" IS 'this is array of real numbe
             "tests.schema.models_no_auto_create_m2m",
             False,
             ASYNCPG_M2M_NO_AUTO_CREATE_SQL,
-            marks=pytest.mark.requires("native"),
             id="postgresql_m2m_no_auto_create",
         ),
         pytest.param(
@@ -1136,7 +1128,6 @@ COMMENT ON COLUMN "postgres_fields"."real_array" IS 'this is array of real numbe
             "tests.schema.models_postgres_fields",
             False,
             ASYNCPG_PGFIELDS_UNSAFE_SQL,
-            marks=pytest.mark.requires("native"),
             id="postgresql_pgfields_unsafe",
         ),
         pytest.param(
@@ -1144,7 +1135,6 @@ COMMENT ON COLUMN "postgres_fields"."real_array" IS 'this is array of real numbe
             "tests.schema.models_postgres_fields",
             True,
             ASYNCPG_PGFIELDS_SAFE_SQL,
-            marks=pytest.mark.requires("native"),
             id="postgresql_pgfields_safe",
         ),
     ],
@@ -1245,7 +1235,6 @@ async def test_sqlite_keeps_the_comments_of_tables_and_through_tables():
         assert "/* How participants relate */" in sql_by_table["teamevents"]
 
 
-@pytest.mark.requires("native")
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_postgresql_schema_qualified_safe():
@@ -1273,7 +1262,6 @@ async def test_postgresql_schema_qualified_safe():
         assert 'ON "custom"."product_tags"' in sql
 
 
-@pytest.mark.requires("native")
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_schema_qualified_single_schema_creation():

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast, get_args
+from typing import TYPE_CHECKING, Any, get_args
 
 from pydantic import field_validator
 
@@ -80,9 +80,7 @@ class RelationFieldSchemas:
             if as_keys:
                 annotation = GenericForeignKeySchemas.get_key_union(generic_field, creator._fqname)
             else:
-                annotation = GenericForeignKeySchemas.get_object_union(
-                    generic_field, cast("dict[str, type[PydanticModel]]", submodels), creator._fqname
-                )
+                annotation = GenericForeignKeySchemas.get_object_union(generic_field, submodels, creator._fqname)  # type: ignore[arg-type]
             optional = name in creator._optional or generic_field.default is not None
             if generic_field.null or optional:
                 annotation = annotation | None
@@ -163,7 +161,7 @@ class RelationFieldSchemas:
                 or DataFieldSchemas.is_tenant_field(creator, field_name, field)
                 or RelationFieldSchemas.can_hide_target(field)
             ):
-                return cast("type[PydanticModel] | None", model | None)
+                return model | None  # type: ignore[return-value]
             return model
         return None
 

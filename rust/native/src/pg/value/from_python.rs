@@ -111,7 +111,9 @@ impl Value {
         }
         if object.is_instance_of::<PyList>() {
             return context.visit(object, |context| {
-                let mut items = Vec::new();
+                // A list subclass may iterate a different sequence than its stored elements.
+                let capacity = if object.is_exact_instance_of::<PyList>() { object.cast::<PyList>()?.len() } else { 0 };
+                let mut items = Vec::with_capacity(capacity);
                 for item in object.try_iter()? {
                     items.push(Self::extract_with_context(&item?, context)?);
                 }

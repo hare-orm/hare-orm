@@ -84,9 +84,14 @@ class WriteSteps:
         if instances is not None:
             if not instances:
                 return
-            pks = (
-                [instance.pk for instance in instances]
-                if model._meta.has_primary_key and all(instance.pk is not None for instance in instances)
-                else None
-            )
+            pks = None
+            if model._meta.has_primary_key:
+                primary_keys: list[Any] = []
+                for instance in instances:
+                    primary_key = instance.pk
+                    if primary_key is None:
+                        break
+                    primary_keys.append(primary_key)
+                else:
+                    pks = primary_keys
         await ChangeEvents.report(connection, model, operation, pks=pks, fields=fields)

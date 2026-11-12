@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from hare.ddl.constraints.foreign_key_constraint import ForeignKeyConstraint
 from hare.ddl.generated_names import GeneratedNames
@@ -187,11 +187,11 @@ class PostgresqlForeignKeyRebuild(ForeignKeyRebuild):
         for referencing_model, relation_field, side_keys in self.get_incoming_relations(model):
             meta = referencing_model._meta
             if side_keys is None:
-                field = cast("ForeignKeyFieldInstance[Model]", relation_field)
+                field: ForeignKeyFieldInstance[Model] = relation_field  # type: ignore[assignment]
                 columns = [meta.fields_db_projection[name] for name in field.source_fields]
                 statements.append(self.get_foreign_key_drop_sql(meta.db_table, columns, meta.schema))
             else:
-                through_field = cast("ManyToManyFieldInstance[Model]", relation_field)
+                through_field: ManyToManyFieldInstance[Model] = relation_field  # type: ignore[assignment]
                 statements.append(self.get_foreign_key_drop_sql(through_field.through, side_keys, meta.schema))
         return statements
 
@@ -202,13 +202,11 @@ class PostgresqlForeignKeyRebuild(ForeignKeyRebuild):
         statements = []
         for referencing_model, relation_field, side_keys in self.get_incoming_relations(model):
             if side_keys is None:
-                sql = self.get_relation_foreign_key_sql(
-                    referencing_model, cast("ForeignKeyFieldInstance[Model]", relation_field)
-                )
+                sql = self.get_relation_foreign_key_sql(referencing_model, relation_field)  # type: ignore[arg-type]
                 if sql is not None:
                     statements.append(sql)
                 continue
-            through_field = cast("ManyToManyFieldInstance[Model]", relation_field)
+            through_field: ManyToManyFieldInstance[Model] = relation_field  # type: ignore[assignment]
             constraint_sql = self.editor.FOREIGN_KEY_CONSTRAINT_CREATE_TEMPLATE.format(
                 name=self.editor.quote(GeneratedNames.get_foreign_key_name(through_field.through, side_keys)),
                 fields=", ".join(self.editor.quote(key) for key in side_keys),

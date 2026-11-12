@@ -11,13 +11,14 @@ from hare.dialects.sqlite.functions.constants import DATE_TEXT_LENGTH
 from hare.dialects.sqlite.functions.sqlite_function_errors import SqliteFunctionErrors
 from hare.dialects.sqlite.functions.sqlite_native_functions import SqliteNativeFunctions
 from hare.sql.enums import TruncType
-from hare.time import Timezone
+from hare.time.system_zone import SystemZone
+from hare.time.zone_names import ZoneNames
 
 
 class DateTruncation:
     """Backs ``SQLITE_TRUNC_FUNCTION_NAME`` (see ``DateTrunc``) - SQLite has no ``DATE_TRUNC()``."""
 
-    #: Keeps the owner bucket of ``Timezone.ZONES`` the native function reads its zones from.
+    #: Keeps the owner bucket of ``ZoneNames.ZONES`` the native function reads its zones from.
     cache_buckets: ClassVar[dict[int, Any]] = {}
 
     @staticmethod
@@ -72,7 +73,7 @@ class DateTruncation:
         if zone is None:
             local_moment = moment
         else:
-            local_moment = (Timezone.make_system_local_aware(moment) if is_naive else moment).astimezone(zone)
+            local_moment = (SystemZone.make_system_local_aware(moment) if is_naive else moment).astimezone(zone)
         if trunc_type == TruncType.DATE:
             return local_moment.date().isoformat()
         if trunc_type == TruncType.TIME:
@@ -87,7 +88,7 @@ class DateTruncation:
             return wall_clock.replace(tzinfo=moment.tzinfo).isoformat(" ")
         truncated = wall_clock.replace(tzinfo=zone)
         if is_naive:
-            return Timezone.get_system_local_naive(truncated).isoformat(" ")
+            return SystemZone.get_system_local_naive(truncated).isoformat(" ")
         return truncated.astimezone(datetime.UTC).isoformat(" ")
 
     @classmethod
@@ -98,18 +99,13 @@ class DateTruncation:
             connection: The SQLite connection.
             function_errors: The connection's function errors.
         """
-        native_functions = SqliteNativeFunctions.module
-        truncate: Any = function_errors.wrap(cls.truncate)
-        if native_functions is not None:
-            # Imported here: the module imports this one.
-            from hare.dialects.sqlite.functions.datetime.sqlite_date_part_extraction import (
-                SqliteDatePartExtraction,
-            )
+        # Imported here: the module imports this one.
+        from hare.dialects.sqlite.functions.datetime.sqlite_date_part_extraction import SqliteDatePartExtraction
 
-            truncate = native_functions.DateFunctions(
-                ZoneInfo,
-                Timezone.ZONES.get_bucket(cls),
-                function_errors.wrap(SqliteDatePartExtraction.extract),
-                truncate,
-            ).truncate
+        truncate = SqliteNativeFunctions.module.DateFunctions(
+            ZoneInfo,
+            ZoneNames.ZONES.get_bucket(cls),
+            function_errors.wrap(SqliteDatePartExtraction.extract),
+            function_errors.wrap(cls.truncate),
+        ).truncate
         await connection.create_function(SQLITE_TRUNC_FUNCTION_NAME, 3, truncate, deterministic=True)

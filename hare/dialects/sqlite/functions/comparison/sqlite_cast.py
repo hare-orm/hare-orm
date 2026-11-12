@@ -8,7 +8,7 @@ import aiosqlite
 from hare.dialects.sqlite.constants import SQLITE_CAST_FUNCTION_NAME
 from hare.dialects.sqlite.functions.sqlite_function_errors import SqliteFunctionErrors
 from hare.sql.enums import CastType
-from hare.time import Timezone
+from hare.time.system_zone import SystemZone
 
 
 class SqliteCast:
@@ -26,7 +26,7 @@ class SqliteCast:
     @staticmethod
     def get_wall_clock(moment: datetime.datetime) -> datetime.datetime:
         """A naive timestamp's wall clock - an aware one in the machine's local zone."""
-        return Timezone.get_system_local_naive(moment) if moment.tzinfo is not None else moment
+        return SystemZone.get_system_local_naive(moment) if moment.tzinfo is not None else moment
 
     @classmethod
     def get_naive_moment(cls, value: Any, source: str) -> datetime.datetime:

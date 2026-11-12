@@ -87,7 +87,7 @@ class ActiveRecordSuite:
             else:
                 from yara_orm import connections
 
-                await connections.get("default").execute("SELECT 1")
+                await connections.get("default").execute_query("SELECT 1")
 
         try:
             cold_start = await BenchmarkScenarioRun.measure(connect, 1)
@@ -541,7 +541,8 @@ class ActiveRecordSuite:
         results["json_read"] = await measure(json_read, 5)
 
     async def get_load_ids(self) -> list[int]:
-        return [widget.id for widget in await self.widgets.all().limit(200)]
+        """Use the same first keys even after earlier scenarios updated the table."""
+        return [widget.id for widget in await self.widgets.all().order_by("id").limit(200)]
 
     async def run_load_test(self) -> dict[str, Measurement]:
         widgets, ids = self.widgets, await self.get_load_ids()

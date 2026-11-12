@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.clickhouse.types.constants import CLICKHOUSE_DECIMAL_TYPE_PRECISIONS
 from hare.sql.order import Order
 
@@ -155,12 +156,12 @@ CLICKHOUSE_FIXED_STRING_TEXT_TEMPLATE = "replaceRegexpOne(toString({column}), '\
 #: A FixedString column turned into a String of its text - the step a narrower FixedString is reached by.
 CLICKHOUSE_FIXED_STRING_TO_TEXT_TEMPLATE = "MODIFY COLUMN {column} {sql_type}, UPDATE {column} = {text} WHERE 1"
 #: The type of a text column.
-CLICKHOUSE_TEXT_TYPE_NAME = "String"
+CLICKHOUSE_TEXT_TYPE_NAME = ClickhouseTypeName.STRING
 #: The name a check's lambda gives an element of an array - numbered by its depth.
 CLICKHOUSE_HELD_ELEMENT_NAME = "hare_element"
 #: A text column's type - a type change from it parses each value, and a value that doesn't parse fails
 #: the change's mutation after the column took its new type, or becomes NULL in a Nullable one.
-CLICKHOUSE_TEXT_COLUMN_TYPES = frozenset({"String", "FixedString"})
+CLICKHOUSE_TEXT_COLUMN_TYPES = frozenset({ClickhouseTypeName.STRING, ClickhouseTypeName.FIXED_STRING})
 #: The type a column has and the server's name of the type it changes to - a field's type is declared
 #: by its SQL name (``INT``, ``VARCHAR(40)``); no row is read of an empty table.
 CLICKHOUSE_COLUMN_TYPES_QUERY = (
@@ -172,13 +173,13 @@ CLICKHOUSE_COLUMN_TYPES_QUERY = (
 #: cast a check could read.
 CLICKHOUSE_UNCHECKED_CONVERSION_TYPES = frozenset(
     {
-        "String",
-        "Dynamic",
-        "FixedString",
-        "Array",
-        "Map",
-        "Tuple",
-        "Nested",
+        ClickhouseTypeName.STRING,
+        ClickhouseTypeName.DYNAMIC,
+        ClickhouseTypeName.FIXED_STRING,
+        ClickhouseTypeName.ARRAY,
+        ClickhouseTypeName.MAP,
+        ClickhouseTypeName.TUPLE,
+        ClickhouseTypeName.NESTED,
     }
 )
 #: A text read as a value of a type - NULL for a text that isn't one.
@@ -208,10 +209,10 @@ CLICKHOUSE_TYPE_NOT_CONVERTED_MESSAGE = (
 #: A number column's type - a change between two of them is checked by the narrowing check.
 CLICKHOUSE_NUMBER_COLUMN_TYPES = frozenset(
     {
-        "Bool",
-        "Float32",
-        "Float64",
-        "Decimal",
+        ClickhouseTypeName.BOOL,
+        ClickhouseTypeName.FLOAT32,
+        ClickhouseTypeName.FLOAT64,
+        ClickhouseTypeName.DECIMAL,
         *CLICKHOUSE_DECIMAL_TYPE_PRECISIONS,
         *(f"{prefix}Int{bits}" for prefix in ("", "U") for bits in (8, 16, 32, 64, 128, 256)),
     }

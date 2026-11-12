@@ -1,7 +1,3 @@
-#: Windows' ``SetProcessInformation()`` class of a process's power throttling state, and what of the
-#: throttling is turned off: the execution speed (0x1) and ignoring the timer resolution (0x4).
-POWER_THROTTLING_INFORMATION_CLASS = 4
-POWER_THROTTLING_CONTROLS = 0x1 | 0x4
 #: The marker of a test opening only SQLite databases of its own, whatever HARE_TEST_DB is - only the
 #: suites of a SQLite database run it.
 SQLITE_ONLY_MARKER = "sqlite_only"
@@ -33,7 +29,6 @@ POSTGRES_CLIENT_PATHS = (RUST_PG_CLIENT_PATH, ASYNCPG_CLIENT_PATH)
 #: What each package of hare importing an optional library requires - the extras installing it; a package
 #: inside one requires what the innermost one listed does.
 PACKAGE_REQUIREMENTS = {
-    "hare.dialects.postgresql.drivers.rust_pg.client": ("native",),
     "hare.dialects.postgresql.drivers.asyncpg.client": ("asyncpg",),
     "hare.dialects.postgresql.drivers.asyncpg.asyncpg_date_codec": ("asyncpg",),
     "hare.dialects.postgresql.drivers.asyncpg.asyncpg_extension_type_codecs": ("asyncpg",),

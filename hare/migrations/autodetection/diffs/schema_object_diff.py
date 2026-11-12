@@ -5,6 +5,7 @@ from collections.abc import Hashable, Iterable
 from typing import TYPE_CHECKING, Any
 
 from hare.declarations.declaration_values import DeclarationValues
+from hare.migrations.autodetection.diffs.schema_object_comparison import SchemaObjectComparison
 from hare.migrations.state.model_state import ModelState
 
 if TYPE_CHECKING:
@@ -83,14 +84,14 @@ class SchemaObjectDiff(abc.ABC):
         """Whether an object reads a column the migration changes."""
         return any(column in self.changed_columns for column in self.get_read_columns(schema_object))
 
-    def is_unchanged(self, old_object: Any, new_object: Any) -> bool:
+    def is_unchanged(self, old_object: SchemaObjectComparison, new_object: SchemaObjectComparison) -> bool:
         """Whether two objects of the two states are the same object, unchanged - and reading no column
         the migration changes."""
         return (
-            not self.reads_changed_columns(old_object)
-            and not self.reads_changed_columns(new_object)
-            and self.get_name(old_object) == self.get_name(new_object)
-            and self.get_signature(old_object) == self.get_signature(new_object)
+            not old_object.reads_changed_columns
+            and not new_object.reads_changed_columns
+            and old_object.name == new_object.name
+            and old_object.signature == new_object.signature
         )
 
     @abc.abstractmethod
@@ -121,8 +122,14 @@ class SchemaObjectDiff(abc.ABC):
         Returns:
             The operations.
         """
-        unmatched_old = dict(enumerate(self.get_objects(self.old_state)))
-        unmatched_new = dict(enumerate(self.get_objects(self.new_state)))
+        unmatched_old = {
+            position: SchemaObjectComparison(self, schema_object)
+            for position, schema_object in enumerate(self.get_objects(self.old_state))
+        }
+        unmatched_new = {
+            position: SchemaObjectComparison(self, schema_object)
+            for position, schema_object in enumerate(self.get_objects(self.new_state))
+        }
 
         def match(old_position: int, new_position: int) -> None:
             del unmatched_old[old_position], unmatched_new[new_position]
@@ -130,48 +137,56 @@ class SchemaObjectDiff(abc.ABC):
         # The objects of one name first - an unnamed object of the same shape mustn't take another's.
         for requires_same_name in (True, False):
             for new_position, new_object in list(unmatched_new.items()):
-                for old_position, old_object in list(unmatched_old.items()):
-                    if (
-                        not requires_same_name or self.get_name(old_object) == self.get_name(new_object)
-                    ) and self.is_unchanged(old_object, new_object):
-                        match(old_position, new_position)
+                for old_position, old_object in unmatched_old.items():
+                    if (not requires_same_name or old_object.name == new_object.name) and self.is_unchanged(
+                        old_object, new_object
+                    ):
                         break
+                else:
+                    continue
+                match(old_position, new_position)
         rename_operations: list[HareOperation] = []
         for new_position, new_object in list(unmatched_new.items()):
-            if not self.can_be_renamed(new_object):
+            if not new_object.can_be_renamed:
                 continue
-            new_signature = self.get_signature(new_object)
-            for old_position, old_object in list(unmatched_old.items()):
+            new_signature = new_object.signature
+            for old_position, old_object in unmatched_old.items():
                 if (
-                    self.can_be_renamed(old_object)
-                    and not self.reads_changed_columns(old_object)
-                    and not self.reads_changed_columns(new_object)
-                    and self.get_name(old_object) != self.get_name(new_object)
-                    and self.get_signature(old_object) == new_signature
+                    old_object.can_be_renamed
+                    and not old_object.reads_changed_columns
+                    and not new_object.reads_changed_columns
+                    and old_object.name != new_object.name
+                    and old_object.signature == new_signature
                 ):
-                    rename_operations.append(self.get_rename_operation(old_object, new_object))
-                    match(old_position, new_position)
                     break
+            else:
+                continue
+            rename_operations.append(self.get_rename_operation(old_object.schema_object, new_object.schema_object))
+            match(old_position, new_position)
         alter_operations: list[HareOperation] = []
         for new_position, new_object in list(unmatched_new.items()):
-            name = self.get_name(new_object)
+            name = new_object.name
             if name is None or not self.alters_in_place:
                 continue
-            for old_position, old_object in list(unmatched_old.items()):
-                if self.get_name(old_object) != name:
+            for old_position, old_object in unmatched_old.items():
+                if old_object.name != name:
                     continue
-                # Dropped before the column it reads changes, created again after.
-                if self.reads_changed_columns(old_object) or self.reads_changed_columns(new_object):
-                    break
-                alter_operation = self.get_alter_operation(new_object)
-                if alter_operation is not None:
-                    alter_operations.append(alter_operation)
-                    match(old_position, new_position)
                 break
-        remove_operations = [self.get_remove_operation(old_object) for old_object in unmatched_old.values()]
+            else:
+                continue
+            # Dropped before the column it reads changes, created again after.
+            if old_object.reads_changed_columns or new_object.reads_changed_columns:
+                continue
+            alter_operation = self.get_alter_operation(new_object.schema_object)
+            if alter_operation is not None:
+                alter_operations.append(alter_operation)
+                match(old_position, new_position)
+        remove_operations = [
+            self.get_remove_operation(old_object.schema_object) for old_object in unmatched_old.values()
+        ]
         add_operations = [
-            self.get_add_operation(new_object)
+            self.get_add_operation(new_object.schema_object)
             for new_object in unmatched_new.values()
-            if not self.is_made_by_its_field(new_object)
+            if not self.is_made_by_its_field(new_object.schema_object)
         ]
         return rename_operations + remove_operations + alter_operations + add_operations

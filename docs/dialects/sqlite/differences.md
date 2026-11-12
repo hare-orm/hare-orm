@@ -79,9 +79,9 @@ of an empty key (`has_key=""` — *JSON path error*). A value read as text, a `C
   `Right`, `LPad`, `RPad`, `Repeat`, `Reverse` and the digests are hare's, with no 32-bit limit on a length,
   a position or a count; a result longer than SQLite holds in one value (1e9 bytes) is refused. A text
   function given an expression of the wrong type is left to SQLite.
-- **`JSONObject()` and `JSONArray()`** use `json_object()` and `json_array()`: a boolean as 1 or 0, a
-  float with 15
-  significant digits (17 from SQLite 3.53), bytes as uppercase hex.
+- **`JSONObject()` and `JSONArray()`** use `json_object()` and `json_array()`: a boolean as 1 or 0,
+  a float in SQLite's JSON number format, bytes as uppercase hex. JSON number formatting can round
+  a double and need not match `CAST(... AS TEXT)`.
 
 ## <a id="queries"></a>Queries
 

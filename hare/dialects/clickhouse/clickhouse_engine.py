@@ -82,7 +82,8 @@ class ClickhouseEngine:
         return self.name
 
     def is_merge_tree(self) -> bool:
-        return self.get_family() == "MergeTree" or self.get_family() in CLICKHOUSE_FINAL_ENGINES
+        family = self.get_family()
+        return family == "MergeTree" or family in CLICKHOUSE_FINAL_ENGINES
 
     def is_replicated(self) -> bool:
         return self.name.startswith(CLICKHOUSE_ENGINE_PREFIXES) and self.is_merge_tree()

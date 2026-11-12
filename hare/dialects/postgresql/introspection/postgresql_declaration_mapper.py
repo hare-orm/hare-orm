@@ -20,11 +20,11 @@ from hare.dialects.postgresql.postgresql_table_options import PostgresqlTableOpt
 from hare.dialects.postgresql.types.postgresql_physical_type import PostgresqlPhysicalType
 from hare.fields.db_defaults.sql_default import SqlDefault
 from hare.fields.enums import OnDelete
+from hare.inspectdb.enums import CatalogDiagnosticCode
 from hare.inspectdb.introspection.catalog_diagnostic import CatalogDiagnostic
 from hare.inspectdb.introspection.catalog_snapshot import CatalogSnapshot
 from hare.inspectdb.introspection.column_info import ColumnInfo
 from hare.inspectdb.introspection.composite_foreign_key_info import CompositeForeignKeyInfo
-from hare.inspectdb.introspection.enums import CatalogDiagnosticCode
 from hare.inspectdb.introspection.foreign_key_info import ForeignKeyInfo
 from hare.inspectdb.introspection.index_info import IndexInfo
 from hare.inspectdb.introspection.schema_introspector import SchemaIntrospector
@@ -488,9 +488,7 @@ class PostgresqlDeclarationMapper:
                     field_name=field_name,
                     columns=ordered_columns,
                     target_table=row["target_table"],
-                    on_delete=(
-                        OnDelete(row["delete_rule"]) if row["delete_rule"] in set(OnDelete) else OnDelete.CASCADE
-                    ),
+                    on_delete=(OnDelete(row["delete_rule"]) if row["delete_rule"] in OnDelete else OnDelete.CASCADE),
                     on_update=row["update_rule"],
                     deferral=SchemaIntrospector.get_deferral(row["is_deferrable"], row["is_initially_deferred"]),
                 )
@@ -509,7 +507,7 @@ class PostgresqlDeclarationMapper:
                 column=column_name,
                 target_table=row["target_table"],
                 target_column=target_column,
-                on_delete=OnDelete(row["delete_rule"]) if row["delete_rule"] in set(OnDelete) else OnDelete.CASCADE,
+                on_delete=OnDelete(row["delete_rule"]) if row["delete_rule"] in OnDelete else OnDelete.CASCADE,
                 to_field=target_column if target_pk_columns != [target_column] else None,
                 target_schema=row["target_schema"],
                 on_update=row["update_rule"],

@@ -78,7 +78,7 @@ class ConnectionOption:
         return raw_value
 
     def _parse_whole_number(self, raw_value: Any) -> int:
-        if self.sql_value and (isinstance(raw_value, bool) or not isinstance(raw_value, int | str)):
+        if self.sql_value and (isinstance(raw_value, bool) or not isinstance(raw_value, (int, str))):
             raise ConfigurationError(f"{self.name} must be a whole number, got {raw_value!r}")
         try:
             value = int(raw_value)
@@ -104,7 +104,7 @@ class ConnectionOption:
     def _parse_boolean(self, raw_value: Any) -> bool:
         if isinstance(raw_value, bool):
             return raw_value
-        normalized_value = str(raw_value).strip().lower() if isinstance(raw_value, str | int) else None
+        normalized_value = str(raw_value).strip().lower() if isinstance(raw_value, (str, int)) else None
         if normalized_value in TRUE_STRINGS:
             return True
         if normalized_value in FALSE_STRINGS:

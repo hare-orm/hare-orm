@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import datetime
 from operator import attrgetter
-from typing import Any, cast
+from typing import Any
 
+from hare.dialects.base.types.prepared_converter import PreparedConverter
 from hare.dialects.base.types.type_mapping import TypeMapping
 from hare.dialects.base.types.type_registry import TypeRegistry
 from hare.dialects.postgresql.fields.citext_field import CitextField
@@ -71,9 +72,9 @@ class PostgresqlTypes:
             ArrayField,
             TypeMapping(
                 column_type=container_values.get_column_type,
-                to_db=container_values.to_db,
-                to_lookup=container_values.to_db,
-                to_python=container_values.to_python,
+                to_db=PreparedConverter(container_values.prepare_db),
+                to_lookup=PreparedConverter(container_values.prepare_db),
+                to_python=PreparedConverter(container_values.prepare_python),
             ),
         )
         types.register(DecimalField, TypeMapping(column_type=attrgetter("SQL_TYPE")))
@@ -174,7 +175,7 @@ class PostgresqlTypes:
         Returns:
             The column type.
         """
-        geometry_field = cast("GeometryField", field)
+        geometry_field: GeometryField = field  # type: ignore[assignment]
         column_type = POSTGIS_GEOGRAPHY_TYPE if geometry_field.geography else POSTGIS_GEOMETRY_TYPE
         type_name = POSTGIS_GEOMETRY_TYPE_NAMES[geometry_field.get_geometry_type()]
         dimension_suffix = "Z" if geometry_field.dimensions == 3 else ""

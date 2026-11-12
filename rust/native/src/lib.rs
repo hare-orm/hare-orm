@@ -1,11 +1,19 @@
 //! `rust.native` - the native part of hare-orm: the `pg` PostgreSQL driver, the `pool` parts every
-//! native driver shares, the `pyo3_async_runtimes` bridge to asyncio, the `rows` attribute,
+//! native driver shares, the batched asyncio bridge, the `rows` attribute,
 //! JSON and value-format operations, the `sqlite_functions` hare registers on a SQLite connection, the
 //! precise system `clock`.
+//!
+//! The asyncio bridge wakes its loop through a Unix socket pair watched by `loop.add_reader()`, so the
+//! driver it serves - `pg`'s client and transactions, and `pool` - is built on Unix alone. Every other
+//! part, `pg`'s value codecs among them, is built everywhere.
 
+#[cfg(unix)]
+mod asyncio;
 mod clock;
 mod json_string;
 mod pg;
+// The driver's errors name the pool's - compiled everywhere, registered on Unix alone.
+#[cfg_attr(not(unix), allow(dead_code))]
 mod pool;
 mod python;
 mod rows;
@@ -21,9 +29,11 @@ static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// number - no more than the machine's cores. The queries are started by one Python thread: a few
 /// workers keep up with it as one does, and while one decodes a large result the others still read
 /// the other connections; many more spin while idle and take cores from Python and the database.
+#[cfg(unix)]
 const DEFAULT_WORKER_THREADS: usize = 4;
 
 /// The environment variable of tokio's own that sets the number of worker threads.
+#[cfg(unix)]
 const WORKER_THREADS_VARIABLE: &str = "TOKIO_WORKER_THREADS";
 
 /// Adds `submodule` to `parent` and to `sys.modules`, so both `from rust.native import pg` and
@@ -40,20 +50,9 @@ fn add_submodule(parent: &Bound<'_, PyModule>, submodule: &Bound<'_, PyModule>) 
 
 #[pymodule]
 fn native(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
-    let mut runtime = tokio::runtime::Builder::new_multi_thread();
-    runtime.enable_all();
-    if std::env::var_os(WORKER_THREADS_VARIABLE).is_none() {
-        let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-        runtime.worker_threads(DEFAULT_WORKER_THREADS.min(cores));
-    }
-    pyo3_async_runtimes::tokio::init(runtime);
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
-    let pg_module = PyModule::new(py, "pg")?;
-    pg::register(py, &pg_module)?;
-    add_submodule(module, &pg_module)?;
-    let pool_module = PyModule::new(py, "pool")?;
-    pool::register(&pool_module)?;
-    add_submodule(module, &pool_module)?;
+    #[cfg(unix)]
+    register_driver(py, module)?;
     let rows_module = PyModule::new(py, "rows")?;
     rows::register(&rows_module)?;
     add_submodule(module, &rows_module)?;
@@ -63,5 +62,24 @@ fn native(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     let clock_module = PyModule::new(py, "clock")?;
     clock::register(&clock_module)?;
     add_submodule(module, &clock_module)?;
+    Ok(())
+}
+
+/// Adds the PostgreSQL driver - `pg` and `pool` - with the runtime its queries run on.
+#[cfg(unix)]
+fn register_driver(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
+    let mut runtime = tokio::runtime::Builder::new_multi_thread();
+    runtime.enable_all();
+    if std::env::var_os(WORKER_THREADS_VARIABLE).is_none() {
+        let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        runtime.worker_threads(DEFAULT_WORKER_THREADS.min(cores));
+    }
+    pyo3_async_runtimes::tokio::init(runtime);
+    let pg_module = PyModule::new(py, "pg")?;
+    pg::register(py, &pg_module)?;
+    add_submodule(module, &pg_module)?;
+    let pool_module = PyModule::new(py, "pool")?;
+    pool::register(&pool_module)?;
+    add_submodule(module, &pool_module)?;
     Ok(())
 }

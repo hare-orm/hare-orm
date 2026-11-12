@@ -12,8 +12,5 @@ class FlatRows(TupleRows):
 
     plan_shape = RowShape.FLAT
 
-    def make_row(self, values: tuple[Any, ...]) -> Any:
-        return values[0]
-
     def get_reader(self, position: int, alias: str) -> Callable[[Any], Any]:
         return lambda row: row

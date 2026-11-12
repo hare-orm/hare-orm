@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Hashable, Iterable, Mapping
-from typing import Any, cast
+from typing import Any
 from urllib.parse import quote
 
 from hare.contrib.request_query.api_getter.api_enrichment_batch import ApiEnrichmentBatch
@@ -162,7 +162,7 @@ class ApiGetter:
                 source, source.url.replace(placeholder, quote(str(value), safe="")), None
             )
         else:
-            response, error = await http_requests.get(source, source.url, {cast("str", source.query_parameter): value})
+            response, error = await http_requests.get(source, source.url, {source.query_parameter: value})  # type: ignore[dict-item]
         items = cls.read_items(source, response, error, [value])
         if items is None:
             return None
@@ -188,7 +188,7 @@ class ApiGetter:
         Returns:
             The answer item of each value - None for a value without one.
         """
-        response, error = await http_requests.get(source, source.url, {cast("str", source.query_parameter): values})
+        response, error = await http_requests.get(source, source.url, {source.query_parameter: values})  # type: ignore[dict-item]
         items = cls.read_items(source, response, error, values)
         if items is None:
             return {}

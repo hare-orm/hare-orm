@@ -1102,11 +1102,12 @@ async def test_dialect_is_part_of_the_cache_key(db):
     qs = Author.objects.filter(name="a")._get_compiler()._get_execution_query()
     real_dialect = qs.dialect.name
     qs._make_query()
-    real_key = next(iter(StatementPlans.plans.get_model_bucket(Author)))
+    real_key = next(iter(StatementPlans.plans.get_bucket(Author)))
 
     other_dialect = DialectRegistry.get_dialect("postgresql" if real_dialect != "postgresql" else "sqlite")
     qs2 = Author.objects.filter(name="a")._get_compiler()._get_execution_query()
-    with patch.object(type(qs2), "dialect", other_dialect):
+    # The query's dialect is its connection's.
+    with patch.object(qs2._connection, "dialect", other_dialect):
         description, other_plan = qs2._get_plan()
 
     assert description is not None
@@ -1131,7 +1132,7 @@ async def test_concurrent_calls_with_different_values_do_not_cross_talk(db):
         return rows[0].name
 
     assert await fetch(authors[0].name) == authors[0].name
-    plans = list(StatementPlans.plans.get_model_bucket(Author).values())
+    plans = list(StatementPlans.plans.get_bucket(Author).values())
     initial_parameters = [list(plan.parameters) for plan in plans]
     with _spy_on_plan_hits() as spy:
         results = await asyncio.gather(*(fetch(a.name) for a in authors))
@@ -1270,7 +1271,7 @@ async def test_with_cte_raw_sql_reference_keeps_one_plan_with_its_cte(db):
         assert [b.name for b in rows] == ["book1"]
 
     assert StatementPlans.plans.entry_count == 1
-    plan = next(iter(StatementPlans.plans.get_model_bucket(Book).values()))
+    plan = next(iter(StatementPlans.plans.get_bucket(Book).values()))
     assert plan.sql is not None and '"cheap"' in plan.sql
 
 
@@ -1653,7 +1654,7 @@ async def test_exists_query_is_a_cache_hit_on_second_call_and_stays_correct(db):
     assert first is True
     assert second is True
     assert third is False
-    exists_entries = [key for key in StatementPlans.plans.get_model_bucket(Book) if key[0] is ExistsQuery]
+    exists_entries = [key for key in StatementPlans.plans.get_bucket(Book) if key[0] is ExistsQuery]
     assert len(exists_entries) == 1
 
 
@@ -1678,7 +1679,7 @@ async def test_count_query_is_a_cache_hit_on_second_call_and_stays_correct(db):
     assert first == 2
     assert second == 2
     assert third == 1
-    count_entries = [key for key in StatementPlans.plans.get_model_bucket(Book) if key[0] is CountQuery]
+    count_entries = [key for key in StatementPlans.plans.get_bucket(Book) if key[0] is CountQuery]
     assert len(count_entries) == 1
 
 
@@ -1697,7 +1698,7 @@ async def test_count_query_group_by_shares_the_plain_cache_entry(db):
     assert spy.call_count > 0
     assert first == 3
     assert second == 3
-    count_entries = [key for key in StatementPlans.plans.get_model_bucket(Book) if key[0] is CountQuery]
+    count_entries = [key for key in StatementPlans.plans.get_bucket(Book) if key[0] is CountQuery]
     assert len(count_entries) == 1
 
 
@@ -1745,13 +1746,13 @@ async def test_contains_query_runs_on_its_own_plan_and_stays_correct(db):
         assert await queryset.contains(delta) is False
         assert await queryset.exists() is True
     assert spy.call_count == 2
-    contains_entries = [key for key in StatementPlans.plans.get_model_bucket(Book) if key[0] is ContainsQuery]
+    contains_entries = [key for key in StatementPlans.plans.get_bucket(Book) if key[0] is ContainsQuery]
     assert len(contains_entries) == 1
 
 
 # A run takes the compiled statement, whose query is the stored one itself, read-only; the
 # clone this checks is the full build every other hit (.sql(), a subquery) takes.
-@patch.object(StatementPlanRuns, "run_on_plan", lambda *args, **kwargs: False)
+@patch.object(StatementPlanRuns, "find_plan", lambda *args, **kwargs: None)
 @pytest.mark.asyncio
 async def test_no_stale_value_ids_survive_in_cloned_exists_and_count_query_tree(db):
     """Symmetry-principle regression test for `ExistsQuery`/`CountQuery` - a cache hit must never
@@ -1838,7 +1839,7 @@ async def test_values_query_is_a_cache_hit_on_second_call_and_stays_correct(db):
     assert first == [{"name": "alpha", "rating": 1.0}]
     assert second == [{"name": "alpha", "rating": 1.0}]
     assert third == [{"name": "beta", "rating": 2.0}]
-    values_entries = [key for key in StatementPlans.plans.get_model_bucket(Book) if key[0] is ValuesQuery]
+    values_entries = [key for key in StatementPlans.plans.get_bucket(Book) if key[0] is ValuesQuery]
     assert len(values_entries) == 1
 
 
@@ -1885,7 +1886,7 @@ async def test_values_list_query_is_a_cache_hit_on_second_call_and_stays_correct
     assert first == [("alpha", 1.0)]
     assert second == [("alpha", 1.0)]
     assert third == [("beta", 2.0)]
-    values_list_entries = [key for key in StatementPlans.plans.get_model_bucket(Book) if key[0] is ValuesQuery]
+    values_list_entries = [key for key in StatementPlans.plans.get_bucket(Book) if key[0] is ValuesQuery]
     assert len(values_list_entries) == 1
 
 
@@ -1965,13 +1966,13 @@ async def test_values_query_select_related_extra_condition_binds_each_calls_cond
         .values("name", "left__left__name")
     )
     assert rows_no_match == [{"name": "root", "left__left__name": None}]
-    extra_condition_entries = [key for key in StatementPlans.plans.get_model_bucket(DoubleFK) if key[0] is ValuesQuery]
+    extra_condition_entries = [key for key in StatementPlans.plans.get_bucket(DoubleFK) if key[0] is ValuesQuery]
     assert len(extra_condition_entries) == 1
 
 
 # A run takes the compiled statement, whose query is the stored one itself, read-only; the
 # clone this checks is the full build every other hit (.sql(), a subquery) takes.
-@patch.object(StatementPlanRuns, "run_on_plan", lambda *args, **kwargs: False)
+@patch.object(StatementPlanRuns, "find_plan", lambda *args, **kwargs: None)
 @pytest.mark.asyncio
 async def test_no_stale_value_ids_survive_in_cloned_values_query_tree(db):
     """Symmetry-principle regression test for `ValuesQuery`/`ValuesListQuery` - a cache hit must
@@ -2025,7 +2026,7 @@ async def test_aggregate_query_literal_metric_is_a_cache_hit_and_stays_correct(d
     assert first == {"doubled": 2.0}
     assert second == {"doubled": 2.0}
     assert third == {"doubled": 4.0}
-    aggregate_entries = [key for key in StatementPlans.plans.get_model_bucket(Book) if key[0] is AggregateQuery]
+    aggregate_entries = [key for key in StatementPlans.plans.get_bucket(Book) if key[0] is AggregateQuery]
     assert len(aggregate_entries) == 1
 
 
@@ -2048,7 +2049,7 @@ async def test_aggregate_query_real_aggregate_function_now_fast_pathed_and_stays
     assert first == {"total": 1.0}
     assert second == {"total": 1.0}
     assert third == {"total": 2.0}
-    aggregate_entries = [key for key in StatementPlans.plans.get_model_bucket(Book) if key[0] is AggregateQuery]
+    aggregate_entries = [key for key in StatementPlans.plans.get_bucket(Book) if key[0] is AggregateQuery]
     assert len(aggregate_entries) == 1
 
 
@@ -2223,7 +2224,7 @@ async def test_aggregate_distinct_flag_is_part_of_the_cache_key(db):
     assert spy.call_count == 0
     assert distinct_count == {"cnt": 1}
     assert plain_count == {"cnt": 2}
-    aggregate_entries = [key for key in StatementPlans.plans.get_model_bucket(Book) if key[0] is AggregateQuery]
+    aggregate_entries = [key for key in StatementPlans.plans.get_bucket(Book) if key[0] is AggregateQuery]
     assert len(aggregate_entries) == 2
 
     # Each shape independently hits on a repeat call.
@@ -2256,7 +2257,7 @@ async def test_aggregate_filter_kwarg_now_fast_pathed_and_stays_correct(db):
     assert spy.call_count > 0
     assert first == {"total": 9.0}
     assert second == {"total": 9.0}
-    aggregate_entries = [key for key in StatementPlans.plans.get_model_bucket(Book) if key[0] is AggregateQuery]
+    aggregate_entries = [key for key in StatementPlans.plans.get_bucket(Book) if key[0] is AggregateQuery]
     assert len(aggregate_entries) == 1
 
 
@@ -2394,7 +2395,7 @@ async def test_window_ntile_now_fast_pathed_and_stays_correct(db):
     assert spy.call_count > 0
     assert first == [{"bucket": 1}, {"bucket": 2}]
     assert second == [{"bucket": 1}, {"bucket": 2}]
-    ntile_entries = [key for key in StatementPlans.plans.get_model_bucket(Book) if key[0] is ValuesQuery]
+    ntile_entries = [key for key in StatementPlans.plans.get_bucket(Book) if key[0] is ValuesQuery]
     assert len(ntile_entries) == 1
 
 
@@ -2579,7 +2580,7 @@ async def test_case_none_default_is_fast_pathed_apart_from_a_literal_default(db)
 
 # A run takes the compiled statement, whose query is the stored one itself, read-only; the
 # clone this checks is the full build every other hit (.sql(), a subquery) takes.
-@patch.object(StatementPlanRuns, "run_on_plan", lambda *args, **kwargs: False)
+@patch.object(StatementPlanRuns, "find_plan", lambda *args, **kwargs: None)
 @pytest.mark.asyncio
 async def test_no_stale_value_ids_survive_in_cloned_case_when_tree(db):
     """Symmetry-principle regression test for `Case`/`When` - a cache hit must never leave the
@@ -2847,7 +2848,7 @@ async def test_correlated_exists_outer_ref_runs_on_its_plan(db):
             )
             assert len(rows_none) == 1 and not rows_none[0].has_event
     assert resolve_spy.call_count == 1, "a correlated OuterReference(...) Exists() runs on the outer query's plan"
-    assert StatementPlans.plans.get_model_bucket(Tournament)
+    assert StatementPlans.plans.get_bucket(Tournament)
 
 
 @pytest.mark.asyncio

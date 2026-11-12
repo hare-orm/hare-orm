@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Collection
 from dataclasses import replace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from hare.exceptions import UnSupportedError
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
+from hare.inspectdb.enums import SchemaPartType
 from hare.inspectdb.exceptions import SchemaNotFoundError
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
-from hare.inspectdb.introspection.enums import SchemaPartType
 from hare.inspectdb.introspection.schema_part import SchemaPart
 from hare.migrations.constants import DEFAULT_MIGRATION_TABLE_NAME
 from hare.migrations.drift.constants import (
@@ -89,7 +89,7 @@ class ShadowDrift:
         real_parts = await self.read_parts(connection, introspector_class, compared, lambda schema: schema)
         schemas = {self.get_model_schema(model_state) for _key, model_state in built}
         async with shadow_database_class(connection, schemas) as shadow:
-            shadow_client = cast("DatabaseClient", shadow.client)
+            shadow_client: DatabaseClient = shadow.client  # type: ignore[assignment]
             shadow_state = ShadowState.get(built, shadow, self.new_state)
             models = [shadow_state.apps.get_model(f"{app_label}.{name}") for (app_label, name), _state in built]
             shadow_editor = dialect.schema_editor_class(shadow_client)

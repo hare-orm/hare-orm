@@ -43,14 +43,7 @@ class WriteFinalizer:
     def register_snapshots(snapshots: Iterable[InstanceSnapshot], connection: DatabaseClient) -> None:
         """Attach persistence undo to the exact client, before publishing fields."""
         if connection.is_transaction_client:
-            RollbackRestores.register_rollback_restores(
-                connection,
-                (
-                    (snapshot.instance, name, value)
-                    for snapshot in snapshots
-                    for name, value in snapshot.values.items()
-                ),
-            )
+            RollbackRestores.register_snapshots(connection, snapshots)
 
     @staticmethod
     def settle_values(values: InstanceValues, connection: DatabaseClient, outcome: WriteOutcome) -> None:
@@ -72,30 +65,38 @@ class WriteFinalizer:
 
     @staticmethod
     def publish_saved(
-        before: InstanceSnapshot,
+        snapshots: Sequence[InstanceSnapshot],
         connection: DatabaseClient,
         outcome: WriteOutcome,
         *,
         updated_fields: Sequence[str] | None = None,
     ) -> None:
-        """Mark a saved instance and update only the dirty baseline of written fields.
+        """Mark saved instances of one model and update only the dirty baseline of written fields.
 
         The caller has checked a known zero-row update or verified existence for a
-        no-op save. Its complete persistence snapshot is retained for a later rollback,
+        no-op save. Each complete persistence snapshot is retained for a later rollback,
         including the connection alias and generated-key flag changed by publication.
         """
-        obj = before.instance
-        WrittenInstances.mark_saved((obj,), connection)
+        if not snapshots:
+            return
+        objs = [snapshot.instance for snapshot in snapshots]
+        WrittenInstances.mark_saved(objs, connection)
         if outcome.operation is RowOperation.INSERT:
-            previous_custom_key = before.values["_custom_generated_pk"]
             # A missing per-instance flag reads the model's False class default.
-            if previous_custom_key is ROLLBACK_RESTORE_UNSET or not previous_custom_key:
-                object.__setattr__(obj, "_custom_generated_pk", False)
-        if obj._meta.track_dirty_fields:
-            if updated_fields is None:
-                DirtyFields.snapshot_dirty_fields(obj)
-            else:
-                DirtyFields.sync_dirty_snapshot_fields(obj, updated_fields)
+            WrittenInstances.clear_custom_generated_keys(
+                [
+                    snapshot.instance
+                    for snapshot in snapshots
+                    if snapshot.values["_custom_generated_pk"] is ROLLBACK_RESTORE_UNSET
+                    or not snapshot.values["_custom_generated_pk"]
+                ]
+            )
+        if objs[0]._meta.track_dirty_fields:
+            for obj in objs:
+                if updated_fields is None:
+                    DirtyFields.snapshot_dirty_fields(obj)
+                else:
+                    DirtyFields.sync_dirty_snapshot_fields(obj, updated_fields)
 
     @staticmethod
     async def saved(
@@ -111,7 +112,7 @@ class WriteFinalizer:
         Bulk callers publish through ``publish_saved`` and report their entire batch
         through the bulk reporting contract, without emitting one event per object.
         """
-        WriteFinalizer.publish_saved(before, connection, outcome, updated_fields=updated_fields)
+        WriteFinalizer.publish_saved((before,), connection, outcome, updated_fields=updated_fields)
         obj = before.instance
         if outcome.performed and ChangeEvents.is_observed(type(obj)):
             await WriteSteps.report(

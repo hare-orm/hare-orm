@@ -405,7 +405,9 @@ async def test_offline_safety_uses_backfill_plan_without_evaluating_defaults(dia
     monkeypatch.setattr(client, "execute", forbidden)
     monkeypatch.setattr(client, "execute_dicts", forbidden)
     monkeypatch.setattr(client, "execute_script", forbidden)
-    risks = await MigrationSafetyChecker().check(migration, state, client=client, read_catalog=False)
+    risks = await MigrationSafetyChecker().check(
+        migration, migration.prepare(state), client=client, read_catalog=False
+    )
     assert [risk.code for risk in risks] == [MigrationRiskCode.ADD_FIELD_BACKFILLS_ROWS]
     assert calls == []
     forbidden.assert_not_called()

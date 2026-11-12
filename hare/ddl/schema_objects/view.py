@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.classes.class_path import ClassPath
 from hare.classes.value_descriptions import ValueDescriptions
@@ -42,7 +42,7 @@ class View(NamedSchemaObject):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if isinstance(cast("object", self.read_columns), str) or not all(
+        if isinstance(self.read_columns, str) or not all(  # type: ignore[unreachable]
             isinstance(column, (tuple, list))
             and len(column) == 2
             and all(isinstance(name, str) and name for name in column)
@@ -80,18 +80,14 @@ class View(NamedSchemaObject):
         return replace(self, query=self.query.for_model(model))
 
     def get_queryset(self) -> QuerySet[Any, Any] | None:
-        """The queryset the view selects - None for raw SQL.
+        """The queryset the view selects, None for raw SQL.
 
         Raises:
-            ConfigurationError: A ``ModelQuery()`` isn't made on a model's queryset.
+            ConfigurationError: A recorded model query has no declaring model.
         """
-        if isinstance(self.query, RawSQLTerm):
-            return None
         from hare.query.queryset.model_query import ModelQuery
 
-        if isinstance(self.query, ModelQuery):
-            return self.query.get_queryset()
-        return self.query
+        return ModelQuery.get_declared_queryset(self.query)
 
     def get_query_sql(self, client: DatabaseClient | None = None) -> str:
         """The ``SELECT`` as SQL.
@@ -104,7 +100,7 @@ class View(NamedSchemaObject):
         """
         queryset = self.get_queryset()
         if queryset is None:
-            return cast("RawSQLTerm", self.query).sql
+            return self.query.sql  # type: ignore[return-value]
         if client is not None:
             queryset = queryset.using(client)
         return queryset.sql(parameters_inline=True)

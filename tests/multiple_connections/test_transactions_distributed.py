@@ -961,7 +961,6 @@ async def test_distributed_participant_on_rollback_callback_can_query_its_own_al
     assert await _widget_count(PARTICIPANT_A) == 1
 
 
-@pytest.mark.requires("native")
 @pytest.mark.asyncio
 async def test_distributed_rust_pg_participant_connection_is_released_after_commit(distributed_dbs) -> None:
     """rust_pg-only regression guard: PREPARE TRANSACTION ends the SQL-level transaction but,
@@ -1251,7 +1250,8 @@ async def test_distributed_cancellation_after_participant_prepare_landed_leaves_
                 result = await original_execute_query(self, query, *args, **kwargs)
                 if query.startswith("PREPARE TRANSACTION"):
                     prepare_landed.set()
-                    await asyncio.sleep(0.5)
+                    # Held until the cancellation lands - it interrupts this wait.
+                    await asyncio.Event().wait()
                 return result
 
             monkeypatch.setattr(transaction_client_class, "execute", execute_query_with_slow_prepare_acknowledgement)

@@ -44,10 +44,10 @@ class HareColumnNames:
             The names, by column.
         """
         # Each name taken, so two columns never come under one.
-        taken_names = set(HareColumnNames.get_spaced_column_names(model))
+        taken_names = Identifiers(HareColumnNames.get_spaced_column_names(model))
         old_value_names: dict[str, str] = {}
         for column in model._meta.fields_db_projection.values():
-            name = HareColumnNames.get_free_name(f"{RETURNING_OLD_COLUMN_ALIAS_PREFIX}{column}", (), taken_names)
+            name = taken_names.get_free_name(f"{RETURNING_OLD_COLUMN_ALIAS_PREFIX}{column}")
             taken_names.add(name)
             old_value_names[column] = name
         return old_value_names
@@ -70,4 +70,4 @@ class HareColumnNames:
             # Almost always none - no set is made then.
             if spaced_column_names := HareColumnNames.get_spaced_column_names(model):
                 taken = {*taken, *spaced_column_names}
-        return Identifiers.get_free_name(name, taken)
+        return Identifiers(taken).get_free_name(name)

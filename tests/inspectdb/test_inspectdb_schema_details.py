@@ -12,8 +12,8 @@ from hare.exceptions import HareError
 from hare.fields.data.numeric import IntField
 from hare.fields.data.text import CharField
 from hare.inspectdb import SchemaIntrospector
+from hare.inspectdb.enums import CatalogDiagnosticCode
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
-from hare.inspectdb.introspection.enums import CatalogDiagnosticCode
 from hare.migrations.drift import detect_drift
 from tests.migrations.round_trips.test_round_trip_real_db import APP_LABEL, RoundTrip, build_live_state, build_model
 from tests.utils.database_under_test import DatabaseUnderTest

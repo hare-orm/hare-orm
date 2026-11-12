@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from taskiq import TaskiqEvents
 
@@ -55,9 +55,7 @@ class HareTaskiq:
         )
         self.middleware = HareTaskiqMiddleware(
             atomic_tasks=(
-                atomic_tasks
-                if isinstance(atomic_tasks, bool)
-                else cast(tuple[str, ...], self.lifecycle.transaction_connection_names)
+                atomic_tasks if isinstance(atomic_tasks, bool) else self.lifecycle.transaction_connection_names  # type: ignore[arg-type]
             ),
             tenant_label=tenant_label,
             transaction_retries=transaction_retries,

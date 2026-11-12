@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import Any, ClassVar
 
 from hare.migrations.autodetection.diffs.declared_schema_object_diff import DeclaredSchemaObjectDiff
 from hare.migrations.operations import (
@@ -15,9 +15,6 @@ from hare.migrations.operations.schema_objects.object_types.materialized_view_ob
 )
 from hare.migrations.operations.schema_objects.object_types.schema_object_type import SchemaObjectType
 
-if TYPE_CHECKING:
-    from hare.ddl.schema_objects.view import View
-
 
 class MaterializedViewDiff(DeclaredSchemaObjectDiff):
     """The materialized view operations of a model - a view removed and added under one name replaces
@@ -30,7 +27,7 @@ class MaterializedViewDiff(DeclaredSchemaObjectDiff):
     rename_operation_class: ClassVar[type[HareOperation] | None] = RenameMaterializedView
 
     def get_read_columns(self, schema_object: Any) -> tuple[tuple[str, str], ...]:
-        return cast("View", schema_object).read_columns
+        return schema_object.read_columns
 
     def get_operations(self) -> list[HareOperation]:
         operations = super().get_operations()

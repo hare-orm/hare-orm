@@ -20,14 +20,19 @@ class PreparedOperationGraph:
 
     The sorter shares dependency matching with this graph. Optimization prepares
     an already ordered sequence; requirements for an operation are read from its
-    actual before-state, including changes made by earlier operations.
+    actual before-state, including changes made by earlier operations. Provider keys
+    are immutable facts of this prepared sequence; a rewrite creates a new graph
+    instead of carrying those keys across changed operations.
     """
 
     def __init__(self, app_label: str, operations: Sequence[Operation], state_before: State) -> None:
         self.app_label = app_label
         self.states = PreparedOperationStates(app_label, operations, state_before)
-        self.provided = tuple(
-            tuple(item.operation.get_provided_dependencies(app_label)) for item in self.states.operations
+        self.provided_keys = tuple(
+            frozenset(
+                self.get_provided_key(dependency) for dependency in item.operation.get_provided_dependencies(app_label)
+            )
+            for item in self.states.operations
         )
         self.required = tuple(
             (
@@ -64,8 +69,8 @@ class PreparedOperationGraph:
 
     def depends_on(self, requirements: Sequence[OperationDependency], provider: int) -> bool:
         """Match creation, change and removal requirements using the sorter's dependency rules."""
-        provided = {self.get_provided_key(item) for item in self.provided[provider]}
-        return any(provided.intersection(self.get_provider_keys(item)) for item in requirements)
+        provided = self.provided_keys[provider]
+        return any(not provided.isdisjoint(self.get_provider_keys(item)) for item in requirements)
 
     @staticmethod
     def get_provider_keys(requirement: OperationDependency) -> list[tuple[Any, ...]]:

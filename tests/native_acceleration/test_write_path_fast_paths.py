@@ -62,20 +62,20 @@ def test_json_shortcut_leaves_problem_values_to_the_full_path():
 @pytest.mark.requires("asyncpg")
 @pytest.mark.database_independent
 def test_asyncpg_binds_a_row_of_plain_values_as_it_is():
-    from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
+    from hare.dialects.postgresql.drivers.asyncpg.client.asyncpg_parameters import AsyncpgParameters
 
     row = [1, "text", 2.5, None, True, b"bytes", Decimal("1.5"), datetime.date(2020, 1, 2)]
-    assert AsyncpgClient._asyncpg_bind_values(row) is row
-    assert AsyncpgClient._asyncpg_bind_values(tuple(row)) == row
+    assert AsyncpgParameters.get_bound_values(row) is row
+    assert AsyncpgParameters.get_bound_values(tuple(row)) == row
 
 
 @pytest.mark.requires("asyncpg")
 @pytest.mark.database_independent
 def test_asyncpg_still_adapts_a_row_holding_a_value_that_needs_it():
-    from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
+    from hare.dialects.postgresql.drivers.asyncpg.client.asyncpg_parameters import AsyncpgParameters
 
     naive_time = datetime.time(10, 30)
-    bound = AsyncpgClient._asyncpg_bind_values([1, naive_time, "x"])
+    bound = AsyncpgParameters.get_bound_values([1, naive_time, "x"])
     assert bound[0] == 1 and bound[2] == "x"
     assert bound[1] == naive_time.replace(tzinfo=datetime.UTC)
 

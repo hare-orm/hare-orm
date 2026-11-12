@@ -6,6 +6,7 @@ from hare.core.caching.cache import Cache
 from hare.dialects.postgresql.fields.hstore.h_store_field import HStoreField
 from hare.fields.data.containers.array_field import ArrayField
 from hare.fields.data.text.text_field import TextField
+from hare.query.enums import Lookup
 
 if TYPE_CHECKING:
     from hare.fields.field import Field
@@ -18,7 +19,9 @@ class PostgresqlHStoreFieldLookups:
     ``contains``/``contained_by`` of pairs, and ``has_key``/``has_keys``/``has_any_keys``."""
 
     #: The whole-value lookups kept from the generic set.
-    GENERIC_LOOKUPS: ClassVar[frozenset[str]] = frozenset({"", "not", "in", "not_in", "isnull", "not_isnull"})
+    GENERIC_LOOKUPS: ClassVar[frozenset[str]] = frozenset(
+        {Lookup.EXACT, Lookup.NOT, Lookup.IN, Lookup.NOT_IN, Lookup.ISNULL, Lookup.NOT_ISNULL}
+    )
     #: Shared fields describing lookup inputs and outputs.
     #: The field a list of whole values is bound as.
     ELEMENT_FIELD: ClassVar[Field[Any]] = HStoreField()
@@ -59,11 +62,11 @@ class PostgresqlHStoreFieldLookups:
                     else field_lookup
                 )
         for lookup_name, hstore_operator, value_encoder in (
-            ("contains", PostgresqlHStoreLookups.contains, None),
-            ("contained_by", PostgresqlHStoreLookups.contained_by, None),
-            ("has_key", PostgresqlHStoreLookups.has_key, ValueEncoders.encode_string),
-            ("has_keys", PostgresqlHStoreLookups.has_keys, ValueEncoders.encode_string_list),
-            ("has_any_keys", PostgresqlHStoreLookups.has_any_keys, ValueEncoders.encode_string_list),
+            (Lookup.CONTAINS, PostgresqlHStoreLookups.contains, None),
+            (Lookup.CONTAINED_BY, PostgresqlHStoreLookups.contained_by, None),
+            (Lookup.HAS_KEY, PostgresqlHStoreLookups.has_key, ValueEncoders.encode_string),
+            (Lookup.HAS_KEYS, PostgresqlHStoreLookups.has_keys, ValueEncoders.encode_string_list),
+            (Lookup.HAS_ANY_KEYS, PostgresqlHStoreLookups.has_any_keys, ValueEncoders.encode_string_list),
         ):
             lookups[lookup_name] = FieldLookup(hstore_operator, value_encoder)
         return lookups

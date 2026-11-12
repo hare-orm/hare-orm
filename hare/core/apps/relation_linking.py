@@ -4,7 +4,7 @@ import keyword
 from collections.abc import Callable
 from copy import copy
 from functools import partial
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.ddl.constraints.unique_constraint import UniqueConstraint
 from hare.exceptions import ConfigurationError
@@ -112,9 +112,7 @@ class RelationLinking:
         Raises:
             ConfigurationError: The related model or the fields pointed at are wrong.
         """
-        foreign_key_object = cast(
-            "OneToOneFieldInstance[Any] | ForeignKeyFieldInstance[Any]", model._meta.fields_map[field]
-        )
+        foreign_key_object: OneToOneFieldInstance[Any] | ForeignKeyFieldInstance[Any] = model._meta.fields_map[field]  # type: ignore[assignment]
         related_model, related_model_name = RelationLinking.get_related_model(apps, foreign_key_object.model_name)
         to_field_names, related_fields = RelationLinking.get_key_targets(
             apps, model, field, foreign_key_object, related_model, related_model_name, is_one_to_one
@@ -157,7 +155,7 @@ class RelationLinking:
             model, foreign_key_object, source_fields, key_source_fields, is_one_to_one
         )
         RelationLinking.add_backward_relation(
-            model, field, foreign_key_object, related_model, related_model_name, foreign_key_relation
+            apps, model, field, foreign_key_object, related_model, related_model_name, foreign_key_relation
         )
 
     @staticmethod
@@ -219,7 +217,7 @@ class RelationLinking:
             # A component may be the key column of the target's own relation - in place once that
             # relation is set up.
             RelationLinking.ensure_foreign_key_or_one_to_one_inited(apps, related_model)
-            to_field_names = cast("tuple[str, ...]", related_model._meta.primary_key_attribute)
+            to_field_names = related_model._meta.primary_key_attribute  # type: ignore[assignment]
             related_fields = list(related_model._meta.pk_fields)
             foreign_key_object.to_field = to_field_names
         else:
@@ -227,7 +225,7 @@ class RelationLinking:
             related_model._meta.raise_if_no_primary_key(
                 f'{relation_label} "{model.__name__}.{field}" to it without to_field='
             )
-            to_field_names = (cast("str", related_model._meta.primary_key_attribute),)
+            to_field_names = (related_model._meta.primary_key_attribute,)  # type: ignore[assignment]
             related_fields = [related_model._meta.pk]
             foreign_key_object.to_field = related_model._meta.primary_key_attribute
 
@@ -442,6 +440,7 @@ class RelationLinking:
 
     @staticmethod
     def add_backward_relation(
+        apps: Apps,
         model: type[Model],
         field: str,
         foreign_key_object: OneToOneFieldInstance[Any] | ForeignKeyFieldInstance[Any],
@@ -450,9 +449,11 @@ class RelationLinking:
         foreign_key_relation: BackwardForeignKeyRelation[Any],
     ) -> None:
         """Adds a relation's backward relation to its target - under its ``related_name``, hidden for
-        ``related_name=False``, none for a swapped model.
+        ``related_name=False``, none for a swapped model. Historical aliases sharing the
+        same physical source columns reuse the existing reverse accessor.
 
         Args:
+            apps: The registry providing table identity rules.
             model: The model of the relation.
             field: The relation's name.
             foreign_key_object: The relation.
@@ -471,22 +472,33 @@ class RelationLinking:
             # No public accessor, but on_delete still has to reach the rows pointing back.
             related_model._meta.add_hidden_backward_relation(f"{model._meta.full_name}.{field}", foreign_key_relation)
             return
-        backward_relation_name = cast(
-            "str",
-            RelationLinking.get_backward_relation_name(
-                backward_relation_name, model._meta.db_table, model._meta.app, model.__name__
-            ),
+        backward_relation_name = RelationLinking.get_backward_relation_name(
+            backward_relation_name, model._meta.db_table, model._meta.app, model.__name__
         )
         if foreign_key_object.related_name:
             foreign_key_object.related_name = backward_relation_name
-        if backward_relation_name in related_model._meta.fields:
+        existing_relation = related_model._meta.fields_map.get(backward_relation_name)  # type: ignore[arg-type]
+        if existing_relation is not None:
+            if (
+                isinstance(existing_relation, BackwardForeignKeyRelation)
+                and type(existing_relation) is type(foreign_key_relation)
+                and existing_relation.relation_fields == foreign_key_relation.relation_fields
+                and existing_relation.relation_source_fields == foreign_key_relation.relation_source_fields
+                and apps.get_table_identity(
+                    existing_relation.related_model,
+                    existing_relation.related_model._meta.schema,
+                    existing_relation.related_model._meta.db_table,
+                )
+                == apps.get_table_identity(model, model._meta.schema, model._meta.db_table)
+            ):
+                return
             raise ConfigurationError(
                 f"backward relation {backward_relation_name!r} duplicates in model {related_model_name}"
                 ' - use a related_name template such as "%(app_label)s_%(class)s_..." to give each'
                 " concrete model a distinct backward-accessor name."
             )
-        RelationLinking.check_related_name_not_reserved(related_model, backward_relation_name, model, field)
-        related_model._meta.add_field(backward_relation_name, foreign_key_relation)
+        RelationLinking.check_related_name_not_reserved(related_model, backward_relation_name, model, field)  # type: ignore[arg-type]
+        related_model._meta.add_field(backward_relation_name, foreign_key_relation)  # type: ignore[arg-type]
 
     @staticmethod
     def check_related_name_not_reserved(
@@ -541,7 +553,7 @@ class RelationLinking:
                 apps.get_table_identity(registered_model, meta.schema, meta.db_table), (registered_model, None)
             )
             for many_to_many_field_name in meta.many_to_many_fields:
-                many_to_many_field = cast("ManyToManyFieldInstance[Any]", meta.fields_map[many_to_many_field_name])
+                many_to_many_field: ManyToManyFieldInstance[Any] = meta.fields_map[many_to_many_field_name]  # type: ignore[assignment]
                 if not many_to_many_field._generated and many_to_many_field.through:
                     table_holders.setdefault(
                         apps.get_table_identity(
@@ -579,6 +591,11 @@ class RelationLinking:
         holder = table_holders.get(key)
         if holder is not None and holder != (model, field):
             holder_model, holder_field_name = holder
+            if holder_field_name == field and apps.get_table_identity(
+                holder_model, holder_model._meta.schema, holder_model._meta.db_table
+            ) == apps.get_table_identity(model, model._meta.schema, model._meta.db_table):
+                # The same historical field reached through another name of its source table.
+                return
             if holder_field_name is None:
                 raise ConfigurationError(
                     f'ManyToManyField "{model.__name__}.{field}" gets the auto-generated through table '
@@ -652,24 +669,20 @@ class RelationLinking:
 
     @staticmethod
     def find_many_to_many_through_foreign_key(
-        through_model: type[Model], target_model: type[Model], side_label: str
+        apps: Apps, through_model: type[Model], target_model: type[Model], side_label: str
     ) -> ForeignKeyFieldInstance[Any]:
         """The one ``ForeignKeyField`` of ``through_model`` pointing at ``target_model``, matched by
-        app and name - migration state renders its own copies of the model classes.
+        physical table - historical names of a moved model can coexist in a migration state.
 
         Raises:
             ConfigurationError: There is no such field, or there are several.
         """
-        # Local import: the registry module imports this module.
-        from hare.core.apps.apps import Apps
-
-        target_key = Apps.model_identity(target_model)
+        target_key = apps.get_table_identity(target_model, target_model._meta.schema, target_model._meta.db_table)
         candidates = [
             name
             for name in through_model._meta.foreign_key_fields
-            if (related := cast("ForeignKeyFieldInstance[Any]", through_model._meta.fields_map[name]).related_model)
-            is not None
-            and Apps.model_identity(related) == target_key
+            if (related := through_model._meta.fields_map[name].related_model) is not None  # type: ignore[attr-defined]
+            and apps.get_table_identity(related, related._meta.schema, related._meta.db_table) == target_key
         ]
         if len(candidates) != 1:
             raise ConfigurationError(
@@ -677,7 +690,7 @@ class RelationLinking:
                 f"ForeignKeyField pointing to {target_model.__name__!r} for its {side_label} side, "
                 f"found {len(candidates)}."
             )
-        through_foreign_key = cast("ForeignKeyFieldInstance[Any]", through_model._meta.fields_map[candidates[0]])
+        through_foreign_key: ForeignKeyFieldInstance[Any] = through_model._meta.fields_map[candidates[0]]  # type: ignore[assignment]
         # Every M2M read/write keys a through row by the target's primary key - a to_field= on any
         # other column would store values no M2M operation can match.
         if tuple(through_foreign_key.to_field_names) != target_model._meta.primary_key_attribute_names:

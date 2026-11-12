@@ -1,5 +1,31 @@
 # Field types
 
+The default JSON decoder reads integer literals exactly, including integers larger than 64 bits: a
+document is decoded by orjson, and one with a run of 19 or more digits — where such an integer may be -
+by hare's native decoder. `NaN`, `Infinity`, `-Infinity` and numbers overflowing a finite float are
+rejected by both. Duplicate object keys retain the last value. Malformed text raises `ValueError`
+inside the codec; `JSONField` reports its usual sensitive-safe `ValidationError`. Custom field decoders
+are unchanged. Input nesting is bounded at 1024 containers; JSONField's existing write-depth bound remains.
+
+A column of a `JSONField` with the default decoder and no declared `field_type` is read in hare's native
+module with that same decoder, without a Python call per value; a value the driver already decoded and
+`NULL` are kept, and text that isn't JSON gets the field's own `ValidationError`. A field with its own
+`decoder`, a declared `field_type` or an overridden `from_db_value()` is read by its `from_db_value()`
+(`Field.get_db_value_reader()` says which reader a field's column takes).
+
+A value written by `save()`, `bulk_create()`, `update()` or a filter passes through the field's
+writer (`Field.get_db_value_writer()`, or `Field.get_lookup_value_writer()` for filters). The writer
+uses the field or dialect conversion, including validation. Exact types declared by
+`get_unchanged_write_types()` may pass through the native serializer unchanged; `validate()` still
+runs once. Values requiring conversion use the ordinary writer. A failed conversion or validator
+propagates its error without a retry. Custom conversion and validation retain their normal callbacks.
+Decimal rounding uses `decimal`; UUID, duration and JSON conversions use the same helpers as direct
+field calls.
+
+Column conversions are prepared for repeated reads and writes. Lookup lists retain the field's
+batch conversion hook; custom registry value and converter-selection methods remain live.
+Preparing a converter does not remove validation or store values from an execution.
+
 The fields of `hare.fields` — the arguments every field takes, the fields holding plain values, enum
 fields, generated columns and composite primary keys — and where the fields of one database live.
 
@@ -18,7 +44,7 @@ class Field:
         primary_key: bool | None = None,
         null: bool = False,
         default: Any = None,
-        db_default: Any = NOT_PROVIDED,
+        db_default: Any = ...,
         unique: bool = False,
         db_index: bool | None = None,
         description: str | None = None,
@@ -27,6 +53,9 @@ class Field:
         **kwargs: Any,
     ) -> None: ...
 ```
+
+The `...` default above means `db_default` was omitted; an explicit `db_default=None` declares
+`DEFAULT NULL`.
 
 | Argument | Meaning |
 |---|---|
@@ -307,7 +336,8 @@ ClickHouse has narrower date and datetime ranges; see [ClickHouse types](../dial
 
 ### <a id="json-values"></a>JSON values
 
-The default JSON encoder uses `orjson` when installed and the standard library otherwise.
+The default JSON encoder uses `orjson` (a required dependency) and the standard library for an integer
+outside orjson's 64-bit range; the default JSON decoder is `JsonCodec.loads`, hare's native decoder.
 Field validation runs before either encoder, including a custom `encoder` callback.
 
 `JSONField` raises `ValidationError` (not a bare `ValueError`/`TypeError`) for a value the encoder can't
@@ -328,9 +358,10 @@ A value JSON can't hold raises `ValidationError` on every write path (`create()`
 `bulk_create()` including `use_copy=True`, `bulk_update()`): a `NaN`/`Infinity` float anywhere inside it. A
 null byte inside a JSON value is stored as the database stores it where it can hold one; PostgreSQL
 refuses it, and hare raises `ValidationError`. An int of any size is stored and read
-back exactly — one outside the 64-bit range orjson handles is encoded and decoded by the standard library
-instead. A `datetime`, `date`, naive `time` or `UUID` inside the value is written as the same ISO/UUID text
-on both paths, and with orjson not installed at all.
+back exactly — one outside the 64-bit range orjson handles is encoded by the standard library
+instead and decoded natively at full precision. A `datetime`, `date`, naive `time` or `UUID` inside the
+value is written as the same ISO/UUID text
+by both encoders.
 
 `exact`/`not` on a whole `JSONField` compare as the database does: PostgreSQL compares `jsonb` values (key
 order and `1` vs `1.0` don't matter), SQLite compares the stored text (they matter), a ClickHouse `JSON`

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from hare.dialects.base.clauses.enums import MergeAction, RowLockStrength
 from hare.dialects.base.clauses.limit_returning_conflict_query_clauses import LimitReturningConflictQueryClauses
@@ -20,7 +20,6 @@ from hare.sql.builder.tables.table import Table
 if TYPE_CHECKING:
     from hare.dialects.base.clauses.merge_when_sql import MergeWhenSql
     from hare.dialects.base.features import Features
-    from hare.dialects.postgresql.declarations import PostgresqlFeatures
     from hare.sql.builder.queries.query_builder import QueryBuilder
     from hare.sql.builder.returned_value import ReturnedValue
     from hare.sql.sql_context import SqlContext
@@ -108,7 +107,7 @@ class PostgresqlQueryClauses(LimitReturningConflictQueryClauses):
         required_options = sorted(
             option.upper() for option, required in (options or POSTGRESQL_DEFAULT_EXPLAIN_OPTIONS).items() if required
         )
-        if unsupported_options := set(required_options) - cast("PostgresqlFeatures", features).explain_options:
+        if unsupported_options := set(required_options) - features.explain_options:  # type: ignore[attr-defined]
             raise UnSupportedError(
                 f"Unsupported options: {unsupported_options} - not taken by the PostgreSQL server of this connection"
             )

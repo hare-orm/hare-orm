@@ -2,18 +2,17 @@ from __future__ import annotations
 
 import inspect
 import typing
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.exceptions import FieldError
 from hare.models.write.rules.enums import WriteType
+from hare.query.constants import LOOKUP_SEPARATOR, PRIMARY_KEY_ALIAS
 from hare.query.generic_foreign_keys.constants import GENERIC_FOREIGN_KEY_LOOKUPS, GENERIC_FOREIGN_KEY_TYPE_KEY
 from hare.query.generic_foreign_keys.generic_foreign_key_paths import GenericForeignKeyPaths
 from hare.query.managers.base_manager import BaseManager
 from hare.query.queryset.queryset import QuerySet
 from hare.stubs.constants import (
     FILTERS_SUFFIX,
-    LOOKUP_SEPARATOR,
-    PRIMARY_KEY_ATTRIBUTE_NAME,
     QUERYSET_SUFFIX,
     UPDATES_SUFFIX,
     WRITES_SUFFIX,
@@ -81,7 +80,7 @@ class ModelStub:
     def get_filter_types(self) -> dict[str, ValueType]:
         """The type of the value of each filter key."""
         filter_types: dict[str, ValueType] = {}
-        for path in [PRIMARY_KEY_ATTRIBUTE_NAME, *self.get_paths(self.model, "", self.relation_depth)]:
+        for path in [PRIMARY_KEY_ALIAS, *self.get_paths(self.model, "", self.relation_depth)]:
             try:
                 lookups = self.get_generic_lookups(path) or self.model._meta.get_lookups(path, self.dialect)
             except FieldError:
@@ -307,7 +306,7 @@ class ModelStub:
         for name in meta.fields_map:
             if name not in relation_names:
                 continue
-            relation = cast("RelationalField[Any]", meta.fields_map[name])
+            relation: RelationalField[Any] = meta.fields_map[name]  # type: ignore[assignment]
             related_model = relation.related_model
             value_type = (
                 ValueType(models=(related_model,), nullable=relation.null)
@@ -322,11 +321,9 @@ class ModelStub:
         values for a composite key, None also taken on assignment; none for a model without a key."""
         if not self.model._meta.primary_key_attribute:
             return []
-        key_type = FilterValueTypes.get_selected_value_type(
-            self.model._meta.get_lookup_info(PRIMARY_KEY_ATTRIBUTE_NAME)
-        )
+        key_type = FilterValueTypes.get_selected_value_type(self.model._meta.get_lookup_info(PRIMARY_KEY_ALIAS))
         key_text = self.value_type_text.get_text(key_type)
-        name = PRIMARY_KEY_ATTRIBUTE_NAME
+        name = PRIMARY_KEY_ALIAS
         return [
             f"    @{self.imports.add('builtins', 'property')}",
             f"    def {name}(self) -> {key_text}: ...",

@@ -2,19 +2,15 @@
 
 # ClickHouse
 
-The charts and numbers below are published 0.12.0 measurements from 2026-10-30. The current-methodology
-section describes the updated runner; it does not establish that these historical measurements followed
-the new rules. This page does not yet contain 0.13.0 results.
-
 hare-orm against SQLAlchemy and Django on ClickHouse: 12 scenarios on a table of 1,000,000 events,
 sorted by their key, and a concurrent load test. A shorter bar is faster, except in the load test,
 which counts operations per second.
 
 ## <a id="summary"></a>Summary
 
-How many times slower than hare-orm on clickhouse-connect over HTTP (its faster driver in this run)
-each library is, on average: the ratio of geometric means of the times over every scenario both run,
-except the cold start.
+How many times slower than hare-orm on clickhouse-driver over the native TCP protocol (its faster
+driver in this run) each library is, on average: the ratio of geometric means of the times over
+every scenario both run, except the cold start.
 
 ![Times slower than hare-orm, on average](../assets/benchmarks/clickhouse-summary-slower-en-light.svg#gh-light-mode-only)
 ![Times slower than hare-orm, on average](../assets/benchmarks/clickhouse-summary-slower-en-dark.svg#gh-dark-mode-only)
@@ -30,7 +26,7 @@ Operations per second:
 ## <a id="by-scenario"></a>By scenario
 
 Each scenario is drawn on its own scale: compare the bars within one scenario, not across scenarios.
-The fastest time is in bold. A bar is the median of 5 runs, and the thin line over it spans the best
+The fastest time is in bold. A bar is the median of 3 runs, and the thin line over it spans the best
 run to the worst.
 
 ### <a id="reads"></a>Reads
@@ -47,11 +43,16 @@ run to the worst.
 
 | | |
 |---|---|
-| Date | 2026-10-30 |
-| Machine | Windows 11, 13th Gen Intel(R) Core(TM) i5-13400, 16 CPU |
-| Python | 3.14.3 |
-| hare-orm release | 0.12.0 |
-| Runs | 5, median |
+| Date | 2026-11-12 |
+| Machine | Linux 6.6.114.1-microsoft-standard-WSL2, 13th Gen Intel(R) Core(TM) i5-13400, 16 CPU |
+| Python | 3.14.8 |
+| hare-orm release | 0.13.0-dev (working tree; package metadata 0.12.0) |
+| Execution | Linux Docker on Windows 11; WSL process pinned to host P-cores 0-11 |
+| CPU allocation | benchmark:4 vCPUs (8-11); PostgreSQL:4 (0-3); ClickHouse:4 (4-7) |
+| Storage | SQLite:Linux ext4 Docker volume; PostgreSQL and ClickHouse data:tmpfs |
+| PostgreSQL durability | fsync=off; synchronous_commit=off; full_page_writes=off |
+| Source snapshot | release-0.13.0; git 02bf9c1b6180; dirty snapshot 9f1c9fab4760 |
+| Runs | 3, median |
 | ClickHouse | 25.8.33.6 |
 | asynch | 0.2.5 |
 | clickhouse-connect | 1.10.0 |
@@ -61,13 +62,6 @@ run to the worst.
 | django-clickhouse-backend | 2.0 |
 | Rows in the table | 1,000,000 |
 
-In the historical run, an ordinary scenario used the minimum of 3–5 repetitions within each run;
-the chart reports the median of five runs. Individual repetition samples were not retained. Load
-latency was estimated as elapsed time × concurrency / operation count, without timing each operation.
-Destructive scenarios, cold start and load used separate measurement paths.
-
-## <a id="current-methodology"></a>Current runner methodology
-
 - On PostgreSQL every ORM has a pool limit of 50 connections. The driver determines how many
   connections open; cold start is measured before warmup.
 - On PostgreSQL every table gets a `VACUUM (FULL, ANALYZE)`, untimed, before each group of scenarios
@@ -76,10 +70,10 @@ Destructive scenarios, cold start and load used separate measurement paths.
   whether it has come by decides the query plan — with a parallel scan or without.
 - Before a load test, concurrent workers run every operation of the load, untimed. This warms the
   operations without guaranteeing preparation on each physical connection.
-- Most scenarios repeat 3–5 times; their median counts and all samples are retained. Before
-  each bulk insert or `get_or_create()` repetition, that scenario's rows are cleared outside
-  the timer. Sequential inserts accumulate rows until the next group; updates reuse the
-  changed rows. Deletes, many-to-many `add()` and the cold start run once.
+- Most scenarios repeat 3–5 times; their median counts and all samples are retained. Before each
+  bulk insert or `get_or_create()` repetition, that scenario's rows are cleared outside the timer.
+  Sequential inserts accumulate rows until the next group; updates reuse the changed rows. Deletes,
+  many-to-many `add()` and the cold start run once.
 - Each ORM runs in a process of its own. The runs go round after round, the ORMs in a shuffled order
   each round; a scenario's result is the median over the runs.
 - On Windows a run's process turns off its power throttling (EcoQoS): the scheduler otherwise may

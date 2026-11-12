@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import FieldError, QueryError
 from hare.models.uniqueness.declared_uniqueness import DeclaredUniqueness
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.queryset.arguments.collection_arguments import CollectionArguments
 from hare.query.queryset.arguments.values_arguments import ValuesArguments
 from hare.query.queryset.combination.queryset_combination import QuerySetCombination
@@ -68,12 +69,12 @@ class ObjectsByKey:
         """
         model = queryset.model
         meta = model._meta
-        if field_name == "pk":
+        if field_name == PRIMARY_KEY_ALIAS:
             meta.raise_if_no_primary_key("in_bulk() by the primary key")
-            return tuple(meta.primary_key_attribute_names)
+            return meta.primary_key_attribute_names
         if field_name not in meta.fields_map:
             raise FieldError(f"in_bulk(): {model.__name__} has no field {field_name!r}")
-        attribute_names = tuple(DeclaredUniqueness.get_attribute_names(model, (field_name,)))
+        attribute_names = DeclaredUniqueness.get_attribute_names(model, (field_name,))
         is_unique = any(
             uniqueness.attribute_names == attribute_names and uniqueness.condition is None
             for uniqueness in DeclaredUniqueness.get_declared(model)
@@ -97,4 +98,4 @@ class ObjectsByKey:
         distinct_on = tuple(queryset._distinct_on)
         if not distinct_on or not all(name in model._meta.fields_map for name in distinct_on):
             return None
-        return tuple(DeclaredUniqueness.get_attribute_names(model, distinct_on))
+        return DeclaredUniqueness.get_attribute_names(model, distinct_on)

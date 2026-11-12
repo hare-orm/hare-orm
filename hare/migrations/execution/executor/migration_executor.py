@@ -401,14 +401,16 @@ class MigrationExecutor:
         state = await self._project_state(applied)
         risks: list[MigrationRisk] = []
         for step in self.get_migration_plan(None, applied):
+            prepared = step.migration.prepare(state)
+            next_state = prepared.after.clone()
             risks.extend(
                 await checker.check(
                     step.migration,
-                    state,
+                    prepared,
                     client=self.connection,
                 )
             )
-            state = await step.migration.apply(state, dry_run=True, schema_editor=None)
+            state = next_state
         return risks
 
     @staticmethod

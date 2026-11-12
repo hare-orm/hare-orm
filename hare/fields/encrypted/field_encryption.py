@@ -37,8 +37,20 @@ class FieldEncryption:
 
     #: ``cryptography.fernet``, imported by the first ``get_fernet_module()`` rather than with hare.
     fernet_module: ClassVar[ModuleType | None] = None
+    hare_context_class: ClassVar[type[HareContext] | None] = None
     default_keyring: ClassVar[EncryptionKeyring | None] = None
+    default_binding: ClassVar[EncryptionBinding] = EncryptionBinding(None, None)
     binding: ClassVar[ContextVar[EncryptionBinding | None]] = ContextVar("hare_encryption_binding", default=None)
+
+    @classmethod
+    def get_current_context(cls) -> HareContext | None:
+        """The active application context, resolving ``HareContext`` once after module import."""
+        hare_context_class = cls.hare_context_class
+        if hare_context_class is None:
+            from hare.core.hare_context import HareContext
+
+            cls.hare_context_class = hare_context_class = HareContext
+        return hare_context_class.get_current()
 
     @classmethod
     def configure(
@@ -91,25 +103,23 @@ class FieldEncryption:
     @classmethod
     def set_keyring(cls, keyring: EncryptionKeyring | None, context: HareContext | None = None) -> None:
         """Replace the selected application's keys without modifying active conversions."""
-        from hare.core.hare_context import HareContext
-
-        context = context if context is not None else HareContext.get_current()
+        context = context if context is not None else cls.get_current_context()
         if context is None:
             cls.default_keyring = keyring
+            cls.default_binding = EncryptionBinding(None, keyring)
         else:
             context.encryption_keyring = keyring
+            context.encryption_binding = EncryptionBinding(context.identity, keyring)
 
     @classmethod
     def get_binding(cls) -> EncryptionBinding:
         """Capture the active application's keyring, inheriting a containing conversion."""
-        from hare.core.hare_context import HareContext
-
-        context = HareContext.get_current()
+        context = cls.get_current_context()
         application = None if context is None else context.identity
         binding = cls.binding.get()
         if binding is not None and binding.application is application:
             return binding
-        return EncryptionBinding(application, cls.default_keyring if context is None else context.encryption_keyring)
+        return cls.default_binding if context is None else context.encryption_binding
 
     @classmethod
     @contextmanager

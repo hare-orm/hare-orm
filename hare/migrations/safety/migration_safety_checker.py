@@ -12,7 +12,6 @@ if TYPE_CHECKING:
     from hare.dialects.base.migration_safety.migration_safety_rule import MigrationSafetyRule
     from hare.migrations.migration import Migration
     from hare.migrations.safety.migration_risk import MigrationRisk
-    from hare.migrations.state.state import State
 
 
 class MigrationSafetyChecker:
@@ -32,16 +31,20 @@ class MigrationSafetyChecker:
     async def check(
         self,
         migration: Migration,
-        state: State,
+        operation_states: PreparedOperationStates,
         *,
         client: DatabaseClient,
         read_catalog: bool = True,
     ) -> list[MigrationRisk]:
-        """Checks one migration.
+        """Checks one migration against its already prepared operation states.
+
+        The caller prepares the tree with ``migration.prepare(state)``. Checking reads
+        those snapshots without advancing them, so a sequence can retain the prepared
+        final state instead of executing another dry-run preparation.
 
         Args:
             migration: The migration.
-            state: The migration state before it - left as it is.
+            operation_states: The snapshots prepared from this migration and its input state; read-only.
             client: The configured client used to prepare the same schema plans as execution.
             read_catalog: Count table rows using the client. When False, preparation makes
                 no database calls and every existing table may be large.
@@ -51,7 +54,6 @@ class MigrationSafetyChecker:
         """
         dialect = client.dialect
         rules = dialect.migration_safety_rules.rules
-        operation_states = migration.prepare(state)
         table_rows = MigrationTableRows(
             operation_states.before, client, self.large_table_rows, read_catalog=read_catalog
         )

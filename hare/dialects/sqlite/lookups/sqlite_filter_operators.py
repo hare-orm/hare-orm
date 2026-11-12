@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import partial
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.lookups.filter_operators import FilterOperators
 from hare.dialects.sqlite.functions.regex.sqlite_posix_regex import SqlitePosixRegex
@@ -64,7 +64,7 @@ class SqliteFilterOperators(FilterOperators):
         """Bind membership conversion to the selected client's immutable adapter snapshot."""
         if connection is None:
             return super().get_operator(field_lookup, connection)
-        client = cast("SqliteClient", connection)
+        client: SqliteClient = connection  # type: ignore[assignment]
         membership = SqliteLargeInList(client.parameter_adapters, supports_unhex=client.features.supports_unhex)
         operator = field_lookup.operator
         if operator is Lookups.is_in:
@@ -106,6 +106,6 @@ class SqliteFilterOperators(FilterOperators):
             searched_field = None
             if field_lookup is not None:
                 searched_field = field_lookup.searched_field
-            text_search = cast("SqliteTextSearch", self.dialect.text_search)
+            text_search: SqliteTextSearch = self.dialect.text_search  # type: ignore[assignment]
             return partial(text_search.get_search_criterion, searched_field=searched_field)
         return super().get_overridden_operator(operator, field_lookup)

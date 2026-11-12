@@ -138,8 +138,8 @@ class ValuesOutput:
         table = query._effective_basetable()
 
         if field in query._annotations:
-            # A dict of its own: the annotations are the originating queryset's.
-            query._annotations = {**query._annotations, return_as: query._annotations[field]}
+            # The selection build has already detached this mapping from the declaration.
+            query._annotations[return_as] = query._annotations[field]
             return
 
         if field in query.model._meta.fields_db_projection:
@@ -221,10 +221,13 @@ class ValuesOutput:
             query: The values query.
             output_aliases: Each selected field name by its alias.
         """
+        annotations = None
         for alias, field in output_aliases.items():
             field = ValuesOutput.get_concrete_field_path(query, field)
             if field in query._annotations:
-                query._annotations = {**query._annotations, alias: query._annotations[field]}
+                if annotations is None:
+                    annotations = query._annotations = dict(query._annotations)
+                annotations[alias] = annotations[field]
 
     @staticmethod
     def get_output_field_names(query: ValuesQuery) -> Collection[str]:

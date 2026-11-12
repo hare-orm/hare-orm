@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
@@ -19,7 +19,6 @@ from hare.models.enums import ModelOption
 
 if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-    from hare.models import Model
 
 
 class RenameModel(TableRenamingOperation):
@@ -82,9 +81,7 @@ class RenameModel(TableRenamingOperation):
         new_reference = f"{app_label}.{self.new_name}"
         # A label, a model class or a swappable reference alike.
         relates_to_model = (
-            state.get_model_key(field.model_name)
-            if state is not None
-            else StateApps.split_reference(cast("str | type[Model]", field.model_name))
+            state.get_model_key(field.model_name) if state is not None else StateApps.split_reference(field.model_name)  # type: ignore[arg-type]
         ) == old_model_key
         goes_through_model = (
             isinstance(field, ManyToManyFieldInstance)
@@ -92,7 +89,7 @@ class RenameModel(TableRenamingOperation):
             and (
                 state.get_model_key(field.through_model)
                 if state is not None
-                else StateApps.split_reference(cast("str | type[Model]", field.through_model))
+                else StateApps.split_reference(field.through_model)  # type: ignore[arg-type]
             )
             == old_model_key
         )

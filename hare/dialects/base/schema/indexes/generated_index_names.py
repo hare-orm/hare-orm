@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from copy import copy
-from typing import Any, cast
+from typing import Any
 
 from hare.ddl.constraints.unique_constraint import UniqueConstraint
 from hare.ddl.enums import GeneratedNamePrefix
@@ -180,8 +180,8 @@ class GeneratedIndexNames(SchemaEditorPart):
             (
                 SchemaStatement(
                     self.editor.RENAME_INDEX_IF_EXISTS_TEMPLATE.format(
-                        old_name=self.editor.qualify_table_name(cast("str", old_index.name), model._meta.schema),
-                        new_name=self.editor.quote(cast("str", new_index.name)),
+                        old_name=self.editor.qualify_table_name(old_index.name, model._meta.schema),  # type: ignore[arg-type]
+                        new_name=self.editor.quote(new_index.name),  # type: ignore[arg-type]
                     )
                 ),
             )

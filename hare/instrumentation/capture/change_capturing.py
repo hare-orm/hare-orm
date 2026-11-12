@@ -10,6 +10,9 @@ from hare.instrumentation.capture.capture_needs import CaptureNeeds
 from hare.instrumentation.capture.captured_change import CapturedChange
 from hare.instrumentation.enums import ChangePayload, RowOperation
 from hare.query.hare_column_names import HareColumnNames
+from hare.query.key_columns import KeyColumns
+from hare.query.rows.row_column import RowColumn
+from hare.query.rows.row_layout import RowLayout
 from hare.sql.terms.values.old_row_value import OldRowValue
 from hare.time import Timezone
 
@@ -238,11 +241,8 @@ class ChangeCapturing:
         """
         meta = model._meta
         values = pk if meta.has_composite_primary_key else (pk,)
-        stored = tuple(
-            types.get_python_value(field, types.get_db_value(field, value, model))
-            for name, value in zip(meta.primary_key_attribute_names, values, strict=True)
-            for field in (meta.fields_map[name],)
-        )
+        fields = tuple(meta.fields_map[name] for name in meta.primary_key_attribute_names)
+        stored = KeyColumns.normalize_values(fields, values, types, model)
         return stored if meta.has_composite_primary_key else stored[0]
 
     @staticmethod
@@ -275,7 +275,13 @@ class ChangeCapturing:
 
     @staticmethod
     def get_row_values(
-        model: type[Model], needs: CaptureNeeds, types: TypeRegistry, row: Mapping[str, Any], *, old: bool = False
+        model: type[Model],
+        needs: CaptureNeeds,
+        types: TypeRegistry,
+        row: Mapping[str, Any],
+        *,
+        old: bool = False,
+        layout: RowLayout | None = None,
     ) -> dict[str, Any]:
         """The captured fields of a row a write returned.
 
@@ -289,20 +295,17 @@ class ChangeCapturing:
         Returns:
             The values by field name.
         """
-        meta = model._meta
-        projection = meta.fields_db_projection
-        fields_map = meta.fields_map
-        if old:
-            old_value_names = HareColumnNames.get_old_value_names(model)
-            return {
-                name: types.get_python_value(fields_map[name], row[old_value_names[projection[name]]])
-                for name in needs.field_names
-            }
-        return {name: types.get_python_value(fields_map[name], row[projection[name]]) for name in needs.field_names}
+        layout = ChangeCapturing.get_row_layout(model, needs.field_names, types, old=old) if layout is None else layout
+        return dict(zip(needs.field_names, layout.read(row), strict=True))
 
     @staticmethod
     def get_row_key(
-        model: type[Model], needs: CaptureNeeds, types: TypeRegistry, row: Mapping[str, Any]
+        model: type[Model],
+        needs: CaptureNeeds,
+        types: TypeRegistry,
+        row: Mapping[str, Any],
+        *,
+        layout: RowLayout | None = None,
     ) -> tuple[Any, Any]:
         """The primary key and the tenant of a row a write returned.
 
@@ -315,19 +318,37 @@ class ChangeCapturing:
         Returns:
             The key - a tuple for a composite one - and the tenant, None without tenants.
         """
-        meta = model._meta
-        projection = meta.fields_db_projection
-        fields_map = meta.fields_map
-        key_values = [
-            types.get_python_value(fields_map[name], row[projection[name]])
-            for name in meta.primary_key_attribute_names
-        ]
-        tenant = (
-            types.get_python_value(fields_map[needs.tenant_field_name], row[projection[needs.tenant_field_name]])
-            if needs.tenant_field_name
-            else None
+        names = (
+            *model._meta.primary_key_attribute_names,
+            *((needs.tenant_field_name,) if needs.tenant_field_name else ()),
         )
-        return key_values[0] if len(key_values) == 1 else tuple(key_values), tenant
+        layout = ChangeCapturing.get_row_layout(model, names, types) if layout is None else layout
+        values = layout.read(row)
+        key_values = values[:-1] if needs.tenant_field_name else values
+        return key_values[0] if len(key_values) == 1 else key_values, values[-1] if needs.tenant_field_name else None
+
+    @staticmethod
+    def get_row_layout(
+        model: type[Model],
+        names: Sequence[str],
+        types: TypeRegistry,
+        *,
+        old: bool = False,
+    ) -> RowLayout:
+        """Prepare a capture projection once, preserving column order and NULL conversion."""
+        meta = model._meta
+        old_names = HareColumnNames.get_old_value_names(model) if old else None
+        return RowLayout(
+            tuple(
+                RowColumn(
+                    old_names[meta.fields_db_projection[name]]
+                    if old_names is not None
+                    else meta.fields_db_projection[name],
+                    types.get_python_reader(meta.fields_map[name]),
+                )
+                for name in names
+            )
+        )
 
     @staticmethod
     def build_change(
@@ -411,20 +432,35 @@ class ChangeCapturing:
         """
         changed_names = None if changed is None else tuple(changed)
         occurred_at = occurred_at or Timezone.now()
+        key_names = (
+            *model._meta.primary_key_attribute_names,
+            *((needs.tenant_field_name,) if needs.tenant_field_name else ()),
+        )
+        key_layout = ChangeCapturing.get_row_layout(model, key_names, types)
+        values_layout = ChangeCapturing.get_row_layout(model, needs.field_names, types) if needs.reads_values else None
+        old_layout = (
+            ChangeCapturing.get_row_layout(model, needs.field_names, types, old=True)
+            if returns_old and operation is not RowOperation.DELETE
+            else None
+        )
         changes: list[CapturedChange] = []
         for raw_row in raw_rows:
             # A driver's row may have no .get() - read as a dict.
             row = dict(raw_row)
-            pk, tenant = ChangeCapturing.get_row_key(model, needs, types, row)
+            pk, tenant = ChangeCapturing.get_row_key(model, needs, types, row, layout=key_layout)
             before: Mapping[str, Any] | None
             after: Mapping[str, Any] | None
-            values = ChangeCapturing.get_row_values(model, needs, types, row) if needs.reads_values else None
+            values = (
+                ChangeCapturing.get_row_values(model, needs, types, row, layout=values_layout)
+                if needs.reads_values
+                else None
+            )
             if operation is RowOperation.DELETE:
                 before, after = values, None
             else:
                 after = values
                 if returns_old:
-                    before = ChangeCapturing.get_row_values(model, needs, types, row, old=True)
+                    before = ChangeCapturing.get_row_values(model, needs, types, row, old=True, layout=old_layout)
                 elif before_by_pk is not None:
                     before = before_by_pk.get(pk)
                 else:

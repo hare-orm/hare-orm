@@ -8,7 +8,7 @@ authors = [
 ]
 license = "MIT"
 keywords = ["orm", "async", "asyncio", "database", "sql", "postgresql", "sqlite", "clickhouse", "asyncpg", "aiosqlite", "migrations", "pydantic", "rust"]
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.16"
 dependencies = [
     # iso8601 stays a base dependency too - hare.fields.data.temporal's own try/except ImportError
     # falls back to it wherever ciso8601 isn't installed (Windows, where it has no wheel).
@@ -21,10 +21,9 @@ dependencies = [
     # The oldest versions with a wheel for each Python.
     "ciso8601 (>=2.3.2); sys_platform != 'win32' and implementation_name == 'cpython' and python_version < '3.13'",
     "ciso8601 (>=2.3.3); sys_platform != 'win32' and implementation_name == 'cpython' and python_version >= '3.13'",
-    # orjson (itself Rust-backed) is JSONField's faster json.dumps/loads replacement whenever
-    # installed (hare.fields.data.json's own try/except ImportError) - no platform restriction,
-    # unlike ciso8601 above. orjson 3.10 and 3.11 take a list or dict nested 255 deep, past the
-    # 254 JSONField keeps without the native module.
+    # orjson (itself Rust-backed) encodes and decodes JSONField values - required, no platform
+    # restriction, unlike ciso8601 above. orjson 3.10 and 3.11 take a list or dict nested 255 deep,
+    # past the 254 JSONField keeps.
     "orjson (>=3.12.0)",
     "aiosqlite (>=0.22.0,<1.0.0)",
     "anyio (>=4.0.0)",
@@ -46,13 +45,14 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Rust",
     "Framework :: AsyncIO",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Database",
     "Typing :: Typed",
-    "Operating System :: POSIX",
+    "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS :: MacOS X",
     "Operating System :: Microsoft :: Windows",
 ]
@@ -61,14 +61,18 @@ classifiers = [
 ipython = [
     "ipython>=8.18.0",
 ]
-# asyncpg 0.31.0 is the first with Python 3.14.
+# asyncpg 0.31 supports Python 3.14; Python 3.15 needs 0.32.
 asyncpg = [
     "asyncpg (>=0.30.0) ; python_version < '3.14'",
-    "asyncpg (>=0.31.0) ; python_version >= '3.14'",
+    "asyncpg (>=0.31.0) ; python_version == '3.14'",
+    "asyncpg (>=0.32.0) ; python_version >= '3.15'",
 ]
 # hare.dialects.clickhouse - ClickHouse through clickhouse-connect's asyncio HTTP client.
 # The per-client Transform adapter is checked against the 1.10 Native codec boundary.
-clickhouse-connect = ["clickhouse-connect[async] (>=1.10.0) ; python_version < '3.15'"]
+clickhouse-connect = [
+    "clickhouse-connect[async] (>=1.10.0) ; python_version < '3.15'",
+    "clickhouse-connect[async] (>=1.12.0) ; python_version >= '3.15'",
+]
 # hare.dialects.clickhouse - ClickHouse through clickhouse-driver, over the native TCP protocol;
 # lz4 and clickhouse-cityhash compress its blocks (the connection setting `compress`). clickhouse-driver
 # 0.2.11 is the first with the Dynamic column type.
@@ -98,31 +102,36 @@ sqlite-vec = ["sqlite-vec (>=0.1.6)"]
 # (pydantic 2.10.0 leaves hare's pydantic models not fully defined, 2.12 is the first with Python 3.14).
 pydantic = [
     "pydantic (>=2.10.1) ; python_version < '3.14'",
-    "pydantic (>=2.12) ; python_version >= '3.14'",
+    "pydantic (>=2.12) ; python_version == '3.14'",
+    "pydantic (>=2.14) ; python_version >= '3.15'",
 ]
 # hare.contrib.request_query - a query built from the parameters of a request (pydantic 2.10.0 leaves
 # hare's pydantic models not fully defined, 2.12 is the first with Python 3.14).
 request-query = [
     "pydantic (>=2.10.1) ; python_version < '3.14'",
-    "pydantic (>=2.12) ; python_version >= '3.14'",
+    "pydantic (>=2.12) ; python_version == '3.14'",
+    "pydantic (>=2.14) ; python_version >= '3.15'",
 ]
 # hare.contrib.frameworks.litestar - Hare in a Litestar app, request queries as its dependencies.
 litestar = [
     "litestar (>=2.23,<3.0); python_version < '4.0'",
     "pydantic (>=2.10.1) ; python_version < '3.14'",
-    "pydantic (>=2.12) ; python_version >= '3.14'",
+    "pydantic (>=2.12) ; python_version == '3.14'",
+    "pydantic (>=2.14) ; python_version >= '3.15'",
 ]
 # hare.contrib.frameworks.fastapi - Hare in a FastAPI app, request queries as its dependencies.
 fastapi = [
     "fastapi (>=0.135); python_version < '4.0'",
     "pydantic (>=2.10.1) ; python_version < '3.14'",
-    "pydantic (>=2.12) ; python_version >= '3.14'",
+    "pydantic (>=2.12) ; python_version == '3.14'",
+    "pydantic (>=2.14) ; python_version >= '3.15'",
 ]
 # hare.contrib.frameworks.robyn - Hare in a Robyn app, request queries for its handlers.
 robyn = [
     "robyn (>=0.88,<0.89); python_version < '4.0'",
     "pydantic (>=2.10.1) ; python_version < '3.14'",
-    "pydantic (>=2.12) ; python_version >= '3.14'",
+    "pydantic (>=2.12) ; python_version == '3.14'",
+    "pydantic (>=2.14) ; python_version >= '3.15'",
 ]
 # hare.contrib.taskiq - Hare in taskiq workers, tasks sent after commit through the outbox.
 taskiq = ["taskiq (>=0.12.2); python_version < '4.0'"]
@@ -130,7 +139,11 @@ taskiq = ["taskiq (>=0.12.2); python_version < '4.0'"]
 redis = ["redis (>=5.0)"]
 # hare.contrib.outbox - KafkaWakeup and KafkaDelivery.
 # The oldest aiokafka versions with a wheel for each Python.
-kafka = ["aiokafka (>=0.12) ; python_version < '3.14'", "aiokafka (>=0.13) ; python_version >= '3.14'"]
+kafka = [
+    "aiokafka (>=0.12) ; python_version < '3.14'",
+    "aiokafka (>=0.13) ; python_version == '3.14'",
+    "aiokafka (>=0.15) ; python_version >= '3.15'",
+]
 # hare.contrib.outbox - RabbitMQWakeup and RabbitMQDelivery.
 rabbitmq = ["aio-pika (>=9.4); python_version < '4.0'"]
 # hare.contrib.outbox - WebhookDelivery.
@@ -167,9 +180,9 @@ packages = [
     {include = "hare"}
 ]
 # The compiled rust.native extension (the rust_pg driver, the row readers/writers and the field
-# codecs) goes into the wheel only. A release builds one wheel per platform with that platform's
-# extension in rust/ (.github/scripts/build_wheel.py, the release workflow), plus a pure wheel and an
-# sdist with none. `rust` has no `__init__.py` (a PEP 420 namespace package): a flat
+# codecs) goes into the wheel only - hare needs it, so a release publishes wheels alone: one per
+# platform and Python with that platform's extension in rust/ (.github/scripts/build_wheel.py, the
+# release workflow). `rust` has no `__init__.py` (a PEP 420 namespace package): a flat
 # `rust/native*.so`/`rust/native*.pyd` next to the `rust/native/` crate source is what `import
 # rust.native` resolves to, in a checkout (the repository root on sys.path) and in an installed wheel
 # alike. The explicit {path, format} form is what carries a file into the wheel; a bare string reaches
@@ -187,7 +200,7 @@ mypy = "*"
 bandit = "*"
 codespell = "*"
 twine = "*"
-# Builds rust.native (make build_native, build_native_windows, build_native_macos).
+# Builds rust.native (make build_native, build_native_linux).
 maturin = "*"
 types-PyYAML = "*"
 types-pytz = "*"
@@ -209,7 +222,6 @@ pytest-randomly = "^5.0.0"
 pytest-repeat = "^0.9.4"
 pytest-cov = "^7.1.0"
 pygments = "*"
-pywin32 = {version = "312", markers = "sys_platform == 'win32'"}
 
 # The tests of `hare stubs` type-check queries through the stubs with it (the "stubs" environment).
 [tool.poetry.group.pyright-cli]
@@ -300,7 +312,7 @@ markers = [
     "database_independent: The test reads no test database - a suite of its own (make test_database_independent), left out of the suite of every database",
     "sqlite_only: The test opens only SQLite databases of its own, whatever HARE_TEST_DB is - left out of the suite of every other database",
     "timing: The test's outcome depends on time (a timeout, a lease, a delay running out) - left out unless --run-timing",
-    "requires: The test requires extras or poetry groups besides its module's REQUIRES - it runs in the environment of tests/matrix/constants.py SUITE_ENVIRONMENTS installing exactly them; native - hare's rust.native extension, missing in the pure environment",
+    "requires: The test requires extras or poetry groups besides its module's REQUIRES - it runs in the environment of tests/matrix/constants.py SUITE_ENVIRONMENTS installing exactly them",
     "postgresql_models: The test reads a model of tests.shared_models.testmodels_postgres - left out of the suite of every other database",
     "decimal_fields: The test reads or writes exact decimals (a DecimalField, a Decimal value) - left out of the suite of a database storing none (SQLite)",
     "plan_verification_after_test: --verify-plans compares the runs on a plan after the test's body - for tests counting the builds or calls a run on a plan makes",
@@ -316,8 +328,12 @@ line-length = 119
 
 [tool.ruff.lint]
 # W605: an invalid escape sequence in a string - a SyntaxWarning on Python 3.14, an error later.
-select = ["E", "F", "I", "W605"]
+select = ["E", "F", "I", "TID251", "W605"]
 ignore = ["D"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"typing.cast".msg = "Use annotations or a targeted type-ignore comment instead of a runtime typing cast."
+"typing_extensions.cast".msg = "Use annotations or a targeted type-ignore comment instead of a runtime typing cast."
 
 [tool.ruff.lint.per-file-ignores]
 # These compare generated output against a large triple-quoted expected-content string - some

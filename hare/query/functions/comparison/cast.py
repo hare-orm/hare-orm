@@ -21,7 +21,7 @@ from hare.query.plans.enums import PlanPartType
 from hare.sql.enums import CastType
 from hare.sql.functions.cast_to import CastTo
 from hare.sql.terms.term import Term
-from hare.time import Timezone
+from hare.time.zone_settings import ZoneSettings
 
 
 class Cast(Function):
@@ -102,7 +102,7 @@ class Cast(Function):
                 # their names would convert the name.
                 cast_term.args[0] = expression_context.dialect.renderers.get_enum_number_term(cast_term.args[0])
             cast_term.source = FunctionArguments.get_cast_type(result.output_field)
-            cast_term.is_aware = Timezone.get_use_timezone()
+            cast_term.is_aware = ZoneSettings.get_use_timezone()
         return ExpressionResult(term=cast_term, joins=result.joins, output_field=self.cast_output_field)
 
     def get_value_field(self, result: ExpressionResult) -> Field[Any] | None:

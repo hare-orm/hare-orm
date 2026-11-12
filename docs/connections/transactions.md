@@ -1,5 +1,12 @@
 # Transactions
 
+The native PostgreSQL client defers `BEGIN` until its first operation. Enclosing
+savepoints are created through the shared cancellation-protected control path before
+that scope's first statement. Control and statement responses are drained before returning.
+A transaction with no statements needs no
+`BEGIN` or ending command. Persistence undo retains complete snapshots; field entries
+are combined only on rollback, keeping the first captured value in each savepoint scope.
+
 `Transactions` (`from hare import Transactions`) runs code in a database transaction: `atomic()` as a
 block or a decorator, running a transaction again after a conflict, `autonomous()` for a transaction of
 its own beside the current one, and callbacks after a commit or a rollback.
@@ -86,10 +93,12 @@ async with Transactions.atomic():
         await Review.objects.create(book=book, rating=5)   # rolling back just this level leaves the outer work intact
 ```
 
-A level's `SAVEPOINT` goes to the database with the first statement run in it — every
+A level's `SAVEPOINT` goes to the database before the first statement run in it — every
 enclosing level's first, outermost to innermost — and a level that runs no statement sends nothing:
 neither the `SAVEPOINT` nor its `RELEASE`/`ROLLBACK TO`. Its `on_commit()`/`on_rollback()` callbacks
-behave the same either way.
+behave the same either way. Cancellation waits for an in-flight `SAVEPOINT` to finish
+before rolling back that level, keeping its parent transaction usable. Savepoints are
+sent separately, in nesting order; several pending levels are not combined into one command.
 
 Spawning several **sibling** nested transactions concurrently off the same still-open parent — the
 natural shape of doing per-item work inside a transaction via `asyncio.gather()` — is also safe:

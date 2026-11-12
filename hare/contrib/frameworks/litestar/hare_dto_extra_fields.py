@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 import typing
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.contrib.frameworks.litestar.constants import DTO_PATH_SEPARATOR, TO_MANY_RELATION_TYPES
 from hare.contrib.frameworks.litestar.declarations import DTOExtraField
@@ -12,7 +12,6 @@ from hare.core.caching.cache_bucket import CacheBucket
 from hare.exceptions import ConfigurationError, NoValuesFetched
 
 if TYPE_CHECKING:
-    from hare.fields.relations.fields.relational_field import RelationalField
     from hare.models import Model
 
 
@@ -206,8 +205,8 @@ class HareDTOExtraFields:
             The reader.
         """
         row_attribute = inspect.getattr_static(row_class, name)
-        row_function = cast(
-            "Callable[[object], Any]", row_attribute.fget if isinstance(row_attribute, property) else row_attribute
+        row_function: Callable[[object], Any] = (
+            row_attribute.fget if isinstance(row_attribute, property) else row_attribute  # type: ignore[assignment]
         )
 
         def read(row: object) -> Any:
@@ -243,7 +242,7 @@ class HareDTOExtraFields:
                     f"HareDTO of {owner.__name__}, related_values: {name!r} - {relation_name!r} is no relation of "
                     f"{related_model.__name__} to one row"
                 )
-            related_model = cast("RelationalField[Any]", field).related_model
+            related_model = field.related_model  # type: ignore[attr-defined]
         value_field = related_model._meta.fields_map.get(field_name)
         if not relation_names or value_field is None or value_field.relation_type is not None:
             raise ConfigurationError(

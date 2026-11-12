@@ -466,7 +466,7 @@ are public and read-only — set them through `Meta` options, never by assigning
 | `primary_key_attribute` | The primary key field's name; a tuple of names for a `CompositePrimaryKey`; `()` for a model with `Meta.primary_key = None`. |
 | `primary_key_attribute_names` | `primary_key_attribute` as a tuple in every case — `("id",)`, `("id", "version")`, `()`. |
 | `pk` | The primary key field; `None` for a composite key or no key. |
-| `pk_fields` | The fields of a composite primary key, in order; `()` otherwise. |
+| `pk_fields` | The key conversion fields in order: `(pk,)` for a scalar key, all component fields for a composite key, or `()` without a primary key. |
 | `has_primary_key` / `has_composite_primary_key` | Whether the model has a primary key / a composite one. |
 | `fields_map` | `{name: Field}` of every field: data fields, relations (forward, backward, M2M) and the key columns of forward relations (`author_id`). |
 | `fields` | The names in `fields_map`. |

@@ -106,10 +106,11 @@ class ClickhouseColumnBackfill(ColumnBackfill):
                     changes=editor.ALTER_FIELD_DROP_DEFAULT_TEMPLATE.format(column=column),
                 )
             )
+        recovery = editor.get_schema_recovery(model)
         return SchemaChangePlan(
             (
                 mask_step,
-                *(SchemaStatement(sql, recovery=editor.get_schema_recovery(model)) for sql in statements),
+                *(SchemaStatement(sql, recovery=recovery) for sql in statements),
             )
         )
 

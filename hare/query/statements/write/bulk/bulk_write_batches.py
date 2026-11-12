@@ -10,8 +10,10 @@ from hare.core.caching.cache import Cache
 from hare.exceptions import (
     QueryError,
 )
+from hare.native.native_modules import NativeModules
 from hare.query.plans.statement.statement_plans import StatementPlans
 from hare.sql.terms.parameters.query_parameters import QueryParameters
+from hare.time.zone_settings import ZoneSettings
 
 if TYPE_CHECKING:
     from hare.dialects.base.types.type_registry import TypeRegistry
@@ -23,7 +25,7 @@ TModel = TypeVar("TModel", bound="Model")
 class BulkWriteBatches:
     """How bulk writes split their objects into statements and serialize them."""
 
-    SERIALIZE_INSTANCES_CACHE: ClassVar[Cache[Callable[[Any], list[Any]]]] = Cache(
+    SERIALIZE_INSTANCES_CACHE: ClassVar[Cache[tuple[tuple[str, Callable[..., Any]], ...]]] = Cache(
         holds_sql=False,
     )
 
@@ -67,9 +69,9 @@ class BulkWriteBatches:
         """
         key = (placeholder_templates, first_index, row_count)
         values_rows_sql = StatementPlans.values_rows_sql
-        sql = values_rows_sql.get_model_bucket(model).get(key)
+        sql = values_rows_sql.get_bucket(model).get(key)
         if sql is None:
-            sql = values_rows_sql.get_model_bucket(model)[key] = BulkWriteBatches.build_values_rows_sql(*key)
+            sql = values_rows_sql.get_bucket(model)[key] = BulkWriteBatches.build_values_rows_sql(*key)
         return sql
 
     @staticmethod
@@ -124,28 +126,26 @@ class BulkWriteBatches:
         return min(requested, max_rows) if requested is not None else max_rows
 
     @staticmethod
-    def get_instance_serializer(
+    def get_instance_writers(
         model: type[Model],
         columns: tuple[str, ...],
         types: TypeRegistry,
-    ) -> Callable[[Any], list[Any]]:
-        """Bind Python field writers to a column layout without source generation."""
-        bucket = BulkWriteBatches.SERIALIZE_INSTANCES_CACHE.get_model_bucket(model)
-        key = (columns, types)
-        serializer = bucket.get(key)
-        if serializer is None:
+    ) -> tuple[tuple[str, Callable[..., Any]], ...]:
+        """The writers of a column layout (``TypeRegistry.get_db_writer()``) - a datetime's and a time's depend
+        on ``use_timezone``."""
+        bucket = BulkWriteBatches.SERIALIZE_INSTANCES_CACHE.get_bucket(model)
+        key = (columns, types, ZoneSettings.get_use_timezone())
+        writers = bucket.get(key)
+        if writers is None:
             writers = tuple((name, types.get_db_writer(model._meta.fields_map[name])) for name in columns)
-
-            def serialize(obj: Any) -> list[Any]:
-                return [writer(getattr(obj, name), obj) for name, writer in writers]
-
-            serializer = bucket.store(key, serialize)
-        return serializer
+            bucket.store(key, writers)
+        return writers
 
     @staticmethod
     def serialize_instance(model: type[TModel], types: TypeRegistry, obj: TModel, columns: Sequence[str]) -> list[Any]:
         """Convert one object's values through its Python field writers."""
-        return BulkWriteBatches.get_instance_serializer(model, tuple(columns), types)(obj)
+        writers = BulkWriteBatches.get_instance_writers(model, tuple(columns), types)
+        return [writer(getattr(obj, name), obj) for name, writer in writers]
 
     @staticmethod
     def get_sensitive_positions(model: type[Model], field_names: Sequence[str]) -> list[int]:
@@ -187,5 +187,5 @@ class BulkWriteBatches:
         columns: list[str],
     ) -> list[list[Any]]:
         """Convert every row through the same field writers as a single-object write."""
-        serialize = BulkWriteBatches.get_instance_serializer(model, tuple(columns), types)
-        return [serialize(obj) for obj in objs]
+        writers = BulkWriteBatches.get_instance_writers(model, tuple(columns), types)
+        return NativeModules.rows.serialize_instances(objs, writers)

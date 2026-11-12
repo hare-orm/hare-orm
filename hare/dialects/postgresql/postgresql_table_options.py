@@ -51,7 +51,7 @@ class PostgresqlTableOptions(TableOptions):
         for name, value in self.storage_parameters.items():
             if not isinstance(name, str) or not POSTGRESQL_STORAGE_PARAMETER_NAME_PATTERN.fullmatch(name):
                 raise ConfigurationError(f"PostgresqlTableOptions: invalid storage parameter name {name!r}")
-            if not isinstance(value, bool | int | float | str):
+            if not isinstance(value, (bool, int, float, str)):
                 raise ConfigurationError(
                     f"PostgresqlTableOptions: storage parameter {name!r} must be a number, a boolean or a "
                     f"string, got {value!r}"

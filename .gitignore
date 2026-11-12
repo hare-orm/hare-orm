@@ -132,7 +132,7 @@ site/
 
 # SQLite versions prepared by tests/sqlite_versions/download_sqlite_versions.py
 /tests/sqlite_versions/*/
-# SpatiaLite downloaded by tests/spatialite/download_spatialite.py
+# SpatiaLite builds and archives downloaded for the SpatiaLite tests
 /tests/spatialite/mod_spatialite-*/
 /tests/spatialite/artifacts/
 /tests/spatialite/sources/

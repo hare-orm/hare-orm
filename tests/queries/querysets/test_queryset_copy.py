@@ -106,3 +106,80 @@ def test_standard_queryset_copy_omits_execution_origin_and_keeps_prefetch_sets_i
     assert target.model is Tournament
     assert not hasattr(target, "_annotation_descriptions")
     assert not hasattr(target, "_plan_origin")
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("copy_method", ["copy", "keeping_calls", "base_declaration"])
+def test_manager_base_identity_does_not_follow_a_copy(copy_method):
+    from hare.query.managers.manager import Manager
+    from hare.query.queryset import QuerySet
+    from hare.query.queryset.query_specification import QuerySpecification
+
+    manager = Manager()
+    manager._model = Tournament
+    source = manager._get_unchanged_queryset()
+    if copy_method == "copy":
+        branch = copy(source)
+    elif copy_method == "keeping_calls":
+        branch = source._clone_keeping_calls()
+    else:
+        branch = QuerySet.__new__(QuerySet)
+        SpecificationCopying.copy_state(source, branch, QuerySpecification)
+
+    assert source._unchanged_base_manager is manager
+    assert branch._unchanged_base_manager is None
+    assert branch._uses_default_scope is source._uses_default_scope
+    branch._annotations["branch"] = object()
+    assert source._annotations == {}
+
+
+@pytest.mark.asyncio
+async def test_get_keeps_a_custom_manager_filter_and_queryset_state(db):
+    from hare.exceptions import DoesNotExist
+    from hare.query.managers.manager import Manager
+    from hare.query.queryset import QuerySet
+
+    class TaggedQuerySet(QuerySet):
+        __slots__ = ("tag",)
+
+        def __init__(self, model):
+            super().__init__(model)
+            self.tag = "from manager"
+
+    class FilteredManager(Manager):
+        def get_queryset(self):
+            return super().get_queryset().filter(name="visible")
+
+    visible = await Tournament.objects.create(name="visible")
+    hidden = await Tournament.objects.create(name="hidden")
+    manager = FilteredManager(TaggedQuerySet)
+    manager._model = Tournament
+    base = manager._get_unchanged_queryset()
+    branch = base._get_single_queryset(
+        (),
+        {"id": visible.id},
+        does_not_exist_exception=None,
+        multiple_objects_returned_exception=None,
+    )
+    assert isinstance(branch, TaggedQuerySet)
+    assert branch.tag == "from manager"
+    assert await base.get(id=visible.id) == visible
+    with pytest.raises(DoesNotExist):
+        await base.get(id=hidden.id)
+
+
+@pytest.mark.database_independent
+def test_copy_metadata_handle_survives_cache_invalidation():
+    from hare.query.queryset import QuerySet
+
+    class TaggedQuerySet(QuerySet):
+        __slots__ = ("tag",)
+
+    bucket = TaggedQuerySet.copy_plan_bucket
+    before = SpecificationCopying.get_slot_copy_plan(TaggedQuerySet)
+    assert "tag" in before[0]
+    assert bucket is not QuerySet.copy_plan_bucket
+    SpecificationCopying.slot_copy_plans.clear()
+    assert TaggedQuerySet.copy_plan_bucket is bucket
+    assert bucket.get(None) is None
+    assert SpecificationCopying.get_slot_copy_plan(TaggedQuerySet) == before

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import subprocess
 import sys
 from pathlib import Path
 
@@ -31,19 +30,10 @@ class NativeInterpreters:
 
     @classmethod
     def main(cls) -> None:
-        parser = argparse.ArgumentParser(description="Find supported native-build interpreters on PATH.")
-        parser.add_argument("--check-imports", action="store_true")
-        arguments = parser.parse_args()
-        paths = cls.get_paths()
-        if arguments.check_imports:
-            for path in paths:
-                subprocess.run(
-                    [str(path), "-c", "from rust.native import pg, rows; print(pg.__version__)"], check=True
-                )
-        else:
-            # Shell command substitution must not retain a Windows carriage return in the last path.
-            sys.stdout.reconfigure(newline="\n")
-            print(" ".join(path.as_posix() for path in paths))
+        argparse.ArgumentParser(description="Find supported native-build interpreters on PATH.").parse_args()
+        # Shell command substitution must not retain a Windows carriage return in the last path.
+        sys.stdout.reconfigure(newline="\n")
+        print(" ".join(path.as_posix() for path in cls.get_paths()))
 
 
 if __name__ == "__main__":

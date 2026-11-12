@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Iterable, Sequence
 from contextlib import asynccontextmanager
 from copy import copy
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar
 
 from hare.ddl.conditions.constraint_condition import ConstraintCondition
 from hare.ddl.constraints.check_constraint import CheckConstraint
@@ -910,19 +910,17 @@ class BaseSchemaEditor:
         if old_relation != new_relation:
             return self.get_relation_conversion_plan(old_model, new_model, field_name)
         if isinstance(old_field, ManyToManyFieldInstance):
-            return self.many_to_many_through_tables.get_many_to_many_change_plan(
-                new_model, old_field, cast("ManyToManyFieldInstance[Model]", new_field)
-            )
+            return self.many_to_many_through_tables.get_many_to_many_change_plan(new_model, old_field, new_field)  # type: ignore[arg-type]
         if isinstance(old_field, ForeignKeyFieldInstance):
-            new_field = cast("ForeignKeyFieldInstance[Model]", new_field)
+            new_field = new_field
             old_names = (
                 old_field.source_fields
                 if len(old_field.source_fields) > 1
                 else (old_field.source_field or field_name,)
             )
             new_names = (
-                new_field.source_fields
-                if len(new_field.source_fields) > 1
+                new_field.source_fields  # type: ignore[attr-defined]
+                if len(new_field.source_fields) > 1  # type: ignore[attr-defined]
                 else (new_field.source_field or field_name,)
             )
             pairs = [
@@ -930,18 +928,18 @@ class BaseSchemaEditor:
                 for old, new in zip(old_names, new_names, strict=True)
             ]
             keys = self.foreign_key_rebuild
-            target_changed = keys.get_relation_target_columns(old_field) != keys.get_relation_target_columns(new_field)
+            target_changed = keys.get_relation_target_columns(old_field) != keys.get_relation_target_columns(new_field)  # type: ignore[arg-type]
             type_changed = any(
                 old.get_column_type(self.client.dialect) != new.get_column_type(self.client.dialect)
                 for old, new in pairs
             )
             steps: list[SchemaStep] = []
             if target_changed:
-                steps.extend(keys.get_relation_target_check_plan(old_model, old_field, new_field).steps)
+                steps.extend(keys.get_relation_target_check_plan(old_model, old_field, new_field).steps)  # type: ignore[arg-type]
             if target_changed or type_changed:
                 steps.extend(keys.get_relation_foreign_key_drop_plan(old_model, old_field).steps)
             elif keys.foreign_key_changed(old_field, new_field):
-                steps.extend(keys.get_foreign_key_change_plan(new_model, old_field, new_field).steps)
+                steps.extend(keys.get_foreign_key_change_plan(new_model, old_field, new_field).steps)  # type: ignore[arg-type]
             index_drop = keys.get_composite_index_drop_plan(new_model, old_field, pairs)
             steps.extend(index_drop.steps)
             for old_key, new_key in pairs:
@@ -950,7 +948,10 @@ class BaseSchemaEditor:
                 steps.extend(keys.get_relation_foreign_key_restore_plan(new_model, new_field).steps)
             steps.extend(
                 keys.get_composite_index_change_plan(
-                    new_model, old_field, new_field, index_dropped=bool(index_drop.steps)
+                    new_model,
+                    old_field,
+                    new_field,  # type: ignore[arg-type]
+                    index_dropped=bool(index_drop.steps),
                 ).steps
             )
             return SchemaChangePlan(tuple(steps))
@@ -1255,7 +1256,7 @@ class BaseSchemaEditor:
             if type(new_constraint) is not type(old_constraint):
                 raise TypeError(f"Cannot rename {type(old_constraint).__name__} to {type(new_constraint).__name__}")
             old_name = old_constraint.name
-            new_name = cast("CheckConstraint | ExclusionConstraint", new_constraint).name
+            new_name = new_constraint.name
         else:
             if not isinstance(new_constraint, UniqueConstraint):
                 raise TypeError(f"Cannot rename UniqueConstraint to {type(new_constraint).__name__}")
@@ -1270,7 +1271,7 @@ class BaseSchemaEditor:
                         self.RENAME_CONSTRAINT_TEMPLATE.format(
                             table=self.get_storage_table_sql(model),
                             old_name=self.quote(old_name),
-                            new_name=self.quote(new_name),
+                            new_name=self.quote(new_name),  # type: ignore[arg-type]
                         )
                     ),
                 )

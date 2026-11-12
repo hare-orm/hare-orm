@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable, Generator, Mapping
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 
 from litestar.dto import DTOField, Mark
 from litestar.dto._backend import DTOBackend
@@ -176,7 +176,7 @@ class HareDTO(AbstractDTO[ModelType], Generic[ModelType]):
             relation; None for a field the query didn't select (``fields=...``), not its default;
             a declared extra field's value.
         """
-        extra_field = cast("HareDTOExtraFields", cls.declared_extra_fields).find(row, name)
+        extra_field = cls.declared_extra_fields.find(row, name)  # type: ignore[union-attr]
         if extra_field is not None:
             return extra_field.read(row)
         return HareDTO.read_attribute(row, name)
@@ -204,7 +204,7 @@ class HareDTO(AbstractDTO[ModelType], Generic[ModelType]):
             except NoValuesFetched:
                 return None
         # A relation not loaded, or one of an empty key - nothing on the other side.
-        if isinstance(value, QuerySet | NoneAwaitableType):
+        if isinstance(value, (QuerySet, NoneAwaitableType)):
             return None
         return value
 

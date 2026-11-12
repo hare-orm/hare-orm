@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from copy import copy
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.exceptions import (
     QueryError,
@@ -15,7 +15,6 @@ from hare.query.expressions.structure.expression_structure import ExpressionStru
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 from hare.sql import SqlContext
-from hare.sql.terms.field import Field as SqlField
 from hare.sql.terms.term import Term
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
@@ -83,11 +82,11 @@ class Subquery(CombinableExpression, Term):  # type: ignore[misc]
         """The query building the subquery's SQL - a queryset selecting values is built by its
         values query."""
         if self._query is None:
-            query = self._query = cast("AwaitableQuery[Any]", self.source_query._get_compiler())
+            query = self._query = self.source_query._get_compiler()  # type: ignore[assignment]
             if query is not self.source_query:
                 # Its values come from the query given.
                 query._plan_origin = self.source_query
-        return self._query
+        return self._query  # type: ignore[return-value]
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
         declaration_query = self.query
@@ -146,7 +145,7 @@ class Subquery(CombinableExpression, Term):  # type: ignore[misc]
         if isinstance(query, CombinedQuery):
             return list(query._get_output_names()) if query._combines_values else None
         if isinstance(query, ValuesQuery):
-            return list(ValuesOutput.get_output_names_for_set_operation(query))
+            return ValuesOutput.get_output_names_for_set_operation(query)
         return None
 
     def raise_if_selects_more_columns(self, filter_key: str, expected_column_count: int) -> None:
@@ -233,7 +232,7 @@ class Subquery(CombinableExpression, Term):  # type: ignore[misc]
         from hare.sql.terms.subqueries.exists_term import ExistsTerm
 
         self._build_if_needed()
-        query = cast("QueryBuilder | SetOperationQuery", cast("AwaitableQuery[Any]", self._built_query).query)
+        query: QueryBuilder | SetOperationQuery = self._built_query.query  # type: ignore[union-attr]
         selection = query.base_query if isinstance(query, SetOperationQuery) else query
         column = selection._selects[0]
         derived = copy(query)
@@ -241,17 +240,17 @@ class Subquery(CombinableExpression, Term):  # type: ignore[misc]
         null_rows = (
             selection.query_class.from_(derived)
             .select(ValueWrapper(1, allow_parametrize=False))
-            .where(derived[column.alias or cast("SqlField", column).name].isnull())
+            .where(derived[column.alias or column.name].isnull())  # type: ignore[attr-defined]
         )
         return ExistsTerm(null_rows)
 
     def get_sql(self, sql_context: SqlContext) -> str:
         self._build_if_needed()
-        return cast("AwaitableQuery[Any]", self._built_query).query.get_sql(sql_context)
+        return self._built_query.query.get_sql(sql_context)  # type: ignore[union-attr]
 
     def as_(self, alias: str) -> Selectable:  # type: ignore[override]
         self._build_if_needed()
-        aliased_query = cast("AwaitableQuery[Any]", self._built_query).query.as_(alias)
+        aliased_query = self._built_query.query.as_(alias)  # type: ignore[union-attr]
         # The aliased query is what lands in SELECT - it keeps this subquery's grouping facts.
         aliased_query.is_subquery = True
         aliased_query.is_aggregate = self.is_aggregate

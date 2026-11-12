@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.classes.deferred_import import DeferredImport
 from hare.core.caching.cache import Cache
 from hare.sql.builder.tables.selectable import Selectable
 from hare.sql.builder.tables.table import Table
@@ -16,16 +17,19 @@ if TYPE_CHECKING:
 class Query:
     """The entry point of hare.sql - builds queries step by step. Immutable."""
 
+    #: ``QueryBuilder`` - imported at its first read, as its module imports this one.
+    query_builder_class: ClassVar[DeferredImport[type[QueryBuilder]]] = DeferredImport(
+        "hare.sql.builder.queries.query_builder", "QueryBuilder"
+    )
+
     SQL_CONTEXT: SqlContext = DEFAULT_SQL_CONTEXT
     #: (Query class,) -> its shared empty builder.
     EMPTY_BUILDERS: ClassVar[Cache[QueryBuilder]] = Cache(EMPTY_BUILDER_CACHE_SIZE)
 
     @classmethod
     def _builder(cls, **kwargs: Any) -> QueryBuilder:
-        # Imported here: the modules import each other.
-        from hare.sql.builder.queries.query_builder import QueryBuilder
 
-        return QueryBuilder(query_class=cls, **kwargs)
+        return Query.query_builder_class(query_class=cls, **kwargs)
 
     @classmethod
     def get_empty_builder(cls) -> QueryBuilder:

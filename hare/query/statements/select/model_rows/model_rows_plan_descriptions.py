@@ -55,6 +55,21 @@ class ModelRowsPlanDescriptions:
         return StatementPlanDescriptions.get_join_conditions_plan_description(query.model, paths_and_conditions)
 
     @staticmethod
+    def describe_queryset(
+        query: ModelRowsQuery[Any], *, plain: bool, built_into_another: bool = False
+    ) -> PlanDescription | None:
+        """Describe the selected statement form without looking up its plan.
+
+        The caller selects the form once and retains its validation order. Origin recording
+        reuses this description after the initial lookup has accepted the query state.
+        """
+        return (
+            query._describe_plain_statement(built_into_another)
+            if plain
+            else query._describe_statement(built_into_another)
+        )
+
+    @staticmethod
     def get_queryset_plan_description(
         query: ModelRowsQuery[Any], built_into_another: bool = False
     ) -> tuple[PlanDescription | None, StatementPlan | None]:
@@ -72,7 +87,9 @@ class ModelRowsPlanDescriptions:
         """
         plan: StatementPlan | None = None
         if ModelRowsPlanDescriptions.has_plain_query_state(query):
-            description = query._describe_plain_statement(built_into_another)
+            description = ModelRowsPlanDescriptions.describe_queryset(
+                query, plain=True, built_into_another=built_into_another
+            )
             if description is None:
                 return None, None
             # A plan kept under the key is the answer to whether the query keeps one - except
@@ -84,7 +101,9 @@ class ModelRowsPlanDescriptions:
             return description, plan
         if not StatementPlanDescriptions.query_state_is_plannable(query):
             return None, None
-        description = query._describe_statement(built_into_another)
+        description = ModelRowsPlanDescriptions.describe_queryset(
+            query, plain=False, built_into_another=built_into_another
+        )
         if description is None:
             return None, None
         if not built_into_another:

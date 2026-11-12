@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.dialects.sqlite.spatial.constants import SPATIALITE_COLUMN_TYPES
 from hare.dialects.sqlite.spatial.spatialite_blob_reader import SpatialiteBlobReader
@@ -27,7 +27,7 @@ class SqliteGeometryValues:
         Returns:
             The column type.
         """
-        geometry_field = cast("GeometryField", field)
+        geometry_field: GeometryField = field  # type: ignore[assignment]
         column_type = SPATIALITE_COLUMN_TYPES[geometry_field.get_geometry_type()]
         return f"{column_type}Z" if geometry_field.dimensions == 3 else column_type
 
@@ -38,7 +38,7 @@ class SqliteGeometryValues:
         Raises:
             ValidationError: The value isn't such a geometry, or is empty.
         """
-        geometry_field = cast("GeometryField", field)
+        geometry_field: GeometryField = field  # type: ignore[assignment]
         geometry_field.validate(value)
         if value is None:
             return None
@@ -56,7 +56,7 @@ class SqliteGeometryValues:
         """
         if value is None:
             return None
-        geometry_field = cast("GeometryField", field)
+        geometry_field: GeometryField = field  # type: ignore[assignment]
         geometry = geometry_field.get_parsed_geometry(value)
         geometry_field.raise_if_other_srid(geometry)
         return SpatialiteBlobWriter.write(geometry_field.get_checked_geometry(geometry))

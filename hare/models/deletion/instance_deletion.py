@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from hare.exceptions import CascadeDepthLimitError, IncompleteInstanceError, QueryError
 from hare.instrumentation.change_events import ChangeEvents
@@ -12,6 +12,8 @@ from hare.models.deletion.cascade.deletion_collector import DeletionCollector
 from hare.models.deletion.cascade.deletion_graph import DeletionGraph
 from hare.models.deletion.cascade.protect_constraint_deferral import ProtectConstraintDeferral
 from hare.models.deletion.cascade.related_rows import RelatedRows
+from hare.models.deletion.deletion_routes import DeletionRoutes
+from hare.models.deletion.enums import DeletionRoute
 from hare.models.deletion.soft_deletion import SoftDeletion
 from hare.models.instances.instance_saving import InstanceSaving
 from hare.models.write.instance_writer import InstanceWriter
@@ -106,7 +108,7 @@ class InstanceDeletion:
             type(obj),
             RowOperation.UPDATE,
             instances=[obj],
-            fields=[cast("str", obj._meta.soft_delete_field)],
+            fields=[obj._meta.soft_delete_field],  # type: ignore[list-item]
         )
 
     @staticmethod
@@ -195,7 +197,8 @@ class InstanceDeletion:
             connection: Connection the delete and its cascade run through.
             apply_active_tenant_scope_guard: See ``delete_with_cascade()``.
         """
-        if DeletionGraph.needs_python_cascade(type(obj)):
+        route = DeletionRoutes.get(type(obj), connection.features, permanent=True)
+        if route is DeletionRoute.PYTHON_CASCADE:
             # A relation the database doesn't enforce, or rows of a captured model it reaches: its
             # on_delete is carried out in Python, in one transaction with the DELETE.
             async with (
@@ -211,9 +214,7 @@ class InstanceDeletion:
                     apply_active_tenant_scope_guard=apply_active_tenant_scope_guard,
                     allow_already_deleted=root_reached_again,
                 )
-        elif connection.features.cascade_depth_limit is not None and (
-            DeletionGraph.has_self_cascading_constrained_relations(type(obj))
-        ):
+        elif route is DeletionRoute.DEPTH_LIMITED:
             # Where the database's cascade stops at a recursion depth, a deep cascade cycle fails
             # the DELETE half-done - tried in a transaction, and on CascadeDepthLimitError rolled
             # back and carried out in Python, deepest rows first.
@@ -242,7 +243,7 @@ class InstanceDeletion:
                         apply_active_tenant_scope_guard=apply_active_tenant_scope_guard,
                         allow_already_deleted=root_reached_again,
                     )
-        elif ProtectConstraintDeferral.is_needed(type(obj), connection):
+        elif route is DeletionRoute.PROTECT_DEFERRED:
             # A protector that this same cascade removes as well must not fail the DELETE - see
             # ProtectConstraintDeferral.
             async with (

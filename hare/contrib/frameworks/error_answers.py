@@ -55,7 +55,7 @@ class ErrorAnswers:
             The reason of a forbidden request query parameter or the message of a refused value, the
             status's phrase otherwise.
         """
-        if isinstance(error, RequestQueryForbidden | ValidationError):
+        if isinstance(error, (RequestQueryForbidden, ValidationError)):
             return str(error)
         return status.phrase
 

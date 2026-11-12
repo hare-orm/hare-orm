@@ -16,8 +16,8 @@ from hare.inspectdb import (
     SchemaIntrospector,
     TableNotFoundError,
 )
+from hare.inspectdb.enums import CatalogDiagnosticCode
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
-from hare.inspectdb.introspection.enums import CatalogDiagnosticCode
 from hare.instrumentation.declarations import QueryExecuted
 from hare.instrumentation.observers.observers import Observers
 from hare.models.class_building.model_field_collection import ModelFieldCollection

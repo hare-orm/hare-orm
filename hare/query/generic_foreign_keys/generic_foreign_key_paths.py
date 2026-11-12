@@ -38,6 +38,11 @@ class GenericForeignKeyPaths:
             The relations before the field (``""`` for the model's own), the field and the parts
             after it; None when the path names none.
         """
+        if "__" not in path:
+            generic_field = model._meta.generic_foreign_key_fields.get(path)
+            if generic_field is not None and generic_field.branch_names:
+                return "", generic_field, []
+            return None
         segments = path.split("__")
         current_model = model
         for index, segment in enumerate(segments):

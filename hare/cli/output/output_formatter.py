@@ -64,7 +64,7 @@ class OutputFormatter:
         OutputFormatter.echo_connection_header(connection_alias)
         for app_label in sorted(apps_config):
             OutputFormatter.echo_app_header(app_label)
-            keys = list(loader.graph.leaf_nodes(app_label))
+            keys = loader.graph.leaf_nodes(app_label)
             if not keys:
                 print(f"    {TerminalColors.DIM}(no heads){TerminalColors.RESET}")
                 continue

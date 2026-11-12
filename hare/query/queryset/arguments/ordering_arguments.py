@@ -58,14 +58,14 @@ class OrderingArguments:
             if type(ordering) is not str:
                 return None
         model = queryset.model
-        parsed = OrderingArguments.plain_orderings.get_model_bucket(model).get((orderings,), CACHE_MISS)
+        parsed = OrderingArguments.plain_orderings.get_bucket(model).get((orderings,), CACHE_MISS)
         if parsed is CACHE_MISS:
             names = [queryset._get_ordering_name(ordering)[0] for ordering in orderings]
             if AnnotationArguments.get_path_annotations(queryset, names):
                 parsed = None
             else:
                 parsed = tuple(OrderingArguments.parse_orderings(queryset, orderings))
-            OrderingArguments.plain_orderings.get_model_bucket(model)[(orderings,)] = parsed
+            OrderingArguments.plain_orderings.get_bucket(model)[(orderings,)] = parsed
         return parsed
 
     @staticmethod

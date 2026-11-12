@@ -1,5 +1,10 @@
 # Request queries
 
+`RequestQuery` exposes declaration and execution hooks. `RequestQueryInputs` collects URL
+parameters, `RequestQueryFactory` builds classes for runtime models, and `RequestQueryRegistry`
+owns declaration caches and model dependencies. `RequestQueryBuilding` combines filters,
+access conditions, ordering and selection through the query's hooks, including subclass overrides.
+
 `hare.contrib.request_query` describes the rows a request asks for once, on a class: the queryset it
 starts from, the parameters it filters by, the search, the orderings a request may choose and the
 pagination. The class is a pydantic model of the request's parameters; a framework adapter

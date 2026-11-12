@@ -771,7 +771,8 @@ whatever name its constraint has. `conflict_where` (PostgreSQL only) — a `Q` o
 `ON CONFLICT (...) WHERE <conflict_where>` can target it; mutually exclusive with
 `on_conflict_constraint`, requires `on_conflict` to name that index's columns.
 
-<a id="bulk-create-ignore-conflicts"></a>**`ignore_conflicts=True`** gives the objects it inserted, in the order
+<a id="bulk-create-ignore-conflicts"></a>**`ignore_conflicts=True`** gives the objects it inserted, in the
+order
 given — the ones a conflict skipped are left out, keep the pk they were given and aren't marked saved. The
 statements read their rows back (`RETURNING`, with or without `returning=True`), and each row is matched
 to its object by the `on_conflict` fields, else by the primary key — the values as the fields write them
@@ -899,7 +900,8 @@ Separate queries (not a JOIN of the queried rows); accepts a string (including `
 `Prefetch(...)`. `FieldError` for an unknown/non-relation field. A many-to-many relation's rows come in
 one query, joined to its through table, when the through table and the related rows are on one
 connection, the relation has no `through=` model and a `Prefetch` queryset neither filters by that
-relation nor annotates, `.distinct()`s or prefetches further; otherwise the through table is read in a
+relation nor annotates, `.distinct()`s, selects joined models, applies extensions or prefetches further;
+otherwise the through table is read in a
 query of its own first.
 
 `count()`, `exists()` and `aggregate()` of a queryset that prefetches raise `QueryError` — they return no
@@ -1047,7 +1049,8 @@ ways:
 
 ```python
 # dotted relation string inside Prefetch
-await Author.objects.all().prefetch_related(Prefetch("books__editor", queryset=Reader.objects.filter(is_active=True)))
+await Author.objects.all().prefetch_related(Prefetch("books__editor",
+queryset=Reader.objects.filter(is_active=True)))
 
 # .prefetch_related() called directly on the queryset passed into Prefetch
 await Author.objects.all().prefetch_related(
@@ -1146,7 +1149,8 @@ pool.
 
 ## <a id="recursive"></a>Recursive queries and CTEs
 
-### <a id="with_recursive-walking-a-relation-of-a-model-to-itself"></a>Walking a relation of a model to itself: `with_recursive()`
+### <a id="with_recursive-walking-a-relation-of-a-model-to-itself"></a>Walking a relation of a model to
+itself: `with_recursive()`
 
 ```python
 class QuerySet(QuerySpecification):
@@ -1292,7 +1296,8 @@ average = await Loan.objects.sample(0.5, method=TableSampleMethod.SYSTEM).aggreg
 ```
 
 ```sql
-SELECT ... FROM "loan" TABLESAMPLE BERNOULLI (5) REPEATABLE (42) WHERE "returned_at" IS NULL ORDER BY "id" LIMIT 20
+SELECT ... FROM "loan" TABLESAMPLE BERNOULLI (5) REPEATABLE (42) WHERE "returned_at" IS NULL ORDER BY "id"
+LIMIT 20
 ```
 
 - **`percent`** — the chance each row (or block) is kept, an `int` or `float` from `0` to `100`: `100`
@@ -1465,8 +1470,10 @@ MERGE INTO "inventory" USING (SELECT column1 AS "isbn", column2 AS "copies"
   FROM (VALUES (CAST($1 AS VARCHAR), CAST($2 AS INTEGER)), (...)) AS "hare_merge_values") AS "hare_merge_source"
 ON "inventory"."isbn"="hare_merge_source"."isbn"
 WHEN MATCHED AND ... THEN DELETE
-WHEN MATCHED THEN UPDATE SET "copies" = "inventory"."copies"+"hare_merge_source"."copies", "version" = "inventory"."version"+$3
-WHEN NOT MATCHED THEN INSERT ("isbn", "copies") VALUES ("hare_merge_source"."isbn", "hare_merge_source"."copies")
+WHEN MATCHED THEN UPDATE SET "copies" = "inventory"."copies"+"hare_merge_source"."copies", "version" =
+"inventory"."version"+$3
+WHEN NOT MATCHED THEN INSERT ("isbn", "copies") VALUES ("hare_merge_source"."isbn",
+"hare_merge_source"."copies")
 ```
 
 - **The source** — a list of dicts with the same keys (each key a column; a key named after a field of

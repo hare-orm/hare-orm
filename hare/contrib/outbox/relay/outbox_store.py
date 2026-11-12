@@ -4,7 +4,7 @@ import uuid
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from operator import attrgetter
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.contrib.outbox.constants import ENQUEUE_ARGUMENT_FIELD_NAMES, RELAY_MANAGED_FIELD_NAMES
@@ -16,6 +16,7 @@ from hare.contrib.outbox.relay.constants import DEFAULT_CLEANUP_BATCH_SIZE
 from hare.contrib.outbox.relay.outbox_backlog import OutboxBacklog
 from hare.contrib.outbox.relay.topic_selection import TopicSelection
 from hare.exceptions import ConfigurationError, UnSupportedError
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.expressions import Exists, OuterReference, Q
 from hare.time import Timezone
 
@@ -133,7 +134,7 @@ class OutboxStore(Generic[TOutboxEvent]):
         primary_key = self.model._meta.primary_key_attribute
         key_fields = {primary_key} if isinstance(primary_key, str) else set(primary_key)
         forbidden = set(metadata) & (
-            RELAY_MANAGED_FIELD_NAMES | ENQUEUE_ARGUMENT_FIELD_NAMES | {"id", "pk"} | key_fields
+            RELAY_MANAGED_FIELD_NAMES | ENQUEUE_ARGUMENT_FIELD_NAMES | {"id", PRIMARY_KEY_ALIAS} | key_fields
         )
         if forbidden:
             raise ConfigurationError(INVALID_RESULT_FIELDS.format(fields=", ".join(sorted(forbidden))))
@@ -256,7 +257,7 @@ class OutboxStore(Generic[TOutboxEvent]):
         if ids is not None:
             queryset = queryset.filter(id__in=list(ids))
         # The outbox's database reports the rows a write changed - its unique fields refuse any other.
-        count = cast("int", await queryset.update(dead_lettered_at=None, attempts=0, next_attempt_at=None))
+        count: int = await queryset.update(dead_lettered_at=None, attempts=0, next_attempt_at=None)
         return count
 
     async def cleanup_published(self, older_than: timedelta, *, batch_size: int = DEFAULT_CLEANUP_BATCH_SIZE) -> int:
@@ -330,8 +331,6 @@ class OutboxStore(Generic[TOutboxEvent]):
             )
             if not sequences:
                 return deleted
-            deleted += cast(
-                "int", await self.get_topic_queryset().filter(condition, sequence__in=list(sequences)).delete()
-            )
+            deleted += await self.get_topic_queryset().filter(condition, sequence__in=list(sequences)).delete()
             if len(sequences) < batch_size:
                 return deleted

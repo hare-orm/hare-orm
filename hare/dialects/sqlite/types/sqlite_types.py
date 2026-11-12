@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import datetime
 import math
 from typing import Any
 
@@ -83,6 +82,4 @@ class SqliteTypes:
                 to_python=SqliteVectorValues.to_python,
             ),
         )
-        # The parameter adapters write these as text.
-        types.bound_as_text = frozenset({datetime.datetime, datetime.date, datetime.time})
         return types

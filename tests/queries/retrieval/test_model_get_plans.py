@@ -1,4 +1,4 @@
-"""Single-row queries use the statement executor on both cache misses and hits,
+"""Single-row queries reuse prepared plans without allocating statements on cache hits,
 with the current filter values, visibility and missing/multiple-row policy."""
 
 from unittest.mock import patch
@@ -17,7 +17,8 @@ from hare.exceptions import (
 )
 from hare.query.enums import GetException
 from hare.query.expressions import F, Q
-from hare.query.plans.call_signatures.call_signature_plans import CallSignaturePlans
+from hare.query.plans.statement.declarations import CallPlanHit
+from hare.query.plans.statement.statement_plan_runs import StatementPlanRuns
 from hare.query.plans.statement.statement_plans import StatementPlans
 from hare.query.statements.select.model_rows_query import ModelRowsQuery
 from hare.transactions.transactions import Transactions
@@ -33,7 +34,7 @@ class NotFoundError(Exception):
 
 
 def spy_on_queryset_init():
-    """Observe the execution object shared by fresh and cached single-row queries."""
+    """Count statement allocations independently of query declarations."""
     return patch.object(ModelRowsQuery, "__init__", autospec=True, side_effect=ModelRowsQuery.__init__)
 
 
@@ -46,16 +47,13 @@ def get_kept_plan(query):
     """The statement plan recorded for the query's call signature, if present."""
     if not has_call_signature(query):
         return None
-    signature_key = CallSignaturePlans.get_key(ModelRowsQuery, query, query._connection or query.get_connection(), ())
-    if signature_key is None:
-        return None
-    found = CallSignaturePlans.find_with_value_positions(query.model, signature_key[0])
-    return None if found is None else found[0]
+    found = StatementPlanRuns.find_call_plan(ModelRowsQuery, query, query._connection or query.get_connection())
+    return found.plan if isinstance(found, CallPlanHit) else None
 
 
 @requires_features(supports_positional_rows=True)
 @pytest.mark.asyncio
-async def test_get_by_pk_uses_the_statement_executor_on_a_cache_hit(db):
+async def test_get_by_pk_allocates_no_statement_on_a_cache_hit(db):
     obj = await testmodels.IntFields.objects.create(intnum=5)
     # The first query of the shape runs its QuerySet, which records the plan.
     await testmodels.IntFields.objects.get(pk=obj.id)
@@ -64,7 +62,7 @@ async def test_get_by_pk_uses_the_statement_executor_on_a_cache_hit(db):
         fetched = await query
     assert has_call_signature(query)
     assert get_kept_plan(query) is not None
-    assert queryset_init.call_count == 1
+    assert queryset_init.call_count == 0
     assert fetched.id == obj.id
     assert fetched.intnum == 5
     assert fetched._saved_in_db
@@ -216,7 +214,7 @@ async def test_other_lookups_run_on_their_plan_too(db):
             query = testmodels.IntFields.objects.get(**kwargs)
             assert (await query).id == obj.id
         assert get_kept_plan(query) is not None, kwargs
-        assert queryset_init.call_count == 1, kwargs
+        assert queryset_init.call_count == 0, kwargs
 
 
 @pytest.mark.asyncio
@@ -287,11 +285,14 @@ async def test_composite_primary_key(db):
 
 @pytest.mark.parametrize("model", [testmodels.ManagerModel, testmodels.LazyJoinedChild, testmodels.LazySelectChild])
 @pytest.mark.asyncio
-async def test_models_with_default_behaviour_use_the_statement_executor(db, model):
-    for _ in range(2):
+async def test_relations_loaded_by_default_run_on_the_call_plan(db, model):
+    """A model's relations loaded by default (``lazy=``) are part of the plan of its calls - a repeated
+    ``get()`` builds no statement."""
+    Caches.forget_model_caches([model])
+    for index in range(2):
         with spy_on_queryset_init() as queryset_init:
             assert await model.objects.get(pk=10**9, does_not_exist_exception=None) is None
-        assert queryset_init.call_count == 1
+        assert queryset_init.call_count == int(index == 0)
 
 
 @pytest.mark.asyncio
@@ -335,14 +336,14 @@ async def test_forgetting_model_caches_drops_the_plan(db):
 
 @requires_features(supports_positional_rows=True)
 @pytest.mark.asyncio
-async def test_get_or_create_reads_through_the_statement_executor(db):
+async def test_get_or_create_reuses_the_prepared_read(db):
     obj = await testmodels.IntFields.objects.create(intnum=11)
     await testmodels.IntFields.objects.get(id=obj.id)
     with spy_on_queryset_init() as queryset_init:
         fetched, created = await testmodels.IntFields.objects.get_or_create(id=obj.id)
     assert not created
     assert fetched.intnum == 11
-    assert queryset_init.call_count == 1
+    assert queryset_init.call_count == 0
     created_row, created = await testmodels.IntFields.objects.get_or_create(intnum=12, defaults={"intnum_null": 1})
     assert created
     assert (await testmodels.IntFields.objects.get_or_create(intnum=12))[0].id == created_row.id

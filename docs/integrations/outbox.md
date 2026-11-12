@@ -1,5 +1,14 @@
 # Transactional outbox
 
+`OutboxEvent` defines stored event fields and the public enqueue hooks. `OutboxEnqueue`
+coordinates writes, `OutboxIdempotency` handles keyed insertion, `OutboxValidation` checks
+stored values, and `OutboxWakeups` signals delivery after commit. Model subclasses can
+override the public hooks; enqueue helpers call them on the actual event model.
+
+`validate_enqueue_options()` is a class hook. Its key and header checks call
+`validate_keys()` and `validate_headers()` on the event model, so subclass overrides apply
+to both `enqueue()` and `enqueue_many()` before any event is written.
+
 Writing a row and announcing it are two operations: if the process stops (or a broker is briefly
 unreachable) between them, either the announcement is lost, or it goes out for a write that then rolled
 back. The transactional outbox writes the announcement as one more row — an **outbox event** — in the

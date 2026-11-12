@@ -20,7 +20,7 @@ jobs:
   deploy-docs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       pages: write
       id-token: write
@@ -35,8 +35,20 @@ jobs:
         id: python
         with:
           python-version: ${{ steps.catalog.outputs.python }}
+      - name: Install Rust
+        run: rustup toolchain install
+      - uses: actions/cache@v6
+        with:
+          path: rust/native/target
+          key: ${{ runner.os }}-cargo-docs-${{ hashFiles('rust/native/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-docs-
+      - name: Install dependencies
+        run: make deps
+      - name: Build rust.native for the documentation hooks
+        run: make build_native
       - name: Build docs
-        run: make docs
+        run: make _docs
       - uses: actions/configure-pages@v6
       - uses: actions/upload-pages-artifact@v5
         with:

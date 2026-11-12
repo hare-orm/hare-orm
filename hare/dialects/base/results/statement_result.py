@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from functools import cached_property
 from operator import itemgetter
 from typing import Any
 
@@ -26,7 +27,7 @@ class StatementResult(tuple[int | None, Sequence[Any]]):
     row_count: int | None = property(itemgetter(0))  # type: ignore[assignment]
     rows: Sequence[Any] = property(itemgetter(1))  # type: ignore[assignment]
     inserted_id: Any = None
-    description: Sequence[Sequence[Any]] | None = None
+    _description_names: tuple[str, ...] | None = None
 
     def __new__(
         cls,
@@ -34,15 +35,26 @@ class StatementResult(tuple[int | None, Sequence[Any]]):
         rows: Sequence[Any],
         inserted_id: Any = None,
         description: Sequence[Sequence[Any]] | None = None,
+        *,
+        column_names: Sequence[str] | None = None,
     ) -> StatementResult:
         result = tuple.__new__(cls, (row_count, rows))
         if inserted_id is not None:
             result.inserted_id = inserted_id
         if description is not None:
-            result.description = description
+            result.__dict__["description"] = description
+        if column_names is not None:
+            result._description_names = tuple(column_names)
+            result.__dict__["column_names"] = result._description_names
         return result
 
-    @property
+    @cached_property
+    def description(self) -> Sequence[Sequence[Any]] | None:
+        """DB-API metadata, retained when supplied by a driver or built lazily from column names."""
+        names = self._description_names
+        return tuple((name,) for name in names) if names is not None else None
+
+    @cached_property
     def column_names(self) -> tuple[str, ...]:
         """The names of the columns of the rows, in order - read from the description, or from the
         first row's names when the rows read by name; empty for no rows read by name."""

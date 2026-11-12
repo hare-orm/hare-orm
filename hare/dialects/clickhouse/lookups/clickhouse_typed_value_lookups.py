@@ -11,6 +11,7 @@ from hare.dialects.clickhouse.lookups.constants import (
 )
 from hare.dialects.clickhouse.types.constants import CLICKHOUSE_DYNAMIC_INTEGER_TYPES
 from hare.dialects.clickhouse.types.declarations import ClickhouseTypedValue
+from hare.query.enums import Lookup
 from hare.query.filters.lookups.field_lookup import FieldLookup
 from hare.query.filters.lookups.lookups import Lookups
 from hare.query.filters.lookups.value_encoders import ValueEncoders
@@ -48,17 +49,17 @@ class ClickhouseTypedValueLookups:
             The lookups.
         """
         return {
-            "": FieldLookup(partial(self.compare, comparison=operator.eq)),
-            "not": FieldLookup(self.not_equal),
-            "in": FieldLookup(self.is_in, ValueEncoders.encode_list),
-            "not_in": FieldLookup(self.not_in, ValueEncoders.encode_list),
-            "isnull": FieldLookup(Lookups.is_null, ValueEncoders.encode_bool),
-            "not_isnull": FieldLookup(Lookups.not_null, ValueEncoders.encode_bool),
-            "gt": FieldLookup(partial(self.compare, comparison=operator.gt)),
-            "gte": FieldLookup(partial(self.compare, comparison=operator.ge)),
-            "lt": FieldLookup(partial(self.compare, comparison=operator.lt)),
-            "lte": FieldLookup(partial(self.compare, comparison=operator.le)),
-            "range": FieldLookup(self.between, ValueEncoders.encode_list),
+            Lookup.EXACT: FieldLookup(partial(self.compare, comparison=operator.eq)),
+            Lookup.NOT: FieldLookup(self.not_equal),
+            Lookup.IN: FieldLookup(self.is_in, ValueEncoders.encode_list),
+            Lookup.NOT_IN: FieldLookup(self.not_in, ValueEncoders.encode_list),
+            Lookup.ISNULL: FieldLookup(Lookups.is_null, ValueEncoders.encode_bool),
+            Lookup.NOT_ISNULL: FieldLookup(Lookups.not_null, ValueEncoders.encode_bool),
+            Lookup.GT: FieldLookup(partial(self.compare, comparison=operator.gt)),
+            Lookup.GTE: FieldLookup(partial(self.compare, comparison=operator.ge)),
+            Lookup.LT: FieldLookup(partial(self.compare, comparison=operator.lt)),
+            Lookup.LTE: FieldLookup(partial(self.compare, comparison=operator.le)),
+            Lookup.RANGE: FieldLookup(self.between, ValueEncoders.encode_list),
         }
 
     def compare(self, term: Term, value: Any, comparison: Any) -> Criterion:

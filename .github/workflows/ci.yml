@@ -19,9 +19,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Every job runs the Makefile targets a developer runs locally (CONTRIBUTING.md, CI and the test
-# matrix): the test jobs together are `make test_matrix` - the databases on Linux, what runs on a
-# developer's machine (the tests reading no database, the native builds, a poetry project adding hare-orm)
-# on Linux, Windows and macOS - Python 3.12-3.14 x SQLite 3.35.5 to the newest, PostgreSQL 14-18 through
+# matrix): the test jobs together are `make test_matrix` - hare is developed on Linux alone, so every
+# suite runs on Linux; the wheels are built and installed on Linux, macOS and Windows
+  # (platform-wheels) - Python 3.12-3.15 x SQLite 3.35.5 to the newest, PostgreSQL 14-18 through
 # asyncpg and rust_pg, PgBouncer 1.22-1.26, ClickHouse 25.8 to the newest (a server and a cluster)
 # through both of its drivers, and the oldest and newest Redis, RabbitMQ and Kafka hare supports. Every
 # run - a pull request, the weekly run, a run on demand, a release - runs the whole matrix; each
@@ -38,6 +38,7 @@ jobs:
     outputs:
       matrix: ${{ steps.catalog.outputs.matrix }}
       python-versions: ${{ steps.catalog.outputs.python-versions }}
+      linux-interpreters: ${{ steps.catalog.outputs.linux-interpreters }}
     steps:
       - uses: actions/checkout@v7
       - id: catalog
@@ -47,12 +48,14 @@ jobs:
           from tests.matrix.matrix_catalog import MatrixCatalog
           print("matrix=" + json.dumps(MatrixCatalog.get_ci_matrices()))
           print("python-versions=" + json.dumps(MatrixCatalog.get("versions.python")))
+          print("linux-interpreters=" + " ".join("python" + version for version in MatrixCatalog.get("versions.python")))
           PY
 
   # ruff format, ruff, mypy, bandit (on Python 3.12, the oldest supported), cargo fmt, clippy and
   # the Rust unit tests, actionlint on these workflows and the documentation built in strict mode -
   # `make check`.
   check:
+    needs: [build-native-linux]
     if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'dev' && github.base_ref == 'main') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -75,10 +78,14 @@ jobs:
             ${{ runner.os }}-cargo-check-
       - name: Install dependencies
         run: make deps
+      - uses: actions/download-artifact@v8
+        with:
+          name: native-Linux
+          path: rust/
       - name: Run checks
-        run: make check
+        run: make _check
 
-  # rust.native of Python 3.12, 3.13 and 3.14 for Linux, built in the maturin image (manylinux2014)
+  # rust.native of Python 3.12, 3.13, 3.14 and 3.15 for Linux, built in the maturin image (manylinux2014)
   # from this commit - `make build_native_linux`. Every Linux job below runs it.
   build-native-linux:
     if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'dev' && github.base_ref == 'main') }}
@@ -105,50 +112,6 @@ jobs:
         with:
           name: native-Linux
           path: rust/native.cpython-*-x86_64-linux-gnu.so
-          if-no-files-found: error
-
-  # rust.native of Python 3.12, 3.13 and 3.14 for Windows and for macOS (one universal2 file per Python,
-  # for Apple silicon and Intel Macs), built on the runner on every run - `make build_native_windows`,
-  # `make build_native_macos`. The jobs testing on Windows and macOS run them.
-  build-native:
-    needs: [catalog]
-    name: build-native (${{ matrix.os }})
-    if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'dev' && github.base_ref == 'main') }}
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.catalog.outputs.matrix)['build-native'] }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v7
-      # setup-python installs every catalog version; the final version is the default Python.
-      - uses: ./.github/actions/setup-poetry
-        with:
-          python-version: ${{ join(fromJSON(needs.catalog.outputs.python-versions), fromJSON('"\n"')) }}
-      # The toolchain rust-toolchain.toml pins.
-      - name: Install Rust
-        run: rustup toolchain install
-      - uses: actions/cache@v6
-        with:
-          path: rust/native/target
-          key: ${{ runner.os }}-cargo-native-${{ hashFiles('rust/native/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-native-
-      - name: Install dependencies
-        run: make deps
-      - name: Build rust.native
-        run: |
-          interpreters=$(poetry run python -m tests.matrix.native_interpreters)
-          make ${{ matrix.make_target }} native_interpreters="$interpreters"
-      - name: The extension of every Python imports
-        run: poetry run python -m tests.matrix.native_interpreters --check-imports
-      - uses: actions/upload-artifact@v7
-        with:
-          name: native-${{ runner.os }}
-          path: ${{ matrix.extension_files }}
           if-no-files-found: error
 
   # The suite on every SQLite version of the matrix and with SQLite's regular expression functions, on
@@ -197,15 +160,14 @@ jobs:
           if-no-files-found: ignore
 
   # The tests reading no test database - the CLI, the mypy plugin, the stubs, the pytest plugin, the
-  # programs run in a process of their own: what runs on a developer's machine - on each OS and Python
-  # - `make matrix_venvs`, `make test_matrix`.
+  # programs run in a process of their own - on each Python - `make matrix_venvs`, `make test_matrix`.
   test-database-independent:
-    name: test-database-independent (${{ matrix.os }}, ${{ matrix.python }})
-    needs: [catalog, build-native-linux, build-native]
+    name: test-database-independent (${{ matrix.python }})
+    needs: [catalog, build-native-linux]
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.catalog.outputs.matrix)['test-database-independent'] }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     defaults:
       run:
@@ -218,7 +180,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - uses: actions/download-artifact@v8
         with:
-          name: native-${{ runner.os }}
+          name: native-Linux
           path: rust/
       # The virtualenv of each environment and database driver of the runs below - tests/matrix.
       - name: Create the virtualenvs
@@ -232,7 +194,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: matrix-logs-database-independent-${{ runner.os }}-${{ matrix.python }}
+          name: matrix-logs-database-independent-${{ matrix.python }}
           path: .test-matrix/
           if-no-files-found: ignore
 
@@ -347,11 +309,11 @@ jobs:
   # tests on a cluster of that version, on each Python - `make test_clickhouse_matrix_up`,
   # `make test_clickhouse_cluster_matrix_up`, `make matrix_venvs`, `make test_matrix`.
   test-clickhouse:
-    name: test-clickhouse (${{ matrix.clickhouse }}, ${{ matrix.python }})
+    name: test-clickhouse (${{ matrix.clickhouse }}, ${{ matrix.driver }}, ${{ matrix.python }})
     needs: [catalog, build-native-linux]
     strategy:
       fail-fast: false
-      # Each ClickHouse on the newest Python, the oldest one on the other Pythons too.
+      # Each ClickHouse on its driver's newest compatible Python; the oldest server also on older Pythons.
       matrix: ${{ fromJSON(needs.catalog.outputs.matrix)['test-clickhouse'] }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -377,16 +339,16 @@ jobs:
       # The virtualenv of each environment and database driver of the runs below - tests/matrix.
       - name: Create the virtualenvs
         run: |
-          make matrix_venvs MATRIX_OPTIONS="--python ${{ matrix.python }} --suite 'clickhouse-*-${{ matrix.clickhouse }}'" \
+          make matrix_venvs MATRIX_OPTIONS="--python ${{ matrix.python }} --suite '${{ matrix.driver }}-${{ matrix.clickhouse }}' --suite '${{ matrix.driver }}-cluster-${{ matrix.clickhouse }}'" \
             matrix_interpreter="${{ steps.python.outputs.python-path }}"
-      - name: Test ClickHouse ${{ matrix.clickhouse }} through both drivers
+      - name: Test ClickHouse ${{ matrix.clickhouse }} through ${{ matrix.driver }}
         run: |
-          make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} --suite 'clickhouse-*-${{ matrix.clickhouse }}' \
+          make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} --suite '${{ matrix.driver }}-${{ matrix.clickhouse }}' --suite '${{ matrix.driver }}-cluster-${{ matrix.clickhouse }}' \
             --print-failed-logs"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: matrix-logs-clickhouse-${{ matrix.clickhouse }}-${{ matrix.python }}
+          name: matrix-logs-clickhouse-${{ matrix.clickhouse }}-${{ matrix.driver }}-${{ matrix.python }}
           path: .test-matrix/
           if-no-files-found: ignore
 
@@ -432,16 +394,16 @@ jobs:
           path: .test-matrix/
           if-no-files-found: ignore
 
-  # A poetry project adding hare-orm from this checkout as its dependency, on each OS and Python -
+  # A poetry project adding hare-orm from this checkout as its dependency, on each Python -
   # `make test_poetry_add`.
   test-poetry-add:
-    needs: [catalog]
-    name: test-poetry-add (${{ matrix.os }}, ${{ matrix.python }})
+    needs: [catalog, build-native-linux]
+    name: test-poetry-add (${{ matrix.python }})
     if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'dev' && github.base_ref == 'main') }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.catalog.outputs.matrix)['test-poetry-add'] }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     defaults:
       run:
@@ -451,13 +413,27 @@ jobs:
       - uses: ./.github/actions/setup-poetry
         id: python
         with:
-          # CPython 3.14.9 on Windows: the environment poetry builds hare-orm in doesn't start ("Failed to
-          # import encodings module") - 3.14.8 until a later 3.14 starts it again.
-          python-version: ${{ matrix.os == 'windows-2025' && matrix.python == '3.14' && '3.14.8' || matrix.python }}
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: native-Linux
+          path: rust/
       - name: Install dependencies
         run: make deps
       - name: Add hare-orm to a new poetry project
+        # The checkout installed by the new project includes its compiled extension.
         run: make test_poetry_add
+
+  # The wheels built and installed on one runner of each OS - Linux, macOS, Windows
+  # ([ci.platform-wheels] of tests/matrix/catalog.toml); release.yml builds every platform.
+  platform-wheels:
+    needs: [catalog]
+    if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'dev' && github.base_ref == 'main') }}
+    uses: ./.github/workflows/platform-wheels.yml
+    with:
+      matrix: ${{ toJSON(fromJSON(needs.catalog.outputs.matrix)['platform-wheels']) }}
+      python-versions: ${{ needs.catalog.outputs.python-versions }}
+      linux-interpreters: ${{ needs.catalog.outputs.linux-interpreters }}
 
   # The one status the rulesets require: every job passed, or was skipped for a pull request from dev
   # into main.
@@ -466,7 +442,6 @@ jobs:
       - catalog
       - check
       - build-native-linux
-      - build-native
       - test-sqlite
       - test-database-independent
       - test-postgres
@@ -475,6 +450,7 @@ jobs:
       - test-clickhouse
       - test-pgbouncer
       - test-poetry-add
+      - platform-wheels
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

@@ -23,12 +23,12 @@ from hare.dialects.sqlite.introspection.sqlite_declaration_mapper import SqliteD
 from hare.dialects.sqlite.sqlite_introspector import SqliteIntrospector
 from hare.fields import IntField
 from hare.fields.db_defaults.sql_default import SqlDefault
+from hare.inspectdb.enums import CatalogDiagnosticCode, SchemaPartType
 from hare.inspectdb.introspection.catalog_identities import CatalogIdentities
 from hare.inspectdb.introspection.catalog_snapshot import CatalogSnapshot
 from hare.inspectdb.introspection.catalog_sql import CatalogSql
 from hare.inspectdb.introspection.column_info import ColumnInfo
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
-from hare.inspectdb.introspection.enums import CatalogDiagnosticCode, SchemaPartType
 from hare.inspectdb.introspection.schema_part import SchemaPart
 from hare.inspectdb.introspection.table_info import TableInfo
 from hare.inspectdb.schema_inspector import SchemaInspector

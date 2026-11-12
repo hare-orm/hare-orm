@@ -4,6 +4,8 @@ import datetime
 from collections.abc import Callable
 from operator import attrgetter
 
+from hare.sql.enums import DatePart
+
 #: A sanity ceiling, not a protection against catastrophic backtracking - a short pattern can hang
 #: re.search() too.
 MAX_REGEX_PATTERN_LENGTH = 1000
@@ -20,19 +22,19 @@ DATE_TEXT_LENGTH = 10
 #: Each EXTRACT() date part to the function the hare_extract_date_part UDF applies to a
 #: zone-adjusted datetime - SQLite has no EXTRACT().
 DATE_PART_EXTRACTORS: dict[str, Callable[[datetime.datetime], int]] = {
-    "YEAR": attrgetter("year"),
-    "ISOYEAR": lambda value: value.isocalendar()[0],
-    "QUARTER": lambda value: (value.month - 1) // 3 + 1,
-    "MONTH": attrgetter("month"),
-    "WEEK": lambda value: value.isocalendar()[1],
+    DatePart.YEAR: attrgetter("year"),
+    DatePart.ISO_YEAR: lambda value: value.isocalendar()[0],
+    DatePart.QUARTER: lambda value: (value.month - 1) // 3 + 1,
+    DatePart.MONTH: attrgetter("month"),
+    DatePart.WEEK: lambda value: value.isocalendar()[1],
     # 1 (Sunday) to 7 (Saturday), hare's week_day.
-    "DOW": lambda value: value.isoweekday() % 7 + 1,
-    "ISODOW": lambda value: value.isoweekday(),
-    "DAY": attrgetter("day"),
-    "HOUR": attrgetter("hour"),
-    "MINUTE": attrgetter("minute"),
-    "SECOND": attrgetter("second"),
-    "MICROSECOND": attrgetter("microsecond"),
+    DatePart.WEEK_DAY: lambda value: value.isoweekday() % 7 + 1,
+    DatePart.ISO_WEEK_DAY: lambda value: value.isoweekday(),
+    DatePart.DAY: attrgetter("day"),
+    DatePart.HOUR: attrgetter("hour"),
+    DatePart.MINUTE: attrgetter("minute"),
+    DatePart.SECOND: attrgetter("second"),
+    DatePart.MICROSECOND: attrgetter("microsecond"),
 }
 
 #: The start of Unix time, the zero of the instant a JSON ``__filter`` aware datetime comparison uses.

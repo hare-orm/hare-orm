@@ -4,7 +4,7 @@ import copy
 import hashlib
 import inspect
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Self, cast
+from typing import TYPE_CHECKING, Any, Self
 
 from hare.contrib.outbox.capture.change_extension import ChangeExtension
 from hare.contrib.outbox.capture.constants import (
@@ -190,12 +190,12 @@ class ChangeCapture(ChangeSink):
             # Local import: the context imports the models, which import this module.
             from hare.core.hare_context import HareContext
 
-            self._outbox = cast("type[OutboxEvent]", HareContext.require_current().get_model(self.outbox_reference))
-        return self._outbox
+            self._outbox = HareContext.require_current().get_model(self.outbox_reference)  # type: ignore[assignment]
+        return self._outbox  # type: ignore[return-value]
 
     def link_models(self, apps: Apps) -> None:
         if not isinstance(self.outbox_reference, type):
-            self._outbox = cast("type[OutboxEvent]", apps.get_model(self.outbox_reference))
+            self._outbox = apps.get_model(self.outbox_reference)  # type: ignore[assignment]
 
     def get_field_names(self, model: type[Model]) -> tuple[str, ...]:
         meta = model._meta

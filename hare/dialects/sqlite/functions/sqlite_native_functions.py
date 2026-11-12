@@ -1,12 +1,11 @@
 from __future__ import annotations
 
+from rust.native import sqlite_functions
+
 
 class SqliteNativeFunctions:
-    """The compiled ``rust.native.sqlite_functions`` module - the SQLite functions whose Python
-    versions ran per row, registered in their place when it is built."""
+    """The compiled ``rust.native.sqlite_functions`` module - the SQLite functions registered on a
+    connection. Each runs the common inputs natively and hands the rest to its Python function."""
 
-    #: The module - None where it isn't built.
-    try:
-        from rust.native import sqlite_functions as module
-    except ImportError:
-        module = None
+    #: The module.
+    module = sqlite_functions

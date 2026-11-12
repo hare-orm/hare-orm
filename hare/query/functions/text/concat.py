@@ -16,7 +16,7 @@ from hare.sql import functions
 from hare.sql.functions.text.concat_function import ConcatFunction
 from hare.sql.terms.term import Term
 from hare.sql.terms.values.value_wrapper import ValueWrapper
-from hare.time import Timezone
+from hare.time.zone_settings import ZoneSettings
 
 
 class Concat(Function):
@@ -72,7 +72,7 @@ class Concat(Function):
             return term
         effective_field = GeneratedField.get_effective_field(output_field)
         if isinstance(effective_field, DatetimeField):
-            return functions.DatetimeAsText(term, Timezone.get_use_timezone())
+            return functions.DatetimeAsText(term, ZoneSettings.get_use_timezone())
         if isinstance(effective_field, UUIDField):
             # A dialect keeping a UUID in a form of its own writes its text into JSON.
             return expression_context.dialect.types.get_json_term(effective_field, term) or term

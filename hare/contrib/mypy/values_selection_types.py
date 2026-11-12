@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from mypy.types import Instance, LiteralType, NoneType, TupleType, Type, TypedDictType, get_proper_type
 
@@ -29,7 +29,7 @@ class ValuesSelectionTypes:
         metadata = get_proper_type(receiver.extra_attrs.attrs.get(HIDDEN_SELECTION_ATTRIBUTE))
         if not isinstance(metadata, TupleType):
             return None
-        shape, selection_mode, *names = [cast(str, cast(LiteralType, item).value) for item in metadata.items]
+        shape, selection_mode, *names = [item.value for item in metadata.items]  # type: ignore[attr-defined]
         if shape == RowShape.DICT:
             selection = ValuesSelection(RowShape.DICT, renamed_fields=tuple(zip(names[::2], names[1::2], strict=True)))
         else:

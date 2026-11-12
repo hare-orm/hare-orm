@@ -7,7 +7,7 @@ from importlib import import_module, invalidate_caches, reload
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import ModuleType
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar
 
 from hare.core.caching.cache import Cache
 from hare.fields.field import Field
@@ -147,8 +147,8 @@ class MigrationLoader:
             return module
         # Compiled from the source directly - a cached .pyc is only validated by whole-second
         # mtime and size, so a same-size edit within the same second would otherwise be ignored.
-        code = compile(source, cast("str", module.__file__), "exec")
-        spec = module.__spec__ or spec_from_file_location(migration_path, cast("str", module.__file__))
+        code = compile(source, module.__file__, "exec")  # type: ignore[arg-type]
+        spec = module.__spec__ or spec_from_file_location(migration_path, module.__file__)
         # _read_module_source accepts only .py files, for which importlib supplies a source loader.
         assert spec is not None  # nosec B101
         replacement = module_from_spec(spec)

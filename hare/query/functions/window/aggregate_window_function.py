@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.query.functions.window.window_function import WindowFunction
@@ -11,7 +11,6 @@ if TYPE_CHECKING:
     from hare.fields.field import Field
     from hare.query.expressions import Aggregate, ExpressionContext
     from hare.query.expressions.expression_result import TableCriterionTuple
-    from hare.sql.terms.functions import AggregateFunction
     from hare.sql.terms.functions.analytic_function import AnalyticFunction
 
 
@@ -36,5 +35,5 @@ class AggregateWindowFunction(WindowFunction):
         self, expression_context: ExpressionContext
     ) -> tuple[AnalyticFunction, list[TableCriterionTuple], Field[Any] | None]:
         result = self.aggregate.get_result(expression_context)
-        analytic_function = self.aggregate.get_analytic_function(cast("AggregateFunction", result.term))
+        analytic_function = self.aggregate.get_analytic_function(result.term)  # type: ignore[arg-type]
         return analytic_function, result.joins, self.aggregate.get_value_field(result)

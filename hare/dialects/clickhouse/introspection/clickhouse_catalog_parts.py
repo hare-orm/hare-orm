@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.dialects.clickhouse.constants import (
     CLICKHOUSE_INDEX_TYPE_ARGUMENT_DEFAULTS,
@@ -10,7 +10,7 @@ from hare.dialects.clickhouse.constants import (
 from hare.dialects.clickhouse.introspection.clickhouse_observed_table_options import ClickhouseObservedTableOptions
 from hare.dialects.clickhouse.introspection.clickhouse_sql_parts import ClickhouseSqlParts
 from hare.dialects.clickhouse.introspection.constants import CLICKHOUSE_ENGINE_CLAUSES
-from hare.inspectdb.introspection.enums import SchemaPartType
+from hare.inspectdb.enums import SchemaPartType
 from hare.inspectdb.introspection.schema_part import SchemaPart
 from hare.inspectdb.introspection.table_parts import TableParts
 
@@ -53,7 +53,7 @@ class ClickhouseCatalogParts:
                 "sql": raw["table_rows"][0]["primary_key"],
             }
             clauses = ClickhouseSqlParts.get_clauses(raw["table_rows"][0]["engine_full"], CLICKHOUSE_ENGINE_CLAUSES)
-            options = cast("ClickhouseTableOptions | None", table_infos[table].table_options)
+            options: ClickhouseTableOptions | None = table_infos[table].table_options  # type: ignore[assignment]
             definitions[SchemaPartType.TABLE_OPTIONS, table, table] = {
                 "engine": clauses.pop(""),
                 "clauses": {

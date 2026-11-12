@@ -19,11 +19,11 @@ from hare.exceptions import ConfigurationError, IntegrityError
 from hare.fields.db_defaults import SqlDefault
 from hare.fields.relations.fields import ForeignKeyFieldInstance, OneToOneFieldInstance
 from hare.inspectdb import ModelFactory, SchemaInspector
+from hare.inspectdb.enums import CatalogDiagnosticCode
 from hare.inspectdb.generation.inspected_model_builder import InspectedModelBuilder
 from hare.inspectdb.generation.model_naming import ModelNaming
 from hare.inspectdb.introspection.column_info import ColumnInfo
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
-from hare.inspectdb.introspection.enums import CatalogDiagnosticCode
 from hare.inspectdb.introspection.table_info import TableInfo
 from hare.migrations.state.state_apps import StateApps
 from hare.models import Model

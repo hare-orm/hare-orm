@@ -7,6 +7,7 @@ from hare.dialects.base.connection.connection_option import ConnectionOption
 from hare.dialects.base.connection.connection_options import ConnectionOptions
 from hare.dialects.clickhouse.client.constants import CLICKHOUSE_CONNECTION_OPTION_DEFAULTS
 from hare.dialects.clickhouse.constants import CLICKHOUSE_CONNECTION_OPTIONS
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.enums import ConnectionOptionType
 
 CLICKHOUSE_DRIVER_COLUMN_WRITE_ERROR = 'Cannot encode column "{name}" as {type}: {error}'
@@ -52,14 +53,8 @@ CLICKHOUSE_DRIVER_INSERT_STATEMENT_TEMPLATE = "INSERT INTO {table} ({columns}) V
 
 #: The fractional digits of a second Python's ``datetime`` keeps.
 CLICKHOUSE_DRIVER_MICROSECOND_DIGITS = 6
-CLICKHOUSE_DRIVER_MICROSECONDS_PER_SECOND = 1_000_000
-CLICKHOUSE_DRIVER_MICROSECONDS_PER_DAY = 86_400 * CLICKHOUSE_DRIVER_MICROSECONDS_PER_SECOND
 #: What a column type holding moments at any depth names.
-CLICKHOUSE_DRIVER_MOMENT_TYPE_NAME = "DateTime"
-#: The container types a moment can be held in.
-CLICKHOUSE_DRIVER_ARRAY_TYPE = "Array"
-CLICKHOUSE_DRIVER_MAP_TYPE = "Map"
-CLICKHOUSE_DRIVER_TUPLE_TYPE = "Tuple"
+CLICKHOUSE_DRIVER_MOMENT_TYPE_NAME = ClickhouseTypeName.DATETIME
 #: The moment the ticks of a column of moments count from, naive - its UTC wall clock.
 CLICKHOUSE_DRIVER_NAIVE_MOMENT_EPOCH = datetime.datetime(1970, 1, 1)
 #: The names of the zone whose wall clock is UTC's - a moment in it is the epoch plus its ticks.
@@ -67,8 +62,8 @@ CLICKHOUSE_DRIVER_UTC_ZONE_NAMES = frozenset({"UTC", "Etc/UTC"})
 
 #: The geometry types the library doesn't know -> the type each is written as.
 CLICKHOUSE_DRIVER_GEOMETRY_ALIASES = (
-    ("LineString", "Array(Point)"),
-    ("MultiLineString", "Array(LineString)"),
+    (ClickhouseTypeName.LINE_STRING, "Array(Point)"),
+    (ClickhouseTypeName.MULTI_LINE_STRING, "Array(LineString)"),
 )
 #: How a ``Variant`` column's discriminators are sent - one byte per row; the compact mode isn't read.
 CLICKHOUSE_DRIVER_VARIANT_BASIC_MODE = 0

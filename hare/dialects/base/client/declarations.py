@@ -4,24 +4,6 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from hare.dialects.base.client.statement_recovery import StatementRecovery
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
-class StatementRequest:
-    """One driver invocation and its explicit permission to retry a read.
-
-    Parameters retain their sensitive-value metadata. A request is local to this
-    invocation: neither observers nor nested statements inherit its retry permission.
-    """
-
-    sql: str | None
-    parameters: Any = None
-    retry_read: bool = False
-    recovery: StatementRecovery | None = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

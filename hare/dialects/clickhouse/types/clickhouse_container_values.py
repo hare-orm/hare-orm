@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from hare.dialects.clickhouse.lookups.clickhouse_array_elements_key import ClickhouseArrayElementsKey
 from hare.dialects.clickhouse.lookups.constants import (
@@ -27,7 +28,6 @@ if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.dialects.base.types.type_registry import TypeRegistry
     from hare.fields.field import Field
-    from hare.models import Model
     from hare.sql.terms.term import Term
 
 
@@ -61,9 +61,7 @@ class ClickhouseContainerValues:
             UnSupportedError: A container, top-level or held, is declared with ``null=True`` - an
                 ``Array``, a ``Map`` and a ``Tuple`` of ClickHouse hold no NULL.
         """
-        if any(
-            not child_field.exists_on(self.dialect) for child_field in cast("ContainerField", field).get_child_fields()
-        ):
+        if any(not child_field.exists_on(self.dialect) for child_field in field.get_child_fields()):  # type: ignore[attr-defined]
             return None
         if field.null:
             raise UnSupportedError(
@@ -74,7 +72,7 @@ class ClickhouseContainerValues:
             return f"Array({self.get_held_type(field.base_field)})"
         if isinstance(field, MapField):
             return f"Map({self.get_held_type(field.key_field)}, {self.get_held_type(field.value_field)})"
-        tuple_field = cast("TupleField", field)
+        tuple_field: TupleField = field  # type: ignore[assignment]
         element_types = [self.get_held_type(child_field) for child_field in tuple_field.fields_in_order]
         if tuple_field.element_names is not None:
             element_types = [
@@ -170,25 +168,19 @@ class ClickhouseContainerValues:
         function_cast = self.types.get_function_cast(field)
         return None if function_cast is None else function_cast(field, term)
 
-    def to_db(self, field: Field[Any], value: Any, instance: type[Model] | Model | None) -> Any:
-        """The container as the server takes it.
+    def prepare_db(self, field: Field[Any]) -> Callable[[Any, Any], Any]:
+        """Prepare field traversal and typed literals independently of row values."""
+        container_field: ContainerField = field  # type: ignore[assignment]
+        write = container_field.get_dialect_db_writer(self.types)
+        decorate = self.prepare_typed_containers(container_field)
 
-        Args:
-            field: The container field.
-            value: The Python value.
-            instance: The model (class) it is written or compared for.
+        def write_value(value: Any, instance: Any) -> Any:
+            db_value = write(value, instance)
+            if db_value is None:
+                raise ValidationError(f"{field.model_field_name}: a ClickHouse container holds no NULL, got None")
+            return decorate(db_value)
 
-        Returns:
-            The value.
-
-        Raises:
-            ValidationError: The value is None - the column holds no NULL.
-        """
-        container_field = cast("ContainerField", field)
-        db_value = container_field.get_dialect_db_value(value, instance, self.types)
-        if db_value is None:
-            raise ValidationError(f"{field.model_field_name}: a ClickHouse container holds no NULL, got None")
-        return self.get_typed_containers(container_field, db_value)
+        return write_value
 
     @staticmethod
     def holds_typed_values(field: Field[Any]) -> bool:
@@ -205,88 +197,96 @@ class ClickhouseContainerValues:
         from hare.dialects.clickhouse.fields.variant_field import VariantField
 
         return any(
-            isinstance(child_field, DynamicField | VariantField)
+            isinstance(child_field, (DynamicField, VariantField))
             or (isinstance(child_field, ContainerField) and ClickhouseContainerValues.holds_typed_values(child_field))
-            for child_field in cast("ContainerField", field).get_child_fields()
+            for child_field in field.get_child_fields()  # type: ignore[attr-defined]
         )
 
-    def get_typed_containers(self, field: ContainerField, value: Any) -> Any:
-        """A container with each empty container in it bound with its type - ClickHouse writes an
-        empty array as one of no type, which a ``SELECT`` casts to no array of arrays (``[[]]`` to an
-        array of three dimensions) and to no array of ``Dynamic``.
-
-        Args:
-            field: The container field.
-            value: The value, as the server takes it.
-
-        Returns:
-            The value.
-        """
-        if isinstance(value, list | dict) and not value:
-            return ClickhouseTypedValue(
-                value, ClickhouseTypeNames.get_server_type(field.get_column_type(self.dialect))
-            )
+    def prepare_typed_containers(self, field: ContainerField) -> Callable[[Any], Any]:
+        """Prepare nested literal types once; empty values still receive their exact type."""
+        empty_type = ClickhouseTypeNames.get_server_type(field.get_column_type(self.dialect))
+        decorate: Callable[[Any], Any]
         if isinstance(field, ArrayField):
-            if not isinstance(field.base_field, ContainerField):
-                return self.get_typed_integers(field.base_field, value)
-            return [
-                element if element is None else self.get_typed_containers(field.base_field, element)
-                for element in value
-            ]
-        if isinstance(field, MapField):
-            given_keys = list(value)
-            keys = self.get_typed_integers(field.key_field, given_keys)
-            if not isinstance(field.value_field, ContainerField):
-                given_items = list(value.values())
-                items = self.get_typed_integers(field.value_field, given_items)
-                if keys is given_keys and items is given_items:
-                    return value
-                return MapValue(zip(keys, items, strict=True))
-            return MapValue(
-                (key, item if item is None else self.get_typed_containers(field.value_field, item))
-                for key, item in zip(keys, value.values(), strict=True)
+            if isinstance(field.base_field, ContainerField):
+                child = self.prepare_typed_containers(field.base_field)
+
+                def write_array(value: Any) -> Any:
+                    return [None if element is None else child(element) for element in value]
+
+                decorate = write_array
+            else:
+                decorate = self.prepare_typed_integers(field.base_field)
+        elif isinstance(field, MapField):
+            write_keys = self.prepare_typed_integers(field.key_field)
+            if isinstance(field.value_field, ContainerField):
+                write_item = self.prepare_typed_containers(field.value_field)
+
+                def write_nested_map(value: Any) -> Any:
+                    keys = write_keys(list(value))
+                    return MapValue(
+                        (key, None if item is None else write_item(item))
+                        for key, item in zip(keys, value.values(), strict=True)
+                    )
+
+                decorate = write_nested_map
+            else:
+                write_items = self.prepare_typed_integers(field.value_field)
+
+                def write_map(value: Any) -> Any:
+                    given_keys, given_items = list(value), list(value.values())
+                    keys, items = write_keys(given_keys), write_items(given_items)
+                    if keys is given_keys and items is given_items:
+                        return value
+                    return MapValue(zip(keys, items, strict=True))
+
+                decorate = write_map
+        else:
+            tuple_field: TupleField = field  # type: ignore[assignment]
+            # Each position keeps separate handling of large integers and nested containers.
+            positions = tuple(
+                (
+                    self.prepare_typed_integers(child_field),
+                    self.prepare_typed_containers(child_field) if isinstance(child_field, ContainerField) else None,
+                )
+                for child_field in tuple_field.fields_in_order
             )
-        tuple_field = cast("TupleField", field)
-        floor = CLICKHOUSE_UNSIGNED_LITERAL_FLOOR
-        return TupleValue(
-            self.get_typed_integers(element_field, [element])[0]
-            if type(element) is int and element >= floor
-            else element
-            if element is None or not isinstance(element_field, ContainerField)
-            else self.get_typed_containers(element_field, element)
-            for element_field, element in zip(tuple_field.fields_in_order, value, strict=True)
+            floor = CLICKHOUSE_UNSIGNED_LITERAL_FLOOR
+
+            def write_tuple(value: Any) -> Any:
+                return TupleValue(
+                    integers([element])[0]
+                    if type(element) is int and element >= floor
+                    else element
+                    if element is None or nested is None
+                    else nested(element)
+                    for (integers, nested), element in zip(positions, value, strict=True)
+                )
+
+            decorate = write_tuple
+
+        return lambda value: (
+            ClickhouseTypedValue(value, empty_type)
+            if isinstance(value, (list, dict)) and not value
+            else decorate(value)
         )
 
-    def get_typed_integers(self, field: Field[Any], values: list[Any]) -> list[Any]:
-        """The values of an array or a map with each integer a literal reads as a ``UInt64`` bound with
-        its signed field's type - beside a negative one the server finds no type of both.
-
-        Args:
-            field: The field of the values.
-            values: The values.
-
-        Returns:
-            The values - the same list when none is bound.
-        """
-        floor = CLICKHOUSE_UNSIGNED_LITERAL_FLOOR
-        if not any(type(value) is int and value >= floor for value in values):
-            return values
+    def prepare_typed_integers(self, field: Field[Any]) -> Callable[[list[Any]], list[Any]]:
+        """Bind the declared signed type, retaining unchanged lists without large integers."""
         held_type = ClickhouseTypeNames.get_server_type(self.get_held_type(field))
         if held_type.removeprefix("Nullable(").startswith(CLICKHOUSE_UNSIGNED_TYPE_PREFIX):
-            return values
-        return [
-            ClickhouseTypedValue(value, held_type) if type(value) is int and value >= floor else value
-            for value in values
-        ]
+            return lambda values: values
+        floor = CLICKHOUSE_UNSIGNED_LITERAL_FLOOR
 
-    def to_python(self, field: Field[Any], value: Any) -> Any:
-        """The Python value of a container the driver returned.
+        def write_values(values: list[Any]) -> list[Any]:
+            if not any(type(value) is int and value >= floor for value in values):
+                return values
+            return [
+                ClickhouseTypedValue(value, held_type) if type(value) is int and value >= floor else value
+                for value in values
+            ]
 
-        Args:
-            field: The container field.
-            value: The value.
+        return write_values
 
-        Returns:
-            The value.
-        """
-        return cast("ContainerField", field).get_dialect_python_value(value, self.types)
+    def prepare_python(self, field: Field[Any]) -> Callable[[Any], Any]:
+        """Prepare the container's sole read traversal."""
+        return field.get_dialect_python_reader(self.types)  # type: ignore[attr-defined]

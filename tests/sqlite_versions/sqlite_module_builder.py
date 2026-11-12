@@ -61,9 +61,8 @@ class SqliteModuleBuilder:
         include_directory = Path(sysconfig.get_paths()["include"])
         library_directory = self.library_path.parent
         extension_name = f"_sqlite3{sysconfig.get_config_var('EXT_SUFFIX')}"
-        link_options = ["-bundle", "-undefined", "dynamic_lookup"] if sys.platform == "darwin" else ["-shared"]
         options = [
-            *link_options,
+            "-shared",
             "-fPIC",
             "-O2",
             "-DPy_BUILD_CORE_MODULE",

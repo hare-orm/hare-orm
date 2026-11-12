@@ -44,6 +44,19 @@ class RelationDependencies:
             return None
 
     @classmethod
+    def get_required_for_field(
+        cls, app_label: str, model_name: str, field: Any, state: State
+    ) -> list[OperationDependency]:
+        """The relation targets and declared enum type needed before a field is added or altered."""
+        dependencies = cls.get_required_for_relation(app_label, model_name, field, state)
+        enum_type = getattr(field, "requires_enum_type", None)
+        if enum_type is not None:
+            dependencies.append(
+                OperationDependency.of_enum_type(enum_type.schema, enum_type.name, DependencyType.CREATED)
+            )
+        return dependencies
+
+    @classmethod
     def get_required_for_relation(
         cls, app_label: str, model_name: str, field: Any, state: State
     ) -> list[OperationDependency]:

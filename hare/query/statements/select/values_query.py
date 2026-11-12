@@ -1,26 +1,20 @@
 from __future__ import annotations
 
-from collections.abc import (
-    AsyncGenerator,
-    Callable,
-    Collection,
-    Iterable,
-    Mapping,
-    Sequence,
-)
+from collections.abc import AsyncGenerator, Callable, Collection, Coroutine, Iterable, Mapping, Sequence
 from copy import copy
-from typing import TYPE_CHECKING, Any, ClassVar, Self, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Self, TypeVar
 
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.exceptions import (
     QueryError,
 )
 from hare.query.enums import RowShape
-from hare.query.expressions import Expression
+from hare.query.execution.query_execution import QueryExecution
 from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import AggregatedMultiValuedPaths
 from hare.query.plans.description.plan_context import PlanContext
 from hare.query.plans.description.plan_description import PlanDescription
 from hare.query.plans.enums import PlanKeyForm
+from hare.query.plans.statement.declarations import ValuesReading
 from hare.query.plans.statement.declared_plan_slots import DeclaredPlanSlots
 from hare.query.plans.statement.statement_plan_descriptions import StatementPlanDescriptions
 from hare.query.queryset.extensions.query_set_extension_result import QuerySetExtensionResult
@@ -45,19 +39,15 @@ from hare.query.statements.select.values.values_distinct import ValuesDistinct
 from hare.query.statements.select.values.values_grouping import ValuesGrouping
 from hare.query.statements.select.values.values_output import ValuesOutput
 from hare.query.statements.select.values.window_filter_wrapping import WindowFilterWrapping
+from hare.query.statements.summary.summary_source import SummarySource
 from hare.sql import Order
-from hare.sql.terms.criteria.criterion import Criterion
-from hare.sql.terms.field import Field
-from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
     from hare.fields.field import Field as ModelField
     from hare.models import Model
+    from hare.query.plans.statement.declarations import CallPlanHit
     from hare.query.plans.statement.statement_plan import StatementPlan
     from hare.query.queryset.queryset import QuerySet
-    from hare.query.statements.summary.aggregate_query import AggregateQuery
-    from hare.query.statements.summary.count_query import CountQuery
-    from hare.query.statements.summary.exists_query import ExistsQuery
     from hare.query.statements.write.update_query import UpdateQuery
 
 TModel = TypeVar("TModel", bound="Model")
@@ -139,7 +129,7 @@ class ValuesQuery(SelectQuery[Any]):
         if selection.shape is RowShape.FLAT and len(selected_fields) != 1:
             raise QueryError(".values_list(flat=True) selects exactly one field")
         outputs = (
-            list(cast("Mapping[str, str]", selected_fields).items())
+            list(selected_fields.items())  # type: ignore[union-attr]
             if rows_class.keyed_by_output_name
             else [(name, name) for name in selected_fields]
         )
@@ -220,11 +210,11 @@ class ValuesQuery(SelectQuery[Any]):
             queryset = self._apply_values_to(
                 source_queryset._with_orderings(*ordering_names) if ordering_names else source_queryset
             )
-            return cast("QuerySet[Any, Any]", SingleRow.as_single(queryset))
+            return SingleRow.as_single(queryset)  # type: ignore[return-value]
         if not reverse:
-            return self._apply_values_to(cast("QuerySet[Any]", source_queryset.first()))
+            return self._apply_values_to(source_queryset.first())  # type: ignore[arg-type]
         self._raise_if_sliced_rows_differ_from_source("last")
-        return self._apply_values_to(cast("QuerySet[Any]", source_queryset.last()))
+        return self._apply_values_to(source_queryset.last())  # type: ignore[arg-type]
 
     def _raise_if_sliced_rows_differ_from_source(self, method_name: str) -> None:
         """Rejects re-selecting within a slice whose rows aren't one per row of the source
@@ -304,27 +294,16 @@ class ValuesQuery(SelectQuery[Any]):
                 rows_query._default_ordering_disabled = True
         return rows_query
 
-    def _get_count_query(self) -> CountQuery:
-        """The number of rows the query returns, counted over the query as a derived table."""
-        from hare.query.statements.summary.count_query import CountQuery
+    def _get_count_source(self) -> SummarySource:
+        """Describe the derived rows counted by count(), keeping the outer slice separate."""
+        return SummarySource(self, self._get_rows_query(sliced=False))
 
-        return CountQuery(self, rows_query=self._get_rows_query(sliced=False))
+    def _get_exists_source(self) -> SummarySource:
+        """Describe the derived rows searched by exists(), keeping the outer slice separate."""
+        return SummarySource(self, self._get_rows_query(sliced=False))
 
-    def _get_exists_query(self) -> ExistsQuery:
-        """Whether the query returns any row."""
-        from hare.query.statements.summary.exists_query import ExistsQuery
-
-        return ExistsQuery(self, rows_query=self._get_rows_query(sliced=False))
-
-    def _get_aggregate_query(self, **kwargs: Expression | Term) -> AggregateQuery:
-        """Aggregates over the rows the query returns. When each row is a row of the source queryset,
-        this is the queryset's own ``aggregate()``; otherwise it runs over the query as a derived
-        table and reads only the selected columns.
-
-        Raises:
-            QueryError: A metric over the derived table reads a column that isn't selected.
-        """
-        from hare.query.statements.summary.aggregate_query import AggregateQuery
+    def _get_aggregate_source(self) -> SummarySource:
+        """Describe aggregate input as source model rows or a sliced derived table."""
 
         if (
             self._limit is None
@@ -332,8 +311,8 @@ class ValuesQuery(SelectQuery[Any]):
             and ValuesGrouping.returns_one_row_per_source_row(self)
             and not RowMultiplication.reads_window_function(self)
         ):
-            return self._source_queryset.aggregate(**kwargs)
-        return AggregateQuery(self, kwargs, rows_query=self._get_rows_query(sliced=True))
+            return self._source_queryset._get_aggregate_source()
+        return SummarySource(self, self._get_rows_query(sliced=True))
 
     def _get_update_query(self, **kwargs: Any) -> UpdateQuery:
         """Updates the model rows the source queryset matches, like Django - the selected fields
@@ -365,7 +344,7 @@ class ValuesQuery(SelectQuery[Any]):
         ordering_field_names = {field_name for field_name, _order in orderings}
         primary_key_attribute_names = list(self.model._meta.primary_key_attribute_names)
         output_field_names = [
-            ValuesOutput.get_concrete_field_path(self, name) for name in ValuesOutput.get_output_field_names(self)
+            ValuesOutput.get_concrete_field_path(self, name) for name in self._selected_fields_by_alias.values()
         ]
         if ValuesGrouping.is_grouped(self):
             tie_breaker_names = ValuesGrouping.get_group_key_names(self)
@@ -376,18 +355,18 @@ class ValuesQuery(SelectQuery[Any]):
                 else output_field_names
             )
         else:
-            multi_valued_names = [
-                name
-                for name in output_field_names
-                if (
-                    name in self._annotations
-                    and name in RowMultiplication.get_row_multiplying_annotation_names(self, selected_only=True)
-                )
-                or (
-                    name not in self._annotations
-                    and AggregatedMultiValuedPaths.get_multi_valued_paths(self.model, name)
-                )
-            ]
+            multi_valued_names = []
+            annotation_names: set[str] | None = None
+            for name in output_field_names:
+                if name in self._annotations:
+                    if annotation_names is None:
+                        annotation_names = set(
+                            RowMultiplication.get_row_multiplying_annotation_names(self, selected_only=True)
+                        )
+                    if name in annotation_names:
+                        multi_valued_names.append(name)
+                elif AggregatedMultiValuedPaths.get_multi_valued_paths(self.model, name):
+                    multi_valued_names.append(name)
             ordering_is_unique = self._ordering_field_names_are_unique(ordering_field_names)
             tie_breaker_names = [*([] if ordering_is_unique else primary_key_attribute_names), *multi_valued_names]
         return orderings + [
@@ -458,61 +437,112 @@ class ValuesQuery(SelectQuery[Any]):
             The names, None for rows of model rows.
         """
         if ValuesGrouping.is_grouped(self):
-            return list(ValuesGrouping.get_group_key_names(self))
+            return ValuesGrouping.get_group_key_names(self)
         if self._distinct and not self._distinct_on:
             return [
-                ValuesOutput.get_concrete_field_path(self, name) for name in ValuesOutput.get_output_field_names(self)
+                ValuesOutput.get_concrete_field_path(self, name) for name in self._selected_fields_by_alias.values()
             ]
         return None
 
-    def _stream_batches(self, connection: DatabaseClient, chunk_size: int) -> AsyncGenerator[list[Any]]:
-        value_fields = ValuesOutput.get_value_fields(self)
-        column_converters = ValuesOutput.get_column_converters(self, value_fields)
-        return self._rows.stream_batches(connection, *self._get_parameterized_sql(), column_converters, chunk_size)
+    def _stream_batches(
+        self, connection: DatabaseClient, chunk_size: int, statement: tuple[str, list[Any]]
+    ) -> AsyncGenerator[list[Any]]:
+        return self._rows.stream_batches(connection, *statement, self._get_column_converters(), chunk_size)
 
-    async def _execute(self) -> Any:
-        column_converters = self._column_converters
-        if column_converters is None:
-            column_converters = ValuesOutput.get_column_converters(self)
+    def _get_column_converters(self) -> list[tuple[str, Callable[[Any], Any] | None]]:
+        """Use the plan's readers, the completed build's readers, or prepare an uncached selection.
+
+        Execution and cursor streaming select readers identically; this method retains no
+        fallback result that could survive a later build with different output columns.
+        """
+        column_converters = (
+            self._statement_plan.result_reading if self._statement_plan is not None else self._column_converters
+        )
+        return ValuesOutput.get_column_converters(self) if column_converters is None else column_converters
+
+    def _execute(self, statement: tuple[str, list[Any]]) -> Coroutine[Any, Any, Any]:
+        column_converters = self._get_column_converters()
+        if self._extension_calls and self._applies_result_transform:
+            # A dialect's result transform reads the driver's result too.
+            return QueryExecution.read(
+                self, self._connection, self._read_with_extension_result(statement, column_converters)
+            )
+        return self._rows.read(self, self._connection, *statement, column_converters, retry_read=self.is_read_only)
+
+    async def _read_with_extension_result(
+        self, statement: tuple[str, list[Any]], column_converters: list[tuple[str, Any]]
+    ) -> Any:
+        """Reads the rows and keeps the driver's result for the dialect's result transform."""
         statement_result = await self._rows.fetch_result(
             self._connection,
-            *self._get_parameterized_sql(),
+            *statement,
             retry_read=self.is_read_only,
         )
+        rows = self._rows.convert_batch(self._connection, statement_result, column_converters)
+        result = self._get_single_or_list_result(rows)
         reader = (
-            self._rows.get_result_reader(
-                self._connection,
-                statement_result,
-                column_converters,
-            )
+            self._rows.get_result_reader(self._connection, statement_result, column_converters)
             if statement_result.rows or statement_result.column_names
             else None
         )
-        rows = [reader(row) for row in statement_result.rows] if reader is not None else []
-        result = self._get_single_or_list_result(rows)
-        if self._extension_calls and self._applies_result_transform:
-            self._extension_result = QuerySetExtensionResult(result, statement_result, reader)
+        self._extension_result = QuerySetExtensionResult(result, statement_result, reader)
         return result
 
-    def _get_call_signature_type_part(self) -> tuple[Any, list[Any]]:
-        # SQL-equivalent row shapes share conversion metadata and choose their own reader.
-        return (self._rows.plan_shape,), []
+    def _get_call_signature_type_part(self) -> tuple[Any, Sequence[Any]]:
+        # SQL-equivalent row shapes share conversion metadata; the calls tell them apart.
+        return (self._rows.plan_shape,), ()
 
-    def _restore_from_plan(self, plan: StatementPlan) -> None:
-        self._column_converters = plan.result_reading
+    @staticmethod
+    def get_queryset_type_part(queryset: QuerySet[Any, Any]) -> tuple[Any, Sequence[Any]]:
+        selection: ValuesSelection = queryset._selection  # type: ignore[assignment]
+        return (ValuesQuery.ROWS_CLASSES_BY_SHAPE[selection.shape].plan_shape,), ()
+
+    def _get_call_plan_reading(self, plan: StatementPlan) -> Any:
+        # The reader of the rows' shape - the calls select the fields and the shape - and the
+        # converters of the columns, kept with the plan.
+        by_position = self._connection.features.supports_positional_rows
+        layout = (
+            self._rows.get_layout(plan.result_reading, plan.result_column_names if by_position else None)
+            if plan.result_column_names or not by_position
+            else None
+        )
+        return ValuesReading(self._rows, plan.result_reading, layout)
+
+    @staticmethod
+    def read_call_plan(
+        queryset: QuerySet[Any, Any], connection: DatabaseClient, hit: CallPlanHit
+    ) -> Coroutine[Any, Any, Any]:
+        """Reads the values of a queryset on the plan of its calls - the reader of their shape kept
+        with the plan. Nothing is copied.
+
+        Args:
+            queryset: The queryset.
+            connection: This execution's connection.
+            hit: The plan found (``StatementPlanRuns.find_call_plan()``).
+
+        Returns:
+            The read of the rows, or of the one row of a single-row queryset.
+        """
+        reading: ValuesReading = hit.reading
+        return reading.reader.read(
+            queryset, connection, hit.sql, hit.parameters, reading.converters, retry_read=True, layout=reading.layout
+        )
 
     def _get_plan_record(self) -> dict[str, Any]:
         self._column_converters = ValuesOutput.get_column_converters(self)
-        return {"result_reading": self._column_converters}
+        return {
+            "result_reading": self._column_converters,
+            "result_column_names": self._get_result_column_names(),
+        }
 
     def _get_selected_field_names(self) -> Collection[str]:
-        return ValuesOutput.get_output_field_names(self)
+        return self._selected_fields_by_alias.values()
 
     def _get_row_join_lookups(self) -> list[str]:
         return [
             *(
                 field_name
-                for field_name in (*ValuesOutput.get_output_field_names(self), *self._group_bys)
+                for field_name in (*self._selected_fields_by_alias.values(), *self._group_bys)
                 if isinstance(field_name, str) and field_name not in self._annotations
             ),
             *QueryJoins.get_ordering_lookups(self),
@@ -529,7 +559,7 @@ class ValuesQuery(SelectQuery[Any]):
             return super()._get_group_key_lookups()
         return QueryJoins.get_field_lookups(
             self,
-            (field_name for field_name in ValuesOutput.get_output_field_names(self) if isinstance(field_name, str)),
+            (field_name for field_name in self._selected_fields_by_alias.values() if isinstance(field_name, str)),
         )
 
     def get_plan_description(self, context: PlanContext) -> PlanDescription | None:
@@ -547,7 +577,7 @@ class ValuesQuery(SelectQuery[Any]):
             # Its percent and seed are written into FROM, not bound.
             return None
         query = self._get_scoped_copy()
-        output_aliases = ValuesOutput.get_selected_fields_by_alias(query)
+        output_aliases = query._selected_fields_by_alias
         ValuesOutput.register_selected_annotations(query, output_aliases)
         return query._describe_statement(True)
 
@@ -559,12 +589,12 @@ class ValuesQuery(SelectQuery[Any]):
             kwargs: Passed on to ``_build_query()``.
         """
         self._make_query(**kwargs)
-        output_aliases = list(ValuesOutput.get_output_aliases(self))
+        output_aliases = list(self._selected_fields_by_alias.keys())
         if len(self.query._selects) > len(output_aliases):
             # A copy - selecting from it sets its alias, and it can be the query a plan keeps.
             inner_query = copy(self.query)
             self.query = self._connection.query_class.from_(inner_query).select(
-                *(cast("Field", inner_query[alias]).as_(alias) for alias in output_aliases)
+                *(inner_query[alias].as_(alias) for alias in output_aliases)
             )
         self._apply_none_as_subquery()
 
@@ -577,7 +607,7 @@ class ValuesQuery(SelectQuery[Any]):
         Returns:
             True when the annotation isn't among the selected fields.
         """
-        selected_field_names = ValuesOutput.get_output_field_names(self)
+        selected_field_names = self._selected_fields_by_alias.values()
         return annotation_name not in selected_field_names or super()._annotation_renders_as_expression(
             annotation_name
         )
@@ -595,7 +625,7 @@ class ValuesQuery(SelectQuery[Any]):
                 "select_for_update() can't be combined with a filter on a window function (Window(...)) - "
                 "the filter applies to the query wrapped in a subquery, whose rows can't be locked."
             )
-        output_aliases = list(ValuesOutput.get_output_aliases(self))
+        output_aliases = list(self._selected_fields_by_alias.keys())
         projection = DerivedProjection(
             self.query,
             column_prefix=WINDOW_FILTER_COLUMN_ALIAS_PREFIX,
@@ -603,7 +633,8 @@ class ValuesQuery(SelectQuery[Any]):
         )
         inner_query = projection.query
         outer_criterion = WindowFilterWrapping.get_derived_table_criterion(
-            cast("Criterion", self._window_filter_criterion), projection.get_reference
+            self._window_filter_criterion,  # type: ignore[arg-type]
+            projection.get_reference,
         )
         order_columns = [(projection.get_reference(term), order) for term, order in inner_query._orderbys]
         distinct_on_columns = [projection.get_reference(term) for term in inner_query._distinct_on]
@@ -637,7 +668,7 @@ class ValuesQuery(SelectQuery[Any]):
         return True
 
     def _prepare_build(self) -> None:
-        output_aliases = ValuesOutput.get_selected_fields_by_alias(self)
+        output_aliases = self._selected_fields_by_alias
         ValuesDistinct.raise_if_over_encrypted_field(self, output_aliases.values())
         # Kept as given: the registration below registers each selected annotation again under
         # its alias - the build resolves the selected fields from the original ones.
@@ -661,10 +692,10 @@ class ValuesQuery(SelectQuery[Any]):
     def _select_columns(self) -> None:
         # The selected fields are resolved from the annotations as given: the registration runs
         # again, in order, alongside each field's own column.
-        self._annotations = self._given_annotations
+        self._annotations = dict(self._given_annotations)
         self.query = self._get_base_query()
         QueryJoins.apply_effective_basetable(self)
-        for alias, field in ValuesOutput.get_selected_fields_by_alias(self).items():
+        for alias, field in self._selected_fields_by_alias.items():
             ValuesOutput.add_field_to_select_query(self, field, alias)
 
     def _apply_ordering(self) -> None:
@@ -672,9 +703,7 @@ class ValuesQuery(SelectQuery[Any]):
         # QueryOrdering.get_ordering() needs each selected annotation's alias, so an ORDER BY reference uses
         # the name that's actually in SELECT.
         annotation_output_aliases = {
-            field: alias
-            for alias, field in ValuesOutput.get_selected_fields_by_alias(self).items()
-            if field in given_annotations
+            field: alias for alias, field in self._selected_fields_by_alias.items() if field in given_annotations
         }
         QueryOrdering.get_ordering(
             self,
@@ -722,7 +751,7 @@ class ValuesQuery(SelectQuery[Any]):
         connection: DatabaseClient,
         sql: str,
         parameters: list[Any],
-        column_converters: list[tuple[str, Callable[[Any], Any] | None]],
+        column_converters: Sequence[tuple[str, Callable[[Any], Any] | None]],
     ) -> list[Any]:
         """Runs a query selecting this query's columns and builds the output rows.
 

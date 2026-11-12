@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Coroutine
 from copy import copy
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.exceptions import QueryError
-from hare.query.constants import GET_FETCH_LIMIT_FOR_MULTIPLICITY_CHECK
+from hare.query.constants import GET_FETCH_LIMIT_FOR_MULTIPLICITY_CHECK, PRIMARY_KEY_ALIAS
+from hare.query.execution.query_execution import QueryExecution
 from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
 from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
 from hare.query.plans.description.plan_context import PlanContext
@@ -25,7 +26,7 @@ from hare.query.statements.select.combined.combined_derived_queries import Combi
 from hare.query.statements.select.combined.combined_plan_descriptions import CombinedPlanDescriptions
 from hare.query.statements.select.rows_query import RowsQuery
 from hare.query.statements.select.select_query import SelectQuery
-from hare.query.statements.select.values_query import ValuesQuery
+from hare.query.statements.summary.summary_source import SummarySource
 from hare.sql import Order
 from hare.sql.builder.queries.query_builder import QueryBuilder
 from hare.sql.builder.queries.set_operation_query import SetOperationQuery
@@ -38,9 +39,6 @@ if TYPE_CHECKING:
     from hare.query.queryset.queryset import QuerySet
     from hare.query.queryset.single_rows.get_exception_argument import GetExceptionArgument
     from hare.query.relation_loading.prefetching.prefetch import Prefetch
-    from hare.query.statements.summary.aggregate_query import AggregateQuery
-    from hare.query.statements.summary.count_query import CountQuery
-    from hare.query.statements.summary.exists_query import ExistsQuery
     from hare.query.statements.write.update_query import UpdateQuery
 
 
@@ -79,7 +77,7 @@ class CombinedQuery(RowsQuery[Any]):
 
         SpecificationCopying.copy_specification(source_queryset, self)
         self._init_build_state()
-        combination = cast("Combination", source_queryset._combination)
+        combination: Combination = source_queryset._combination  # type: ignore[assignment]
         self._source_queryset = source_queryset
         #: Whether the rows are the values the branches select, not model instances.
         self._combines_values = QuerySetCombination.selects_values(source_queryset)
@@ -95,7 +93,7 @@ class CombinedQuery(RowsQuery[Any]):
     def _get_rows(self) -> CombinedValuesRows | CombinedModelRows:
         """A reader of the combined rows, for one build."""
         if self._combines_values:
-            return CombinedValuesRows(cast("ValuesQuery", CombinedBranches.get_first_leaf(self)))
+            return CombinedValuesRows(CombinedBranches.get_first_leaf(self))  # type: ignore[arg-type]
         return CombinedModelRows(self.model, CombinedBranches.get_models(self), self._prefetched_relations)
 
     # --- the branches ---------------------------------------------------------------------------
@@ -114,13 +112,13 @@ class CombinedQuery(RowsQuery[Any]):
 
     def _get_plan(self) -> tuple[PlanDescription | None, StatementPlan | None]:
         # The branches' descriptions decide whether the statement keeps a plan.
-        description = self._describe_statement(False)
+        description = self._get_build_plan_description()
         if description is None:
             return None, None
         return description, StatementPlans.find(self.model, description.structure)
 
-    def _restore_from_plan(self, plan: StatementPlan) -> None:
-        self._rows.restore(plan.result_reading)
+    def _get_build_plan_description(self) -> PlanDescription | None:
+        return self._describe_statement(False)
 
     def _get_plan_record(self) -> dict[str, Any]:
         return {"result_reading": self._rows.get_result_reading()}
@@ -146,7 +144,7 @@ class CombinedQuery(RowsQuery[Any]):
                 combined_query = branch_query
             else:
                 combined_query = CombinedBranches.combine(self, combined_query, branch_query, branch_index)
-        derived_table = cast("QueryBuilder | SetOperationQuery", combined_query).as_(VALUES_SET_OPERATION_ALIAS)
+        derived_table = combined_query.as_(VALUES_SET_OPERATION_ALIAS)  # type: ignore[union-attr]
         rows = self._rows
         output_aliases = rows.get_output_aliases()
         column_names = {
@@ -173,9 +171,13 @@ class CombinedQuery(RowsQuery[Any]):
 
     # --- running --------------------------------------------------------------------------------
 
-    async def _execute(self) -> Any:
-        sql, parameters = self._get_parameterized_sql()
-        rows = await self._rows.read(self, sql, parameters)
+    def _execute(self, statement: tuple[str, list[Any]]) -> Coroutine[Any, Any, Any]:
+        return QueryExecution.read(self, self._connection, self._read(statement))
+
+    async def _read(self, statement: tuple[str, list[Any]]) -> Any:
+        """Reads the rows of the combined statement."""
+        sql, parameters = statement
+        rows = await self._rows.read(self, sql, parameters, self._get_result_reading())
         return self._get_single_or_list_result(rows)
 
     def _get_default_iteration_orderings(self) -> list[tuple[str, Order]]:
@@ -195,11 +197,16 @@ class CombinedQuery(RowsQuery[Any]):
             *((name, Order.ASC) for name in built_query._rows.get_output_names() if name not in ordering_names),
         ]
 
-    def _stream_batches(self, connection: DatabaseClient, chunk_size: int) -> AsyncGenerator[list[Any]]:
-        return cast(
-            "AsyncGenerator[list[Any]]",
-            self._rows.stream_batches(connection, *self._get_parameterized_sql(), chunk_size),
-        )
+    def _stream_batches(
+        self, connection: DatabaseClient, chunk_size: int, statement: tuple[str, list[Any]]
+    ) -> AsyncGenerator[list[Any]]:
+        return self._rows.stream_batches(connection, *statement, chunk_size, self._get_result_reading())  # type: ignore[return-value]
+
+    def _get_result_reading(self) -> tuple[Any, ...]:
+        """Read metadata from the plan or the completed build without restoring build state."""
+        if self._statement_plan is not None:
+            return self._statement_plan.result_reading
+        return self._rows.get_result_reading()
 
     # --- the rows as a derived table ---------------------------------------------------------------
 
@@ -231,28 +238,18 @@ class CombinedQuery(RowsQuery[Any]):
         """The output names of the combined values, in output order."""
         return self._rows.get_output_names()
 
-    def _get_count_query(self) -> CountQuery:
-        """The number of rows the query returns, counted over the query as a derived table."""
-        from hare.query.statements.summary.count_query import CountQuery
+    def _get_count_source(self) -> SummarySource:
+        """Describe the derived rows counted by count(), keeping the outer slice separate."""
+        return SummarySource(self, self._get_rows_query(sliced=False))
 
-        return CountQuery(self, rows_query=self._get_rows_query(sliced=False))
+    def _get_exists_source(self) -> SummarySource:
+        """Describe the derived rows searched by exists(), keeping the outer slice separate."""
+        return SummarySource(self, self._get_rows_query(sliced=False))
 
-    def _get_exists_query(self) -> ExistsQuery:
-        """Whether the query returns any row."""
-        from hare.query.statements.summary.exists_query import ExistsQuery
+    def _get_aggregate_source(self) -> SummarySource:
+        """Describe aggregate input as the sliced combined rows."""
 
-        return ExistsQuery(self, rows_query=self._get_rows_query(sliced=False))
-
-    def _get_aggregate_query(self, **kwargs: Any) -> AggregateQuery:
-        """Aggregates over the combined rows - a metric reads the combined columns: the output
-        names of values, the fields and annotations of model instances.
-
-        Raises:
-            QueryError: A metric reads anything but the combined columns.
-        """
-        from hare.query.statements.summary.aggregate_query import AggregateQuery
-
-        return AggregateQuery(self, kwargs, rows_query=self._get_rows_query(sliced=True))
+        return SummarySource(self, self._get_rows_query(sliced=True))
 
     def _get_field_values_query(
         self, field_name: str, value_wrapper_references: RecordedValueReferences | None = None
@@ -272,7 +269,7 @@ class CombinedQuery(RowsQuery[Any]):
             FieldError: The combined rows don't select the field.
         """
         primary_key_attribute = self.model._meta.primary_key_attribute
-        if field_name == "pk":
+        if field_name == PRIMARY_KEY_ALIAS:
             self.model._meta.raise_if_no_primary_key("a union used as an __in filter value")
             if isinstance(primary_key_attribute, tuple):
                 raise QueryError(

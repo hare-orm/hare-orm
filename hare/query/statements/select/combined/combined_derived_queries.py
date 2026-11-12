@@ -3,9 +3,10 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from copy import copy
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import FieldError, QueryError
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.expressions import Expression, Ordering
 from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
 from hare.query.rows.values_rows.combined_values_rows import CombinedValuesRows
@@ -101,7 +102,7 @@ class CombinedDerivedQueries:
         parsed_orderings: list[tuple[str, Order]] = []
         for ordering in orderings:
             field_name, order = query._get_ordering_name(ordering)
-            if field_name == "pk" and not query._combines_values:
+            if field_name == PRIMARY_KEY_ALIAS and not query._combines_values:
                 parsed_orderings.extend(
                     (primary_key_attribute_name, order)
                     for primary_key_attribute_name in query.model._meta.primary_key_attribute_names
@@ -126,7 +127,7 @@ class CombinedDerivedQueries:
         Returns:
             The copy.
         """
-        combination = cast("Combination", queryset._combination)
+        combination: Combination = queryset._combination  # type: ignore[assignment]
         changed_queryset = queryset._clone()
         changed_queryset._combination = replace(
             combination,
@@ -160,8 +161,8 @@ class CombinedDerivedQueries:
                 "tuples/dicts, not model instances, so there's nothing to attach a prefetched relation to."
             )
         queryset = query._source_queryset._clone()
-        queryset._combination = replace(
-            cast("Combination", queryset._combination),
+        queryset._combination = replace(  # type: ignore[type-var]
+            queryset._combination,
             prefetched_relations=query._prefetched_relations + tuple(relations),
         )
         return queryset
@@ -198,8 +199,8 @@ class CombinedDerivedQueries:
                 "tuples/dicts, not model instances, so there's nothing to attach a prefetched relation to."
             )
         queryset = CombinedDerivedQueries.get_changed_branches_queryset(query._source_queryset, select_values)
-        queryset._combination = replace(cast("Combination", queryset._combination), prefetched_relations=())
-        first_leaf = cast("ValuesQuery", CombinedBranches.get_first_leaf(CombinedQuery(queryset)))
+        queryset._combination = replace(queryset._combination, prefetched_relations=())  # type: ignore[type-var]
+        first_leaf: ValuesQuery = CombinedBranches.get_first_leaf(CombinedQuery(queryset))  # type: ignore[assignment]
         output_name_by_selected_name = dict(
             zip(
                 ValuesOutput.get_output_field_names(first_leaf),

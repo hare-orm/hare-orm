@@ -21,6 +21,7 @@ from hare.fields.db_defaults.random_hex import RandomHex
 from hare.fields.db_defaults.sql_default import SqlDefault
 from hare.fields.enums import NowValueType
 from hare.time import Timezone
+from hare.time.zone_settings import ZoneSettings
 
 if TYPE_CHECKING:
     from hare.dialects.base.renderers.term_renderers import TermRenderers
@@ -63,13 +64,13 @@ class SqliteDefaults:
             constant offset, the ``SQLITE_LOCAL_NOW_FUNCTION_NAME`` function for a zone with DST.
         """
         if default.value_type == NowValueType.DATETIME:
-            return SQLITE_NOW_UTC_SQL if Timezone.get_use_timezone() else SQLITE_NOW_LOCAL_SQL
+            return SQLITE_NOW_UTC_SQL if ZoneSettings.get_use_timezone() else SQLITE_NOW_LOCAL_SQL
         suffix = ""
-        if Timezone.get_use_timezone():
+        if ZoneSettings.get_use_timezone():
             constant_offset = default.get_constant_utc_offset(Timezone.default())
             if constant_offset is None:
                 return SQLITE_NOW_LOCAL_NOW_FUNCTION_SQL_TEMPLATE.format(
-                    zone=sql_context.dialect.literals.get_string_literal_sql(Timezone.name()),
+                    zone=sql_context.dialect.literals.get_string_literal_sql(ZoneSettings.name()),
                     value_type=default.value_type.value,
                 )
             moment = SQLITE_NOW_SHIFTED_MOMENT_TEMPLATE.format(minutes=int(constant_offset.total_seconds() // 60))

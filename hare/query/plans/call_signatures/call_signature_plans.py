@@ -4,28 +4,24 @@ from collections.abc import Sequence
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
-from hare.exceptions import QueryError
 from hare.query.plans.constants import (
     CALL_SIGNATURE_ANNOTATION_CALLS,
     CALL_SIGNATURE_CONDITION_FILTER_CALLS,
     CALL_SIGNATURE_FILTER_CALLS,
-    EXPRESSIONS_NESTED_TOO_DEEPLY_MESSAGE,
 )
 from hare.query.plans.description.filter_plan_descriptions import FilterPlanDescriptions
 from hare.query.plans.description.plan_context import PlanContext
 from hare.query.plans.description.plan_description import PlanDescription
 from hare.query.plans.description.plannable import Plannable
 from hare.query.plans.plan_origins import PlanOrigins
-from hare.query.plans.statement.query_key_compiler import QueryKeyCompiler
 from hare.query.plans.statement.statement_plans import StatementPlans
 from hare.query.scopes.row_scopes import RowScopes
-from hare.time import Timezone
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.query.plans.statement.statement_plan import StatementPlan
     from hare.query.queryset.query_specification import QuerySpecification
-    from hare.query.scopes.row_visibility import RowVisibility
+    from hare.query.statements.awaitable_query import AwaitableQuery
 
 
 class CallSignaturePlans:
@@ -104,98 +100,27 @@ class CallSignaturePlans:
             structures.append((call, tuple(filter_structures)))
         return tuple(structures), values
 
-    @classmethod
-    def get_key(
-        cls,
-        query_class: type,
-        specification: QuerySpecification[Any],
-        connection: DatabaseClient,
-        type_structure: Any,
-    ) -> tuple[tuple[Any, ...], Sequence[Any], RowVisibility | None] | None:
-        """The key of the plan a queryset's calls run on as ``query_class`` - the query class, the
-        connection, the zone, the default scope, the calls and what else the query class keys by.
-
-        Args:
-            query_class: The class of the query run.
-            specification: The queryset, or the query made from it.
-            connection: The connection.
-            type_structure: What else the query class keys by (``_get_call_signature_type_part()``).
-
-        Returns:
-            The key, the values bound - the default scope's, then the calls' - and the visibility the
-            default scope was resolved with (None for a model without one); None when the default
-            scope can't be resolved now (no tenant is active), or a condition keeps no plan.
-        """
-        if specification._row_scope_provider is not None:
-            return None
-        row_scopes = RowScopes.of(specification.model)
-        if row_scopes.field_scopes:
-            visibility = specification._visibility.get_for_active_tenant()
-            scope = row_scopes.get_filters_plan_description(
-                visibility, uses_default_scope=specification._uses_default_scope
-            )
-            if scope is None:
-                return None
-            scope_description = scope[0]
-        else:
-            visibility = None
-            scope_description = PlanDescription.EMPTY
-        call_signature = specification._call_signature  # type: ignore[attr-defined]
-        call_values = specification._call_values  # type: ignore[attr-defined]
-        last_call = call_signature[-1]
-        if last_call is not call_signature[0] and last_call[0] == "get":
-            # get() alone - it starts its signature - of plain values, each bound as given: the call
-            # holds their types, the signature is the structure.
-            calls_structure = call_signature
-        else:
-            try:
-                calls_description = cls.describe_calls(
-                    call_signature,
-                    call_values,
-                    connection.dialect.parameters.single_parameter_in_list_min_length,
-                    specification.model,
-                )
-            except RecursionError:
-                # Described level by level, as the query is built - an expression nested hundreds of
-                # levels deep is deeper than Python's stack before the build is reached.
-                raise QueryError(EXPRESSIONS_NESTED_TOO_DEEPLY_MESSAGE) from None
-            if calls_description is None:
-                return None
-            calls_structure, call_values = calls_description
-        key = (
-            "calls",
-            query_class,
-            connection.dialect,
-            *QueryKeyCompiler.get_connection_structure(connection),
-            Timezone.get_rendered_zone_key(),
-            scope_description.structure,
-            calls_structure,
-            type_structure,
-        )
-        if not scope_description.values:
-            return key, call_values, visibility
-        return key, [*scope_description.values, *call_values], visibility
-
     @staticmethod
     def find_with_value_positions(
         model: Any, key: tuple[Any, ...]
-    ) -> tuple[StatementPlan, tuple[int, ...] | None] | None:
+    ) -> tuple[StatementPlan, tuple[int, ...] | None, Any] | None:
         """The plan kept under the key of a queryset's calls, with the position of each value of its
-        description among the values bound - the calls' values, then the query class's own.
+        description among the values bound - the calls' values, then the query class's own - and
+        what the query class reads the result of the plan with.
 
         Args:
             model: The model queried.
-            key: The key (``get_key()``).
+            key: The structural key of the calls and their execution settings.
 
         Returns:
-            The plan and the positions - None when they come in the plan's order; None when no plan
-            is kept yet.
+            The plan, the positions - None when they come in the plan's order - and the reading
+            (``AwaitableQuery._get_call_plan_reading()``); None when no plan is kept yet.
         """
-        return StatementPlans.call_signature_plans.get_model_bucket(model).get(key)
+        return StatementPlans.call_signature_plans.get_bucket(model).get(key)
 
     @staticmethod
     def get_value_origins(specification: QuerySpecification[Any], connection: DatabaseClient) -> list[Any] | None:
-        """The origin of each value ``get_key()`` gives - the default scope's, then the calls' - for
+        """The origin of each value the call-plan lookup binds - the default scope's, then the calls' - for
         a plan kept under the key: the plan's values are found among them by their origins.
 
         Args:
@@ -261,7 +186,7 @@ class CallSignaturePlans:
 
     @staticmethod
     def record(
-        model: Any,
+        query: AwaitableQuery[Any],
         key: tuple[Any, ...],
         value_origins: Sequence[Any],
         type_value_count: int,
@@ -273,8 +198,8 @@ class CallSignaturePlans:
         its origin - and each value of the calls is one of them.
 
         Args:
-            model: The model queried.
-            key: The key (``get_key()``).
+            query: The prepared executor, used only during registration and never retained.
+            key: The structural key of the calls and their execution settings.
             value_origins: The origins of the values of the default scope and the calls
                 (``get_value_origins()``).
             type_value_count: How many values the query class binds after them.
@@ -300,7 +225,9 @@ class CallSignaturePlans:
         if type_value_number != type_value_count or len(set(positions)) != len(value_origins) + type_value_count:
             # A value of the calls the plan doesn't bind, or a value of no known origin.
             return
-        StatementPlans.call_signature_plans.get_model_bucket(model)[key] = (
+        reading = query._get_call_plan_reading(plan)
+        StatementPlans.call_signature_plans.get_bucket(query.model)[key] = (
             plan,
             None if positions == list(range(len(positions))) else tuple(positions),
+            reading,
         )

@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Callable
 from operator import attrgetter
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar
 
 from clickhouse_connect.datatypes import dynamic, registry
 from clickhouse_connect.datatypes.container import Array, Map, Nested, Tuple
@@ -69,7 +68,7 @@ class ClickhouseConnectColumnTypes:
                         ]
                     column._insert_name = f"Tuple({', '.join(names)})"
                 elif isinstance(column, dynamic.Variant):
-                    cast("Callable[[], None]", column._build_dispatch)()
+                    column._build_dispatch()  # type: ignore[no-untyped-call]
             elif isinstance(column, SimpleAggregateFunction):
                 column.element_type = self.get_type(column.element_type.name)
         self.columns[name] = column

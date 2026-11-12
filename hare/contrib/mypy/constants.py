@@ -28,8 +28,6 @@ BOOL_FULLNAME = "builtins.bool"
 TRUE_FULLNAME = "builtins.True"
 FALSE_FULLNAME = "builtins.False"
 
-#: The model instance attribute holding its key value.
-PRIMARY_KEY_ATTRIBUTE_NAME = "pk"
 
 #: The queryset methods whose keyword arguments are filter keys.
 FILTER_METHOD_NAMES = frozenset({"filter", "exclude", "get", "get_or_create", "update_or_create"})
@@ -60,8 +58,6 @@ ANNOTATION_TYPE_RULES = {
 
 #: The ``[tool.hare]`` setting naming the modules imported before the models are bound.
 MYPY_IMPORTS_SETTING = "mypy_imports"
-#: What separates the parts of a filter key or a field path.
-LOOKUP_SEPARATOR = "__"
 PYPROJECT_FILE_NAME = "pyproject.toml"
 
 MODELS_NOT_LOADED_MESSAGE = "hare: the models can't be loaded for type checking - {error}"

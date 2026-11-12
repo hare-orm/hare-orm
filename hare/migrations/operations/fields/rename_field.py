@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from copy import copy
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.ddl.conditions.field_condition import FieldCondition
 from hare.ddl.constraints.check_constraint import CheckConstraint
@@ -112,7 +112,7 @@ class RenameField(ModelBoundOperation):
         old_field = model_state.fields.pop(self.old_name)
         # The given field keeps its real source_field; a hand-written migration without field=
         # carries the old field over.
-        new_field = cast("Field[Any]", self.field if self.field is not None else old_field).snapshot()
+        new_field = (self.field if self.field is not None else old_field).snapshot()  # type: ignore[union-attr]
         model_state.set_field(self.new_name, new_field)
         self._rename_meta_field_references(model_state)
 
@@ -283,8 +283,8 @@ class RenameField(ModelBoundOperation):
             The pairs after the rename; None when a relation of the model reads the field as one
             of several - its key fields, named after the fields it reads, are renamed with it.
         """
-        old_field = cast("Any", dict(fields)[self.old_name])
-        new_field = cast("Any", self.field if self.field is not None else old_field).snapshot()
+        old_field: Any = dict(fields)[self.old_name]
+        new_field = (self.field if self.field is not None else old_field).snapshot()  # type: ignore[union-attr]
         renamed_fields: list[tuple[str, FieldLike]] = []
         for field_name, field in fields:
             if isinstance(field, ForeignKeyFieldInstance) and isinstance(field.model_name, SwappableModelReference):

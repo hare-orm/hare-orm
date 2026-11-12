@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from copy import copy
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import QueryError
 from hare.query.constants import COMBINED_QUERY_APP_COLUMN, COMBINED_QUERY_MODEL_COLUMN
@@ -322,13 +322,16 @@ class CombinedBranches:
         """
         selects = branch_query._selects
         current_aliases = [select.alias or select.name for select in selects]
-        if current_aliases[: len(aliases)] == aliases or not set(aliases) <= set(current_aliases):
+        if current_aliases[: len(aliases)] == aliases:
+            return branch_query
+        alias_set = set(aliases)
+        if not alias_set <= set(current_aliases):
             return branch_query
         selects_by_alias = dict(zip(current_aliases, selects, strict=True))
         ordered_query = copy(branch_query)
         ordered_query._selects = [
             *(selects_by_alias[alias] for alias in aliases),
-            *(select for alias, select in zip(current_aliases, selects, strict=True) if alias not in set(aliases)),
+            *(select for alias, select in zip(current_aliases, selects, strict=True) if alias not in alias_set),
         ]
         return ordered_query
 
@@ -445,7 +448,7 @@ class CombinedBranches:
         first_branch_query = (
             combined_query.base_query if isinstance(combined_query, SetOperationQuery) else combined_query
         )
-        column_names = [select.alias or cast("Field", select).name for select in first_branch_query._selects]
+        column_names = [select.alias or select.name for select in first_branch_query._selects]  # type: ignore[attr-defined]
         derived_table_query = query._connection.query_class.from_(combined_query).select(
             *(combined_query.field(column_name) for column_name in column_names)
         )

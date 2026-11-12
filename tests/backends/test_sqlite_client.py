@@ -197,6 +197,7 @@ async def test_translate_exceptions_forwards_keyword_arguments():
         SimpleNamespace(
             connection_alias="default",
             is_transaction_client=False,
+            runs_statement_options=AiosqliteClient.runs_statement_options,
             driver_errors=AiosqliteClient.driver_errors,
         ),
         "SELECT 1",
@@ -217,6 +218,7 @@ async def test_translate_exceptions_attaches_sql_and_params_on_failure():
             SimpleNamespace(
                 connection_alias="default",
                 is_transaction_client=False,
+                runs_statement_options=AiosqliteClient.runs_statement_options,
                 driver_errors=AiosqliteClient.driver_errors,
                 _get_operational_error=AiosqliteClient._get_operational_error,
             ),
@@ -236,6 +238,7 @@ async def test_translate_exceptions_attaches_sql_and_params_on_failure():
             SimpleNamespace(
                 connection_alias="default",
                 is_transaction_client=False,
+                runs_statement_options=AiosqliteClient.runs_statement_options,
                 driver_errors=AiosqliteClient.driver_errors,
                 _get_operational_error=AiosqliteClient._get_operational_error,
             ),
@@ -264,6 +267,7 @@ async def test_translate_exceptions_translates_the_rest_of_sqlite3_errors():
             SimpleNamespace(
                 connection_alias="default",
                 is_transaction_client=False,
+                runs_statement_options=AiosqliteClient.runs_statement_options,
                 driver_errors=AiosqliteClient.driver_errors,
                 _get_operational_error=AiosqliteClient._get_operational_error,
             ),
@@ -281,6 +285,7 @@ async def test_translate_exceptions_translates_the_rest_of_sqlite3_errors():
             SimpleNamespace(
                 connection_alias="default",
                 is_transaction_client=False,
+                runs_statement_options=AiosqliteClient.runs_statement_options,
                 driver_errors=AiosqliteClient.driver_errors,
                 _get_operational_error=AiosqliteClient._get_operational_error,
             ),
@@ -297,6 +302,7 @@ async def test_translate_exceptions_translates_the_rest_of_sqlite3_errors():
             SimpleNamespace(
                 connection_alias="default",
                 is_transaction_client=False,
+                runs_statement_options=AiosqliteClient.runs_statement_options,
                 driver_errors=AiosqliteClient.driver_errors,
                 _get_operational_error=AiosqliteClient._get_operational_error,
             ),
@@ -313,6 +319,7 @@ async def test_translate_exceptions_translates_the_rest_of_sqlite3_errors():
             SimpleNamespace(
                 connection_alias="default",
                 is_transaction_client=False,
+                runs_statement_options=AiosqliteClient.runs_statement_options,
                 driver_errors=AiosqliteClient.driver_errors,
                 _get_operational_error=AiosqliteClient._get_operational_error,
             ),
@@ -332,6 +339,7 @@ async def test_translate_exceptions_translates_the_rest_of_sqlite3_errors():
             SimpleNamespace(
                 connection_alias="default",
                 is_transaction_client=False,
+                runs_statement_options=AiosqliteClient.runs_statement_options,
                 driver_errors=AiosqliteClient.driver_errors,
                 _get_operational_error=AiosqliteClient._get_operational_error,
             ),
@@ -353,6 +361,7 @@ async def test_translate_exceptions_translates_the_rest_of_sqlite3_errors():
             SimpleNamespace(
                 connection_alias="default",
                 is_transaction_client=False,
+                runs_statement_options=AiosqliteClient.runs_statement_options,
                 driver_errors=AiosqliteClient.driver_errors,
                 _get_operational_error=AiosqliteClient._get_operational_error,
             ),
@@ -411,6 +420,7 @@ async def test_translate_exceptions_reports_an_untranslated_exception_to_hooks()
                 SimpleNamespace(
                     connection_alias="default",
                     is_transaction_client=False,
+                    runs_statement_options=AiosqliteClient.runs_statement_options,
                     driver_errors=AiosqliteClient.driver_errors,
                     _get_operational_error=AiosqliteClient._get_operational_error,
                 ),
@@ -445,6 +455,7 @@ async def test_translate_exceptions_works_for_commit_and_rollback_with_no_query_
             SimpleNamespace(
                 connection_alias="default",
                 is_transaction_client=False,
+                runs_statement_options=AiosqliteClient.runs_statement_options,
                 driver_errors=AiosqliteClient.driver_errors,
                 _get_operational_error=AiosqliteClient._get_operational_error,
             )
@@ -459,6 +470,7 @@ async def test_translate_exceptions_works_for_commit_and_rollback_with_no_query_
             SimpleNamespace(
                 connection_alias="default",
                 is_transaction_client=False,
+                runs_statement_options=AiosqliteClient.runs_statement_options,
                 driver_errors=AiosqliteClient.driver_errors,
                 _get_operational_error=AiosqliteClient._get_operational_error,
             )
@@ -482,6 +494,7 @@ async def test_translate_exceptions_does_not_attach_sql_for_non_query_methods():
             SimpleNamespace(
                 connection_alias="default",
                 is_transaction_client=False,
+                runs_statement_options=AiosqliteClient.runs_statement_options,
                 driver_errors=AiosqliteClient.driver_errors,
                 _get_operational_error=AiosqliteClient._get_operational_error,
             ),
@@ -514,6 +527,7 @@ async def test_translate_exceptions_fires_query_hook_on_success_and_failure():
                 SimpleNamespace(
                     connection_alias="default",
                     is_transaction_client=False,
+                    runs_statement_options=AiosqliteClient.runs_statement_options,
                     driver_errors=AiosqliteClient.driver_errors,
                     _get_operational_error=AiosqliteClient._get_operational_error,
                 ),
@@ -531,6 +545,7 @@ async def test_translate_exceptions_fires_query_hook_on_success_and_failure():
                 SimpleNamespace(
                     connection_alias="default",
                     is_transaction_client=False,
+                    runs_statement_options=AiosqliteClient.runs_statement_options,
                     driver_errors=AiosqliteClient.driver_errors,
                     _get_operational_error=AiosqliteClient._get_operational_error,
                 ),
@@ -566,6 +581,7 @@ async def test_translate_exceptions_logs_slow_query(caplog, monkeypatch):
             SimpleNamespace(
                 connection_alias="default",
                 is_transaction_client=False,
+                runs_statement_options=AiosqliteClient.runs_statement_options,
                 driver_errors=AiosqliteClient.driver_errors,
                 _get_operational_error=AiosqliteClient._get_operational_error,
             ),

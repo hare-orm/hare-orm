@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import (
-    Coroutine,
-    Generator,
-)
+from collections.abc import Generator, Sequence
 from copy import copy
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, Self, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Self, TypeVar
 
 from hare.dialects.base.client.database_client import DatabaseClient
-from hare.dialects.base.client.transaction_client import TransactionClient
 from hare.exceptions import (
     ConfigurationError,
     QueryError,
@@ -21,10 +17,11 @@ from hare.query.expressions import (
 from hare.query.expressions.constants import UNBINDABLE_VALUE_ORIGIN
 from hare.query.expressions.subqueries.outer_scope import OuterScope
 from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
-from hare.query.plans.constants import EXPRESSIONS_NESTED_TOO_DEEPLY_MESSAGE
+from hare.query.plans.constants import EXPRESSIONS_NESTED_TOO_DEEPLY_MESSAGE, NO_CALL_PLAN
 from hare.query.plans.description.plan_description import PlanDescription
 from hare.query.plans.plan_origins import PlanOrigins
 from hare.query.plans.recording.plan_recording import PlanRecording
+from hare.query.plans.statement.declarations import CallPlanHit, CallPlanLookup, RenderedStatement
 from hare.query.plans.statement.query_key_compiler import QueryKeyCompiler
 from hare.query.plans.statement.statement_plan import StatementPlan
 from hare.query.plans.statement.statement_plan_descriptions import StatementPlanDescriptions
@@ -117,17 +114,7 @@ class AwaitableQuery(BoundQuery[TModel], Generic[TModel], abstract=True):
             DoesNotExist: A ``.get()`` query matched no row.
             MultipleObjectsReturned: A single-row query matched more than one row.
         """
-        if self._single:
-            if len(rows) == 1:
-                return rows[0]
-            if not rows:
-                if self._raise_does_not_exist:
-                    GetExceptions.raise_object_does_not_exist(self)
-                return None
-            GetExceptions.raise_multiple_objects_returned(self)
-        if self._reverse_result_order:
-            return rows[::-1]
-        return rows
+        return GetExceptions.single_or_list_result(self, rows)
 
     def _get_filter_annotations(self) -> dict[str, Any]:
         """The annotations a filter of this query reads - by name, before a field of that name.
@@ -199,7 +186,7 @@ class AwaitableQuery(BoundQuery[TModel], Generic[TModel], abstract=True):
         return scoped_query
 
     def _get_statements(self, parameters_inline: bool) -> list[tuple[str, list[Any]]]:
-        self._make_query()
+        rendered = self._make_query()
         if parameters_inline:
             return [
                 (
@@ -207,6 +194,8 @@ class AwaitableQuery(BoundQuery[TModel], Generic[TModel], abstract=True):
                     [],
                 )
             ]
+        if rendered is not None:
+            return [(rendered.sql, rendered.parameters)]
         sql, values = self.query.get_parameterized_sql(self._connection.sql_context)
         return [(sql, values)]
 
@@ -214,7 +203,7 @@ class AwaitableQuery(BoundQuery[TModel], Generic[TModel], abstract=True):
         self._make_query()
         return self.query.get_read_columns()
 
-    def _make_query(self, **kwargs: Any) -> None:
+    def _make_query(self, **kwargs: Any) -> CallPlanHit | RenderedStatement | None:
         """Builds ``self.query`` for the context the query runs in: its default scope first.
 
         Args:
@@ -227,7 +216,7 @@ class AwaitableQuery(BoundQuery[TModel], Generic[TModel], abstract=True):
         if RowScopeBinding.current.get() is None:
             scope_token = RowScopeBinding.current.set(RowScopeBinding())
         try:
-            self._make_query_steps(**kwargs)
+            return self._make_query_steps(**kwargs)
         except RecursionError:
             # Built and written level by level - an expression nested hundreds of levels deep
             # (F("n") + 1 + 1 ...) is deeper than Python's stack.
@@ -236,7 +225,7 @@ class AwaitableQuery(BoundQuery[TModel], Generic[TModel], abstract=True):
             if scope_token is not None:
                 RowScopeBinding.current.reset(scope_token)
 
-    def _make_query_steps(self, **kwargs: Any) -> None:
+    def _make_query_steps(self, **kwargs: Any) -> CallPlanHit | RenderedStatement | None:
         """The build of ``_make_query()``.
 
         Args:
@@ -244,17 +233,20 @@ class AwaitableQuery(BoundQuery[TModel], Generic[TModel], abstract=True):
         """
         QuerySetExtensions.bind(self)
         self._extension_result = None
-        self._compiled_statement = None
         self._statement_plan = None
         self._deferred_plan_record = None
         self._extension_value_wrapper_references = None
         self._extension_calls_built_in = False
         self._apply_ambient_scope()
-        self._build_query(**kwargs)
+        hit = self._build_query(**kwargs)
         if self._extension_calls:
-            self._apply_extension_calls()
+            if isinstance(hit, CallPlanHit):
+                QuerySetExtensions.check(self)
+            else:
+                hit = self._apply_extension_calls()
+        return hit
 
-    def _apply_extension_calls(self) -> None:
+    def _apply_extension_calls(self) -> RenderedStatement | None:
         """Applies the calls of the dialect's QuerySet methods to the query just built, then
         records its plan - the plan's SQL text holds the calls. A query run on its plan has them
         in the text already.
@@ -262,9 +254,6 @@ class AwaitableQuery(BoundQuery[TModel], Generic[TModel], abstract=True):
         Raises:
             UnSupportedError: The connection's dialect has no implementation of a called method.
         """
-        if self._compiled_statement is not None:
-            QuerySetExtensions.check(self)
-            return
         QuerySetExtensions.apply(
             self,
             self._extension_value_wrapper_references,
@@ -274,7 +263,8 @@ class AwaitableQuery(BoundQuery[TModel], Generic[TModel], abstract=True):
         if deferred_plan_record is not None:
             self._deferred_plan_record = None
             # A copy of the plan's query with other values in its terms would miss the calls.
-            StatementPlanRuns.record_plan(self, **deferred_plan_record, extension_calls_applied=True)
+            return StatementPlanRuns.record_plan(self, **deferred_plan_record, extension_calls_applied=True)
+        return None
 
     def _apply_extension_calls_to_row_source(self) -> None:
         """Applies the calls of the dialect's QuerySet methods to the query reading the rows, before the
@@ -301,50 +291,81 @@ class AwaitableQuery(BoundQuery[TModel], Generic[TModel], abstract=True):
         """
         return self._window_filter_criterion is not None
 
-    def _make_query_to_run(self) -> None:
+    def _make_query_to_run(self) -> tuple[str, list[Any]]:
         """Builds the query to be run by itself - the only build a plan's compiled statement may stand
         in for. A query shown with ``.sql()``/``explain()`` or built into another one is built with
-        ``_make_query()``. A query of a queryset made by simple calls alone runs on the plan kept
-        under the key of the calls, built not even in part.
+        ``_make_query()``. A query of a queryset made by simple calls alone looked its plan up by the
+        key of the calls before it was made (``StatementPlanRuns.find_call_plan()``).
         """
-        QuerySetExtensions.bind(self)
-        self._extension_result = None
-        self._runs_compiled_statement = True
-        if self._call_signature is not None and StatementPlanRuns.run_on_call_signature_plan(self):
-            return
-        self._make_query()
+        hit = self._make_query(for_execution=True)
+        return (hit.sql, hit.parameters) if hit is not None else self._get_parameterized_sql()
 
-    def _get_call_signature_type_part(self) -> tuple[Any, list[Any]]:
+    def _get_call_signature_type_part(self) -> tuple[Any, Sequence[Any]]:
         """What the key of the calls and the values bound hold of this type of query beyond its
-        calls - the values a write assigns, say.
+        calls - the values a write assigns, say. Only read: a query not made to run is asked too.
 
         Returns:
             The structure (None when the query isn't run by the key of its calls) and the values,
             bound after the calls' own.
         """
-        return (), []
+        return (), ()
 
-    def _prepare_call_signature_run(self) -> None:
-        """Works out what running on a plan of the calls needs - what a build would before looking
-        its plan up (``_prepare_build()``)."""
-        self._prepare_build()
+    def _get_call_plan_reading(self, plan: StatementPlan) -> Any:
+        """What reading the result of ``plan`` takes beyond the plan, kept with it under the key of the
+        calls - a function of that key alone. None by default.
+
+        Args:
+            plan: The plan just found or recorded for this query.
+        """
+        return None
+
+    def _find_call_plan(
+        self, connection: DatabaseClient, type_part: tuple[Any, Sequence[Any]] | None = None
+    ) -> CallPlanHit | CallPlanLookup:
+        """The plan this query - only read, never copied - runs on by the key of its queryset's calls.
+
+        Args:
+            connection: This execution's connection.
+            type_part: ``_get_call_signature_type_part()`` when the caller has it already.
+        """
+        if self._call_signature is None:
+            return NO_CALL_PLAN
+        return StatementPlanRuns.find_call_plan(
+            type(self), self, connection, self._get_call_signature_type_part() if type_part is None else type_part
+        )
+
+    def _get_execution_query_to_build(
+        self, lookup: CallPlanLookup = NO_CALL_PLAN, connection: DatabaseClient | None = None, for_write: bool = False
+    ) -> Self:
+        """The copy of this query an execution builds when no plan was found by the key of its calls -
+        marked to keep the plan it builds under that key too.
+
+        Args:
+            lookup: The lookup that found no plan.
+            connection: The connection the lookup was made for - the copy runs on it.
+            for_write: Whether the connection is chosen for a write, when none was.
+        """
+        query = self._get_execution_query(for_write, connection)
+        if connection is not None and query._connection is not connection:
+            query._apply_connection(connection)
+        if lookup.record_key is not None:
+            StatementPlanRuns.prepare_call_plan_record(query, lookup)
+        return query
 
     def _get_parameterized_sql(self) -> tuple[str, list[Any]]:
-        """The statement to run: the compiled one running on a plan left, otherwise
-        ``self.query`` rendered.
+        """Render the built statement for a full build or SQL inspection.
 
         Returns:
             The SQL text and its parameters.
         """
-        compiled_statement = self._compiled_statement
-        if compiled_statement is not None:
-            return compiled_statement
         return self.query.get_parameterized_sql(self._connection.sql_context)
 
     #: Whether a plan's statement takes the LIMIT and OFFSET of the query running on it.
     plan_binds_slice: ClassVar[bool] = False
 
-    def _build_query(self, *, value_wrapper_references: RecordedValueReferences | None = None) -> None:
+    def _build_query(
+        self, *, value_wrapper_references: RecordedValueReferences | None = None, for_execution: bool = False
+    ) -> CallPlanHit | RenderedStatement | None:
         """Builds ``self.query`` - the one way a query of any type is built: prepared, then run on
         the plan kept for it (``StatementPlans``), or built in full and kept as the plan.
 
@@ -367,25 +388,24 @@ class AwaitableQuery(BoundQuery[TModel], Generic[TModel], abstract=True):
             self._prepare_build()
             if records_for_caller:
                 if not self._keeps_plan_built_into_another():
-                    cast("RecordedValueReferences", value_wrapper_references).append((UNBINDABLE_VALUE_ORIGIN, None))
+                    value_wrapper_references.append((UNBINDABLE_VALUE_ORIGIN, None))  # type: ignore[union-attr]
                 self._extension_value_wrapper_references = value_wrapper_references
                 self._build_statement(value_wrapper_references, records_for_caller=True)
-                return
+                return None
             # A setting written into the SQL text as it is (a sample's percent and seed) keeps no plan.
             description, plan = (None, None) if self._options.keeps_no_plan() else self._get_plan()
-            if (
-                description is not None
-                and plan is not None
-                and StatementPlanRuns.find_plan(
+            if for_execution and description is not None and plan is not None:
+                hit = StatementPlanRuns.find_plan(
                     self,
                     description.structure,
                     self._get_plan_values(description),
                     paginate=self.plan_binds_slice,
                     plan=plan,
                 )
-            ):
-                self._restore_from_plan(plan)
-                return
+                if hit is not None:
+                    self._annotation_output_fields = dict(hit.plan.annotation_output_fields)
+                    self._statement_plan = hit.plan
+                    return hit
             value_wrapper_references = [] if description is not None else None
             self._extension_value_wrapper_references = value_wrapper_references
             # Described again with the origins of its values before the build changes the query - as
@@ -396,7 +416,7 @@ class AwaitableQuery(BoundQuery[TModel], Generic[TModel], abstract=True):
             if recording_token is not None:
                 PlanRecording.current.reset(recording_token)
         if description is not None and keeps_plan:
-            StatementPlanRuns.record_plan(
+            return StatementPlanRuns.record_plan(
                 self,
                 self._get_plan_key(description),
                 value_wrapper_references,
@@ -405,6 +425,7 @@ class AwaitableQuery(BoundQuery[TModel], Generic[TModel], abstract=True):
                 plan_recording=plan_recording,
                 **self._get_plan_record(),
             )
+        return None
 
     def _prepare_build(self) -> None:
         """Works out what both a run on a plan and a full build need - called before the plan is
@@ -498,7 +519,7 @@ class AwaitableQuery(BoundQuery[TModel], Generic[TModel], abstract=True):
 
     def _get_origins_description(self) -> PlanDescription | None:
         """This query's description with the origin of each value, made before the build."""
-        return PlanOrigins.describe(lambda: self._get_plan()[0])
+        return PlanOrigins.describe(self._get_build_plan_description)
 
     def _get_plan_value_description(self) -> PlanDescription | None:
         """The values of this query the plan it runs on binds, each with its origin - in the order
@@ -520,10 +541,6 @@ class AwaitableQuery(BoundQuery[TModel], Generic[TModel], abstract=True):
             The description.
         """
         return origins_description
-
-    def _restore_from_plan(self, plan: StatementPlan) -> None:
-        """Takes from the plan this query runs on what reading the result needs - a full build
-        works it out while building."""
 
     def _get_plan_record(self) -> dict[str, Any]:
         """What else the plan of the query just built keeps (``StatementPlanRuns.record_plan()``'s arguments)."""
@@ -586,38 +603,3 @@ class AwaitableQuery(BoundQuery[TModel], Generic[TModel], abstract=True):
     def _apply_none_as_subquery(self) -> None:
         if self._is_none:
             self.query = self.query.where(BasicCriterion.always_false())
-
-    async def _execute(self) -> Any:
-        raise NotImplementedError()
-
-    def _raise_if_row_lock_outside_transaction(self) -> None:
-        """Rejects a ``select_for_update()`` query run outside a transaction.
-
-        Raises:
-            QueryError: The query runs outside a transaction.
-        """
-        if not isinstance(self._connection, TransactionClient):
-            raise QueryError(
-                "select_for_update() requires an active Transactions.atomic() block - a "
-                "SELECT ... FOR UPDATE lock is only meaningful for the lifetime of the enclosing "
-                "transaction; used outside one, the lock is acquired and immediately released "
-                "(autocommit), giving no real protection while looking like it does"
-            )
-
-    async def _execute_reading(self, coro: Coroutine[Any, Any, Any]) -> Any:
-        """Enforce row-lock scope and translate errors raised while decoding a result."""
-        if self._select_for_update:
-            try:
-                self._raise_if_row_lock_outside_transaction()
-            except QueryError:
-                coro.close()
-                raise
-        connection = self._connection
-        try:
-            return await coro
-        except Exception as error:
-            # A driver decoding the rows as they are read raises outside the statement's own call.
-            read_error = connection.get_result_read_error(error)
-            if read_error is None:
-                raise
-            raise read_error from error

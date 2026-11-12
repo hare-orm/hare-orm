@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, TypeVar
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
+from hare.classes.deferred_import import DeferredImport
 from hare.exceptions import IntegrityError, QueryError, ValidationError
 from hare.query.key_columns import KeyColumns
 
@@ -9,7 +11,6 @@ TModel = TypeVar("TModel", bound="Model")
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.dialects.base.types.type_registry import TypeRegistry
     from hare.fields.field import Field
     from hare.models import Model
     from hare.query.queryset.relations.many_to_many_relation import ManyToManyRelation
@@ -19,6 +20,9 @@ class ManyToManyMembers:
     """The members given to add(), remove() and set(): instances or primary keys, checked to be of the
     related model and saved, fetched as instances through the related model's default scope, and
     their keys ready for the database."""
+
+    #: ``Model`` - imported at its first read, as its module imports this one.
+    model_class: ClassVar[DeferredImport[type[Model]]] = DeferredImport("hare.models", "Model")
 
     @staticmethod
     def get_connection_of(model: type[Model], connection: DatabaseClient) -> DatabaseClient:
@@ -40,13 +44,15 @@ class ManyToManyMembers:
     @staticmethod
     def is_model_instance(member: Any) -> bool:
         """Whether a member is given as a model instance, not as a primary key value."""
-        from hare.models import Model
 
-        return isinstance(member, Model)
+        return isinstance(member, ManyToManyMembers.model_class)
 
     @staticmethod
     def get_member_pk_db_values(
-        relation: ManyToManyRelation[Any], member: Any, types: TypeRegistry
+        relation: ManyToManyRelation[Any],
+        member: Any,
+        *,
+        writers: Sequence[tuple[str, Callable[[Any, Any], Any]]],
     ) -> tuple[Any, ...]:
         """The DB-ready primary key of a member - a related instance, or its primary key value (a
         tuple for a composite key).
@@ -54,7 +60,7 @@ class ManyToManyMembers:
         Args:
             relation: The many-to-many relation of an instance.
             member: A related instance or its primary key.
-            types: The type registry of the through table's connection.
+            writers: Prepared attribute names and writers for the related primary key.
 
         Raises:
             ValidationError: ``member`` is None or an instance of another model, or a composite key value
@@ -64,19 +70,16 @@ class ManyToManyMembers:
         related_meta = relation.model._meta
         if member is None or ManyToManyMembers.is_model_instance(member):
             ManyToManyMembers.validate_related_instances(relation, (member,))
-            return KeyColumns.get_db_values(related_meta, member, types)
+            return tuple(write(getattr(member, name), member) for name, write in writers)
         if not related_meta.has_composite_primary_key:
-            return (types.get_db_value(related_meta.pk, member, relation.model),)
+            return (writers[0][1](member, relation.model),)
         if not isinstance(member, tuple) or len(member) != len(related_meta.pk_fields):
             raise ValidationError(
                 f"Invalid value for relationship field {relation.field.model_field_name!r}: {member!r} - "
                 f"{relation.model.__name__} has a composite primary key, pass an instance or a tuple of "
                 f"{len(related_meta.pk_fields)} values"
             )
-        return tuple(
-            types.get_db_value(field, value, relation.model)
-            for field, value in zip(related_meta.pk_fields, member, strict=True)
-        )
+        return tuple(write(value, relation.model) for (_name, write), value in zip(writers, member, strict=True))
 
     @staticmethod
     async def get_related_instances(
@@ -96,20 +99,24 @@ class ManyToManyMembers:
         if all(ManyToManyMembers.is_model_instance(member) for member in members):
             return members
         types = (connection or relation.model.get_connection()).dialect.types
-        requested_values = {
-            ManyToManyMembers.get_member_pk_db_values(relation, member, types): member
+        meta = relation.model._meta
+        writers = KeyColumns.get_instance_writers(meta, types)
+        member_keys = [
+            None
+            if ManyToManyMembers.is_model_instance(member)
+            else ManyToManyMembers.get_member_pk_db_values(relation, member, writers=writers)
             for member in members
-            if not ManyToManyMembers.is_model_instance(member)
-        }
+        ]
+        requested_values = {key: member for member, key in zip(members, member_keys, strict=True) if key is not None}
         related_meta = relation.model._meta
         fetched_instances = await (
             relation.model._meta.manager.create_queryset()
             .filter(pk__in=list(requested_values.values()))
             .using(connection)
         )
-        fetched_by_pk_values = {
-            KeyColumns.get_db_values(related_meta, instance, types): instance for instance in fetched_instances
-        }
+        fetched_by_pk_values = dict(
+            zip(KeyColumns.get_db_rows(related_meta, fetched_instances, types), fetched_instances, strict=True)
+        )
         if missing_values := [
             value for pk_values, value in requested_values.items() if pk_values not in fetched_by_pk_values
         ]:
@@ -118,10 +125,8 @@ class ManyToManyMembers:
                 f"{relation.field.model_field_name!r} - no {relation.model.__name__} with that primary key"
             )
         return tuple(
-            member
-            if ManyToManyMembers.is_model_instance(member)
-            else fetched_by_pk_values[ManyToManyMembers.get_member_pk_db_values(relation, member, types)]
-            for member in members
+            member if key is None else fetched_by_pk_values[key]
+            for member, key in zip(members, member_keys, strict=True)
         )
 
     @staticmethod
@@ -170,4 +175,4 @@ class ManyToManyMembers:
             One field per forward key column.
         """
         related_meta = relation.model._meta
-        return list(related_meta.pk_fields if related_meta.has_composite_primary_key else (related_meta.pk,))
+        return list(related_meta.pk_fields)

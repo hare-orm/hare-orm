@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import cast
-
 from hare.sql.exceptions import QueryException
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms.term import Term
@@ -34,4 +32,4 @@ class Parameter(Term):
         if self._placeholder:
             return self._placeholder
 
-        return sql_context.dialect.parameters.get_placeholder(cast("int", self._index))
+        return sql_context.dialect.parameters.get_placeholder(self._index)  # type: ignore[arg-type]

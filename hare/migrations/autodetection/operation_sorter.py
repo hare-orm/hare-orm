@@ -73,6 +73,8 @@ class OperationSorter:
         Returns:
             The requirements of the targets' creation.
         """
+        if not self.state.environment.unmanaged_models:
+            return []
         unmanaged_targets: list[OperationDependency] = []
         waiting = [
             (requirement.app_label, requirement.model_name)

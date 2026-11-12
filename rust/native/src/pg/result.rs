@@ -6,7 +6,7 @@ use std::sync::Arc;
 use pyo3::exceptions::PyIndexError;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyIterator, PyList, PySlice};
+use pyo3::types::{PyIterator, PyList, PySlice, PyTuple};
 
 use crate::pg::result_columns::ResultColumns;
 use crate::pg::result_data::ResultData;
@@ -52,6 +52,16 @@ impl PgResult {
 
 #[pymethods]
 impl PgResult {
+    /// Positional rows use the same decoded values as named rows, without a `PgRow` wrapper.
+    /// Column names accompany the tuples so callers need not inspect a first row.
+    fn positional<'py>(&self, py: Python<'py>) -> PyResult<(Bound<'py, PyList>, Bound<'py, PyTuple>)> {
+        let rows = PyList::empty(py);
+        for values in &self.data.rows {
+            rows.append(PyTuple::new(py, values.iter())?)?;
+        }
+        Ok((rows, PyTuple::new(py, self.columns.names())?))
+    }
+
     /// The server's command completion count, including writes without RETURNING.
     #[getter]
     fn row_count(&self) -> Option<u64> {

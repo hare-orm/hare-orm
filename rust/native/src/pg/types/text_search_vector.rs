@@ -1,10 +1,12 @@
 //! `TSVECTOR`, read as the text `tsvector_out` prints.
 
-use crate::pg::wire_reader::PgWireReader;
+use std::fmt::Write as _;
+
 use tokio_postgres::types::{FromSql, Type};
 
 use crate::pg::decode_context::PgDecodeContext;
 use crate::pg::value::BoxError;
+use crate::pg::wire_reader::PgWireReader;
 
 /// `TSVECTOR`'s wire format (`tsvectorsend`): a 4-byte lexeme count, then per lexeme a
 /// null-terminated UTF-8 string, a 2-byte position count, and that many 2-byte position+weight
@@ -22,14 +24,20 @@ impl PgTsVectorText {
         let mut reader = PgWireReader::new(raw, "tsvector");
         let nitems = reader.count(3)?;
         context.reserve_values(nitems)?;
-        let mut rendered_entries = Vec::with_capacity(nitems);
-        for _ in 0..nitems {
+        let mut text = String::new();
+        for index in 0..nitems {
             let lexeme = reader.c_string()?.replace('\\', "\\\\").replace('\'', "''");
             let position_count = reader.i16()?;
             let npos = reader.checked_count(i32::from(position_count), 2)?;
             context.reserve_values(npos)?;
-            let mut positions = Vec::with_capacity(npos);
-            for _ in 0..npos {
+            if index != 0 {
+                text.push(' ');
+            }
+            write!(text, "'{lexeme}'").expect("writing into a String never fails");
+            if npos != 0 {
+                text.push(':');
+            }
+            for position_index in 0..npos {
                 let raw_pos = reader.u16()?;
                 let position = raw_pos & 0x3FFF;
                 let weight_letter = match raw_pos >> 14 {
@@ -38,16 +46,14 @@ impl PgTsVectorText {
                     1 => "C",
                     _ => "",
                 };
-                positions.push(format!("{position}{weight_letter}"));
+                if position_index != 0 {
+                    text.push(',');
+                }
+                write!(text, "{position}{weight_letter}").expect("writing into a String never fails");
             }
-            rendered_entries.push(if positions.is_empty() {
-                format!("'{lexeme}'")
-            } else {
-                format!("'{lexeme}':{}", positions.join(","))
-            });
         }
         reader.finish()?;
-        Ok(PgTsVectorText(rendered_entries.join(" ")))
+        Ok(PgTsVectorText(text))
     }
 }
 

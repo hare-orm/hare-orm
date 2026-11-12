@@ -36,16 +36,19 @@ class PrefetchRequest:
         query: QuerySet[Any] | ModelRowsQuery[Any],
         prefetch_map: dict[str, set[str | Prefetch]],
         prefetch_queries: dict[str, list[tuple[str | None, QuerySet[Any]]]],
+        *,
+        visibility: RowVisibility | None = None,
     ) -> PrefetchRequest:
         """Capture a query's visibility, row lock and connection choice for explicit prefetch maps.
 
         The maps can describe the query's relations or dependencies of a custom ``to_attribute``;
-        they are retained without mutation.
+        they are retained without mutation. An explicit ``visibility`` captures the current
+        execution's tenant without changing a reusable queryset's declaration.
         """
         return cls(
             prefetch_map,
             prefetch_queries,
-            visibility=query._visibility,
+            visibility=query._visibility if visibility is None else visibility,
             select_for_update=query._select_for_update,
             select_for_update_nowait=query._select_for_update_nowait,
             select_for_update_skip_locked=query._select_for_update_skip_locked,

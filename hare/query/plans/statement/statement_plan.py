@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Self
 
+from hare.native.native_modules import NativeModules
 from hare.query.constants import PLAN_CACHE_MISS
+from hare.query.plans.statement.declarations import RenderedStatement
 from hare.query.plans.statement.parameter_preparation import ParameterPreparation
 from hare.query.plans.statement.parameter_slot import ParameterSlot
 from hare.sql.builder.queries.query_builder import QueryBuilder
@@ -31,11 +33,14 @@ class StatementPlan:
     literal, a value of another type, a LIMIT or OFFSET on one side only, a value no reference binds
     - is built in full. The text isn't reused (``sql`` is None) when it holds a parameter that came
     from no term, or a CTE whose values the plan doesn't bind.
+
+    A fixed positional model projection retains its shared column layout, prepared before the
+    plan is published. Connections and loaded instances remain local to each execution.
     """
 
     __slots__ = (
         "value_sources",
-        "repeated_values",
+        "parameter_bindings",
         "sql",
         "parameters",
         "has_limit",
@@ -43,6 +48,7 @@ class StatementPlan:
         "limit_binding",
         "offset_binding",
         "result_reading",
+        "result_column_names",
         "decode_plan",
         "decode_plan_key",
         "decode_plan_is_partial",
@@ -56,8 +62,27 @@ class StatementPlan:
     #: defined (they import this module).
     unbindable_value_classes: ClassVar[tuple[type, ...]] = (Term,)
 
-    def __init__(
-        self,
+    if TYPE_CHECKING:
+        value_sources: tuple[tuple[ValueReference, ...], ...]
+        parameter_bindings: Any
+        sql: str | None
+        parameters: list[Any]
+        has_limit: bool
+        has_offset: bool
+        limit_binding: ParameterSlot | None
+        offset_binding: ParameterSlot | None
+        result_reading: Any
+        result_column_names: tuple[str, ...]
+        decode_plan: tuple[HydrationEntry, ...] | None
+        decode_plan_key: tuple[str | None, ...] | None
+        decode_plan_is_partial: bool
+        select_related_positions: tuple[Any, ...]
+        annotation_output_fields: tuple[tuple[str, ModelField[Any] | None], ...]
+        scope_sources: tuple[ScopeValueSource, ...]
+
+    @classmethod
+    def prepare(
+        cls,
         template: QueryBuilder | SetOperationQuery,
         value_sources: tuple[tuple[ValueReference, ...], ...],
         repeated_values: tuple[tuple[int, int], ...] = (),
@@ -71,8 +96,9 @@ class StatementPlan:
         scope_sources: tuple[ScopeValueSource, ...] = (),
         *,
         sql_context: SqlContext | None = None,
-    ) -> None:
-        """Renders ``template`` once, recording each parameter's source.
+        result_column_names: tuple[str, ...] = (),
+    ) -> tuple[RenderedStatement, Self | None]:
+        """Render once for this execution and prepare a detached plan from the same recording.
 
         Args:
             template: The query the first query of the key built.
@@ -96,44 +122,54 @@ class StatementPlan:
             scope_sources: The default scopes folded into its JOINs - their references follow
                 the description's in ``value_sources``.
             sql_context: The selected connection's rendering settings, captured when the plan is built.
+
+        Returns:
+            The current statement and its reusable plan, or None for the plan when a recorded
+            source cannot be rebound. Current parameter values belong only to the statement.
         """
-        self.repeated_values = repeated_values
         parameterizer = RecordingParameterizer()
         # A set operation renders in the context of its first branch's query class.
         context_query = template.base_query if isinstance(template, SetOperationQuery) else template
         sql_context = (sql_context or context_query.query_class.SQL_CONTEXT).copy(parameterizer=parameterizer)
         sql = template.get_sql(sql_context)
-        preparation = ParameterPreparation(parameterizer, sql_context.dialect.parameters)
+        preparation = ParameterPreparation(parameterizer, sql_context.dialect.parameters, sql_context.dialect.types)
         prepared_sources = preparation.prepare_inputs(value_sources)
-        self.value_sources = prepared_sources or ()
-        self.sql: str | None = (
-            sql
-            if prepared_sources is not None
-            and all(source is not None for source in parameterizer.sources)
-            and (binds_ctes or not template._with)
-            else None
+        rendered = RenderedStatement(sql, parameterizer.values)
+        if (
+            prepared_sources is None
+            or any(source is None for source in parameterizer.sources)
+            or (not binds_ctes and template._with)
+        ):
+            return rendered, None
+        plan = cls()
+        plan.sql = sql
+        plan.value_sources = prepared_sources
+        plan.parameter_bindings = NativeModules.rows.ParameterBindings(
+            tuple(tuple(reference.bind for reference in sources) for sources in prepared_sources), repeated_values
         )
-        self.parameters = parameterizer.values.copy()
+        plan.parameters = parameterizer.values.copy()
         for position in preparation.bound_positions:
-            self.parameters[position] = None
-        self.has_limit = template._limit is not None
-        self.has_offset = template._offset is not None
-        self.limit_binding = preparation.slot(template._limit) if template._limit is not None else None
-        self.offset_binding = preparation.slot(template._offset) if template._offset is not None else None
-        self.result_reading = result_reading
-        self.decode_plan = decode_plan
-        self.decode_plan_key = decode_plan_key
-        self.decode_plan_is_partial = decode_plan_is_partial
-        self.select_related_positions = select_related_positions
-        self.annotation_output_fields = annotation_output_fields
-        self.scope_sources = scope_sources
+            plan.parameters[position] = None
+        plan.has_limit = template._limit is not None
+        plan.has_offset = template._offset is not None
+        plan.limit_binding = preparation.slot(template._limit) if template._limit is not None else None
+        plan.offset_binding = preparation.slot(template._offset) if template._offset is not None else None
+        plan.result_reading = result_reading
+        plan.result_column_names = result_column_names
+        plan.decode_plan = decode_plan
+        plan.decode_plan_key = decode_plan_key
+        plan.decode_plan_is_partial = decode_plan_is_partial
+        plan.select_related_positions = select_related_positions
+        plan.annotation_output_fields = annotation_output_fields
+        plan.scope_sources = scope_sources
+        return rendered, plan
 
     def get_scope_values(self) -> list[Any] | None:
         """The values of the default scopes folded into the plan's JOINs, as the current context
         makes them.
 
         Returns:
-            The values, None when a scope has another structure now.
+            A fresh list of values, None when a scope has another structure now.
         """
         values: list[Any] = []
         for scope_source in self.scope_sources:
@@ -154,43 +190,53 @@ class StatementPlan:
         """The parameters of one query of the plan key, in the order of the plan's SQL text.
 
         Args:
-            values: The query's values, in the order of ``value_sources``.
+            values: The query's values in description order, before the current JOIN-scope values
+                appended here to match ``value_sources``.
             model: The model queried.
             dialect: The dialect the query runs on.
             limit: The query's LIMIT (None for none); ``PLAN_CACHE_MISS`` keeps the plan's own.
             offset: The query's OFFSET, the same way.
 
         Returns:
-            The parameters, or None when the query's SQL text would differ from the plan's.
+            The parameters, or None when the query's SQL text would differ from the plan's,
+            including a change in the structure of a JOIN scope.
         """
-        if self.sql is None or len(values) != len(self.value_sources):
+        if self.sql is None:
             return None
-        for position, first_position in self.repeated_values:
-            if values[position] is not values[first_position]:
+        if self.scope_sources:
+            scope_values = self.get_scope_values()
+            if scope_values is None:
                 return None
-        parameters = self.parameters.copy()
-        unbindable_value_classes = self.unbindable_value_classes
-        for references, value in zip(self.value_sources, values, strict=True):
-            if value is None or isinstance(value, unbindable_value_classes):
-                return None
-            for reference in references:
-                parameter_values = reference.get_parameter_values(value, model, dialect)
-                if parameter_values is None:
-                    return None
-                for slot, parameter_value, always_parameterized in parameter_values:
-                    # Published references were detached into slots by ParameterPreparation.
-                    assert isinstance(slot, ParameterSlot)  # nosec B101
-                    if not slot.bind(parameters, parameter_value, always_parameterized):
-                        return None
-        for value, present, boundary_slot in (
-            (limit, self.has_limit, self.limit_binding),
-            (offset, self.has_offset, self.offset_binding),
+            scope_values[:0] = values
+            values = scope_values
+        parameters = self.parameter_bindings.bind(
+            values, self.parameters, self.unbindable_value_classes, model, dialect
+        )
+        if parameters is None:
+            return None
+        if limit is not PLAN_CACHE_MISS and not StatementPlan.bind_boundary(
+            parameters, limit, self.has_limit, self.limit_binding
         ):
-            if value is PLAN_CACHE_MISS:
-                continue
-            if value is None:
-                if present:
-                    return None
-            elif boundary_slot is None or not boundary_slot.positions or not boundary_slot.bind(parameters, value):
-                return None
+            return None
+        if offset is not PLAN_CACHE_MISS and not StatementPlan.bind_boundary(
+            parameters, offset, self.has_offset, self.offset_binding
+        ):
+            return None
         return parameters
+
+    @staticmethod
+    def bind_boundary(parameters: list[Any], value: Any, present: bool, slot: ParameterSlot | None) -> bool:
+        """Binds a query's LIMIT or OFFSET.
+
+        Args:
+            parameters: The parameters being bound.
+            value: The query's LIMIT or OFFSET, None for none.
+            present: Whether the plan's SQL text has it.
+            slot: Its parameter slot, None when the text holds no parameter for it.
+
+        Returns:
+            False when the query's SQL text would differ from the plan's.
+        """
+        if value is None:
+            return not present
+        return slot is not None and bool(slot.positions) and slot.bind(parameters, value)

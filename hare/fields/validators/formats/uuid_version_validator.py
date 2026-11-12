@@ -4,6 +4,7 @@ from uuid import UUID
 
 from hare.exceptions import ValidationError
 from hare.fields.validators.validator import Validator
+from hare.native.native_modules import NativeModules
 
 
 class UUIDVersionValidator(Validator):
@@ -16,10 +17,11 @@ class UUIDVersionValidator(Validator):
 
     def __init__(self, version: int, message: str | None = None) -> None:
         self.version = version
+        self.check = NativeModules.rows.ValueCheck.uuid_version(version)
         super().__init__(message)
 
     def __call__(self, value: UUID | None) -> None:
         if value is None:
             raise ValidationError("Value must not be None")
-        if value.version != self.version:
+        if self.check.failure(value) is not None:
             self._raise(f"expected a version {self.version} UUID, got {value} of version {value.version}")

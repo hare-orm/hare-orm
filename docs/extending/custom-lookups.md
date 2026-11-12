@@ -89,6 +89,7 @@ PostgreSQL's trigram lookups and ClickHouse's `__global_in` are lookups of one d
 |---|---|
 | `operator` | Builds the criterion — `(term, encoded_value) -> Criterion`. |
 | `value_encoder` | Encodes the filter value — `(value, model, field, dialect)`; `None` converts it as the field converts its own values. |
+| `value_encoder_builder` | Optional `(field, dialect) -> encoder`. Prepares fixed field conversions before the value is encoded. The resulting encoder still receives `(value, model, field, dialect)` and performs every per-value check. Plain `value_encoder` callbacks remain supported. |
 | `array_element_field` | The field each item of a list value is bound as. |
 | `array_element_fields` | Per key column, the field each item of a list of key rows is bound as. |
 | `text_function` | Turns the value into the text a text lookup matches. |
@@ -99,6 +100,11 @@ PostgreSQL's trigram lookups and ClickHouse's `__global_in` are lookups of one d
 | `required_feature` | The `Features` flag a connection needs to run the lookup; on a connection without it the query raises `UnSupportedError` before any SQL. |
 
 `lookup.with_changes(**changes)` is a copy with some attributes replaced.
+
+`lookup.get_value_encoder(field, dialect)` selects the encoder for ordinary fields, annotations
+and relation lookups. A configured builder takes precedence over `value_encoder`. The same
+selected encoder converts the value and is retained when the filter records a parameter
+reference; recording does not call the builder again. SQL terms bypass value encoding.
 
 The built-in LIKE operators declare the pattern parameter when constructing their SQL.
 `LikePatternParameter` carries the source wrapper and the prefix/suffix wildcard flags;

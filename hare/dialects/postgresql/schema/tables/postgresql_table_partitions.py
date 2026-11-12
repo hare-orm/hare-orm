@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Collection
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.ddl.constraints.exclusion_constraint import ExclusionConstraint
 from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
@@ -39,8 +39,8 @@ class PostgresqlTablePartitions(TablePartitions):
         """
         model = new_model
         dialect = self.editor.client.dialect
-        old = cast("PostgresqlTableOptions", old_model._meta.get_table_options(dialect) or PostgresqlTableOptions())
-        new = cast("PostgresqlTableOptions", new_model._meta.get_table_options(dialect) or PostgresqlTableOptions())
+        old: PostgresqlTableOptions = old_model._meta.get_table_options(dialect) or PostgresqlTableOptions()  # type: ignore[assignment]
+        new: PostgresqlTableOptions = new_model._meta.get_table_options(dialect) or PostgresqlTableOptions()  # type: ignore[assignment]
         new.raise_if_unsupported(model, self.editor.client.features)
         if old.with_partitions({}).partitioning != new.with_partitions({}).partitioning:
             return self.editor.table_rebuild.get_rebuild_plan(old_model, new_model)
@@ -86,14 +86,14 @@ class PostgresqlTablePartitions(TablePartitions):
         options = self.editor.get_partitioned_options(model)
         if options is None:
             return []
-        features = cast("PostgresqlFeatures", self.editor.client.features)
+        features: PostgresqlFeatures = self.editor.client.features  # type: ignore[assignment]
         if not features.supports_partitioned_exclusion_constraints and any(
             isinstance(constraint, ExclusionConstraint) for constraint in model._meta.constraints
         ):
             raise UnSupportedError(
                 f"{model.__name__}: a partitioned table takes an exclusion constraint from PostgreSQL 17 on"
             )
-        partitioning = cast("Partitioning", options.partitioning)
+        partitioning: Partitioning = options.partitioning  # type: ignore[assignment]
         bound_sqls = partitioning.get_partition_bound_sqls(self.get_bound_value_renderer(model, partitioning))
         return [
             self.get_partition_create_sql(model, options, partition_name, bound_sql, safe)
@@ -106,7 +106,7 @@ class PostgresqlTablePartitions(TablePartitions):
             return []
         return [
             Partitioning.get_partition_table_name(model._meta.db_table, partition_name)
-            for partition_name in cast("Partitioning", options.partitioning).get_partition_names()
+            for partition_name in options.partitioning.get_partition_names()  # type: ignore[union-attr]
         ]
 
     async def add_partition(self, model: type[Model], partition: Partition) -> None:
@@ -125,7 +125,7 @@ class PostgresqlTablePartitions(TablePartitions):
         options = self.editor.get_partitioned_options(model)
         if options is None:
             raise ConfigurationError(f"{model.__name__}: a partition can only be added to a partitioned table")
-        partitioning = cast("Partitioning", options.partitioning)
+        partitioning: Partitioning = options.partitioning  # type: ignore[assignment]
         bound_sql = partition.get_bound_sql(self.get_bound_value_renderer(model, partitioning))
         return SchemaChangePlan(
             (SchemaStatement(self.get_partition_create_sql(model, options, partition.name, bound_sql, safe=False)),)

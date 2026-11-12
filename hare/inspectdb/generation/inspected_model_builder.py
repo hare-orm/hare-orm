@@ -838,19 +838,19 @@ class InspectedModelBuilder:
                 field_names_by_column[column_name] = composite_foreign_key.field_name
         return field_names_by_column
 
-    def get_index_field_names(self, index: IndexInfo) -> list[str]:
+    def get_index_field_names(self, index: IndexInfo, field_names_by_column: dict[str, str]) -> list[str]:
         """The field names an index or a unique constraint lists, in their order and without their
         key orders - a composite relation's columns named once.
 
         Args:
             index: The index.
+            field_names_by_column: The column mapping prepared after all model fields are built.
 
         Returns:
             The names.
         """
         return [
-            field_name.removeprefix("-")
-            for field_name in index.get_declared_relation_fields(self.get_index_field_names_by_column())
+            field_name.removeprefix("-") for field_name in index.get_declared_relation_fields(field_names_by_column)
         ]
 
     def _build_composite_pk(self) -> None:
@@ -865,17 +865,18 @@ class InspectedModelBuilder:
             return
         self.composite_pk_names = [self.field_attribute_names[column_name] for column_name in self.pk_columns]
 
-    def _get_unique_constraint(self, index: IndexInfo) -> UniqueConstraint:
+    def _get_unique_constraint(self, index: IndexInfo, field_names_by_column: dict[str, str]) -> UniqueConstraint:
         """Reconstructs a unique index as a UniqueConstraint - named when its database name isn't
         the generated one, and carrying its predicate and deferral.
 
         Args:
             index: A plain btree unique index over real columns.
+            field_names_by_column: The column mapping prepared after all model fields are built.
 
         Returns:
             The UniqueConstraint.
         """
-        kwargs: dict[str, Any] = {"fields": self.get_index_field_names(index)}
+        kwargs: dict[str, Any] = {"fields": self.get_index_field_names(index, field_names_by_column)}
         if not self.is_default_index_name(index.name, GeneratedNamePrefix.UNIQUE_CONSTRAINT, index.columns):
             kwargs["name"] = index.name
         if index.condition_sql:
@@ -906,23 +907,25 @@ class InspectedModelBuilder:
             and index.expression_terms is None
         )
 
-    def _get_special_index(self, index: IndexInfo) -> Index:
+    def _get_special_index(self, index: IndexInfo, field_names_by_column: dict[str, str]) -> Index:
         """Reconstructs an index with an opclass, access method, predicate or expression term.
 
         Args:
             index: The introspected index.
+            field_names_by_column: The column mapping prepared after all model fields are built.
 
         Returns:
             The Index, PartialIndex or access-method subclass.
         """
         index_class, index_args, index_kwargs = index.get_index_declaration(
-            self.introspector_class.INDEX_CLASSES_BY_TYPE, self.get_index_field_names_by_column(), as_key_terms=False
+            self.introspector_class.INDEX_CLASSES_BY_TYPE, field_names_by_column, as_key_terms=False
         )
         if not self.is_default_special_index_name(index, index_class, index_args, index_kwargs):
             index_kwargs["name"] = index.name
         return index_class(*index_args, **index_kwargs)
 
     def _build_meta_entries(self) -> None:
+        field_names_by_column = self.get_index_field_names_by_column()
         table = self.table
         declarable_indexes, undeclarable_index_comments = self._get_declarable_indexes()
         # A partial unique index under hare's generated PartialIndex(unique=True) name stays that
@@ -930,7 +933,8 @@ class InspectedModelBuilder:
         partial_unique_constraint_indexes = [
             index
             for index in declarable_indexes
-            if self.is_partial_unique_constraint(index) and self._get_special_index(index).name is not None
+            if self.is_partial_unique_constraint(index)
+            and self._get_special_index(index, field_names_by_column).name is not None
         ]
         partial_unique_constraint_index_ids = {id(index) for index in partial_unique_constraint_indexes}
         special_indexes = [
@@ -945,13 +949,15 @@ class InspectedModelBuilder:
         multi_column_plain = [index for index in plain_indexes if not index.is_unique]
 
         self._add_table_meta_options()
-        index_calls = self._get_plain_index_calls(multi_column_plain)
-        special_index_calls, index_comments = self._get_special_index_calls(special_indexes)
+        index_calls = self._get_plain_index_calls(multi_column_plain, field_names_by_column)
+        special_index_calls, index_comments = self._get_special_index_calls(special_indexes, field_names_by_column)
         index_calls.extend(special_index_calls)
-        unique_index_calls, unique_constraint_calls = self._get_unique_declarations(plain_indexes)
+        unique_index_calls, unique_constraint_calls = self._get_unique_declarations(
+            plain_indexes, field_names_by_column
+        )
         index_calls.extend(unique_index_calls)
         unique_constraint_calls.extend(
-            self._get_unique_constraint(index)
+            self._get_unique_constraint(index, field_names_by_column)
             for index in (*self.constraint_unique_column_indexes.values(), *partial_unique_constraint_indexes)
         )
         if index_calls:
@@ -1044,19 +1050,22 @@ class InspectedModelBuilder:
                 ],
             )
 
-    def _get_plain_index_calls(self, multi_column_plain: list[IndexInfo]) -> list[Index]:
+    def _get_plain_index_calls(
+        self, multi_column_plain: list[IndexInfo], field_names_by_column: dict[str, str]
+    ) -> list[Index]:
         """The ``Index`` of each plain non-unique index over several columns, and of each named index
         of one column.
 
         Args:
             multi_column_plain: The plain non-unique indexes.
+            field_names_by_column: The column mapping prepared after all model fields are built.
 
         Returns:
             The indexes.
         """
         index_calls: list[Index] = []
         for index in multi_column_plain:
-            declared_fields = index.get_declared_relation_fields(self.get_index_field_names_by_column())
+            declared_fields = index.get_declared_relation_fields(field_names_by_column)
             index_kwargs: dict[str, Any] = {"fields": declared_fields}
             name_parts = Index(fields=declared_fields).get_name_parts()
             if not self.is_default_index_name(index.name, GeneratedNamePrefix.INDEX, index.columns, name_parts):
@@ -1068,12 +1077,15 @@ class InspectedModelBuilder:
             index_calls.append(Index(fields=[self.field_attribute_names[column_name]], name=index.name))
         return index_calls
 
-    def _get_special_index_calls(self, special_indexes: list[IndexInfo]) -> tuple[list[Index], list[str]]:
+    def _get_special_index_calls(
+        self, special_indexes: list[IndexInfo], field_names_by_column: dict[str, str]
+    ) -> tuple[list[Index], list[str]]:
         """The index of each index of another type or with options, with a note on what its
         declaration can't carry.
 
         Args:
             special_indexes: The indexes.
+            field_names_by_column: The column mapping prepared after all model fields are built.
 
         Returns:
             The indexes, and the notes.
@@ -1081,7 +1093,7 @@ class InspectedModelBuilder:
         index_calls: list[Index] = []
         index_comments: list[str] = []
         for index in special_indexes:
-            index_calls.append(self._get_special_index(index))
+            index_calls.append(self._get_special_index(index, field_names_by_column))
             index_label = ", ".join(index.expression_terms or index.columns)
             if index.is_unique and index.index_type in self.introspector_class.INDEX_CLASSES_BY_TYPE:
                 index_comments.append(
@@ -1098,12 +1110,15 @@ class InspectedModelBuilder:
 
         return index_calls, index_comments
 
-    def _get_unique_declarations(self, plain_indexes: list[IndexInfo]) -> tuple[list[Index], list[UniqueConstraint]]:
+    def _get_unique_declarations(
+        self, plain_indexes: list[IndexInfo], field_names_by_column: dict[str, str]
+    ) -> tuple[list[Index], list[UniqueConstraint]]:
         """What each plain unique index stands for: an ``Index(unique=True)``, a named
         ``UniqueConstraint``, or (under the generated name) an unnamed one.
 
         Args:
             plain_indexes: The plain indexes, unique or not.
+            field_names_by_column: The column mapping prepared after all model fields are built.
 
         Returns:
             The unique indexes, and the unique constraints.
@@ -1116,8 +1131,8 @@ class InspectedModelBuilder:
         for index in plain_indexes:
             if not index.is_unique:
                 continue
-            attribute_names = self.get_index_field_names(index)
-            declared_fields = index.get_declared_relation_fields(self.get_index_field_names_by_column())
+            attribute_names = self.get_index_field_names(index, field_names_by_column)
+            declared_fields = index.get_declared_relation_fields(field_names_by_column)
             if declared_fields != attribute_names:
                 # A descending key - only an Index(unique=True) declares one.
                 index_kwargs: dict[str, Any] = {"fields": declared_fields, "unique": True}
@@ -1137,13 +1152,14 @@ class InspectedModelBuilder:
                 ):
                     index_calls.append(Index(fields=attribute_names, unique=True))
                 else:
-                    unique_constraint_calls.append(self._get_unique_constraint(index))
+                    unique_constraint_calls.append(self._get_unique_constraint(index, field_names_by_column))
                 continue
             # An unnamed constraint carries no name of its own, so two physical unique indexes
             # over the same column set are always redundant.
-            if tuple(attribute_names) not in unnamed_unique_field_sets:
-                unnamed_unique_field_sets.add(tuple(attribute_names))
-                unique_constraint_calls.append(UniqueConstraint(fields=tuple(attribute_names)))
+            field_names = tuple(attribute_names)
+            if field_names not in unnamed_unique_field_sets:
+                unnamed_unique_field_sets.add(field_names)
+                unique_constraint_calls.append(UniqueConstraint(fields=field_names))
         return index_calls, unique_constraint_calls
 
     def _add_index_comments(self, index_comments: list[str], undeclarable_index_comments: list[str]) -> None:

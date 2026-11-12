@@ -69,13 +69,13 @@ OUTER_JSON_PATH_ANNOTATION_NAME = "hare outer json path"
 
 #: A comparison lookup to the one giving the same result with its two sides swapped.
 MIRRORED_COMPARISON_LOOKUPS: dict[str, str] = {
-    "": "",
+    Lookup.EXACT: Lookup.EXACT,
     "exact": "exact",
-    "not": "not",
-    "gt": "lt",
-    "gte": "lte",
-    "lt": "gt",
-    "lte": "gte",
+    Lookup.NOT: Lookup.NOT,
+    Lookup.GT: Lookup.LT,
+    Lookup.GTE: Lookup.LTE,
+    Lookup.LT: Lookup.GT,
+    Lookup.LTE: Lookup.GTE,
 }
 
 # The SQL type a float/Decimal literal operand is cast to: a database would otherwise infer the

@@ -267,6 +267,11 @@ those FK fields satisfy the [`SET_DEFAULT` rule](#set-default-needs-db-default).
 
 ### <a id="many-to-many-across-connections"></a>A relation to a model on another connection
 
+A many-to-many relation does not choose its class by routing connections when its fetched
+rows are accessed. A relation without query settings can serve iteration, length and membership
+from its fetched rows alone. Query binding preserves the related manager's QuerySet class;
+cross-connection reads declare linked keys as an execution dependency.
+
 A `ManyToManyField` to a model on another connection (`db_constraint=False`) keeps its through table on
 the connection of the model declaring it, and no query joins the two connections' tables:
 
@@ -445,6 +450,13 @@ is no link: `add()` and `set()` add it again with a new through row. When the th
 pair unique — a `UniqueConstraint` without a `condition` over its two relations, with or without its
 `Meta.tenant_field` — a new row can't be written, so the soft-deleted row is restored instead, with the
 `through_defaults` given.
+
+Relation key conversion preserves the input order and repeated members. An instance's key writer
+receives that instance; a raw key's writer receives the related model class. Resolving raw keys to
+instances retains the converted keys for restoring the requested order. Through-model callable and
+async defaults are still evaluated separately for each new link, even when column writers are prepared
+once for the operation. `set()` checks explicit through defaults before modifying links, including
+when the requested membership needs no additions.
 
 ## <a id="genericforeignkeyfield"></a>`GenericForeignKeyField`
 

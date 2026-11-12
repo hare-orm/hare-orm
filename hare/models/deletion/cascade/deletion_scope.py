@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.dialects.base.client.transaction_client import TransactionClient
     from hare.models import Model
 
 
@@ -31,11 +30,7 @@ class DeletionScope:
     @staticmethod
     def get_database(client: DatabaseClient) -> DatabaseClient:
         """Returns the physical client's identity independently of transaction nesting."""
-        return (
-            cast("TransactionClient", client).get_non_transactional_client()
-            if client.is_transaction_client
-            else client
-        )
+        return client.get_non_transactional_client() if client.is_transaction_client else client  # type: ignore[attr-defined]
 
     @staticmethod
     def get_row_identity(

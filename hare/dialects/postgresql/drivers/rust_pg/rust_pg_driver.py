@@ -34,8 +34,8 @@ class RustPgDriver(PostgresqlDriver):
             from hare.dialects.postgresql.drivers.rust_pg.client.rust_pg_client import RustPgClient
         except ImportError as error:
             raise ConfigurationError(
-                "The postgresql engine needs the rust.native extension, which is not built: build it "
-                "(`make build_native`) or use the postgresql+asyncpg engine."
+                "The postgresql engine - hare's native driver - runs on Linux and macOS; on Windows use the "
+                "postgresql+asyncpg engine."
             ) from error
         return RustPgClient
 

@@ -19,6 +19,7 @@ from hare.dialects.base.results.described_result import DescribedResult
 from hare.dialects.base.results.statement_result import StatementResult
 from hare.dialects.clickhouse.client.clickhouse_client import ClickhouseClient
 from hare.dialects.clickhouse.client.clickhouse_external_sets import ClickhouseExternalSets
+from hare.dialects.clickhouse.client.clickhouse_insert_values import ClickhouseInsertValues
 from hare.dialects.clickhouse.client.clickhouse_statement_result import ClickhouseStatementResult
 from hare.dialects.clickhouse.client.constants import CLICKHOUSE_BEGIN_TRANSACTION_SQL, CLICKHOUSE_ROLLBACK_SQL
 from hare.dialects.clickhouse.client.declarations import ClickhouseDriverErrors, ClickhouseExternalSet
@@ -307,7 +308,7 @@ class ClickhouseDriverClient(ClickhouseClient):
 
     @classmethod
     def _insert_records(cls, library_client: Client, statement: str, records: list[tuple[Any, ...]]) -> None:
-        library_client.execute(statement, cls._get_inserted_columns(records), columnar=True)
+        library_client.execute(statement, ClickhouseInsertValues.get_columns(cls, records), columnar=True)
 
     @ClickhouseClient.translate_exceptions(StatementForm.SCRIPT)
     async def execute_script(self, query: str) -> None:

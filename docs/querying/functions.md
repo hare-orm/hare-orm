@@ -234,8 +234,9 @@ is a literal or an expression — a string there is text. A `Collate` name is a 
 expression or a literal. Each database writes a value itself. PostgreSQL writes it as `jsonb` holds it: a
 boolean as `true`/`false`, a Decimal and a float as a number (an integral float as an integer, `2`), an aware
 datetime as ISO text in UTC (`2020-01-02T03:04:05.5+00:00`), a time with its offset (`12:30:00+00`), bytes as
-`\x` and hex. SQLite uses `json_object()`: a boolean as `1`/`0`, a float with 15 significant digits (17 from
-SQLite 3.53), a moment or time as its stored text, bytes as uppercase hex. ClickHouse
+`\x` and hex. SQLite uses `json_object()`: a boolean as `1`/`0`, a float in SQLite's JSON number format,
+a moment or time as its stored text, bytes as uppercase hex. Its JSON number formatting can round
+a double and need not match `CAST(... AS TEXT)`. ClickHouse
 uses `toJSONString()`: a Decimal without trailing zeros, a `DateTime64` as `2024-02-29 13:45:06.789000`, NaN
 as null, bytes as the hex the column holds. A JSON field or a nested `JSONObject` is nested JSON everywhere.
 The object's keys come back in the database's order — on PostgreSQL `jsonb`'s own (shorter keys first). A key

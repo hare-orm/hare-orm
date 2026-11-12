@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from base64 import b32encode
 from hashlib import sha3_224
-from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
 
 from pydantic import ConfigDict, Field as PydanticField, create_model
 from pydantic.fields import ComputedFieldInfo
@@ -330,9 +330,9 @@ class PydanticModelCreator:
         # two given name= values) can share one hash while being different schemas.
         model_index_key = (self._model_class, f"{self._hash};{self._name}")
         if (
-            hashed_model := PydanticModelCreator.MODEL_INDEX.get_model_bucket(self._model_class).get(model_index_key)
+            hashed_model := PydanticModelCreator.MODEL_INDEX.get_bucket(self._model_class).get(model_index_key)
         ) is not None:
-            return cast("type[PydanticModel]", hashed_model)
+            return hashed_model
 
         self._pconfig = PydanticMetaReading.initialize_pconfig(self)
         computed_fields: dict[str, Any] = {}
@@ -367,7 +367,7 @@ class PydanticModelCreator:
         model.related_value_paths = (
             () if self._exclude_read_only else tuple(ExtraFieldSchemas.get_shown_related_values(self).values())
         )
-        PydanticModelCreator.MODEL_INDEX.get_model_bucket(self._model_class)[model_index_key] = model
+        PydanticModelCreator.MODEL_INDEX.get_bucket(self._model_class)[model_index_key] = model
         return model
 
     def _process_field(

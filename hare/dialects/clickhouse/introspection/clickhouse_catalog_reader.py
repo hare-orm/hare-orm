@@ -13,9 +13,9 @@ from hare.dialects.clickhouse.constants import (
     CLICKHOUSE_TABLE_SQL,
 )
 from hare.dialects.clickhouse.introspection.constants import CLICKHOUSE_TABLE_SETTING_DEFAULTS_SQL
+from hare.inspectdb.enums import SchemaPartType
 from hare.inspectdb.exceptions import SchemaNotFoundError, TableNotFoundError
 from hare.inspectdb.introspection.catalog_snapshot import CatalogSnapshot
-from hare.inspectdb.introspection.enums import SchemaPartType
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient

@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 
 from hare.dialects.clickhouse.constants import CLICKHOUSE_DATETIME_PRECISION
-from hare.sql.enums import AnalyticFunctionName, TruncType
+from hare.sql.enums import AnalyticFunctionName, DatePart, TruncType
 from hare.sql.order import Order
 
 #: A ClickHouse integer type, nullable or not - ``UInt64``, ``Nullable(Int8)``.
@@ -149,19 +149,19 @@ CLICKHOUSE_REMAINDER_TRUNC_TEMPLATE = (
     "+ timeZoneOffset(toTimeZone({0}, {1})) * 1000000, {2}))"
 )
 
-CLICKHOUSE_DATE_PART_FUNCTIONS = {
-    "YEAR": "toYear({})",
-    "ISOYEAR": "toISOYear({})",
-    "QUARTER": "toQuarter({})",
-    "MONTH": "toMonth({})",
-    "WEEK": "toISOWeek({})",
-    "DOW": "toDayOfWeek({}, 3)",
-    "ISODOW": "toDayOfWeek({})",
-    "DAY": "toDayOfMonth({})",
-    "HOUR": "toHour({})",
-    "MINUTE": "toMinute({})",
-    "SECOND": "toSecond({})",
-    "MICROSECOND": "positiveModulo(toUnixTimestamp64Micro(toDateTime64({}, 6)), 1000000)",
+CLICKHOUSE_DATE_PART_FUNCTIONS: dict[str, str] = {
+    DatePart.YEAR: "toYear({})",
+    DatePart.ISO_YEAR: "toISOYear({})",
+    DatePart.QUARTER: "toQuarter({})",
+    DatePart.MONTH: "toMonth({})",
+    DatePart.WEEK: "toISOWeek({})",
+    DatePart.WEEK_DAY: "toDayOfWeek({}, 3)",
+    DatePart.ISO_WEEK_DAY: "toDayOfWeek({})",
+    DatePart.DAY: "toDayOfMonth({})",
+    DatePart.HOUR: "toHour({})",
+    DatePart.MINUTE: "toMinute({})",
+    DatePart.SECOND: "toSecond({})",
+    DatePart.MICROSECOND: "positiveModulo(toUnixTimestamp64Micro(toDateTime64({}, 6)), 1000000)",
 }
 
 #: The ``formatDateTime`` pattern of a time of day written as text, with its microseconds.
@@ -192,9 +192,9 @@ CLICKHOUSE_GROUP_DISTINCT_ARRAY_FUNCTION_NAME = "groupUniqArray"
 #: form of each, which returns NULL there instead of the column type's default (0, 1970-01-01) or NaN.
 #: A sum over no rows is ClickHouse's own 0.
 CLICKHOUSE_NULL_FOR_NO_ROWS_AGGREGATE_NAMES = {
-    "MAX": "maxOrNull",
-    "MIN": "minOrNull",
-    "AVG": "avgOrNull",
+    AnalyticFunctionName.MAX: "maxOrNull",
+    AnalyticFunctionName.MIN: "minOrNull",
+    AnalyticFunctionName.AVG: "avgOrNull",
     "STDDEV_POP": "stddevPopOrNull",
     "STDDEV_SAMP": "stddevSampOrNull",
     "VAR_POP": "varPopOrNull",
@@ -219,7 +219,10 @@ CLICKHOUSE_TEXT_WITHOUT_OFFSET_TEMPLATE = (
 )
 
 #: The window functions reading a neighboring row -> ClickHouse's, which read the window's frame.
-CLICKHOUSE_OFFSET_FUNCTION_NAMES = {"LAG": "lagInFrame", "LEAD": "leadInFrame"}
+CLICKHOUSE_OFFSET_FUNCTION_NAMES: dict[str, str] = {
+    AnalyticFunctionName.LAG: "lagInFrame",
+    AnalyticFunctionName.LEAD: "leadInFrame",
+}
 
 #: A window frame of the whole partition.
 CLICKHOUSE_WHOLE_PARTITION_FRAME = "ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING"

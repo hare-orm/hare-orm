@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import namedtuple
-from functools import cached_property
+from collections.abc import Sequence
 from typing import Any, ClassVar
 
 from hare.core.caching.cache import Cache
@@ -15,6 +15,11 @@ class NamedRows(TupleRows):
 
     #: (field names,) -> the namedtuple class of a row selecting them.
     row_classes: ClassVar[Cache[type[tuple[Any, ...]]]] = Cache(ROW_CLASS_CACHE_SIZE, holds_sql=False)
+
+    def __init__(self, output_names: tuple[str, ...], output_column_aliases: Sequence[tuple[str, ...]]) -> None:
+        """Bind fixed output names and the shared namedtuple class used by every batch."""
+        super().__init__(output_names, output_column_aliases)
+        self.row_class = self.get_row_class(output_names)
 
     @staticmethod
     def get_row_class(field_names: tuple[str, ...]) -> type[tuple[Any, ...]]:
@@ -30,11 +35,3 @@ class NamedRows(TupleRows):
         if row_class is None:
             row_class = NamedRows.row_classes[(field_names,)] = namedtuple("Row", field_names, rename=True)
         return row_class
-
-    def make_row(self, values: tuple[Any, ...]) -> Any:
-        return self.row_class(*values)
-
-    @cached_property
-    def row_class(self) -> type[tuple[Any, ...]]:
-        """The namedtuple class of this reader's fixed output names, shared by every batch."""
-        return self.get_row_class(self.output_names)

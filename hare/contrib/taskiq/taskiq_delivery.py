@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from taskiq.kicker import AsyncKicker
 
@@ -75,8 +75,8 @@ class TaskiqDelivery(OutboxDelivery, Generic[TOutboxEvent]):
             ConfigurationError: The label names no model of the current context.
         """
         if self._model is None:
-            self._model = cast("type[TOutboxEvent]", HareContext.require_current().get_model(self.model_reference))
-        return self._model
+            self._model = HareContext.require_current().get_model(self.model_reference)  # type: ignore[assignment]
+        return self._model  # type: ignore[return-value]
 
     async def kiq_on_commit(
         self,

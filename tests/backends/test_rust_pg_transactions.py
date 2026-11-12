@@ -1,9 +1,13 @@
-"""Native transaction entry acknowledges BEGIN and preserves statement outcomes."""
+"""Native transaction control precedes the first statement and preserves statement outcomes."""
+
+import asyncio
+from unittest.mock import patch
 
 import pytest
 
 from hare import Connections
 from hare.contrib.test import requires_features
+from hare.exceptions import OperationalError, TransactionManagementError
 from hare.transactions.transactions import Transactions
 from tests.shared_models.testmodels import Tournament
 from tests.utils.database_under_test import DatabaseUnderTest
@@ -30,11 +34,11 @@ async def count_idle_in_transaction(pool_client) -> int:
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
-async def test_transaction_entry_confirms_begin_before_the_first_statement(db_truncate):
+async def test_transaction_entry_defers_begin_until_the_first_statement(db_truncate):
     skip_unless_rust_pg()
     pool_client = Tournament.get_connection()
     async with Transactions.atomic():
-        assert await count_idle_in_transaction(pool_client) == 1
+        assert await count_idle_in_transaction(pool_client) == 0
     async with Transactions.atomic() as transaction:
         await transaction.execute("SELECT 1")
         assert await count_idle_in_transaction(pool_client) == 1
@@ -43,12 +47,14 @@ async def test_transaction_entry_confirms_begin_before_the_first_statement(db_tr
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
-async def test_direct_native_begin_confirms_the_server_transaction(db_truncate):
+async def test_direct_native_begin_defers_the_server_transaction_until_a_statement(db_truncate):
     skip_unless_rust_pg()
     client = Tournament.get_connection()
     await client._ensure_connection()
     transaction = await client._connected_pool.begin(None)
     try:
+        assert await count_idle_in_transaction(client) == 0
+        await transaction.fetch_all("SELECT 1", [])
         assert await count_idle_in_transaction(client) == 1
     finally:
         await transaction.rollback()
@@ -152,3 +158,80 @@ async def test_writes_of_a_committed_transaction_persist(db_truncate):
         await Tournament.objects.create(name="first")
         await Tournament.objects.create(name="second")
     assert await Tournament.objects.all().count() == 2
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+async def test_failed_preparation_of_the_first_statement_aborts_its_transaction(db_truncate):
+    skip_unless_rust_pg()
+    with pytest.raises(TransactionManagementError):
+        async with Transactions.atomic() as transaction:
+            with pytest.raises(OperationalError, match="no_such_first_statement_table"):
+                await transaction.execute("SELECT * FROM no_such_first_statement_table")
+            await Tournament.objects.create(name="must not commit")
+    assert await Tournament.objects.count() == 0
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+async def test_positional_results_retain_duplicate_column_names_and_native_value_types(db_truncate):
+    skip_unless_rust_pg()
+    client = Tournament.get_connection()
+    result = await client.execute(
+        "SELECT 7 AS repeated, 8 AS repeated, ARRAY[1, 2] AS numbers, NULL::text AS missing",
+        rows_by_position=True,
+    )
+    assert result.column_names == ("repeated", "repeated", "numbers", "missing")
+    assert result.rows == [(7, 8, [1, 2], None)]
+    assert type(result.rows[0]) is tuple
+    assert type(result.rows[0][2]) is list
+    empty = await client.execute("SELECT 7 AS number WHERE FALSE", rows_by_position=True)
+    assert empty.rows == []
+    assert empty.column_names == ("number",)
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.parametrize("has_outer_statement", [False, True])
+@pytest.mark.asyncio
+async def test_cancelling_the_first_statement_waits_for_its_savepoint(db_truncate, has_outer_statement):
+    skip_unless_rust_pg()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    landed = asyncio.Event()
+
+    async def write_child():
+        async with Transactions.atomic():
+            await Tournament.objects.create(name="cancelled child")
+
+    async with Transactions.atomic() as outer:
+        if has_outer_statement:
+            await Tournament.objects.create(name="outer")
+        original = type(outer)._driver_savepoint
+
+        async def send(client, name):
+            entered.set()
+            await release.wait()
+            await original(client, name)
+            landed.set()
+
+        with patch.object(type(outer), "_driver_savepoint", send):
+            async with asyncio.TaskGroup() as tasks:
+                writer = tasks.create_task(write_child())
+                waiting = tasks.create_task(entered.wait())
+                try:
+                    completed, _ = await asyncio.wait((writer, waiting), return_when=asyncio.FIRST_COMPLETED)
+                    assert waiting in completed
+                    writer.cancel()
+                    await asyncio.sleep(0)
+                    assert not writer.done()
+                    release.set()
+                    with pytest.raises(asyncio.CancelledError):
+                        await writer
+                    assert landed.is_set()
+                finally:
+                    release.set()
+                    waiting.cancel()
+        await Tournament.objects.create(name="after")
+    assert not await Tournament.objects.filter(name="cancelled child").exists()
+    assert await Tournament.objects.filter(name="after").count() == 1
+    assert await Tournament.objects.filter(name="outer").count() == int(has_outer_statement)

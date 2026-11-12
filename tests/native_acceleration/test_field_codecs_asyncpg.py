@@ -13,7 +13,7 @@ from tests.native_acceleration.test_field_codecs import (
 
 pytestmark = pytest.mark.database_independent
 
-ASYNCPG_CONNECTIONS = [("asyncpg", POSTGRESQL_TYPES, AsyncpgClient.native_python_types)]
+ASYNCPG_CONNECTIONS = [("asyncpg", POSTGRESQL_TYPES, AsyncpgClient.native_python_types, None)]
 
 
 @pytest.mark.parametrize(

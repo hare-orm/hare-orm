@@ -183,6 +183,9 @@ class AlterColumnNotNullSafe:
 filling the existing rows; the index is the field's flag, not an index operation of its own. `AlterField`
 creates or drops it as the flag changes, `RemoveField` drops it with the column.
 
+Both `AddField` and `AlterField` declare dependencies on the referenced model and target
+key fields, an explicit through model, and the field's declared ENUM type when applicable.
+
 `AddField(..., not_valid=True)` of a `ForeignKeyField`/`OneToOneField` with a database constraint adds
 the column, then its FOREIGN KEY `NOT VALID` (PostgreSQL) under the name the inline `REFERENCES` would
 have: only new and updated rows must satisfy it, so adding it doesn't scan the table while the writes to

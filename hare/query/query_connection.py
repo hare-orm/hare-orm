@@ -120,6 +120,8 @@ class QueryConnection:
         Raises:
             QueryError: The inner model lives on another connection.
         """
+        if model is outer_model:
+            return
         outer_alias = outer_connection.connection_alias
         routed_aliases_of = {
             routed_model: {

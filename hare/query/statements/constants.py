@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from hare.dialects.base.clauses.enums import MergeAction
 from hare.instrumentation.enums import RowOperation
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.enums import Lookup
 
 #: Alias of the derived table `AggregateQuery` joins to the base table when `.aggregate()` has to
@@ -16,7 +17,7 @@ AGGREGATE_SUBQUERY_PRIMARY_KEY_ALIAS_PREFIX = "hare pk "
 #: computes `.aggregate()` over for a `.group_by()` queryset - one row per group.
 AGGREGATE_SUBQUERY_GROUP_BY_ALIAS_PREFIX = "hare group "
 
-#: Preferred alias of the VALUES table joined by ``bulk_update()``; Identifiers.get_free_name
+#: Preferred alias of the VALUES table joined by ``bulk_update()``; the identifier scope
 #: selects a distinct name when it collides with the updated table.
 BULK_UPDATE_VALUES_ALIAS = "hare_bulk_update_values"
 
@@ -116,7 +117,7 @@ IGNORE_CONFLICTS_KEYLESS_REASON = (
 #: IGNORE_CONFLICTS_MATCHING_MESSAGE's reason for a database without RETURNING.
 IGNORE_CONFLICTS_NO_RETURNING_REASON = "{dialect} has no RETURNING"
 #: The ``on_conflict_constraint`` naming the model's primary key, whatever name its constraint has.
-PRIMARY_KEY_CONFLICT_CONSTRAINT = "pk"
+PRIMARY_KEY_CONFLICT_CONSTRAINT = PRIMARY_KEY_ALIAS
 
 BULK_INSERT_DEFERRED_PREVIEW_MESSAGE = (
     "bulk_create() SQL is deferred until write-time values are prepared for: {fields}. "

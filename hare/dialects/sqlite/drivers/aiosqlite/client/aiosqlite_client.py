@@ -5,7 +5,7 @@ import sqlite3
 import time
 from collections.abc import Callable, Coroutine
 from contextlib import closing
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import aiosqlite
 
@@ -222,7 +222,7 @@ class AiosqliteClient(SqliteClient):
     def acquire_connection(self) -> ConnectionWrapper[aiosqlite.Connection]:
         # A client Hare.init replaced runs a query that took it on the one replacing it.
         if (successor := self.get_successor()) is not None:
-            return cast("AiosqliteClient", successor).acquire_connection()
+            return successor.acquire_connection()  # type: ignore[return-value]
         return AiosqliteConnectionWrapper(self._lock, self)
 
     def _get_transaction_client(self) -> AiosqliteTransactionClient:

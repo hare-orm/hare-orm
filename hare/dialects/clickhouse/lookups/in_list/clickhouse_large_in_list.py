@@ -7,6 +7,7 @@ from typing import Any
 
 from hare.dialects.base.parameters.large_in_list import LargeInList
 from hare.dialects.clickhouse.client.declarations import ClickhouseValueSet
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.clickhouse.lookups.constants import CLICKHOUSE_VALUE_SET_INTEGER_TYPES, CLICKHOUSE_VALUE_SET_MINIMUM
 from hare.dialects.clickhouse.lookups.in_list.clickhouse_value_set_values import ClickhouseValueSetValues
 from hare.sql.terms.criteria.criterion import Criterion
@@ -78,11 +79,11 @@ class ClickhouseLargeInList(LargeInList):
             if type(value) is not value_type:
                 return None
         if value_type is uuid.UUID:
-            return "UUID"
+            return ClickhouseTypeName.UUID
         if value_type is str:
-            return "String"
+            return ClickhouseTypeName.STRING
         if value_type is datetime.date:
-            return "Date32"
+            return ClickhouseTypeName.DATE32
         if value_type is int:
             least, greatest = min(values), max(values)
             for type_name, low, high in CLICKHOUSE_VALUE_SET_INTEGER_TYPES:

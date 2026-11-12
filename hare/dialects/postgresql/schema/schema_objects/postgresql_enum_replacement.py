@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar
 
 from hare.ddl.schema_objects.enum_type import EnumType
 from hare.dialects.base.schema.plans.enums import SchemaEffect
@@ -44,7 +44,7 @@ class PostgresqlEnumReplacement:
 
     async def execute(self, editor: BaseSchemaEditor) -> None:
         """Collect an honest runtime step, or take locks and execute its catalog-derived SQL."""
-        schema_editor = cast("PostgresqlSchemaEditor", editor)
+        schema_editor: PostgresqlSchemaEditor = editor  # type: ignore[assignment]
         if schema_editor.collect_sql:
             schema_editor.collected_sql.append(
                 POSTGRESQL_ENUM_REPLACEMENT_PREVIEW.format(type=schema_editor.enum_types.get_type_sql(self.old))

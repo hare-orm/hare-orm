@@ -1,8 +1,11 @@
 //! Decode one result batch and fill opaque values using the server's output functions.
+use std::fmt::Write as _;
+
+use tokio_postgres::types::{ToSql, Type};
+
 use crate::pg::error::DriverError;
 use crate::pg::value::column_decoder::PgColumnDecoder;
 use crate::pg::value::{decode_pg_row_values, RawWireValue, ServerTextForms, Value};
-use tokio_postgres::types::{ToSql, Type};
 
 const SERVER_TEXT_FORMS_PER_QUERY: usize = 10_000;
 pub(crate) struct PgRowDecoder;
@@ -39,8 +42,14 @@ impl PgRowDecoder {
     ) -> Result<Vec<String>, DriverError> {
         let mut texts = Vec::with_capacity(requests.len());
         for chunk in requests.chunks(SERVER_TEXT_FORMS_PER_QUERY) {
-            let placeholders = (1..=chunk.len()).map(|index| format!("${index}::text")).collect::<Vec<_>>().join(",");
-            let sql = format!("SELECT ARRAY[{placeholders}]::text[]");
+            let mut sql = String::from("SELECT ARRAY[");
+            for index in 1..=chunk.len() {
+                if index != 1 {
+                    sql.push(',');
+                }
+                write!(sql, "${index}::text").expect("writing into a String never fails");
+            }
+            sql.push_str("]::text[]");
             let raw_values: Vec<RawWireValue> = chunk.iter().map(|(_, raw)| RawWireValue(raw)).collect();
             let params: Vec<(&(dyn ToSql + Sync), Type)> = raw_values
                 .iter()

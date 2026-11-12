@@ -11,6 +11,7 @@ import pytest
 from hare.exceptions import ConfigurationError
 from hare.query.functions import Extract, TruncDay
 from hare.time import Timezone, ZoneInfo
+from hare.time.system_zone import SystemZone
 from tests.shared_models.testmodels import DatetimeFields
 
 UTC = datetime.UTC
@@ -26,7 +27,7 @@ AFTER_DST = datetime.datetime(2026, 3, 29, 1, 30, tzinfo=UTC)
 @pytest.mark.parametrize("month", [1, 7])
 def test_local_zone_matches_the_system_clock_in_winter_and_summer(month):
     moment = datetime.datetime(2024, month, 15, 12, tzinfo=UTC)
-    zone = ZoneInfo(Timezone.get_local_zone_name())
+    zone = ZoneInfo(SystemZone.get_local_zone_name())
     assert moment.astimezone(zone).utcoffset() == moment.astimezone().utcoffset()
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Iterable, Iterator
-from typing import TYPE_CHECKING, Any, ClassVar, Self, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Self, TypeVar, overload
 
 from hare.core.caching.cache import Cache
 from hare.dialects.base.client.transaction_lifecycle.transaction_callbacks import TransactionCallbacks
@@ -103,7 +103,7 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
             relation_class = RelatedQuerySet.CLASSES_BY_QUERYSET_CLASS[key] = type(
                 f"{cls.__name__}{queryset_class.__name__}", (cls, queryset_class), {"__slots__": ()}
             )
-        return cast("type[Self]", relation_class)
+        return relation_class
 
     def __getstate__(self) -> dict[str, Any]:
         """The relation without its query settings and its rollback registrations - they hold
@@ -175,14 +175,9 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
                 # when queried.
                 key_values = tuple([getattr(instance, field_name, None) for field_name in self.from_fields])
             else:
-                try:
-                    key_values = tuple([getattr(instance, field_name) for field_name in self.from_fields])
-                except AttributeError:
-                    # A referenced field left unloaded - the error names it.
-                    RelationValues.get_relation_key_values(
-                        instance, self.from_fields, f"The relation to {self.model.__name__}"
-                    )
-                    raise
+                key_values = RelationValues.get_relation_key_values(
+                    instance, self.from_fields, f"The relation to {self.model.__name__}"
+                )
             if key_values == self._bound_key_values and not manager.overrides_get_queryset:
                 return
             relation_rows = self.relation_rows
@@ -253,7 +248,7 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
         Returns:
             The queryset.
         """
-        queryset = cast("QuerySet[TModel]", self.model._meta.manager.create_queryset())
+        queryset: QuerySet[TModel] = self.model._meta.manager.create_queryset()
         queryset._apply_connection(connection)
         queryset._connection_explicitly_chosen = True
         return queryset
@@ -310,7 +305,7 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
         """
         if not connection.is_transaction_client:
             return
-        transaction = cast("TransactionClient", connection)
+        transaction: TransactionClient = connection  # type: ignore[assignment]
         registered_on = transaction._get_top_level_transaction()
         current_span = TransactionCallbacks.get_registration_span(transaction)
         layers = self._rollback_reset_layers

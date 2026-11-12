@@ -1,7 +1,6 @@
 """SystemClock is the one clock hare stamps moments with - on every Python version and platform it
 reads the system's precise wall clock."""
 
-import sys
 import time
 from datetime import UTC, datetime, timedelta
 
@@ -36,20 +35,11 @@ def test_system_clock_reads_the_same_moment_as_python(getter, zone):
 
 
 @pytest.mark.timing
-@pytest.mark.requires("native")
 def test_native_clock_reads_the_same_moment_as_python():
     native_utc = NativeModules.clock.get_utc_now()
     assert native_utc.tzinfo is UTC
     assert abs(native_utc - datetime.now(UTC)) < CLOCK_AGREEMENT
     seconds, microseconds = NativeModules.clock.get_posix_time()
-    assert 0 <= microseconds < 1_000_000
-    assert abs(seconds + microseconds / 1_000_000 - time.time()) < CLOCK_AGREEMENT.total_seconds()
-
-
-@pytest.mark.timing
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows' own precise clock")
-def test_windows_precise_clock_reads_posix_time():
-    seconds, microseconds = SystemClock.get_windows_posix_time()
     assert 0 <= microseconds < 1_000_000
     assert abs(seconds + microseconds / 1_000_000 - time.time()) < CLOCK_AGREEMENT.total_seconds()
 

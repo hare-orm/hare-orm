@@ -3,7 +3,7 @@ from __future__ import annotations
 import enum
 from collections.abc import Callable
 from functools import partial
-from typing import Any, cast
+from typing import Any
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import (
@@ -373,6 +373,6 @@ class Lookups:
             value: The pattern.
             text_function: The field_term's text, when it isn't a plain ``VARCHAR`` cast.
         """
-        term = cast("Term", field_term.wrap_constant(value))
+        term: Term = field_term.wrap_constant(value)
         text_term = text_function(field_term) if text_function is not None else Cast(field_term, SqlTypes.VARCHAR)
         return BasicCriterion(comparator, text_term, term)

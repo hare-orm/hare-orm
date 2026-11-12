@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.exceptions import FieldError, QueryError
@@ -38,7 +38,7 @@ class RawSQLQuery(AwaitableQuery[TModel], Generic[TModel]):
         self._sql = sql
         self._parameters = parameters
         self._apply_connection(connection)
-        self._raw_sql_plan: RawSQLPlan | None = StatementPlans.raw_sql_plans.get_model_bucket(self.model).get(
+        self._raw_sql_plan: RawSQLPlan | None = StatementPlans.raw_sql_plans.get_bucket(self.model).get(
             self._get_raw_sql_plan_key()
         )
         # A text and parameter types a plan was kept for were checked when it was made. Any other
@@ -88,8 +88,9 @@ class RawSQLQuery(AwaitableQuery[TModel], Generic[TModel]):
             indexes_by_parameter_id = {id(parameter): index for index, parameter in enumerate(raw_sql.parameters)}
             parameter_indexes = [indexes_by_parameter_id.get(id(source)) for source in parameterizer.sources]
             if None not in parameter_indexes:
-                StatementPlans.raw_sql_plans.get_model_bucket(self.model)[self._get_raw_sql_plan_key()] = RawSQLPlan(
-                    sql, cast("tuple[int, ...]", tuple(parameter_indexes))
+                StatementPlans.raw_sql_plans.get_bucket(self.model)[self._get_raw_sql_plan_key()] = RawSQLPlan(
+                    sql,
+                    tuple(parameter_indexes),  # type: ignore[arg-type]
                 )
         return [(sql, parameterizer.values)]
 
@@ -103,15 +104,14 @@ class RawSQLQuery(AwaitableQuery[TModel], Generic[TModel]):
             return []
         column_names = result.column_names
         annotation_names_key = (self.model, connection.connection_alias, connection.dialect, column_names)
-        annotation_names = StatementPlans.raw_sql_annotation_names.get_model_bucket(self.model).get(
-            annotation_names_key
-        )
+        annotation_names = StatementPlans.raw_sql_annotation_names.get_bucket(self.model).get(annotation_names_key)
         if annotation_names is None:
             annotation_names = self._get_annotation_names(column_names)
-            StatementPlans.raw_sql_annotation_names.get_model_bucket(self.model)[annotation_names_key] = (
-                annotation_names
-            )
-        return await ModelRows(self.model, connection, annotations=annotation_names).read_all(result)
+            StatementPlans.raw_sql_annotation_names.get_bucket(self.model)[annotation_names_key] = annotation_names
+        instances = ModelRows(self.model, connection.dialect.types, annotations=annotation_names).read_all(
+            connection, result
+        )
+        return instances if isinstance(instances, list) else await instances
 
     def _get_annotation_names(self, column_names: Sequence[str]) -> list[str]:
         """Finds the raw query's annotations - a column that is

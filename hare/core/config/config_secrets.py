@@ -44,7 +44,7 @@ class ConfigSecrets:
                 else:
                     masked_mapping[key] = ConfigSecrets.mask_secrets(item)
             return masked_mapping
-        if isinstance(value, list | tuple):
+        if isinstance(value, (list, tuple)):
             return type(value)(ConfigSecrets.mask_secrets(item) for item in value)
         return value
 

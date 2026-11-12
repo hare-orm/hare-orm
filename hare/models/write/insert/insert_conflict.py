@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.models.write.rules.constants import BULK_CREATE_UPDATE_FIELDS_NAME
 from hare.models.write.rules.enums import WriteType
@@ -64,11 +64,10 @@ class InsertConflict:
             version_column = fields_db_projection[version_field]
             query = query.do_update(version_column, table[version_column] + 1)
         if self.update_tenants is not None:
-            tenant_field = cast("str", meta.tenant_field)
+            tenant_field: str = meta.tenant_field  # type: ignore[assignment]
             tenant_column = table[fields_db_projection[tenant_field]]
-            tenant_db_values = [
-                types.get_db_value(meta.fields_map[tenant_field], tenant, model) for tenant in self.update_tenants
-            ]
+            write_tenant = types.get_db_writer(meta.fields_map[tenant_field])
+            tenant_db_values = [write_tenant(tenant, model) for tenant in self.update_tenants]
             query = query.where(
                 tenant_column == tenant_db_values[0]
                 if len(tenant_db_values) == 1

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from hare.sql.builder.queries.pagination_sql import PaginationSql
 from hare.sql.builder.returned_value import ReturnedValue
@@ -347,7 +347,7 @@ class QuerySqlRendering:
     @staticmethod
     def where_sql(builder: QueryBuilder, sql_context: SqlContext) -> str:
         where_context = sql_context.copy(subquery=True)
-        wheres = cast("QueryBuilder", builder._wheres)
+        wheres: QueryBuilder = builder._wheres  # type: ignore[assignment]
         return f" WHERE {wheres.get_sql(where_context)}"
 
     @staticmethod

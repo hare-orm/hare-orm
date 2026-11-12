@@ -4,7 +4,7 @@ import abc
 import asyncio
 import time
 from collections.abc import Sequence
-from typing import Any, cast
+from typing import Any
 
 from hare.dialects.base.client.constants import TRANSACTION_FINALISED_MESSAGE
 from hare.dialects.base.client.enums import StatementForm
@@ -169,7 +169,7 @@ class ClickhouseTransactionClient(TransactionClient, ClickhouseClient):
     async def _check_commit_allowed(self) -> None:
         if self.transaction_state.finished:
             raise TransactionManagementError(TRANSACTION_FINALISED_MESSAGE)
-        transaction = cast("ClickhouseTransactionClient", self._get_top_level_transaction())
+        transaction: ClickhouseTransactionClient = self._get_top_level_transaction()  # type: ignore[assignment]
         if transaction._transaction_aborted:
             await self.rollback()
             raise TransactionManagementError(f"{CLICKHOUSE_TRANSACTION_ABORTED_MESSAGE} (nothing was committed)")

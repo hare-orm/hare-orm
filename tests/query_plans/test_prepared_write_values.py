@@ -8,6 +8,7 @@ import pytest
 from hare import fields
 from hare.contrib.test import hare_test_context
 from hare.models import Model
+from hare.query.plans.statement.statement_plans import StatementPlans
 
 pytestmark = pytest.mark.sqlite_only
 
@@ -57,14 +58,13 @@ async def test_full_compilation_reuses_the_exact_values_of_the_cached_write():
         query = Entry.objects.filter(id=1).update(value="next")
         await query
         execution = query._get_execution_query(True)
+        execution._prepare_write_values()
         counts = len(conversions), len(stamps)
-        execution._make_query_to_run()
-        assert execution._compiled_statement is not None
-        planned = execution._get_parameterized_sql()
+        hits = StatementPlans.hits
+        planned = execution._make_query_to_run()
+        assert StatementPlans.hits > hits
 
         fresh = copy(execution)
-        fresh._compiled_statement = None
-        fresh._runs_compiled_statement = False
         fresh._make_query()
         assert fresh._get_parameterized_sql() == planned
         assert (len(conversions), len(stamps)) == counts

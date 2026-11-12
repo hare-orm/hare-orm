@@ -117,13 +117,15 @@ class MigrationMaker:
         for writer in MigrationMaker.get_writers_in_dependency_order(writers):
             migration = Migration(writer.name, writer.app_label, operations=writer.operations)
             migration.atomic = writer.atomic
+            prepared = migration.prepare(state)
+            next_state = prepared.after.clone()
             connection_alias = self.apps_config[writer.app_label].get("default_connection") or DEFAULT_CONNECTION_NAME
             risks.extend(
                 await self.safety_checker.check(
-                    migration, state, client=state.environment.connections.get(connection_alias), read_catalog=False
+                    migration, prepared, client=state.environment.connections.get(connection_alias), read_catalog=False
                 )
             )
-            state = await migration.apply(state, dry_run=True, schema_editor=None)
+            state = next_state
         return risks
 
     @staticmethod

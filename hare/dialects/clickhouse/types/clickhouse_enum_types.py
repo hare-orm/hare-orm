@@ -3,9 +3,10 @@ from __future__ import annotations
 import enum
 import zlib
 from operator import itemgetter
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.caching.cache import Cache
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.clickhouse.types.constants import (
     CLICKHOUSE_ENUM8_RANGE,
     CLICKHOUSE_ENUM16_RANGE,
@@ -74,7 +75,11 @@ class ClickhouseEnumTypes:
         from hare.dialects.clickhouse.constants import CLICKHOUSE_DIALECT
 
         lowest, highest = CLICKHOUSE_ENUM8_RANGE
-        type_name = "Enum8" if all(lowest <= number <= highest for number in numbers_by_label.values()) else "Enum16"
+        type_name = (
+            ClickhouseTypeName.ENUM8
+            if all(lowest <= number <= highest for number in numbers_by_label.values())
+            else ClickhouseTypeName.ENUM16
+        )
         members_sql = ", ".join(
             f"{CLICKHOUSE_DIALECT.literals.get_literal_sql(label)} = {number}"
             for label, number in sorted(numbers_by_label.items(), key=itemgetter(1))
@@ -112,7 +117,7 @@ class ClickhouseEnumTypes:
         Returns:
             The number, None for None.
         """
-        enum_field = cast("CharEnumFieldInstance", field)
+        enum_field: CharEnumFieldInstance = field  # type: ignore[assignment]
         stored_value = enum_field.to_db_value(value, instance)
         if stored_value is None:
             return None
@@ -128,7 +133,7 @@ class ClickhouseEnumTypes:
         Returns:
             The type.
         """
-        enum_field = cast("CharEnumFieldInstance", field)
+        enum_field: CharEnumFieldInstance = field  # type: ignore[assignment]
         return cls.get_enum_type(cls.get_char_enum_numbers(enum_field.enum_type))
 
     @classmethod
@@ -141,7 +146,7 @@ class ClickhouseEnumTypes:
         Returns:
             The type.
         """
-        enum_field = cast("IntEnumFieldInstance", field)
+        enum_field: IntEnumFieldInstance = field  # type: ignore[assignment]
         return cls.get_enum_type({member.name: int(member.value) for member in enum_field.enum_type})
 
     @staticmethod
@@ -172,9 +177,7 @@ class ClickhouseEnumTypes:
             The member, None for None.
         """
         if isinstance(value, str):
-            value = ClickhouseEnumTypes.get_driver_labels(cast("CharEnumFieldInstance", field).enum_type).get(
-                value, value
-            )
+            value = ClickhouseEnumTypes.get_driver_labels(field.enum_type).get(value, value)  # type: ignore[arg-type]
         return field.from_db_value(value)
 
     @classmethod
@@ -212,7 +215,7 @@ class ClickhouseEnumTypes:
         Returns:
             The label, None for None.
         """
-        enum_field = cast("IntEnumFieldInstance", field)
+        enum_field: IntEnumFieldInstance = field  # type: ignore[assignment]
         number = enum_field.to_db_value(value, instance)
         return None if number is None else enum_field.enum_type(number).name
 
@@ -227,7 +230,7 @@ class ClickhouseEnumTypes:
         Returns:
             The member, None for None.
         """
-        enum_field = cast("IntEnumFieldInstance", field)
+        enum_field: IntEnumFieldInstance = field  # type: ignore[assignment]
         if value is None:
             return None
         if isinstance(value, str):

@@ -11,7 +11,7 @@ from hare.dialects.clickhouse.constants import CLICKHOUSE_DIALECT
 from hare.dialects.clickhouse.introspection.clickhouse_catalog_engine import ClickhouseCatalogEngine
 from hare.dialects.clickhouse.introspection.clickhouse_catalog_identities import ClickhouseCatalogIdentities
 from hare.exceptions import ConfigurationError, UnSupportedError
-from hare.inspectdb.introspection.enums import SchemaPartType
+from hare.inspectdb.enums import SchemaPartType
 from hare.inspectdb.introspection.schema_part import SchemaPart
 from hare.query.expressions import F
 

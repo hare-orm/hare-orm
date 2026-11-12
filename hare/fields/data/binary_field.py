@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 
 from hare.classes.value_descriptions import ValueDescriptions
@@ -63,3 +64,9 @@ class BinaryField(Field[TBinary]):
             raise ValidationError(
                 f"{self.model_field_name}: expected bytes-like data, got {ValueDescriptions.get_description(value)}"
             )
+
+    def get_unchanged_write_types(self, converter: Callable[..., Any] | None) -> tuple[type, ...] | None:
+        # This class's to_db_value() writes a bytes as it is.
+        if converter is None and type(self).to_db_value is BinaryField.to_db_value:
+            return (bytes,)
+        return None

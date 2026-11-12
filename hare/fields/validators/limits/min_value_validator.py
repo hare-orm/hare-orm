@@ -3,6 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from hare.fields.validators.limits.numeric_validator import NumericValidator
+from hare.native.native_modules import NativeModules
 
 
 class MinValueValidator(NumericValidator):
@@ -11,9 +12,11 @@ class MinValueValidator(NumericValidator):
     def __init__(self, min_value: int | float | Decimal, message: str | None = None) -> None:
         self._validate_type(min_value)
         self.min_value = min_value
+        self.check = NativeModules.rows.ValueCheck.lower_limit(min_value)
         super().__init__(message)
 
     def __call__(self, value: int | float | Decimal) -> None:
-        self._validate_type(value)
-        if value < self.min_value:
+        if type(value) not in self.exact_types:
+            self._validate_type(value)
+        if self.check.failure(value) is not None:
             self._raise(f"Value should be greater or equal to {self.min_value}")

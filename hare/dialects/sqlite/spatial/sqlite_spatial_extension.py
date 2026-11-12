@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-import ctypes
-import os
 import sqlite3
-import sys
-from typing import Any, ClassVar, cast
 
 import aiosqlite
 
@@ -30,10 +26,6 @@ class SqliteSpatialExtension:
             geography is measured on the ellipsoid of and a spatial index registers its column with.
     """
 
-    #: The directories of the libraries loaded on Windows, kept open for the process - Windows finds
-    #: the libraries SpatiaLite itself needs (GEOS, PROJ, ...) only in them.
-    dll_directories: ClassVar[dict[str, Any]] = {}
-
     def __init__(self, library_path: str, proj_database: str | None, metadata: SpatialiteMetadata) -> None:
         self.library_path = library_path
         self.proj_database = proj_database
@@ -52,29 +44,6 @@ class SqliteSpatialExtension:
                 "extensions - this one was built without them (SQLITE_OMIT_LOAD_EXTENSION)"
             )
 
-    def prepare_windows_library(self) -> None:
-        """On Windows, opens the library from its own directory first - SQLite's own loading doesn't
-        look for the libraries SpatiaLite needs next to it. A library given by name only is left to the
-        system's loader.
-
-        Raises:
-            ConfigurationError: The directory or the library can't be opened.
-        """
-        # A platform check as the block's condition - type checkers skip it off Windows.
-        if sys.platform == "win32":
-            directory = os.path.dirname(self.library_path)
-            if not directory:
-                return
-            library_file = (
-                self.library_path if self.library_path.lower().endswith(".dll") else f"{self.library_path}.dll"
-            )
-            try:
-                if directory not in self.dll_directories:
-                    self.dll_directories[directory] = os.add_dll_directory(directory)
-                ctypes.WinDLL(library_file)
-            except OSError as error:
-                raise ConfigurationError(f"SpatiaLite can't be loaded from {self.library_path!r}: {error}") from error
-
     def load(self, raw_connection: sqlite3.Connection) -> frozenset[int] | None:
         """Loads SpatiaLite into a connection, points it at ``proj_database`` and creates the spatial
         metadata when asked and missing; extension loading is switched off again after it.
@@ -88,7 +57,6 @@ class SqliteSpatialExtension:
         Raises:
             ConfigurationError: The library can't be loaded.
         """
-        self.prepare_windows_library()
         raw_connection.enable_load_extension(True)
         try:
             raw_connection.load_extension(self.library_path)
@@ -110,7 +78,4 @@ class SqliteSpatialExtension:
         Returns:
             The SRIDs of the spatial metadata's reference systems; None with ``metadata`` NONE.
         """
-        return cast(
-            "frozenset[int] | None",
-            await connection._execute(self.load, connection._conn),  # type: ignore[no-untyped-call]
-        )
+        return await connection._execute(self.load, connection._conn)  # type: ignore[no-untyped-call]

@@ -4,6 +4,7 @@ import math
 import struct
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.clickhouse.fields.constants import FLOAT32_MAX
 from hare.exceptions import ValidationError
 from hare.fields.data.numeric.float_field import FloatField
@@ -22,7 +23,7 @@ class Float32Field(FloatField[TFloat]):
     float32 (``0.1``, not the ``0.10000000149011612`` the driver gives); a value beyond its range, or
     so close to zero it would be stored as 0, is refused - a float32 holds neither."""
 
-    SQL_TYPE = "Float32"
+    SQL_TYPE = ClickhouseTypeName.FLOAT32
     MANTISSA_BITS = FLOAT32_MANTISSA_BITS
     EXACT_DECIMAL_DIGITS = 6
     COLUMN_TYPE_FROM_DIALECT = True

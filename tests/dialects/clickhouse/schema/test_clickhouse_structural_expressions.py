@@ -169,7 +169,7 @@ async def test_projection_compilation_preserves_the_queryset_and_runnable_plans(
         model.objects.all().using(round_trip.connection).values("site").annotate(total=Sum("score")).order_by("site")
     )
     original_sql = query.sql(parameters_inline=True)
-    bucket = StatementPlans.plans.get_model_bucket(model)
+    bucket = StatementPlans.plans.get_bucket(model)
     original_plans = {key: (id(plan), plan.sql) for key, plan in bucket.items()}
     hits = StatementPlans.hits
     projection = ClickhouseProjection("by_site", query)

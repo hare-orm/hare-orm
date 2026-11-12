@@ -112,7 +112,7 @@ class Window(CombinableExpression):
         Raises:
             QueryError: It isn't one.
         """
-        if not isinstance(item, str | Expression):
+        if not isinstance(item, (str, Expression)):
             raise QueryError(
                 f"Window({argument_name}=...) takes field names and expressions, got {type(item).__name__}"
             )

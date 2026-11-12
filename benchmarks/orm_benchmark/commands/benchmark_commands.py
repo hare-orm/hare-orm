@@ -10,7 +10,6 @@ from orm_benchmark.constants import BENCHMARK_SEED, CHART_DIRECTORY, REPOSITORY,
 from orm_benchmark.declarations.databases import DATABASES
 from orm_benchmark.declarations.targets import TARGET_BY_KEY, TARGETS
 from orm_benchmark.running.runner import Runner
-from tests.utils.power_throttling import PowerThrottling
 
 
 class BenchmarkCommands:
@@ -42,7 +41,6 @@ class BenchmarkCommands:
             if not Runner.runs_here(target):
                 # The target's library is installed in an environment of its own - its Python runs it.
                 raise SystemExit(subprocess.run([Runner.get_interpreter(target), *sys.argv], check=False).returncode)
-            PowerThrottling.turn_off()
             result = asyncio.run(Runner.run_once(target, arguments.size, arguments.seed))
             if arguments.out:
                 with open(arguments.out, "w", encoding="utf-8") as output:

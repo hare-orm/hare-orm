@@ -11,7 +11,7 @@
   <a href="https://github.com/hare-orm/hare-orm/actions/workflows/ci.yml"><img src="https://github.com/hare-orm/hare-orm/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://hare-orm.github.io/hare-orm/ru/"><img src="https://img.shields.io/badge/docs-hare--orm.github.io%2Fhare--orm-blue" alt="Docs"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
-  <a href="pyproject.toml"><img src="https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14-blue.svg" alt="Python 3.12, 3.13, 3.14"></a>
+  <a href="pyproject.toml"><img src="https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14%20%7C%203.15-blue.svg" alt="Python 3.12, 3.13, 3.14, 3.15"></a>
 </p>
 
 Асинхронная ORM для Python с PostgreSQL, SQLite и ClickHouse, спроектированная с упором на связи между
@@ -71,11 +71,9 @@ pip install hare-orm
 from hare import fields
 from hare.models import Model
 
-
 class Author(Model):
     id = fields.IntField(primary_key=True)
     name = fields.CharField(max_length=120)
-
 
 class Book(Model):
     id = fields.IntField(primary_key=True)
@@ -91,7 +89,6 @@ import asyncio
 from hare import Hare, HareConfig
 from library.models import Author, Book
 
-
 async def main() -> None:
     await Hare.init(HareConfig.from_db_url("sqlite+aiosqlite://db.sqlite3", {"models": ["library.models"]}))
     try:
@@ -104,7 +101,6 @@ async def main() -> None:
             print(book.title, "—", book.author.name)
     finally:
         await Hare.close_connections()
-
 
 asyncio.run(main())
 ```
@@ -132,7 +128,7 @@ pip install hare-orm[ipython]        # `hare shell` с IPython
 
 Все дополнения перечислены в разделе
 [Установка](https://hare-orm.github.io/hare-orm/ru/getting-started/installation/). Нужен Python
-3.12, 3.13 или 3.14.
+3.12, 3.13, 3.14 или 3.15.
 
 ## Производительность
 
@@ -197,16 +193,20 @@ poetry run mkdocs serve
 | Компонент | Поддерживается |
 | --- | --- |
 | hare-orm | Последний минорный выпуск; исправления выходят его патч-выпусками |
-| Python | CPython 3.12, 3.13, 3.14 |
+| Python | CPython 3.12, 3.13, 3.14, 3.15 |
 | SQLite | 3.35.5+ |
 | PostgreSQL | 14+ |
 | PgBouncer | 1.22.1+ |
 | ClickHouse | 25.8+ |
 | Redis, RabbitMQ, Kafka (outbox) | 7.2+, 4.0+, 3.9+ |
 
-Полная поддержка обещается только на Linux: базы данных проверяются там. На Windows и macOS hare
-ставится и работает для разработки — колёса, CLI и тесты, не читающие базу, проверяются на всех трёх
-системах.
+На Python 3.15 доступны ядро и совместимые интеграции. Robyn 0.88 и ClickHouse TCP
+(`clickhouse-driver`) требуют Python 3.12–3.14; для ClickHouse на 3.15 используйте HTTP
+(`clickhouse-connect`). Подробнее: [Установка](docs/getting-started/installation.ru.md).
+
+Полная матрица баз данных проверяется на Linux. hare поставляется wheel-пакетами с расширением на Rust
+для Linux (glibc и musl), macOS и Windows, на x86-64 и ARM64. Rust-драйвер PostgreSQL работает на Linux
+и macOS; для PostgreSQL на Windows установите extra `asyncpg` и используйте `postgresql+asyncpg://`.
 
 Отказ от поддержки версии Python или базы данных — несовместимое изменение, о нём объявляется в
 журнале изменений. Исправления уязвимостей выпускаются по правилам [SECURITY.md](SECURITY.ru.md).

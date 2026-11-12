@@ -1,25 +1,25 @@
 from __future__ import annotations
 
 import datetime
+from collections.abc import Callable
 from decimal import Decimal
 from enum import Enum
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.clickhouse.types.clickhouse_type_names import ClickhouseTypeNames
 from hare.dialects.clickhouse.types.constants import (
     CLICKHOUSE_DECIMAL_MAX_PRECISION,
     CLICKHOUSE_DYNAMIC_DATETIME_TYPE,
     CLICKHOUSE_DYNAMIC_INTEGER_TYPES,
     CLICKHOUSE_DYNAMIC_PLAIN_TYPES,
-    CLICKHOUSE_DYNAMIC_TYPE,
 )
 from hare.dialects.clickhouse.types.declarations import ClickhouseTypedValue
 from hare.exceptions import ValidationError
 from hare.fields.data.containers.declarations import MapValue, TupleValue
-from hare.time import Timezone
+from hare.time.zone_settings import ZoneSettings
 
 if TYPE_CHECKING:
-    from hare.dialects.clickhouse.fields.dynamic_field import DynamicField
     from hare.fields.field import Field
     from hare.models import Model
 
@@ -42,30 +42,24 @@ class ClickhouseDynamicValues:
         Returns:
             The column type.
         """
-        max_types = cast("DynamicField", field).max_types
-        return CLICKHOUSE_DYNAMIC_TYPE if max_types is None else f"{CLICKHOUSE_DYNAMIC_TYPE}(max_types={max_types})"
+        max_types = field.max_types  # type: ignore[attr-defined]
+        return (
+            ClickhouseTypeName.DYNAMIC if max_types is None else f"{ClickhouseTypeName.DYNAMIC}(max_types={max_types})"
+        )
 
     @classmethod
-    def to_db(cls, field: Field[Any], value: Any, instance: type[Model] | Model | None) -> Any:
-        """The value bound with its type.
-
-        Args:
-            field: The dynamic field.
-            value: The Python value.
-            instance: The model (class) it is written or compared for.
-
-        Returns:
-            The typed value, written into the column's type.
-
-        Raises:
-            ValidationError: The value is None on a field holding no NULL, or has no ClickHouse type.
-        """
+    def prepare_db(cls, field: Field[Any]) -> Callable[[Any, Any], Any]:
+        """Prepare the declared column type; infer the stored type from each value."""
         held_type = cls.get_column_type(field)
-        if value is None:
-            field.validate(value)
-            return ClickhouseTypedValue(None, "Nothing", held_type)
-        written_value, column_type = cls.get_written_value(value, field.model_field_name or "value")
-        return ClickhouseTypedValue(written_value, column_type, held_type)
+
+        def write_value(value: Any, instance: Any) -> Any:
+            if value is None:
+                field.validate(value)
+                return ClickhouseTypedValue(None, ClickhouseTypeName.NOTHING, held_type)
+            written_value, column_type = cls.get_written_value(value, field.model_field_name or "value")
+            return ClickhouseTypedValue(written_value, column_type, held_type)
+
+        return write_value
 
     @classmethod
     def to_lookup(cls, field: Field[Any], value: Any, instance: type[Model] | Model | None) -> Any:
@@ -193,14 +187,14 @@ class ClickhouseDynamicValues:
         present_values = [value for value in unwrapped_values if value is not None]
         has_none = len(present_values) < len(unwrapped_values)
         if not present_values:
-            return unwrapped_values, "Nullable(Nothing)" if has_none else "Nothing"
+            return unwrapped_values, "Nullable(Nothing)" if has_none else ClickhouseTypeName.NOTHING
         if all(isinstance(value, int) and not isinstance(value, bool) for value in present_values):
             written_values, held_type = unwrapped_values, cls.get_integer_type(present_values, path)
         elif all(isinstance(value, Decimal) for value in present_values):
             written_values, held_type = unwrapped_values, cls.get_decimal_type(present_values, path)
         else:
             written_values = []
-            held_type = "Nothing"
+            held_type = ClickhouseTypeName.NOTHING
             for value in unwrapped_values:
                 if value is None:
                     written_values.append(None)
@@ -259,9 +253,9 @@ class ClickhouseDynamicValues:
             if not value.is_finite():
                 raise ValidationError(f"{path}: {value} has no ClickHouse decimal")
             _, digits, exponent = value.as_tuple()
-            exponent = cast("int", exponent)
-            integer_digits = max(integer_digits, len(digits) + exponent)
-            scale = max(scale, -exponent)
+            exponent = exponent
+            integer_digits = max(integer_digits, len(digits) + exponent)  # type: ignore[operator]
+            scale = max(scale, -exponent)  # type: ignore[operator]
         precision = max(integer_digits + scale, 1)
         if precision > CLICKHOUSE_DECIMAL_MAX_PRECISION:
             raise ValidationError(
@@ -282,7 +276,7 @@ class ClickhouseDynamicValues:
         Returns:
             The value.
         """
-        return cls.get_python_value(value, Timezone.get_aware_zone() or datetime.UTC)
+        return cls.get_python_value(value, ZoneSettings.get_aware_zone() or datetime.UTC)
 
     @classmethod
     def get_python_value(cls, value: Any, zone: datetime.tzinfo) -> Any:

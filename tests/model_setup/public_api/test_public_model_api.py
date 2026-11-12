@@ -191,6 +191,10 @@ def test_enum_type_is_the_enum_of_an_enum_field():
 
 def test_meta_primary_key_names(db):
     assert Event._meta.primary_key_attribute_names == ("event_id",)
+    assert Event._meta.pk_fields == (Event._meta.pk,)
+    assert Address._meta.pk_fields == (Address._meta.pk,)
+    assert Address._meta.primary_key_attribute_names == ("event_id",)
+    assert Visit._meta.pk_fields == ()
     assert VersionedDocument._meta.primary_key_attribute_names == ("id", "version")
     assert Visit._meta.primary_key_attribute_names == ()
     assert VersionedDocument._meta.pk is None

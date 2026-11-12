@@ -5,7 +5,9 @@ from copy import copy
 
 import pytest
 
+from hare.core.registries import Registries
 from hare.exceptions import QueryError
+from hare.fields.encrypted.field_encryption import FieldEncryption
 from hare.query.execution.dependent_condition import DependentCondition
 from hare.query.execution.query_dependency import QueryDependency
 from hare.query.execution.query_execution import QueryExecution
@@ -13,6 +15,7 @@ from hare.query.expressions import Q
 from hare.query.plans.description.plan_context import PlanContext
 from hare.query.queryset.queryset import QuerySet
 from hare.query.queryset.selection.statement_selection import StatementSelection
+from hare.query.scopes.row_scope_binding import RowScopeBinding
 from tests.shared_models.testmodels import Tournament
 
 
@@ -155,3 +158,43 @@ async def test_nested_execution_loads_a_dependency_skipped_by_an_empty_parent():
     assert await execution.call(read_condition) == {}
     assert dependency.calls == 1
     assert QueryExecution.current.get() is None
+
+
+@pytest.mark.asyncio
+async def test_nested_dependency_copy_on_write_does_not_modify_parent():
+    first, second = FilterDependency(), FilterDependency()
+    declaration = QuerySet(Tournament)
+    declaration._execution_dependencies = (first,)
+    parent = QueryExecution()
+    await parent.prepare(declaration)
+
+    async def nested():
+        child = QueryExecution()
+        assert child.conditions is parent.conditions
+        declaration._execution_dependencies = (second,)
+        await child.call(lambda: child.prepare(declaration))
+        assert child.conditions is not parent.conditions
+        assert second in child.conditions and second not in parent.conditions
+        assert QueryExecution.current.get() is parent.conditions
+
+    await parent.call(nested)
+    assert QueryExecution.current.get() is None
+
+
+def test_nested_execution_restores_each_inherited_binding_after_a_callback_error():
+    variables = (
+        QueryExecution.current,
+        Registries.execution_snapshot,
+        FieldEncryption.binding,
+        RowScopeBinding.current,
+    )
+    original = tuple(variable.get() for variable in variables)
+    with QueryExecution():
+        inherited = tuple(variable.get() for variable in variables)
+        with pytest.raises(ValueError, match="callback failed"):
+            with QueryExecution():
+                for variable in variables:
+                    variable.set(object())
+                raise ValueError("callback failed")
+        assert all(variable.get() is value for variable, value in zip(variables, inherited, strict=True))
+    assert all(variable.get() is value for variable, value in zip(variables, original, strict=True))

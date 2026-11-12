@@ -7,7 +7,7 @@ from __future__ import annotations
 import contextvars
 from collections.abc import Collection, Generator, Iterable, Mapping, Sequence
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.caching.model_cache import ModelCache
 from hare.dialects.base.constants import SQL_DIALECT
@@ -112,7 +112,7 @@ class Tenancy:
         if scope is None or scope_class is AllTenants:
             return None
         if scope_class is TenantValues:
-            return cast("tuple[Any, ...]", scope.values)
+            return scope.values
         return (scope,)
 
     @classmethod
@@ -155,7 +155,7 @@ class Tenancy:
         Returns:
             ``(whether a value is given, the value, a description of the entry it came from)``.
         """
-        tenant_field = cast("str", model._meta.tenant_field)
+        tenant_field: str = model._meta.tenant_field  # type: ignore[assignment]
         if tenant_field in values:
             return True, values[tenant_field], f"{tenant_field}={values[tenant_field]!r}"
         relation_key = model._meta.foreign_key_shadow_columns.get(tenant_field)
@@ -165,7 +165,7 @@ class Tenancy:
         related_instance = values[relation_name]
         if related_instance is None:
             return True, None, f"{relation_name}=None"
-        relation_field = cast("RelationalField[Any]", model._meta.fields_map[relation_name])
+        relation_field: RelationalField[Any] = model._meta.fields_map[relation_name]  # type: ignore[assignment]
         to_field = relation_field.to_field_instances[relation_field.source_fields.index(tenant_field)]
         return True, getattr(related_instance, to_field.model_field_name), f"{relation_name}={related_instance!r}"
 
@@ -228,7 +228,7 @@ class Tenancy:
             return True
         if first is None or second is None:
             return False
-        tenant_field = model._meta.fields_map[cast("str", model._meta.tenant_field)]
+        tenant_field = model._meta.fields_map[model._meta.tenant_field]  # type: ignore[index]
         try:
             return SQL_DIALECT.types.get_python_value(tenant_field, first) == SQL_DIALECT.types.get_python_value(
                 tenant_field, second
@@ -242,23 +242,27 @@ class Tenancy:
         """Whether a forward relation of ``model`` points at a model with ``Meta.tenant_field``."""
         meta = model._meta
         return any(
-            cast("RelationalField[Model]", meta.fields_map[field_name]).related_model._meta.tenant_field
+            meta.fields_map[field_name].related_model._meta.tenant_field  # type: ignore[attr-defined]
             for field_name in meta.foreign_key_fields | meta.one_to_one_fields
         )
 
     @staticmethod
-    def get_relation_row(obj: Model) -> dict[str, Any]:
-        """The values ``check_relation_targets()`` reads off a written obj - its forward
-        relations' key columns and its own ``Meta.tenant_field``."""
-        meta = obj._meta
+    def get_relation_field_names(model: type[Model]) -> tuple[str, ...]:
+        """The forward relation source columns and tenant read for one operation."""
+        meta = model._meta
         names = [
             source_field
             for field_name in meta.foreign_key_fields | meta.one_to_one_fields
-            for source_field in cast("RelationalField[Model]", meta.fields_map[field_name]).source_fields
+            for source_field in meta.fields_map[field_name].source_fields  # type: ignore[attr-defined]
         ]
         if meta.tenant_field:
             names.append(meta.tenant_field)
-        return {name: getattr(obj, name, None) for name in names}
+        return tuple(names)
+
+    @staticmethod
+    def get_relation_row(obj: Model, field_names: tuple[str, ...]) -> dict[str, Any]:
+        """Read a relation-check row, preserving unloaded fields as NULL."""
+        return {name: getattr(obj, name, None) for name in field_names}
 
     @classmethod
     async def check_objects_relation_targets(
@@ -275,7 +279,8 @@ class Tenancy:
             QueryError: A relation names another tenant's row.
         """
         if cls.has_tenant_scoped_relations(model):
-            rows = [cls.get_relation_row(obj) for obj in objects]
+            relation_names = cls.get_relation_field_names(model)
+            rows = [cls.get_relation_row(obj, relation_names) for obj in objects]
             await cls.check_relation_targets(
                 model, rows, connection, None if field_names is None else set(field_names)
             )
@@ -306,8 +311,9 @@ class Tenancy:
         meta = model._meta
         if cls.current.get() is None:
             return
+        selected_names = None if field_names is None else frozenset(field_names)
         for field_name in sorted(meta.foreign_key_fields | meta.one_to_one_fields):
-            field = cast("RelationalField[Model]", meta.fields_map[field_name])
+            field: RelationalField[Model] = meta.fields_map[field_name]  # type: ignore[assignment]
             related_model = field.related_model
             related_tenant_field = related_model._meta.tenant_field
             if related_tenant_field is None:
@@ -316,20 +322,18 @@ class Tenancy:
             if related_scope is None or related_scope is cls.ALL:
                 continue
             if (
-                field_names is not None
-                and field_name not in field_names
-                and not set(field.source_fields) & set(field_names)
+                selected_names is not None
+                and field_name not in selected_names
+                and selected_names.isdisjoint(field.source_fields)
             ):
                 continue
             keys: dict[tuple[Any, ...], None] = {}
+            writers = tuple(connection.dialect.types.get_db_writer(column) for column in field.to_field_instances)
             for row in rows:
                 values = [row.get(source_field) for source_field in field.source_fields]
                 if any(value is None for value in values):
                     continue
-                key = tuple(
-                    connection.dialect.types.get_db_value(to_field, value, related_model)
-                    for value, to_field in zip(values, field.to_field_instances, strict=True)
-                )
+                key = tuple(write(value, related_model) for value, write in zip(values, writers, strict=True))
                 keys[key] = None
             if keys:
                 await cls._check_related_tenants(model, field_name, field, keys, related_scope, connection)
@@ -352,9 +356,11 @@ class Tenancy:
         related_meta = related_model._meta
         table = related_meta.basetable
         key_columns = [related_meta.fields_db_projection[name] for name in field.to_field_names]
-        tenant_column = related_meta.fields_db_projection[cast("str", related_meta.tenant_field)]
+        tenant_column = related_meta.fields_db_projection[related_meta.tenant_field]  # type: ignore[index]
         rows_hidden_by_policy = related_meta.tenant_row_level_security and connection.tenant_row_level_security
         ordered_keys = list(keys)
+        tenant_field = related_meta.fields_map[related_meta.tenant_field]  # type: ignore[index]
+        read_tenant = connection.dialect.types.get_python_reader(tenant_field)
         for start in range(0, len(ordered_keys), TENANT_RELATION_CHECK_BATCH_SIZE):
             batch = ordered_keys[start : start + TENANT_RELATION_CHECK_BATCH_SIZE]
             query = (
@@ -366,12 +372,11 @@ class Tenancy:
                 .where(KeyColumns.row_is_in([table[column] for column in key_columns], batch))
             )
             _, related_rows = await connection.execute(*query.get_parameterized_sql())
-            tenant_field = related_meta.fields_map[cast("str", related_meta.tenant_field)]
             allowed_keys: set[tuple[Any, ...]] = set()
             refused_tenants: dict[tuple[Any, ...], Any] = {}
             for related_row in related_rows:
                 row_key = tuple(related_row[f"key_{position}"] for position in range(len(key_columns)))
-                related_tenant = connection.dialect.types.get_python_value(tenant_field, related_row["tenant"])
+                related_tenant = read_tenant(related_row["tenant"])
                 if cls.allows(related_model, related_scope, related_tenant):
                     allowed_keys.add(row_key)
                 else:

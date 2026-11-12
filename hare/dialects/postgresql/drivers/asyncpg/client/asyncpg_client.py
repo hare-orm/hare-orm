@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import datetime
 import decimal
 import functools
 import gc
@@ -31,6 +30,8 @@ from hare.dialects.postgresql.drivers.asyncpg.asyncpg_extension_type_codecs impo
 from hare.dialects.postgresql.drivers.asyncpg.asyncpg_interval_codec import AsyncpgIntervalCodec
 from hare.dialects.postgresql.drivers.asyncpg.asyncpg_timestamp_codec import AsyncpgTimestampCodec
 from hare.dialects.postgresql.drivers.asyncpg.asyncpg_timestamptz_codec import AsyncpgTimestamptzCodec
+from hare.dialects.postgresql.drivers.asyncpg.client.asyncpg_parameters import AsyncpgParameters
+from hare.dialects.postgresql.drivers.asyncpg.client.asyncpg_schema_codecs import AsyncpgSchemaCodecs
 from hare.dialects.postgresql.drivers.asyncpg.client.constants import ASYNCPG_CONNECTION_PARAMETERS
 from hare.dialects.postgresql.drivers.asyncpg.constants import (
     ASYNCPG_ARGUMENT_COUNT_MESSAGE_PREFIX,
@@ -42,13 +43,8 @@ from hare.dialects.postgresql.drivers.asyncpg.constants import (
     ASYNCPG_ROOT_CERTIFICATE_SETTING,
     ASYNCPG_SIMPLE_QUERY_RESULT_FRAME_NAME,
     ASYNCPG_TOO_MANY_ARGUMENTS_MESSAGE,
-    EPOCH_YEAR,
-    FAST_SCALAR_BIND_TYPES,
-    PLAIN_BIND_TYPE_TUPLE,
-    PLAIN_BIND_TYPES,
     POOL_CLOSE_TIMEOUT_SECONDS,
 )
-from hare.dialects.postgresql.drivers.asyncpg.pre_epoch_local_zone import PreEpochLocalZone
 from hare.dialects.postgresql.drivers.constants import (
     POSTGRES_SHELL_SSL_MODE_BY_SWITCH,
     POSTGRES_SHELL_SSL_MODE_VARIABLE,
@@ -62,14 +58,13 @@ from hare.exceptions import (
     TooManyParametersError,
     TransactionManagementError,
 )
-from hare.fields.constants import NAIVE_INFINITY_DATETIMES
 from hare.instrumentation.pools.pool_metrics import PoolMetrics
 from hare.instrumentation.queries.query_tags import QueryTags
-from hare.native.native_modules import NativeModules
-from hare.time import Timezone
 
 if TYPE_CHECKING:
-    from hare.dialects.postgresql.drivers.asyncpg.client.asyncpg_transaction_client import AsyncpgTransactionClient
+    from hare.dialects.postgresql.drivers.asyncpg.client.asyncpg_transaction_client import (
+        AsyncpgTransactionClient,
+    )
 
 
 class AsyncpgClient(PostgresqlClient):
@@ -81,9 +76,6 @@ class AsyncpgClient(PostgresqlClient):
     # (100000 as Decimal('1.0E+5')) - a DecimalField value is quantized to the field's scale.
     native_python_types = PostgresqlClient.native_python_types - {decimal.Decimal}
     connection_class = asyncpg.connection.Connection
-    #: The compiled ``rust.native.rows`` - checks a row's value types in one call; None where it
-    #: isn't built.
-    native_rows: ClassVar[Any] = NativeModules.rows
     _pool: asyncpg.Pool | None
     _connection: asyncpg.connection.Connection | None = None
     # What a connect is retried on: OSError (refused, DNS), a connection lost at the protocol level,
@@ -127,92 +119,6 @@ class AsyncpgClient(PostgresqlClient):
         #: Each open pool's event, by the pool's id(), closing a connection that finishes opening after
         #: the pool is gone - an asyncpg pool takes no weak reference.
         self.pool_closed_events: dict[int, asyncio.Event] = {}
-
-    @classmethod
-    def _asyncpg_bind_value(cls, value: Any) -> Any:
-        """Adapts a value for asyncpg: a ``Range`` becomes an ``asyncpg.Range``, the only type its
-        range codec takes; a naive ``datetime.time`` gets a UTC offset - a ``TimeField`` column is
-        ``TIMETZ``, and the codec rejects a naive time.
-        """
-        if type(value) in FAST_SCALAR_BIND_TYPES:
-            if type(value) is datetime.time and value.tzinfo is None:
-                return value.replace(tzinfo=datetime.UTC)
-            if (
-                type(value) is datetime.datetime
-                and value.tzinfo is None
-                and value.year < EPOCH_YEAR
-                and value not in NAIVE_INFINITY_DATETIMES
-            ):
-                return cls._get_bindable_pre_epoch_datetime(value)
-            return value
-        if type(value) is list:
-            # Elements are adapted like scalars - a TIMETZ[] parameter (a large TimeField __in list)
-            # needs the naive-time offset, an ArrayField(RangeField) value asyncpg.Range elements,
-            # a nested (multi-dimensional) list the same at every level.
-            for element in value:
-                element_type = type(element)
-                if (
-                    element_type not in FAST_SCALAR_BIND_TYPES
-                    or element_type is datetime.time
-                    or element_type is datetime.datetime
-                ):
-                    return [cls._asyncpg_bind_value(element) for element in value]
-            return value
-        if (
-            hasattr(value, "lower_inc")
-            and hasattr(value, "upper_inc")
-            and hasattr(value, "lower")
-            and hasattr(value, "upper")
-        ):
-            # empty= is passed on: an empty range has the same None bounds as an unbounded one.
-            return asyncpg.Range(
-                value.lower,
-                value.upper,
-                lower_inc=value.lower_inc,
-                upper_inc=value.upper_inc,
-                empty=getattr(value, "is_empty", False),
-            )
-        return value
-
-    @staticmethod
-    def _get_bindable_pre_epoch_datetime(value: datetime.datetime) -> datetime.datetime:
-        """A naive pre-1970 datetime asyncpg can bind to a TIMESTAMPTZ.
-
-        asyncpg reads a naive value as the system's local time through ``datetime.astimezone()``,
-        which fails before 1970 on Windows - such a value gets the system zone's offset attached here,
-        as a ``PreEpochLocalZone`` the ``timestamp`` codec drops again.
-
-        Args:
-            value: A naive datetime before 1970.
-
-        Returns:
-            `value` itself when ``astimezone()`` can convert it, the value in the local offset otherwise.
-        """
-        try:
-            value.astimezone()
-        except (OSError, OverflowError, ValueError):
-            return value.replace(tzinfo=PreEpochLocalZone(Timezone.make_system_local_aware(value).utcoffset()))
-        return value
-
-    @classmethod
-    def _asyncpg_bind_values(cls, values: Sequence[Any]) -> list[Any]:
-        """``values`` adapted for asyncpg by ``_asyncpg_bind_value()`` - a row of plain scalars
-        (``PLAIN_BIND_TYPES``, the usual case) as it is, checked without a call per value.
-
-        Args:
-            values: The statement's parameters.
-
-        Returns:
-            The parameters to bind.
-        """
-        if cls.native_rows is not None and type(values) is list:
-            if cls.native_rows.are_all_of_types(values, PLAIN_BIND_TYPE_TUPLE):
-                return values
-            return [cls._asyncpg_bind_value(value) for value in values]
-        for value in values:
-            if type(value) not in PLAIN_BIND_TYPES:
-                return [cls._asyncpg_bind_value(value) for value in values]
-        return values if type(values) is list else list(values)
 
     async def create_connection(self, with_db: bool) -> None:
         self.raise_if_root_certificate_unusable(self.ssl_root_cert)
@@ -469,11 +375,12 @@ class AsyncpgClient(PostgresqlClient):
         pool = self._pool
         if pool is None:
             return None
+        idle_size = pool.get_idle_size()
         return (
             pool.get_size(),
-            pool.get_idle_size(),
+            idle_size,
             # asyncpg counts no waiters - the tasks taking a connection beyond the idle ones wait.
-            max(0, self.pool_statistics.acquiring - pool.get_idle_size()),
+            max(0, self.pool_statistics.acquiring - idle_size),
             pool.get_min_size(),
             pool.get_max_size(),
         )
@@ -673,7 +580,8 @@ class AsyncpgClient(PostgresqlClient):
             await transaction.start()
             try:
                 await AsyncpgClient.run_ending_connection_on_cancel(
-                    connection, connection.executemany(query, [self._asyncpg_bind_values(row) for row in values])
+                    connection,
+                    connection.executemany(query, [AsyncpgParameters.get_bound_values(row) for row in values]),
                 )
             except Exception:
                 await transaction.rollback()
@@ -729,7 +637,7 @@ class AsyncpgClient(PostgresqlClient):
             await connection.copy_records_to_table(
                 table,
                 schema_name=schema,
-                records=[self._asyncpg_bind_values(row) for row in records],
+                records=[AsyncpgParameters.get_bound_values(row) for row in records],
                 columns=columns,
                 where=f"TRUE{tags_comment}" if tags_comment else None,
             )
@@ -747,7 +655,7 @@ class AsyncpgClient(PostgresqlClient):
         async with self.acquire_connection() as connection:
             if self.log.isEnabledFor(logging.DEBUG):
                 self.log.debug("%s: %s", query, values)
-            parameters = [query, *self._asyncpg_bind_values(values)] if values else [query]
+            parameters = [query, *AsyncpgParameters.get_bound_values(values)] if values else [query]
             if returns_rows is None:
                 return await self._fetch_with_description(connection, query, parameters[1:])
             if not returns_rows:
@@ -762,7 +670,7 @@ class AsyncpgClient(PostgresqlClient):
         async with self.acquire_connection() as connection:
             if self.log.isEnabledFor(logging.DEBUG):
                 self.log.debug("%s: %s", query, values)
-            bind_values = self._asyncpg_bind_values(values) if values else []
+            bind_values = AsyncpgParameters.get_bound_values(values) if values else []
             result = await self._fetch_with_description(connection, query, bind_values)
             return DescribedResult(
                 columns=result.column_names,
@@ -780,12 +688,7 @@ class AsyncpgClient(PostgresqlClient):
         asyncpg pools cannot be weakly referenced. Initialization replaces each physical
         connection's entry before checkout; close and abandon remove its pool identity.
         """
-        pool_id = id(pool)
-        snapshots = self.schema_connections.get_bucket(self)
-        for key in tuple(snapshots):
-            if key[0] == pool_id:
-                snapshots.pop(key, None)
-        self.schema_retirements.get_bucket(self).pop((pool_id,), None)
+        return AsyncpgSchemaCodecs.forget_schema_connections(self, pool)
 
     async def refresh_schema_codecs(self, connection: Any, pool: asyncpg.Pool) -> None:
         """Refresh one checked-out connection before use when its schema generation changed.
@@ -795,26 +698,9 @@ class AsyncpgClient(PostgresqlClient):
         Only removal of an installed OID requires retiring a known connection; ordinary DDL
         and newly installed extensions do not reconnect the pool.
         """
-        key = (id(pool), connection.get_server_pid())
-        snapshots = self.schema_connections.get_bucket(self)
-        while True:
-            generation = self.schema_generation
-            previous = snapshots.get(key)
-            if previous is not None and previous[0] == generation:
-                return
-            # A failed installation may already have registered new OIDs. Its partial
-            # registry must remain unknown, so the next refresh retires it conservatively.
-            snapshots.pop(key, None)
-            await connection.reload_schema_state()
-            installed_oids = await AsyncpgExtensionTypeCodecs.install(connection)
-            if previous is None or previous[1] - installed_oids:
-                retirements = self.schema_retirements.get_bucket(self)
-                if retirements.get((id(pool),)) != generation:
-                    await pool.expire_connections()
-                    retirements.store((id(pool),), generation)
-            snapshots.store(key, (generation, installed_oids))
-            # Concurrent DDL must be visible before handing this connection to the
-            # statement that requested it, rather than only on its next acquisition.
+        return await AsyncpgSchemaCodecs.refresh_schema_codecs(self, connection, pool)
+        # Concurrent DDL must be visible before handing this connection to the
+        # statement that requested it, rather than only on its next acquisition.
 
     async def invalidate_schema_cache(self) -> None:
         """Mark all connections stale without borrowing a slot held by a prepared transaction."""

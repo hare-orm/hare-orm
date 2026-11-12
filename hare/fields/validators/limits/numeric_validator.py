@@ -11,6 +11,9 @@ class NumericValidator(Validator):
     """The base of the validators of a number: an int, a float or a ``Decimal``."""
 
     types = (int, float, Decimal)
+    #: The types a value is taken as a number by without the ``isinstance`` check - its subclasses go
+    #: through that check.
+    exact_types = frozenset(types)
 
     def _validate_type(self, value: Any) -> None:
         if value is None:

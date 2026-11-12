@@ -16,7 +16,7 @@ class PlanCoverage:
     #: Those built in full that keep no plan.
     built_without_plan: ClassVar[int] = 0
     #: The unpatched ``_make_query_to_run()``, None while not installed.
-    original: ClassVar[Callable[[AwaitableQuery[Any]], None] | None] = None
+    original: ClassVar[Callable[[AwaitableQuery[Any]], tuple[str, list[Any]]] | None] = None
 
     @classmethod
     def install(cls) -> None:
@@ -25,11 +25,12 @@ class PlanCoverage:
             return
         original = cls.original = AwaitableQuery._make_query_to_run
 
-        def make_query_to_run(query: AwaitableQuery[Any]) -> None:
-            original(query)
+        def make_query_to_run(query: AwaitableQuery[Any]) -> tuple[str, list[Any]]:
+            statement = original(query)
             cls.made += 1
             if query._statement_plan is None and query._deferred_plan_record is None:
                 cls.built_without_plan += 1
+            return statement
 
         AwaitableQuery._make_query_to_run = make_query_to_run  # type: ignore[method-assign]
 

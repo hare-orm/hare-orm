@@ -4,6 +4,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.classes.value_descriptions import ValueDescriptions
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.clickhouse.fields.declarations import (
     Int128Field,
     Int256Field,
@@ -60,20 +61,20 @@ class DynamicField(Field[Any]):
 
     #: Each path segment -> the type of the held values it reads, and their field.
     PATH_FIELDS: ClassVar[dict[str, tuple[str, Field[Any]]]] = {
-        "Bool": ("Bool", BooleanField(null=True)),
-        "Int64": ("Int64", BigIntField(null=True)),
-        "UInt64": ("UInt64", UInt64Field(null=True)),
-        "Int128": ("Int128", Int128Field(null=True)),
-        "UInt128": ("UInt128", UInt128Field(null=True)),
-        "Int256": ("Int256", Int256Field(null=True)),
-        "UInt256": ("UInt256", UInt256Field(null=True)),
-        "Float64": ("Float64", FloatField(null=True)),
-        "String": ("String", TextField(null=True)),
-        "UUID": ("UUID", UUIDField(null=True)),
-        "Date32": ("Date32", DateField(null=True)),
-        "DateTime64": ("DateTime64(6, 'UTC')", DatetimeField(null=True)),
-        "IPv4": ("IPv4", IPv4AddressField(null=True)),
-        "IPv6": ("IPv6", IPAddressField(null=True)),
+        ClickhouseTypeName.BOOL: (ClickhouseTypeName.BOOL, BooleanField(null=True)),
+        ClickhouseTypeName.INT64: (ClickhouseTypeName.INT64, BigIntField(null=True)),
+        ClickhouseTypeName.UINT64: (ClickhouseTypeName.UINT64, UInt64Field(null=True)),
+        ClickhouseTypeName.INT128: (ClickhouseTypeName.INT128, Int128Field(null=True)),
+        ClickhouseTypeName.UINT128: (ClickhouseTypeName.UINT128, UInt128Field(null=True)),
+        ClickhouseTypeName.INT256: (ClickhouseTypeName.INT256, Int256Field(null=True)),
+        ClickhouseTypeName.UINT256: (ClickhouseTypeName.UINT256, UInt256Field(null=True)),
+        ClickhouseTypeName.FLOAT64: (ClickhouseTypeName.FLOAT64, FloatField(null=True)),
+        ClickhouseTypeName.STRING: (ClickhouseTypeName.STRING, TextField(null=True)),
+        ClickhouseTypeName.UUID: (ClickhouseTypeName.UUID, UUIDField(null=True)),
+        ClickhouseTypeName.DATE32: (ClickhouseTypeName.DATE32, DateField(null=True)),
+        ClickhouseTypeName.DATETIME64: ("DateTime64(6, 'UTC')", DatetimeField(null=True)),
+        ClickhouseTypeName.IPV4: (ClickhouseTypeName.IPV4, IPv4AddressField(null=True)),
+        ClickhouseTypeName.IPV6: (ClickhouseTypeName.IPV6, IPAddressField(null=True)),
     }
 
     def __init__(self, max_types: int | None = None, **kwargs: Any) -> None:

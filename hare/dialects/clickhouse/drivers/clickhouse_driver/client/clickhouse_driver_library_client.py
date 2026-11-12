@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import datetime
 from collections.abc import Callable, Sequence
 from typing import Any, ClassVar
 
@@ -12,16 +11,9 @@ from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver
 from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_query_result import (
     ClickhouseDriverQueryResult,
 )
-from hare.dialects.clickhouse.drivers.clickhouse_driver.constants import (
-    CLICKHOUSE_DRIVER_ARRAY_TYPE,
-    CLICKHOUSE_DRIVER_MAP_TYPE,
-    CLICKHOUSE_DRIVER_MICROSECOND_DIGITS,
-    CLICKHOUSE_DRIVER_MICROSECONDS_PER_DAY,
-    CLICKHOUSE_DRIVER_MICROSECONDS_PER_SECOND,
-    CLICKHOUSE_DRIVER_MOMENT_TYPE_NAME,
-    CLICKHOUSE_DRIVER_TUPLE_TYPE,
-)
+from hare.dialects.clickhouse.drivers.clickhouse_driver.constants import CLICKHOUSE_DRIVER_MOMENT_TYPE_NAME
 from hare.dialects.clickhouse.drivers.constants import CLICKHOUSE_MOMENT_EPOCH
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.clickhouse.types.clickhouse_physical_type import ClickhousePhysicalType
 from hare.native.native_modules import NativeModules
 
@@ -44,7 +36,7 @@ class ClickhouseDriverLibraryClient(Client):  # type: ignore[misc]  # the librar
 
     #: The totals row of the last statement read - None for a statement without one.
     last_totals: Any = None
-    #: ``rust.native.rows`` - converts a column's moments to ticks; None where it isn't built.
+    #: ``rust.native.rows`` - converts a column's moments to ticks.
     native_rows: ClassVar[Any] = NativeModules.rows
 
     def receive_result(self, with_column_types: bool = False, progress: bool = False, columnar: bool = False) -> Any:
@@ -101,18 +93,18 @@ class ClickhouseDriverLibraryClient(Client):  # type: ignore[misc]  # the librar
         column_type = column_type.unwrapped
         if CLICKHOUSE_DRIVER_MOMENT_TYPE_NAME not in column_type.sql:
             return None
-        if column_type.name == CLICKHOUSE_DRIVER_ARRAY_TYPE:
+        if column_type.name == ClickhouseTypeName.ARRAY:
             write_element = cls._get_value_writer(column_type.elements[0])
             if write_element is None:
                 return None
             return lambda value: None if value is None else [write_element(element) for element in value]
-        if column_type.name == CLICKHOUSE_DRIVER_MAP_TYPE:
+        if column_type.name == ClickhouseTypeName.MAP:
             write_key = cls._get_value_writer(column_type.elements[0]) or cls._keep_value
             write_item = cls._get_value_writer(column_type.elements[1]) or cls._keep_value
             return lambda value: (
                 None if value is None else {write_key(key): write_item(item) for key, item in value.items()}
             )
-        if column_type.name == CLICKHOUSE_DRIVER_TUPLE_TYPE:
+        if column_type.name == ClickhouseTypeName.TUPLE:
             element_writers = [cls._get_value_writer(element) for element in column_type.elements]
             if all(write_element is None for write_element in element_writers):
                 return None
@@ -147,7 +139,7 @@ class ClickhouseDriverLibraryClient(Client):  # type: ignore[misc]  # the librar
             The digits - 0 for a column of whole seconds - None for a column of anything else.
         """
         column_type = column_type.unwrapped
-        if column_type.name == "DateTime64":
+        if column_type.name == ClickhouseTypeName.DATETIME64:
             return column_type.precision
         if column_type.name == CLICKHOUSE_DRIVER_MOMENT_TYPE_NAME:
             return 0
@@ -165,28 +157,5 @@ class ClickhouseDriverLibraryClient(Client):  # type: ignore[misc]  # the librar
         Returns:
             The values to write.
         """
-        epoch = CLICKHOUSE_MOMENT_EPOCH
-        if cls.native_rows is not None:
-            ticks: list[Any] = cls.native_rows.get_moment_ticks(values, epoch, moment_scale)
-            return ticks
-        moment_class = datetime.datetime
-        per_day = CLICKHOUSE_DRIVER_MICROSECONDS_PER_DAY
-        per_second = CLICKHOUSE_DRIVER_MICROSECONDS_PER_SECOND
-        microseconds = [
-            (since_epoch := value - epoch).days * per_day + since_epoch.seconds * per_second + since_epoch.microseconds
-            if isinstance(value, moment_class)
-            else None
-            for value in values
-        ]
-        if moment_scale > CLICKHOUSE_DRIVER_MICROSECOND_DIGITS:
-            multiplier = 10 ** (moment_scale - CLICKHOUSE_DRIVER_MICROSECOND_DIGITS)
-            return [
-                value if moment is None else moment * multiplier
-                for value, moment in zip(values, microseconds, strict=True)
-            ]
-        divisor = 10 ** (CLICKHOUSE_DRIVER_MICROSECOND_DIGITS - moment_scale)
-        if divisor == 1 and None not in microseconds:
-            return microseconds
-        return [
-            value if moment is None else moment // divisor for value, moment in zip(values, microseconds, strict=True)
-        ]
+        ticks: list[Any] = cls.native_rows.get_moment_ticks(values, CLICKHOUSE_MOMENT_EPOCH, moment_scale)
+        return ticks

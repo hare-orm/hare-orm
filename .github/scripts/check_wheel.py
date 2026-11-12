@@ -1,12 +1,12 @@
-"""Checks an installed hare-orm wheel: the extensions its tag promises import, hare works on SQLite - and
-on PostgreSQL through the Rust driver when ``--postgres-url`` names a server - and ``hare makemigrations`` and
-``hare migrate`` work on a project of its models, with none of the extras installed.
+"""Checks an installed hare-orm wheel: its extension imports - with the PostgreSQL driver on Linux and macOS,
+without it on Windows - hare works on SQLite - and on PostgreSQL through the Rust driver when
+``--postgres-url`` names a server - and ``hare makemigrations`` and ``hare migrate`` work on a project of its
+models, with none of the extras installed.
 
 Run it with the interpreter the wheel is installed into, from outside the repository (so
 ``import rust`` finds the installed package, not the checkout):
 
-    python check_wheel.py --platform-wheel [--postgres-url postgresql://user:pass@host:5432/db]
-    python check_wheel.py --pure-wheel
+    python check_wheel.py [--postgres-url postgresql://user:pass@host:5432/db]
 """
 
 from __future__ import annotations
@@ -14,7 +14,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import importlib
-import subprocess
+import os
+import subprocess  # nosec B404 - build checks invoke trusted tooling without a shell.
 import sys
 import tempfile
 from pathlib import Path
@@ -37,25 +38,25 @@ class WheelCheckNote(Model):
 class WheelCheck:
     """The checks of one installed wheel."""
 
-    #: The extension modules a platform wheel carries.
+    #: The extension modules a wheel carries.
     EXTENSION_MODULES = ("rust.native",)
+    #: The submodules of rust.native that make up the PostgreSQL driver - built on Unix alone.
+    DRIVER_SUBMODULES = ("pg", "pool")
 
-    def __init__(self, platform_wheel: bool, postgres_url: str | None) -> None:
+    def __init__(self, postgres_url: str | None) -> None:
         """
         Args:
-            platform_wheel: Whether the wheel is a platform wheel, with the extensions.
             postgres_url: A PostgreSQL server to run a query on through the Rust driver.
         """
-        self.platform_wheel = platform_wheel
         self.postgres_url = postgres_url
 
     def check_extensions(self) -> None:
-        """Checks the extensions import from the installed package - or are absent from the pure
-        wheel.
+        """Checks the extensions import from the installed package, with the PostgreSQL driver where
+        it is built.
 
         Raises:
-            SystemExit: An extension doesn't import, imports from the checkout, or the pure wheel
-                carries one.
+            SystemExit: An extension doesn't import or imports from the checkout, or the driver is
+                missing on Unix or present on Windows.
         """
         import hare  # noqa: PLC0415 - the installed package, located at run time
 
@@ -64,22 +65,23 @@ class WheelCheck:
             try:
                 module = importlib.import_module(module_name)
             except ImportError as error:
-                if self.platform_wheel:
-                    raise SystemExit(f"{module_name} doesn't import: {error}") from error
-                print(f"{module_name}: absent, as in the pure wheel")
-                continue
+                raise SystemExit(f"{module_name} doesn't import: {error}") from error
             module_file = getattr(module, "__file__", None)
             if module_file is None:
                 # The bare `rust` namespace directory, with no compiled module in it.
-                if self.platform_wheel:
-                    raise SystemExit(f"{module_name} is an empty namespace package")
-                print(f"{module_name}: absent, as in the pure wheel")
-                continue
-            if not self.platform_wheel:
-                raise SystemExit(f"the pure wheel carries {module_name}: {module_file}")
+                raise SystemExit(f"{module_name} is an empty namespace package")
             if Path(module_file).resolve().parent.parent != package_directory:
                 raise SystemExit(f"{module_name} imports from {module_file}, not from the installed package")
             print(f"{module_name}: {module_file}")
+        native = importlib.import_module("rust.native")
+        driver_submodules = [name for name in self.DRIVER_SUBMODULES if hasattr(native, name)]
+        expected_submodules = list(self.DRIVER_SUBMODULES) if os.name == "posix" else []
+        if driver_submodules != expected_submodules:
+            raise SystemExit(
+                f"rust.native carries the driver submodules {driver_submodules} on {sys.platform}, "
+                f"expected {expected_submodules}"
+            )
+        print(f"rust.native driver submodules: {driver_submodules or 'none, as on Windows'}")
 
     async def check_database(self, db_url: str) -> None:
         """Creates a table, writes and reads a row on the database of ``db_url``.
@@ -137,7 +139,7 @@ class WheelCheck:
             )
             outputs = []
             for command in ("makemigrations", "migrate", "makemigrations"):
-                completed = subprocess.run(
+                completed = subprocess.run(  # nosec B603 - explicit build-tool arguments, no shell.
                     [sys.executable, "-m", "hare.cli", "-c", "wheel_settings.HARE_ORM", command],
                     cwd=project,
                     capture_output=True,
@@ -160,16 +162,11 @@ class WheelCheck:
         asyncio.run(self.check_database("sqlite+aiosqlite://:memory:"))
         self.check_migrations()
         if self.postgres_url:
-            if not self.platform_wheel:
-                raise SystemExit("--postgres-url checks the Rust driver, which only a platform wheel carries")
             asyncio.run(self.check_database(self.postgres_url))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Checks an installed hare-orm wheel.")
-    wheel_type = parser.add_mutually_exclusive_group(required=True)
-    wheel_type.add_argument("--platform-wheel", action="store_true", help="The wheel carries the extensions.")
-    wheel_type.add_argument("--pure-wheel", action="store_true", help="The wheel carries no extension.")
     parser.add_argument("--postgres-url", help="A PostgreSQL server to check the Rust driver against.")
     arguments = parser.parse_args()
-    WheelCheck(arguments.platform_wheel, arguments.postgres_url).run()
+    WheelCheck(arguments.postgres_url).run()

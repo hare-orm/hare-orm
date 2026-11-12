@@ -5,11 +5,13 @@ import itertools
 from collections.abc import Iterable
 from copy import copy
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.classes.deferred_import import DeferredImport
 from hare.exceptions import UnSupportedError
 from hare.sql.builder.joins.join import Join
 from hare.sql.builder.joins.joiner import Joiner
+from hare.sql.builder.queries.query import Query
 from hare.sql.builder.queries.query_sql_rendering import QuerySqlRendering
 from hare.sql.builder.tables.aliased_query import AliasedQuery
 from hare.sql.builder.tables.cte import Cte
@@ -35,8 +37,8 @@ from hare.sql.terms.values.value_wrapper import ValueWrapper
 if TYPE_CHECKING:
     from typing import Self
 
+    from hare.sql.builder.queries.correlated_subqueries import CorrelatedSubqueries
     from hare.sql.builder.queries.set_operation_query import SetOperationQuery
-from hare.sql.builder.queries.query import Query
 
 
 class QueryBuilder(Selectable, Term):
@@ -44,6 +46,11 @@ class QueryBuilder(Selectable, Term):
     Query Builder is the main class in hare.sql which stores the state of a query and offers functions which allow the
     state to be branched immutably.
     """
+
+    #: ``CorrelatedSubqueries`` - imported at its first read, as its module imports this one.
+    correlated_subqueries: ClassVar[DeferredImport[type[CorrelatedSubqueries]]] = DeferredImport(
+        "hare.sql.builder.queries.correlated_subqueries", "CorrelatedSubqueries"
+    )
 
     #: The mutable containers a builder method may change in place. A copy shares them with its
     #: source until _mutable() gives it its own on the first change.
@@ -324,7 +331,7 @@ class QueryBuilder(Selectable, Term):
         if current_table in self._select_star_tables:
             select_star_tables = self._mutable("_select_star_tables")
             select_star_tables.remove(current_table)
-            select_star_tables.add(cast("Table", new_table))
+            select_star_tables.add(new_table)
         return self
 
     @BuilderMethods.builder
@@ -729,12 +736,12 @@ class QueryBuilder(Selectable, Term):
 
     @BuilderMethods.builder
     def limit(self, limit: int) -> Self:
-        self._limit = cast("ValueWrapper", self.wrap_constant(limit))
+        self._limit = self.wrap_constant(limit)  # type: ignore[assignment]
         return self
 
     @BuilderMethods.builder
     def offset(self, offset: int) -> Self:
-        self._offset = cast("ValueWrapper", self.wrap_constant(offset))
+        self._offset = self.wrap_constant(offset)  # type: ignore[assignment]
         return self
 
     @BuilderMethods.builder
@@ -781,9 +788,9 @@ class QueryBuilder(Selectable, Term):
     @BuilderMethods.builder
     def slice(self, slice: slice) -> Self:
         if slice.start is not None:
-            self._offset = cast("ValueWrapper", self.wrap_constant(slice.start))
+            self._offset = self.wrap_constant(slice.start)  # type: ignore[assignment]
         if slice.stop is not None:
-            self._limit = cast("ValueWrapper", self.wrap_constant(slice.stop))
+            self._limit = self.wrap_constant(slice.stop)  # type: ignore[assignment]
         return self
 
     def __getitem__(self, item: Any) -> Self | Field:  # type:ignore[override]
@@ -815,7 +822,7 @@ class QueryBuilder(Selectable, Term):
             self._selects = [
                 select for select in self._selects if not hasattr(select, "table") or term.table != select.table
             ]
-            self._mutable("_select_star_tables").add(cast("Table", term.table))
+            self._mutable("_select_star_tables").add(term.table)
 
         self._mutable("_selects").append(term)
 
@@ -997,10 +1004,7 @@ class QueryBuilder(Selectable, Term):
         )
         features = sql_context.effective_features
         if not sql_context.subquery:
-            # Local import: the check reads queries built by this module.
-            from hare.sql.builder.queries.correlated_subqueries import CorrelatedSubqueries
-
-            CorrelatedSubqueries.check_statement(self, sql_context)
+            QueryBuilder.correlated_subqueries.check_statement(self, sql_context)
         if (
             (self._orderbys or self._wheres is not None)
             and (features.rewrites_correlated_order_by or features.correlated_select_requires_unfiltered_source)
@@ -1009,11 +1013,8 @@ class QueryBuilder(Selectable, Term):
             and not self._delete_from
             and not self._insert_table
         ):
-            # Local import: the module reads queries built by this one.
-            from hare.sql.builder.queries.correlated_subqueries import CorrelatedSubqueries
-
-            if CorrelatedSubqueries.needs_derived_table(self, sql_context):
-                return CorrelatedSubqueries.get_derived_table_sql(self, sql_context)
+            if QueryBuilder.correlated_subqueries.needs_derived_table(self, sql_context):
+                return QueryBuilder.correlated_subqueries.get_derived_table_sql(self, sql_context)
 
         if self._update_table:
             if not sql_context.effective_features.supports_row_updates:

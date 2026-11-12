@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Collection
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import ConfigurationError
 from hare.fields.relations.swappable_model_reference import SwappableModelReference
@@ -99,7 +99,7 @@ class MigrationSplitter:
                     migration.split_dependencies.add(current)
                 migrations.append(migration)
                 current = current_by_app[app_label] = len(migrations) - 1
-            migrations[current].operations.append(cast("HareOperation", operation))
+            migrations[current].operations.append(operation)  # type: ignore[arg-type]
             migrations[current].split_dependencies.update(
                 needed for needed in needed_migrations if migrations[needed].app_label != app_label
             )

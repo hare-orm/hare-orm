@@ -96,7 +96,8 @@ class Cursor:
                     # A wrapper carries the byte encoding into containers, including a named
                     # tuple's TypedDict, which can't take TypeAdapter's config directly.
                     adapter = TypeAdapter(
-                        list.__class_getitem__(value_type), config=ConfigDict(val_json_bytes="base64")
+                        list.__class_getitem__(value_type),  # type: ignore[arg-type]
+                        config=ConfigDict(val_json_bytes="base64"),
                     )
                     values.append(adapter.validate_python([raw_value])[0])
                     continue

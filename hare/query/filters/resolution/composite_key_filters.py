@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import QueryError
 from hare.fields.field import Field
 from hare.fields.relations.fields.relational_field import RelationalField
+from hare.query.constants import PRIMARY_KEY_ALIAS, PRIMARY_KEY_IN_FILTER, PRIMARY_KEY_NOT_FILTER
 from hare.query.enums import Connector, Lookup
 from hare.query.expressions.conditions.query_modifier import QueryModifier
 from hare.query.expressions.constants import TO_MANY_RELATION_SHORTCUT_LOOKUPS
@@ -59,11 +60,11 @@ class CompositeKeyFilters:
             return None
         if relation_name not in model._meta.foreign_key_fields and relation_name not in model._meta.one_to_one_fields:
             return None
-        field_object = cast("RelationalField[Model]", model._meta.fields_map[relation_name])
+        field_object: RelationalField[Model] = model._meta.fields_map[relation_name]  # type: ignore[assignment]
         source_fields = tuple(field_object.source_fields)
         if len(source_fields) <= 1:
             return None
-        if lookup in {"", "not"} and value is None:
+        if lookup in {Lookup.EXACT, Lookup.NOT} and value is None:
             lookup, value = Lookup.ISNULL, lookup == Lookup.EXACT
         if lookup in {Lookup.ISNULL, Lookup.NOT_ISNULL}:
             # A composite key is null exactly when every key column is.
@@ -216,14 +217,14 @@ class CompositeKeyFilters:
         composite_pk_q = KeyColumns.get_primary_key_q(expression_context.model, key, value)
         if composite_pk_q is None:
             return None
-        if key == "pk__in" and composite_pk_q.filters.get(key) is not None:
+        if key == PRIMARY_KEY_IN_FILTER and composite_pk_q.filters.get(key) is not None:
             return CompositeKeyFilters.get_composite_pk_in_modifier(expression_context, composite_pk_q.filters[key])
         # The comparison of each key column records a reference of its own - the key binds through
         # them all at once, under this key.
         recording = expression_context.value_wrapper_references
         recorded_count = 0 if recording is None else len(recording)
         modifier = composite_pk_q.get_result(expression_context)
-        if recording is None or key not in {"pk", "pk__not"} or not isinstance(value, tuple):
+        if recording is None or key not in {PRIMARY_KEY_ALIAS, PRIMARY_KEY_NOT_FILTER} or not isinstance(value, tuple):
             return modifier, None
         component_references: list[Any] = [reference for _component_key, reference in recording[recorded_count:]]
         del recording[recorded_count:]
@@ -254,7 +255,7 @@ class CompositeKeyFilters:
 
         model = expression_context.model
         meta = model._meta
-        primary_key_attribute = cast("tuple[str, ...]", meta.primary_key_attribute)
+        primary_key_attribute: tuple[str, ...] = meta.primary_key_attribute  # type: ignore[assignment]
         # Local import: the queryset package imports this module.
         from hare.query.queryset.arguments.filter_arguments import FilterArguments
 
@@ -263,7 +264,7 @@ class CompositeKeyFilters:
                 expression_context,
                 value_rows,
                 CompositeKeyFilters.get_composite_pk_columns(expression_context),
-                "pk__in",
+                PRIMARY_KEY_IN_FILTER,
             )
             return subquery_modifier, None
         # The key values column by column - each column is checked and converted in one pass.
@@ -280,9 +281,7 @@ class CompositeKeyFilters:
         columns = CompositeKeyFilters.get_composite_pk_columns(expression_context)
         types = expression_context.dialect.types
         encoded_columns = [
-            [None if value is None else types.get_lookup_value(pk_field, value, model) for value in value_column]
-            if None in value_column
-            else types.get_lookup_values(pk_field, value_column, model)
+            types.get_lookup_values(pk_field, value_column, model)
             for pk_field, value_column in zip(meta.pk_fields, value_columns, strict=True)
         ]
         has_none = any(None in encoded_column for encoded_column in encoded_columns)
@@ -430,7 +429,7 @@ class CompositeKeyFilters:
         """
         base_field_name = key.partition("__")[0]
         meta = model._meta
-        if base_field_name == "pk":
+        if base_field_name == PRIMARY_KEY_ALIAS:
             return len(meta.primary_key_attribute_names)
         field_object = meta.fields_map.get(base_field_name)
         if base_field_name in meta.foreign_key_fields or base_field_name in meta.one_to_one_fields:
@@ -440,6 +439,6 @@ class CompositeKeyFilters:
             or base_field_name in meta.backward_foreign_key_fields
             or base_field_name in meta.backward_one_to_one_fields
         ):
-            related_model = cast("RelationalField[Model]", field_object).related_model
+            related_model = field_object.related_model  # type: ignore[union-attr]
             return len(related_model._meta.primary_key_attribute_names)
         return 1

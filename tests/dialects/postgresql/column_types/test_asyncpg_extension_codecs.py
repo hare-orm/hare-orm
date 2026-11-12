@@ -99,9 +99,7 @@ TSVECTOR_TEXTS = {
 @pytest.mark.parametrize(("text", "printed"), list(TSVECTOR_TEXTS.items()))
 def test_a_tsvector_text_is_read_and_printed_as_postgresql_does(text, printed):
     binary = AsyncpgTsvectorCodec.encode(text)
-    assert AsyncpgTsvectorCodec.decode(binary) == printed
-    if AsyncpgTsvectorCodec.native_decoder is not None:
-        assert AsyncpgTsvectorCodec.native_decoder(binary) == printed
+    assert AsyncpgTsvectorCodec.decoder(binary) == printed
 
 
 @pytest.mark.parametrize(
@@ -125,7 +123,5 @@ def test_a_text_that_isnt_a_tsvector_is_refused_with_postgresqls_message(text, m
 def test_an_hstore_reads_back_as_the_text_postgresql_prints():
     binary = AsyncpgHstoreCodec.encode('"q\\"x"=>"\\\\", n=>NULL')
     printed = '"q\\"x"=>"\\\\", "n"=>NULL'
-    assert AsyncpgHstoreCodec.decode(binary) == printed
-    if AsyncpgHstoreCodec.native_decoder is not None:
-        assert AsyncpgHstoreCodec.native_decoder(binary) == printed
-    assert AsyncpgHstoreCodec.decode(AsyncpgHstoreCodec.encode({})) == ""
+    assert AsyncpgHstoreCodec.decoder(binary) == printed
+    assert AsyncpgHstoreCodec.decoder(AsyncpgHstoreCodec.encode({})) == ""

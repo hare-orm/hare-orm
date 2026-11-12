@@ -8,10 +8,9 @@ from hare.fields.encrypted.encrypted_json_field import EncryptedJSONField
 from hare.fields.field import Field
 from hare.fields.generated_field import GeneratedField
 from hare.query.filters.constants import (
-    CALENDAR_DATE_PART_LOOKUPS,
-    DATETIME_CAST_SEGMENTS,
-    DATETIME_DATE_PART_LOOKUPS,
-    TIME_OF_DAY_DATE_PART_LOOKUPS,
+    CALENDAR_DATE_PART_SEGMENTS,
+    DATETIME_DATE_PART_SEGMENTS,
+    TIME_OF_DAY_DATE_PART_SEGMENTS,
 )
 from hare.query.filters.lookups.field_transforms import FieldTransforms
 from hare.query.filters.lookups.json.json_filter_parser import JsonFilterParser
@@ -70,11 +69,11 @@ class ValuePaths:
         """
         source = GeneratedField.get_effective_field(field).date_function_source
         if source in {DateTruncSource.DATETIME, DateTruncSource.NAIVE_DATETIME}:
-            return DATETIME_CAST_SEGMENTS | frozenset(DATETIME_DATE_PART_LOOKUPS)
+            return DATETIME_DATE_PART_SEGMENTS
         if source == DateTruncSource.DATE:
-            return frozenset(CALENDAR_DATE_PART_LOOKUPS)
+            return CALENDAR_DATE_PART_SEGMENTS
         if source == DateTruncSource.TIME:
-            return frozenset(TIME_OF_DAY_DATE_PART_LOOKUPS)
+            return TIME_OF_DAY_DATE_PART_SEGMENTS
         return frozenset()
 
     @staticmethod

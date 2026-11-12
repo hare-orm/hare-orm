@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.dialects.postgresql.client.constants import (
     POSTGRESQL_CURRENT_SEARCH_PATH_SQL,
@@ -120,9 +120,8 @@ class TransactionPooler:
         if not client.transaction_pooling:
             return client
         if client._direct_client is None:
-            client._direct_client = cast(
-                "TPostgresqlClient",
-                client.create_independent_client({**TransactionPooler.get_direct_settings(client), "min_size": 0}),
+            client._direct_client = client.create_independent_client(  # type: ignore[assignment]
+                {**TransactionPooler.get_direct_settings(client), "min_size": 0}
             )
-            client._direct_client.pool_role = PoolRole.DIRECT
-        return client._direct_client
+            client._direct_client.pool_role = PoolRole.DIRECT  # type: ignore[union-attr]
+        return client._direct_client  # type: ignore[return-value]

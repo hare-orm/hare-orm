@@ -1,10 +1,10 @@
+use crate::asyncio::future_into_py;
 use crate::pg::connection_executor::PgConnectionExecutor;
 use crate::pg::error::to_pyerr;
 use crate::pg::parameter_values::ParameterValues;
 use crate::pg::result::PgResult;
 use crate::pg::timed_manager::Object;
 use crate::pg::tls::PgTls;
-use pyo3_async_runtimes::tokio::future_into_py;
 
 use super::{connection_released, CancelTarget, StatementCaching};
 use pyo3::prelude::*;

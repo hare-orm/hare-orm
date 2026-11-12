@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 
 use crate::pg::client::{CancelTarget, PendingCancels, PinnedConnectionState, StatementCaching};
 use crate::pg::error::DriverError;
+use crate::pg::pending_statements::PendingStatements;
 use crate::pg::statement_lease::PgStatementLease;
 use crate::pg::timed_manager::Object;
 
@@ -15,6 +16,7 @@ pub(crate) struct PgConnectionExecutor {
     pub(crate) connection: Arc<Mutex<Option<Object>>>,
     pub(crate) state: PinnedConnectionState,
     pub(crate) caching: StatementCaching,
+    pub(crate) pending: Option<Arc<PendingStatements>>,
     needs_drain: Arc<AtomicBool>,
 }
 
@@ -29,6 +31,7 @@ impl PgConnectionExecutor {
                 pending_cancels: PendingCancels::default(),
             },
             caching,
+            pending: None,
             needs_drain: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -43,7 +46,7 @@ impl PgConnectionExecutor {
         }
         self.wait_for_idle(connection.as_ref().expect("retained connection")).await?;
         self.caching.refresh(connection.as_ref().expect("retained connection"));
-        Ok(Some(PgStatementLease::new(connection, &self.state)))
+        Ok(Some(PgStatementLease::new(connection, &self.state, self.pending.clone())))
     }
 
     /// No connection is removed from its holder before all cancellable waits finish.

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.clauses.enums import RowLockStrength
 from hare.fields.relations.fields.relational_field import RelationalField
@@ -56,7 +56,7 @@ class Prefetcher:
             field_name: [
                 (
                     to_attribute,
-                    query
+                    query._clone()
                     if query._connection_explicitly_chosen
                     else self._with_parent_connection(query._clone(), prefetch),
                 )
@@ -82,7 +82,7 @@ class Prefetcher:
             # fallback below included. It gets the parent query's visibility and tenant: the related
             # rows are scoped to the tenant the parent query was built under.
             related_query = self._with_parent_connection(
-                RowScopes.get_queryset(related_model, visibility=prefetch.visibility), prefetch
+                RowScopes.get_queryset(related_model, visibility=prefetch.visibility)._clone(), prefetch
             )
             # The parent's select_for_update() locks the prefetched rows too. `of=` names the parent
             # query's tables and isn't passed on.
@@ -192,7 +192,7 @@ class Prefetcher:
         for field_name, forwarded in prefetch.prefetch_map.items():
             if not forwarded or field_name not in forward_relation_names or field_name in prefetch.prefetch_queries:
                 continue
-            source_fields = cast("RelationalField[Any]", meta.fields_map[field_name]).source_fields
+            source_fields = meta.fields_map[field_name].source_fields  # type: ignore[attr-defined]
             for obj in objs:
                 if f"_{field_name}" in vars(obj):
                     continue
@@ -226,7 +226,7 @@ class Prefetcher:
         related_objs = list(related_by_id.values())
         if not related_objs:
             return result
-        related_model = cast("RelationalField[Any]", self.model._meta.fields_map[field]).related_model
+        related_model = self.model._meta.fields_map[field].related_model  # type: ignore[attr-defined]
         prefetch_map: dict[str, set[str | Prefetch]] = {}
         prefetch_queries: dict[str, list[tuple[str | None, QuerySet[Any]]]] = {}
         Prefetch.add_lookups(related_model, prefetch_map, prefetch_queries, prefetch.prefetch_map[field])

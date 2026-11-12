@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from hare.dialects.base.client.enums import StatementForm
+
+#: Call shapes carrying an SQL text whose characters and driver errors are checked as SQL.
+SQL_STATEMENT_FORMS = frozenset({StatementForm.SQL, StatementForm.MANY, StatementForm.SCRIPT})
+
 #: How long a shielded COMMIT/ROLLBACK/savepoint statement is waited for after its task was
 #: cancelled - a dead server must not hang the cancellation.
 SHIELDED_CANCELLATION_WAIT_TIMEOUT_SECONDS = 30.0

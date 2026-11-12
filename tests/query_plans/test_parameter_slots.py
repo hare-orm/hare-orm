@@ -26,8 +26,10 @@ def test_prepared_plan_releases_input_values_and_source_tree():
     wrapper_ref = weakref.ref(wrapper)
     book = Table("book")
     query = Query.from_(book).select(book.id).where(book.title == wrapper)
-    plan = StatementPlan(query, ((LiteralValueReference(wrapper),),))
-    del query, value, wrapper
+    statement, plan = StatementPlan.prepare(query, ((LiteralValueReference(wrapper),),))
+    assert plan is not None
+    assert statement.parameters[0] is value
+    del statement, query, value, wrapper
     gc.collect()
 
     assert value_ref() is None
@@ -41,7 +43,8 @@ def test_repeated_sql_occurrences_bind_fresh_sensitive_values():
     wrapper = ValueWrapper("first")
     wrapper.sensitive = True
     query = Query.from_(book).select(book.id).where((book.title == wrapper) | (book.subtitle == wrapper))
-    plan = StatementPlan(query, ((LiteralValueReference(wrapper),),))
+    _, plan = StatementPlan.prepare(query, ((LiteralValueReference(wrapper),),))
+    assert plan is not None
 
     bindings = []
     for value in ("second", "third"):
@@ -82,7 +85,8 @@ def test_value_conversion_errors_are_not_cache_misses():
     book = Table("book")
     wrapper = ValueWrapper("first")
     query = Query.from_(book).select(book.id).where(book.title == wrapper)
-    plan = StatementPlan(query, ((LiteralValueReference(wrapper, convert),),))
+    _, plan = StatementPlan.prepare(query, ((LiteralValueReference(wrapper, convert),),))
+    assert plan is not None
     with pytest.raises(ValueError, match="refused input"):
         plan.bind(["second"], object, None)
 
@@ -96,10 +100,11 @@ def test_prepared_parameters_preserve_encoded_type_metadata(replacement):
     wrapper = ValueWrapper(first)
     book = Table("book")
     query = Query.from_(book).select(book.id).where(book.value == wrapper)
-    plan = StatementPlan(
+    _, plan = StatementPlan.prepare(
         query,
         ((LiteralValueReference(wrapper),),),
         sql_context=DEFAULT_SQL_CONTEXT.copy(dialect=CLICKHOUSE_DIALECT),
     )
     expected = [replacement] if replacement.column_type == first.column_type else None
+    assert plan is not None
     assert plan.bind([replacement], object, CLICKHOUSE_DIALECT) == expected

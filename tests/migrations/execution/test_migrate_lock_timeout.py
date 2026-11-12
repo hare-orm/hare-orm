@@ -7,13 +7,12 @@ import sqlite3
 import time
 from contextlib import closing
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
 from hare.core.config.hare_config import HareConfig
 from hare.core.config.migrations_config import MigrationsConfig
-from hare.dialects.base.client.database_client import DatabaseClient
 from hare.exceptions import ConfigurationError, QueryError
 from hare.migrations.api import migrate
 from hare.migrations.execution.migration_runner import MigrationRunner
@@ -36,7 +35,7 @@ def test_an_invalid_lock_timeout_is_refused_everywhere(lock_timeout):
     with pytest.raises(ConfigurationError, match="lock_timeout"):
         HareConfig.from_dict({**CONFIG_BASE, "migrations": {"lock_timeout": lock_timeout}})
     with pytest.raises(ConfigurationError, match="lock_timeout"):
-        MigrationRunner(cast("DatabaseClient", object()), lock_timeout=lock_timeout)
+        MigrationRunner(object(), lock_timeout=lock_timeout)
     with pytest.raises(QueryError, match="lock_timeout"):
         TransactionOptions(lock_timeout=lock_timeout)
 

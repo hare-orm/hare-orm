@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from enum import Enum
-from typing import TYPE_CHECKING, Any, cast
+from functools import partial
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import UnSupportedError, ValidationError
-from hare.fields import Field
 from hare.fields.constants import NULL_BYTE_MESSAGE
 from hare.fields.data.constants import INT64_MAX, INT64_MIN
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
-    from hare.fields.relations.fields.relational_field import RelationalField
+    from hare.dialects.base.types.type_registry import TypeRegistry
+    from hare.fields.field import Field
     from hare.models import Model
 
 
@@ -20,7 +21,27 @@ class ValueEncoders:
     called as ``(value, model, field, dialect)``, ``dialect`` being the one the query runs on."""
 
     @staticmethod
-    def encode_list(values: Iterable[Any], obj: Model | type[Model], field: Field[Any], dialect: Dialect) -> list[Any]:
+    def prepare(encoder: Callable[..., Any], field: Field[Any], types: TypeRegistry) -> Callable[..., Any]:
+        """Bind standard lookup conversions once; extension encoders keep their contract."""
+        if encoder is ValueEncoders.encode_list:
+            return partial(encoder, convert=types.get_lookup_values_writer(field))
+        if encoder is ValueEncoders.encode_related_value or encoder is ValueEncoders.encode_related_list:
+            key_field = field.related_model._meta.pk  # type: ignore[attr-defined]
+            return partial(encoder, writer=types.get_db_writer(key_field))
+        if encoder is ValueEncoders.encode_composite_pk or encoder is ValueEncoders.encode_composite_related_list:
+            fields = field.related_model._meta.pk_fields  # type: ignore[attr-defined]
+            return partial(encoder, writers=tuple(types.get_db_writer(column) for column in fields))
+        return encoder
+
+    @staticmethod
+    def encode_list(
+        values: Iterable[Any],
+        obj: Model | type[Model],
+        field: Field[Any],
+        dialect: Dialect,
+        *,
+        convert: Callable[[list[Any], Any], list[Any]] | None = None,
+    ) -> list[Any]:
         """Encodes the values of ``__in``/``__not_in``/``__range``. A None is passed through - the
         lookup turns it into a NULL check. Each other value goes through ``to_lookup_value()``, not
         the write conversion, which could change the value compared.
@@ -33,15 +54,18 @@ class ValueEncoders:
                 f"{field.model_field_name}: expected a list/tuple/set of values for this lookup, got "
                 f"{field.get_value_for_message(values)}"
             )
-        # The conversion TypeRegistry.get_lookup_value() picks, picked once for the whole list.
-        converter = dialect.types.get_lookup_converter(type(field))
-        if converter is None:
-            to_lookup_value = field.to_lookup_value
-            return [element if element is None else to_lookup_value(element, obj) for element in values]
-        return [element if element is None else converter(field, element, obj) for element in values]
+        convert = dialect.types.get_lookup_values_writer(field) if convert is None else convert
+        return convert(list(values), obj)
 
     @staticmethod
-    def encode_related_value(value: Any, obj: Model, field: Field[Any], dialect: Dialect) -> Any:
+    def encode_related_value(
+        value: Any,
+        obj: Model,
+        field: Field[Any],
+        dialect: Dialect,
+        *,
+        writer: Callable[[Any, Any], Any] | None = None,
+    ) -> Any:
         """Encodes a related object/pk for a many-to-many or backward relation filter as its key
         column binds it.
 
@@ -54,30 +78,44 @@ class ValueEncoders:
         Returns:
             The value to bind.
         """
-        return dialect.types.get_db_value(cast("RelationalField[Any]", field).related_model._meta.pk, value, obj)
+        if writer is None:
+            writer = dialect.types.get_db_writer(field.related_model._meta.pk)  # type: ignore[attr-defined]
+        return writer(value, obj)
 
     @staticmethod
-    def encode_related_list(values: Iterable[Any], obj: Model, field: Field[Any], dialect: Dialect) -> list[Any]:
+    def encode_related_list(
+        values: Iterable[Any],
+        obj: Model,
+        field: Field[Any],
+        dialect: Dialect,
+        *,
+        writer: Callable[[Any, Any], Any] | None = None,
+    ) -> list[Any]:
         """Encodes related objects or primary keys for a many-to-many or backward relation filter. A
         None is rejected: over a relation it would mean "no related row", which ``__isnull`` asks.
 
         Raises:
             UnSupportedError: ``values`` contains None.
         """
-        target_pk = field.related_model._meta.pk  # type: ignore[attr-defined]
-        types = dialect.types
         if any(element is None for element in values):
             raise UnSupportedError(
                 "None is not supported inside __in=/__not_in= for a many-to-many or backward "
                 "relation filter - use __isnull=/__not_isnull= to filter on whether the relation "
                 "itself is empty."
             )
-        return [
-            types.get_db_value(target_pk, element.pk if hasattr(element, "pk") else element, obj) for element in values
-        ]
+        if writer is None:
+            writer = dialect.types.get_db_writer(field.related_model._meta.pk)  # type: ignore[attr-defined]
+        return [writer(getattr(element, "pk", element), obj) for element in values]
 
     @staticmethod
-    def encode_composite_pk(value: Any, obj: Model, field: Field[Any], dialect: Dialect) -> tuple[Any, ...]:
+    def encode_composite_pk(
+        value: Any,
+        obj: Model,
+        field: Field[Any],
+        dialect: Dialect,
+        *,
+        writers: tuple[Callable[[Any, Any], Any], ...] | None = None,
+    ) -> tuple[Any, ...]:
         """Encodes a single composite-PK value (a related model obj, or its raw ``pk`` tuple
         directly) for a many-to-many filter targeting a composite-PK model, into a tuple of
         database-compatible values - one per component, in primary key order.
@@ -85,20 +123,24 @@ class ValueEncoders:
         Raises:
             UnSupportedError: ``value``'s raw tuple doesn't have one element per key field.
         """
-        pk_fields = cast("RelationalField[Any]", field).related_model._meta.pk_fields
-        raw = value.pk if hasattr(value, "pk") else value
+        pk_fields = field.related_model._meta.pk_fields  # type: ignore[attr-defined]
+        raw = getattr(value, "pk", value)
         if not isinstance(raw, tuple) or len(raw) != len(pk_fields):
             raise UnSupportedError(
                 f"expected a {len(pk_fields)}-tuple primary key (or an instance with one), got {raw!r}."
             )
-        return tuple(
-            dialect.types.get_db_value(pk_field, component, obj)
-            for pk_field, component in zip(pk_fields, raw, strict=True)
-        )
+        if writers is None:
+            writers = tuple(dialect.types.get_db_writer(column) for column in pk_fields)
+        return tuple(write(component, obj) for write, component in zip(writers, raw, strict=True))
 
     @staticmethod
     def encode_composite_related_list(
-        values: Iterable[Any], obj: Model, field: Field[Any], dialect: Dialect
+        values: Iterable[Any],
+        obj: Model,
+        field: Field[Any],
+        dialect: Dialect,
+        *,
+        writers: tuple[Callable[[Any, Any], Any], ...] | None = None,
     ) -> list[tuple[Any, ...]]:
         """``ValueEncoders.encode_composite_pk``, applied to every element of an iterable for ``__in``/``__not_in``
         on a many-to-many filter targeting a composite-PK model. See ``ValueEncoders.encode_related_list`` for why
@@ -112,7 +154,9 @@ class ValueEncoders:
                 "None is not supported inside __in=/__not_in= for a many-to-many relation filter - "
                 "use __isnull=/__not_isnull= to filter on whether the relation itself is empty."
             )
-        return [ValueEncoders.encode_composite_pk(element, obj, field, dialect) for element in values]
+        if writers is None:
+            writers = tuple(dialect.types.get_db_writer(column) for column in field.related_model._meta.pk_fields)  # type: ignore[attr-defined]
+        return [ValueEncoders.encode_composite_pk(element, obj, field, dialect, writers=writers) for element in values]
 
     @staticmethod
     def encode_bool(value: Any, obj: Model | None, field: Field[Any], dialect: Dialect) -> bool:

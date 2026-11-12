@@ -62,23 +62,12 @@ class Runner:
 
     @staticmethod
     def get_processor_name() -> str:
-        """The processor's marketing name ("Intel Core i7-..."), where the system tells it."""
+        """The processor's marketing name ("Intel Core i7-..."), where Linux tells it."""
         try:
-            if sys.platform == "win32":
-                import winreg
-
-                with winreg.OpenKey(
-                    winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0"
-                ) as key:
-                    return str(winreg.QueryValueEx(key, "ProcessorNameString")[0]).strip()
-            if sys.platform == "darwin":
-                return subprocess.run(
-                    ["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True, check=True
-                ).stdout.strip()
             for line in Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines():
                 if line.startswith("model name"):
                     return line.split(":", 1)[1].strip()
-        except (OSError, subprocess.CalledProcessError):
+        except OSError:
             pass
         return platform.processor() or platform.machine()
 
@@ -158,7 +147,7 @@ class Runner:
         if target.environment is None:
             return sys.executable
         directory = REPOSITORY / f"{ENVIRONMENT_DIRECTORY_PREFIX}{target.environment}"
-        interpreter = directory / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+        interpreter = directory / "bin/python"
         if not interpreter.exists():
             raise SystemExit(f"{target.key} runs in {directory} - create it as benchmarks/README.md says")
         return str(interpreter)

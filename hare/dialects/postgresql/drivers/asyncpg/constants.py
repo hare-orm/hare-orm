@@ -31,17 +31,8 @@ PLAIN_BIND_TYPE_TUPLE = tuple(PLAIN_BIND_TYPES)
 POSTGRES_EPOCH = datetime.datetime(2000, 1, 1)
 POSTGRES_TIMESTAMP_INFINITY = 2**63 - 1
 POSTGRES_TIMESTAMP_NEGATIVE_INFINITY = -(2**63)
-#: The same origin of ``timestamptz``, a UTC moment.
-POSTGRES_EPOCH_UTC = POSTGRES_EPOCH.replace(tzinfo=datetime.UTC)
-#: Origin and infinities of Postgres's binary ``date`` - days since 2000-01-01.
-POSTGRES_EPOCH_DATE_ORDINAL = POSTGRES_EPOCH.toordinal()
-POSTGRES_DATE_INFINITY = 2**31 - 1
-POSTGRES_DATE_NEGATIVE_INFINITY = -(2**31)
-#: The sizes of a binary ``date`` and ``timestamptz``.
-POSTGRES_DATE_SIZE = 4
-POSTGRES_TIMESTAMP_SIZE = 8
 
-#: A naive datetime before this year may be one ``datetime.astimezone()`` can't convert (Windows).
+#: Only dates before this year can approach the datetime range's lower boundary.
 EPOCH_YEAR = 1970
 
 #: AsyncpgTransactionClient.stream()'s default `Cursor.fetch(batch_size)` batch size
@@ -111,7 +102,5 @@ TSVECTOR_MAX_POSITION = 16383
 TSVECTOR_WHITESPACE = frozenset(" \t\n\r\v\f")
 #: A position's weight letter in ``tsvector`` input -> the weight's bits; ``*`` is ``A``.
 TSVECTOR_WEIGHTS_BY_LETTER = {"a": 3, "A": 3, "*": 3, "b": 2, "B": 2, "c": 1, "C": 1, "d": 0, "D": 0}
-#: A weight's bits -> its letter in ``tsvector`` output; ``D`` is written as nothing.
-TSVECTOR_LETTERS_BY_WEIGHT = ("", "C", "B", "A")
 #: Where a ``tsvector`` position's weight starts in its 16 bits.
 TSVECTOR_WEIGHT_SHIFT = 14

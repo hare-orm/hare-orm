@@ -9,7 +9,7 @@ from hare.fields.data.numeric.float_field import FloatField
 from hare.fields.generated_field import GeneratedField
 from hare.query.enums import Lookup
 from hare.query.expressions.expression_context import ExpressionContext
-from hare.query.expressions.value_references.cursor_value_reference import CursorValueReference
+from hare.query.expressions.value_references.literal_value_reference import LiteralValueReference
 from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
 from hare.query.filters.resolution.filter_kwargs import FilterKwargs
 from hare.query.lookup_info.bound_lookup_path import BoundLookupPath
@@ -105,7 +105,7 @@ class KeysetBounds:
 
         ``value_wrapper_references``, when a plan is recorded, gets an entry per boundary value, keyed by
         its origin among the query's cursor values (``PlanOrigins.get_value_origin()``): a
-        ``CursorValueReference``, or None where no plan can bind the value - one the field writes as NULL,
+        ``LiteralValueReference``, or None where no plan can bind the value - one the field writes as NULL,
         or a term of another form. A boundary given as None adds no entry.
 
         The upper boundary of a window (``_before_cursor_values``) is "strictly after" the same
@@ -226,7 +226,11 @@ class KeysetBounds:
                     value_wrapper_references.append(
                         (
                             PlanOrigins.get_value_origin(query, cursor_attribute, index),
-                            CursorValueReference(wrapper, field) if field is not None else None,
+                            LiteralValueReference(
+                                wrapper, query.dialect.types.get_read_column_encoder(field, query.model)
+                            )
+                            if field is not None
+                            else None,
                         )
                     )
             step = comparison & Criterion.all(equalities) if equalities else comparison

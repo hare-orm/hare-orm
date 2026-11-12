@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from functools import partial
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.dialects.postgresql.fields.constants import (
     MULTIRANGE_SPAN_PATH_FUNCTION,
@@ -126,8 +126,8 @@ class MultiRangeField(Field[list[Range[Any]]]):
 
     def get_members_type(self) -> Any:
         """The type of a multirange given as a sequence of its ranges - each a ``Range`` or its bounds."""
-        bound_range = cast("Any", Range)[self.range_field.get_bound_field().field_type]
-        return cast("Any", Sequence)[bound_range | self.range_field.get_bounds_type()]
+        bound_range = Range[self.range_field.get_bound_field().field_type]  # type: ignore[misc, valid-type]
+        return Sequence[bound_range | self.range_field.get_bounds_type()]  # type: ignore[misc]
 
     def get_accepted_value_types(self) -> tuple[Any, ...]:
         return (self.get_members_type(),)
@@ -135,7 +135,7 @@ class MultiRangeField(Field[list[Range[Any]]]):
     def get_lookup_value_alternatives(self, lookup: str) -> tuple[Any, ...]:
         """Equality, containment and position take a ``Range`` too, or a list of ranges - a multirange;
         ``contains`` also a range's ``(lower, upper)`` bounds."""
-        bound_range = cast("Any", Range)[self.range_field.get_bound_field().field_type]
+        bound_range = Range[self.range_field.get_bound_field().field_type]  # type: ignore[misc, valid-type]
         if lookup in RANGE_VALUE_LOOKUPS:
             return (bound_range, self.get_members_type())
         if lookup == Lookup.CONTAINS:

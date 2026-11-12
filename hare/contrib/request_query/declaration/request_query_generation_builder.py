@@ -59,7 +59,7 @@ class RequestQueryGenerationBuilder:
                 query_class,
                 {queryset.model, *parameter_builder.described_models, *builder.described_models},
             )
-            query_class.bound_models.add(queryset.model)
+            RequestQueryRegistry.bound_models.add(queryset.model)
         schema.model_rebuild()
         generation = RequestQueryGeneration(schema, declaration, options)
         schema.parameter_generation = generation

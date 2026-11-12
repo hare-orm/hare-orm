@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import QueryError
 from hare.query.expressions.expression_result import ExpressionResult
@@ -10,7 +10,6 @@ from hare.query.lookup_info.value_paths import ValuePaths
 
 if TYPE_CHECKING:
     from hare.fields.field import Field
-    from hare.fields.relations.fields.backward_foreign_key_relation import BackwardForeignKeyRelation
     from hare.fields.relations.fields.relational_field import RelationalField
     from hare.models import Model
     from hare.query.expressions.expression_context import ExpressionContext
@@ -73,7 +72,7 @@ class BoundLookupPath:
         for path_field in fields:
             if path_field.model_field_name not in model._meta.fetch_fields:
                 break
-            relation = cast("RelationalField[Model]", path_field)
+            relation: RelationalField[Model] = path_field  # type: ignore[assignment]
             prefix = f"{prefix}__{relation.model_field_name}" if prefix else relation.model_field_name
             extra_conditions = context.select_related_extra_conditions
             new_joins = LookupPaths.get_scoped_joins(
@@ -98,11 +97,7 @@ class BoundLookupPath:
                     "column to read. Reference the individual components instead, e.g. "
                     f"'{name}__{meta.primary_key_attribute_names[0]}'."
                 )
-            column = table[
-                meta.db_pk_column
-                if meta.has_primary_key
-                else cast("BackwardForeignKeyRelation[Model]", last_field).relation_source_fields[0]
-            ]
+            column = table[meta.db_pk_column if meta.has_primary_key else last_field.relation_source_fields[0]]  # type: ignore[attr-defined]
         else:
             column = table[last_field.source_field or last_field.model_field_name]
         term = column

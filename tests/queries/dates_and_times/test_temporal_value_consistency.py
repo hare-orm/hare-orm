@@ -24,6 +24,7 @@ from hare.models import Model
 from hare.query.expressions import Case, F, Q, Value, When
 from hare.query.functions import Coalesce, Max, Min
 from hare.time import Timezone
+from hare.time.system_zone import SystemZone
 
 APP_LABEL = "temporal_values"
 TEST_DB_URL = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
@@ -372,7 +373,7 @@ async def test_datetime_field_over_postgres_timestamp_column_round_trips(use_tim
             "ALTER TABLE temporal_event ALTER COLUMN moment TYPE timestamp USING moment::timestamp"
         )
         aware_moment = datetime.datetime(2024, 6, 1, 12, 0, tzinfo=UTC)
-        written_moment = aware_moment if use_timezone else Timezone.get_system_local_naive(aware_moment)
+        written_moment = aware_moment if use_timezone else SystemZone.get_system_local_naive(aware_moment)
         created = await TemporalEvent.objects.create(moment=written_moment)
         stored_text = (await connection.execute_dicts("SELECT moment::text AS text FROM temporal_event"))[0]
         fetched = await TemporalEvent.objects.get(id=created.id)
@@ -434,8 +435,7 @@ def test_json_standard_library_path_writes_what_orjson_writes(value):
 
 
 @pytest.mark.database_independent
-def test_json_encoding_without_orjson_serializes_dates(monkeypatch):
-    monkeypatch.setattr(JsonCodec, "orjson", None)
+def test_json_encoding_serializes_dates():
     assert JsonCodec.dumps({"on": datetime.date(2024, 1, 1)}) == '{"on":"2024-01-01"}'
 
 

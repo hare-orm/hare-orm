@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from copy import copy
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.dialects.enums import ParameterPosition
 from hare.exceptions import FieldError
@@ -59,7 +59,6 @@ if TYPE_CHECKING:
     from hare.query.expressions.conditions.q import Q
     from hare.query.expressions.value_references.composite_key_value_reference import CompositeKeyValueReference
     from hare.query.expressions.value_references.value_reference_types import FilterValueReference, ValueReference
-    from hare.query.filters.lookups.field_lookup import FieldLookup
     from hare.query.lookup_info.lookup_info import LookupInfo
 
 
@@ -184,7 +183,7 @@ class FilterKwargs:
                 )
                 recorded_reference: ValueReference | None = reference
                 if binds_related_keys and reference is not None:
-                    relation = cast("RelationalField[Model]", lookup_info.relations[0])
+                    relation: RelationalField[Model] = lookup_info.relations[0]  # type: ignore[assignment]
                     recorded_reference = RelatedKeyValueReference(
                         reference,
                         relation.related_model,
@@ -249,15 +248,17 @@ class FilterKwargs:
             the lookup's value encoder (None for the field's own conversion); the operator; the
             converted value the criterion embeds.
         """
+        value_encoder: Callable[..., Any] | None
         if lookup_info.target == LookupTarget.RELATION:
-            criterion, join, operator, value = RelationFilters.get_relation_lookup_criterion(
+            encoder_field: Field[Any] | None = None if isinstance(value, Term) else lookup_info.relations[-1]
+            criterion, join, value_encoder, operator, value = RelationFilters.get_relation_lookup_criterion(
                 expression_context, lookup_info, value, table, join_table
             )
-            return criterion, join, None, None, None, operator, value
+            return criterion, join, None, encoder_field, value_encoder, operator, value
         model = expression_context.model
-        field_lookup = cast("FieldLookup", lookup_info.field_lookup)
-        model_field = cast("Field[Any]", lookup_info.field)
-        value_field = cast("Field[Any]", lookup_info.value_field)
+        field_lookup = lookup_info.field_lookup
+        model_field: Field[Any] = lookup_info.field  # type: ignore[assignment]
+        value_field: Field[Any] = lookup_info.value_field  # type: ignore[assignment]
         # Like Django, `field=None` and `field__iexact=None` mean `field__isnull=True`; `field__not=None`
         # means `field__isnull=False`.
         if value is None and (lookup_info.term_transforms or not lookup_info.transforms):
@@ -274,11 +275,11 @@ class FilterKwargs:
                 field_lookup = not_isnull_lookup
                 value = True
         field_object: Field[Any] | None = None
-        value_encoder: Callable[..., Any] | None = None
+        value_encoder = None
         encoder_field = GeneratedField.get_effective_field(value_field)
         if not isinstance(value, Term):
             field_object = model_field
-            value_encoder = field_lookup.value_encoder
+            value_encoder = field_lookup.get_value_encoder(encoder_field, expression_context.dialect)  # type: ignore[union-attr]
             if value_encoder is not None:
                 # A GeneratedField is encoded as its output_field - an encoder reaches for that
                 # field's own attributes (a range's element type, an array's base_field).
@@ -286,7 +287,8 @@ class FilterKwargs:
             else:
                 value = expression_context.dialect.types.get_lookup_value(value_field, value, model)
         operator = expression_context.dialect.filter_operators.get_operator(
-            field_lookup, expression_context.connection
+            field_lookup,  # type: ignore[arg-type]
+            expression_context.connection,
         )
         term: Term = table[
             model_field.source_field
@@ -327,7 +329,7 @@ class FilterKwargs:
         Returns:
             True for such a value.
         """
-        related_model = cast("RelationalField[Model]", lookup_info.relations[0]).related_model
+        related_model = lookup_info.relations[0].related_model  # type: ignore[attr-defined]
         if isinstance(value, related_model):
             return True
         return isinstance(value, (list, tuple, set)) and not any(
@@ -411,7 +413,7 @@ class FilterKwargs:
         if joins:
             # A lookup on a relation itself (.filter(tags=obj), tags__in=..., ...) joins its
             # through or related table here, scoped like any other JOIN to that model.
-            relation = cast("RelationalField[Model]", lookup_info.relations[-1])
+            relation: RelationalField[Model] = lookup_info.relations[-1]  # type: ignore[assignment]
             relation_name = relation.model_field_name
             tracker = AggregatedMultiValuedPaths.get_from(expression_context)
             if relation.is_multi_valued and tracker is not None:
@@ -521,7 +523,7 @@ class FilterKwargs:
         operator = expression_context.dialect.filter_operators.get_operator(
             field_lookup, expression_context.connection
         )
-        parameter_converter, encoder_field = AnnotationFilters.get_parameter_converter(
+        parameter_converter, encoder_field, value_encoder = AnnotationFilters.get_parameter_converter(
             expression_context, field_lookup, annotation_output_field, value
         )
         if parameter_converter is None and isinstance(annotation, Value) and not isinstance(value, Term):
@@ -550,7 +552,7 @@ class FilterKwargs:
                 operator,
                 raw_value,
                 value,
-                field_lookup,
+                value_encoder,
                 encoder_field,
                 parameter_converter,
             )
@@ -620,7 +622,7 @@ class FilterKwargs:
             key, lookup_info = relation_key, FilterKwargs.get_key_lookup_info(expression_context, relation_key)
         if lookup_info.target != LookupTarget.RELATION or len(lookup_info.relations) != 1:
             return None
-        relation = cast("RelationalField[Model]", lookup_info.relations[0])
+        relation: RelationalField[Model] = lookup_info.relations[0]  # type: ignore[assignment]
         meta = expression_context.model._meta
         if relation.model_field_name in meta.foreign_key_fields or relation.model_field_name in meta.one_to_one_fields:
             modifier = RelationFilters.get_forward_relation_isnull_kwarg(expression_context, key, value)

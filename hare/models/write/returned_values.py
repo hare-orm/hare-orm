@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import collections
 import math
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
+from hare.dialects.base.types.type_registry import TypeRegistry
 from hare.fields.constants import ROLLBACK_RESTORE_UNSET
 from hare.models.constants import MIN_STORED_KEY_CODEC_BATCH_SIZE
+from hare.models.write.instance_snapshot import InstanceSnapshot
 from hare.models.write.rollback_restores import RollbackRestores
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.dialects.base.types.type_registry import TypeRegistry
     from hare.fields.field import Field
     from hare.models import Model
 
@@ -34,6 +36,7 @@ class ReturnedValues:
         columns: Iterable[str] | None = None,
         *,
         connection: DatabaseClient,
+        readers: Sequence[tuple[str, str, Callable[[Any], Any]]] | None = None,
     ) -> None:
         """Sets on an obj every field a ``RETURNING`` row holds a column of - put back as they were when the
         write's transaction rolls back.
@@ -46,17 +49,28 @@ class ReturnedValues:
             columns: Only these columns of the row - every one by default.
             connection: The connection the write ran on.
         """
+        if readers is None:
+            readers = ReturnedValues.get_returning_readers(model, types, row.keys() if columns is None else columns)
+        for column, field_name, read in readers:
+            value = read(row[column])
+            RollbackRestores.register_rollback_restore(
+                obj, connection, field_name, obj.__dict__.get(field_name, ROLLBACK_RESTORE_UNSET)
+            )
+            setattr(obj, field_name, value)
+
+    @staticmethod
+    def get_returning_readers(
+        model: type[Model],
+        types: TypeRegistry,
+        columns: Iterable[str],
+    ) -> tuple[tuple[str, str, Callable[[Any], Any]], ...]:
+        """Prepare readers of a RETURNING projection; assignments and rollback stay row-local."""
         meta = model._meta
-        field_names_by_column = meta.fields_db_projection_reverse
-        fields_map = meta.fields_map
-        for column in row.keys() if columns is None else columns:
-            field_name = field_names_by_column.get(column)
-            if field_name is not None:
-                value = types.get_python_value(fields_map[field_name], row[column])
-                RollbackRestores.register_rollback_restore(
-                    obj, connection, field_name, obj.__dict__.get(field_name, ROLLBACK_RESTORE_UNSET)
-                )
-                setattr(obj, field_name, value)
+        return tuple(
+            (column, name, types.get_python_reader(meta.fields_map[name]))
+            for column in columns
+            if (name := meta.fields_db_projection_reverse.get(column)) is not None
+        )
 
     @staticmethod
     def match_rows(
@@ -84,6 +98,7 @@ class ReturnedValues:
         meta = model._meta
         fields = [meta.fields_map[field_name] for field_name in field_names]
         columns = [meta.fields_db_projection[field_name] for field_name in field_names]
+        readers = ReturnedValues.get_key_readers(types, fields, columns)
         instances = list(instances)
         instances_by_key: dict[tuple[Any, ...], TInstance] = {}
         for instance in instances:
@@ -95,7 +110,7 @@ class ReturnedValues:
         for raw_row in rows:
             # A driver's row may have no .items()/.get() - read as a dict.
             row = dict(raw_row)
-            key = ReturnedValues.get_row_key(types, fields, columns, row)
+            key = ReturnedValues.get_row_key(readers, row)
             matched_instance = instances_by_key.get(key)
             if matched_instance is None or id(matched_instance) in matched_instance_ids:
                 if instances_by_stored_key is None:
@@ -132,96 +147,50 @@ class ReturnedValues:
         return instances_by_stored_key
 
     @staticmethod
-    def get_stored_key(
-        types: TypeRegistry, fields: Sequence[Field[Any]], field_names: Sequence[str], instance: Model
-    ) -> tuple[Any, ...]:
-        """An instance's values of fields as the database stores them - each written and read back through
-        its field.
+    def get_stored_key_reader(
+        types: TypeRegistry,
+        fields: Sequence[Field[Any]],
+        field_names: Sequence[str],
+        count: int,
+    ) -> Callable[[Model], tuple[Any, ...]]:
+        """Prepare stored-key matching for one operation, always returning a tuple.
 
-        Args:
-            types: The connection's type registry.
-            fields: The fields.
-            field_names: Their names.
-            instance: The instance.
-
-        Returns:
-            The values, in the fields' order.
+        NULL and unchanged native keys bypass conversion. Other values are written,
+        read and made hashable in field order with the actual instance as context.
+        Small batches retain direct dispatch; larger batches bind the same codecs.
+        No values or execution connections are retained by the prepared callable.
         """
-        return tuple(
-            None
-            if value is None
-            else ReturnedValues.get_hashable(types.get_python_value(field, types.get_db_value(field, value, instance)))
+        prepares_columns = count >= MIN_STORED_KEY_CODEC_BATCH_SIZE
+        codecs = tuple(
+            (
+                field_name,
+                types.get_native_key_type(field),
+                TypeRegistry.get_db_writer(types, field) if prepares_columns else partial(types.get_db_value, field),
+                TypeRegistry.get_python_reader(types, field)
+                if prepares_columns
+                else partial(types.get_python_value, field),
+            )
             for field, field_name in zip(fields, field_names, strict=True)
-            for value in (getattr(instance, field_name),)
         )
+
+        def read_key(instance: Model) -> tuple[Any, ...]:
+            stored_values = []
+            for field_name, native_type, write, read in codecs:
+                value = getattr(instance, field_name)
+                if value is not None and type(value) is not native_type:
+                    value = ReturnedValues.get_hashable(read(write(value, instance)))
+                stored_values.append(value)
+            return tuple(stored_values)
+
+        return read_key
 
     @staticmethod
     def get_stored_keys(
         types: TypeRegistry, fields: Sequence[Field[Any]], field_names: Sequence[str], instances: Sequence[Model]
     ) -> list[tuple[Any, ...]]:
-        """Instances' values of fields as the database stores them - ``get_stored_key()`` of each, a value of
-        its field's native key type (``TypeRegistry.get_native_key_type()``) taken as it is.
-
-        For a batch using the registry's standard conversion methods, bind its field codecs once.
-        Values still pass through the same write/read callbacks in instance and field order. Custom
-        registry conversion methods and small batches retain per-value dispatch. NULL and native
-        key values bypass conversion in both paths.
-
-        Args:
-            types: The connection's type registry.
-            fields: The fields.
-            field_names: Their names.
-            instances: The instances.
-
-        Returns:
-            Each instance's values, in the fields' order.
-        """
-        field_readers = [
-            (field, field_name, types.get_native_key_type(field))
-            for field, field_name in zip(fields, field_names, strict=True)
-        ]
-        get_db_value, get_python_value, get_hashable = (
-            types.get_db_value,
-            types.get_python_value,
-            ReturnedValues.get_hashable,
-        )
-        stored_keys: list[tuple[Any, ...]] = []
-        if len(instances) >= MIN_STORED_KEY_CODEC_BATCH_SIZE:
-            from hare.dialects.base.types.type_registry import TypeRegistry
-
-            if (
-                getattr(get_db_value, "__func__", None) is TypeRegistry.get_db_value
-                and getattr(get_python_value, "__func__", None) is TypeRegistry.get_python_value
-                and getattr(types.get_db_converter, "__func__", None) is TypeRegistry.get_db_converter
-                and getattr(types.get_python_converter, "__func__", None) is TypeRegistry.get_python_converter
-            ):
-                codecs = [
-                    (
-                        field_name,
-                        native_type,
-                        TypeRegistry.get_db_writer(types, field),
-                        TypeRegistry.get_python_reader(types, field),
-                    )
-                    for field, field_name, native_type in field_readers
-                ]
-                for instance in instances:
-                    stored_values = []
-                    for field_name, native_type, write, read in codecs:
-                        value = getattr(instance, field_name)
-                        if value is not None and type(value) is not native_type:
-                            value = get_hashable(read(write(value, instance)))
-                        stored_values.append(value)
-                    stored_keys.append(tuple(stored_values))
-                return stored_keys
-        for instance in instances:
-            stored_values = []
-            for field, field_name, native_type in field_readers:
-                value = getattr(instance, field_name)
-                if value is not None and type(value) is not native_type:
-                    value = get_hashable(get_python_value(field, get_db_value(field, value, instance)))
-                stored_values.append(value)
-            stored_keys.append(tuple(stored_values))
-        return stored_keys
+        """Read stored matching keys with one preparation, preserving instance order."""
+        read_key = ReturnedValues.get_stored_key_reader(types, fields, field_names, len(instances))
+        return [read_key(instance) for instance in instances]
 
     @staticmethod
     def get_hashable(value: Any) -> Any:
@@ -255,24 +224,33 @@ class ReturnedValues:
         return value
 
     @staticmethod
-    def get_row_key(
-        types: TypeRegistry, fields: Sequence[Field[Any]], columns: Sequence[str], row: Mapping[str, Any]
-    ) -> tuple[Any, ...]:
-        """A returned row's values of fields, as the fields read them.
+    def get_key_readers(
+        types: TypeRegistry, fields: Sequence[Field[Any]], columns: Sequence[str]
+    ) -> list[tuple[Callable[[Any], Any], str]]:
+        """The reader and the column of each field telling returned rows apart - taken once per batch.
 
         Args:
             types: The connection's type registry.
             fields: The fields.
             columns: Their columns.
+
+        Returns:
+            The readers, in the fields' order.
+        """
+        return [(types.get_python_reader(field), column) for field, column in zip(fields, columns, strict=True)]
+
+    @staticmethod
+    def get_row_key(readers: Sequence[tuple[Callable[[Any], Any], str]], row: Mapping[str, Any]) -> tuple[Any, ...]:
+        """A returned row's values of the fields, as the fields read them.
+
+        Args:
+            readers: ``get_key_readers()``.
             row: The row, by column name.
 
         Returns:
             The values, in the fields' order.
         """
-        return tuple(
-            ReturnedValues.get_hashable(types.get_python_value(field, row.get(column)))
-            for field, column in zip(fields, columns, strict=True)
-        )
+        return tuple(ReturnedValues.get_hashable(read(row.get(column))) for read, column in readers)
 
     @staticmethod
     def match_rows_in_order(
@@ -305,11 +283,12 @@ class ReturnedValues:
             yield from ((instance, dict(raw_row)) for instance, raw_row in zip(instances, rows, strict=True))
             return
         stored_keys = ReturnedValues.get_stored_keys(types, fields, field_names, instances)
+        readers = ReturnedValues.get_key_readers(types, fields, columns)
         next_index = 0
         for raw_row in rows:
             # A driver's row may have no .items()/.get() - read as a dict.
             row = dict(raw_row)
-            key = ReturnedValues.get_row_key(types, fields, columns, row)
+            key = ReturnedValues.get_row_key(readers, row)
             for index in range(next_index, len(instances)):
                 if stored_keys[index] == key:
                     yield instances[index], row
@@ -341,6 +320,7 @@ class ReturnedValues:
         meta = model._meta
         fields = [meta.fields_map[field_name] for field_name in field_names]
         columns = [meta.fields_db_projection[field_name] for field_name in field_names]
+        readers = ReturnedValues.get_key_readers(types, fields, columns)
         instances = list(instances)
         instances_by_stored_key: collections.defaultdict[tuple[Any, ...], collections.deque[TInstance]] = (
             collections.defaultdict(collections.deque)
@@ -351,7 +331,8 @@ class ReturnedValues:
             instances_by_stored_key[stored_key].append(instance)
         for raw_row in rows:
             row = dict(raw_row)
-            matching_instances = instances_by_stored_key.get(ReturnedValues.get_row_key(types, fields, columns, row))
+            key = ReturnedValues.get_row_key(readers, row)
+            matching_instances = instances_by_stored_key.get(key)
             if matching_instances:
                 yield matching_instances.popleft(), row
 
@@ -376,12 +357,15 @@ class ReturnedValues:
 
         field_names_by_column = model._meta.fields_db_projection_reverse
         field_names = [field_names_by_column.get(column, column) for column in columns]
-        restores: list[tuple[Model, str, Any]] | None = [] if connection.is_transaction_client else None
+        snapshots: list[InstanceSnapshot] | None = [] if connection.is_transaction_client else None
         for obj in objs:
+            old_values: dict[str, Any] | None = {} if snapshots is not None else None
             for field_name in field_names:
                 if not isinstance(obj.__dict__.get(field_name), DatabaseDefault) and field_name in obj.__dict__:
-                    if restores is not None:
-                        restores.append((obj, field_name, obj.__dict__[field_name]))
+                    if old_values is not None:
+                        old_values[field_name] = obj.__dict__[field_name]
                     del obj.__dict__[field_name]
-        if restores:
-            RollbackRestores.register_rollback_restores(connection, restores)
+            if snapshots is not None and old_values:
+                snapshots.append(InstanceSnapshot(obj, old_values))
+        if snapshots:
+            RollbackRestores.register_snapshots(connection, snapshots)

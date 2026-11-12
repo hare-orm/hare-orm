@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 from hare.exceptions import QueryError
 from hare.query.constants import AMBIENT_TENANT_NOT_OVERRIDDEN
@@ -47,8 +47,8 @@ class TenantScope(RowScope):
                 "many-to-many relation) to intentionally query across every tenant"
             )
         if tenant_class is TenantValues or tenant_class is AllTenants:
-            return self.get_scope_filter(cast("str", model._meta.tenant_field), tenant)
-        return cast("str", model._meta.tenant_field), tenant
+            return self.get_scope_filter(model._meta.tenant_field, tenant)  # type: ignore[arg-type]
+        return model._meta.tenant_field, tenant  # type: ignore[return-value]
 
     @staticmethod
     def get_scope_filter(tenant_field: str, scope: Any) -> tuple[str, Any] | None:

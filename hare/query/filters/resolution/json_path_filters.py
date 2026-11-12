@@ -23,7 +23,7 @@ from hare.query.filters.resolution.annotation_filters import AnnotationFilters
 from hare.query.lookup_info.value_paths import ValuePaths
 from hare.sql.functions.declarations import JsonComparand
 from hare.sql.terms.term import Term
-from hare.time import Timezone
+from hare.time.zone_settings import ZoneSettings
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
@@ -52,7 +52,7 @@ class JsonPathFilters:
         if effective_field is None or isinstance(effective_field, JSONField):
             return term
         json_term, value_type = JSONObject.get_json_value(term, effective_field, dialect)
-        return JsonComparand(json_term, value_type, is_aware=Timezone.get_use_timezone())
+        return JsonComparand(json_term, value_type, is_aware=ZoneSettings.get_use_timezone())
 
     @staticmethod
     def get_json_path_mirrored_kwarg(

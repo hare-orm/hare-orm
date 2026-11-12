@@ -38,7 +38,7 @@ def test_requirements_are_read_without_importing_test_or_fixture_sources(manifes
     manifest.check_inventory()
     assert manifest.get_path_requirements(directory / "conftest.py") == {"framework"}
     assert manifest.get_path_requirements(module_path) == {"framework", "adapter"}
-    manifest.check_cell_requirements(module_path, {"framework", "adapter", "serializer", "native"})
+    manifest.check_cell_requirements(module_path, {"framework", "adapter", "serializer"})
     assert not set(sys.modules) - imported
 
 

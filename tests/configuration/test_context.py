@@ -25,6 +25,7 @@ from hare.instrumentation.declarations import QueryExecuted, TransactionEvent
 from hare.instrumentation.observers.observer_set import ObserverSet
 from hare.instrumentation.observers.observers import Observers
 from hare.time import Timezone
+from hare.time.zone_settings import ZoneSettings
 from hare.transactions.enums import TransactionEventType
 
 pytestmark = pytest.mark.sqlite_only
@@ -1135,7 +1136,7 @@ class TestTimezoneAndRouters:
                 timezone="America/New_York",
             )
             assert Timezone.name() == "America/New_York"
-            assert Timezone.get_use_timezone() is True
+            assert ZoneSettings.get_use_timezone() is True
 
             async with HareContext() as inner:
                 await inner.init(
@@ -1146,10 +1147,10 @@ class TestTimezoneAndRouters:
                     timezone="Europe/Moscow",
                 )
                 assert Timezone.name() == "Europe/Moscow"
-                assert Timezone.get_use_timezone() is False
+                assert ZoneSettings.get_use_timezone() is False
 
             assert Timezone.name() == "America/New_York"
-            assert Timezone.get_use_timezone() is True
+            assert ZoneSettings.get_use_timezone() is True
 
     @pytest.mark.asyncio
     async def test_naive_datetime_is_interpreted_consistently_across_create_and_filter(self):

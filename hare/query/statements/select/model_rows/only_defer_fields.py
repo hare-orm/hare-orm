@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import FieldError
 from hare.fields.relations.fields.backward_foreign_key_relation import BackwardForeignKeyRelation
@@ -157,7 +157,7 @@ class OnlyDeferFields:
                         f'Unknown field "{fetch_fields_lookup}__..." for model {query.model.__name__!r} - '
                         f"{fetch_field.model_field_name} is no relation"
                     )
-                field = cast("RelationalField[Model]", fetch_field)
+                field: RelationalField[Model] = fetch_field
                 path = path + (field.model_field_name,)
                 is_last_field = position == len(fetch_fields) - 1
                 # Each relation's extra_condition goes into its JOIN here too - an intermediate one's as
@@ -167,7 +167,7 @@ class OnlyDeferFields:
                     table,
                     field.model_field_name,
                     field,
-                    extra_conditions.get(LOOKUP_SEPARATOR.join(cast("tuple[str, ...]", path[1:]))),
+                    extra_conditions.get(LOOKUP_SEPARATOR.join(path[1:])),  # type: ignore[arg-type]
                 )
                 referring_model = model
                 model = field.related_model
@@ -185,10 +185,11 @@ class OnlyDeferFields:
                 query._select_related_positions.append((model, len(hop_field_names), table, referring_model, path))
                 added_paths.add(path)
                 try:
+                    table_name = table.get_table_name() if hop_field_names else ""
                     query.query = query.query.select(
                         *[
                             table[model._meta.fields_db_projection[hop_field_name]].as_(
-                                LookupPaths.safe_select_label(table.get_table_name(), hop_field_name)
+                                LookupPaths.safe_select_label(table_name, hop_field_name)
                             )
                             for hop_field_name in hop_field_names
                         ]
@@ -324,6 +325,6 @@ class OnlyDeferFields:
         """
         meta = model._meta
         return tuple(
-            name if name in meta.fields_db_projection else cast("str", meta.fields_map[name].source_field)
+            name if name in meta.fields_db_projection else meta.fields_map[name].source_field  # type: ignore[misc]
             for name in meta.primary_key_attribute_names
         )

@@ -187,8 +187,14 @@ async def test_listener_reports_closed_after_its_connection_is_killed(db_simple)
 
         # The dead listener must never be mistaken for a live one - a NOTIFY sent afterward
         # (from an unrelated, still-healthy pooled connection) has no one left to deliver it to.
-        await client.execute(f"NOTIFY {channel}, 'after-kill'")
-        await asyncio.sleep(0.2)
+        # A live listener of the channel receiving it proves the NOTIFY was delivered by then.
+        delivered: list[str] = []
+        live_listener = await client.listen(channel, lambda *args: delivered.append(args[3]))
+        try:
+            await client.execute(f"NOTIFY {channel}, 'after-kill'")
+            await wait_until(lambda: delivered == ["after-kill"])
+        finally:
+            await live_listener.close()
         assert received == []
     finally:
         # Idempotent even though the connection is already dead server-side.

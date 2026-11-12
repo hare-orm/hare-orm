@@ -1,19 +1,22 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Collection, Iterable, Iterator, Mapping
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from copy import copy
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.exceptions import QueryError
 from hare.query.constants import AGGREGATE_OVER_DISTINCT_ON_MESSAGE
+from hare.query.execution.query_execution import QueryExecution
 from hare.query.expressions import Expression, ExpressionContext, Q
 from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
+from hare.query.plans.constants import NO_CALL_PLAN
 from hare.query.plans.description.plan_context import PlanContext
 from hare.query.plans.description.plan_description import PlanDescription
 from hare.query.plans.description.plan_parts import PlanParts
 from hare.query.plans.enums import PlanKeyForm
 from hare.query.plans.plan_origins import PlanOrigins
+from hare.query.plans.statement.declarations import CallPlanHit
 from hare.query.plans.statement.declared_plan_slots import DeclaredPlanSlots
 from hare.query.plans.statement.statement_plan_descriptions import StatementPlanDescriptions
 from hare.query.queryset.annotation_access_tracker import AnnotationAccessTracker
@@ -43,7 +46,9 @@ from hare.sql.terms.functions.aggregate_function import AggregateFunction
 from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
+    from hare.dialects.base.client.database_client import DatabaseClient
     from hare.fields.field import Field
+    from hare.query.queryset.queryset import QuerySet
     from hare.sql.builder.queries.query_builder import QueryBuilder
     from hare.sql.builder.tables.selectable import Selectable
 
@@ -57,6 +62,8 @@ class AggregateQuery(RowsSummaryQuery):
     After ``.group_by()`` the metrics run over the grouped rows; built from a ``.values()`` query or
     a set operation, over that query as a derived table.
     """
+
+    rows_source_method_name = "_get_aggregate_source"
 
     #: A plain SELECT of aggregate expressions - see AwaitableQuery.is_read_only.
     is_read_only: ClassVar[bool] = True
@@ -81,15 +88,28 @@ class AggregateQuery(RowsSummaryQuery):
         metrics: Mapping[str, Expression | Term],
         *,
         rows_query: AwaitableQuery[Any] | None = None,
+        selected_rows: QuerySet[Any] | None = None,
     ) -> None:
         """
         Args:
             source: The queryset aggregated, or a query made from one.
             metrics: The expressions to compute, by the name each is returned under.
             rows_query: The rows the metrics run over, as a derived table - sliced itself.
+            selected_rows: A ``.values()`` or set-operation queryset whose rows the metrics run over -
+                made into its aggregate the first time the query is built.
         """
-        super().__init__(source, rows_query=rows_query)
-        if rows_query is not None:
+        super().__init__(
+            source,
+            rows_query=rows_query,
+            selected_rows=selected_rows,
+            selected_rows_arguments=dict(metrics) if selected_rows is not None else None,
+        )
+        self._apply_summary_arguments(dict(metrics))
+
+    def _apply_summary_arguments(self, arguments: dict[str, Any]) -> None:
+        """Bind metrics to the chosen source while leaving its filters' annotations intact."""
+        metrics = arguments
+        if self._rows_query is not None or self._selected_rows is not None:
             self._limit = None
             self._offset = 0
         self._raise_if_annotation_names_are_unsafe(metrics)
@@ -144,13 +164,13 @@ class AggregateQuery(RowsSummaryQuery):
         self._annotations = {name: annotation for name, annotation in annotations.items() if name in used}
         self._alias_keys = self._alias_keys.intersection(self._annotations)
 
-    def _get_call_signature_type_part(self) -> tuple[Any, list[Any]]:
+    def _get_call_signature_type_part(self) -> tuple[Any, Sequence[Any]]:
         # The metrics - their structure in the key, their values bound after the calls'.
         if self._bound_rows_query is not None:
-            return None, []
+            return None, ()
         description = self._get_metrics_plan_description()
         if description is None:
-            return None, []
+            return None, ()
         return description.structure, list(description.values)
 
     def _build_statement(
@@ -606,23 +626,57 @@ class AggregateQuery(RowsSummaryQuery):
         return bool(joins) or CorrelatedSubqueries.reads_other_tables(term, {derived_table})
 
     async def _execute_bound(self) -> dict[str, Any]:
-        query = self._get_execution_query()
-        query._make_query_to_run()
-        return await query._execute_reading(query._execute())
-
-    async def _execute(self) -> dict[str, Any]:
         if not self._metric_keys:
-            # Nothing to compute - a select list of nothing isn't SQL on every database.
             return {}
-        result = await self._connection.execute_dicts(*self._get_parameterized_sql(), retry_read=True)
+        lookup = NO_CALL_PLAN
+        connection: DatabaseClient | None = None
+        if self._call_signature is not None:
+            connection = self.get_connection()
+            call_plan = self._find_call_plan(connection)
+            if isinstance(call_plan, CallPlanHit):
+                return await QueryExecution.read(
+                    self,
+                    connection,
+                    self._aggregate(
+                        connection, call_plan.sql, call_plan.parameters, dict(call_plan.plan.annotation_output_fields)
+                    ),
+                )
+            lookup = call_plan
+        query = self._get_execution_query_to_build(lookup, connection)
+        statement = query._make_query_to_run()
+        return await QueryExecution.read(
+            query,
+            query._connection,
+            query._aggregate(query._connection, *statement, query._annotation_output_fields),
+        )
+
+    async def _aggregate(
+        self,
+        connection: DatabaseClient,
+        sql: str,
+        parameters: list[Any],
+        annotation_output_fields: Mapping[str, Field[Any] | None],
+    ) -> dict[str, Any]:
+        """Runs the statement and reads the metrics off its one row.
+
+        Args:
+            connection: This execution's connection.
+            sql: The statement.
+            parameters: Its parameters.
+            annotation_output_fields: The field each metric's value is read by, when it has one.
+
+        Returns:
+            The metrics, in the order they were passed.
+        """
+        result = await connection.execute_dicts(sql, parameters, retry_read=True)
         row = result[0] if result else dict.fromkeys(self._metric_keys)
         for key in self._metric_keys:
             # Mirrors ValuesOutput.get_selected_value_field()'s identical read of this same
             # per-query-execution dict, populated by QueryAnnotations.get_annotate() only for the specific
             # functions that opt in (e.g. Max/Min - result type equals the source field's type).
-            field_object = self._annotation_output_fields.get(key)
+            field_object = annotation_output_fields.get(key)
             if field_object:
-                row[key] = self.dialect.types.get_python_value(field_object, row[key])
+                row[key] = connection.dialect.types.get_python_value(field_object, row[key])
         # In the order the metrics were passed, like Django - self._metric_keys is a set.
         ordered_metric_keys = [key for key in self._annotations if key in self._metric_keys]
         ordered_metric_keys += sorted(self._metric_keys.difference(ordered_metric_keys))

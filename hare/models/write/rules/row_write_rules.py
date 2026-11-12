@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.classes.deferred_import import DeferredImport
 from hare.core.caching.cache import Cache
 from hare.exceptions import FieldError, QueryError
 from hare.fields.constants import ROLLBACK_RESTORE_UNSET
@@ -25,6 +26,7 @@ from hare.models.write.rules.constants import (
 )
 from hare.models.write.rules.enums import WriteType
 from hare.native.native_modules import NativeModules
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.expressions.expression import Expression
 from hare.sql.terms.term import Term
 from hare.time import Timezone
@@ -65,10 +67,13 @@ class RowWriteRules:
         QueryError: The write type can't set a field.
     """
 
+    #: ``Model`` - imported at its first read, as its module imports this one.
+    model_class: ClassVar[DeferredImport[type[Model]]] = DeferredImport("hare.models.model", "Model")
+
     #: Bounded rules of each model, by write type, names and options.
     RULES_CACHE: ClassVar[Cache[RowWriteRules]] = Cache(Cache.max_size_from_env(), holds_sql=False)
-    #: The compiled ``rust.native.rows`` - sets the values of many objects in one call; None where it isn't
-    #: built.
+    #: The compiled ``rust.native.rows`` - sets the values of many objects in one call, past their
+    #: ``__setattr__``: a model with one of its own is stamped through it, in Python.
     native_rows: ClassVar[Any] = NativeModules.rows
 
     __slots__ = (
@@ -108,8 +113,10 @@ class RowWriteRules:
         self.method_name = method_name
         self.finds_rows_by_key = finds_rows_by_key
         named_field_names: tuple[str, ...] | None = None
-        if field_names is not None and write_type is not WriteType.INSERT and "pk" in field_names:
-            raise QueryError(REFUSED_FIELD_MESSAGE.format(name="pk", method=method_name, reason=PRIMARY_KEY_REASON))
+        if field_names is not None and write_type is not WriteType.INSERT and PRIMARY_KEY_ALIAS in field_names:
+            raise QueryError(
+                REFUSED_FIELD_MESSAGE.format(name=PRIMARY_KEY_ALIAS, method=method_name, reason=PRIMARY_KEY_REASON)
+            )
         if field_names is None:
             written = self.get_every_written_field_name(model, write_type)
         else:
@@ -206,8 +213,12 @@ class RowWriteRules:
             FieldError, QueryError: See the class.
         """
         names = None if field_names is None else tuple(field_names)
-        key = (write_type, names, method_name, stamps_named_fields, single_column_relations, finds_rows_by_key)
-        rules_by_key = cls.RULES_CACHE.get_model_bucket(model)
+        key = (
+            (write_type, names, method_name)
+            if stamps_named_fields and not single_column_relations and finds_rows_by_key
+            else (write_type, names, method_name, stamps_named_fields, single_column_relations, finds_rows_by_key)
+        )
+        rules_by_key = cls.RULES_CACHE.get_bucket(model)
         try:
             rules = rules_by_key.get(key)
             hashable = True
@@ -262,7 +273,7 @@ class RowWriteRules:
         stored: dict[str, None] = {}
         for name in names:
             field = fields_map.get(name) if isinstance(name, str) else None
-            if name == "pk" and field is None:
+            if name == PRIMARY_KEY_ALIAS and field is None:
                 stored.update(dict.fromkeys(meta.primary_key_attribute_names))
             elif isinstance(field, (ForeignKeyFieldInstance, OneToOneFieldInstance)):
                 if single_column_relations and len(field.source_fields) > 1:
@@ -281,7 +292,7 @@ class RowWriteRules:
                         f"name the branch instead ({', '.join(repr(branch) for branch in generic_field.branch_names)})"
                     )
                 for branch_name in generic_field.branch_names:
-                    branch = cast("ForeignKeyFieldInstance[Any]", fields_map[branch_name])
+                    branch: ForeignKeyFieldInstance[Any] = fields_map[branch_name]  # type: ignore[assignment]
                     stored.update(dict.fromkeys(branch.source_fields))
             elif isinstance(name, str) and name in meta.fields_db_projection:
                 stored[name] = None
@@ -348,7 +359,7 @@ class RowWriteRules:
         may change individual composite-key columns; writes locating rows by key may not.
         A missing reason means this assignment is allowed, independently of its value.
         """
-        if name == "pk" and write_type is not WriteType.INSERT:
+        if name == PRIMARY_KEY_ALIAS and write_type is not WriteType.INSERT:
             return PRIMARY_KEY_REASON
         meta = model._meta
         field = meta.fields_map[name]
@@ -411,10 +422,7 @@ class RowWriteRules:
         Returns:
             True when the values may be stored directly.
         """
-        # Local import: the Model module imports the write package.
-        from hare.models.model import Model
-
-        if model.__setattr__ is not Model.__setattr__:
+        if model.__setattr__ is not RowWriteRules.model_class.__setattr__:
             return False
         meta = model._meta
         if meta.next_setattr is not object.__setattr__:
@@ -543,7 +551,7 @@ class RowWriteRules:
         if self.blind_indexes:
             fields_map = self.model._meta.fields_map
             for source_name, index_name in self.blind_indexes:
-                index_field = cast("BlindIndexField", fields_map[index_name])
+                index_field: BlindIndexField = fields_map[index_name]  # type: ignore[assignment]
                 for obj in objs:
                     set_value(obj, index_name, index_field.get_blind_index(getattr(obj, source_name)))
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.ddl.constraints.check_constraint import CheckConstraint
 from hare.ddl.constraints.exclusion_constraint import ExclusionConstraint
@@ -113,7 +113,9 @@ class AddConstraint(AddSchemaObject):
             return
         self.raise_if_table_options_unsupported(app_label, new_state, state_editor)
         plan = state_editor.constraint_statements.get_unique_constraint_using_index_plan(
-            self._model(new_state, app_label), cast("UniqueConstraint", self.constraint), self.using_index
+            self._model(new_state, app_label),
+            self.constraint,  # type: ignore[arg-type]
+            self.using_index,
         )
         await plan.execute(state_editor)
 

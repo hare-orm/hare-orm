@@ -44,9 +44,9 @@ class PostgresqlForeignKeyDeferral:
         ):
             tenant_schema_names = tuple(schema_name for schema_name, _ in await TenantSchemas.get_schemas(connection))
         names_key = (connection.connection_alias, tenant_schema_names)
-        cached_names: tuple[str, ...] | None = ProtectConstraintDeferral.CONSTRAINT_NAMES_CACHE.get_model_bucket(
-            model
-        ).get(names_key)
+        cached_names: tuple[str, ...] | None = ProtectConstraintDeferral.CONSTRAINT_NAMES_CACHE.get_bucket(model).get(
+            names_key
+        )
         if cached_names is not None:
             return cached_names
         names: list[str] = []
@@ -73,7 +73,7 @@ class PostgresqlForeignKeyDeferral:
                 )
                 names.extend(row["name"] for row in rows if row["name"] not in names)
         constraint_names = tuple(names)
-        ProtectConstraintDeferral.CONSTRAINT_NAMES_CACHE.get_model_bucket(model)[names_key] = constraint_names
+        ProtectConstraintDeferral.CONSTRAINT_NAMES_CACHE.get_bucket(model)[names_key] = constraint_names
         return constraint_names
 
     @staticmethod

@@ -1,15 +1,11 @@
-"""Builds the hare-orm wheels of a release.
-
-With ``--extension-wheels`` it builds the wheels of one platform, one per Python version: for every
-tag maturin built a ``rust.native`` wheel for (``cp312-cp312-manylinux_2_17_x86_64``, ``cp313-...``,
+"""Builds the hare-orm wheels of one platform of a release, one per Python version: for every tag
+maturin built a ``rust.native`` wheel for (``cp312-cp312-manylinux_2_17_x86_64``, ``cp313-...``,
 ``cp314-...``), the extension is taken out of that wheel, put into ``rust/`` and packed into a
 hare-orm wheel with the same tag, together with the shared libraries maturin's repair bundled with it
-(``hare_native.libs/``, libgcc_s on musllinux). Without it, it builds the pure wheel (``py3-none-any``) with no
-extension - for the platforms no platform wheel is built for, where ``postgresql+asyncpg://`` and
-SQLite work and ``postgresql://`` says the Rust driver isn't there.
+(``hare_native.libs/``, libgcc_s on musllinux). hare has no wheel without the extension.
 
 Usage:
-    python .github/scripts/build_wheel.py --out dist [--extension-wheels extension-wheels]
+    python .github/scripts/build_wheel.py --out dist --extension-wheels extension-wheels
 """
 
 from __future__ import annotations
@@ -17,7 +13,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
-import subprocess
+import subprocess  # nosec B404 - build checks invoke trusted tooling without a shell.
 import sys
 import tempfile
 import tomllib
@@ -32,14 +28,14 @@ from pathlib import Path, PurePosixPath
 class BuildSpec:
     """One wheel's ABI/platform and the exact extension archives staged for it."""
 
-    tag: str | None
+    tag: str
     extension_wheels: tuple[tuple[str, Path], ...] = ()
 
 
 class WheelBuilder:
-    """Builds hare-orm's wheel of one platform, or its pure wheel."""
+    """Builds hare-orm's wheels of one platform."""
 
-    #: The extension modules a platform wheel carries.
+    #: The extension modules a wheel carries.
     EXTENSION_MODULES = ("native",)
     #: The file suffixes of a compiled extension module.
     EXTENSION_SUFFIXES = (".so", ".pyd")
@@ -188,59 +184,62 @@ class WheelBuilder:
     @staticmethod
     def build(spec: BuildSpec, source_directory: Path, output_directory: Path) -> Path:
         """Build and tag a wheel inside staging; no output is published until check succeeds."""
-        subprocess.run(
+        # Poetry is the trusted build tool on PATH.
+        subprocess.run(  # nosec B603, B607
             ["poetry", "build", "--format", "wheel", "--output", str(output_directory)],
             cwd=source_directory,
             check=True,
         )
         (wheel,) = output_directory.glob("*.whl")
-        if spec.tag is not None:
-            python_tag, abi_tag, platform_tag = spec.tag.split("-")
-            subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "wheel",
-                    "tags",
-                    "--remove",
-                    "--python-tag",
-                    python_tag,
-                    "--abi-tag",
-                    abi_tag,
-                    "--platform-tag",
-                    platform_tag,
-                    str(wheel),
-                ],
-                check=True,
-            )
-            (wheel,) = output_directory.glob("*.whl")
-            # Poetry packages the supplied binaries as data. Retagging does not change
-            # the installation scheme; set it explicitly and let wheel regenerate RECORD.
-            unpacked = output_directory / "unpacked"
-            subprocess.run([sys.executable, "-m", "wheel", "unpack", "-d", str(unpacked), str(wheel)], check=True)
-            (package,) = unpacked.iterdir()
-            (metadata_path,) = package.glob("*.dist-info/WHEEL")
-            metadata = BytesParser().parsebytes(metadata_path.read_bytes())
-            metadata.replace_header("Root-Is-Purelib", "false")
-            metadata_path.write_bytes(metadata.as_bytes())
-            repacked = output_directory / "repacked"
-            repacked.mkdir()
-            subprocess.run([sys.executable, "-m", "wheel", "pack", "-d", str(repacked), str(package)], check=True)
-            (wheel,) = repacked.glob("*.whl")
+        python_tag, abi_tag, platform_tag = spec.tag.split("-")
+        subprocess.run(  # nosec B603 - explicit build-tool arguments, no shell.
+            [
+                sys.executable,
+                "-m",
+                "wheel",
+                "tags",
+                "--remove",
+                "--python-tag",
+                python_tag,
+                "--abi-tag",
+                abi_tag,
+                "--platform-tag",
+                platform_tag,
+                str(wheel),
+            ],
+            check=True,
+        )
+        (wheel,) = output_directory.glob("*.whl")
+        # Poetry packages the supplied binaries as data. Retagging does not change
+        # the installation scheme; set it explicitly and let wheel regenerate RECORD.
+        unpacked = output_directory / "unpacked"
+        subprocess.run(  # nosec B603 - the current interpreter runs the installed wheel tool.
+            [sys.executable, "-m", "wheel", "unpack", "-d", str(unpacked), str(wheel)], check=True
+        )
+        (package,) = unpacked.iterdir()
+        (metadata_path,) = package.glob("*.dist-info/WHEEL")
+        metadata = BytesParser().parsebytes(metadata_path.read_bytes())
+        metadata.replace_header("Root-Is-Purelib", "false")
+        metadata_path.write_bytes(metadata.as_bytes())
+        repacked = output_directory / "repacked"
+        repacked.mkdir()
+        subprocess.run(  # nosec B603 - the current interpreter runs the installed wheel tool.
+            [sys.executable, "-m", "wheel", "pack", "-d", str(repacked), str(package)], check=True
+        )
+        (wheel,) = repacked.glob("*.whl")
         return wheel
 
-    def check(self, wheel: Path, tag: str | None, bundled_libraries: list[str]) -> None:
+    def check(self, wheel: Path, tag: str, bundled_libraries: list[str]) -> None:
         """Checks the wheel carries exactly the extension modules its tag promises, and the shared
         libraries bundled with them.
 
         Args:
             wheel: The wheel.
-            tag: Its tag, None for the pure wheel.
+            tag: Its tag.
             bundled_libraries: The wheel paths of the libraries maturin bundled with the extensions.
 
         Raises:
-            SystemExit: A platform wheel misses an extension or a bundled library, or the pure wheel
-                carries one.
+            SystemExit: The wheel misses an extension or a bundled library.
         """
         with zipfile.ZipFile(wheel) as archive:
             names = archive.namelist()
@@ -248,35 +247,30 @@ class WheelBuilder:
             if len(metadata_paths) != 1:
                 raise SystemExit(f"{wheel.name} must carry exactly one WHEEL metadata file")
             metadata = BytesParser().parsebytes(archive.read(metadata_paths[0]))
-        expected_tag = tag or "py3-none-any"
-        expected_tags = {"-".join(parts) for parts in product(*(part.split(".") for part in expected_tag.split("-")))}
+        expected_tags = {"-".join(parts) for parts in product(*(part.split(".") for part in tag.split("-")))}
         if set(metadata.get_all("Tag", [])) != expected_tags:
-            raise SystemExit(f"{wheel.name} metadata tags differ from {expected_tag}")
-        if metadata.get("Root-Is-Purelib") != ("true" if tag is None else "false"):
+            raise SystemExit(f"{wheel.name} metadata tags differ from {tag}")
+        if metadata.get("Root-Is-Purelib") != "false":
             raise SystemExit(f"{wheel.name} has the wrong Root-Is-Purelib installation scheme")
         extensions = [name for name in names if name.startswith("rust/") and name.endswith(self.EXTENSION_SUFFIXES)]
         libraries = sorted(name for name in names if name.startswith(f"{self.BUNDLED_LIBRARIES_DIRECTORY_NAME}/"))
-        if tag is None and (extensions or libraries):
-            raise SystemExit(f"the pure wheel carries compiled extensions: {extensions + libraries}")
         if libraries != sorted(bundled_libraries):
             raise SystemExit(f"{wheel.name} carries the libraries {libraries}, expected {sorted(bundled_libraries)}")
-        if tag is not None:
-            modules = sorted(Path(name).name.split(".")[0] for name in extensions)
-            if modules != sorted(self.EXTENSION_MODULES):
-                raise SystemExit(f"{wheel.name} carries {extensions}, expected one file per {self.EXTENSION_MODULES}")
-            # rust/native.cpython-312-x86_64-linux-gnu.so, rust/native.cp312-win_amd64.pyd
-            python_version_digits = tag.split("-")[0].removeprefix("cp")
-            other_version_extensions = [
-                name for name in extensions if f"cp{python_version_digits}-" not in name.replace("cpython-", "cp")
-            ]
-            if other_version_extensions:
-                raise SystemExit(f"{wheel.name} carries extensions of another Python: {other_version_extensions}")
-        print(f"built {wheel.name}: {extensions + libraries or 'no extensions'}")
+        modules = sorted(Path(name).name.split(".")[0] for name in extensions)
+        if modules != sorted(self.EXTENSION_MODULES):
+            raise SystemExit(f"{wheel.name} carries {extensions}, expected one file per {self.EXTENSION_MODULES}")
+        # rust/native.cpython-312-x86_64-linux-gnu.so, rust/native.cpython-312-darwin.so,
+        # rust/native.cp312-win_amd64.pyd
+        python_version_digits = tag.split("-")[0].removeprefix("cp")
+        other_version_extensions = [
+            name for name in extensions if f"cp{python_version_digits}-" not in name.replace("cpython-", "cp")
+        ]
+        if other_version_extensions:
+            raise SystemExit(f"{wheel.name} carries extensions of another Python: {other_version_extensions}")
+        print(f"built {wheel.name}: {extensions + libraries}")
 
-    def get_specs(self, extension_wheels: Path | None) -> tuple[BuildSpec, ...]:
+    def get_specs(self, extension_wheels: Path) -> tuple[BuildSpec, ...]:
         """Describe every requested build before staging or invoking build tools."""
-        if extension_wheels is None:
-            return (BuildSpec(None),)
         return tuple(
             BuildSpec(tag, tuple(module_wheels.items()))
             for tag, module_wheels in self.get_extension_wheels_by_tag(extension_wheels).items()
@@ -293,14 +287,14 @@ class WheelBuilder:
         finally:
             temporary.unlink(missing_ok=True)
 
-    def run(self, extension_wheels: Path | None) -> None:
+    def run(self, extension_wheels: Path) -> None:
         """Build each ABI in a fresh directory; failures leave the checkout untouched."""
         for spec in self.get_specs(extension_wheels):
             with tempfile.TemporaryDirectory(prefix="hare-wheel-") as directory:
                 staging = Path(directory)
                 source = staging / "source"
                 self.stage_source(source)
-                libraries = self.extract_extensions(spec, source) if spec.extension_wheels else []
+                libraries = self.extract_extensions(spec, source)
                 wheel = self.build(spec, source, staging / "wheels")
                 self.check(wheel, spec.tag, libraries)
                 self.publish(wheel)
@@ -312,12 +306,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--extension-wheels",
         type=Path,
-        help=(
-            "The directory with maturin's rust.native wheels of one platform, one per Python version; "
-            "without it the pure wheel is built."
-        ),
+        required=True,
+        help="The directory with maturin's rust.native wheels of one platform, one per Python version.",
     )
     arguments = parser.parse_args()
     WheelBuilder(Path(__file__).resolve().parents[2], arguments.out.resolve()).run(
-        arguments.extension_wheels.resolve() if arguments.extension_wheels else None
+        arguments.extension_wheels.resolve()
     )

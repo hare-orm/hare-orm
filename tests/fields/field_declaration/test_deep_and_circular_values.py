@@ -7,7 +7,6 @@ from typing import Any
 import pytest
 
 from hare.exceptions import QueryError, ValidationError
-from hare.fields.data.json.json_codec import JsonCodec
 from hare.query.expressions import RawSQL, Value
 from tests.fields.models_write_paths import WritePathRecord
 
@@ -70,19 +69,14 @@ def make_deep_tuple(depth: int) -> tuple[Any, ...]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("native", [True, False], ids=["native_check", "python_check"])
 @pytest.mark.parametrize(
     "make_value",
     [lambda: make_deep_tuple(5_000), lambda: make_deep_tuple(254), lambda: make_deep_list(254)],
     ids=["tuple_5000", "tuple_255_containers", "list_255_containers"],
 )
-async def test_a_json_value_nesting_past_254_containers_is_refused_alike(
-    db_write_paths, monkeypatch, native, make_value
-):
+async def test_a_json_value_nesting_past_254_containers_is_refused_alike(db_write_paths, make_value):
     """A tuple nested 5000 deep ended the process in orjson - a stack overflow, no exception; a list
     nested 255 deep was refused by a message naming no reason."""
-    if not native:
-        monkeypatch.setattr(JsonCodec, "storable_value_checker", None)
     with pytest.raises(ValidationError, match="nests more than 254 lists, tuples and dicts"):
         await WritePathRecord.objects.create(data=make_value())
     # 254 containers - the innermost empty list is one.

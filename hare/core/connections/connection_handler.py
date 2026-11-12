@@ -6,7 +6,7 @@ import contextvars
 import warnings
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.core.config.connection_config import ConnectionConfig
 from hare.core.connections.connection_frame import ConnectionFrame
@@ -104,7 +104,7 @@ class ConnectionHandler:
 
     @staticmethod
     def _get_client_class(db_info: dict[str, Any]) -> type[DatabaseClient]:
-        return DialectRegistry.get_driver(cast("str", db_info.get("engine"))).get_client_class(db_info["credentials"])
+        return DialectRegistry.get_driver(db_info.get("engine")).get_client_class(db_info["credentials"])  # type: ignore[arg-type]
 
     def _get_db_info(self, connection_alias: str) -> str | dict[str, Any]:
         try:

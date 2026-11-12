@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from hare.lazy_loading.lazy_pattern import LazyPattern
+from hare.search.enums import SearchOperator
 
 #: FTS5 must be available to read a managed full-text index.
 FULL_TEXT_INDEX_REQUIRED_FEATURE = "supports_full_text_index"
@@ -15,7 +16,7 @@ SQLITE_FULL_TEXT_NO_MATCH_QUERY = '""'
 SQLITE_FULL_TEXT_SNIPPET_MAX_WORDS = 64
 
 #: The FTS5 operator joining two queries, keyed by ``SearchOperator`` values.
-SQLITE_FULL_TEXT_QUERY_OPERATORS: dict[str, str] = {"and": "AND", "or": "OR"}
+SQLITE_FULL_TEXT_QUERY_OPERATORS: dict[str, str] = {SearchOperator.AND: "AND", SearchOperator.OR: "OR"}
 
 #: The FTS5 operator keeping the left query's rows the right one doesn't match.
 SQLITE_FULL_TEXT_NOT_OPERATOR = "NOT"

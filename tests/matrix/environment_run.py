@@ -13,9 +13,8 @@ import sys
 from tests.matrix.constants import (
     MATRIX_DATABASE_DRIVER_EXTRAS,
     SUITE_ENVIRONMENT_OPTION,
-    SUITE_ENVIRONMENTS,
-    WITHOUT_NATIVE_PLUGIN,
 )
+from tests.matrix.matrix_catalog import MatrixCatalog
 from tests.matrix.matrix_virtualenv import MatrixVirtualenv
 from tests.matrix.paths import REPOSITORY_DIRECTORY
 from tests.matrix.process_groups import ProcessGroups
@@ -59,7 +58,9 @@ class EnvironmentRun:
         Raises:
             SystemExit: No environment has the name, or its virtualenv doesn't exist.
         """
-        environments = {environment.name: environment for environment in SUITE_ENVIRONMENTS}
+        environments = {
+            environment.name: environment for environment in MatrixCatalog.get_environments(python_version)
+        }
         if environment_name not in environments:
             raise SystemExit(f"No environment {environment_name} - known: {', '.join(environments)}")
         environment = environments[environment_name]
@@ -74,7 +75,6 @@ class EnvironmentRun:
             str(virtualenv.get_python_executable()),
             "-m",
             "pytest",
-            *([] if environment.native else ["-p", WITHOUT_NATIVE_PLUGIN]),
             f"{SUITE_ENVIRONMENT_OPTION}={environment_name}",
             *pytest_arguments,
         ]

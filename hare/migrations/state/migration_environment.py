@@ -4,11 +4,12 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from hare.core.apps import Apps
+from hare.core.apps.swappable_models import SwappableModels
 from hare.core.connections.connection_handler import ConnectionHandler
 from hare.core.hare_context import HareContext
 
 if TYPE_CHECKING:
+    from hare.core.apps import Apps
     from hare.migrations.state.model_state import ModelState
 
 
@@ -61,4 +62,4 @@ class MigrationEnvironment:
         """Read a captured setting; absent settings may use historical declarations."""
         if setting not in self.swappable_settings:
             return None
-        return Apps({}, self.connections, swappable=self.swappable_settings).get_swappable_label(setting)
+        return SwappableModels.get_single_model_label(setting, self.swappable_settings[setting])

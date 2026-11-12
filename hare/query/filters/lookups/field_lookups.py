@@ -11,7 +11,7 @@ from hare.fields.data.temporal.datetime_field import DatetimeField
 from hare.fields.data.temporal.time_field import TimeField
 from hare.fields.field import Field
 from hare.fields.generated_field import GeneratedField
-from hare.query.enums import LookupValueShape
+from hare.query.enums import Lookup, LookupValueShape
 from hare.query.filters.constants import DATETIME_DATE_PART_LOOKUPS
 from hare.query.filters.lookups.annotation_container_lookups import AnnotationContainerLookups
 from hare.query.filters.lookups.date_part_lookups import DatePartLookups
@@ -122,28 +122,30 @@ class FieldLookups:
                 text_operator = partial(text_operator, text_function=text_function)
             return FieldLookup(text_operator, ValueEncoders.encode_string)
 
-        lookups = {
-            "": FieldLookup(operator.eq),
-            "not": FieldLookup(Lookups.not_equal),
-            "in": FieldLookup(Lookups.is_in, ValueEncoders.encode_list, array_element_field=field),
-            "not_in": FieldLookup(Lookups.not_in, ValueEncoders.encode_list, array_element_field=field),
-            "isnull": FieldLookup(Lookups.is_null, ValueEncoders.encode_bool),
-            "not_isnull": FieldLookup(Lookups.not_null, ValueEncoders.encode_bool),
-            "gte": FieldLookup(operator.ge),
-            "lte": FieldLookup(operator.le),
-            "gt": FieldLookup(operator.gt),
-            "lt": FieldLookup(operator.lt),
-            "range": FieldLookup(Lookups.between, ValueEncoders.encode_list),
-            "contains": get_text_lookup(Lookups.contains),
-            "startswith": get_text_lookup(Lookups.starts_with),
-            "search": FieldLookup(Lookups.search, ValueEncoders.encode_string, searched_field=field),
-            "endswith": get_text_lookup(Lookups.ends_with),
-            "iexact": get_text_lookup(Lookups.insensitive_exact),
-            "icontains": get_text_lookup(Lookups.insensitive_contains),
-            "istartswith": get_text_lookup(Lookups.insensitive_starts_with),
-            "iendswith": get_text_lookup(Lookups.insensitive_ends_with),
-            "posix_regex": FieldLookup(Lookups.posix_regex, ValueEncoders.encode_string, text_function=text_function),
-            "iposix_regex": FieldLookup(
+        lookups: dict[str, FieldLookup] = {
+            Lookup.EXACT: FieldLookup(operator.eq),
+            Lookup.NOT: FieldLookup(Lookups.not_equal),
+            Lookup.IN: FieldLookup(Lookups.is_in, ValueEncoders.encode_list, array_element_field=field),
+            Lookup.NOT_IN: FieldLookup(Lookups.not_in, ValueEncoders.encode_list, array_element_field=field),
+            Lookup.ISNULL: FieldLookup(Lookups.is_null, ValueEncoders.encode_bool),
+            Lookup.NOT_ISNULL: FieldLookup(Lookups.not_null, ValueEncoders.encode_bool),
+            Lookup.GTE: FieldLookup(operator.ge),
+            Lookup.LTE: FieldLookup(operator.le),
+            Lookup.GT: FieldLookup(operator.gt),
+            Lookup.LT: FieldLookup(operator.lt),
+            Lookup.RANGE: FieldLookup(Lookups.between, ValueEncoders.encode_list),
+            Lookup.CONTAINS: get_text_lookup(Lookups.contains),
+            Lookup.STARTSWITH: get_text_lookup(Lookups.starts_with),
+            Lookup.SEARCH: FieldLookup(Lookups.search, ValueEncoders.encode_string, searched_field=field),
+            Lookup.ENDSWITH: get_text_lookup(Lookups.ends_with),
+            Lookup.IEXACT: get_text_lookup(Lookups.insensitive_exact),
+            Lookup.ICONTAINS: get_text_lookup(Lookups.insensitive_contains),
+            Lookup.ISTARTSWITH: get_text_lookup(Lookups.insensitive_starts_with),
+            Lookup.IENDSWITH: get_text_lookup(Lookups.insensitive_ends_with),
+            Lookup.POSIX_REGEX: FieldLookup(
+                Lookups.posix_regex, ValueEncoders.encode_string, text_function=text_function
+            ),
+            Lookup.IPOSIX_REGEX: FieldLookup(
                 Lookups.insensitive_posix_regex, ValueEncoders.encode_string, text_function=text_function
             ),
         }
@@ -188,18 +190,18 @@ class FieldLookups:
         from hare.query.filters.lookups.json.json_path_lookups import JsonPathLookups
 
         return {
-            "": FieldLookup(JsonLookups.equal),
-            "not": FieldLookup(JsonLookups.not_equal),
-            "in": FieldLookup(JsonLookups.is_in, ValueEncoders.encode_list, array_element_field=field),
-            "not_in": FieldLookup(JsonLookups.not_in, ValueEncoders.encode_list, array_element_field=field),
-            "isnull": FieldLookup(Lookups.is_null, ValueEncoders.encode_bool),
-            "not_isnull": FieldLookup(Lookups.not_null, ValueEncoders.encode_bool),
-            "contains": FieldLookup(JsonLookups.contains),
-            "contained_by": FieldLookup(JsonLookups.contained_by),
-            "has_key": FieldLookup(JsonLookups.has_key, ValueEncoders.encode_string),
-            "has_keys": FieldLookup(JsonLookups.has_keys, ValueEncoders.encode_string_list),
-            "has_any_keys": FieldLookup(JsonLookups.has_any_keys, ValueEncoders.encode_string_list),
-            "filter": FieldLookup(JsonLookups.filter, ValueEncoders.encode_json),
+            Lookup.EXACT: FieldLookup(JsonLookups.equal),
+            Lookup.NOT: FieldLookup(JsonLookups.not_equal),
+            Lookup.IN: FieldLookup(JsonLookups.is_in, ValueEncoders.encode_list, array_element_field=field),
+            Lookup.NOT_IN: FieldLookup(JsonLookups.not_in, ValueEncoders.encode_list, array_element_field=field),
+            Lookup.ISNULL: FieldLookup(Lookups.is_null, ValueEncoders.encode_bool),
+            Lookup.NOT_ISNULL: FieldLookup(Lookups.not_null, ValueEncoders.encode_bool),
+            Lookup.CONTAINS: FieldLookup(JsonLookups.contains),
+            Lookup.CONTAINED_BY: FieldLookup(JsonLookups.contained_by),
+            Lookup.HAS_KEY: FieldLookup(JsonLookups.has_key, ValueEncoders.encode_string),
+            Lookup.HAS_KEYS: FieldLookup(JsonLookups.has_keys, ValueEncoders.encode_string_list),
+            Lookup.HAS_ANY_KEYS: FieldLookup(JsonLookups.has_any_keys, ValueEncoders.encode_string_list),
+            Lookup.FILTER: FieldLookup(JsonLookups.filter, ValueEncoders.encode_json),
             **JsonPathLookups.get_ordering_lookups(),
         }
 
@@ -218,14 +220,14 @@ class FieldLookups:
         if target_meta.pk is None:
             target_pk_fields = tuple(target_meta.pk_fields)
             return {
-                "": FieldLookup(Lookups.row_equal, ValueEncoders.encode_composite_pk),
-                "not": FieldLookup(Lookups.row_not_equal, ValueEncoders.encode_composite_pk),
-                "in": FieldLookup(
+                Lookup.EXACT: FieldLookup(Lookups.row_equal, ValueEncoders.encode_composite_pk),
+                Lookup.NOT: FieldLookup(Lookups.row_not_equal, ValueEncoders.encode_composite_pk),
+                Lookup.IN: FieldLookup(
                     Lookups.row_is_in,
                     ValueEncoders.encode_composite_related_list,
                     array_element_fields=target_pk_fields,
                 ),
-                "not_in": FieldLookup(
+                Lookup.NOT_IN: FieldLookup(
                     Lookups.row_not_in,
                     ValueEncoders.encode_composite_related_list,
                     array_element_fields=target_pk_fields,
@@ -233,10 +235,12 @@ class FieldLookups:
             }
         target_pk = target_meta.pk
         return {
-            "": FieldLookup(operator.eq, ValueEncoders.encode_related_value),
-            "not": FieldLookup(Lookups.not_equal, ValueEncoders.encode_related_value),
-            "in": FieldLookup(Lookups.is_in, ValueEncoders.encode_related_list, array_element_field=target_pk),
-            "not_in": FieldLookup(Lookups.not_in, ValueEncoders.encode_related_list, array_element_field=target_pk),
+            Lookup.EXACT: FieldLookup(operator.eq, ValueEncoders.encode_related_value),
+            Lookup.NOT: FieldLookup(Lookups.not_equal, ValueEncoders.encode_related_value),
+            Lookup.IN: FieldLookup(Lookups.is_in, ValueEncoders.encode_related_list, array_element_field=target_pk),
+            Lookup.NOT_IN: FieldLookup(
+                Lookups.not_in, ValueEncoders.encode_related_list, array_element_field=target_pk
+            ),
         }
 
     @staticmethod
@@ -250,17 +254,19 @@ class FieldLookups:
         Returns:
             The lookups by suffix.
         """
-        lookups = {
-            "isnull": FieldLookup(Lookups.is_null),
-            "not_isnull": FieldLookup(Lookups.not_null),
+        lookups: dict[str, FieldLookup] = {
+            Lookup.ISNULL: FieldLookup(Lookups.is_null),
+            Lookup.NOT_ISNULL: FieldLookup(Lookups.not_null),
         }
         target_pk = field.related_model._meta.pk
         if target_pk is None:
             return lookups
         return {
             **lookups,
-            "": FieldLookup(operator.eq, ValueEncoders.encode_related_value),
-            "not": FieldLookup(Lookups.not_equal, ValueEncoders.encode_related_value),
-            "in": FieldLookup(Lookups.is_in, ValueEncoders.encode_related_list, array_element_field=target_pk),
-            "not_in": FieldLookup(Lookups.not_in, ValueEncoders.encode_related_list, array_element_field=target_pk),
+            Lookup.EXACT: FieldLookup(operator.eq, ValueEncoders.encode_related_value),
+            Lookup.NOT: FieldLookup(Lookups.not_equal, ValueEncoders.encode_related_value),
+            Lookup.IN: FieldLookup(Lookups.is_in, ValueEncoders.encode_related_list, array_element_field=target_pk),
+            Lookup.NOT_IN: FieldLookup(
+                Lookups.not_in, ValueEncoders.encode_related_list, array_element_field=target_pk
+            ),
         }

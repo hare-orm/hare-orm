@@ -8,7 +8,7 @@ import socket
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import timedelta
-from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar
 
 from hare.contrib.outbox.constants import OUTBOX_KEY_MAX_LENGTH, OUTBOX_RELEASE_FAILED
 from hare.contrib.outbox.deliveries.callable_delivery import CallableDelivery
@@ -51,7 +51,6 @@ if TYPE_CHECKING:
     from hare.contrib.outbox.deliveries.outbox_delivery import OutboxDelivery
     from hare.contrib.outbox.wakeups.outbox_wakeup import OutboxWakeup
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.dialects.base.client.transaction_client import TransactionClient
     from hare.fields.relations.swappable_model_reference import SwappableModelReference
 
 TOutboxEvent = TypeVar("TOutboxEvent", bound=OutboxEvent)
@@ -161,8 +160,8 @@ class OutboxRelay(Generic[TOutboxEvent]):
             ConfigurationError: The label names no model of the current context.
         """
         if self._model is None:
-            self._model = cast("type[TOutboxEvent]", HareContext.require_current().get_model(self.model_reference))
-        return self._model
+            self._model = HareContext.require_current().get_model(self.model_reference)  # type: ignore[assignment]
+        return self._model  # type: ignore[return-value]
 
     @property
     def store(self) -> OutboxStore[TOutboxEvent]:
@@ -172,7 +171,7 @@ class OutboxRelay(Generic[TOutboxEvent]):
             if client is None:
                 client = self.model.get_connection(for_write=True)
             if client.is_transaction_client:
-                client = cast("TransactionClient", client).get_non_transactional_client()
+                client = client.get_non_transactional_client()  # type: ignore[attr-defined]
             self._store = OutboxStore(self.model, client, topics=self.topic_selection)
         return self._store
 

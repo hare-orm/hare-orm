@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.caching.cache import Cache
 from hare.core.caching.cache_bucket import CacheBucket
@@ -96,12 +96,12 @@ class ModelTenants:
         meta = model._meta
         if meta.tenant_field is None:
             return tuple(
-                cast("type[Model]", base_class)
+                base_class
                 for base_class in model.__mro__[1:]
                 if hasattr(base_class, "_meta") and base_class._meta.tenant_schema
             )
         return tuple(
-            cast("type[Model]", base_class)
+            base_class
             for base_class in model.__mro__[1:]
             if hasattr(base_class, "_meta") and base_class._meta.tenant_field == meta.tenant_field
         )

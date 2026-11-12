@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.classes.constants import CONTAINER_MAX_DEPTH
+from hare.classes.deferred_import import DeferredImport
 from hare.exceptions import QueryError
 from hare.query.expressions.constants import (
     ISNULL_LOOKUP_SUFFIXES,
@@ -18,11 +19,24 @@ from hare.query.plans.description.plan_description import PlanDescription
 from hare.query.plans.description.plannable import Plannable
 from hare.query.query_connection import QueryConnection
 
+if TYPE_CHECKING:
+    from hare.query.queryset.combination.queryset_combination import QuerySetCombination
+    from hare.query.queryset.queryset import QuerySet
+
 
 class FilterPlanDescriptions:
     """How a filter describes its value for a plan: a plain value or a list by its type or length (its
     values bound), a value written into the SQL text by itself (part of the key), and a query
     compared with by the query's own description."""
+
+    #: ``QuerySet`` - imported at its first read, as its module imports this one.
+    query_set_class: ClassVar[DeferredImport[type[QuerySet[Any, Any]]]] = DeferredImport(
+        "hare.query.queryset", "QuerySet"
+    )
+    #: ``QuerySetCombination`` - imported at its first read, as its module imports this one.
+    query_set_combination: ClassVar[DeferredImport[type[QuerySetCombination]]] = DeferredImport(
+        "hare.query.queryset.combination.queryset_combination", "QuerySetCombination"
+    )
 
     @staticmethod
     def describe_value_filter(
@@ -68,7 +82,7 @@ class FilterPlanDescriptions:
                 # A bound left None opens the range on its side - a plain comparison of the other
                 # bound.
                 values.append(value)
-                bounds = cast("list[Any] | tuple[Any, ...]", value)
+                bounds: list[Any] | tuple[Any, ...] = value  # type: ignore[assignment]
                 return RANGE_LOOKUP_SUFFIX, (bounds[0] is None, bounds[1] is None)
             # A list of another length renders another number of parameters.
             values.append(value)
@@ -218,12 +232,8 @@ class FilterPlanDescriptions:
         Returns:
             True for a queryset combining querysets of model instances.
         """
-        # Deferred import: hare.query.queryset imports this module at import time.
-        from hare.query.queryset import QuerySet
-        from hare.query.queryset.combination.queryset_combination import QuerySetCombination
-
         return (
-            isinstance(value, QuerySet)
+            isinstance(value, FilterPlanDescriptions.query_set_class)
             and value._combination is not None
-            and not QuerySetCombination.selects_values(value)
+            and not FilterPlanDescriptions.query_set_combination.selects_values(value)
         )

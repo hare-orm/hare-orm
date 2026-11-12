@@ -77,28 +77,4 @@ class HydrationLayout:
         Returns:
             The complete reader, or None for a value used as the driver returns it.
         """
-        dialect_reader = types.get_python_reader(field) if types.get_python_converter(type(field)) else None
-        if dialect_reader is not None:
-            return dialect_reader
-        if field.field_type in native_types and field.keeps_native_db_values:
-            return None
-        if type(field).from_db_value is Field.from_db_value and type(field).to_python is Field.to_python:
-            return HydrationLayout.get_field_type_reader(field.field_type)
-        return field.from_db_value
-
-    @staticmethod
-    def get_field_type_reader(field_type: Callable[[Any], Any]) -> Callable[[Any], Any]:
-        """The reader of a column its field converts by calling its own Python type - a NULL
-        stays None.
-
-        Args:
-            field_type: The field's Python type.
-
-        Returns:
-            The reader.
-        """
-
-        def read(value: Any) -> Any:
-            return value if value is None else field_type(value)
-
-        return read
+        return types.get_native_reader(field, native_types)

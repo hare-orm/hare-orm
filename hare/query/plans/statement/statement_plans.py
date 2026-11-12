@@ -38,10 +38,10 @@ class StatementPlans:
     insert_templates: ClassVar[Cache[tuple[str, list[Any]]]] = Cache(Cache.max_size_from_env())
     #: (model, "calls", query class, ...) -> the plan of ``plans`` a query of a queryset made by
     #: simple calls alone runs on (``CallSignaturePlans``), with the position of the call value each
-    #: of its values is (None in the plan's own order) - found in one lookup, without hashing the
-    #: plan's own key; dropped whenever ``plans`` drops any plan, so a plan dropped there is no
-    #: longer found by its calls either.
-    call_signature_plans: ClassVar[Cache[tuple[StatementPlan, tuple[int, ...] | None]]] = Cache(
+    #: of its values is (None in the plan's own order) and what the query class reads its result
+    #: with - found in one lookup, without hashing the plan's own key; dropped whenever ``plans``
+    #: drops any plan, so a plan dropped there is no longer found by its calls either.
+    call_signature_plans: ClassVar[Cache[tuple[StatementPlan, tuple[int, ...] | None, Any]]] = Cache(
         Cache.max_size_from_env(), dropped_with=plans
     )
     #: (model, the writer's key in ``instance_writes``, only a live row, tenant guard applied,
@@ -79,7 +79,7 @@ class StatementPlans:
         Returns:
             The plan, or None when the key has none yet.
         """
-        return cls.plans.get_model_bucket(model).get(key)
+        return cls.plans.get_bucket(model).get(key)
 
     @classmethod
     def record(cls, model: type[Model], key: tuple[Any, ...], plan: StatementPlan) -> None:
@@ -90,7 +90,7 @@ class StatementPlans:
             key: The plan key.
             plan: The plan.
         """
-        cls.plans.get_model_bucket(model)[key] = plan
+        cls.plans.get_bucket(model)[key] = plan
 
     @classmethod
     def count_hit(cls) -> None:

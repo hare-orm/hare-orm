@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
+from hare.core.routing.written_connections import WrittenConnections
 from hare.exceptions import QueryError
 from hare.models.deletion.cascade.cascade_restore import CascadeRestore
 from hare.models.deletion.cascade.related_rows import RelatedRows
@@ -47,10 +48,12 @@ class RestoreQuery:
 
     async def _execute_bound(self) -> int | None:
         # On a database without transactions the rows and their cascade are one step a cancel can't split.
-        connection = cast("DatabaseClient", self.source._get_execution_query(for_write=True)._connection)
-        return await WriteSteps.get_whole_run(connection, self._execute())
+        connection = self.source.get_connection(for_write=True)
+        if WrittenConnections.is_recording:
+            WrittenConnections.record(connection.connection_alias)
+        return await WriteSteps.get_whole_run(connection, self._execute(connection))
 
-    async def _execute(self) -> int | None:
+    async def _execute(self, connection: DatabaseClient) -> int | None:
         """Restores the rows - one ``UPDATE`` without ``cascade``; with it, or for a model overriding
         ``restore()``, in a transaction.
 
@@ -62,11 +65,12 @@ class RestoreQuery:
         from hare.query.queryset.selection.statement_selection import StatementSelection
 
         model = self.source.model
-        soft_delete_field = cast("str", model._meta.soft_delete_field)
+        soft_delete_field: str = model._meta.soft_delete_field
         overrides_restore = model.restore is not Model.restore
         if not self.cascade and not overrides_restore:
-            return await UpdateQuery(self.source, {soft_delete_field: None}, WriteType.SOFT_DELETE, "restore")
-        connection = cast("DatabaseClient", self.source._get_execution_query(for_write=True)._connection)
+            return await UpdateQuery(
+                self.source.using(connection), {soft_delete_field: None}, WriteType.SOFT_DELETE, "restore"
+            )
         async with connection._in_transaction() as transaction_connection:
             matching_rows = self.get_rows_on(self.source, transaction_connection)
             keys = list(dict.fromkeys(await StatementSelection.get_primary_key_values_query(matching_rows)))
@@ -87,7 +91,7 @@ class RestoreQuery:
             count = await UpdateQuery(restored_rows, {soft_delete_field: None}, WriteType.SOFT_DELETE)
             keys_by_deleted_at: dict[datetime.datetime, list[Any]] = {}
             for key in keys:
-                keys_by_deleted_at.setdefault(cast("datetime.datetime", deleted_at_by_key[key]), []).append(key)
+                keys_by_deleted_at.setdefault(deleted_at_by_key[key], []).append(key)  # type: ignore[arg-type]
             for deleted_at, deleted_keys in keys_by_deleted_at.items():
                 await CascadeRestore(transaction_connection, deleted_at).run(model, deleted_keys)
         return count
@@ -102,8 +106,6 @@ class RestoreQuery:
         Returns:
             A copy of the queryset.
         """
-        rows = queryset._clone()
-        rows._apply_connection(connection)
-        rows._connection_explicitly_chosen = True
+        rows = queryset.using(connection)
         rows._visibility = replace(self.source._visibility, only_deleted=rows._visibility.only_deleted)
         return rows

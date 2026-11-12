@@ -7,7 +7,7 @@ import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import ModuleType
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.core.config.app_config import AppConfig
 from hare.core.config.cli_config import CliConfig
@@ -341,5 +341,5 @@ class HareConfig(ConfigSection):
             hint = f" - available: {', '.join(available_names[:5])}" if available_names else ""
             raise ConfigurationError(f"Variable {variable_name!r} not found in module {module_path!r}{hint}")
         if isinstance(value, HareConfig):
-            return cast("Self", value)
+            return value  # type: ignore[return-value]
         return cls.from_dict(value)

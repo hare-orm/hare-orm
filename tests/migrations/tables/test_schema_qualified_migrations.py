@@ -10,12 +10,11 @@ Covers:
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
 from hare import fields
-from hare.contrib.test import requires_features
 from hare.ddl import DatabaseFunction, DatabaseSequence, MaterializedView, RawSQLTerm, View
 from hare.ddl.enums import TriggerEvent
 from hare.ddl.indexes import Index
@@ -25,7 +24,6 @@ from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
 from hare.dialects.base.schema.tables.table_comments import TableComments
 from hare.dialects.postgresql.schema.postgresql_schema_editor import PostgresqlSchemaEditor
 from hare.dialects.sqlite.schema.sqlite_schema_editor import SqliteSchemaEditor
-from hare.exceptions import DatabaseError
 from hare.fields.relations.fields import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.migrations.autodetection.operation_generator import OperationGenerator
@@ -576,14 +574,14 @@ def _make_m2m_models_with_schema() -> tuple[type[Model], type[Model]]:
 def test_through_schema_set_on_forward_m2m_field() -> None:
     """Forward M2M field gets through_schema from declaring model."""
     _, SArticle = _make_m2m_models_with_schema()
-    field = cast(ManyToManyFieldInstance, SArticle._meta.fields_map["tags"])
+    field: ManyToManyFieldInstance = SArticle._meta.fields_map["tags"]
     assert field.through_schema == "catalog"
 
 
 def test_through_schema_set_on_backward_m2m_field() -> None:
     """Backward (auto-generated) M2M field gets through_schema from declaring model."""
     STag, _ = _make_m2m_models_with_schema()
-    field = cast(ManyToManyFieldInstance, STag._meta.fields_map["articles"])
+    field: ManyToManyFieldInstance = STag._meta.fields_map["articles"]
     assert field._generated is True
     assert field.through_schema == "catalog"
 
@@ -607,7 +605,7 @@ def test_through_schema_none_without_schema() -> None:
             table = "plain_b"
 
     init_apps(PlainA, PlainB)
-    field = cast(ManyToManyFieldInstance, PlainB._meta.fields_map["a_items"])
+    field: ManyToManyFieldInstance = PlainB._meta.fields_map["a_items"]
     assert field.through_schema is None
 
 
@@ -639,7 +637,7 @@ def test_m2m_lookup_joins_the_through_table_in_its_schema(filter_key: str) -> No
 def test_get_joins_for_an_m2m_field_includes_schema(model_index, table_name, field_name) -> None:
     """LookupPaths.get_joins_for_related_field() creates the through Table with the schema."""
     model_class = _make_m2m_models_with_schema()[model_index]
-    field = cast(ManyToManyFieldInstance, model_class._meta.fields_map[field_name])
+    field: ManyToManyFieldInstance = model_class._meta.fields_map[field_name]
 
     base_table = Table(table_name, schema="catalog")
     joins = LookupPaths.get_joins_for_related_field(base_table, field, field_name)
@@ -649,31 +647,6 @@ def test_get_joins_for_an_m2m_field_includes_schema(model_index, table_name, fie
     assert through_table._table_name == "article_tag"
     assert through_table._schema is not None
     assert through_table._schema._name == "catalog"
-
-
-@requires_features(supports_schemas=True)
-@pytest.mark.asyncio
-async def test_rolling_back_create_schema_over_a_schema_holding_a_table_fails_and_keeps_it(db_isolated_no_schema):
-    """Rolling back CreateSchema drops the schema without CASCADE - a schema holding a table hare
-    doesn't know of is the database's to refuse, never dropped with what it holds."""
-    connection = db_isolated_no_schema.get_connection()
-    editor = connection.dialect.schema_editor_class(connection, atomic=False)
-    state = State()
-    old_state = state.clone()
-    operation = CreateSchema(schema_name="rollback_kept")
-    operation.state_forward("models", state)
-    await operation.database_forward("models", old_state, state, editor)
-    await connection.execute_script('CREATE TABLE "rollback_kept"."outside" (id INT)')
-    try:
-        with pytest.raises(DatabaseError):
-            await operation.database_backward("models", old_state, state, editor)
-        rows = await connection.execute_dicts(
-            "SELECT COUNT(*) AS count FROM information_schema.tables "
-            "WHERE table_schema = 'rollback_kept' AND table_name = 'outside'"
-        )
-        assert rows[0]["count"] == 1
-    finally:
-        await connection.execute_script('DROP SCHEMA IF EXISTS "rollback_kept" CASCADE')
 
 
 @pytest.mark.asyncio

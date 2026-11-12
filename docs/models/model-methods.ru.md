@@ -477,7 +477,7 @@ await Model[some_pk]  # -> Self или DoesNotExist
 | `primary_key_attribute` | Имя поля первичного ключа; кортеж имён для `CompositePrimaryKey`; `()` у модели с `Meta.primary_key = None`. |
 | `primary_key_attribute_names` | `primary_key_attribute` всегда в виде кортежа — `("id",)`, `("id", "version")`, `()`. |
 | `pk` | Поле первичного ключа; `None` для составного ключа или без ключа. |
-| `pk_fields` | Поля составного первичного ключа по порядку; иначе `()`. |
+| `pk_fields` | Поля преобразования ключа по порядку: `(pk,)` для простого ключа, все компоненты составного или `()` для модели без ключа. |
 | `has_primary_key` / `has_composite_primary_key` | Есть ли у модели первичный ключ / составной первичный ключ. |
 | `fields_map` | `{name: Field}` всех полей: поля с данными, связи (прямые, обратные, «многие-ко-многим») и колонки ключей прямых связей (`author_id`). |
 | `fields` | Имена из `fields_map`. |

@@ -27,7 +27,7 @@ def get_plain_index_columns(sqls: list[str], table: str) -> list[tuple[str, ...]
     return index_columns
 
 
-@pytest_asyncio.fixture(params=["sqlite", pytest.param("postgresql", marks=pytest.mark.requires("native"))])
+@pytest_asyncio.fixture(params=["sqlite", "postgresql"])
 async def schema_sqls(request) -> AsyncGenerator[list[str]]:
     async with HareContext():
         initialize = _init_for_sqlite if request.param == "sqlite" else _init_for_postgres

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -11,35 +12,39 @@ from hare.sql.terms.values.value_wrapper import ValueWrapper
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.models import Model
-    from hare.query.expressions.value_references.value_reference_types import ParameterValues
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ScalarValueReference:
     """Bind a fresh filter value through the field's lookup conversion.
 
     Preparation identifies the criterion's ``ValueWrapper``; the published statement plan
-    stores its immutable ``ParameterSlot`` instead. A cache hit uses ``get_lookup_value``
-    to preserve filtering semantics rather than write-time rounding or truncation.
+    stores its immutable ``ParameterSlot`` and the dialect's lookup conversion of the field
+    (``TypeRegistry.get_lookup_writer()``) instead - filtering semantics rather than write-time
+    rounding or truncation.
     """
 
     wrapper: ParameterSlot | ValueWrapper
     field: Field[Any]
+    #: The dialect's conversion of ``field`` - ``(value, model) -> value`` - resolved once when the plan
+    #: is published (``ParameterPreparation``); None while the plan is prepared.
+    convert: Callable[[Any, Any], Any] | None = None
 
-    def get_parameter_values(self, value: Any, model: type[Model], dialect: Dialect) -> ParameterValues | None:
+    def bind(self, parameters: list[Any], value: Any, model: type[Model], dialect: Dialect) -> bool:
         """The parameter a new value gives - converted the way the filter converted the recorded
         one (``to_lookup_value()``: no write-time truncation or rounding).
 
         Args:
+            parameters: The parameter buffer of this execution, filled in place.
             value: The new value.
             model: The model queried.
             dialect: The dialect the query runs on.
 
         Returns:
-            The parameters, or None when the converted value isn't a plain value (e.g. an
-            IntField's cast for a float) and the query has to be built again.
+            True when the prepared SQL shape accepts the value; False requests a fresh build.
+            Conversion and validation errors propagate to the caller.
         """
-        lookup_value = dialect.types.get_lookup_value(self.field, value, model)
+        lookup_value = self.convert(value, model)  # type: ignore[misc]
         if isinstance(lookup_value, Term):
-            return None
-        return [(self.wrapper, lookup_value, False)]
+            return False
+        return self.wrapper.bind(parameters, lookup_value, False)  # type: ignore[union-attr]

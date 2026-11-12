@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.exceptions import FieldError
+from hare.query.constants import PRIMARY_KEY_IN_FILTER
 from hare.query.generic_foreign_keys.generic_foreign_key_types import GenericForeignKeyTypes
 from hare.query.queryset.arguments.annotation_arguments import AnnotationArguments
 from hare.query.queryset.arguments.ordering_arguments import OrderingArguments
@@ -59,7 +60,9 @@ class SingleRow:
         queryset.model._meta.raise_if_no_primary_key("narrowing a sliced or distinct(*fields) queryset's rows")
         primary_key_attribute = queryset.model._meta.primary_key_attribute
         # A composite key compares its columns as one row value: (a, b) IN (SELECT a, b ...).
-        pk_filter_key = "pk__in" if isinstance(primary_key_attribute, tuple) else f"{primary_key_attribute}__in"
+        pk_filter_key = (
+            PRIMARY_KEY_IN_FILTER if isinstance(primary_key_attribute, tuple) else f"{primary_key_attribute}__in"
+        )
         clone._limit = None
         clone._offset = None
         clone._distinct = False

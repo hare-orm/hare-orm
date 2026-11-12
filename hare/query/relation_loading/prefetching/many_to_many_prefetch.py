@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Iterable, Sequence
+from functools import partial
 from operator import attrgetter
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.constants import (
     PREFETCH_MAX_SLICED_COMPOSITE_PARENTS,
@@ -10,9 +12,11 @@ from hare.dialects.base.constants import (
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.models.instances.instance_connections import InstanceConnections
 from hare.native.native_modules import NativeModules
+from hare.query.execution.query_execution import QueryExecution
 from hare.query.expressions import F, Q
 from hare.query.filters.lookups.value_encoders import ValueEncoders
 from hare.query.key_columns import KeyColumns
+from hare.query.plans.statement.statement_plan_runs import StatementPlanRuns
 from hare.query.relation_loading.constants import PREFETCH_PARENT_KEY_ANNOTATION, PREFETCH_ROW_NUMBER_ANNOTATION
 from hare.query.relation_loading.prefetching.declarations import ManyToManyPrefetchJob, PrefetchNode
 from hare.query.relation_loading.prefetching.enums import PrefetchRowsStrategy
@@ -20,13 +24,12 @@ from hare.query.relation_loading.prefetching.prefetch_checks import PrefetchChec
 from hare.query.relation_loading.prefetching.prefetch_keys import PrefetchKeys
 from hare.query.relation_loading.prefetching.related_rows_fetch import RelatedRowsFetch
 from hare.query.relation_loading.prefetching.sliced_prefetch import SlicedPrefetch
+from hare.query.statements.select.grouped_model_rows_query import GroupedModelRowsQuery
 from hare.sql.builder.tables.table import Table
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.fields.field import Field
     from hare.models import Model
-    from hare.models.meta_info import MetaInfo
     from hare.query.queryset import QuerySet
     from hare.query.relation_loading.prefetching.prefetch_result import PrefetchResult
     from hare.query.relation_loading.prefetching.prefetcher import Prefetcher
@@ -80,13 +83,12 @@ class ManyToManyPrefetch:
             return await ManyToManyPrefetch.prefetch_many_to_many_by_join(job, parent_key_values)
         # The through table is read first, then the related rows by primary key - the same for a
         # single-column and a composite key on either side.
-        # The through rows are read by position where rust.native.rows lays them out, by column name
-        # otherwise.
+        # The through rows are read by position where rust.native.rows lays them out - single-column
+        # keys on a driver giving positional rows - by column name otherwise.
         reads_natively = (
-            NativeModules.rows is not None
-            and through_connection.features.supports_positional_rows
-            and len(ManyToManyPrefetch.get_key_fields(parent_meta)) == 1
-            and len(ManyToManyPrefetch.get_key_fields(target_meta)) == 1
+            through_connection.features.supports_positional_rows
+            and len(parent_meta.pk_fields) == 1
+            and len(target_meta.pk_fields) == 1
         )
         through_rows = await ManyToManyPrefetch.read_through_rows(
             job, through_connection, reads_natively=reads_natively
@@ -94,18 +96,6 @@ class ManyToManyPrefetch:
         if reads_natively:
             return await ManyToManyPrefetch.lay_out_many_to_many_rows_natively(job, through_connection, through_rows)
         return await ManyToManyPrefetch.lay_out_many_to_many_rows(job, through_connection, through_rows)
-
-    @staticmethod
-    def get_key_fields(meta: MetaInfo) -> tuple[Field[Any], ...]:
-        """The fields of a model's primary key.
-
-        Args:
-            meta: The model's meta.
-
-        Returns:
-            The key fields - one for a single-column key.
-        """
-        return meta.pk_fields if meta.has_composite_primary_key else (meta.pk,)
 
     @staticmethod
     def get_through_connection(prefetcher: Prefetcher, field_object: ManyToManyFieldInstance[Any]) -> DatabaseClient:
@@ -143,14 +133,14 @@ class ManyToManyPrefetch:
         """
         parent_meta = prefetcher.model._meta
         if parent_meta.has_composite_primary_key:
-            return list({KeyColumns.get_db_values(parent_meta, obj, connection.dialect.types) for obj in objs})
+            return list(set(KeyColumns.get_db_rows(parent_meta, objs, connection.dialect.types)))
         # The through table's key column is compared as a filter's __in list is - encoded at once.
         # The key's own column field - a one-to-one primary key's is its key column, not the relation.
         parent_key_name = parent_meta.primary_key_attribute_names[0]
         parent_key_values = list(dict.fromkeys(map(attrgetter(parent_key_name), objs)))
         encoded_values = ValueEncoders.encode_list(
             parent_key_values,
-            cast("Model", prefetcher.model),
+            prefetcher.model,
             parent_meta.fields_map[parent_key_name],
             connection.dialect,
         )
@@ -171,7 +161,7 @@ class ManyToManyPrefetch:
             The rows.
         """
         prefetcher, field_object = job.prefetcher, job.field_object
-        parent_pk_fields = ManyToManyPrefetch.get_key_fields(prefetcher.model._meta)
+        parent_pk_fields = prefetcher.model._meta.pk_fields
         through_table = Table(field_object.through, schema=field_object.through_schema)
         backward_columns = [through_table[column] for column in field_object.backward_keys]
         forward_columns = [through_table[column] for column in field_object.forward_keys]
@@ -251,15 +241,15 @@ class ManyToManyPrefetch:
         """
         field_object, related_queryset = job.field_object, job.related_queryset
         target_meta = related_queryset.model._meta
-        parent_pk_fields = ManyToManyPrefetch.get_key_fields(job.prefetcher.model._meta)
-        target_pk_fields = ManyToManyPrefetch.get_key_fields(target_meta)
+        parent_pk_fields = job.prefetcher.model._meta.pk_fields
+        target_pk_fields = target_meta.pk_fields
         parent_layout = PrefetchKeys.get_layout(parent_pk_fields, field_object.backward_keys, through_connection)
         target_layout = PrefetchKeys.get_layout(target_pk_fields, field_object.forward_keys, through_connection)
-        parent_keys_by_target_key: dict[tuple[Any, ...], list[tuple[Any, ...]]] = {}
+        parent_keys_by_target_key: defaultdict[tuple[Any, ...], list[tuple[Any, ...]]] = defaultdict(list)
         for row in through_rows:
             parent_key = parent_layout.read(row)
             target_key = target_layout.read(row)
-            parent_keys_by_target_key.setdefault(target_key, []).append(parent_key)
+            parent_keys_by_target_key[target_key].append(parent_key)
 
         related_objects_by_parent_key: dict[tuple[Any, ...], list[Model]] = {}
         if parent_keys_by_target_key:
@@ -276,7 +266,10 @@ class ManyToManyPrefetch:
             for related_object in related_objects:
                 related_key = related_object.pk if isinstance(related_object.pk, tuple) else (related_object.pk,)
                 for parent_key in parent_keys_by_target_key.get(related_key, []):
-                    related_objects_by_parent_key.setdefault(parent_key, []).append(related_object)
+                    group = related_objects_by_parent_key.get(parent_key)
+                    if group is None:
+                        group = related_objects_by_parent_key[parent_key] = []
+                    group.append(related_object)
         return related_objects_by_parent_key
 
     @staticmethod
@@ -295,7 +288,7 @@ class ManyToManyPrefetch:
         target_key_names = related_queryset.model._meta.primary_key_attribute_names
         related_name = job.field_object.related_name
         parent_paths = tuple(f"{related_name}__{name}" for name in parent_key_names)
-        rows_by_parent: dict[tuple[Any, ...], list[Model]] = {}
+        rows_by_parent: defaultdict[tuple[Any, ...], list[Model]] = defaultdict(list)
         objs = list(objs)
         # The owners' composite keys are OR-ed - a database may bound the depth of an expression.
         bounds_depth = related_queryset.get_connection().features.max_expression_depth is not None
@@ -337,7 +330,7 @@ class ManyToManyPrefetch:
             for pair in pairs:
                 related_object = related_by_key.get(tuple(pair[parent_width:]))
                 if related_object is not None:
-                    rows_by_parent.setdefault(tuple(pair[:parent_width]), []).append(related_object)
+                    rows_by_parent[tuple(pair[:parent_width])].append(related_object)
         for obj in objs:
             parent_key = PrefetchKeys.get_value(obj, parent_key_names)
             job.result.add_many(obj, job.field, job.to_attribute, rows_by_parent.get(parent_key, []))
@@ -350,7 +343,8 @@ class ManyToManyPrefetch:
         the through table on the related model's own side of the relation: both are read on the
         parents' connection, the through table has no model of its own (whose default scope the
         raw read adds), and the related queryset neither filters by that relation itself, nor
-        annotates, deduplicates or prefetches further - each related row then comes once per owner.
+        annotates, deduplicates or loads further relations, explicitly or by default - each related
+        row then comes once per owner.
 
         Args:
             related_queryset: The target queryset with its selected connection.
@@ -369,10 +363,10 @@ class ManyToManyPrefetch:
             or related_queryset.get_connection() is not connection
             or related_queryset._q_object_list
             or related_queryset._annotations
+            or related_queryset._loads_relations()
+            or related_queryset._extension_calls
             or related_queryset._distinct
             or related_queryset._combination is not None
-            or related_queryset._prefetch_map
-            or related_queryset._prefetch_queries
         ):
             return False
         relation_path_prefix = f"{related_name}__"
@@ -400,26 +394,18 @@ class ManyToManyPrefetch:
         related_queryset, field_object = job.related_queryset, job.field_object
         # Each key by its own column - a one-to-one primary key's is its key column.
         parent_key_name = job.prefetcher.model._meta.primary_key_attribute_names[0]
-        target_key_name = related_queryset.model._meta.primary_key_attribute_names[0]
         related_name = field_object.related_name
-        related_queryset = PrefetchChecks.ensure_only_includes_fields(related_queryset, target_key_name)
-        related_rows = await related_queryset.filter(**{f"{related_name}__in": parent_key_values})._annotate(
+        related_queryset = PrefetchChecks.ensure_only_includes_fields(
+            related_queryset, *related_queryset.model._meta.primary_key_attribute_names
+        )
+        rows_query = related_queryset.filter(**{f"{related_name}__in": parent_key_values})._annotate(
             {PREFETCH_PARENT_KEY_ANNOTATION: F(f"{related_name}__{parent_key_name}")}
         )
-        if native_rows is not None:
-            related_objects_by_parent = native_rows.group_rows_by_owner(
-                related_rows, target_key_name, PREFETCH_PARENT_KEY_ANNOTATION
-            )
-        else:
-            related_objects_by_parent = {}
-            shared_objects: dict[Any, Model] = {}
-            for related_object in related_rows:
-                parent_key = getattr(related_object, PREFETCH_PARENT_KEY_ANNOTATION)
-                target_key = getattr(related_object, target_key_name)
-                shared_object = shared_objects.setdefault(target_key, related_object)
-                related_objects_by_parent.setdefault(parent_key, []).append(shared_object)
-            for shared_object in shared_objects.values():
-                delattr(shared_object, PREFETCH_PARENT_KEY_ANNOTATION)
+        related_rows = await QueryExecution.run_operation(
+            (rows_query,),
+            partial(StatementPlanRuns.read_queryset, rows_query, model_query_class=GroupedModelRowsQuery),
+        )
+        related_objects_by_parent = native_rows.group_by_item(related_rows, 0, 1)
         return ManyToManyPrefetch.set_related_objects_by_parent(job, parent_key_name, related_objects_by_parent)
 
     @staticmethod
@@ -448,7 +434,7 @@ class ManyToManyPrefetch:
         parents_by_target_key: dict[Any, list[Any]] = {}
         if through_rows:
             layout = PrefetchKeys.get_layout((parent_key_field, target_key_field), (0, 1), through_connection)
-            keys = [layout.read(row) for row in through_rows]
+            keys = layout.read_many(through_rows)
             parents_by_target_key = native_rows.group_by_item(keys, 1, 0)
         related_objects: list[Model] = []
         if parents_by_target_key:

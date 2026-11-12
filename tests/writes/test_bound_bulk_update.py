@@ -10,6 +10,7 @@ from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.exceptions import QueryError
 from hare.models import Model
+from hare.query.statements.write.bulk.declarations import BulkUpdateRun
 from hare.sql.builder.tables.table import Table
 from hare.sql.builder.update_from_values import UpdateFromValues, ValuesColumn
 from hare.sql.terms.values.literal_value import LiteralValue
@@ -87,10 +88,11 @@ async def test_bound_update_does_not_reread_changed_input_values():
         assert len(preview.commands) == 2
         assert preview.requires_transaction is False
         execution = query._get_execution_query(True)
-        batches = execution._make_queries()
+        run = BulkUpdateRun(execution._connection, list(objects))
+        batches = execution._make_queries(run)
         for obj in objects:
             obj.amount = 999
-        await execution._execute_statements(batches)
+        await execution._execute_statements(run, run.connection, batches)
         assert await PlainEntry.objects.order_by("id").values_list("amount", flat=True) == [10, 11]
 
 

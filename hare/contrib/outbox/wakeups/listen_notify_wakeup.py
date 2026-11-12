@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from functools import partial
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 from weakref import WeakKeyDictionary
 
 from hare.contrib.notify import NotificationListener
@@ -54,7 +54,7 @@ class ListenNotifyWakeup(OutboxWakeup):
         unsent_topics = set(topics)
         notified: set[str] | None = None
         if ChangeCapturing.is_in_transaction(connection):
-            connection_transaction = cast("TransactionClient", connection)
+            connection_transaction: TransactionClient = connection  # type: ignore[assignment]
             transaction = connection_transaction._get_top_level_transaction()
             savepoint_span = TransactionCallbacks.get_registration_span(connection_transaction)
             notified_by_savepoint = self.notified_topics.setdefault(transaction, {})

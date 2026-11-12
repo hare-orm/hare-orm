@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.caching.cache import Cache
 from hare.exceptions import QueryError
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.lookup_info.lookup_path import LookupPath
 
 if TYPE_CHECKING:
@@ -32,7 +33,7 @@ class ConcreteFieldPaths:
         Returns:
             The paths read - the path itself when it names a field or isn't a model field.
         """
-        paths = ConcreteFieldPaths.paths.get_model_bucket(model)
+        paths = ConcreteFieldPaths.paths.get_bucket(model)
         concrete_field_paths = paths.get(field_path)
         if concrete_field_paths is None:
             concrete_field_paths = paths[field_path] = ConcreteFieldPaths.read_paths(model, field_path)
@@ -55,21 +56,21 @@ class ConcreteFieldPaths:
         last_name = lookup_path.rest[0]
         meta = lookup_path.model._meta
         path_prefix = lookup_path.prefix
-        if last_name == "pk" and last_name not in meta.fields_map:
+        if last_name == PRIMARY_KEY_ALIAS and last_name not in meta.fields_map:
             return tuple(
                 f"{path_prefix}{primary_key_attribute_name}"
                 for primary_key_attribute_name in meta.primary_key_attribute_names
             )
         if last_name not in meta.fetch_fields:
             return (field_path,)
-        relation = cast("RelationalField[Model]", meta.fields_map[last_name])
+        relation: RelationalField[Model] = meta.fields_map[last_name]  # type: ignore[assignment]
         if last_name in meta.foreign_key_fields or last_name in meta.one_to_one_fields:
             return tuple(f"{path_prefix}{source_field_name}" for source_field_name in relation.source_fields)
         related_meta = relation.related_model._meta
         if not related_meta.has_primary_key:
             # A related model without a primary key is read by its key column to this row - never
             # NULL in a joined row, like a primary key.
-            backward_relation = cast("BackwardForeignKeyRelation[Model]", relation)
+            backward_relation: BackwardForeignKeyRelation[Model] = relation  # type: ignore[assignment]
             source_field_names = [
                 related_meta.fields_db_projection_reverse.get(column, column)
                 for column in backward_relation.relation_source_fields

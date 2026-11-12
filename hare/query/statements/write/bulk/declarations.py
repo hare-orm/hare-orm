@@ -4,12 +4,27 @@ import dataclasses
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 if TYPE_CHECKING:
+    from hare.dialects.base.client.database_client import DatabaseClient
     from hare.models.model import Model
     from hare.query.execution.write_statements import WriteStatement
+    from hare.query.expressions import Q
     from hare.sql.builder.update_from_values import UpdateFromValues
     from hare.sql.sql_context import SqlContext
+    from hare.sql.terms.term import Term
 
 TModel = TypeVar("TModel", bound="Model")
+
+
+@dataclasses.dataclass(slots=True)
+class BulkUpdateRun(Generic[TModel]):
+    """Mutable bookkeeping of one bulk update, never retained by the declaration."""
+
+    connection: DatabaseClient
+    objects: list[TModel]
+    unwritten_objects: list[TModel] = dataclasses.field(default_factory=list)
+    completed_objects: list[TModel] = dataclasses.field(default_factory=list)
+    tenant_condition: Q | None = None
+    filter_criterion: Term | None = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

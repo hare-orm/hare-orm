@@ -18,7 +18,7 @@ async def test_plain_query_reuses_its_plan_with_new_values(db):
     StatementPlans.call_signature_plans.clear()
     rows = await testmodels.Tournament.objects.filter(name="first").order_by("id")
     assert [row.name for row in rows] == ["first"]
-    bucket = StatementPlans.plans.get_model_bucket(testmodels.Tournament)
+    bucket = StatementPlans.plans.get_bucket(testmodels.Tournament)
     (plan,) = bucket.values()
     hits = StatementPlans.hits
     rows = await testmodels.Tournament.objects.filter(name="second").order_by("id")
@@ -75,12 +75,12 @@ async def test_ordering_and_filter_values_change_between_hits(db):
 async def test_forgetting_model_caches_drops_the_plain_shape_caches(db):
     Caches.forget_model_caches([testmodels.Tournament])
     await testmodels.Tournament.objects.filter(name="x")
-    bucket = StatementPlans.plans.get_model_bucket(testmodels.Tournament)
+    bucket = StatementPlans.plans.get_bucket(testmodels.Tournament)
     (plan,) = bucket.values()
     assert testmodels.Tournament in InstanceHydration.ALL_FIELDS_SELECTS_KEY_CACHE
     Caches.forget_model_caches([testmodels.Tournament])
     assert not bucket
     assert testmodels.Tournament not in InstanceHydration.ALL_FIELDS_SELECTS_KEY_CACHE
     assert await testmodels.Tournament.objects.filter(name="x") == []
-    (replacement,) = StatementPlans.plans.get_model_bucket(testmodels.Tournament).values()
+    (replacement,) = StatementPlans.plans.get_bucket(testmodels.Tournament).values()
     assert replacement is not plan

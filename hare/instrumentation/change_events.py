@@ -10,7 +10,7 @@ import functools
 from collections.abc import Generator, Iterable
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.dialects.base.client.transaction_lifecycle.transaction_callbacks import TransactionCallbacks
 from hare.fields.constants import SENSITIVE_VALUE_PLACEHOLDER
@@ -124,7 +124,7 @@ class ChangeEvents:
         )
         for cascade_model, is_soft in reached[1:]:
             if is_soft:
-                soft_delete_field = cast("str", cascade_model._meta.soft_delete_field)
+                soft_delete_field: str = cascade_model._meta.soft_delete_field  # type: ignore[assignment]
                 events.append(cls.build_event(client, cascade_model, RowOperation.UPDATE, None, (soft_delete_field,)))
             else:
                 events.append(cls.build_event(client, cascade_model, RowOperation.DELETE, None, None))
@@ -141,7 +141,7 @@ class ChangeEvents:
                         )
                     )
             for relation_name in sorted(reached_model._meta.many_to_many_fields):
-                relation = cast("ManyToManyFieldInstance[Any]", reached_model._meta.fields_map[relation_name])
+                relation: ManyToManyFieldInstance[Any] = reached_model._meta.fields_map[relation_name]  # type: ignore[assignment]
                 related_name = getattr(relation, "related_name", None)
                 events.append(
                     cls.build_event(

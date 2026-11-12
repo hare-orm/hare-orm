@@ -1,11 +1,12 @@
 //! Parameters of one statement, converted from Python values at the driver boundary.
 
-use crate::pg::error::DriverError;
+use std::sync::OnceLock;
+
 use pyo3::prelude::*;
 use pyo3::Borrowed;
-use std::sync::OnceLock;
-use tokio_postgres::types::{Kind as TypeShape, ToSql, Type};
+use tokio_postgres::types::{Kind as TypeShape, Type};
 
+use crate::pg::error::DriverError;
 use crate::pg::value::Value;
 
 pub struct ParameterValues(pub Vec<Value>);
@@ -24,10 +25,6 @@ impl ParameterValues {
     pub(crate) fn unspecified_type() -> Type {
         static UNSPECIFIED: OnceLock<Type> = OnceLock::new();
         UNSPECIFIED.get_or_init(|| Type::new(String::new(), 0, TypeShape::Simple, String::new())).clone()
-    }
-
-    pub(crate) fn as_sql_refs(params: &[Value]) -> Vec<&(dyn ToSql + Sync)> {
-        params.iter().map(|value| value as &(dyn ToSql + Sync)).collect()
     }
 
     pub(crate) fn types(params: &[Value]) -> Vec<Type> {

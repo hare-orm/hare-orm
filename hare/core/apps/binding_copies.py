@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 
 class BindingCopies:
@@ -12,9 +12,8 @@ class BindingCopies:
     """
 
     def __init__(self) -> None:
-        self.copies: dict[int, Any] = {}
-
-    def copy(self, value: Any) -> Any:
+        # Binding starts after model classes are available. Keep these types for the
+        # whole workspace rather than importing them for every value in its graph.
         from hare.ddl.indexes.index import Index
         from hare.fields.bound_field import BoundField
         from hare.fields.field import Field
@@ -23,6 +22,19 @@ class BindingCopies:
         from hare.instrumentation.capture.change_sink import ChangeSink
         from hare.models.meta_info import MetaInfo
 
+        self.copies: dict[int, Any] = {}
+        self.framework_classes = (
+            Field,
+            BoundField,
+            BoundRelation,
+            GenericForeignKeyFieldInstance,
+            MetaInfo,
+            ChangeSink,
+            Index,
+        )
+        self.bound_field_class = BoundField
+
+    def copy(self, value: Any) -> Any:
         identity = id(value)
         if identity in self.copies:
             return self.copies[identity]
@@ -45,9 +57,7 @@ class BindingCopies:
                 return self.copies[identity]
             result = tuple(items) if isinstance(value, tuple) else frozenset(items)
             self.copies[identity] = result
-        elif isinstance(
-            value, (Field, BoundField, BoundRelation, GenericForeignKeyFieldInstance, MetaInfo, ChangeSink, Index)
-        ):
+        elif isinstance(value, self.framework_classes):
             result = object.__new__(type(value))
             self.copies[identity] = result
             state = object.__getstate__(value)
@@ -55,11 +65,11 @@ class BindingCopies:
                 attributes, slots = state
                 attributes = {**(attributes or {}), **slots}
             else:
-                attributes = cast("dict[str, Any] | None", state) or {}
+                attributes = state or {}  # type: ignore[assignment]
             for name, item in attributes.items():
                 if name in ("cache_buckets", "plan_cache_buckets"):
                     copied = {}
-                elif isinstance(value, BoundField) and name == "declaration":
+                elif isinstance(value, self.bound_field_class) and name == "declaration":
                     copied = item
                 else:
                     copied = self.copy(item)

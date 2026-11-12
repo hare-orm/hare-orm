@@ -12,10 +12,10 @@ if TYPE_CHECKING:
     from hare.ddl.security.grant import Grant
     from hare.ddl.security.policy import Policy
     from hare.ddl.table_options import TableOptions
+from hare.inspectdb.enums import CatalogDiagnosticCode
 from hare.inspectdb.introspection.catalog_diagnostic import CatalogDiagnostic
 from hare.inspectdb.introspection.column_info import ColumnInfo
 from hare.inspectdb.introspection.composite_foreign_key_info import CompositeForeignKeyInfo
-from hare.inspectdb.introspection.enums import CatalogDiagnosticCode
 from hare.inspectdb.introspection.foreign_key_info import ForeignKeyInfo
 from hare.inspectdb.introspection.index_info import IndexInfo
 

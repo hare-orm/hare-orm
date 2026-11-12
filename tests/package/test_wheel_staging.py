@@ -44,39 +44,48 @@ def test_source_staging_keeps_metadata_but_excludes_local_artifacts(wheel_builde
 
 
 @pytest.mark.parametrize("failure", ["build", "check", None])
-def test_failed_or_successful_build_never_mutates_checkout(wheel_builder, monkeypatch, failure):
+def test_failed_or_successful_build_never_mutates_checkout(wheel_builder, monkeypatch, tmp_path, failure):
     original = {
         path.relative_to(wheel_builder.repository): path.read_bytes()
         for path in wheel_builder.repository.rglob("*")
         if path.is_file()
     }
+    archives = tmp_path / "archives"
+    archives.mkdir()
+    with zipfile.ZipFile(archives / "hare_native-1-cp314-cp314-win_amd64.whl", "w") as archive:
+        archive.writestr("rust/native.cp314-win_amd64.pyd", b"archive extension")
     wheel_builder.out.mkdir()
-    published = wheel_builder.out / "hare_orm-1-py3-none-any.whl"
+    published = wheel_builder.out / "hare_orm-1-cp314-cp314-win_amd64.whl"
     published.write_bytes(b"previous wheel")
 
     def build(spec, source, output):
         assert source != wheel_builder.repository
-        assert not (source / "rust").exists()
+        # The extension comes from the archive, never from the checkout.
+        assert {path.name: path.read_bytes() for path in (source / "rust").iterdir()} == {
+            "native.cp314-win_amd64.pyd": b"archive extension"
+        }
         if failure == "build":
             raise RuntimeError("build failed")
         output.mkdir()
         wheel = output / published.name
         with zipfile.ZipFile(wheel, "w") as archive:
             archive.writestr(
-                "hare_orm-1.dist-info/WHEEL", "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
+                "hare_orm-1.dist-info/WHEEL",
+                "Wheel-Version: 1.0\nRoot-Is-Purelib: false\nTag: cp314-cp314-win_amd64\n",
             )
             archive.writestr("hare/__init__.py", "VALUE = 42")
+            archive.writestr("rust/native.cp314-win_amd64.pyd", b"archive extension")
             if failure == "check":
-                archive.writestr("rust/native.cp314-win_amd64.pyd", b"unexpected")
+                archive.writestr("rust/native.cp313-win_amd64.pyd", b"unexpected")
         return wheel
 
     monkeypatch.setattr(wheel_builder, "build", build)
     if failure is None:
-        wheel_builder.run(None)
+        wheel_builder.run(archives)
         assert zipfile.is_zipfile(published)
     else:
         with pytest.raises((RuntimeError, SystemExit)):
-            wheel_builder.run(None)
+            wheel_builder.run(archives)
         assert published.read_bytes() == b"previous wheel"
     assert {
         path.relative_to(wheel_builder.repository): path.read_bytes()
@@ -138,11 +147,11 @@ def test_archive_library_cannot_escape_staging(wheel_builder, tmp_path):
 
 @pytest.mark.parametrize(
     ("purelib", "tag", "message"),
-    [("false", "py3-none-any", "installation scheme"), ("true", "cp314-cp314-win_amd64", "metadata tags")],
+    [("true", "cp314-cp314-win_amd64", "installation scheme"), ("false", "py3-none-any", "metadata tags")],
 )
 def test_wheel_metadata_must_match_the_build_spec(wheel_builder, tmp_path, purelib, tag, message):
-    wheel = tmp_path / "hare_orm-1-py3-none-any.whl"
+    wheel = tmp_path / "hare_orm-1-cp314-cp314-win_amd64.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr("hare_orm-1.dist-info/WHEEL", f"Wheel-Version: 1.0\nRoot-Is-Purelib: {purelib}\nTag: {tag}\n")
     with pytest.raises(SystemExit, match=message):
-        wheel_builder.check(wheel, None, [])
+        wheel_builder.check(wheel, "cp314-cp314-win_amd64", [])

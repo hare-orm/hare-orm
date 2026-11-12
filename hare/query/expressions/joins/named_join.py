@@ -78,7 +78,7 @@ class NamedJoin(Expression, abstract=True):
             QueryError: The bare name compares a composite primary key with anything but ``isnull``.
         """
         first_segment = path.partition("__")[0]
-        if not path or (first_segment not in related_model._meta.fields_map and first_segment in set(Lookup)):
+        if not path or (first_segment not in related_model._meta.fields_map and first_segment in Lookup):
             # Whether a row was joined: a column of its primary key is NULL only without one.
             if path != Lookup.ISNULL:
                 self.raise_if_composite_primary_key(related_model)

@@ -21,6 +21,7 @@ from hare.fields.data.containers.container_field import ContainerField
 from hare.fields.field import Field
 from hare.fields.generated_field import GeneratedField
 from hare.models.write.rules.enums import WriteType
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.queryset.extensions.query_set_extensions import QuerySetExtensions
 from hare.typing_info.bound_models import BoundModels
 from hare.typing_info.filter_value_types import FilterValueTypes
@@ -159,7 +160,7 @@ class ModelRegistry:
                 )
             if dialect is None:
                 continue
-            for path in (*meta.fields_map, *(("pk",) if meta.has_primary_key else ())):
+            for path in (*meta.fields_map, *((PRIMARY_KEY_ALIAS,) if meta.has_primary_key else ())):
                 try:
                     lookups = meta.get_lookups(path, dialect)
                 except FieldError:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.caching.cache import Cache
 
@@ -48,7 +48,7 @@ class LookupPath:
         Returns:
             The path.
         """
-        paths = LookupPath.paths.get_model_bucket(model)
+        paths = LookupPath.paths.get_bucket(model)
         cache_key = (name, crosses_last)
         cached_path = paths.get(cache_key)
         if cached_path is not None:
@@ -59,7 +59,7 @@ class LookupPath:
         current_model = model
         position = 0
         while position < crossable_count and segments[position] in current_model._meta.fetch_fields:
-            relation = cast("RelationalField[Model]", current_model._meta.fields_map[segments[position]])
+            relation: RelationalField[Model] = current_model._meta.fields_map[segments[position]]  # type: ignore[assignment]
             relations.append(relation)
             current_model = relation.related_model
             position += 1

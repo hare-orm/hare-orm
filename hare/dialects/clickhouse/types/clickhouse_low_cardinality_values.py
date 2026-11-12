@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
+from hare.dialects.base.types.type_registry import TypeRegistry
 from hare.dialects.clickhouse.types.clickhouse_type_names import ClickhouseTypeNames
 from hare.dialects.clickhouse.types.constants import CLICKHOUSE_LOW_CARDINALITY_TYPE_NAMES
 from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
-    from hare.dialects.base.types.type_registry import TypeRegistry
-    from hare.dialects.clickhouse.fields.low_cardinality_field import LowCardinalityField
     from hare.fields.field import Field
-    from hare.models import Model
 
 
 class ClickhouseLowCardinalityValues:
@@ -40,7 +39,7 @@ class ClickhouseLowCardinalityValues:
             ConfigurationError: The base field's type is one ClickHouse keeps no ``LowCardinality``
                 of - only of text, ``FixedString`` and UUIDs.
         """
-        base_type = cast("LowCardinalityField", field).base_field.get_column_type(self.dialect)
+        base_type = field.base_field.get_column_type(self.dialect)  # type: ignore[attr-defined]
         type_name, __ = ClickhouseTypeNames.get_type_parts(
             ClickhouseTypeNames.get_type_without_nullable(ClickhouseTypeNames.get_server_type(base_type))
         )
@@ -51,45 +50,23 @@ class ClickhouseLowCardinalityValues:
             )
         return f"LowCardinality({base_type})"
 
-    def to_db(self, field: Field[Any], value: Any, instance: type[Model] | Model | None) -> Any:
-        """The value as the base field's column binds it.
+    def prepare_db(self, field: Field[Any]) -> Callable[[Any, Any], Any]:
+        """Bind the inner writer while retaining the outer field's NULL validation."""
+        write = TypeRegistry.get_db_writer(self.types, field.base_field)  # type: ignore[attr-defined]
 
-        Args:
-            field: The low cardinality field.
-            value: The Python value.
-            instance: The model (class) it is written or compared for.
+        def write_value(value: Any, instance: Any) -> Any:
+            if value is None:
+                field.validate(value)
+                return None
+            return write(value, instance)
 
-        Returns:
-            The value - None for None, refused where the field holds no NULL.
-        """
-        if value is None:
-            field.validate(value)
-            return None
-        return self.types.get_db_value(cast("LowCardinalityField", field).base_field, value, instance)
+        return write_value
 
-    def to_lookup(self, field: Field[Any], value: Any, instance: type[Model] | Model | None) -> Any:
-        """The value a filter compares, as the base field's column binds it.
+    def prepare_lookup(self, field: Field[Any]) -> Callable[[Any, Any], Any]:
+        """Comparisons retain the base field's lookup contract, including NULL."""
+        return TypeRegistry.get_lookup_writer(self.types, field.base_field)  # type: ignore[attr-defined]
 
-        Args:
-            field: The low cardinality field.
-            value: The Python value.
-            instance: The model (class) the filter is built for.
-
-        Returns:
-            The value.
-        """
-        return self.types.get_lookup_value(cast("LowCardinalityField", field).base_field, value, instance)
-
-    def to_python(self, field: Field[Any], value: Any) -> Any:
-        """The Python value the base field reads.
-
-        Args:
-            field: The low cardinality field.
-            value: The value the driver returned.
-
-        Returns:
-            The value.
-        """
-        if value is None:
-            return None
-        return self.types.get_python_value(cast("LowCardinalityField", field).base_field, value)
+    def prepare_python(self, field: Field[Any]) -> Callable[[Any], Any]:
+        """Bind the inner reader without passing an outer NULL through it."""
+        read = TypeRegistry.get_python_reader(self.types, field.base_field)  # type: ignore[attr-defined]
+        return lambda value: None if value is None else read(value)

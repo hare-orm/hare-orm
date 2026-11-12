@@ -2,15 +2,30 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from operator import attrgetter
-from typing import Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
-from hare.query.plans.constants import KEY_ONLY_PLAN_PART_TYPES
-from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
+from hare.classes.deferred_import import DeferredImport
+from hare.query.expressions.constants import LITERAL_CAST_SQL_TYPE, PLAIN_VALUE_TYPES
+from hare.query.plans.constants import (
+    ARGUMENT_PLAN_PART_TYPES,
+    CALLED_PLAN_PART_TYPES,
+    EXPRESSION_PLAN_PART_TYPES,
+    KEY_ONLY_PLAN_PART_TYPES,
+    LITERAL_PLAN_PART_TYPES,
+    QUERY_PLAN_PART_TYPES,
+    SEQUENCE_PLAN_PART_TYPES,
+)
+from hare.query.plans.description.declared_plan_parts import BoundPlanParts
 from hare.query.plans.description.plan_context import PlanContext
 from hare.query.plans.description.plan_description import PlanDescription
 from hare.query.plans.description.plan_parts import PlanParts
 from hare.query.plans.enums import PlanPartType
 from hare.query.plans.plan_origins import PlanOrigins
+
+if TYPE_CHECKING:
+    from hare.query.plans.description.filter_plan_descriptions import FilterPlanDescriptions
+    from hare.query.plans.description.plannable import Plannable
+    from hare.query.query_connection import QueryConnection
 
 
 class PlanDescriberCompiler:
@@ -21,6 +36,18 @@ class PlanDescriberCompiler:
     """
 
     ORIGIN_SLOTS = ("_plan_origin", "_value_origins")
+    #: ``FilterPlanDescriptions`` - imported at its first read, as its module imports this one.
+    filter_plan_descriptions: ClassVar[DeferredImport[type[FilterPlanDescriptions]]] = DeferredImport(
+        "hare.query.plans.description.filter_plan_descriptions", "FilterPlanDescriptions"
+    )
+    #: ``Plannable`` - imported at its first read, as its module imports this one.
+    plannable_class: ClassVar[DeferredImport[type[Plannable]]] = DeferredImport(
+        "hare.query.plans.description.plannable", "Plannable"
+    )
+    #: ``QueryConnection`` - imported at its first read, as its module imports this one.
+    query_connection: ClassVar[DeferredImport[type[QueryConnection]]] = DeferredImport(
+        "hare.query.query_connection", "QueryConnection"
+    )
 
     @staticmethod
     def compile(describer_class: type) -> Callable[[Any, PlanContext], PlanDescription | None]:
@@ -35,12 +62,14 @@ class PlanDescriberCompiler:
         Raises:
             TypeError: A declaration uses an unknown part type.
         """
-        parts = tuple(describer_class.plan_parts)  # type: ignore[attr-defined]
-        for attribute, part_type in parts:
+        declared_parts = tuple(describer_class.plan_parts)  # type: ignore[attr-defined]
+        for attribute, part_type in declared_parts:
             if all(part_type is not candidate for candidate in PlanPartType):
                 raise TypeError(
                     f"{describer_class.__qualname__}.plan_parts: unknown part type {part_type!r} of {attribute!r}"
                 )
+        # Each attribute's reader made once - not on every description.
+        parts = tuple((attribute, attrgetter(attribute), part_type) for attribute, part_type in declared_parts)
 
         def describe(obj: Any, context: PlanContext) -> PlanDescription | None:
             return PlanDescriberCompiler.describe(obj, context, parts)
@@ -48,13 +77,13 @@ class PlanDescriberCompiler:
         return describe
 
     @staticmethod
-    def describe(obj: Any, context: PlanContext, parts: DeclaredPlanParts) -> PlanDescription | None:
+    def describe(obj: Any, context: PlanContext, parts: BoundPlanParts) -> PlanDescription | None:
         """Combine the declared parts, retaining no execution values on the class.
 
         Args:
             obj: The expression or condition.
             context: The enclosing model and binding context.
-            parts: The declared parts in parameter order.
+            parts: The declared parts in parameter order, each with the reader of its attribute.
 
         Returns:
             The structure, values and origins, or None for an unplannable part.
@@ -62,19 +91,19 @@ class PlanDescriberCompiler:
         structures: list[Any] = [type(obj)]
         values: list[Any] = []
         origins: list[Any] | None = [] if PlanOrigins.records else None
-        key_positions: list[tuple[int, str, PlanPartType]] = []
-        for attribute, part_type in parts:
+        key_positions: list[tuple[int, Callable[[Any], Any], PlanPartType]] = []
+        for attribute, getter, part_type in parts:
             if part_type is PlanPartType.NONE:
                 continue
             if part_type is PlanPartType.KEEPS_PLAN_METHOD:
-                if not attrgetter(attribute)(obj)():
+                if not getter(obj)():
                     return None
                 continue
             if part_type in KEY_ONLY_PLAN_PART_TYPES:
-                key_positions.append((len(structures), attribute, part_type))
+                key_positions.append((len(structures), getter, part_type))
                 structures.append(None)
                 continue
-            description = PlanDescriberCompiler.describe_part(obj, attribute, part_type, context)
+            description = PlanDescriberCompiler.describe_part(obj, attribute, getter(obj), part_type, context)
             if description is None:
                 return None
             structures.append(description.structure)
@@ -85,8 +114,8 @@ class PlanDescriberCompiler:
                     if part_type is PlanPartType.JOIN_CONDITION_METHOD
                     else PlanParts.get_origins(description, origins)
                 )
-        for position, attribute, part_type in key_positions:
-            value = attrgetter(attribute)(obj)
+        for position, getter, part_type in key_positions:
+            value = getter(obj)
             if part_type is PlanPartType.KEY_METHOD:
                 value = value()
             elif part_type is PlanPartType.PLAN_KEY:
@@ -98,32 +127,24 @@ class PlanDescriberCompiler:
 
     @staticmethod
     def describe_part(
-        obj: Any, attribute: str, part_type: PlanPartType, context: PlanContext
+        obj: Any, attribute: str, value: Any, part_type: PlanPartType, context: PlanContext
     ) -> PlanDescription | None:
         """Read a value-bearing part through its declared protocol.
 
         Args:
             obj: The declaring object.
             attribute: Its attribute or method name.
+            value: The attribute's value - its method for a method part.
             part_type: How the value contributes to the statement.
             context: The enclosing binding context.
 
         Returns:
             The part's description, or None for an unplannable value.
         """
-        value = attrgetter(attribute)(obj)
-        if part_type in {
-            PlanPartType.VALUE_METHOD,
-            PlanPartType.ARGUMENT_METHOD,
-            PlanPartType.EXPRESSION_METHOD,
-            PlanPartType.JOIN_CONDITION_METHOD,
-            PlanPartType.QUERY_METHOD,
-        }:
+        if part_type in CALLED_PLAN_PART_TYPES:
             value = value()
-        if part_type in {PlanPartType.LITERAL, PlanPartType.VALUE_METHOD}:
+        if part_type in LITERAL_PLAN_PART_TYPES:
             if part_type is PlanPartType.LITERAL:
-                from hare.query.expressions.constants import LITERAL_CAST_SQL_TYPE
-
                 structure = (obj.get_cast_sql_type(value, LITERAL_CAST_SQL_TYPE), obj.get_literal_structure(value))
             else:
                 structure = PlanParts.get_literal_structure(value)
@@ -140,15 +161,15 @@ class PlanDescriberCompiler:
                 if PlanOrigins.records
                 else None,
             )
-        if part_type in {PlanPartType.ARGUMENT, PlanPartType.ARGUMENT_METHOD, PlanPartType.ENCODED_ARGUMENT}:
+        if part_type in ARGUMENT_PLAN_PART_TYPES:
             return PlanParts.describe_argument(
                 obj, attribute, value, context, binds_sequence=part_type is PlanPartType.ENCODED_ARGUMENT
             )
         if part_type is PlanPartType.FIELD:
             return PlanParts.describe_field(value, context)
-        if part_type in {PlanPartType.EXPRESSION, PlanPartType.EXPRESSION_METHOD, PlanPartType.JOIN_CONDITION_METHOD}:
+        if part_type in EXPRESSION_PLAN_PART_TYPES:
             return PlanDescription.ABSENT if value is None else value.get_plan_description(context)
-        if part_type in {PlanPartType.ARGUMENTS, PlanPartType.FIELDS, PlanPartType.EXPRESSIONS}:
+        if part_type in SEQUENCE_PLAN_PART_TYPES:
             descriptions = []
             for index, item in enumerate(value or ()):
                 if part_type is PlanPartType.ARGUMENTS:
@@ -165,14 +186,12 @@ class PlanDescriberCompiler:
             assert combined is not None  # nosec B101
             combined.structure = combined.structure[1:]
             return combined
-        if part_type in {PlanPartType.QUERY, PlanPartType.QUERY_METHOD}:
-            from hare.query.query_connection import QueryConnection
-
+        if part_type in QUERY_PLAN_PART_TYPES:
             description = value.get_plan_description(context)
             if description is None:
                 return None
             return PlanDescription(
-                (QueryConnection.get_pinned_connection_name(value), description.structure),
+                (PlanDescriberCompiler.query_connection.get_pinned_connection_name(value), description.structure),
                 description.values,
                 description.origins,
             )
@@ -192,10 +211,8 @@ class PlanDescriberCompiler:
         Returns:
             The description, or None for an empty or unsupported condition.
         """
-        from hare.query.expressions.constants import PLAIN_VALUE_TYPES
-        from hare.query.plans.description.filter_plan_descriptions import FilterPlanDescriptions
-        from hare.query.plans.description.plannable import Plannable
-
+        filter_plan_descriptions = PlanDescriberCompiler.filter_plan_descriptions
+        plannable = PlanDescriberCompiler.plannable_class
         if not filters:
             return None if not obj.children and obj.expression is None else PlanDescription.EMPTY
         if context.model is None or obj.names_generic_field(context.model):
@@ -209,8 +226,8 @@ class PlanDescriberCompiler:
                 values.append(value)
                 if origins is not None:
                     origins.append(PlanOrigins.get_value_origin(obj, key))
-            elif isinstance(value, Plannable):
-                description = FilterPlanDescriptions.get_filter_value_plan_description(value, context)
+            elif isinstance(value, plannable):
+                description = filter_plan_descriptions.get_filter_value_plan_description(value, context)
                 if description is None:
                     return None
                 structures.append((key, description.structure))
@@ -219,7 +236,7 @@ class PlanDescriberCompiler:
                     origins = PlanParts.get_origins(description, origins)
             else:
                 value_count = len(values)
-                structure = FilterPlanDescriptions.describe_value_filter(
+                structure = filter_plan_descriptions.describe_value_filter(
                     key, value, values, context.single_parameter_in_list_min_length
                 )
                 structures.append((key, structure))

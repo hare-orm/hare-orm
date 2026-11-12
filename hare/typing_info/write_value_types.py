@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Union, cast
+from typing import TYPE_CHECKING, Any, Union
 
 from hare.models.write.rules.enums import WriteType
 from hare.models.write.rules.row_write_rules import RowWriteRules
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.typing_info.declarations import ValueType
 
 if TYPE_CHECKING:
@@ -30,7 +31,7 @@ class WriteValueTypes:
                     *meta.fields_db_projection,
                     *(name for name in meta.fields_map if name in relations),
                     *meta.generic_foreign_key_fields,
-                    *(("pk",) if meta.has_primary_key else ()),
+                    *((PRIMARY_KEY_ALIAS,) if meta.has_primary_key else ()),
                 )
             )
         )
@@ -52,14 +53,18 @@ class WriteValueTypes:
         if write_type is not WriteType.INSERT:
             if name not in WriteValueTypes.get_names(model):
                 return None
-            names = (name,) if name == "pk" else RowWriteRules.get_stored_field_names(model, [name], ".update()")
+            names = (
+                (name,)
+                if name == PRIMARY_KEY_ALIAS
+                else RowWriteRules.get_stored_field_names(model, [name], ".update()")
+            )
             if any(
                 RowWriteRules.get_refusal_reason(model, column, write_type, ".update()", finds_rows_by_key=False)
                 is not None
                 for column in names
             ):
                 return None
-        if name == "pk":
+        if name == PRIMARY_KEY_ALIAS:
             if not meta.has_primary_key:
                 return None
             if meta.has_composite_primary_key:
@@ -67,7 +72,7 @@ class WriteValueTypes:
                     Union[(column.field_type, *column.get_accepted_value_types())] for column in meta.pk_fields
                 )
                 return ValueType(classes=(values,), accepts_expressions=accepts_expressions)
-            name = cast("str", meta.primary_key_attribute)
+            name = meta.primary_key_attribute  # type: ignore[assignment]
         if name in meta.generic_foreign_key_fields:
             field = meta.generic_foreign_key_fields[name]
             return ValueType(
@@ -77,7 +82,7 @@ class WriteValueTypes:
                 accepts_expressions=accepts_expressions,
             )
         if name in meta.foreign_key_fields or name in meta.one_to_one_fields:
-            relation = cast("RelationalField[Any]", meta.fields_map[name])
+            relation: RelationalField[Any] = meta.fields_map[name]  # type: ignore[assignment]
             return ValueType(
                 models=(relation.related_model,),
                 nullable=relation.null,

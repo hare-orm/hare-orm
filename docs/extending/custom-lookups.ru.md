@@ -88,6 +88,7 @@ DialectRegistry.get_dialect("postgresql").filter_operators.register_operator(
 |---|---|
 | `operator` | Строит условие — `(term, encoded_value) -> Criterion`. |
 | `value_encoder` | Преобразует значение фильтра — `(value, model, field, dialect)`; `None` — поле преобразует его так же, как свои значения. |
+| `value_encoder_builder` | Необязательная фабрика `(field, dialect) -> encoder`. Подготавливает постоянные преобразования поля до обработки значения. Полученный encoder принимает `(value, model, field, dialect)` и выполняет все проверки каждого значения. Обычный `value_encoder` продолжает поддерживаться. |
 | `array_element_field` | Поле, которым передаётся каждый элемент значения-списка. |
 | `array_element_fields` | Для каждой колонки ключа — поле, которым передаётся каждый элемент списка строк ключа. |
 | `text_function` | Превращает значение в текст, с которым сравнивает текстовый оператор. |
@@ -98,6 +99,11 @@ DialectRegistry.get_dialect("postgresql").filter_operators.register_operator(
 | `required_feature` | Флаг `Features`, нужный подключению для этого оператора; на подключении без него запрос даёт `UnSupportedError` до отправки SQL. |
 
 `lookup.with_changes(**changes)` — копия с заменёнными атрибутами.
+
+`lookup.get_value_encoder(field, dialect)` выбирает кодировщик для обычных полей, аннотаций
+и фильтров связей. Заданная фабрика имеет приоритет над `value_encoder`. Выбранный кодировщик
+преобразует значение и сохраняется при записи ссылки на параметр; запись ссылки не вызывает
+фабрику повторно. SQL-выражения передаются без кодирования значения.
 
 Встроенные операторы LIKE объявляют параметр шаблона при построении SQL.
 `LikePatternParameter` хранит исходный wrapper и флаги подстановки в начале и конце;

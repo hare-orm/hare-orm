@@ -35,6 +35,10 @@ class ObserverSet:
         from hare.instrumentation.observers.observer_dispatcher import ObserverDispatcher
 
         loop = asyncio.get_running_loop()
+        # Read without the lock (one read, atomic under the GIL hare runs with); it guards the making.
+        dispatcher = self.dispatchers.get(loop)
+        if dispatcher is not None:
+            return dispatcher
         with self.dispatch_lock:
             dispatcher = self.dispatchers.get(loop)
             if dispatcher is None:

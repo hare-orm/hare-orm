@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, Self, cast
+from typing import Any, Self
 
 from hare import fields
 from hare.contrib.versioning.constants import NEW_VERSION_EXCLUDED_FIELDS_META_OPTION
@@ -13,9 +13,6 @@ from hare.models.class_building.extension_model_options import ExtensionModelOpt
 from hare.query.expressions import Q
 from hare.query.scopes.row_scopes import RowScopes
 from hare.query.scopes.row_visibility import RowVisibility
-
-if TYPE_CHECKING:
-    from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 
 ExtensionModelOptions.allow(NEW_VERSION_EXCLUDED_FIELDS_META_OPTION)
 
@@ -69,7 +66,7 @@ class VersionedModel(Model):
             if exception:
                 raise exception()
             raise DoesNotExist(cls)
-        return cast("Self", obj)
+        return obj  # type: ignore[return-value]
 
     @classmethod
     async def get_last_visible_version_or_exception(
@@ -118,7 +115,7 @@ class VersionedModel(Model):
         # overriding the relation by name has to skip copying those columns too, or the stale
         # copied shadow value survives the exclusion or conflicts with the override.
         for field_name in (excluded_field_names | kwargs.keys()) & relation_field_names:
-            excluded.update(cast("ForeignKeyFieldInstance[Any]", self._meta.fields_map[field_name]).source_fields)
+            excluded.update(self._meta.fields_map[field_name].source_fields)  # type: ignore[attr-defined]
         if self._meta.soft_delete_field is not None:
             # A new version isn't born deleted.
             excluded.add(self._meta.soft_delete_field)

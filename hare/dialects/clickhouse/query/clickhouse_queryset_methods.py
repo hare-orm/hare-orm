@@ -16,6 +16,7 @@ from hare.dialects.clickhouse.query.constants import (
     CLICKHOUSE_MIN_SETTING_INTEGER,
 )
 from hare.exceptions import QueryError, UnSupportedError
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.expressions import Expression
 from hare.query.queryset.constants import MAX_TABLE_SAMPLE_PERCENT
 from hare.query.queryset.extensions.enums import ExtensionPhase
@@ -162,7 +163,7 @@ class ClickhouseQuerySetMethods:
         """
         if (
             isinstance(percent, bool)
-            or not isinstance(percent, int | float)
+            or not isinstance(percent, (int, float))
             or not math.isfinite(percent)
             or not 0 <= percent < MAX_TABLE_SAMPLE_PERCENT
         ):
@@ -237,7 +238,7 @@ class ClickhouseQuerySetMethods:
                     f"limit_by() takes {name} as an int from 0 to {CLICKHOUSE_MAX_ROW_COUNT}, got "
                     f"{ValueDescriptions.get_shown_value(value)}"
                 )
-        if not expressions or not all(isinstance(expression, str | Expression) for expression in expressions):
+        if not expressions or not all(isinstance(expression, (str, Expression)) for expression in expressions):
             raise QueryError(
                 f"limit_by() groups the rows by field names or expressions - at least one, got "
                 f"{ValueDescriptions.get_shown_value(expressions)}"
@@ -258,7 +259,7 @@ class ClickhouseQuerySetMethods:
             expressions = tuple(
                 name
                 for expression in expressions
-                for name in (meta.primary_key_attribute_names if expression == "pk" else (expression,))
+                for name in (meta.primary_key_attribute_names if expression == PRIMARY_KEY_ALIAS else (expression,))
             )
         terms = []
         for expression in expressions:

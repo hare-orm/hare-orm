@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any
 
 from hare.ddl.enums import GrantTarget
 from hare.dialects.postgresql.introspection.postgresql_object_grants import PostgresqlObjectGrants
-from hare.inspectdb.introspection.enums import SchemaPartType
+from hare.inspectdb.enums import SchemaPartType
 from hare.inspectdb.introspection.schema_part import SchemaPart
 
 if TYPE_CHECKING:

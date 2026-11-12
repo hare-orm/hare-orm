@@ -1,7 +1,7 @@
 """Prints the test tools of the lowest-dependencies run as requirements pinned to their
 ``poetry.lock`` versions.
 
-The run resolves hare's own dependencies - the ``[project]`` dependencies and every extra - to the
+The run resolves hare's own dependencies - the ``[project]`` dependencies and compatible extras - to the
 lowest versions their declared bounds allow (``uv pip compile --resolution lowest-direct``). The test
 tools (the ``test`` poetry group, and the groups the test environments install - ``pytz``,
 ``pyright-cli``: the run takes the tests of every environment) aren't hare's dependencies and declare

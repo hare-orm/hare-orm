@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from functools import reduce
-from typing import TYPE_CHECKING, Any, overload
+from typing import TYPE_CHECKING, Any, ClassVar, overload
 
+from hare.classes.deferred_import import DeferredImport
 from hare.sql.builder_methods import BuilderMethods
 from hare.sql.constants import DEFAULT_SQL_CONTEXT
 from hare.sql.exceptions import QueryException
@@ -19,6 +20,13 @@ from hare.sql.builder.tables.selectable import Selectable
 
 class Table(Selectable):
     """A table, qualified by its schema, and its alias in a query."""
+
+    #: ``Schema`` - imported at its first read, as its module imports this one.
+    schema_class: ClassVar[DeferredImport[type[Schema]]] = DeferredImport("hare.sql.builder.tables.schema", "Schema")
+    #: ``Query`` - imported at its first read, as its module imports this one.
+    default_query_class: ClassVar[DeferredImport[type[Query]]] = DeferredImport(
+        "hare.sql.builder.queries.query", "Query"
+    )
 
     @overload
     @staticmethod
@@ -37,17 +45,19 @@ class Table(Selectable):
         schema: str | list[str] | tuple[str, ...] | Schema | None,
     ) -> Schema | None:
         # A schema is given as its name, a list or tuple of the names of its path, a Schema, or None.
-        # Imported here: the modules import each other.
-        from hare.sql.builder.tables.schema import Schema
 
-        if isinstance(schema, Schema):
+        if isinstance(schema, Table.schema_class):
             return schema
         if isinstance(schema, (list, tuple)):
             if not schema or not all(isinstance(schema_name, str) for schema_name in schema):
                 raise QueryException(f"A table's schema takes names, got {schema!r}")
-            return reduce(lambda obj, schema_name: Schema(schema_name, parent=obj), schema[1:], Schema(schema[0]))
+            return reduce(
+                lambda obj, schema_name: Table.schema_class(schema_name, parent=obj),
+                schema[1:],
+                Table.schema_class(schema[0]),
+            )
         if schema is not None:
-            return Schema(schema)
+            return Table.schema_class(schema)  # type: ignore[arg-type]
         return None
 
     def __init__(
@@ -58,8 +68,6 @@ class Table(Selectable):
         query_class: type[Query] | None = None,
         table_options: tuple[Any, ...] = (),
     ) -> None:
-        # Imported here: the modules import each other.
-        from hare.sql.builder.queries.query import Query
 
         super().__init__(alias)
         #: The ``Meta.table_options`` of the model whose table it is - none for a table of no model; a
@@ -68,7 +76,7 @@ class Table(Selectable):
         self._table_name = name
         self._schema = self._init_schema(schema)
         if query_class is None:
-            query_class = Query
+            query_class = Table.default_query_class
         self._query_class = query_class
 
     def get_table_name(self) -> str:

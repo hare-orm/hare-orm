@@ -25,7 +25,7 @@ from hare.sql.functions.cast import Cast as CastTerm
 from hare.sql.functions.json.json_object import JsonObject as JsonObjectTerm
 from hare.sql.functions.json.json_value import JsonValue
 from hare.sql.terms.values.value_wrapper import ValueWrapper
-from hare.time import Timezone
+from hare.time.zone_settings import ZoneSettings
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
@@ -143,7 +143,7 @@ class JSONObject(Function):
                 expression_context.dialect,
             )
             term = self.get_typed_literal_term(term, value_type, expression_context)
-            terms.append(JsonValue(term, value_type, is_aware=Timezone.get_use_timezone()))
+            terms.append(JsonValue(term, value_type, is_aware=ZoneSettings.get_use_timezone()))
             if result.joins:
                 joins = ExpressionResult.dedup_joins(joins, result.joins)
         return terms, joins

@@ -11,7 +11,12 @@ from hare.instrumentation.capture.change_capturing import ChangeCapturing
 from hare.instrumentation.change_events import ChangeEvents
 from hare.instrumentation.enums import RowOperation
 from hare.models.write.write_steps import WriteSteps
+from hare.query.constants import PRIMARY_KEY_ALIAS
+from hare.query.execution.dependent_condition import DependentCondition
+from hare.query.key_columns import KeyColumns
+from hare.query.lookup_info.lookup_paths import LookupPaths
 from hare.query.queryset.relations.many_to_many.linked_keys import LinkedKeys
+from hare.query.queryset.relations.many_to_many.linked_rows_dependency import LinkedRowsDependency
 from hare.query.queryset.relations.many_to_many.many_to_many_members import ManyToManyMembers
 from hare.query.queryset.relations.many_to_many.through_defaults import ThroughDefaults
 from hare.query.queryset.relations.many_to_many.through_row_inserting import ThroughRowInserting
@@ -43,9 +48,37 @@ class ManyToManyRelation(RelatedQuerySet[TModel]):
         relation_rows: RelationRows | None = None,
     ) -> None:
         super().__init__(
-            many_to_many_field.related_model, (many_to_many_field.related_name,), obj, ("pk",), relation_rows
+            many_to_many_field.related_model,
+            (many_to_many_field.related_name,),
+            obj,
+            (PRIMARY_KEY_ALIAS,),
+            relation_rows,
         )
         self.field = many_to_many_field
+
+    def _bind(self) -> None:
+        """Choose the query declaration when binding, leaving fetched-row access independent of routing.
+
+        Custom manager querysets are preserved in both cases. Cross-connection reads declare
+        their through-table keys as an execution dependency of the ordinary queryset.
+        """
+        reads_linked_rows = (
+            any(
+                isinstance(dependency, LinkedRowsDependency) and dependency.relation is self
+                for dependency in self._execution_dependencies
+            )
+            if self._is_bound
+            else not self.field._generated and LookupPaths.crosses_connections(self.field)
+        )
+        if reads_linked_rows:
+            queryset = self.model._meta.manager.create_queryset()
+            dependency = LinkedRowsDependency(self)
+            queryset._execution_dependencies = (*queryset._execution_dependencies, dependency)
+            queryset._q_objects.append(DependentCondition(dependency))
+            queryset._call_signature = None
+            self._copy_bound_settings(queryset, None)
+            return
+        super()._bind()
 
     def __getstate__(self) -> dict[str, Any]:
         state = super().__getstate__()
@@ -149,8 +182,9 @@ class ManyToManyRelation(RelatedQuerySet[TModel]):
             await ThroughRowUnlinking.remove_or_clear(self, related_instances, using)
             return
         connection = Connections.get_client(using) or ThroughRows.through_table_connection(self, for_write=True)
+        writers = KeyColumns.get_instance_writers(self.model._meta, connection.dialect.types)
         forward_pk_values = [
-            ManyToManyMembers.get_member_pk_db_values(self, member, connection.dialect.types)
+            ManyToManyMembers.get_member_pk_db_values(self, member, writers=writers)
             for member in objs
             if not ManyToManyMembers.is_model_instance(member)
         ]
@@ -235,9 +269,9 @@ class ManyToManyRelation(RelatedQuerySet[TModel]):
         members = await self._get_set_members(objs)
         ManyToManyMembers.validate_owner_saved(self)
         connection = Connections.get_client(using) or ThroughRows.through_table_connection(self, for_write=True)
+        writers = KeyColumns.get_instance_writers(self.model._meta, connection.dialect.types)
         members_by_pk_values = {
-            ManyToManyMembers.get_member_pk_db_values(self, member, connection.dialect.types): member
-            for member in members
+            ManyToManyMembers.get_member_pk_db_values(self, member, writers=writers): member for member in members
         }
         # Checked before the first write - a database without transactions keeps what a failure leaves.
         ThroughDefaults.through_defaults_columns_and_values(self, through_defaults, connection.dialect.types)

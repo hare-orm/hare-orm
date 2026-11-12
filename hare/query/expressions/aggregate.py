@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from copy import copy
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import FieldError, QueryError, UnSupportedError
@@ -257,7 +257,7 @@ class Aggregate(Function):
         if ordering_key is term.args[0]:
             return term
         keyed_term = copy(term)
-        keyed_term.name = cast("str", self.keyed_function_name)
+        keyed_term.name = self.keyed_function_name  # type: ignore[assignment]
         keyed_term.args = [term.args[0], ordering_key]
         return keyed_term
 
@@ -273,18 +273,18 @@ class Aggregate(Function):
         """
         term = super()._get_function_term(function_arg, default_terms)
         if function_arg.aggregate_orderings:
-            term = cast("AggregateFunction", term).order_arguments(*function_arg.aggregate_orderings)
+            term = term.order_arguments(*function_arg.aggregate_orderings)  # type: ignore[attr-defined]
         if function_arg.aggregate_filter is None:
             return term
-        return cast("AggregateFunction", term).filter(function_arg.aggregate_filter)
+        return term.filter(function_arg.aggregate_filter)  # type: ignore[attr-defined]
 
     def get_function_term(  # type:ignore[override]
         self, field: ArithmeticExpression | HareSqlField | str, *default_values: Any
     ) -> DistinctOptionFunction:
-        function = cast("DistinctOptionFunction", super().get_function_term(field, *default_values))
+        function = super().get_function_term(field, *default_values)
         if self.distinct:
-            function = function.distinct()
-        return function
+            function = function.distinct()  # type: ignore[attr-defined]
+        return function  # type: ignore[return-value]
 
     def raise_if_values_not_ordered(self, dialect: Dialect, output_field: Field[Any]) -> None:
         """Refuses ``Min()``/``Max()`` of a value the database orders none of - before any SQL.

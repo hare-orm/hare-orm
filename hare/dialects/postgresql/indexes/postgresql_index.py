@@ -83,7 +83,7 @@ class PostgresqlIndex(PartialIndex):
 
         if not isinstance(dialect, PostgresqlDialect):
             raise UnSupportedError(
-                f"{type(self).__name__}(fields={list(self.get_declared_fields())!r}) is an index of PostgreSQL - the "
+                f"{type(self).__name__}(fields={self.get_declared_fields()!r}) is an index of PostgreSQL - the "
                 f"{dialect} dialect has none: declare an index of that database in the model, or change the migration"
             )
 

@@ -6,7 +6,6 @@ import pytest
 
 from hare.exceptions import ValidationError
 from hare.fields import JSONField
-from hare.fields.data.json.json_codec import JsonCodec
 
 pytestmark = pytest.mark.database_independent
 
@@ -20,10 +19,7 @@ def test_invalid_number_never_reaches_encoder(number):
     assert calls == []
 
 
-@pytest.mark.parametrize("orjson_available", [False, True])
-def test_long_integer_is_exact_after_preparation(monkeypatch, orjson_available):
-    if not orjson_available:
-        monkeypatch.setattr(JsonCodec, "orjson", None)
+def test_long_integer_is_exact_after_preparation():
     value = {"integer": 10**100 + 1}
     assert json.loads(JSONField().to_db_value(value, None)) == value
 

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
-from typing import TYPE_CHECKING, Any, ClassVar, Self, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Self, TypeVar
 
+from hare.classes.deferred_import import DeferredImport
 from hare.sql.terms.node_traversal import NodeTraversal
 
 if TYPE_CHECKING:
+    from hare.sql.terms.functions.aggregate_function import AggregateFunction
     from hare.sql.terms.term import Term
 
 TNode = TypeVar("TNode", bound="Node")
@@ -14,6 +16,11 @@ TMatch = TypeVar("TMatch")
 
 class Node:
     """The base of every part of a statement - the nodes of a tree its SQL is written from."""
+
+    #: ``AggregateFunction`` - imported at its first read, as its module imports this one.
+    aggregate_function_class: ClassVar[DeferredImport[type[AggregateFunction]]] = DeferredImport(
+        "hare.sql.terms.functions.aggregate_function", "AggregateFunction"
+    )
 
     is_aggregate: bool | None = None
     #: A window function call - computed after grouping, so an aggregate inside it never groups
@@ -58,7 +65,7 @@ class Node:
         """Rebuild declared inputs while preserving node-specific rendering metadata."""
         from hare.sql.terms.node_structure import NodeStructure
 
-        return cast("Self", NodeStructure.rebuild(self, attributes))
+        return NodeStructure.rebuild(self, attributes)  # type: ignore[return-value]
 
     def get_children(self) -> Iterator[Node]:
         """Direct structural children, in SQL traversal order; literals remain opaque."""
@@ -94,15 +101,13 @@ class Node:
         Returns:
             True when the query needs grouping for this node and it belongs in HAVING, not WHERE.
         """
-        from hare.sql.terms.functions.aggregate_function import AggregateFunction
-
         for node in NodeTraversal.walk(self, lambda child: not child.is_subquery):
             if node.is_subquery:
                 if node.is_aggregate:
                     return True
             elif node.is_analytic:
                 continue
-            elif isinstance(node, AggregateFunction):
+            elif isinstance(node, Node.aggregate_function_class):
                 return True
             else:
                 continue
@@ -158,4 +163,4 @@ class Node:
             return []
         if self.contains_aggregate:
             return self.get_group_by_column_terms()
-        return [cast("Term", self)]
+        return [self]  # type: ignore[list-item]

@@ -290,9 +290,9 @@ async def test_early_init():
         pytest.param(
             "import sys\n"
             "from hare.dialects.dialect_registry import DialectRegistry\nfrom hare.core.registries import Registries\n"
-            "from hare.time.timezone import Timezone\n"
+            "from hare.time.zone_names import ZoneNames\n"
             "DialectRegistry.load_builtin_dialects()\n"
-            "Timezone.validate('UTC')\n"
+            "ZoneNames.validate('UTC')\n"
             "print('sqlite3' in sys.modules, 'importlib.resources' in sys.modules)\n",
             ["False False"],
             id="loading_the_builtin_dialects_imports_no_sqlite3_and_no_zone_data",

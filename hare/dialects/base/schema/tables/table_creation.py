@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import heapq
 from collections.abc import Sequence
-from typing import cast
 
 from hare.ddl.conditions.constraint_condition import ConstraintCondition
 from hare.ddl.constraints.check_constraint import CheckConstraint
@@ -178,9 +177,7 @@ class TableCreation(SchemaEditorPart):
 
         many_to_many_tables_sql = []
         for many_to_many_field_name in sorted(model._meta.many_to_many_fields):
-            many_to_many_field = cast(
-                "ManyToManyFieldInstance[Model]", model._meta.fields_map[many_to_many_field_name]
-            )
+            many_to_many_field: ManyToManyFieldInstance[Model] = model._meta.fields_map[many_to_many_field_name]  # type: ignore[assignment]
             if (many_to_many_field.through_schema or schema, many_to_many_field.through) in model_table_keys:
                 continue
             if many_to_many_create_string := self.get_many_to_many_table_definition(model, many_to_many_field, safe):
@@ -377,7 +374,7 @@ class TableCreation(SchemaEditorPart):
         """
         from hare.query.key_columns import KeyColumns
 
-        pk_fields = target_meta.pk_fields if target_meta.has_composite_primary_key else (target_meta.pk,)
+        pk_fields = target_meta.pk_fields
         pk_columns = KeyColumns.get_source_columns(target_meta)
         target_table = self.editor.get_referenced_table_sql(target_meta.db_table, target_meta.schema)
         # on_delete=SET_NULL needs nullable columns - on both sides, as the backward field has the
@@ -658,7 +655,7 @@ class TableCreation(SchemaEditorPart):
             The constraint.
         """
         key_field = model._meta.fields_map[key_field_name]
-        foreign_key_field = cast("ForeignKeyFieldInstance[Model]", key_field.reference)
+        foreign_key_field: ForeignKeyFieldInstance[Model] = key_field.reference  # type: ignore[assignment]
         db_field = model._meta.fields_db_projection[key_field_name]
         to_field_name = (
             foreign_key_field.to_field_instance.source_field or foreign_key_field.to_field_instance.model_field_name

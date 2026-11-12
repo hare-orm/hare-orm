@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 from hare.exceptions import ConfigurationError
 from hare.migrations.constants import MIGRATION_NUMBER_RE
@@ -76,29 +76,30 @@ class MigrationSquasher:
         if len(plan) == 1:
             return SquashedMigration(writer=None, replaced_names=[plan[0].name])
 
-        migrations = [cast("Migration", loader.graph.nodes[key]) for key in plan]
+        migrations = [loader.graph.nodes[key] for key in plan]
         replaced: list[tuple[str, str]] = []
         for key, migration in zip(plan, migrations, strict=True):
-            replaced.extend(migration.replaces or [(key.app_label, key.name)])
+            replaced.extend(migration.replaces or [(key.app_label, key.name)])  # type: ignore[union-attr]
         replaced_keys = {MigrationKey(app_label=label, name=name) for label, name in replaced} | set(plan)
         operations: list[Operation] = []
         elided_operation_count = 0
         dependencies: list[Any] = []
         run_before: list[tuple[str, str]] = []
+        squashed_keys = set(plan)
         for migration in migrations:
-            for operation in migration.operations:
+            for operation in migration.operations:  # type: ignore[union-attr]
                 if getattr(operation, "elidable", False):
                     elided_operation_count += 1
                     continue
                 operations.append(operation)
-            for dependency in migration.dependencies:
+            for dependency in migration.dependencies:  # type: ignore[union-attr]
                 dependency_key = MigrationKey(app_label=dependency[0], name=dependency[1])
                 if dependency_key in replaced_keys:
                     continue
-                self.raise_if_squash_makes_cycle(loader, migration, dependency_key, set(plan))
+                self.raise_if_squash_makes_cycle(loader, migration, dependency_key, squashed_keys)
                 if dependency not in dependencies:
                     dependencies.append(dependency)
-            for successor in migration.run_before:
+            for successor in migration.run_before:  # type: ignore[union-attr]
                 if (
                     MigrationKey(app_label=successor[0], name=successor[1]) not in replaced_keys
                     and successor not in run_before
@@ -111,11 +112,10 @@ class MigrationSquasher:
                 label: config.get("default_connection", "default") for label, config in self.apps_config.items()
             },
         )
-        squashed_keys = set(plan)
         for key in loader.graph.forwards_plan(end_key):
             if key not in squashed_keys:
                 self.raise_if_squash_makes_cycle(loader, migrations[-1], key, squashed_keys)
-                predecessor = cast("Migration", loader.graph.nodes[key])
+                predecessor: Migration = loader.graph.nodes[key]  # type: ignore[assignment]
                 state_before = predecessor.prepare(state_before).after
 
         name = self.get_squashed_name(loader, plan, squashed_name)

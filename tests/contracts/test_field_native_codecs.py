@@ -28,7 +28,14 @@ async def test_sampled_field_conversions_match_bound_readers_and_writers(contrac
         .orderby(table[model._meta.fields_db_projection["id"]])
     )
     _, raw_rows = await connection.execute(*query.get_parameterized_sql(), returns_rows=True, rows_by_position=True)
-    connections = [(str(connection.dialect.name), connection.dialect.types, connection.native_python_types)]
+    connections = [
+        (
+            str(connection.dialect.name),
+            connection.dialect.types,
+            connection.native_python_types,
+            getattr(connection, "parameter_adapters", None),
+        )
+    ]
     for position, field_name in enumerate(field_names):
         assert_reads_match(model, field_name, [row[position] for row in raw_rows], connections=connections)
         field = model._meta.fields_map[field_name]

@@ -11,6 +11,8 @@ from hare.contrib import test
 from hare.dialects.base.constants import SQL_DIALECT
 from hare.exceptions import ValidationError
 from hare.fields.data.choices import CharEnumFieldInstance, IntEnumFieldInstance
+from hare.models.instances.dirty_fields import DirtyFields
+from hare.native.native_modules import NativeModules
 from hare.query.rows.model_rows.model_columns import ModelColumns
 from hare.query.rows.native.hydration_layout import HydrationLayout
 from hare.query.rows.row_column import RowColumn
@@ -90,7 +92,13 @@ def _synthetic_row(decode_plan, values_by_name: dict) -> tuple:
 
 def _hydrate_models(model, decode_plan, is_partial: bool, rows: list[tuple]):
     columns = ModelColumns(model, decode_plan, tuple(range(len(decode_plan))), is_partial)
-    return [columns.hydrate(row, model.get_connection().connection_alias) for row in rows]
+    return NativeModules.rows.ModelResultLayout([columns], ()).read_batch(
+        rows,
+        0,
+        len(rows),
+        model.get_connection().connection_alias,
+        DirtyFields.snapshot_dirty_fields,
+    )
 
 
 def _hydrate_both(model, decode_plan, is_partial: bool, rows: list[tuple]):
@@ -389,10 +397,18 @@ async def test_reused_reader_observes_timezone_config_change(db):
     moment = datetime.datetime(2024, 1, 15, 12, 0)
     row = _synthetic_row(decode_plan, {"id": 1, "datetime": moment})
     with override_timezone(use_timezone=True, timezone="UTC"):
-        aware = columns.hydrate(row, None).datetime
+        aware = (
+            NativeModules.rows.ModelResultLayout((columns,), ())
+            .read_row(row, None, DirtyFields.snapshot_dirty_fields)
+            .datetime
+        )
         assert aware == moment.replace(tzinfo=datetime.UTC)
     with override_timezone(use_timezone=False, timezone="UTC"):
-        naive = columns.hydrate(row, None).datetime
+        naive = (
+            NativeModules.rows.ModelResultLayout((columns,), ())
+            .read_row(row, None, DirtyFields.snapshot_dirty_fields)
+            .datetime
+        )
         assert naive == moment
         assert naive.tzinfo is None
 

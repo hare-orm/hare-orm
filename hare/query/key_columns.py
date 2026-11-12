@@ -1,11 +1,20 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import QueryError, UnSupportedError
 from hare.fields.relations.relation_values import RelationValues
+from hare.native.native_modules import NativeModules
+from hare.query.constants import (
+    PRIMARY_KEY_ALIAS,
+    PRIMARY_KEY_IN_FILTER,
+    PRIMARY_KEY_NOT_FILTER,
+    PRIMARY_KEY_NOT_IN_FILTER,
+)
+from hare.query.rows.row_column import RowColumn
+from hare.query.rows.row_layout import RowLayout
 from hare.sql.builder.tables.table import Table
 from hare.sql.terms.criteria.criterion import Criterion
 from hare.sql.terms.term import Term
@@ -14,6 +23,7 @@ from hare.sql.terms.values.row_value_list import RowValueList
 
 if TYPE_CHECKING:
     from hare.dialects.base.types.type_registry import TypeRegistry
+    from hare.fields.field import Field
     from hare.models import Model
     from hare.models.meta_info import MetaInfo
     from hare.query.expressions.conditions.q import Q
@@ -58,7 +68,7 @@ class KeyColumns:
         for column in sorted(meta.db_fields):
             column_matches = inner_table[column].is_distinct_from(outer_table[column]).negate()
             correlation = column_matches if correlation is None else correlation & column_matches
-        return cast("Criterion", correlation)
+        return correlation  # type: ignore[return-value]
 
     @staticmethod
     def get_db_values(meta: MetaInfo, instance: Model, types: TypeRegistry) -> tuple[Any, ...]:
@@ -79,6 +89,95 @@ class KeyColumns:
                 for field, name in zip(meta.pk_fields, meta.primary_key_attribute_names, strict=True)
             )
         return (types.get_db_value(meta.pk, instance.pk, instance),)
+
+    @staticmethod
+    def get_instance_writers(meta: MetaInfo, types: TypeRegistry) -> tuple[tuple[str, Callable[[Any, Any], Any]], ...]:
+        """Prepare key columns once, retaining scalar pk access and composite component order."""
+        if meta.has_composite_primary_key:
+            return tuple(
+                (name, types.get_db_writer(field))
+                for name, field in zip(meta.primary_key_attribute_names, meta.pk_fields, strict=True)
+            )
+        return ((PRIMARY_KEY_ALIAS, types.get_db_writer(meta.pk)),)
+
+    @staticmethod
+    def get_db_rows(meta: MetaInfo, instances: Iterable[Model], types: TypeRegistry) -> list[tuple[Any, ...]]:
+        """Write instance keys in row order, preparing each column once for this operation.
+
+        Each writer receives the actual instance. Scalar keys retain the model's ``pk`` access;
+        composite keys retain the declared component attributes and their order.
+        """
+        writers = KeyColumns.get_instance_writers(meta, types)
+        return [tuple(values) for values in NativeModules.rows.serialize_instances(instances, writers)]
+
+    @staticmethod
+    def write_rows(
+        fields: Sequence[Field[Any]],
+        rows: Iterable[Sequence[Any]],
+        types: TypeRegistry,
+        instance: type[Model] | Model | None,
+    ) -> list[tuple[Any, ...]]:
+        """Write raw key tuples through one prepared column layout, without reordering checks."""
+        writers = tuple(types.get_db_writer(field) for field in fields)
+        return [tuple(write(value, instance) for write, value in zip(writers, row, strict=True)) for row in rows]
+
+    @staticmethod
+    def transfer_rows(
+        fields: Sequence[Field[Any]],
+        columns: Sequence[str],
+        rows: Iterable[Any],
+        source_types: TypeRegistry,
+        target_types: TypeRegistry,
+        instance: type[Model] | Model | None,
+    ) -> list[tuple[Any, ...]]:
+        """Read stored keys on their source and write them for their destination.
+
+        NULL filtering and visibility belong to the caller. Only fixed column metadata is
+        prepared here; connections and row values are not retained beyond the operation.
+        """
+        transfer = KeyColumns.get_transfer_encoder(fields, columns, source_types, target_types)
+        return [transfer(row, instance) for row in rows]
+
+    @staticmethod
+    def get_transfer_encoder(
+        fields: Sequence[Field[Any]],
+        columns: Sequence[str],
+        source_types: TypeRegistry,
+        target_types: TypeRegistry,
+    ) -> Callable[[Any, Any], tuple[Any, ...]]:
+        """Prepare key transfer for callers interleaving it with other row-local work."""
+        conversions = tuple(
+            (column, source_types.get_python_reader(field), target_types.get_db_writer(field))
+            for field, column in zip(fields, columns, strict=True)
+        )
+        return lambda row, instance: tuple(write(read(row[column]), instance) for column, read, write in conversions)
+
+    @staticmethod
+    def normalize_values(
+        fields: Sequence[Field[Any]],
+        values: Sequence[Any],
+        types: TypeRegistry,
+        instance: type[Model] | Model | None,
+    ) -> tuple[Any, ...]:
+        """Return decoded values after storage conversion, without matching or hashing policy."""
+        conversions = tuple((types.get_db_writer(field), types.get_python_reader(field)) for field in fields)
+        return tuple(read(write(value, instance)) for (write, read), value in zip(conversions, values, strict=True))
+
+    @staticmethod
+    def read_rows(
+        fields: Sequence[Field[Any]],
+        columns: Sequence[str | int],
+        rows: Iterable[Any],
+        types: TypeRegistry,
+    ) -> list[tuple[Any, ...]]:
+        """Decode key columns without collapsing all-NULL composite keys or changing row order."""
+        layout = RowLayout(
+            tuple(
+                RowColumn(column, types.get_python_reader(field))
+                for field, column in zip(fields, columns, strict=True)
+            )
+        )
+        return [layout.read(row) for row in rows]
 
     @staticmethod
     def row_is_in(columns: Sequence[Term], value_rows: Sequence[Sequence[Any]]) -> Criterion:
@@ -168,11 +267,13 @@ class KeyColumns:
         from hare.query.expressions.subqueries.subquery import Subquery
         from hare.query.queryset.query_specification import QuerySpecification
 
-        if key in {"pk__not", "pk__not_in"}:
+        if key in {PRIMARY_KEY_NOT_FILTER, PRIMARY_KEY_NOT_IN_FILTER}:
             # The key's columns are never NULL - the negation is the plain NOT of the comparison.
-            positive_q = KeyColumns.get_primary_key_q(model, "pk" if key == "pk__not" else "pk__in", value)
+            positive_q = KeyColumns.get_primary_key_q(
+                model, PRIMARY_KEY_ALIAS if key == PRIMARY_KEY_NOT_FILTER else PRIMARY_KEY_IN_FILTER, value
+            )
             return None if positive_q is None else ~positive_q
-        if key == "pk":
+        if key == PRIMARY_KEY_ALIAS:
             return KeyColumns.get_comparison_q(
                 key,
                 primary_key_attribute,
@@ -182,7 +283,7 @@ class KeyColumns:
                 accepts_instances=False,
                 reads_outer_references=True,
             )
-        if key != "pk__in":
+        if key != PRIMARY_KEY_IN_FILTER:
             return None
         if isinstance(value, (QuerySpecification, Subquery, KeyRowsQuery)):
             return Q(pk__in=value)
@@ -237,11 +338,11 @@ class KeyColumns:
 
         if accepts_instances and isinstance(item, Model):
             if instance_key_names is not None:
-                return tuple(RelationValues.get_relation_key_values(item, instance_key_names, f"Filter '{label}'"))
+                return RelationValues.get_relation_key_values(item, instance_key_names, f"Filter '{label}'")
             item = item.pk
         elif reads_outer_references and isinstance(item, OuterReference):
-            if item.field == "pk" or item.field.endswith("__pk"):
-                path_prefix = item.field.removesuffix("pk")
+            if item.field == PRIMARY_KEY_ALIAS or item.field.endswith("__pk"):
+                path_prefix = item.field.removesuffix(PRIMARY_KEY_ALIAS)
                 return tuple(OuterReference(f"{path_prefix}{key_name}") for key_name in key_names)
             return tuple(OuterReference(f"{item.field}_{key_name}") for key_name in key_names)
         if not isinstance(item, tuple) or len(item) != len(key_names):

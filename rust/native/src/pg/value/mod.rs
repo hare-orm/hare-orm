@@ -19,7 +19,10 @@ pub(crate) mod test_support;
 mod tests;
 
 pub(crate) use decode::{decode_pg_row_values, ServerTextForms};
-pub(crate) use encode::{BinaryParameter, RawWireValue};
+pub(crate) use encode::RawWireValue;
+// Written by the driver's COPY, built on Unix alone.
+#[cfg(unix)]
+pub(crate) use encode::BinaryParameter;
 
 use std::error::Error;
 use std::net::IpAddr;

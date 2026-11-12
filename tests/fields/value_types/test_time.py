@@ -18,6 +18,8 @@ from hare.query.filters import FieldLookups
 from hare.sql.constants import DEFAULT_SQL_CONTEXT
 from hare.sql.terms import Field as SqlField
 from hare.time import UTC, Timezone, ZoneInfo
+from hare.time.system_zone import SystemZone
+from hare.time.zone_names import ZoneNames
 from tests.shared_models import testmodels
 from tests.utils.timezone_context import override_timezone
 
@@ -312,7 +314,7 @@ async def test_datetime_field_to_db_value_normalizes_aware_value_when_use_tz_fal
             assert result == aware_dt
         else:
             assert Timezone.is_naive(result), f"Expected naive, got {result} with tzinfo={result.tzinfo}"
-            assert result == Timezone.get_system_local_naive(aware_dt)
+            assert result == SystemZone.get_system_local_naive(aware_dt)
 
 
 @pytest.mark.database_independent
@@ -714,7 +716,7 @@ async def test_datetime_filter_by_hour_use_tz_true_unaffected_by_missing_tzlocal
     model = testmodels.DatetimeFields
     with override_timezone(use_timezone=True, timezone="Europe/Berlin"):
         obj = await model.objects.create(datetime=datetime(2024, 1, 1, 10, 0, tzinfo=Timezone.default()))
-        with patch.object(Timezone, "get_tzlocal", staticmethod(lambda: None)):
+        with patch.object(SystemZone, "get_tzlocal", staticmethod(lambda: None)):
             assert await model.objects.filter(id=obj.id, datetime__hour=10).count() == 1
 
 
@@ -727,7 +729,7 @@ async def test_datetime_filter_by_hour_use_tz_false_raises_clear_error_without_t
     model = testmodels.DatetimeFields
     with override_timezone(use_timezone=False):
         obj = await model.objects.create(datetime=datetime(2024, 1, 1, 10, 0))
-        with patch.object(Timezone, "get_tzlocal", staticmethod(lambda: None)):
+        with patch.object(SystemZone, "get_tzlocal", staticmethod(lambda: None)):
             with pytest.raises(ConfigurationError, match="tzlocal"):
                 await model.objects.filter(id=obj.id, datetime__hour=10).count()
 
@@ -1118,7 +1120,7 @@ def test_timezone_parse_returns_the_same_cached_instance():
     assert Timezone.parse("US/Central") is Timezone.parse("US/Central")
 
     with override_timezone(use_timezone=True, timezone="Asia/Shanghai"):
-        assert Timezone.default() is Timezone.default() is Timezone.ZONES[("Asia/Shanghai",)]
+        assert Timezone.default() is Timezone.default() is ZoneNames.ZONES[("Asia/Shanghai",)]
 
 
 @pytest.mark.database_independent
@@ -1584,7 +1586,7 @@ async def test_pre_epoch_datetime_round_trips_with_use_tz_false(db):
 @pytest.mark.database_independent
 def test_system_local_conversion_falls_back_when_astimezone_fails():
     """`datetime.astimezone()` raises OSError before 1970 on Windows - the system zone is taken
-    from `Timezone.get_system_zone_fallback()` instead."""
+    from `SystemZone.get_system_zone_fallback()` instead."""
     aware = datetime(1965, 6, 1, 12, 0, tzinfo=UTC)
     fallback_zone = dt_timezone(timedelta(hours=3))
 
@@ -1596,10 +1598,10 @@ def test_system_local_conversion_falls_back_when_astimezone_fails():
 
     failing_aware = FailingDatetime(1965, 6, 1, 12, 0, tzinfo=UTC)
     failing_naive = FailingDatetime(1965, 6, 1, 12, 0)
-    with patch.object(Timezone, "get_system_zone_fallback", return_value=fallback_zone):
-        assert Timezone.get_system_local_naive(failing_aware) == datetime(1965, 6, 1, 15, 0)
-        assert Timezone.make_system_local_aware(failing_naive) == datetime(1965, 6, 1, 9, 0, tzinfo=UTC)
-    assert Timezone.get_system_local_naive(aware).tzinfo is None
+    with patch.object(SystemZone, "get_system_zone_fallback", return_value=fallback_zone):
+        assert SystemZone.get_system_local_naive(failing_aware) == datetime(1965, 6, 1, 15, 0)
+        assert SystemZone.make_system_local_aware(failing_naive) == datetime(1965, 6, 1, 9, 0, tzinfo=UTC)
+    assert SystemZone.get_system_local_naive(aware).tzinfo is None
 
 
 # ============================================================================
@@ -1637,10 +1639,9 @@ async def test_time_field_round_trips_and_filters_on_every_backend(db):
 
 @pytest.mark.database_independent
 def test_a_zone_name_is_spelled_as_the_zone_database_spells_it():
-    from hare.time import Timezone
 
-    assert Timezone.get_zone_name("europe/moscow") == "Europe/Moscow"
-    assert Timezone.get_zone_name("utc") == "UTC"
+    assert ZoneNames.get_zone_name("europe/moscow") == "Europe/Moscow"
+    assert ZoneNames.get_zone_name("utc") == "UTC"
     for name in ("UTC ", "Europe\\Moscow", 'a"b', "UTC\n"):
         with pytest.raises(ConfigurationError, match="Unknown timezone"):
-            Timezone.validate(name)
+            ZoneNames.validate(name)

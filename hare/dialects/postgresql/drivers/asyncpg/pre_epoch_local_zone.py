@@ -4,9 +4,9 @@ import datetime
 
 
 class PreEpochLocalZone(datetime.tzinfo):
-    """The system zone's offset attached to a naive datetime before 1970, which asyncpg can't read as
-    local time on Windows - a ``timestamptz`` takes the moment it names, a ``timestamp`` the wall-clock
-    time it was given, with the zone dropped again.
+    """The system zone's offset for a naive datetime whose local conversion fails near the range
+    boundary. A ``timestamptz`` takes the moment it names; a ``timestamp`` takes the original
+    wall-clock time, with this adapter's zone dropped again.
 
     Args:
         offset: The system zone's offset at that time.

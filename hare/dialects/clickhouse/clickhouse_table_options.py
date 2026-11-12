@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Iterable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Self
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.core.caching.cache import Cache
@@ -142,7 +142,7 @@ class ClickhouseTableOptions(TableOptions):
             len(setting) == 2
             and isinstance(setting[0], str)
             and setting[0].isidentifier()
-            and isinstance(setting[1], str | int)
+            and isinstance(setting[1], (str, int))
             for setting in self.settings
         ):
             raise ConfigurationError(
@@ -669,7 +669,7 @@ class ClickhouseTableOptions(TableOptions):
         if not self.keeps_row_versions():
             return queryset
         # A method the dialect adds to QuerySet.
-        return cast("QuerySet[Any]", queryset.final())  # type: ignore[attr-defined]
+        return queryset.final()  # type: ignore[attr-defined]
 
     def keeps_row_versions(self) -> bool:
         """Whether the engine keeps several versions of a row its merges and ``FINAL`` merge into one -
@@ -739,7 +739,7 @@ class ClickhouseTableOptions(TableOptions):
         Returns:
             The field names, the primary key's own left out.
         """
-        bucket = ClickhouseTableOptions.fixed_field_names.get_model_bucket(model)
+        bucket = ClickhouseTableOptions.fixed_field_names.get_bucket(model)
         fixed_field_names = bucket.get(id(self))
         if fixed_field_names is not None:
             return fixed_field_names
@@ -812,6 +812,6 @@ class ClickhouseTableOptions(TableOptions):
 
         if isinstance(value, bool):
             return "1" if value else "0"
-        if isinstance(value, int | float):
+        if isinstance(value, (int, float)):
             return repr(value)
         return CLICKHOUSE_DIALECT.literals.get_string_literal_sql(value)

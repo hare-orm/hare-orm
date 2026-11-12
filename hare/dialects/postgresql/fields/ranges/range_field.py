@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from functools import partial
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.dialects.postgresql.fields.constants import (
     RANGE_BOUND_PATH_FUNCTIONS,
@@ -85,7 +85,7 @@ class RangeField(Field[Range[Any]]):
     def get_bounds_type(self) -> Any:
         """The type of a range given as its ``(lower, upper)`` bounds - None for an unbounded side."""
         bound_type = self.get_bound_field().field_type
-        return cast("Any", tuple)[bound_type | None, bound_type | None]
+        return tuple[bound_type | None, bound_type | None]  # type: ignore[valid-type]
 
     def get_accepted_value_types(self) -> tuple[Any, ...]:
         return (self.get_bounds_type(),)
@@ -94,9 +94,9 @@ class RangeField(Field[Range[Any]]):
         """Equality, containment and position take a ``Range`` too; ``contains`` a ``Range`` or its
         ``(lower, upper)`` bounds."""
         if lookup in RANGE_VALUE_LOOKUPS:
-            return (cast("Any", Range)[self.get_bound_field().field_type],)
+            return (Range[self.get_bound_field().field_type],)  # type: ignore[misc]
         if lookup == Lookup.CONTAINS:
-            return (cast("Any", Range)[self.get_bound_field().field_type], self.get_bounds_type())
+            return (Range[self.get_bound_field().field_type], self.get_bounds_type())  # type: ignore[misc]
         return ()
 
     def get_path_segments(self) -> tuple[str, ...]:
@@ -164,7 +164,7 @@ class RangeField(Field[Range[Any]]):
         self.validate(value)
         if value is None:
             return None
-        written_range = cast("Range[Any]", self.get_written_range(value))
+        written_range: Range[Any] = self.get_written_range(value)  # type: ignore[assignment]
         if written_range.is_empty:
             return written_range
         range_value = Range(

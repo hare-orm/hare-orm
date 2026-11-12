@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.classes.value_descriptions import ValueDescriptions
@@ -110,7 +111,12 @@ class VectorField(Field[list[float]]):
 
     @staticmethod
     def encode_nearby_value(
-        value: tuple[Sequence[float], float], model: type[Model] | Model, field: Field[Any], dialect: Dialect
+        value: tuple[Sequence[float], float],
+        model: type[Model] | Model,
+        field: Field[Any],
+        dialect: Dialect,
+        *,
+        writer: Callable[[Any, Any], Any] | None = None,
     ) -> tuple[Any, float]:
         """Converts ``(query_vector, max_distance)`` - the vector the way the dialect stores the field.
 
@@ -127,7 +133,13 @@ class VectorField(Field[list[float]]):
             raise ValidationError(
                 f"{field.model_field_name}__nearby: the distance must be a finite number, got {max_distance!r}"
             )
-        return dialect.types.get_db_value(field, query_vector, model), float(max_distance)
+        writer = dialect.types.get_db_writer(field) if writer is None else writer
+        return writer(query_vector, model), float(max_distance)
+
+    @staticmethod
+    def get_nearby_encoder(field: Field[Any], dialect: Dialect) -> Callable[..., Any]:
+        """Prepare the vector writer while retaining the lookup's pair and distance checks."""
+        return partial(VectorField.encode_nearby_value, writer=dialect.types.get_db_writer(field))
 
     @staticmethod
     def get_nearby_criterion(term: Term, value: tuple[Any, float]) -> Term:
@@ -145,6 +157,7 @@ class VectorField(Field[list[float]]):
             VectorField.get_nearby_criterion,
             VectorField.encode_nearby_value,
             required_feature=VECTOR_SEARCH_REQUIRED_FEATURE,
+            value_encoder_builder=VectorField.get_nearby_encoder,
         )
 
     #: The field's own lookup, declared with the class - no query is built before it exists.

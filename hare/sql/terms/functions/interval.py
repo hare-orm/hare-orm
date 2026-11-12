@@ -5,6 +5,7 @@ import re
 
 from hare.exceptions import UnSupportedError
 from hare.sql.constants import DEFAULT_SQL_CONTEXT
+from hare.sql.enums import DatePart
 from hare.sql.exceptions import QueryException
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms.term import Term
@@ -32,7 +33,15 @@ class Interval(Term):
     is_aggregate = None
 
     units = ["years", "months", "days", "hours", "minutes", "seconds", "microseconds"]
-    labels = ["YEAR", "MONTH", "DAY", "HOUR", "MINUTE", "SECOND", "MICROSECOND"]
+    labels = [
+        DatePart.YEAR,
+        DatePart.MONTH,
+        DatePart.DAY,
+        DatePart.HOUR,
+        DatePart.MINUTE,
+        DatePart.SECOND,
+        DatePart.MICROSECOND,
+    ]
 
     trim_pattern = re.compile(r"(^0+\.)|(\.0+$)|(^[0\-.: ]+[\-: ])|([\-:. ][0\-.: ]+$)")
 
@@ -67,7 +76,7 @@ class Interval(Term):
             strict=True,
         ):
             if value:
-                if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                     raise QueryException(f"INTERVAL takes a finite number of {unit}, got {value!r}")
                 int_value = int(value)
                 setattr(self, unit, abs(int_value))
@@ -81,7 +90,7 @@ class Interval(Term):
 
     def get_expression_and_unit(self) -> tuple[str, str]:
         """The interval's quantity text and its unit (``DAY``, ``HOUR_MINUTE``, ...)."""
-        if self.largest == "MICROSECOND":
+        if self.largest == DatePart.MICROSECOND:
             expression = getattr(self, "microseconds")
             unit = "MICROSECOND"
 

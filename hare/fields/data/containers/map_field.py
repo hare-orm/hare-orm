@@ -96,24 +96,52 @@ class MapField(ContainerField):
     def encode_value(
         self, value: Any, instance: type[Model] | Model | None, types: TypeRegistry | None, path: str
     ) -> Any:
-        if not isinstance(value, Mapping):
-            raise ValidationError(f"{path}: expected a dict, got {self.get_value_for_message(value)}")
-        encoded = MapValue()
-        for key, item in value.items():
-            key_path = f"{path}[{key!r}]"
-            if key is None:
-                raise ValidationError(f"{key_path}: a map key is never None")
-            encoded[self.encode_child(self.key_field, key, instance, types, key_path)] = self.encode_child(
-                self.value_field, item, instance, types, key_path
-            )
-        return encoded
+        """Write one value through the same traversal a prepared column uses."""
+        return self._prepare_encoder(types)(value, instance, path)
+
+    def get_value_encoder(self, types: TypeRegistry | None) -> Callable[..., Any]:
+        """Prepare this shape while preserving an overridden encode_value hook."""
+        if getattr(self.encode_value, "__func__", None) is not MapField.encode_value:
+            return super().get_value_encoder(types)
+        return self._prepare_encoder(types)
+
+    def _prepare_encoder(self, types: TypeRegistry | None) -> Callable[..., Any]:
+        encode_key = self.get_child_encoder(self.key_field, types)
+        encode_item = self.get_child_encoder(self.value_field, types)
+
+        def encode_value(value: Any, instance: Any, path: str) -> Any:
+            if not isinstance(value, Mapping):
+                raise ValidationError(f"{path}: expected a dict, got {self.get_value_for_message(value)}")
+            encoded = MapValue()
+            for key, item in value.items():
+                key_path = f"{path}[{key!r}]"
+                if key is None:
+                    raise ValidationError(f"{key_path}: a map key is never None")
+                encoded_key = encode_key(key, instance, key_path)
+                encoded[encoded_key] = encode_item(item, instance, key_path)
+            return encoded
+
+        return encode_value
 
     def decode_value(self, value: Any, types: TypeRegistry | None) -> Any:
-        items = value.items() if isinstance(value, Mapping) else value
-        return {
-            self.decode_child(self.key_field, key, types): self.decode_child(self.value_field, item, types)
-            for key, item in items
-        }
+        """Read one value through the same traversal a prepared column uses."""
+        return self._prepare_decoder(types)(value)
+
+    def get_value_decoder(self, types: TypeRegistry | None) -> Callable[[Any], Any]:
+        """Prepare this shape while preserving an overridden decode_value hook."""
+        if getattr(self.decode_value, "__func__", None) is not MapField.decode_value:
+            return super().get_value_decoder(types)
+        return self._prepare_decoder(types)
+
+    def _prepare_decoder(self, types: TypeRegistry | None) -> Callable[[Any], Any]:
+        read_key = self.get_child_decoder(self.key_field, types)
+        read_item = self.get_child_decoder(self.value_field, types)
+
+        def decode_value(value: Any) -> Any:
+            items = value.items() if isinstance(value, Mapping) else value
+            return {read_key(key): read_item(item) for key, item in items}
+
+        return decode_value
 
     def normalize_value(self, value: Any, path: str) -> Any:
         if not isinstance(value, Mapping):

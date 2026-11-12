@@ -214,22 +214,19 @@ class ClickhouseSchemaEditor(BaseSchemaEditor):
         """Compile dependent projections and dictionaries around the shared field plan."""
         names = self.table_partitions.get_projection_names_reading_retyped_column(old_model, new_model, field_name)
         plan = super().get_alter_field_plan(old_model, new_model, field_name, candidate_referencing_models)
-        return SchemaChangePlan(
-            (
-                *(SchemaStatement(sql) for sql in self.table_partitions.get_projection_drop_sqls(old_model, names)),
-                *plan.steps,
-                *(
-                    SchemaStatement(sql, recovery=self.get_schema_recovery(new_model))
-                    for sql in self.table_partitions.get_projection_add_sqls(new_model, names)
-                ),
-                *(
-                    SchemaStatement(sql)
-                    for sql in self.dictionaries.get_retyped_field_dictionary_sqls(old_model, new_model, field_name)
-                ),
-            ),
-            before=plan.before,
-            after=plan.after,
+        steps = [
+            *(SchemaStatement(sql) for sql in self.table_partitions.get_projection_drop_sqls(old_model, names)),
+            *plan.steps,
+        ]
+        projection_sqls = self.table_partitions.get_projection_add_sqls(new_model, names)
+        if projection_sqls:
+            recovery = self.get_schema_recovery(new_model)
+            steps.extend(SchemaStatement(sql, recovery=recovery) for sql in projection_sqls)
+        steps.extend(
+            SchemaStatement(sql)
+            for sql in self.dictionaries.get_retyped_field_dictionary_sqls(old_model, new_model, field_name)
         )
+        return SchemaChangePlan(tuple(steps), before=plan.before, after=plan.after)
 
     def get_column_type_change_plan(
         self,

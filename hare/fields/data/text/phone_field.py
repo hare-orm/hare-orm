@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import importlib
 from types import ModuleType
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, overload
 
 from hare.exceptions import ConfigurationError
 from hare.fields.constants import E164_PHONE_PATTERN
@@ -92,7 +92,7 @@ class PhoneField(CharField[TStr]):
         Raises:
             ValidationError: ``phonenumbers`` can't read the number or finds it invalid.
         """
-        phonenumbers = cast("ModuleType", self.phonenumbers)
+        phonenumbers: ModuleType = self.phonenumbers  # type: ignore[assignment]
         try:
             parsed_number = phonenumbers.parse(number, self.region)
         except phonenumbers.NumberParseException:

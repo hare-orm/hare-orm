@@ -76,10 +76,10 @@ them:
   whether it has come by decides the query plan — with a parallel scan or without.
 - Before a load test, concurrent workers run every operation of the load, untimed. This warms the
   operations without guaranteeing preparation on each physical connection.
-- Most scenarios repeat 3–5 times; their median counts and all samples are retained. Before
-  each bulk insert or `get_or_create()` repetition, that scenario's rows are cleared outside
-  the timer. Sequential inserts accumulate rows until the next group; updates reuse the
-  changed rows. Deletes, many-to-many `add()` and the cold start run once.
+- Most scenarios repeat 3–5 times; their median counts and all samples are retained. Before each
+  bulk insert or `get_or_create()` repetition, that scenario's rows are cleared outside the timer.
+  Sequential inserts accumulate rows until the next group; updates reuse the changed rows. Deletes,
+  many-to-many `add()` and the cold start run once.
 - Each ORM runs in a process of its own. The runs go round after round, the ORMs in a shuffled order
   each round; a scenario's result is the median over the runs.
 - On Windows a run's process turns off its power throttling (EcoQoS): the scheduler otherwise may
@@ -110,15 +110,18 @@ draw the spread from the best run to the worst.
 
 ## Running it
 
+Use CPython 3.14 for the full set: its pinned drivers include ClickHouse TCP, which is not available
+on Python 3.15. The published development snapshot uses three rounds with `--size large --seed 1`.
+
 The servers, at 127.0.0.1: PostgreSQL on port 5433 with the user and password `postgres`
 (`make test_db_up` starts one) and ClickHouse with the password `clickhouse`, its HTTP interface on 8124
 and its native protocol on 9124 (`make test_clickhouse_up`). Each run creates a database of its own
 there, or a SQLite file in the temporary directory, and drops it afterwards.
 
 ```sh
-python -m venv .bench-venv
-.bench-venv/bin/pip install -e . -r benchmarks/requirements.txt   # .bench-venv\Scripts\pip on Windows
-.bench-venv/bin/python benchmarks/bench.py all
+python3.14 -m venv .bench-venv
+.bench-venv/bin/pip install -e . -r benchmarks/requirements.txt
+.bench-venv/bin/python benchmarks/bench.py all --runs 3 --size large --seed 1
 ```
 
 The `sqlalchemy-clickhouse` target runs in an environment of its own, `.bench-venv-clickhouse-sqlalchemy`:
@@ -126,7 +129,7 @@ clickhouse-sqlalchemy's asynchronous driver runs only on SQLAlchemy 2.0.30 and P
 other SQLAlchemy targets measure its current version.
 
 ```sh
-python3.12 -m venv .bench-venv-clickhouse-sqlalchemy               # py -3.12 on Windows
+python3.12 -m venv .bench-venv-clickhouse-sqlalchemy
 .bench-venv-clickhouse-sqlalchemy/bin/pip install -r benchmarks/requirements-clickhouse-sqlalchemy.txt
 ```
 
@@ -141,4 +144,26 @@ python benchmarks/bench.py all --targets hare-rust django
 python benchmarks/bench.py charts                        # the charts and pages again, from results.json
 ```
 
-Not measured here: network latency, several processes or cores, memory use.
+## <a id="comparing-changes"></a>Comparing changes
+
+Measure hare-orm on Linux. From a Windows or macOS development host, use a Linux container and keep
+the source trees, virtualenvs and temporary SQLite databases in its Linux filesystem. A host bind
+mount can dominate filesystem-heavy workloads; export results separately.
+
+Use the same Python, dependency versions, release build flags and server configuration for both
+revisions. Give each source tree and Python version a separate `CARGO_TARGET_DIR`; build its native
+extension from its own sources. Record `hare.__file__`, `rust.native.__file__` and the extension's
+SHA-256 alongside the source revision. Verify that the expected native API is present: a stale
+extension or an editable installation pointing at another tree invalidates the comparison.
+
+Run one benchmark process at a time, alternating revisions over several rounds. Keep CPU and memory
+limits, connection pools, concurrency, data size and seeds equal. Disclose database durability
+settings: `make test_db_up` disables PostgreSQL `fsync`, `synchronous_commit` and `full_page_writes`
+for tests. A SQLite file on tmpfs measures a different workload from a durable disk file; label it
+separately. Collect profiles in separate runs, since profiling changes throughput.
+
+Historical published results retain the system and library versions that produced them. They are
+not measurements of the current checkout. A release comparison requires fresh results for both
+revisions under the same conditions.
+
+Not measured here: several application processes, peak memory use or a controlled network-latency sweep.

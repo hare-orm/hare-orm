@@ -116,18 +116,25 @@ pub(crate) fn encode_array(items: &[Value], postgres_type: &Type, out: &mut Byte
 /// list - or reports why the nesting is not a valid rectangular array: a sub-array whose length
 /// differs from a sibling's, or a scalar/NULL element beside sibling sub-arrays.
 pub(crate) fn array_shape_and_leaves(items: &[Value]) -> Result<(Vec<usize>, Vec<&Value>), String> {
+    let mut leaves = Vec::new();
+    let shape = append_array_leaves(items, &mut leaves)?;
+    Ok((shape, leaves))
+}
+
+/// Append row-major leaves while checking the shape before any value is encoded.
+fn append_array_leaves<'a>(items: &'a [Value], leaves: &mut Vec<&'a Value>) -> Result<Vec<usize>, String> {
     if items.iter().all(|item| !matches!(item, Value::Array(_))) {
-        return Ok((vec![items.len()], items.iter().collect()));
+        leaves.extend(items.iter());
+        return Ok(vec![items.len()]);
     }
     let mut sub_shape: Option<Vec<usize>> = None;
-    let mut leaves = Vec::new();
     for item in items {
         let Value::Array(sub_items) = item else {
             return Err("a scalar or NULL element sits alongside a sub-array at the same nesting depth - every \
                  element at a given depth must itself be a sub-array of the same shape"
                 .to_string());
         };
-        let (shape, mut sub_leaves) = array_shape_and_leaves(sub_items)?;
+        let shape = append_array_leaves(sub_items, leaves)?;
         match &sub_shape {
             None => sub_shape = Some(shape),
             Some(expected) if *expected == shape => {}
@@ -137,11 +144,10 @@ pub(crate) fn array_shape_and_leaves(items: &[Value]) -> Result<(Vec<usize>, Vec
                 ));
             }
         }
-        leaves.append(&mut sub_leaves);
     }
     let mut full_shape = vec![items.len()];
     full_shape.extend(sub_shape.expect("items is non-empty in this branch"));
-    Ok((full_shape, leaves))
+    Ok(full_shape)
 }
 
 /// Rebuilds the nested `Value::Array` tree from wire-order dimension sizes and the flat,

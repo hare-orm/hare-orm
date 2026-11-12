@@ -7,7 +7,7 @@ import uuid
 from asyncio.events import AbstractEventLoop
 from collections.abc import AsyncGenerator, Callable, Coroutine, Iterable, Mapping
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any, ClassVar, Self, SupportsInt, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Self, SupportsInt, TypeVar
 
 from hare.core.resource_completion import ResourceCompletion
 from hare.dialects.base.client.connect_failure_reports import ConnectFailureReports
@@ -331,21 +331,6 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
                 )
         settings[POSTGRES_SESSION_TIME_ZONE_SETTING] = POSTGRES_SESSION_TIME_ZONE
         return settings
-
-    async def _run_with_command_timeout(self, function: CoroutineFunction[Any], *args: Any, **kwargs: Any) -> Any:
-        """Runs ``func(self, ...)``, cancelling it once ``command_timeout`` elapses. Enforced here:
-        asyncpg's own option waits for its cancel request to be answered, and rust_pg has none.
-
-        Raises:
-            TimeoutError: The call outlived ``command_timeout``.
-        """
-        try:
-            async with asyncio.timeout(self.command_timeout) as timeout_scope:
-                return await function(self, *args, **kwargs)
-        except TimeoutError:
-            if not timeout_scope.expired():
-                raise
-            raise TimeoutError(f"Command timed out after {self.command_timeout}s") from None
 
     @abc.abstractmethod
     async def create_connection(self, with_db: bool) -> None:
@@ -677,7 +662,7 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
             session_lock_timeout_sql = self.dialect.transactions.get_session_lock_timeout_sql(
                 max(1, round(seconds * 1000))
             )
-            await session_client.execute(cast("str", session_lock_timeout_sql))
+            await session_client.execute(session_lock_timeout_sql)  # type: ignore[arg-type]
             yield session_client
         finally:
             await session_client.close()

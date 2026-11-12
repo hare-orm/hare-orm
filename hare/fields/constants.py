@@ -21,12 +21,6 @@ SENSITIVE_VALUE_PLACEHOLDER = "<hidden>"
 #: The suffix of a blind index field's name and column - ``email`` -> ``email_blind_index``.
 BLIND_INDEX_NAME_SUFFIX = "_blind_index"
 
-#: orjson decodes an integer literal outside its range as a float - a JSON text with a run of at
-#: least this many digits is decoded by the standard library instead, which reads any int exactly.
-JSON_LONG_INTEGER_MIN_DIGITS = 19
-#: A run of JSON_LONG_INTEGER_MIN_DIGITS digits after JSON_DIGIT_MARKER_TABLE is applied.
-JSON_LONG_INTEGER_MARKER = b"1" * JSON_LONG_INTEGER_MIN_DIGITS
-
 #: The ``db_default`` of a field that declares none.
 DB_DEFAULT_NOT_SET = DbDefaultNotSet()
 

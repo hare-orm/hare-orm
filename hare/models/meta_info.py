@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable, Iterable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.core.caching.caches import Caches
-from hare.core.connections.connections import Connections
+from hare.core.connections.model_connection_choice import ModelConnectionChoice
+from hare.core.hare_context import HareContext
 from hare.ddl.constraints.unique_constraint import UniqueConstraint
 from hare.ddl.enums import RowLevelSecurity
 from hare.ddl.indexes.index import Index
@@ -19,7 +20,7 @@ from hare.ddl.security.policy import Policy
 from hare.ddl.table_options import TableOptions
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.dialects.base.literals.constants import SQL_NULL_BYTE
-from hare.exceptions import ConfigurationError, HareError, QueryError
+from hare.exceptions import ConfigurationError, HareError
 from hare.fields.constants import FOREIGN_KEY_COLUMN_SUFFIX, SCHEMA_TEXT_NULL_BYTE_MESSAGE
 from hare.fields.field import Field
 from hare.fields.relations.fields.backward_foreign_key_relation import BackwardForeignKeyRelation
@@ -32,9 +33,10 @@ from hare.instrumentation.capture.change_capturing import ChangeCapturing
 from hare.models.class_building.lazy_relation_fields import LazyRelationFields
 from hare.models.class_building.model_definition_checks import ModelDefinitionChecks
 from hare.models.class_building.schema_object_declarations import SchemaObjectDeclarations
-from hare.models.constants import META_ORDERING_ALIAS_PREFIX, MISSING_DEFAULT_CONNECTION_MESSAGE
+from hare.models.constants import META_ORDERING_ALIAS_PREFIX
 from hare.models.enums import ModelOption
-from hare.models.tenancy.tenant_row_level_security import TenantRowLevelSecurity
+from hare.models.tenancy.tenant_connection_checks import TenantConnectionChecks
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.expressions.ordering import Ordering
 from hare.query.lookup_info.lookup_info import LookupInfo
 from hare.query.lookup_info.lookup_info_builder import LookupInfoBuilder
@@ -109,7 +111,7 @@ class MetaInfo:
         "meta",
         "one_to_one_fields",
         "declared_field_names",
-        "pk",
+        PRIMARY_KEY_ALIAS,
         "primary_key_attribute",
         "pk_without_overlaps",
         "pk_fields",
@@ -284,8 +286,8 @@ class MetaInfo:
         self.basequery_all_fields: QueryBuilder = QueryBuilder()
         self.basetable: Table = Table("")
         self.primary_key_attribute: str | tuple[str, ...] = getattr(meta, ModelOption.PRIMARY_KEY_ATTRIBUTE, "")
-        #: Only set when primary_key_attribute is a tuple (composite PK) - the actual Field objects, in the
-        #: same order as primary_key_attribute. Empty for a single-column PK (use .pk instead).
+        #: The key conversion fields in key order: (pk,) for a scalar key, the component fields
+        #: for a composite key, or () without a primary key. Updated as relations are linked.
         self.pk_fields: tuple[Field[Any], ...] = ()
         #: Whether a composite primary key compares its last field WITHOUT OVERLAPS.
         self.pk_without_overlaps: bool = False
@@ -538,7 +540,7 @@ class MetaInfo:
             if isinstance(constraint, UniqueConstraint) and constraint.fields and constraint.condition is None
         )
         if self.has_composite_primary_key:
-            entries.append(cast("tuple[str, ...]", self.primary_key_attribute))
+            entries.append(self.primary_key_attribute)  # type: ignore[arg-type]
         return entries
 
     def is_relation_field_names(self, field_names: tuple[str, ...] | list[str]) -> bool:
@@ -721,9 +723,7 @@ class MetaInfo:
         Raises:
             ConfigurationError: No context is active, or the model has no default connection.
         """
-        if self.default_connection is None:
-            raise ConfigurationError(MISSING_DEFAULT_CONNECTION_MESSAGE.format(model_name=self._model.__name__))
-        return Connections.get(self.default_connection)
+        return ModelConnectionChoice.get_default(HareContext.require_current(), self._model)
 
     def check_tenant_client(self, client: DatabaseClient) -> None:
         """Checks a query of the model may run on a client - a ``Meta.tenant_schema`` model's on a
@@ -739,10 +739,7 @@ class MetaInfo:
             QueryError: No single tenant is active, or the query runs outside a transaction that set
                 its tenants.
         """
-        if self.tenant_schema and client.tenant_schema is None:
-            raise self.get_missing_tenant_schema_error(client)
-        if self.tenant_row_level_security and not getattr(client, "sets_tenants", False):
-            raise TenantRowLevelSecurity.get_missing_tenants_error(self._model, client)
+        return TenantConnectionChecks.check_tenant_client(self, client)
 
     def get_missing_tenant_schema_error(self, client: DatabaseClient) -> HareError:
         """The error of reaching a ``Meta.tenant_schema`` model's table through a client of no tenant.
@@ -754,15 +751,7 @@ class MetaInfo:
             ConfigurationError when the connection has no schema per tenant, else QueryError - no
             single tenant is active.
         """
-        if client.tenant_schema_template is None:
-            return ConfigurationError(
-                f"{self._model.__name__} has Meta.tenant_schema, but its connection "
-                f"{self.default_connection!r} has no tenant_schema_template"
-            )
-        return QueryError(
-            f"{self._model.__name__} has Meta.tenant_schema - its table is reached inside "
-            "Tenancy.scope(tenant) of a single tenant"
-        )
+        return TenantConnectionChecks.get_missing_tenant_schema_error(self, client)
 
     @property
     def ordering(self) -> tuple[tuple[str, Order], ...]:
@@ -778,20 +767,22 @@ class MetaInfo:
             unknown_fields = {
                 field_path
                 for field_path, _ in self._default_ordering
-                if field_path != "pk"
+                if field_path != PRIMARY_KEY_ALIAS
                 and field_path not in self.ordering_expressions
                 and field_path.partition("__")[0] not in self.fields
             }
             raise ConfigurationError(
                 f"Unknown fields {','.join(unknown_fields)} in default ordering for model {self._model.__name__}"
             )
-        if self._default_ordering and any(field_name == "pk" for field_name, _ in self._default_ordering):
+        if self._default_ordering and any(field_name == PRIMARY_KEY_ALIAS for field_name, _ in self._default_ordering):
             # Resolved here, not in finalise_fields(): self.primary_key_attribute is only final after
             # build_meta(). "pk" orders by every primary key column.
             self._default_ordering = tuple(
                 (ordering_field_name, order)
                 for field_name, order in self._default_ordering
-                for ordering_field_name in (self.primary_key_attribute_names if field_name == "pk" else (field_name,))
+                for ordering_field_name in (
+                    self.primary_key_attribute_names if field_name == PRIMARY_KEY_ALIAS else (field_name,)
+                )
             )
         return self._default_ordering
 
@@ -826,7 +817,7 @@ class MetaInfo:
         Returns:
             The description.
         """
-        lookup_infos = LookupInfoBuilder.lookup_infos.get_model_bucket(self._model)
+        lookup_infos = LookupInfoBuilder.lookup_infos.get_bucket(self._model)
         lookup_info = lookup_infos.get(key)
         if lookup_info is None:
             lookup_info = lookup_infos.store(key, LookupInfoBuilder.get_lookup_info(self._model, key, label=label))
@@ -851,7 +842,7 @@ class MetaInfo:
         self._check_bound()
         if dialect is None:
             dialect = self._model.get_connection().dialect
-        lookups_by_path = LookupInfoBuilder.lookups_by_path.get_model_bucket(self._model)
+        lookups_by_path = LookupInfoBuilder.lookups_by_path.get_bucket(self._model)
         cache_key = (path, dialect)
         lookups = lookups_by_path.get(cache_key)
         if lookups is None:
@@ -874,7 +865,7 @@ class MetaInfo:
             ConfigurationError: The model isn't bound yet (``is_bound``).
         """
         self._check_bound()
-        ordering_infos = LookupInfoBuilder.ordering_infos.get_model_bucket(self._model)
+        ordering_infos = LookupInfoBuilder.ordering_infos.get_bucket(self._model)
         ordering_info = ordering_infos.get(name)
         if ordering_info is None:
             ordering_info = ordering_infos.store(name, LookupInfoBuilder.get_ordering_info(self._model, name))
@@ -1001,7 +992,7 @@ class MetaInfo:
             # that alias) - resolving it to the real primary_key_attribute name is deferred to the `ordering`
             # property itself (see its own comment), so it must not be flagged unknown here.
             if (
-                field_name != "pk"
+                field_name != PRIMARY_KEY_ALIAS
                 and field_name not in self.ordering_expressions
                 and field_name.partition("__")[0] not in self.fields
             ):
@@ -1017,7 +1008,7 @@ class MetaInfo:
         Returns:
             The layout.
         """
-        layouts = HydrationLayout.layouts.get_model_bucket(self._model)
+        layouts = HydrationLayout.layouts.get_bucket(self._model)
         key = (connection.native_python_types, connection.dialect)
         layout = layouts.get(key)
         if layout is None:

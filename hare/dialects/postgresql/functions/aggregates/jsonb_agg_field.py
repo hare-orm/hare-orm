@@ -30,12 +30,9 @@ class JSONBAggField(JSONField[list[Any]]):
         json_field = GeneratedField.get_effective_field(self.element_field)
         if isinstance(json_field, JSONField):
             return [json_field.validate_declared_type(element) for element in data]
+        read = POSTGRESQL_DIALECT.types.get_python_reader(self.element_field)
         return [
-            None
-            if element is None
-            else POSTGRESQL_DIALECT.types.get_python_value(
-                self.element_field, JSONBAggField.get_numbers_of_texts(self.element_field, element)
-            )
+            None if element is None else read(JSONBAggField.get_numbers_of_texts(self.element_field, element))
             for element in data
         ]
 

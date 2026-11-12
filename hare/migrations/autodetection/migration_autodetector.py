@@ -318,7 +318,7 @@ class MigrationAutodetector:
         Returns:
             The keys of its leaf migrations.
         """
-        return list(self.loader.graph.leaf_nodes(app_label))
+        return self.loader.graph.leaf_nodes(app_label)
 
     def migration_name(self, app_label: str, new_state: State) -> tuple[str, bool]:
         """The name of the app's next migration - ``0001_initial`` for its first, else the next number

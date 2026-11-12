@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import sys
 from pathlib import Path
 from typing import ClassVar
 
@@ -9,11 +10,11 @@ import pytest
 from tests.matrix.constants import (
     EVERY_SUITE_ENVIRONMENT,
     NATIVE_MODULE,
-    NATIVE_REQUIREMENT,
     REQUIRES_MARKER,
     SUITE_ENVIRONMENT_OPTION,
     SUITE_ENVIRONMENTS,
 )
+from tests.matrix.matrix_catalog import MatrixCatalog
 from tests.matrix.suite_environment import SuiteEnvironment
 from tests.matrix.suite_requirements import SuiteRequirements
 
@@ -22,15 +23,11 @@ class SuiteEnvironments:
     """Which environment of ``SUITE_ENVIRONMENTS`` each test belongs to, and the tests of the one a run is
     in. The selection manifest declares module and directory import requirements without importing
     tests. A cell adds its declared requirements with ``@pytest.mark.requires("encryption")``.
-    A test runs in the
-    environment installing exactly the packages of what it requires - requiring pydantic and litestar is
-    requiring litestar, whose extra installs pydantic - and, unless it requires ``native`` (hare's
-    ``rust.native`` extension), in the environment of the same packages without the extension."""
+    A test runs in the environment installing exactly the packages of what it requires - requiring
+    pydantic and litestar is requiring litestar, whose extra installs pydantic."""
 
     #: The packages and groups the run's environment installs - set as pytest is configured.
     current_installed: ClassVar[frozenset[str]] = frozenset()
-    #: Whether the run's environment has rust.native - set as pytest is configured.
-    current_native: ClassVar[bool] = True
     #: Whether the run takes the tests of every environment (EVERY_SUITE_ENVIRONMENT) - a virtualenv
     #: installing everything.
     runs_every_environment: ClassVar[bool] = False
@@ -44,7 +41,7 @@ class SuiteEnvironments:
 
         Raises:
             pytest.UsageError: No environment has the name given, two environments install the same, or
-                rust.native is there in an environment without it, or missing in one with it.
+                rust.native isn't built.
         """
         try:
             SuiteRequirements.manifest.check_inventory()
@@ -55,13 +52,9 @@ class SuiteEnvironments:
         environment = cls.get(name)
         requirements = SuiteRequirements.get_requirements(environment)
         cls.current_installed = SuiteRequirements.get_installed(requirements)
-        cls.current_native = environment.native
-        environment_names_by_installation: dict[tuple[frozenset[str], bool], str] = {}
+        environment_names_by_installation: dict[frozenset[str], str] = {}
         for known_environment in SUITE_ENVIRONMENTS:
-            installation = (
-                SuiteRequirements.get_installed(SuiteRequirements.get_requirements(known_environment)),
-                known_environment.native,
-            )
+            installation = SuiteRequirements.get_installed(SuiteRequirements.get_requirements(known_environment))
             if installation in environment_names_by_installation:
                 raise pytest.UsageError(
                     f"the environments {environment_names_by_installation[installation]} and {known_environment.name} "
@@ -71,16 +64,9 @@ class SuiteEnvironments:
         try:
             importlib.import_module(NATIVE_MODULE)
         except ImportError as error:
-            if environment.native:
-                raise pytest.UsageError(
-                    f"the {environment.name} environment needs {NATIVE_MODULE} - build it (make build_native)"
-                ) from error
-        else:
-            if not environment.native:
-                raise pytest.UsageError(
-                    f"the {environment.name} environment has no {NATIVE_MODULE} - run it with "
-                    "-p tests.matrix.without_native"
-                )
+            raise pytest.UsageError(
+                f"the {environment.name} environment needs {NATIVE_MODULE} - build it (make build_native)"
+            ) from error
 
     @staticmethod
     def get(name: str) -> SuiteEnvironment:
@@ -95,10 +81,11 @@ class SuiteEnvironments:
         Raises:
             pytest.UsageError: No environment has the name.
         """
-        for environment in SUITE_ENVIRONMENTS:
+        environments = MatrixCatalog.get_environments(f"{sys.version_info.major}.{sys.version_info.minor}")
+        for environment in environments:
             if environment.name == name:
                 return environment
-        names = ", ".join(environment.name for environment in SUITE_ENVIRONMENTS)
+        names = ", ".join(environment.name for environment in environments)
         raise pytest.UsageError(f"{SUITE_ENVIRONMENT_OPTION}={name} - the environments are: {names}")
 
     @classmethod
@@ -144,12 +131,7 @@ class SuiteEnvironments:
         Returns:
             True when it requires a package the run's environment doesn't install.
         """
-        if cls.runs_every_environment:
-            return False
-        requirements = cls.get_path_requirements(path)
-        if NATIVE_REQUIREMENT in requirements and not cls.current_native:
-            return True
-        return not SuiteRequirements.get_installed(requirements - {NATIVE_REQUIREMENT}) <= cls.current_installed
+        return not SuiteRequirements.get_installed(cls.get_path_requirements(path)) <= cls.current_installed
 
     @classmethod
     def get_other_environment_items(cls, items: list[pytest.Item]) -> list[pytest.Item]:
@@ -180,14 +162,15 @@ class SuiteEnvironments:
                 SuiteRequirements.manifest.check_cell_requirements(item.path, requirements)
             except ValueError as error:
                 raise pytest.UsageError(f"{item.nodeid}: {error}") from None
-            installed = SuiteRequirements.get_installed(requirements - {NATIVE_REQUIREMENT})
+            installed = SuiteRequirements.get_installed(requirements)
             if installed not in known_installed:
                 raise pytest.UsageError(
                     f"{item.nodeid} requires {sorted(requirements)} - no environment of SUITE_ENVIRONMENTS installs "
                     "exactly that; add one to tests/matrix/catalog.toml [[environments]]"
                 )
             if cls.runs_every_environment:
-                continue
-            if installed != cls.current_installed or (NATIVE_REQUIREMENT in requirements and not cls.current_native):
+                if not installed <= cls.current_installed:
+                    other_items.append(item)
+            elif installed != cls.current_installed:
                 other_items.append(item)
         return other_items

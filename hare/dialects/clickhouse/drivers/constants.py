@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import datetime
 
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
+
 #: The DB_URL scheme and the connection config ``engine`` of the clickhouse-connect driver.
 CLICKHOUSE_CONNECT_DRIVER_NAME = "clickhouse+clickhouse-connect"
 #: The DB_URL scheme and the connection config ``engine`` of the clickhouse-driver driver.
@@ -61,29 +63,29 @@ CLICKHOUSE_UNKNOWN_DATABASE_ERROR_CODES = frozenset({81})
 
 #: The byte ClickHouse writes a type of no argument as, in a value of a ``Dynamic`` column's shared
 #: variant (the type's binary encoding).
-CLICKHOUSE_BINARY_PLAIN_TYPE_TAGS = {
-    "Nothing": 0x00,
-    "UInt8": 0x01,
-    "UInt16": 0x02,
-    "UInt32": 0x03,
-    "UInt64": 0x04,
-    "UInt128": 0x05,
-    "UInt256": 0x06,
-    "Int8": 0x07,
-    "Int16": 0x08,
-    "Int32": 0x09,
-    "Int64": 0x0A,
-    "Int128": 0x0B,
-    "Int256": 0x0C,
-    "Float32": 0x0D,
-    "Float64": 0x0E,
-    "Date": 0x0F,
-    "Date32": 0x10,
-    "String": 0x15,
-    "UUID": 0x1D,
-    "IPv4": 0x28,
-    "IPv6": 0x29,
-    "Bool": 0x2D,
+CLICKHOUSE_BINARY_PLAIN_TYPE_TAGS: dict[str, int] = {
+    ClickhouseTypeName.NOTHING: 0x00,
+    ClickhouseTypeName.UINT8: 0x01,
+    ClickhouseTypeName.UINT16: 0x02,
+    ClickhouseTypeName.UINT32: 0x03,
+    ClickhouseTypeName.UINT64: 0x04,
+    ClickhouseTypeName.UINT128: 0x05,
+    ClickhouseTypeName.UINT256: 0x06,
+    ClickhouseTypeName.INT8: 0x07,
+    ClickhouseTypeName.INT16: 0x08,
+    ClickhouseTypeName.INT32: 0x09,
+    ClickhouseTypeName.INT64: 0x0A,
+    ClickhouseTypeName.INT128: 0x0B,
+    ClickhouseTypeName.INT256: 0x0C,
+    ClickhouseTypeName.FLOAT32: 0x0D,
+    ClickhouseTypeName.FLOAT64: 0x0E,
+    ClickhouseTypeName.DATE: 0x0F,
+    ClickhouseTypeName.DATE32: 0x10,
+    ClickhouseTypeName.STRING: 0x15,
+    ClickhouseTypeName.UUID: 0x1D,
+    ClickhouseTypeName.IPV4: 0x28,
+    ClickhouseTypeName.IPV6: 0x29,
+    ClickhouseTypeName.BOOL: 0x2D,
 }
 #: The type named by each byte of a type of no argument.
 CLICKHOUSE_BINARY_PLAIN_TYPES_BY_TAG = {tag: type_name for type_name, tag in CLICKHOUSE_BINARY_PLAIN_TYPE_TAGS.items()}
@@ -108,28 +110,28 @@ CLICKHOUSE_BINARY_NULLABLE_TAG = 0x23
 CLICKHOUSE_BINARY_LOW_CARDINALITY_TAG = 0x26
 CLICKHOUSE_BINARY_MAP_TAG = 0x27
 #: The byte of each type wrapping one other type, and the type each of the bytes names.
-CLICKHOUSE_BINARY_WRAPPER_TAGS = {
-    "Array": CLICKHOUSE_BINARY_ARRAY_TAG,
-    "Nullable": CLICKHOUSE_BINARY_NULLABLE_TAG,
-    "LowCardinality": CLICKHOUSE_BINARY_LOW_CARDINALITY_TAG,
+CLICKHOUSE_BINARY_WRAPPER_TAGS: dict[str, int] = {
+    ClickhouseTypeName.ARRAY: CLICKHOUSE_BINARY_ARRAY_TAG,
+    ClickhouseTypeName.NULLABLE: CLICKHOUSE_BINARY_NULLABLE_TAG,
+    ClickhouseTypeName.LOW_CARDINALITY: CLICKHOUSE_BINARY_LOW_CARDINALITY_TAG,
 }
 CLICKHOUSE_BINARY_WRAPPERS_BY_TAG = {tag: type_name for type_name, tag in CLICKHOUSE_BINARY_WRAPPER_TAGS.items()}
 #: The most digits of each decimal width, and its bytes.
 CLICKHOUSE_BINARY_DECIMAL_WIDTHS = ((9, 4), (18, 8), (38, 16), (76, 32))
 #: The bytes of each integer type, and whether it is signed.
-CLICKHOUSE_BINARY_INTEGER_WIDTHS = {
-    "UInt8": (1, False),
-    "UInt16": (2, False),
-    "UInt32": (4, False),
-    "UInt64": (8, False),
-    "UInt128": (16, False),
-    "UInt256": (32, False),
-    "Int8": (1, True),
-    "Int16": (2, True),
-    "Int32": (4, True),
-    "Int64": (8, True),
-    "Int128": (16, True),
-    "Int256": (32, True),
+CLICKHOUSE_BINARY_INTEGER_WIDTHS: dict[str, tuple[int, bool]] = {
+    ClickhouseTypeName.UINT8: (1, False),
+    ClickhouseTypeName.UINT16: (2, False),
+    ClickhouseTypeName.UINT32: (4, False),
+    ClickhouseTypeName.UINT64: (8, False),
+    ClickhouseTypeName.UINT128: (16, False),
+    ClickhouseTypeName.UINT256: (32, False),
+    ClickhouseTypeName.INT8: (1, True),
+    ClickhouseTypeName.INT16: (2, True),
+    ClickhouseTypeName.INT32: (4, True),
+    ClickhouseTypeName.INT64: (8, True),
+    ClickhouseTypeName.INT128: (16, True),
+    ClickhouseTypeName.INT256: (32, True),
 }
 #: The day a date counts from.
 CLICKHOUSE_BINARY_EPOCH_DATE = datetime.date(1970, 1, 1)

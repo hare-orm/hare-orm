@@ -8,14 +8,14 @@ use pyo3::types::{PyFloat, PyInt, PyString, PyTuple};
 use pyo3::{PyTraverseError, PyVisit};
 
 /// What every argument is compared by - all of one type, or the Python function decides.
-enum SortKeys {
+enum SortKeys<'a> {
     Integers(Vec<i128>),
     Floats(Vec<f64>),
-    Texts(Vec<String>),
+    Texts(Vec<&'a str>),
 }
 
 /// The sort keys of the arguments; None when they are of mixed types this doesn't compare exactly.
-fn get_sort_keys(values: &[Bound<'_, PyAny>], compares_numbers: bool) -> PyResult<Option<SortKeys>> {
+fn get_sort_keys<'a>(values: &'a [Bound<'_, PyAny>], compares_numbers: bool) -> PyResult<Option<SortKeys<'a>>> {
     if values.iter().all(PyAnyMethods::is_instance_of::<PyFloat>) {
         return Ok(Some(SortKeys::Floats(values.iter().map(PyAnyMethods::extract).collect::<PyResult<_>>()?)));
     }
@@ -31,8 +31,7 @@ fn get_sort_keys(values: &[Bound<'_, PyAny>], compares_numbers: bool) -> PyResul
         return Ok(None);
     }
     if values.iter().all(PyAnyMethods::is_instance_of::<PyString>) {
-        let texts: PyResult<Vec<String>> =
-            values.iter().map(|value| Ok(value.cast::<PyString>()?.to_str()?.to_owned())).collect();
+        let texts: PyResult<Vec<&str>> = values.iter().map(|value| value.cast::<PyString>()?.to_str()).collect();
         return Ok(Some(SortKeys::Texts(texts?)));
     }
     Ok(None)

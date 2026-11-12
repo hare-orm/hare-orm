@@ -4,7 +4,9 @@ from decimal import Decimal
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import ValidationError
+from hare.fields.validators.enums import DigitsFailure
 from hare.fields.validators.validator import Validator
+from hare.native.native_modules import NativeModules
 
 
 class MaxDigitsValidator(Validator):
@@ -21,38 +23,26 @@ class MaxDigitsValidator(Validator):
     def __init__(self, max_digits: int, decimal_places: int, message: str | None = None) -> None:
         self.max_digits = max_digits
         self.decimal_places = decimal_places
+        self.check = NativeModules.rows.ValueCheck.max_digits(max_digits, decimal_places)
         super().__init__(message)
 
     def __call__(self, value: Decimal) -> None:
         if value is None:
             raise ValidationError("Value must not be None")
-        sign, digit_tuple, exponent = value.as_tuple()
-        if not isinstance(exponent, int):
+        failure = self.check.failure(value)
+        if failure is None:
+            return
+        reason, count = failure
+        if reason == DigitsFailure.NOT_FINITE:
             raise ValidationError(f"Value {ValueDescriptions.get_shown_value(value)} is not a finite decimal")
-        if exponent >= 0:
-            digits = len(digit_tuple)
-            if digit_tuple != (0,):
-                # A positive exponent adds that many trailing zeros.
-                digits += exponent
-            decimals = 0
-        else:
-            # A negative exponent past every digit adds leading zeros after the decimal point.
-            if abs(exponent) > len(digit_tuple):
-                digits = decimals = abs(exponent)
-            else:
-                digits = len(digit_tuple)
-                decimals = abs(exponent)
-        whole_digits = digits - decimals
-
         shown_value = ValueDescriptions.get_shown_text(value)
-        if digits > self.max_digits:
-            self._raise(f"Value '{shown_value}' has {digits} digits, more than max_digits={self.max_digits}")
-        if decimals > self.decimal_places:
+        if reason == DigitsFailure.DIGITS:
+            self._raise(f"Value '{shown_value}' has {count} digits, more than max_digits={self.max_digits}")
+        if reason == DigitsFailure.DECIMAL_PLACES:
             self._raise(
-                f"Value '{shown_value}' has {decimals} decimal places, more than decimal_places={self.decimal_places}"
+                f"Value '{shown_value}' has {count} decimal places, more than decimal_places={self.decimal_places}"
             )
-        if whole_digits > (self.max_digits - self.decimal_places):
-            self._raise(
-                f"Value '{shown_value}' has {whole_digits} digits before the decimal point, more than "
-                f"{self.max_digits - self.decimal_places} allowed"
-            )
+        self._raise(
+            f"Value '{shown_value}' has {count} digits before the decimal point, more than "
+            f"{self.max_digits - self.decimal_places} allowed"
+        )

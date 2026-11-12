@@ -6,10 +6,11 @@ import logging
 import operator
 import os
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from rust.native.pool import PoolStatistics, set_pool_metrics_enabled
 
+from hare.classes.deferred_import import DeferredImport
 from hare.dialects.base.client.connect_failure_reports import ConnectFailureReports
 from hare.dialects.base.client.enums import StatementForm
 from hare.dialects.base.results.described_result import DescribedResult
@@ -59,6 +60,11 @@ if TYPE_CHECKING:
 
 class RustPgClient(PostgresqlClient):
     """The PostgreSQL client of hare's Rust driver (``rust.native``)."""
+
+    #: ``RustPgTransactionClient`` - imported at its first read, as its module imports this one.
+    transaction_client_class: ClassVar[DeferredImport[type[RustPgTransactionClient]]] = DeferredImport(
+        "hare.dialects.postgresql.drivers.rust_pg.client.rust_pg_transaction_client", "RustPgTransactionClient"
+    )
 
     row_to_dict = staticmethod(operator.methodcaller("to_dict"))
     driver_name = "postgresql"
@@ -303,10 +309,8 @@ class RustPgClient(PostgresqlClient):
         await self.close()
 
     def _get_transaction_client(self) -> RustPgTransactionClient:
-        # Imported here: the modules import each other.
-        from hare.dialects.postgresql.drivers.rust_pg.client.rust_pg_transaction_client import RustPgTransactionClient
 
-        return RustPgTransactionClient(self)
+        return RustPgClient.transaction_client_class(self)
 
     async def _run_statement(self, make_call: Callable[[Any], Awaitable[Any]]) -> Any:
         """Runs one statement on the pool, created on first use.
@@ -322,7 +326,7 @@ class RustPgClient(PostgresqlClient):
         while True:
             if self.discarded and (successor := self.get_successor()) is not None:
                 # Discarded by a repeated Hare.init() - the statement runs on the client replacing it.
-                return await cast("RustPgClient", successor)._run_statement(make_call)
+                return await successor._run_statement(make_call)  # type: ignore[attr-defined]
             pool = self._pool
             # A pool another task still sets up is waited for.
             if pool is None or self.opening_task is not None:
@@ -426,19 +430,10 @@ class RustPgClient(PostgresqlClient):
         if returns_rows is False:
             rows_affected = await self._run_statement(lambda executor: executor.execute(query, values))
             return StatementResult(rows_affected, [])
-        pool = self._pool
-        if pool is not None and not self.is_transaction_client and self.opening_task is None:
-            # Straight on the pool - _run_statement()'s path outside a transaction.
-            try:
-                rows = await pool.fetch_all(query, values)
-            except pg.PoolClosedError:
-                # No statement reached the server - it runs on the pool open now, or on the client
-                # replacing this one.
-                if self.get_successor() is None and (self._pool is pool or self.discarded):
-                    raise
-                rows = await self._run_statement(lambda executor: executor.fetch_all(query, values))
-        else:
-            rows = await self._run_statement(lambda executor: executor.fetch_all(query, values))
+        rows = await self._run_statement(lambda executor: executor.fetch_all(query, values))
+        if rows_by_position:
+            positional_rows, column_names = rows.positional()
+            return StatementResult(rows.row_count, positional_rows, column_names=column_names)
         return StatementResult(rows.row_count, rows)
 
     @PostgresqlClient.translate_exceptions(StatementForm.SQL)

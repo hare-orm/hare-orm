@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.core.apps.relation_linking import RelationLinking
 from hare.ddl.schema_requirements import SchemaRequirements
@@ -154,7 +154,7 @@ class ModelState:
             )
 
         model = type(name, bases, attributes)
-        return cast("type[Model]", model)
+        return model
 
     @staticmethod
     def get_declared_pk_field_name(model: type[Model]) -> str | tuple[str, ...]:
@@ -260,7 +260,7 @@ class ModelState:
             state_field = field.snapshot()
             state_field.model_field_name = name
             if isinstance(field, ForeignKeyFieldInstance):
-                relation = cast(ForeignKeyFieldInstance[Any], state_field)
+                relation: ForeignKeyFieldInstance[Any] = state_field  # type: ignore[assignment]
                 # Record the effective schema, including M2M delete rules and indexes
                 # covered by another declaration, without retaining the model binding.
                 relation.on_delete = field.on_delete
@@ -269,7 +269,7 @@ class ModelState:
                 if len(field.db_column_names) == 1:
                     relation.source_field = field.db_column_names[0]
             elif isinstance(field, ManyToManyFieldInstance):
-                many_to_many = cast(ManyToManyFieldInstance[Any], state_field)
+                many_to_many: ManyToManyFieldInstance[Any] = state_field  # type: ignore[assignment]
                 many_to_many.on_delete = field.on_delete
                 if field.through_model is None and field.through:
                     # Freeze an automatic table's name as migration DDL; declared

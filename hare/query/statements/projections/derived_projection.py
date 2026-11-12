@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Collection, Mapping
 from copy import copy
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
-from hare.query.hare_column_names import HareColumnNames
 from hare.query.statements.constants import DISTINCT_ORDERING_COLUMN_ALIAS_PREFIX
 from hare.query.statements.projections.declarations import ProjectionColumn
 from hare.sql.builder.queries.set_operation_query import SetOperationQuery
+from hare.sql.identifiers import Identifiers
 from hare.sql.terms.field import Field
 from hare.sql.terms.node_structure import NodeStructure
 from hare.sql.terms.select_reference import SelectReference
@@ -38,7 +38,7 @@ class DerivedProjection:
         if isinstance(query, SetOperationQuery):
             source = copy(query)
             with_clauses, source._with = source._with, []
-            names = [term.alias or cast("Field", term).name for term in source.base_query._selects]
+            names = [term.alias or term.name for term in source.base_query._selects]  # type: ignore[attr-defined]
             query = source.base_query.query_class.from_(source).select(*(source[name].as_(name) for name in names))
             query._with = with_clauses
         self.query = copy(query)
@@ -46,7 +46,7 @@ class DerivedProjection:
         self.columns: list[ProjectionColumn] = []
         self.by_key: dict[tuple[Any, ...], ProjectionColumn] = {}
         self.by_alias: dict[str, ProjectionColumn] = {}
-        self.names: set[str] = set()
+        self.names = Identifiers()
         # Canonical sources of this statement, before all table references use binding identity.
         self.source_bindings = NodeStructure.get_source_bindings(query)
         selects = self.query._mutable("_selects")
@@ -81,7 +81,7 @@ class DerivedProjection:
     def get_free_name(self, position: int) -> str:
         """Allocate a column name without collisions under case-insensitive identifiers."""
         prefix = self.column_prefix or DISTINCT_ORDERING_COLUMN_ALIAS_PREFIX
-        return HareColumnNames.get_free_name(f"{prefix}{position}", (), self.names)
+        return self.names.get_free_name(f"{prefix}{position}")
 
     def find(self, term: Term) -> ProjectionColumn | None:
         """Find a selected alias reference or a structurally equal bound value."""
@@ -94,11 +94,7 @@ class DerivedProjection:
         if (column := self.find(term)) is not None:
             return column
         name = term.alias or (term.name if isinstance(term, Field) else None)
-        if (
-            self.column_prefix is not None
-            or name is None
-            or name.casefold() in {item.casefold() for item in self.names}
-        ):
+        if self.column_prefix is not None or name is None or name in self.names:
             name = self.get_free_name(len(self.columns))
         self.names.add(name)
         selected = term.as_(name)
@@ -117,8 +113,8 @@ class DerivedProjection:
 
     def get_reference(self, term: Term) -> Field:
         """A reference from the enclosing query to the projected operand."""
-        return cast("Field", self.query[self.include(term).name])
+        return self.query[self.include(term).name]  # type: ignore[return-value]
 
     def get_output(self, aliases: Collection[str]) -> list[Field]:
         """The requested visible columns, preserving caller aliases and their order."""
-        return [cast("Field", self.query[self.by_alias[alias].name]).as_(alias) for alias in aliases]
+        return [self.query[self.by_alias[alias].name].as_(alias) for alias in aliases]  # type: ignore[misc]

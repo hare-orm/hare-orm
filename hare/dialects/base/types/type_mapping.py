@@ -18,6 +18,9 @@ if TYPE_CHECKING:
 class TypeMapping:
     """How a dialect stores the columns of one field class; None leaves a value to the field.
 
+    Conversion callbacks may be PreparedConverter factories. Prepared writers/readers bind
+    their field metadata once; direct calls invoke the same conversion after preparation.
+
     Attributes:
         column_type: The column type, or a ``(field) -> str | None`` building it - None for a field the
             dialect has no column type of.

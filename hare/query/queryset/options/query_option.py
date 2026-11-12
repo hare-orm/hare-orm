@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from operator import attrgetter
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
 
 if TYPE_CHECKING:
     from hare.query.queryset.query_specification import QuerySpecification
@@ -27,7 +27,7 @@ class QueryOption(Generic[OptionValue]):
         def set_option(instance: QuerySpecification[Any], value: Any) -> None:
             instance._options = instance._options.updated(**{name: value})
 
-        return cast("QueryOption[OptionValue]", property(attrgetter(f"_options.{name}"), set_option))
+        return property(attrgetter(f"_options.{name}"), set_option)  # type: ignore[return-value]
 
     if TYPE_CHECKING:
 

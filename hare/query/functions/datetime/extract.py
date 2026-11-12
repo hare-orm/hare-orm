@@ -15,12 +15,13 @@ from hare.query.plans.enums import PlanPartType
 from hare.sql.enums import DatePart, DateTruncSource
 from hare.sql.functions.datetime.extract import Extract as ExtractTerm
 from hare.sql.terms.term import Term
-from hare.time import Timezone
+from hare.time.zone_names import ZoneNames
+from hare.time.zone_settings import ZoneSettings
 
 
 class Extract(Function):
     """A date part of a date, time or datetime as an integer - a datetime's in the current zone
-    (``Timezone.override()``, else Hare's configured one; the local system zone under
+    (``ZoneSettings.override()``, else Hare's configured one; the local system zone under
     ``use_timezone=False``) or in ``tzinfo``, like the ``__year``/``__hour`` lookups:
     ``Extract("created_at", "week_day")``. ``week_day`` counts 1 (Sunday) to 7, ``iso_week_day`` 1
     (Monday) to 7, ``week`` and ``iso_year`` follow ISO-8601."""
@@ -64,7 +65,7 @@ class Extract(Function):
         super().__init__(field)
         self.date_part: DatePart = DATETIME_DATE_PART_LOOKUPS[part_name]
         self.part_name = part_name
-        self.zone_name = None if tzinfo is None else Timezone.get_zone_name(tzinfo)
+        self.zone_name = None if tzinfo is None else ZoneNames.get_zone_name(tzinfo)
 
     def get_plan_options(self) -> tuple[Any, ...]:
         return (self.date_part, self.zone_name)
@@ -84,8 +85,8 @@ class Extract(Function):
         if isinstance(extract_term, ExtractTerm):
             extract_term.is_time_of_day = source == DateTruncSource.TIME
         if isinstance(extract_term, ExtractTerm) and source == DateTruncSource.DATETIME:
-            use_timezone = Timezone.get_use_timezone()
-            extract_term.zone_name = self.zone_name or (Timezone.name() if use_timezone else None)
+            use_timezone = ZoneSettings.get_use_timezone()
+            extract_term.zone_name = self.zone_name or (ZoneSettings.name() if use_timezone else None)
             extract_term.use_local_zone_when_naive = not use_timezone
         return ExpressionResult(
             term=extract_term,

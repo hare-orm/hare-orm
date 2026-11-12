@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.exceptions import IncompleteInstanceError
 from hare.fields.enums import RelationLoadStrategy
@@ -9,9 +9,7 @@ from hare.fields.relations.declarations import RelationProperty
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.fields.relations.fields.relational_field import RelationalField
 from hare.fields.relations.relation_values import RelationValues
-from hare.query.lookup_info.lookup_paths import LookupPaths
 from hare.query.queryset import QuerySet, QuerySetSingle
-from hare.query.queryset.relations.linked_many_to_many_relation import LinkedManyToManyRelation
 from hare.query.queryset.relations.many_to_many_relation import ManyToManyRelation
 from hare.query.queryset.relations.related_queryset.related_query_set import RelatedQuerySet
 from hare.query.queryset.relations.related_queryset.relation_rows import RelationRows
@@ -149,7 +147,7 @@ class RelationAccessors:
             values = RelationValues.get_relation_key_values(obj, from_fields, usage)
             if None in values:
                 # A NULL target value (a nullable to_field=, or an unsaved pk) is referenced by no row.
-                return cast("QuerySetSingle[Model | None]", NoneAwaitable)
+                return NoneAwaitable  # type: ignore[return-value]
             return RelationAccessors.get_related_queryset(
                 related_model, dict(zip(relation_fields, values, strict=True)), obj
             ).first()
@@ -181,15 +179,10 @@ class RelationAccessors:
             if relation is None:
                 # The relation class itself for a manager of plain querysets - get_class_for() answers
                 # the same, one call later.
-                relation_class: type[ManyToManyRelation[Model]] = (
-                    cast("type[ManyToManyRelation[Model]]", LinkedManyToManyRelation)
-                    if RelationAccessors.reads_linked_rows(field_object)
-                    else ManyToManyRelation
-                )
                 many_to_many_class: type[ManyToManyRelation[Model]] = (
-                    relation_class
+                    ManyToManyRelation
                     if field_object.related_model._meta.manager.queryset_class is QuerySet
-                    else relation_class.get_class_for(field_object.related_model)
+                    else ManyToManyRelation.get_class_for(field_object.related_model)
                 )
                 relation = many_to_many_class(obj, field_object, relation_rows)
                 relation_rows.keep_relation(relation)
@@ -199,19 +192,6 @@ class RelationAccessors:
             return relation
 
         return RelationProperty(get_relation)
-
-    @staticmethod
-    def reads_linked_rows(field_object: ManyToManyFieldInstance[Model]) -> bool:
-        """Whether a many-to-many relation's rows are read by the keys its links hold - a relation to a
-        model on another connection, read from the model declaring it.
-
-        Args:
-            field_object: The many-to-many field.
-
-        Returns:
-            True for a field declared to a model on another connection.
-        """
-        return not field_object._generated and LookupPaths.crosses_connections(field_object)
 
     @staticmethod
     def get_relation(obj: Model, field_name: str) -> RelatedQuerySet[Any]:
@@ -225,7 +205,7 @@ class RelationAccessors:
         Returns:
             The relation.
         """
-        return cast("RelatedQuerySet[Any]", getattr(type(obj), field_name).fget(obj, bind=False))
+        return getattr(type(obj), field_name).fget(obj, bind=False)
 
     @staticmethod
     def get_related_queryset(model: type[TModel], filters: dict[str, Any], obj: Model) -> QuerySet[TModel]:
@@ -240,7 +220,7 @@ class RelationAccessors:
         Returns:
             The queryset.
         """
-        queryset = cast("QuerySet[TModel]", model._meta.manager.create_queryset())
+        queryset: QuerySet[TModel] = model._meta.manager.create_queryset()
         queryset._append_filters(False, (), filters)
         queryset._set_instance_connection(obj)
         return queryset
@@ -259,7 +239,7 @@ class RelationAccessors:
         """
         relation_names_needing_refresh = set()
         for relation_name in obj._meta.foreign_key_fields | obj._meta.one_to_one_fields:
-            relation_field = cast("RelationalField[Any]", obj._meta.fields_map[relation_name])
+            relation_field: RelationalField[Any] = obj._meta.fields_map[relation_name]  # type: ignore[assignment]
             if getattr(relation_field, "lazy", None) != RelationLoadStrategy.JOINED:
                 continue
             if set(relation_field.source_fields) & refresh_fields:

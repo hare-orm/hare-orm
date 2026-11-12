@@ -10,7 +10,10 @@ from hare.query.statements.building.query_annotations import QueryAnnotations
 from hare.sql.terms.field import Field
 
 if TYPE_CHECKING:
+    from hare.dialects.base.client.database_client import DatabaseClient
     from hare.models import Model
+    from hare.query.plans.statement.statement_plan import StatementPlan
+    from hare.query.queryset.query_specification import QuerySpecification
     from hare.query.rows.native.hydration_layout import HydrationEntry
     from hare.query.statements.select.model_rows_query import ModelRowsQuery
     from hare.sql.builder.queries.query_builder import QueryBuilder
@@ -27,7 +30,7 @@ class InstanceHydration:
     ALL_FIELDS_SELECTS_KEY_CACHE: ClassVar[ModelCache[tuple[QueryBuilder, tuple[str | None, ...]]]] = ModelCache()
 
     @staticmethod
-    def check_no_annotation_field_collision(query: ModelRowsQuery[Any]) -> None:
+    def check_no_annotation_field_collision(query: QuerySpecification[Any]) -> None:
         """Refuses an annotation named like a field or a property of the model - it would overwrite it on the
         instance.
 
@@ -73,27 +76,40 @@ class InstanceHydration:
         return frozenset([*model._meta.fields_map, *property_names])
 
     @staticmethod
-    def get_model_rows_reader(query: ModelRowsQuery[Any]) -> ModelRows:
-        """How this query's rows are read into instances - shared by ``_execute()`` and
-        ``stream()``.
+    def get_model_rows_reader(
+        query: QuerySpecification[Any],
+        connection: DatabaseClient | None = None,
+        plan: StatementPlan | None = None,
+        *,
+        reader_class: type[ModelRows] = ModelRows,
+    ) -> ModelRows:
+        """One reader factory for compiled plans, uncacheable statements and streaming.
 
-        Args:
-            query: The model rows query.
-
-        Returns:
-            The reader.
+        A plan contains layout metadata only; the reader holds no connection - ``connection`` only
+        selects the plan's prepared columns and the dialect decoding the annotations. Without a plan,
+        the caller supplies a built model query with the same layout attributes.
         """
-        plan = query._statement_plan
-        return ModelRows(
+        if connection is None:
+            connection = query._connection
+            plan = query._statement_plan  # type: ignore[attr-defined]
+        if plan is not None:
+            reader: ModelRows = plan.result_reading
+            return reader
+        built_query: ModelRowsQuery[Any] = query  # type: ignore[assignment]
+        return reader_class(
             query.model,
-            query._connection,
-            select_related_buckets=query._select_related_positions,
-            decode_plan=query._decode_plan,
-            decode_plan_is_partial=query._decode_plan_is_partial,
-            decode_plan_key=plan.decode_plan_key if plan is not None else query._decode_plan_key,
+            connection.dialect.types,  # type: ignore[union-attr]
+            select_related_buckets=built_query._select_related_positions,
+            decode_plan=built_query._decode_plan,
+            decode_plan_is_partial=built_query._decode_plan_is_partial,
+            decode_plan_key=built_query._decode_plan_key,
             # An .alias() key is never selected - there's no column to read it from.
-            annotations=[name for name in query._annotations if name not in query._alias_keys],
-            annotation_fields=QueryAnnotations.get_annotation_fields(query),
+            annotations=(
+                tuple(name for name in query._annotations if name not in query._alias_keys)
+                if query._annotations
+                else ()
+            ),
+            annotation_fields=QueryAnnotations.get_annotation_fields(built_query),
         )
 
     @staticmethod

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from hare.declarations.declaration_values import DeclarationValues
@@ -51,11 +52,22 @@ class ClickhouseTablePartitions(TablePartitions):
             return self.editor.table_rebuild.get_rebuild_plan(old_model, new_model)
         recovery = self.editor.get_schema_recovery(model)
         return SchemaChangePlan(
-            tuple(SchemaStatement(statement, recovery=recovery) for statement in self.get_alter_sqls(model, old, new))
+            tuple(
+                SchemaStatement(statement, recovery=recovery)
+                for statement in self.get_alter_sqls(
+                    model, old, new, old_settings=old_settings, new_settings=new_settings
+                )
+            )
         )
 
     def get_alter_sqls(
-        self, model: type[Model], old: ClickhouseTableOptions, new: ClickhouseTableOptions
+        self,
+        model: type[Model],
+        old: ClickhouseTableOptions,
+        new: ClickhouseTableOptions,
+        *,
+        old_settings: Mapping[str, str | int],
+        new_settings: Mapping[str, str | int],
     ) -> list[str]:
         """The statements changing a table from its old options to its new ones in place.
 
@@ -63,6 +75,8 @@ class ClickhouseTablePartitions(TablePartitions):
             model: The model rendered with its new options.
             old: The table's options.
             new: The options it gets.
+            old_settings: Effective settings already prepared for the transition.
+            new_settings: Effective settings of the resulting table, in declaration order.
 
         Returns:
             The statements.
@@ -76,7 +90,6 @@ class ClickhouseTablePartitions(TablePartitions):
                 if new.ttl is None
                 else f"MODIFY TTL {new.get_expression_sql(model, new.ttl, self.editor)}"
             )
-        old_settings, new_settings = dict(old.get_table_settings()), dict(new.get_table_settings())
         modified_settings = [
             f"{name} = {new.get_setting_sql(value)}"
             for name, value in new_settings.items()

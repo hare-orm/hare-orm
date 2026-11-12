@@ -73,7 +73,7 @@ class TransactionOptions:
         """
         if timeout is None:
             return
-        if isinstance(timeout, bool) or not isinstance(timeout, int | float):
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
             raise QueryError(f"{name} must be a number of seconds, got {timeout!r}")
         if not MIN_TRANSACTION_STATEMENT_TIMEOUT_SECONDS <= timeout <= MAX_TRANSACTION_STATEMENT_TIMEOUT_SECONDS:
             raise QueryError(

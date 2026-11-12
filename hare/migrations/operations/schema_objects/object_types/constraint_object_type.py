@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.ddl.constraints.check_constraint import CheckConstraint
 from hare.ddl.constraints.exclusion_constraint import ExclusionConstraint
@@ -71,9 +71,7 @@ class ConstraintObjectType(SchemaObjectType):
     @classmethod
     async def add(cls, editor: BaseSchemaEditor, model: type[Model], schema_object: Any, **options: Any) -> None:
         if options.get("not_valid"):
-            await editor.constraint_statements.get_unvalidated_check_add_plan(
-                model, cast("CheckConstraint", schema_object)
-            ).execute(editor)
+            await editor.constraint_statements.get_unvalidated_check_add_plan(model, schema_object).execute(editor)
         else:
             await editor.add_constraint(model, schema_object)
 

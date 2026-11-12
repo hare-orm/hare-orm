@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.constants import PREFETCH_BIND_PARAMETERS_HEADROOM
 from hare.query.queryset.lazy_relation_names import LazyRelationNames
@@ -18,7 +18,6 @@ from hare.query.relation_loading.prefetching.prefetch_result import PrefetchResu
 from hare.query.relation_loading.prefetching.sliced_prefetch import SlicedPrefetch
 
 if TYPE_CHECKING:
-    from hare.fields.relations.fields.backward_foreign_key_relation import BackwardForeignKeyRelation
     from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
     from hare.fields.relations.fields.relational_field import RelationalField
     from hare.models import Model
@@ -57,7 +56,7 @@ class PrefetchPlan:
         meta = prefetcher.model._meta
         nodes = []
         for field, entries in prefetcher._make_prefetch_queries(fetched).items():
-            relation = cast("RelationalField[Any]", meta.fields_map[field])
+            relation: RelationalField[Any] = meta.fields_map[field]  # type: ignore[assignment]
             if field in meta.backward_foreign_key_fields:
                 strategy = PrefetchStrategy.REVERSE
             elif field in meta.backward_one_to_one_fields:
@@ -74,7 +73,6 @@ class PrefetchPlan:
                         (obj for obj in objs if type(obj) is binding.model), binding.source_names, field
                     )
             for to_attribute, queryset in entries:
-                queryset = queryset._clone()
                 # A prefetch loads one level; lazy SELECT defaults must not traverse a self-relation chain.
                 _, lazy_select_fields = LazyRelationNames.get(queryset.model)
                 queryset._deferred_related_fields = queryset._deferred_related_fields | lazy_select_fields
@@ -117,7 +115,7 @@ class PrefetchPlan:
                         else:
                             rows_strategy = PrefetchRowsStrategy.NUMBERED
                 else:
-                    many_relation = cast("ManyToManyFieldInstance[Any]", relation)
+                    many_relation: ManyToManyFieldInstance[Any] = relation  # type: ignore[assignment]
                     through_connection = ManyToManyPrefetch.get_through_connection(prefetcher, many_relation)
                     rows_strategy = PrefetchRowsStrategy.LINKS
                     if sliced:
@@ -159,7 +157,7 @@ class PrefetchPlan:
             nodes.append(
                 PrefetchNode(
                     field,
-                    cast("RelationalField[Any]", meta.fields_map[field]),
+                    meta.fields_map[field],  # type: ignore[arg-type]
                     PrefetchStrategy.LOADED,
                     None,
                     None,
@@ -173,7 +171,7 @@ class PrefetchPlan:
         """Bind key names before fetching, retaining distinct direct-relation source shapes."""
         bindings = []
         for model in dict.fromkeys(type(obj) for obj in objs):
-            relation = cast("RelationalField[Any]", model._meta.fields_map[field])
+            relation: RelationalField[Any] = model._meta.fields_map[field]  # type: ignore[assignment]
             if strategy is PrefetchStrategy.DIRECT:
                 source_names = relation.source_fields
                 target_names = relation.to_field_names
@@ -182,7 +180,7 @@ class PrefetchPlan:
                 target_names = relation.related_model._meta.primary_key_attribute_names
             else:
                 source_names = tuple(target.model_field_name for target in relation.to_field_instances)
-                target_names = cast("BackwardForeignKeyRelation[Any]", relation).relation_fields
+                target_names = relation.relation_fields  # type: ignore[attr-defined]
             bindings.append(PrefetchKeyBinding(model, tuple(source_names), tuple(target_names)))
         return tuple(bindings)
 

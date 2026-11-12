@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import FieldError, QueryError, UnSupportedError
 from hare.fields.relations.fields.relational_field import RelationalField
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.expressions.constants import (
     MAX_RECURSIVE_DEPTH,
     RECURSIVE_ROWS_CTE_NAME,
@@ -83,7 +84,7 @@ class RecursiveRows(KeyRowsQuery):
             The subquery.
         """
         self.start._build_conditions_for_copies()
-        start_keys_query = self.start._get_field_values_query("pk")
+        start_keys_query = self.start._get_field_values_query(PRIMARY_KEY_ALIAS)
         # Made again for each description and build - its values come from the start rows.
         start_keys_query._plan_origin = self.start
         return Subquery(start_keys_query)

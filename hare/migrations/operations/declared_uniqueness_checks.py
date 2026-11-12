@@ -63,14 +63,12 @@ class DeclaredUniquenessChecks:
             ``<name> (unique=True)`` of each.
         """
         meta = model._meta
+        relation_names = meta.foreign_key_fields | meta.one_to_one_fields
         return [
             f"{field_name} (unique=True)"
             for field_name in field_names
             if (field := meta.fields_map.get(field_name)) is not None
             and getattr(field, "unique", False)
             and not getattr(field, "pk", False)
-            and (
-                field_name in meta.fields_db_projection
-                or field_name in meta.foreign_key_fields | meta.one_to_one_fields
-            )
+            and (field_name in meta.fields_db_projection or field_name in relation_names)
         ]

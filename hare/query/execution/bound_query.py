@@ -78,8 +78,6 @@ class BoundQuery(QuerySpecification[TModel], Generic[TModel], abstract=True):
         "_window_filter_criterion",
         # Set on the copy a query makes of itself to run once - see _get_execution_query().
         "_is_execution_query",
-        # The SQL text and parameters a plan hit of a running query left - see StatementPlanRuns.run_on_plan().
-        "_compiled_statement",
         # The plan the last build found for this query, or recorded - None for a query that keeps
         # no plan.
         "_statement_plan",
@@ -93,9 +91,6 @@ class BoundQuery(QuerySpecification[TModel], Generic[TModel], abstract=True):
         # Set when the build applied the calls of the dialect's QuerySet methods itself - to the
         # query reading the rows, before wrapping it in a derived table.
         "_extension_calls_built_in",
-        # Set by _make_query_to_run(): the query is built to be run by itself, not shown or
-        # embedded in another one.
-        "_runs_compiled_statement",
         # The calls the queryset this query runs was made with, when it was made by simple calls
         # alone (QuerySet._call_signature) - None otherwise - and the values of their filters.
         "_call_signature",
@@ -105,7 +100,7 @@ class BoundQuery(QuerySpecification[TModel], Generic[TModel], abstract=True):
         # builds is kept under it too.
         "_call_signature_record",
         # The object this query, made again for each description or build of a query it is built
-        # into, stands for - unset otherwise (PlanOrigins).
+        # into, stands for - None otherwise (PlanOrigins).
         "_plan_origin",
     )
 
@@ -125,22 +120,22 @@ class BoundQuery(QuerySpecification[TModel], Generic[TModel], abstract=True):
         self._has_aggregate: bool = False
         self._window_filter_criterion: Criterion | None = None
         self._is_execution_query: bool = False
-        self._compiled_statement: tuple[str, list[Any]] | None = None
         self._statement_plan: StatementPlan | None = None
         self._deferred_plan_record: dict[str, Any] | None = None
         self._extension_value_wrapper_references: RecordedValueReferences | None = None
         self._extension_calls_built_in: bool = False
-        self._runs_compiled_statement: bool = False
         self._call_signature: tuple[Any, ...] | None = None
         self._call_values: tuple[Any, ...] = ()
         self._call_signature_record: tuple[tuple[Any, ...], Sequence[str], int] | None = None
+        self._plan_origin: Any = None
 
-    def _get_execution_query(self, for_write: bool = False) -> Self:
+    def _get_execution_query(self, for_write: bool = False, connection: DatabaseClient | None = None) -> Self:
         """A copy of this query bound to the connection it runs on for one execution - a queryset
         run again later, or by several tasks at once, compiles into its own copy each time.
 
         Args:
             for_write: Whether the connection is chosen for a write.
+            connection: The connection this execution already chose - chosen here when None.
 
         Returns:
             The copy, or this query itself when it already is one.
@@ -148,7 +143,9 @@ class BoundQuery(QuerySpecification[TModel], Generic[TModel], abstract=True):
         execution_query = self if self._is_execution_query else self.__copy__()
         execution_query._is_execution_query = True
         if execution_query._connection is None:
-            execution_query._apply_connection(execution_query.get_connection(for_write=for_write))  # type: ignore[unreachable]
+            execution_query._apply_connection(  # type: ignore[unreachable]
+                execution_query.get_connection(for_write=for_write) if connection is None else connection
+            )
         if for_write and WrittenConnections.is_recording:
             WrittenConnections.record(execution_query._connection.connection_alias)
         return execution_query

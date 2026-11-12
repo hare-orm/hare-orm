@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from functools import partial, wraps
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
-from hare.dialects.base.client.constants import READ_RETRY_MESSAGE, UNENCODABLE_SURROGATE_MESSAGE
-from hare.dialects.base.client.declarations import StatementRequest
+from hare.dialects.base.client.constants import (
+    READ_RETRY_MESSAGE,
+    SQL_STATEMENT_FORMS,
+    UNENCODABLE_SURROGATE_MESSAGE,
+)
 from hare.dialects.base.client.enums import StatementForm
+from hare.dialects.base.client.statement_options import StatementOptions
 from hare.exceptions import DatabaseError, DBConnectionError, TransactionManagementError, ValidationError
 from hare.instrumentation.declarations import QueryCall
 from hare.instrumentation.observers.observers import Observers
@@ -17,6 +21,7 @@ from hare.sql.terms.parameters.query_parameters import QueryParameters
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.dialects.base.client.statement_recovery import StatementRecovery
     from hare.dialects.base.client.transaction_client import TransactionClient
 
 
@@ -33,72 +38,95 @@ class StatementExecution:
     def decorate(
         client_class: type[DatabaseClient], form: StatementForm, function: Callable[..., Any]
     ) -> Callable[..., Any]:
-        """Wrap a declared call shape; the function name is only an observer label."""
+        """Wrap a declared call shape; the function name is only an observer label.
+
+        The wrapper reads the call's SQL and parameters (tagged once, before query wrappers) and gives
+        back the coroutine of its run - what the caller awaits - without a coroutine of its own: an
+        error of the arguments is raised by the call. ``retry_read`` and ``recovery`` are the
+        wrapper's own keywords, never passed to the driver.
+        """
         observed = form is not StatementForm.CONTROL
+        is_sql = form is StatementForm.SQL
+        is_bulk_load = form is StatementForm.BULK_LOAD
 
         @wraps(function)
-        async def execute(client: DatabaseClient, *args: Any, **kwargs: Any) -> Any:
-            args, kwargs, request = StatementExecution.bind(client, form, args, kwargs)
-            operation = partial(StatementExecution.run, client_class, form, function, client, request, args, kwargs)
+        def execute(
+            client: DatabaseClient,
+            *args: Any,
+            retry_read: bool = False,
+            recovery: StatementRecovery | None = None,
+            **kwargs: Any,
+        ) -> Coroutine[Any, Any, Any]:
+            sql: str | None = None
+            parameters: Any = None
+            if is_bulk_load:
+                table = args[0] if args else kwargs["table"]
+                columns = args[1] if len(args) > 1 else kwargs["columns"]
+                bulk_sql = client.dialect.clauses.get_bulk_load_statement_sql(table, columns)
+                sql = QueryTags.append(bulk_sql, client.dialect)
+            elif observed:
+                sql = args[0] if args else kwargs.get("query")
+                parameters = args[1] if len(args) > 1 else kwargs.get("values")
+                if sql is not None and QueryTags.current.get():
+                    tagged_sql = QueryTags.append(sql, client.dialect)
+                    if tagged_sql is not sql:
+                        if args:
+                            args = (tagged_sql, *args[1:])
+                        else:
+                            kwargs = {**kwargs, "query": tagged_sql}
+                        sql = tagged_sql
+            retry_limit = (
+                client.read_retry_max_retries
+                if retry_read and is_sql and client_class.runs_statement_options and not client.is_transaction_client
+                else 0
+            )
             if observed and Observers.query_wrappers:
-                call = QueryCall(
-                    function.__name__,
-                    cast("str", request.sql),
-                    request.parameters,
-                    client.connection_alias,
-                    client.dialect,
+                operation = partial(
+                    StatementExecution.run_retries if retry_limit else StatementExecution.attempt,
+                    client_class,
+                    form,
+                    function,
+                    client,
+                    sql,
+                    parameters,
+                    recovery,
+                    args,
+                    kwargs,
+                    **({"retry_limit": retry_limit} if retry_limit else {}),
                 )
-                return await Observers.run_wrapped(call, operation)
-            return await operation()
+                call = QueryCall(function.__name__, sql, parameters, client.connection_alias, client.dialect)  # type: ignore[arg-type]
+                return Observers.run_wrapped(call, operation)
+            if retry_limit:
+                return StatementExecution.run_retries(
+                    client_class, form, function, client, sql, parameters, recovery, args, kwargs, retry_limit
+                )
+            return StatementExecution.attempt(
+                client_class, form, function, client, sql, parameters, recovery, args, kwargs
+            )
 
         return execute
 
     @staticmethod
-    def bind(
-        client: DatabaseClient, form: StatementForm, args: tuple[Any, ...], kwargs: dict[str, Any]
-    ) -> tuple[tuple[Any, ...], dict[str, Any], StatementRequest]:
-        """Bind the explicit SQL/parameters or bulk-load metadata without parsing SQL."""
-        retry_read = kwargs.pop("retry_read", False)
-        recovery = kwargs.pop("recovery", None)
-        if form is StatementForm.CONTROL:
-            return args, kwargs, StatementRequest(None)
-        if form is StatementForm.BULK_LOAD:
-            table = args[0] if args else kwargs["table"]
-            columns = args[1] if len(args) > 1 else kwargs["columns"]
-            bulk_sql = client.dialect.clauses.get_bulk_load_statement_sql(table, columns)
-            return args, kwargs, StatementRequest(QueryTags.append(bulk_sql, client.dialect))
-        sql = args[0] if args else kwargs.get("query")
-        parameters = args[1] if len(args) > 1 else kwargs.get("values")
-        if sql is not None and QueryTags.current.get():
-            tagged_sql = QueryTags.append(sql, client.dialect)
-            if tagged_sql is not sql:
-                if args:
-                    args = (tagged_sql, *args[1:])
-                else:
-                    kwargs = {**kwargs, "query": tagged_sql}
-                sql = tagged_sql
-        return args, kwargs, StatementRequest(sql, parameters, retry_read and form is StatementForm.SQL, recovery)
-
-    @staticmethod
-    async def run(
+    async def run_retries(
         client_class: type[DatabaseClient],
         form: StatementForm,
         function: Callable[..., Any],
         client: DatabaseClient,
-        request: StatementRequest,
+        sql: str | None,
+        parameters: Any,
+        recovery: StatementRecovery | None,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
+        retry_limit: int,
     ) -> Any:
-        """Retry only explicitly safe reads outside a transaction, after translated failures."""
-        retry_limit = (
-            client.read_retry_max_retries
-            if request.retry_read and client_class.runs_statement_options and not client.is_transaction_client
-            else 0
-        )
+        """Retries a lost connection up to ``retry_limit`` times, with a growing delay - a delay
+        and an event per attempt; a cancellation starts no other attempt."""
         attempt = 0
         while True:
             try:
-                return await StatementExecution.attempt(client_class, form, function, client, request, args, kwargs)
+                return await StatementExecution.attempt(
+                    client_class, form, function, client, sql, parameters, recovery, args, kwargs
+                )
             except DBConnectionError as error:
                 if attempt >= retry_limit:
                     raise
@@ -113,14 +141,17 @@ class StatementExecution:
         form: StatementForm,
         function: Callable[..., Any],
         client: DatabaseClient,
-        request: StatementRequest,
+        sql: str | None,
+        parameters: Any,
+        recovery: StatementRecovery | None,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ) -> Any:
         """Execute with transaction guards, timeout, error translation and one event per attempt."""
         observed = form is not StatementForm.CONTROL
-        has_sql = form in {StatementForm.SQL, StatementForm.MANY, StatementForm.SCRIPT}
-        sql, parameters = request.sql, request.parameters
+        has_sql = form in SQL_STATEMENT_FORMS
+        transaction_client = client.is_transaction_client
+        transaction_statement = observed and transaction_client
         rejected_character = client_class.rejected_sql_character
         if rejected_character is not None and sql is not None and rejected_character in sql:
             client.raise_rejected_sql_character(sql)
@@ -128,32 +159,22 @@ class StatementExecution:
         exception: BaseException | None = None
         try:
             try:
-                if form is not StatementForm.CONTROL and client.is_transaction_client:
-                    transaction = cast("TransactionClient", client)
+                if transaction_statement:
+                    transaction: TransactionClient = client  # type: ignore[assignment]
                     transaction._check_statement_allowed()
                     if client_class.checks_aborted_transactions and transaction._is_transaction_aborted():
                         raise TransactionManagementError(client.aborted_transaction_message)
-                if not client_class.runs_statement_options:
-                    return await function(client, *args, **kwargs)
-
-                async def timed(client: Any, *args: Any, **kwargs: Any) -> Any:
-                    return await client._run_with_command_timeout(function, *args, **kwargs)
-
-                operation = timed if observed and client.command_timeout is not None else function
-                if client.password_provider is not None and not client.is_transaction_client:
-                    operation = partial(
-                        cast("Callable[..., Any]", client_class.run_renewing_refused_password), operation
-                    )
+                operation = StatementOptions.get_operation(client, function, observed)
                 return await operation(client, *args, **kwargs)
             except BaseException as driver_error:
                 original_error = driver_error
                 exception, hides_context = StatementExecution.get_error(
-                    client_class, client, request, driver_error, args, has_sql
+                    client_class, client, sql, parameters, driver_error, args, has_sql
                 )
             # Recovery runs outside the driver's exception handler: cancellation of
             # cleanup must not inherit a driver error containing sensitive values.
-            if request.recovery is not None:
-                await request.recovery.recover(client, original_error)
+            if recovery is not None:
+                await recovery.recover(client, original_error)
             if not hides_context:
                 if exception is original_error:
                     raise exception
@@ -168,7 +189,8 @@ class StatementExecution:
     def get_error(
         client_class: type[DatabaseClient],
         client: DatabaseClient,
-        request: StatementRequest,
+        sql: str | None,
+        parameters: Any,
         driver_error: BaseException,
         args: tuple[Any, ...],
         has_sql: bool,
@@ -176,10 +198,8 @@ class StatementExecution:
         """Translate an error and say whether its driver context must be discarded."""
         if client_class.is_unencodable_surrogate_error(driver_error):
             return ValidationError(UNENCODABLE_SURROGATE_MESSAGE), True
-        error = client_class.translate_driver_error(
-            client, driver_error, request.sql, request.parameters, args, has_sql
-        )
-        hidden_values = QueryParameters.get_hidden_values_of(request.parameters)
+        error = client_class.translate_driver_error(client, driver_error, sql, parameters, args, has_sql)
+        hidden_values = QueryParameters.get_hidden_values_of(parameters)
         if isinstance(error, DatabaseError) and (hidden_values or error.hides_driver_error):
             error.drop_values(hidden_values)
             return error, True
@@ -191,12 +211,11 @@ class StatementExecution:
     ) -> AsyncGenerator[list[Any]]:
         """Observe one stream through wire cleanup; a partially read stream never retries."""
         query = QueryTags.append(query, client.dialect)
-        request = StatementRequest(query, values)
         start = time.perf_counter()
         exception: BaseException | None = None
         try:
             if client.is_transaction_client:
-                cast("TransactionClient", client)._check_statement_allowed()
+                client._check_statement_allowed()  # type: ignore[attr-defined]
             if client.rejected_sql_character is not None and client.rejected_sql_character in query:
                 client.raise_rejected_sql_character(query)
             if Observers.query_wrappers:
@@ -218,7 +237,7 @@ class StatementExecution:
             raise
         except BaseException as driver_error:
             exception, hides_context = StatementExecution.get_error(
-                type(client), client, request, driver_error, (query, values), True
+                type(client), client, query, values, driver_error, (query, values), True
             )
             if not hides_context:
                 if exception is driver_error:

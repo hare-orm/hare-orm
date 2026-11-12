@@ -39,10 +39,10 @@ pub fn check_json_storable<'py>(py: Python<'py>, value: Bound<'py, PyAny>) -> Py
             if let Some(problem) = enter_container(&mut open_containers, &item, pending.len()) {
                 return Ok((problem, py.None().into_bound(py)));
             }
-            for key in dict.keys() {
+            for (key, _) in dict.iter() {
                 pending.push(key);
             }
-            for dict_value in dict.values() {
+            for (_, dict_value) in dict.iter() {
                 pending.push(dict_value);
             }
         } else if let Ok(list) = item.cast::<PyList>() {

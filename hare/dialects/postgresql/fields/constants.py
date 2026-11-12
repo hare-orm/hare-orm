@@ -44,7 +44,7 @@ POSTGRESQL_LTREE_PATH_FUNCTIONS = {"depth": "nlevel"}
 CLASS_NAME_WORD_BOUNDARY_PATTERN = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 
 #: Range path segments reading a bound, by the PostgreSQL function giving it.
-RANGE_BOUND_PATH_FUNCTIONS = {"startswith": "lower", "endswith": "upper"}
+RANGE_BOUND_PATH_FUNCTIONS: dict[str, str] = {Lookup.STARTSWITH: "lower", Lookup.ENDSWITH: "upper"}
 
 #: Range path segments reading a boolean property, each the PostgreSQL function of the same name.
 RANGE_FLAG_PATH_FUNCTIONS = frozenset({"isempty", "lower_inc", "lower_inf", "upper_inc", "upper_inf"})

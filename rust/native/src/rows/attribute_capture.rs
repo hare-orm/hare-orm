@@ -1,8 +1,10 @@
-//! Remembering attribute values of many instances in one call - `InstanceValues.capture()`.
+//! Remembering attribute values of many instances in one call - `InstanceValues.capture()` and
+//! `InstanceSnapshot.capture_persistence()`.
 
 use pyo3::exceptions::PyAttributeError;
+use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyInt, PyString, PyTuple};
+use pyo3::types::{PyDict, PyInt, PyList, PyString, PyTuple};
 
 /// Remembers the current value of each of `field_names` on each instance, keeping a value already
 /// remembered: `old_values` maps `id(instance)` to `(instance, {field name: value})`; a field the
@@ -49,4 +51,41 @@ pub fn capture_instance_values(
         values.set_item(name, value)?;
     }
     Ok(())
+}
+
+/// The persistence snapshots of `instances`, in order - `snapshot_class(instance, values)` of each:
+/// the instance's own (`__dict__`) values of `names` - `missing` for one it lacks, a dict copied, as a
+/// later write edits it in place - and then its `pk` when `includes_primary_key`.
+#[pyfunction]
+pub fn capture_persistence_snapshots<'py>(
+    snapshot_class: &Bound<'py, PyAny>,
+    instances: &Bound<'py, PyAny>,
+    names: Vec<Bound<'py, PyString>>,
+    missing: &Bound<'py, PyAny>,
+    includes_primary_key: bool,
+) -> PyResult<Bound<'py, PyList>> {
+    let py = snapshot_class.py();
+    let state_name = intern!(py, "__dict__");
+    let primary_key_name = intern!(py, "pk");
+    let snapshots = PyList::empty(py);
+    for instance in instances.try_iter()? {
+        let instance = instance?;
+        let state = instance.getattr(state_name)?.cast_into::<PyDict>()?;
+        let values = PyDict::new(py);
+        for name in &names {
+            let value = match state.get_item(name)? {
+                Some(value) => match value.cast::<PyDict>() {
+                    Ok(mapping) => mapping.copy()?.into_any(),
+                    Err(_) => value,
+                },
+                None => missing.clone(),
+            };
+            values.set_item(name, value)?;
+        }
+        if includes_primary_key {
+            values.set_item(primary_key_name, instance.getattr(primary_key_name)?)?;
+        }
+        snapshots.append(snapshot_class.call1((instance, values))?)?;
+    }
+    Ok(snapshots)
 }

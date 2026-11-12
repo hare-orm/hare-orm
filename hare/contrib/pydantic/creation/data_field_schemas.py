@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from copy import copy
 from enum import Enum
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from pydantic import SerializationInfo, SerializerFunctionWrapHandler, field_validator, model_serializer
 
@@ -118,7 +118,7 @@ class DataFieldSchemas:
                 *creator._model_description.foreign_key_fields,
                 *creator._model_description.one_to_one_fields,
             )
-            for source_field_name in cast("ForeignKeyFieldInstance[Any]", relation_field).source_fields
+            for source_field_name in relation_field.source_fields  # type: ignore[attr-defined]
         }
         return [
             field
@@ -161,9 +161,10 @@ class DataFieldSchemas:
         ) -> Any:
             data = handler(self)
             if isinstance(data, dict):
-                by_alias = cast("bool | None", info.by_alias)
+                by_alias = info.by_alias
                 if by_alias is None:
-                    by_alias = self.model_config.get("serialize_by_alias", False)
+                    # Earlier supported Pydantic versions expose None here.
+                    by_alias = self.model_config.get("serialize_by_alias", False)  # type: ignore[unreachable]
                 for field_name in field_names:
                     output_name = (
                         type(self).model_fields[field_name].serialization_alias or field_name
@@ -201,9 +202,7 @@ class DataFieldSchemas:
                 )
             if isinstance(DataFieldSchemas.unwrap_generated_field(field), ContainerField):
                 generated_validators[f"_hare_orm_check_held_values_{field_name}"] = field_validator(field_name)(
-                    DataFieldSchemas.make_held_values_validator(
-                        cast("ContainerField", DataFieldSchemas.unwrap_generated_field(field))
-                    )
+                    DataFieldSchemas.make_held_values_validator(DataFieldSchemas.unwrap_generated_field(field))  # type: ignore[arg-type]
                 )
         return generated_validators
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.core.extensions.declarations import ExtensionContribution, MethodRegistration
 from hare.core.registries import Registries
@@ -116,7 +116,7 @@ class QuerySetExtensions:
                 condition = args[0] if len(args) == 1 and not kwargs and isinstance(args[0], Q) else Q(*args, **kwargs)
                 args, kwargs = (condition,), {}
             if not queryset._model_is_set_up():
-                return cast("QuerySet[Any]", CallsBeforeSetup.keep(queryset, name, args, kwargs))
+                return CallsBeforeSetup.keep(queryset, name, args, kwargs)  # type: ignore[return-value]
             clone = queryset._clone()
             clone._extension_calls = (*clone._extension_calls, QuerySetExtensionCall(name, args, dict(kwargs)))
             return clone
@@ -125,13 +125,14 @@ class QuerySetExtensions:
 
     @classmethod
     def get_implementation(
-        cls, query: QuerySpecification[Any], extension_call: QuerySetExtensionCall
+        cls, query: QuerySpecification[Any], extension_call: QuerySetExtensionCall, dialect: Dialect
     ) -> QuerySetExtension:
         """The implementation of a called method for the dialect of the query's connection.
 
         Args:
             query: The query.
             extension_call: The call.
+            dialect: The dialect of the connection the query runs on.
 
         Returns:
             The implementation.
@@ -140,13 +141,13 @@ class QuerySetExtensions:
             UnSupportedError: The connection's dialect has no implementation of the method.
         """
         implementations = cls.get_registered().get(extension_call.name, {})
-        implementation = implementations.get(type(query.dialect))
+        implementation = implementations.get(type(dialect))
         if implementation is None:
             dialect_names = sorted(str(dialect_class.name) for dialect_class in implementations)
             raise UnSupportedError(
                 f"{query.model.__name__}.{extension_call.name}() is a method of the "
                 f"{', '.join(dialect_names) or 'no longer registered'} dialect - the query runs on "
-                f"{query.dialect.name}"
+                f"{dialect.name}"
             )
         return implementation
 
@@ -157,7 +158,10 @@ class QuerySetExtensions:
         Multiple result handlers are rejected rather than silently choosing one or
         assuming that unrelated result shapes can be composed.
         """
-        calls = tuple(BoundExtensionCall(call, cls.get_implementation(query, call)) for call in query._extension_calls)
+        dialect = query.dialect
+        calls = tuple(
+            BoundExtensionCall(call, cls.get_implementation(query, call, dialect)) for call in query._extension_calls
+        )
         handlers = [bound.call.name for bound in calls if bound.implementation.transform_result is not None]
         if len(handlers) > 1:
             raise QueryError(f"Only one result-shaping extension can be used: {', '.join(handlers)}")
@@ -201,19 +205,20 @@ class QuerySetExtensions:
         return any(bound.implementation.changes_rows for bound in cls.get_bound_calls(query))
 
     @classmethod
-    def raise_if_refused_in_write(cls, query: QuerySpecification[Any]) -> None:
+    def raise_if_refused_in_write(cls, query: QuerySpecification[Any], dialect: Dialect) -> None:
         """Rejects a write called with a method it refuses (``QuerySetExtension.refuses_writes``) -
         before it picks its rows, however it picks them.
 
         Args:
             query: The write.
+            dialect: The dialect of the connection the write runs on.
 
         Raises:
             QueryError: The write has such a call.
             UnSupportedError: The connection's dialect has no implementation of a called method.
         """
         for extension_call in query._extension_calls:
-            if cls.get_implementation(query, extension_call).refuses_writes:
+            if cls.get_implementation(query, extension_call, dialect).refuses_writes:
                 raise QueryError(WRITE_REFUSED_EXTENSION_MESSAGE.format(method_name=extension_call.name))
 
     @classmethod

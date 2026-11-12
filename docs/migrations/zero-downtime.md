@@ -55,9 +55,13 @@ True for a risk its migration accepts.
   don't apply — such an operation is how the code and the database are kept in step by hand.
   Migration-wide lock rules inspect all executed operations together, including nested database
   branches, so a `RunPython` outside a container is checked against schema changes inside it.
-- `MigrationSafetyChecker(large_table_rows=...)` (`hare.migrations.safety`) checks one migration on a
-  given state: `await checker.check(migration, state, client=...)`. To prepare the same schema plans
-  without reading the database, pass `read_catalog=False`; every existing table then may be large.
+- `MigrationSafetyChecker(large_table_rows=...)` (`hare.migrations.safety`) checks the operation
+  snapshots prepared by `prepared = migration.prepare(state)`:
+  `await checker.check(migration, prepared, client=...)`. Preparation preserves the input state;
+  the checker reads the snapshots without changing them. To inspect several migrations in order,
+  retain `next_state = prepared.after.clone()` before checking, then use it for the next migration.
+  There is no need to apply the same migration again with `dry_run=True`.
+  Pass `read_catalog=False` to skip database reads; every existing table then may be large.
   Backfill and row-rewrite warnings use the effects of the prepared field plan, including Python
   value conversions and dialect-specific materialization. Preparing these plans does not evaluate
   callable defaults or read the clock.

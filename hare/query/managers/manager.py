@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import copy
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, cast, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, overload
 
 from typing_extensions import TypeVar
 
@@ -80,12 +80,10 @@ class Manager(BaseManager, Generic[TQuerySet]):
             The queryset.
         """
         queryset = self.create_queryset()
-        model = cast("type[Model]", self._model)
+        model: type[Model] = self._model  # type: ignore[assignment]
         if not self.overrides_get_queryset:
-            if queryset._visibility is RowVisibility.DEFAULT and self.scope is None:
-                # Its queries run by the calls made on it (QuerySet._call_signature) - also one taken
-                # before the model is set up and kept, as `Model.objects` read once at import.
-                queryset._call_signature = (type(queryset),)
+            # create_queryset() makes it anew - for a query made from it unchanged (QuerySet.get()).
+            queryset._unchanged_base_manager = self
             if model._meta._inited:
                 Manager.unchanged_querysets.set_value(self, queryset)
         return queryset
@@ -108,10 +106,16 @@ class Manager(BaseManager, Generic[TQuerySet]):
         return queryset
 
     def create_queryset(self) -> QuerySet[Any, Any]:
-        """Attaches explicit row policies to the custom factory's declaration."""
+        """Attach row policies and the call signature of an unchanged factory's declaration.
+
+        The same initialization serves manager access and relation loading. An overridden
+        factory or a scope provider retains its ordinary query-building path.
+        """
         queryset = self.get_queryset()
         queryset._uses_default_scope = True
         queryset._row_scope_provider = self.scope
+        if not self.overrides_get_queryset and queryset._visibility is RowVisibility.DEFAULT and self.scope is None:
+            queryset._call_signature = (type(queryset),)
         return queryset
 
     def copy_unbound(self) -> Manager[TQuerySet]:

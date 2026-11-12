@@ -923,7 +923,8 @@ class QuerySet:
 не является связью. Строки связи «многие-ко-многим» приходят одним запросом, соединённым со связующей
 таблицей, когда связующая таблица и связанные строки лежат на одном соединении, у связи нет модели
 `through=`, а QuerySet из `Prefetch` не фильтрует по этой связи, не добавляет вычисляемых значений,
-`.distinct()` и вложенной предзагрузки; иначе сначала отдельным запросом читается связующая таблица.
+`.distinct()`, `select_related()`, расширений и вложенной предзагрузки; иначе сначала отдельным запросом
+читается связующая таблица.
 
 `count()`, `exists()` и `aggregate()` у QuerySet с предзагрузкой дают `QueryError` — они не возвращают
 объектов, к которым прикрепить связи; `prefetch_related(None)` снимает всю предзагрузку, заданную раньше:
@@ -1075,7 +1076,8 @@ class Prefetch:
 
 ```python
 # путь через связи внутри Prefetch
-await Author.objects.all().prefetch_related(Prefetch("books__editor", queryset=Reader.objects.filter(is_active=True)))
+await Author.objects.all().prefetch_related(Prefetch("books__editor",
+queryset=Reader.objects.filter(is_active=True)))
 
 # .prefetch_related() прямо у запроса, переданного в Prefetch
 await Author.objects.all().prefetch_related(
@@ -1173,7 +1175,8 @@ SQLite, где курсор читается на соединении тран�
 
 ## <a id="recursive"></a>Рекурсивные запросы и CTE
 
-### <a id="with_recursive-walking-a-relation-of-a-model-to-itself"></a>Обход связи модели с самой собой: `with_recursive()`
+### <a id="with_recursive-walking-a-relation-of-a-model-to-itself"></a>Обход связи модели с самой собой:
+`with_recursive()`
 
 ```python
 class QuerySet(QuerySpecification):
@@ -1320,7 +1323,8 @@ average = await Loan.objects.sample(0.5, method=TableSampleMethod.SYSTEM).aggreg
 ```
 
 ```sql
-SELECT ... FROM "loan" TABLESAMPLE BERNOULLI (5) REPEATABLE (42) WHERE "returned_at" IS NULL ORDER BY "id" LIMIT 20
+SELECT ... FROM "loan" TABLESAMPLE BERNOULLI (5) REPEATABLE (42) WHERE "returned_at" IS NULL ORDER BY "id"
+LIMIT 20
 ```
 
 - **`percent`** — вероятность, с которой остаётся каждая строка (или блок), `int` или `float` от `0` до
@@ -1495,8 +1499,10 @@ MERGE INTO "inventory" USING (SELECT column1 AS "isbn", column2 AS "copies"
   FROM (VALUES (CAST($1 AS VARCHAR), CAST($2 AS INTEGER)), (...)) AS "hare_merge_values") AS "hare_merge_source"
 ON "inventory"."isbn"="hare_merge_source"."isbn"
 WHEN MATCHED AND ... THEN DELETE
-WHEN MATCHED THEN UPDATE SET "copies" = "inventory"."copies"+"hare_merge_source"."copies", "version" = "inventory"."version"+$3
-WHEN NOT MATCHED THEN INSERT ("isbn", "copies") VALUES ("hare_merge_source"."isbn", "hare_merge_source"."copies")
+WHEN MATCHED THEN UPDATE SET "copies" = "inventory"."copies"+"hare_merge_source"."copies", "version" =
+"inventory"."version"+$3
+WHEN NOT MATCHED THEN INSERT ("isbn", "copies") VALUES ("hare_merge_source"."isbn",
+"hare_merge_source"."copies")
 ```
 
 - **Источник** — список словарей с одинаковыми ключами (каждый ключ — колонка; ключ с именем поля модели

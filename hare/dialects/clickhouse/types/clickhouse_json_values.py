@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import re
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.clickhouse.lookups.declarations import ClickhouseStoredJsonText
 from hare.dialects.clickhouse.types.constants import (
     CLICKHOUSE_ESCAPED_JSON_KEY_DOT,
-    CLICKHOUSE_JSON_COLUMN_TYPE,
     CLICKHOUSE_JSON_DIGITS_AS_ZEROS,
     CLICKHOUSE_JSON_EXACT_FLOAT_INTEGER,
     CLICKHOUSE_JSON_INTEGER_RANGE,
@@ -20,7 +20,6 @@ from hare.dialects.clickhouse.types.constants import (
 from hare.exceptions import ValidationError
 
 if TYPE_CHECKING:
-    from hare.fields.data.json.json_field import JSONField
     from hare.fields.field import Field
     from hare.models import Model
 
@@ -40,11 +39,7 @@ class ClickhouseJsonValues:
         Returns:
             The column type.
         """
-        return (
-            CLICKHOUSE_JSON_TEXT_COLUMN_TYPE
-            if cast("JSONField[Any]", field).keeps_json_text
-            else CLICKHOUSE_JSON_COLUMN_TYPE
-        )
+        return CLICKHOUSE_JSON_TEXT_COLUMN_TYPE if field.keeps_json_text else ClickhouseTypeName.JSON  # type: ignore[attr-defined]
 
     @staticmethod
     def to_lookup(field: Field[Any], value: Any, instance: type[Model] | Model | None) -> Any:
@@ -59,7 +54,7 @@ class ClickhouseJsonValues:
         Returns:
             The text, None for None.
         """
-        text = cast("JSONField[Any]", field).to_lookup_value(value, instance)
+        text = field.to_lookup_value(value, instance)
         return text if text is None or not isinstance(text, str) else ClickhouseStoredJsonText(text)
 
     @staticmethod
@@ -78,7 +73,7 @@ class ClickhouseJsonValues:
             ValidationError: The value isn't an object, or holds what the column doesn't keep
                 (``raise_if_not_kept()``).
         """
-        text = cast("JSONField[Any]", field).to_db_value(value, instance)
+        text = field.to_db_value(value, instance)
         if text is None:
             return None
         if not text.lstrip().startswith("{"):
@@ -102,7 +97,7 @@ class ClickhouseJsonValues:
         Returns:
             The text, None for None.
         """
-        return cast("JSONField[Any]", field).to_db_value(value, instance)
+        return field.to_db_value(value, instance)
 
     @staticmethod
     def may_hold_not_kept_values(text: str) -> bool:
@@ -149,7 +144,7 @@ class ClickhouseJsonValues:
                             "be read back missing"
                         )
                     pending.append(member)
-            elif isinstance(item, list | tuple):
+            elif isinstance(item, (list, tuple)):
                 # The numbers of one array and of the arrays in it - the objects in it keep paths of
                 # their own.
                 array_items: list[Any] = [item]
@@ -159,7 +154,7 @@ class ClickhouseJsonValues:
                 widest_integer = 0
                 while array_items:
                     for element in array_items.pop():
-                        if isinstance(element, list | tuple):
+                        if isinstance(element, (list, tuple)):
                             array_items.append(element)
                         elif type(element) is bool:
                             holds_boolean = True
@@ -211,9 +206,9 @@ class ClickhouseJsonValues:
             ValidationError: The value isn't an object, or a key holds the escape itself, which the
                 server would read back as a dot.
         """
-        if cast("JSONField[Any]", field).keeps_json_text:
+        if field.keeps_json_text:  # type: ignore[attr-defined]
             # Its JSON text, as it is.
-            return cast("JSONField[Any]", field).to_db_value(value, instance)
+            return field.to_db_value(value, instance)
         text = cls.to_db(field, value, instance)
         if text is None or (CLICKHOUSE_JSON_KEY_DOT not in text and CLICKHOUSE_ESCAPED_JSON_KEY_DOT not in text):
             return text

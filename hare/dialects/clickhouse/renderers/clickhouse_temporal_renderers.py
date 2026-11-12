@@ -20,7 +20,8 @@ from hare.sql.constants import MICROSECONDS_PER_DAY
 from hare.sql.enums import DatetimeCastTarget, DateTruncSource, TruncType
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms import functions as term_functions
-from hare.time import Timezone
+from hare.time.system_zone import SystemZone
+from hare.time.zone_settings import ZoneSettings
 
 if TYPE_CHECKING:
     from hare.dialects.base.renderers.term_renderers import TermRenderers
@@ -75,7 +76,7 @@ class ClickhouseTemporalRenderers:
             The zone, None for UTC.
         """
         if function.zone_name is None and function.use_local_zone_when_naive:
-            return Timezone.get_local_zone_name()
+            return SystemZone.get_local_zone_name()
         return function.zone_name
 
     @classmethod
@@ -128,7 +129,7 @@ class ClickhouseTemporalRenderers:
         """
         if default.value_type == NowValueType.DATETIME:
             return CLICKHOUSE_NOW_SQL
-        zone_name = Timezone.name() if Timezone.get_use_timezone() else Timezone.get_local_zone_name()
+        zone_name = ZoneSettings.name() if ZoneSettings.get_use_timezone() else SystemZone.get_local_zone_name()
         zone_sql = cls.get_zone_sql(zone_name, sql_context)
         if default.value_type == NowValueType.DATE:
             return f"toDate32({CLICKHOUSE_NOW_SQL}, {zone_sql})"
@@ -252,7 +253,7 @@ class ClickhouseTemporalRenderers:
         """
         if is_aware:
             return CLICKHOUSE_UTC_ZONE_SQL
-        return sql_context.dialect.literals.get_string_literal_sql(Timezone.get_local_zone_name())
+        return sql_context.dialect.literals.get_string_literal_sql(SystemZone.get_local_zone_name())
 
     @classmethod
     def render_datetime_as_text(cls, function: functions.DatetimeAsText, sql_context: SqlContext) -> str:

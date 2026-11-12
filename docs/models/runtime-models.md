@@ -1,5 +1,10 @@
 # Models registered at runtime
 
+Registration and removal are coordinated by `LiveModelRegistration`. The registry binds
+many-to-many declarations through `ManyToManyLinking` and checks table and schema object
+name collisions through `ModelNameChecks`. Registration failures restore the registry and
+relation bindings together; removing a model invalidates dependent query declarations and plans.
+
 A model class built while the application runs — from a table read off the database, say — is registered
 after `Hare.init()` and removed again without restarting.
 

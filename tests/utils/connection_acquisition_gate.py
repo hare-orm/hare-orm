@@ -3,13 +3,12 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
-from typing import Any, ClassVar, TypeVar, cast
+from typing import Any, ClassVar, TypeVar
 
 import pytest
 
 from hare.core.resource_completion import ResourceCompletion
 from hare.dialects.base.client.database_client import DatabaseClient
-from hare.dialects.sqlite.client.sqlite_client import SqliteClient
 
 TResult = TypeVar("TResult")
 
@@ -73,7 +72,7 @@ class ConnectionAcquisitionGate:
             target, method = client, "_pool_acquire"
         else:
             assert client.dialect.name == "sqlite"
-            target, method = cast("SqliteClient", client)._lock, "acquire"
+            target, method = client._lock, "acquire"
         target_type = type(target)
         original = getattr(target_type, method)
         native_gate = None

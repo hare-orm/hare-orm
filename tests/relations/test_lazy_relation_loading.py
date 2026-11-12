@@ -339,3 +339,17 @@ async def test_refresh_from_db_reloads_lazy_select_fk_and_m2m(db):
     await fetched.refresh_from_db(fields=["mentor_id"])
 
     assert fetched.mentor.name == "old"
+
+
+@pytest.mark.parametrize(
+    ("parent_class", "child_class"),
+    [(LazyJoinedParent, LazyJoinedChild), (LazySelectParent, LazySelectChild)],
+)
+@pytest.mark.asyncio
+async def test_a_lazy_relation_loads_on_every_repeated_get(db, parent_class, child_class):
+    parent = await parent_class.objects.create(name="Parent")
+    child = await child_class.objects.create(name="Child", parent=parent)
+    for _ in range(3):
+        fetched = await child_class.objects.get(pk=child.pk)
+        assert isinstance(fetched.parent, parent_class)
+        assert fetched.parent.name == "Parent"

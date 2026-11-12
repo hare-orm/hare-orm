@@ -4,7 +4,7 @@ import dataclasses
 from typing import Any
 
 from hare.inspectdb.constants import CATALOG_DIAGNOSTIC_PART_TYPES
-from hare.inspectdb.introspection.enums import CatalogDiagnosticCode, SchemaPartType
+from hare.inspectdb.enums import CatalogDiagnosticCode, SchemaPartType
 from hare.inspectdb.introspection.schema_part import SchemaPart
 from hare.inspectdb.introspection.table_info import TableInfo
 

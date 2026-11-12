@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from hare.ddl.enums import TriggerForEach
 from hare.ddl.schema_objects.trigger import Trigger
 from hare.dialects.base.schema.triggers.trigger_statements import TriggerStatements
 from hare.exceptions import UnSupportedError
@@ -19,7 +20,7 @@ class SqliteTriggerStatements(TriggerStatements):
     editor: SqliteSchemaEditor
 
     def get_trigger_create_sqls(self, model: type[Model], trigger: Trigger, safe: bool = False) -> list[str]:
-        if trigger.for_each == "STATEMENT":
+        if trigger.for_each == TriggerForEach.STATEMENT:
             raise UnSupportedError(
                 f"STATEMENT-level triggers are not supported on {self.editor.client.dialect.name}; "
                 "SQLite triggers always fire per row."

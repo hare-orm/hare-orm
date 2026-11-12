@@ -7,7 +7,7 @@ import sys
 import types
 from collections.abc import Callable
 from copy import copy
-from typing import TYPE_CHECKING, Any, ClassVar, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, ParamSpec, TypeVar
 
 from hare.core.constants import HARE_PACKAGE_DIRECTORY
 from hare.exceptions import ConfigurationError, HareError
@@ -58,7 +58,7 @@ class CallsBeforeSetup:
                 return call_method(query, *args, **kwargs)
             return CallsBeforeSetup.keep(query, method.__name__, args, kwargs)
 
-        return cast("Callable[P, T]", call_or_keep)
+        return call_or_keep  # type: ignore[return-value]
 
     @staticmethod
     def recorded_result(method: Callable[P, T]) -> Callable[P, T]:
@@ -85,7 +85,7 @@ class CallsBeforeSetup:
                 CallsBeforeSetup.PENDING.append(result)
             return result
 
-        return cast("Callable[P, T]", call_and_keep)
+        return call_and_keep  # type: ignore[return-value]
 
     @classmethod
     def keep(

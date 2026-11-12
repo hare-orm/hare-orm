@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.declarations.declaration_value_serializer import DeclarationValueSerializer
 from hare.declarations.import_manager import ImportManager
@@ -94,7 +94,7 @@ class ModelSourceBuilder:
             The source.
         """
         # Only a model with a state reaches here - a skipped through table has none.
-        state = cast("ModelState", inspected.state)
+        state: ModelState = inspected.state  # type: ignore[assignment]
         base_name = self.imports.add_from("hare.models", "Model")
         lines = [f"class {inspected.class_name}({base_name}):"]
         for attribute_name, field in state.fields.items():

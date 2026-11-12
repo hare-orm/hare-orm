@@ -21,6 +21,24 @@ class Identifiers:
     and may run on any connection.
     """
 
+    __slots__ = ("folded_taken_names",)
+
+    def __init__(self, taken_names: Collection[str] = ()) -> None:
+        """Prepare case-insensitive occupied names for one allocation scope.
+
+        Args:
+            taken_names: Existing names; copied so later additions stay local to this scope.
+        """
+        self.folded_taken_names = {name.casefold() for name in taken_names}
+
+    def add(self, name: str) -> None:
+        """Reserve a selected name; choosing a free name alone does not reserve it."""
+        self.folded_taken_names.add(name.casefold())
+
+    def __contains__(self, name: str) -> bool:
+        """Whether the scope contains this name, independently of letter case."""
+        return name.casefold() in self.folded_taken_names
+
     #: (name, limit) -> the shortened name of a name over its limit.
     SHORTENED_NAMES: ClassVar[Cache[str]] = Cache(SHORTENED_IDENTIFIER_CACHE_SIZE)
 
@@ -61,23 +79,21 @@ class Identifiers:
             shortened_name = Identifiers.SHORTENED_NAMES[key] = f"{prefix}_{digest}"
         return shortened_name
 
-    @staticmethod
-    def get_free_name(name: str, taken_names: Collection[str]) -> str:
-        """A generated name none of ``taken_names`` holds - ``name`` itself, else the first free one of
+    def get_free_name(self, name: str) -> str:
+        """A generated name this scope does not hold - ``name`` itself, else the first free one of
         ``<name> 2``, ``<name> 3``, ... - within ``IDENTIFIER_LENGTH_LIMIT`` bytes, and told apart from the
         taken names regardless of letter case, as a database may read identifiers.
 
         Args:
-            name: The name.
-            taken_names: The names it may not be.
+            name: The preferred name.
 
         Returns:
-            The free name.
+            The free name, not yet reserved. Call ``add()`` when subsequent choices must exclude it.
         """
         candidate = Identifiers.get_within_limit(name)
-        if not taken_names:
+        folded_taken_names = self.folded_taken_names
+        if not folded_taken_names:
             return candidate
-        folded_taken_names = {taken_name.casefold() for taken_name in taken_names}
         number = 2
         while candidate.casefold() in folded_taken_names:
             candidate = Identifiers.get_within_limit(f"{name} {number}")

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar
 
 from hare.fields.enums import ValueComputation
 from hare.fields.field import Field
@@ -33,7 +33,4 @@ class StatisticResultAggregate(Aggregate):
         return ExpressionResult(term=float_term, joins=result.joins, output_field=result.output_field)
 
     def _coerce_output_field(self, field_object: Field[Any], expression_context: ExpressionContext) -> Field[Any]:
-        return cast(
-            "Field[Any]",
-            NumericTyping.get_statistic_output_field(field_object, expression_context.dialect, self.computation),
-        )
+        return NumericTyping.get_statistic_output_field(field_object, expression_context.dialect, self.computation)  # type: ignore[return-value]

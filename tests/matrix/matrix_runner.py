@@ -21,6 +21,7 @@ import io
 import os
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from tests.matrix.constants import (
@@ -46,8 +47,8 @@ from tests.matrix.constants import (
     SQLITE_SUITE_PREFIX,
     SUITE_ENVIRONMENT_OPTION,
     SUITE_ENVIRONMENTS,
-    WITHOUT_NATIVE_PLUGIN,
 )
+from tests.matrix.matrix_catalog import MatrixCatalog
 from tests.matrix.matrix_ports import MatrixPorts
 from tests.matrix.matrix_virtualenv import MatrixVirtualenv
 from tests.matrix.paths import MATRIX_LOG_DIRECTORY, REPOSITORY_DIRECTORY
@@ -138,8 +139,14 @@ class MatrixRunner:
         SuiteRequirements.manifest.check_inventory()
         runs: list[RunSpec] = []
         for python_version in self.python_versions:
+            available = {
+                environment.name: environment for environment in MatrixCatalog.get_environments(python_version)
+            }
             for suite_environment in self.suite_environments:
-                runs.extend(self.get_environment_runs(python_version, suite_environment))
+                if suite_environment.name in available:
+                    runs.extend(self.get_environment_runs(python_version, available[suite_environment.name]))
+        if not runs:
+            raise SystemExit("No supported test environments for the selected Python versions")
         if self.suites:
             known_suites = list(dict.fromkeys(run.suite for run in runs))
             unknown_suites = [pattern for pattern in self.suites if not fnmatch.filter(known_suites, pattern)]
@@ -173,8 +180,15 @@ class MatrixRunner:
         if suite_environment.extras and set(suite_environment.extras) <= set(MATRIX_BROKERS):
             return runs + self.get_broker_runs(python_version, suite_environment)
         newest_only = suite_environment.on_newest_servers_only
-        if newest_only and python_version != MATRIX_PYTHON_VERSIONS[-1]:
-            return runs
+        if newest_only:
+            suite_environment = replace(
+                suite_environment,
+                databases=tuple(
+                    database
+                    for database in suite_environment.databases
+                    if python_version == MatrixCatalog.get_latest_python(suite_environment.name, database)
+                ),
+            )
         databases = suite_environment.databases
         if "sqlite" in databases:
             for sqlite_version in self.sqlite_versions[-1:] if newest_only else self.sqlite_versions:
@@ -330,7 +344,6 @@ class MatrixRunner:
             "pytest",
             "-p",
             "tests.matrix.run_report",
-            *([] if run.suite_environment.native else ["-p", WITHOUT_NATIVE_PLUGIN]),
             "-n",
             self.workers if run.suite_environment.whole_suite else "0",
             *MATRIX_PYTEST_OPTIONS,

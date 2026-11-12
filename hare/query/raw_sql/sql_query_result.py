@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Generic, TypeVar, cast
+from typing import Any, Generic, TypeVar
 
 from hare.lazy_loading.pydantic_classes import PydanticClasses
 
@@ -32,7 +32,7 @@ class SqlQueryResult(Generic[SchemaT]):
             The rows.
         """
         if PydanticClasses.is_type_adapter(schema):
-            return [cast("SchemaT", schema.validate_python(row)) for row in rows]
+            return [schema.validate_python(row) for row in rows]
         if PydanticClasses.is_model_class(schema):
-            return [cast("SchemaT", schema.model_validate(row)) for row in rows]
-        return cast("list[SchemaT]", rows)
+            return [schema.model_validate(row) for row in rows]  # type: ignore[misc]
+        return rows  # type: ignore[return-value]

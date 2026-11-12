@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any
 
 from hare.contrib.pydantic.messages import COLUMN_NOT_FETCHED, RELATED_ROWS_NOT_FETCHED, RELATION_NOT_FETCHED
 from hare.exceptions import NoValuesFetched
@@ -10,9 +10,6 @@ from hare.fields.relations.relation_accessors import RelationAccessors
 from hare.models import Model
 from hare.query.queryset import QuerySet
 from hare.query.queryset.single_rows.none_awaitable_type import NoneAwaitable
-
-if TYPE_CHECKING:
-    from hare.fields.relations.fields.relational_field import RelationalField
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +48,7 @@ class PydanticFieldSource:
                         missing_column = segment
                     break
                 if model is not None and isinstance(segment, str) and segment in model._meta.fetch_fields:
-                    if field is not None and cast("RelationalField[Any]", field).is_multi_valued:
+                    if field is not None and field.is_multi_valued:  # type: ignore[attr-defined]
                         if not RelationAccessors.get_relation(model, segment)._fetched:
                             raise NoValuesFetched(RELATED_ROWS_NOT_FETCHED.format(field=segment))
                     elif value is NoneAwaitable or isinstance(value, QuerySet):
@@ -86,6 +83,6 @@ class PydanticFieldSource:
                 for target in cls.get_fetch_targets(model, (branch, *remaining), prefix)
             )
         if name in model._meta.fetch_fields:
-            related = cast("RelationalField[Any]", model._meta.fields_map[name]).related_model
+            related = model._meta.fields_map[name].related_model  # type: ignore[attr-defined]
             return cls.get_fetch_targets(related, tuple(remaining), (*prefix, name))
         return ((prefix, model),) if prefix else ()

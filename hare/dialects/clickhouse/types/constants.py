@@ -6,9 +6,26 @@ import ipaddress
 import re
 import uuid
 
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
+
 CLICKHOUSE_PHYSICAL_TYPE_CACHE_SIZE = 1024
-CLICKHOUSE_TYPE_CONTAINERS = frozenset({"Array", "Map", "Tuple", "Nested", "Nullable", "LowCardinality", "Variant"})
-CLICKHOUSE_DECIMAL_TYPE_PRECISIONS = {"Decimal32": 9, "Decimal64": 18, "Decimal128": 38, "Decimal256": 76}
+CLICKHOUSE_TYPE_CONTAINERS = frozenset(
+    {
+        ClickhouseTypeName.ARRAY,
+        ClickhouseTypeName.MAP,
+        ClickhouseTypeName.TUPLE,
+        ClickhouseTypeName.NESTED,
+        ClickhouseTypeName.NULLABLE,
+        ClickhouseTypeName.LOW_CARDINALITY,
+        ClickhouseTypeName.VARIANT,
+    }
+)
+CLICKHOUSE_DECIMAL_TYPE_PRECISIONS: dict[str, int] = {
+    ClickhouseTypeName.DECIMAL32: 9,
+    ClickhouseTypeName.DECIMAL64: 18,
+    ClickhouseTypeName.DECIMAL128: 38,
+    ClickhouseTypeName.DECIMAL256: 76,
+}
 
 #: The start of a dictionary-encoded column type - ``LowCardinality(T)``.
 CLICKHOUSE_LOW_CARDINALITY_PREFIX = "LowCardinality("
@@ -20,75 +37,71 @@ CLICKHOUSE_ENUM_NUMBER_SPAN = 2**16
 #: The ISO names hare's fields write their column types with -> ClickHouse's own name of the type,
 #: the one the server reports (``VARCHAR(n)`` and ``CHAR(n)`` are ``String`` whatever their length).
 CLICKHOUSE_ISO_TYPE_NAMES = {
-    "TINYINT": "Int8",
-    "SMALLINT": "Int16",
-    "INT": "Int32",
-    "INTEGER": "Int32",
-    "BIGINT": "Int64",
-    "REAL": "Float32",
-    "FLOAT": "Float32",
-    "DOUBLE": "Float64",
-    "DOUBLE PRECISION": "Float64",
-    "BOOL": "Bool",
-    "BOOLEAN": "Bool",
-    "TEXT": "String",
-    "VARCHAR": "String",
-    "CHAR": "String",
+    "TINYINT": ClickhouseTypeName.INT8,
+    "SMALLINT": ClickhouseTypeName.INT16,
+    "INT": ClickhouseTypeName.INT32,
+    "INTEGER": ClickhouseTypeName.INT32,
+    "BIGINT": ClickhouseTypeName.INT64,
+    "REAL": ClickhouseTypeName.FLOAT32,
+    "FLOAT": ClickhouseTypeName.FLOAT32,
+    "DOUBLE": ClickhouseTypeName.FLOAT64,
+    "DOUBLE PRECISION": ClickhouseTypeName.FLOAT64,
+    "BOOL": ClickhouseTypeName.BOOL,
+    "BOOLEAN": ClickhouseTypeName.BOOL,
+    "TEXT": ClickhouseTypeName.STRING,
+    "VARCHAR": ClickhouseTypeName.STRING,
+    "CHAR": ClickhouseTypeName.STRING,
 }
 #: An ISO type name in a type's text, with the length a text type may give - outside quoted text.
 CLICKHOUSE_ISO_TYPE_NAME_PATTERN = re.compile(
     r"'(?:[^'\\]|\\.)*'|\b(DOUBLE PRECISION|TINYINT|SMALLINT|INTEGER|INT|BIGINT|REAL|FLOAT|DOUBLE|BOOLEAN|BOOL|TEXT"
     r"|VARCHAR|CHAR)\b(?:\(\d+\))?"
 )
-#: The type of a ``Dynamic`` column.
-CLICKHOUSE_DYNAMIC_TYPE = "Dynamic"
-#: The wrapper of a type holding NULLs too.
-CLICKHOUSE_NULLABLE_TYPE = "Nullable"
 #: The most types a ``Dynamic`` column keeps in columns of their own - the rest share one.
 CLICKHOUSE_DYNAMIC_MAX_TYPES = 254
 #: The type a moment is kept as in a ``Dynamic`` column - the type of a ``DatetimeField``.
 CLICKHOUSE_DYNAMIC_DATETIME_TYPE = "DateTime64(6, 'UTC')"
 #: The type a ``Dynamic`` column keeps a value of each of these classes as, whatever the value.
 CLICKHOUSE_DYNAMIC_PLAIN_TYPES: dict[type, str] = {
-    bool: "Bool",
-    float: "Float64",
-    str: "String",
-    datetime.date: "Date32",
-    uuid.UUID: "UUID",
-    ipaddress.IPv4Address: "IPv4",
-    ipaddress.IPv6Address: "IPv6",
+    bool: ClickhouseTypeName.BOOL,
+    float: ClickhouseTypeName.FLOAT64,
+    str: ClickhouseTypeName.STRING,
+    datetime.date: ClickhouseTypeName.DATE32,
+    uuid.UUID: ClickhouseTypeName.UUID,
+    ipaddress.IPv4Address: ClickhouseTypeName.IPV4,
+    ipaddress.IPv6Address: ClickhouseTypeName.IPV6,
 }
 #: The integer types a ``Dynamic`` column keeps an int as - the first one holding it.
 CLICKHOUSE_DYNAMIC_INTEGER_TYPES = (
-    ("Int64", -(2**63), 2**63 - 1),
-    ("UInt64", 0, 2**64 - 1),
-    ("Int128", -(2**127), 2**127 - 1),
-    ("UInt128", 0, 2**128 - 1),
-    ("Int256", -(2**255), 2**255 - 1),
-    ("UInt256", 0, 2**256 - 1),
+    (ClickhouseTypeName.INT64, -(2**63), 2**63 - 1),
+    (ClickhouseTypeName.UINT64, 0, 2**64 - 1),
+    (ClickhouseTypeName.INT128, -(2**127), 2**127 - 1),
+    (ClickhouseTypeName.UINT128, 0, 2**128 - 1),
+    (ClickhouseTypeName.INT256, -(2**255), 2**255 - 1),
+    (ClickhouseTypeName.UINT256, 0, 2**256 - 1),
 )
 #: The most digits a ``Decimal(P, S)`` holds.
 CLICKHOUSE_DECIMAL_MAX_PRECISION = 76
 #: The start of a parsed ClickHouse type name -> the Python types the drivers read its values as.
 #: Nullable/LowCardinality wrappers are removed before lookup; a longer start is matched first.
 CLICKHOUSE_READ_PYTHON_TYPES: tuple[tuple[str, tuple[type, ...]], ...] = (
-    ("DateTime", (datetime.datetime,)),
-    ("Date", (datetime.date,)),
-    ("Decimal", (decimal.Decimal,)),
-    ("Bool", (bool,)),
+    (ClickhouseTypeName.DATETIME, (datetime.datetime,)),
+    (ClickhouseTypeName.DATE, (datetime.date,)),
+    (ClickhouseTypeName.DECIMAL, (decimal.Decimal,)),
+    (ClickhouseTypeName.BOOL, (bool,)),
     ("UInt", (int,)),
     ("Int", (int,)),
     ("Float", (float,)),
-    ("String", (str,)),
+    (ClickhouseTypeName.STRING, (str,)),
     # clickhouse-connect reads the padded bytes, clickhouse-driver their text.
-    ("FixedString", (str, bytes)),
-    ("Enum", (str,)),
-    ("UUID", (uuid.UUID,)),
-    ("IPv4", (ipaddress.IPv4Address,)),
-    ("IPv6", (ipaddress.IPv6Address,)),
-    ("Array", (list,)),
-    ("Tuple", (tuple,)),
-    ("Map", (dict,)),
+    (ClickhouseTypeName.FIXED_STRING, (str, bytes)),
+    (ClickhouseTypeName.ENUM, (str,)),
+    (ClickhouseTypeName.UUID, (uuid.UUID,)),
+    (ClickhouseTypeName.IPV4, (ipaddress.IPv4Address,)),
+    (ClickhouseTypeName.IPV6, (ipaddress.IPv6Address,)),
+    (ClickhouseTypeName.ARRAY, (list,)),
+    (ClickhouseTypeName.TUPLE, (tuple,)),
+    (ClickhouseTypeName.MAP, (dict,)),
 )
 #: The least integer a literal is read as a ``UInt64`` from - which no signed integer of an array or a map
 #: shares a type with, so such a value of a signed field is written with its type.
@@ -96,11 +109,9 @@ CLICKHOUSE_UNSIGNED_LITERAL_FLOOR = 2**32
 #: How the server names its unsigned integer types.
 CLICKHOUSE_UNSIGNED_TYPE_PREFIX = "UInt"
 
-#: The type of a JSONField's column on a server with the JSON type.
-CLICKHOUSE_JSON_COLUMN_TYPE = "JSON"
 #: The column of a JSON field keeping its text (``JSONField.keeps_json_text``) - and of every JSON
 #: field on a driver reading no JSON column.
-CLICKHOUSE_JSON_TEXT_COLUMN_TYPE = "String"
+CLICKHOUSE_JSON_TEXT_COLUMN_TYPE = ClickhouseTypeName.STRING
 
 #: A string of a JSON text, and the ``:`` following it when it is a key (``colon``).
 CLICKHOUSE_JSON_STRING_PATTERN = re.compile(r'"(?:[^"\\]|\\.)*"(?P<colon>\s*:)?')
@@ -138,4 +149,6 @@ CLICKHOUSE_TYPE_TEXT_ESCAPES = {
 CLICKHOUSE_ENUM_DRIVER_LABELS_CACHE_SIZE = 256
 #: The types ClickHouse keeps ``LowCardinality`` of - others it refuses (an enum, a decimal, a moment)
 #: or allows only under ``allow_suspicious_low_cardinality_types`` (a number, a date, an address).
-CLICKHOUSE_LOW_CARDINALITY_TYPE_NAMES = frozenset({"String", "FixedString", "UUID"})
+CLICKHOUSE_LOW_CARDINALITY_TYPE_NAMES = frozenset(
+    {ClickhouseTypeName.STRING, ClickhouseTypeName.FIXED_STRING, ClickhouseTypeName.UUID}
+)

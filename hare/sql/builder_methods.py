@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 from collections.abc import Callable
 from functools import wraps
-from typing import Any, TypeVar, cast
+from typing import Any, TypeVar
 
 TFunction = TypeVar("TFunction", bound=Callable[..., Any])
 TReturnValue = TypeVar("TReturnValue")
@@ -36,7 +36,7 @@ class BuilderMethods:
             result = function(self_copy, *args, **kwargs)
             return self_copy if result is None else result
 
-        return cast("TFunction", copying_method)
+        return copying_method  # type: ignore[return-value]
 
     @staticmethod
     def ignore_copy(function: Callable[[TSelf, str], TReturnValue]) -> Callable[[TSelf, str], TReturnValue]:

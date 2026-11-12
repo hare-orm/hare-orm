@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.caching.cache import Cache
 from hare.exceptions import FieldError, QueryError
@@ -11,6 +11,7 @@ from hare.fields.field import Field
 from hare.fields.generated_field import GeneratedField
 from hare.fields.relations.fields.backward_foreign_key_relation import BackwardForeignKeyRelation
 from hare.fields.relations.fields.relational_field import RelationalField
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.enums import Lookup, LookupTarget, LookupValueShape
 from hare.query.expressions.constants import TO_MANY_RELATION_SHORTCUT_LOOKUPS
 from hare.query.filters.constants import (
@@ -114,23 +115,23 @@ class LookupInfoBuilder:
             segment = segments[position]
             rest = segments[position + 1 :]
             meta = current_model._meta
-            if segment == "pk" and not meta.has_primary_key:
+            if segment == PRIMARY_KEY_ALIAS and not meta.has_primary_key:
                 raise FieldError(f"{label}: {current_model.__name__} has no primary key (Meta.primary_key = None)")
-            if segment == "pk" and meta.has_composite_primary_key:
+            if segment == PRIMARY_KEY_ALIAS and meta.has_composite_primary_key:
                 return cls._get_composite_pk_info(
                     LookupKeyPosition(model, key, label, current_model, tuple(relations)), rest
                 )
-            if segment == "pk" and meta.pk is not None and meta.pk.model_field_name in meta.fetch_fields:
+            if segment == PRIMARY_KEY_ALIAS and meta.pk is not None and meta.pk.model_field_name in meta.fetch_fields:
                 # A relation is the primary key: pk is that relation, compared by a key or an instance.
                 segment = meta.pk.model_field_name
-            field_object = meta.pk if segment == "pk" else meta.fields_map.get(segment)
+            field_object = meta.pk if segment == PRIMARY_KEY_ALIAS else meta.fields_map.get(segment)
             if field_object is None:
                 raise FieldError(f"{label}: {current_model.__name__} has no field {segment!r}")
             if segment not in meta.fetch_fields:
                 return cls._get_field_info(
                     LookupKeyPosition(model, key, label, current_model, tuple(relations)), segment, field_object, rest
                 )
-            relation = cast("RelationalField[Model]", field_object)
+            relation: RelationalField[Model] = field_object  # type: ignore[assignment]
             relation_lookup = cls._get_relation_lookup(current_model, relation, rest, key)
             if relation_lookup is not None:
                 return cls._get_relation_info(
@@ -234,14 +235,14 @@ class LookupInfoBuilder:
             meta = current_model._meta
             prefix = "".join(f"{relation_segment}__" for relation_segment in segments[:position])
             is_last = position == len(segments) - 1
-            if segment == "pk":
+            if segment == PRIMARY_KEY_ALIAS:
                 if not meta.has_primary_key:
                     raise FieldError(f"{label}: {current_model.__name__} has no primary key (Meta.primary_key = None)")
                 if not is_last:
                     raise FieldError(
                         f"{label}: {current_model.__name__}.pk has no path '{'__'.join(segments[position + 1 :])}'"
                     )
-                key_fields = meta.pk_fields or (meta.pk,)
+                key_fields = meta.pk_fields
                 # The model's own pk orders by its key field(s); a related one (``author__pk``) is
                 # read through the relation as named.
                 key_paths = tuple(key_field.model_field_name for key_field in key_fields) if not prefix else (path,)
@@ -250,7 +251,7 @@ class LookupInfoBuilder:
             if field_object is None:
                 raise FieldError(f"{label}: {current_model.__name__} has no field {segment!r}")
             if segment in meta.fetch_fields:
-                relation = cast("RelationalField[Model]", field_object)
+                relation: RelationalField[Model] = field_object  # type: ignore[assignment]
                 if not is_last:
                     relations.append(relation)
                     current_model = relation.related_model
@@ -269,7 +270,7 @@ class LookupInfoBuilder:
                     )
                 # A reverse or many-to-many relation orders by the related primary key.
                 related_meta = relation.related_model._meta
-                key_fields = related_meta.pk_fields or (related_meta.pk,)
+                key_fields = related_meta.pk_fields
                 return cls._get_ordering(name, model, [*relations, relation], key_fields, (path,), (), descending)
             transforms = tuple(segments[position + 1 :])
             if transforms:
@@ -334,7 +335,7 @@ class LookupInfoBuilder:
             return None
         lookup_name = rest[0]
         related_meta = relation.related_model._meta
-        if lookup_name == "pk" or lookup_name in related_meta.fields_map:
+        if lookup_name == PRIMARY_KEY_ALIAS or lookup_name in related_meta.fields_map:
             return None
         meta = model._meta
         if relation.model_field_name in meta.foreign_key_fields or relation.model_field_name in meta.one_to_one_fields:
@@ -376,7 +377,7 @@ class LookupInfoBuilder:
             )
         if not related_meta.has_primary_key:
             # IS [NOT] NULL is tested on the related row's key column to this one.
-            backward_relation = cast("BackwardForeignKeyRelation[Model]", relation)
+            backward_relation: BackwardForeignKeyRelation[Model] = relation  # type: ignore[assignment]
             key_field = related_meta.fields_map[
                 related_meta.fields_db_projection_reverse[backward_relation.relation_source_fields[0]]
             ]
@@ -395,7 +396,7 @@ class LookupInfoBuilder:
                 field_lookup=FieldLookups.get(relation).get(lookup_name),
             )
         key_fields: tuple[Field[Any], ...] = (
-            tuple(relation.to_field_instances) if is_forward else (related_meta.pk_fields or (related_meta.pk,))
+            tuple(relation.to_field_instances) if is_forward else related_meta.pk_fields
         )
         field_lookup: FieldLookup | None
         value_field: Field[Any] | None = None
@@ -679,20 +680,20 @@ class LookupInfoBuilder:
         for position, segment in enumerate(segments):
             meta = current_model._meta
             is_last = position == len(segments) - 1
-            if segment == "pk" and meta.has_composite_primary_key:
+            if segment == PRIMARY_KEY_ALIAS and meta.has_composite_primary_key:
                 if not is_last:
                     raise FieldError(f"{model.__name__} has no field path {path!r}")
                 return ["", Lookup.IN, Lookup.NOT, Lookup.NOT_IN]
-            if segment == "pk" and meta.pk is not None and meta.pk.model_field_name in meta.fetch_fields:
+            if segment == PRIMARY_KEY_ALIAS and meta.pk is not None and meta.pk.model_field_name in meta.fetch_fields:
                 # A relation is the primary key: pk is that relation, compared by a key or an instance.
                 segment = meta.pk.model_field_name
-            field_object = meta.pk if segment == "pk" else meta.fields_map.get(segment)
+            field_object = meta.pk if segment == PRIMARY_KEY_ALIAS else meta.fields_map.get(segment)
             if field_object is None:
                 raise FieldError(
                     f"{model.__name__} has no field path {path!r}: {current_model.__name__} has no field {segment!r}"
                 )
             if segment in meta.fetch_fields:
-                relation = cast("RelationalField[Model]", field_object)
+                relation: RelationalField[Model] = field_object  # type: ignore[assignment]
                 if not is_last:
                     current_model = relation.related_model
                     continue

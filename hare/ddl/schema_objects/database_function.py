@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 from hare.classes.class_path import ClassPath
 from hare.classes.value_descriptions import ValueDescriptions
@@ -52,7 +52,7 @@ class DatabaseFunction(NamedSchemaObject):
             )
         if not isinstance(self.body.sql, str) or not self.body.sql.strip():
             raise ConfigurationError(f"DatabaseFunction {self.name!r}: the body can't be empty")
-        if isinstance(cast("object", self.arguments), str) or not all(
+        if isinstance(self.arguments, str) or not all(  # type: ignore[unreachable]
             isinstance(argument, str) and argument.strip() for argument in self.arguments
         ):
             raise ConfigurationError(

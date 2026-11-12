@@ -17,8 +17,9 @@ from tests.plan_verification.exceptions import PlanMismatchError
 
 class PlanVerification:
     """Checks every query that runs on a kept plan against the same query built in full - its SQL
-    text and its parameters must be the ones the plan gave. ORM queries use
-    ``AwaitableQuery._make_query_to_run()`` for both cached and freshly compiled statements;
+    text and its parameters must be the ones the plan gave. A query of a queryset's calls finds its
+    plan in ``StatementPlanRuns.find_call_plan()`` before any query object is made; a query being
+    built finds one by its description in ``AwaitableQuery._make_query_to_run()``;
     ``RawSQLQuery._get_statements()`` prepares a ``.raw()`` query. The full build runs with
     every plan lookup answering "none" and no plan kept.
 
@@ -57,6 +58,11 @@ class PlanVerification:
             cls.patch(StatementPlans, "record", cls.get_planless_record)
             cls.patch(CallSignaturePlans, "find_with_value_positions", cls.get_planless_lookup)
             cls.patch(CallSignaturePlans, "record", cls.get_planless_record)
+            from hare.query.plans.statement.statement_plan_runs import StatementPlanRuns
+            from hare.query.statements.write.matching_rows_query import MatchingRowsQuery
+
+            cls.patch(StatementPlanRuns, "find_call_plan", cls.get_verified_call_plan)
+            cls.patch(MatchingRowsQuery, "_get_statement_on", cls.get_verified_write_statement)
         except BaseException:
             cls.uninstall()
             raise
@@ -138,17 +144,74 @@ class PlanVerification:
         return record
 
     @classmethod
-    def get_verified_make_query_to_run(cls, original: Callable[[AwaitableQuery[Any]], None]) -> Callable[..., None]:
+    def get_verified_write_statement(cls, original: Callable[..., Any]) -> Callable[..., Any]:
+        """Verify writes with the actual restricted source, transaction and this run's stamps."""
+
+        def get_statement(query: Any, connection: Any, source: Any = None, **kwargs: Any) -> Any:
+            from hare.query.plans.statement.declarations import CallPlanHit
+
+            statement = original(query, connection, source, **kwargs)
+            if isinstance(statement, CallPlanHit) and not cls.planless.get():
+
+                def make_query() -> AwaitableQuery[Any]:
+                    unbuilt = copy(query)
+                    if source is not None:
+                        unbuilt._take_rows_of(source, keeps_ordering=True)
+                    unbuilt._apply_connection(connection)
+                    if kwargs.get("prepared") is not None:
+                        unbuilt._prepared_write = kwargs["prepared"]
+                    return unbuilt
+
+                cls.verify(type(query).__name__, query.model, make_query, (statement.sql, statement.parameters))
+            return statement
+
+        return get_statement
+
+    @classmethod
+    def get_verified_call_plan(cls, original: Callable[..., Any]) -> Callable[..., Any]:
+        """``StatementPlanRuns.find_call_plan()`` comparing each hit with the query built in full - the
+        one place a query runs on the plan of its queryset's calls."""
+
+        def find_call_plan(query_class: type, specification: Any, connection: Any, *args: Any) -> Any:
+            from hare.query.plans.statement.declarations import CallPlanHit
+            from hare.query.statements.write.matching_rows_query import MatchingRowsQuery
+
+            lookup = original(query_class, specification, connection, *args)
+            if not isinstance(lookup, CallPlanHit) or cls.planless.get() or issubclass(query_class, MatchingRowsQuery):
+                return lookup
+
+            def make_query() -> AwaitableQuery[Any]:
+                from hare.query.queryset.queryset import QuerySet
+                from hare.query.queryset.selection.statement_selection import StatementSelection
+
+                query = (
+                    StatementSelection.get_select_query(specification)
+                    if isinstance(specification, QuerySet)
+                    else copy(specification)
+                )
+                query._apply_connection(connection)
+                return query
+
+            cls.verify(query_class.__name__, specification.model, make_query, (lookup.sql, lookup.parameters))
+            return lookup
+
+        return find_call_plan
+
+    @classmethod
+    def get_verified_make_query_to_run(cls, original: Callable[..., Any]) -> Callable[..., Any]:
         """``_make_query_to_run()`` comparing a run on a plan with the query built in full."""
 
-        def make_query_to_run(query: AwaitableQuery[Any]) -> None:
+        def make_query_to_run(query: AwaitableQuery[Any]) -> tuple[str, list[Any]]:
             if cls.planless.get():
-                original(query)
-                return
+                return original(query)
             unbuilt_query = copy(query)
-            original(query)
-            if query._compiled_statement is not None:
-                cls.verify(type(query).__name__, query.model, lambda: unbuilt_query, query._compiled_statement)
+            hits = StatementPlans.hits
+            statement = original(query)
+            if StatementPlans.hits != hits:
+                if hasattr(type(query), "_prepared_write"):
+                    unbuilt_query._prepared_write = query._prepared_write
+                cls.verify(type(query).__name__, query.model, lambda: unbuilt_query, statement)
+            return statement
 
         return make_query_to_run
 

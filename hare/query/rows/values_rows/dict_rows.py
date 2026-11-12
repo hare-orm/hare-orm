@@ -21,8 +21,5 @@ class DictRows(ValuesRows):
             return (output_name,)
         return tuple(f"{output_name}{COMPOSITE_KEY_COMPONENT_ALIAS_SEPARATOR}{index}" for index in range(column_count))
 
-    def make_row(self, values: tuple[Any, ...]) -> dict[str, Any]:
-        return dict(zip(self.output_names, values, strict=True))
-
     def get_reader(self, position: int, alias: str) -> Callable[[Any], Any]:
         return itemgetter(alias)

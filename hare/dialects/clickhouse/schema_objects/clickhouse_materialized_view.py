@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Self, cast
+from typing import TYPE_CHECKING, Any, Self
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.ddl.expressions.declared_expressions import DeclaredExpressions
@@ -75,7 +75,7 @@ class ClickhouseMaterializedView(MaterializedView):
         if self.to is not None and (not isinstance(self.to, str) or not self.to.strip()):
             raise ConfigurationError(f"{owner}: to must be a table name, got {self.to!r}")
         object.__setattr__(self, "engine", self.get_engine())
-        if isinstance(cast("object", self.order_by), str) or not all(
+        if isinstance(self.order_by, str) or not all(  # type: ignore[unreachable]
             DeclaredExpressions.is_declared_expression(key) for key in self.order_by
         ):
             raise ConfigurationError(
@@ -95,7 +95,7 @@ class ClickhouseMaterializedView(MaterializedView):
                 f'{owner}: refresh takes a schedule - "EVERY 1 HOUR", "AFTER 30 MINUTE", with OFFSET and '
                 f"RANDOMIZE FOR - got {self.refresh!r}"
             )
-        if isinstance(cast("object", self.depends_on), str) or not all(
+        if isinstance(self.depends_on, str) or not all(  # type: ignore[unreachable]
             isinstance(view_name, str) and view_name for view_name in self.depends_on
         ):
             raise ConfigurationError(f"{owner}: depends_on must be a sequence of view names, got {self.depends_on!r}")

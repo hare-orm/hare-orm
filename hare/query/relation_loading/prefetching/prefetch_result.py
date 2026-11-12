@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
-from hare.fields.relations.relation_accessors import RelationAccessors
+from hare.query.queryset.relations.related_queryset.relation_rows import RelationRows
 from hare.query.relation_loading.prefetching.declarations import PrefetchAttachment
 from hare.query.relation_loading.prefetching.enums import PrefetchAttachmentType
 
@@ -39,7 +39,7 @@ class PrefetchResult:
     def take_slice(self, row_slice: slice) -> None:
         """Applies a per-parent slice before any relation cache becomes visible."""
         self.attachments = [
-            replace(attachment, value=cast("list[Model]", attachment.value)[row_slice])
+            replace(attachment, value=attachment.value[row_slice])  # type: ignore[index]
             if attachment.attachment_type is PrefetchAttachmentType.MANY
             else attachment
             for attachment in self.attachments
@@ -52,7 +52,12 @@ class PrefetchResult:
             if attachment.to_attribute:
                 setattr(obj, attachment.to_attribute, value)
             elif attachment.attachment_type is PrefetchAttachmentType.MANY:
-                RelationAccessors.get_relation(obj, field)._set_result_for_query(cast("list[Model]", value), None)
+                attribute = f"_{field}"
+                relation_rows = getattr(obj, attribute, None)
+                if relation_rows is None:
+                    relation_rows = RelationRows()
+                    setattr(obj, attribute, relation_rows)
+                relation_rows.set_fetched(value)  # type: ignore[arg-type]
             elif attachment.attachment_type is PrefetchAttachmentType.REVERSE or value is None:
                 setattr(obj, f"_{field}", value)
             else:

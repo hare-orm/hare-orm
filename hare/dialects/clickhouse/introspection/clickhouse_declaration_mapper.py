@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.dialects.clickhouse.constants import (
     CLICKHOUSE_DEFAULT_INDEX_TYPE,
@@ -65,18 +65,18 @@ class ClickhouseDeclarationMapper:
             parts = [part.strip() for part in ClickhouseSqlParts.split(expression)]
             part_identifiers = [ClickhouseSqlParts.get_identifier(part) for part in parts]
             reads_columns_only = all(identifier in column_names for identifier in part_identifiers)
-            index_columns = cast("list[str]", part_identifiers) if reads_columns_only else []
+            index_columns = part_identifiers if reads_columns_only else []
             # A minmax index of granularity 1 is the one hare writes for an index of no type. Over one
             # column it is a field flag, as a plain single-column index is on the other databases.
             index_type = str(row["type"])
             granularity = int(row["granularity"])
             is_default_type = index_type == CLICKHOUSE_DEFAULT_INDEX_TYPE and granularity == 1
             if is_default_type and len(index_columns) == 1:
-                column_indexes.append(IndexInfo(columns=index_columns, is_unique=False, name=str(row["name"])))
+                column_indexes.append(IndexInfo(columns=index_columns, is_unique=False, name=str(row["name"])))  # type: ignore[arg-type]
             else:
                 indexes.append(
                     IndexInfo(
-                        columns=index_columns,
+                        columns=index_columns,  # type: ignore[arg-type]
                         is_unique=False,
                         name=str(row["name"]),
                         expression_terms=None if reads_columns_only else parts,

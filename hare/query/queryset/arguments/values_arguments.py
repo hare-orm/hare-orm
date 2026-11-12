@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, Any
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import QueryError
 from hare.query.expressions import Expression
+from hare.query.expressions.conditions.condition_value import ConditionValue
+from hare.query.queryset.arguments.filter_arguments import FilterArguments
 from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
@@ -14,6 +16,27 @@ if TYPE_CHECKING:
 class ValuesArguments:
     """The checks of what values() and values_list() are given - field names or expressions of the
     right types, on a queryset not loading model fields or relations the rows don't use."""
+
+    @staticmethod
+    def get_checked_expressions(
+        queryset: QuerySet[Any, Any],
+        method_name: str,
+        field_names: tuple[str, ...],
+        expressions: dict[str, Any],
+        *,
+        allow_field_name_kwargs: bool,
+    ) -> dict[str, Any]:
+        """Normalize projection expressions and check the source before publishing aliases."""
+        FilterArguments.check_selected_names(queryset, field_names, method_name)
+        expressions = {key: ConditionValue.get_value_expression(value) for key, value in expressions.items()}
+        ValuesArguments.raise_if_values_unusable(
+            queryset,
+            f".{method_name}()",
+            field_names,
+            expressions,
+            allow_field_name_kwargs=allow_field_name_kwargs,
+        )
+        return expressions
 
     @staticmethod
     def raise_if_values_unusable(

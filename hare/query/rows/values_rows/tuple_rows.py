@@ -17,8 +17,5 @@ class TupleRows(ValuesRows):
     def get_column_aliases(cls, output_name: str, first_column_index: int, column_count: int) -> tuple[str, ...]:
         return tuple(str(first_column_index + index) for index in range(column_count))
 
-    def make_row(self, values: tuple[Any, ...]) -> Any:
-        return values
-
     def get_reader(self, position: int, alias: str) -> Callable[[Any], Any]:
         return itemgetter(position)

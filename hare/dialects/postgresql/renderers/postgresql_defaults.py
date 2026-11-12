@@ -17,7 +17,8 @@ from hare.fields.db_defaults.now import Now
 from hare.fields.db_defaults.random_hex import RandomHex
 from hare.fields.db_defaults.uuid_v7 import UuidV7
 from hare.fields.enums import NowValueType
-from hare.time import Timezone
+from hare.time.system_zone import SystemZone
+from hare.time.zone_settings import ZoneSettings
 
 if TYPE_CHECKING:
     from hare.dialects.base.renderers.term_renderers import TermRenderers
@@ -50,10 +51,10 @@ class PostgresqlDefaults:
             The configured zone's name under ``use_timezone=True``; the system's local zone otherwise
             (its name when ``tzlocal`` is installed, its current UTC offset without it).
         """
-        if Timezone.get_use_timezone():
-            return sql_context.dialect.literals.get_string_literal_sql(Timezone.name())
+        if ZoneSettings.get_use_timezone():
+            return sql_context.dialect.literals.get_string_literal_sql(ZoneSettings.name())
         try:
-            return sql_context.dialect.literals.get_string_literal_sql(Timezone.get_local_zone_name())
+            return sql_context.dialect.literals.get_string_literal_sql(SystemZone.get_local_zone_name())
         except ConfigurationError:
             local_offset = datetime.datetime.now().astimezone().utcoffset() or datetime.timedelta(0)
             return POSTGRESQL_NOW_OFFSET_ZONE_TEMPLATE.format(offset=default.get_offset_text(local_offset))
@@ -76,7 +77,7 @@ class PostgresqlDefaults:
         if default.value_type == NowValueType.DATE:
             return POSTGRESQL_NOW_DATE_SQL_TEMPLATE.format(zone=zone_sql)
         offset_text = (
-            default.get_configured_offset_text() if Timezone.get_use_timezone() else POSTGRESQL_NAIVE_TIME_OFFSET
+            default.get_configured_offset_text() if ZoneSettings.get_use_timezone() else POSTGRESQL_NAIVE_TIME_OFFSET
         )
         return POSTGRESQL_NOW_TIME_SQL_TEMPLATE.format(zone=zone_sql, offset=offset_text)
 

@@ -25,12 +25,11 @@ class Star(Field):
 
     def get_sql(self, sql_context: SqlContext) -> str:
         if self.table is not None:
-            namespace = sql_context.source_aliases.get(self.table.source_binding, self.table.get_table_name())
             if (
                 sql_context.with_namespace
                 or self.table.alias
                 or self.table.source_binding in sql_context.source_aliases
             ):
-                return f"{sql_context.quote(namespace)}.*"
+                return f"{sql_context.quote(self.table.get_namespace(sql_context))}.*"
 
         return "*"

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import ConfigurationError
 from hare.fields.composite_primary_key import CompositePrimaryKey
@@ -10,6 +10,7 @@ from hare.inspectdb.generation.declarations import ModelGenerationOptions
 from hare.inspectdb.generation.inspected_model_builder import InspectedModelBuilder
 from hare.models import Model
 from hare.models.enums import ModelOption
+from hare.query.constants import PRIMARY_KEY_ALIAS
 
 if TYPE_CHECKING:
     from hare.inspectdb.generation.inspected_model import InspectedModel
@@ -72,11 +73,11 @@ class ModelFactory:
             The new model class.
         """
         # Only a model with a state reaches here - a skipped through table has none.
-        state = cast("ModelState", inspected.state)
+        state: ModelState = inspected.state  # type: ignore[assignment]
         attributes: dict[str, Any] = {"__module__": FACTORY_MODEL_MODULE_NAME, "__qualname__": inspected.class_name}
         attributes.update(state.fields)
         if isinstance(state.pk_field_name, tuple):
-            attributes["pk"] = CompositePrimaryKey(
+            attributes[PRIMARY_KEY_ALIAS] = CompositePrimaryKey(
                 *state.pk_field_name, without_overlaps=state.options.get(ModelOption.PK_WITHOUT_OVERLAPS, False)
             )
         meta_options = {
@@ -84,4 +85,4 @@ class ModelFactory:
         }
         if meta_options:
             attributes["Meta"] = type("Meta", (), meta_options)
-        return cast("type[Model]", type(inspected.class_name, (Model,), attributes))
+        return type(inspected.class_name, (Model,), attributes)

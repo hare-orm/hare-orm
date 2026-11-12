@@ -1,5 +1,17 @@
 from __future__ import annotations
 
+#: The name every model gives its primary key in filters, orderings, field lists and keyword
+#: arguments - each key field of a composite one together.
+PRIMARY_KEY_ALIAS = "pk"
+
+#: Separator of filter and relation path components.
+LOOKUP_SEPARATOR = "__"
+
+#: The filter keys of the primary key's membership, inequality and non-membership.
+PRIMARY_KEY_IN_FILTER = PRIMARY_KEY_ALIAS + "__in"
+PRIMARY_KEY_NOT_FILTER = PRIMARY_KEY_ALIAS + "__not"
+PRIMARY_KEY_NOT_IN_FILTER = PRIMARY_KEY_ALIAS + "__not_in"
+
 #: RowVisibility.tenant when no tenant scope was captured - the active one is read instead. A
 #: captured scope may itself be None.
 AMBIENT_TENANT_NOT_OVERRIDDEN = object()

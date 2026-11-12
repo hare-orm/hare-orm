@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from hare.fields.generated_field import GeneratedField
@@ -54,7 +54,7 @@ class InsertStatement:
                 field_names.append(field_name)
         return field_names
 
-    def get_columns(self, field_names: Sequence[str]) -> list[str]:
+    def get_columns(self, field_names: Iterable[str]) -> list[str]:
         """The columns of fields."""
         fields_db_projection = self.model._meta.fields_db_projection
         return [fields_db_projection[field_name] for field_name in field_names]
@@ -86,7 +86,7 @@ class InsertStatement:
             for column in meta.generated_db_fields
             if not (primary_key_given and not returns_primary_key and column in primary_key_columns)
         )
-        columns.extend(self.get_columns(list(omitted_field_names)))
+        columns.extend(self.get_columns(omitted_field_names))
         if returns_version and meta.optimistic_lock_field:
             columns.append(meta.fields_db_projection[meta.optimistic_lock_field])
         return list(dict.fromkeys(columns))

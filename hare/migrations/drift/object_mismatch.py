@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from hare.inspectdb.introspection.enums import SchemaPartType
+from hare.inspectdb.enums import SchemaPartType
 
 
 @dataclass(frozen=True)

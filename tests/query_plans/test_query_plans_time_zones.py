@@ -6,7 +6,8 @@ from datetime import UTC, datetime
 import pytest
 
 from hare.query.plans.statement.statement_plans import StatementPlans
-from hare.time import Timezone
+from hare.time.system_zone import SystemZone
+from hare.time.zone_settings import ZoneSettings
 from tests.shared_models import testmodels
 from tests.utils.timezone_context import override_timezone
 
@@ -50,7 +51,7 @@ async def test_plans_of_the_two_time_zone_modes_stay_apart(db):
             with override_timezone(use_timezone=True, timezone="UTC"):
                 count, hits = await count_plan_hits(model.objects.filter(id=obj.id, datetime__day=2).count())
                 assert (count, hits) == (0, 0)
-            assert Timezone.get_rendered_zone_key() == "Europe/Berlin"
+            assert ZoneSettings.get_rendered_zone_key() == "Europe/Berlin"
         finally:
             await model.objects.all().delete()
 
@@ -61,16 +62,16 @@ async def test_a_plan_of_the_machines_zone_configured_isnt_run_for_naive_datetim
     """The key held the zone's name alone - the machine's own zone, configured under use_timezone,
     shared its plans with naive datetimes, which render no zone at all."""
     model = testmodels.DatetimeFields
-    local_zone_name = Timezone.get_local_zone_name()
+    local_zone_name = SystemZone.get_local_zone_name()
     try:
         with override_timezone(use_timezone=True, timezone=local_zone_name):
-            aware_key = Timezone.get_rendered_zone_key()
+            aware_key = ZoneSettings.get_rendered_zone_key()
             await model.objects.create(datetime=datetime(2024, 1, 1, 12, 30, tzinfo=UTC))
             assert await model.objects.filter(datetime__year=2024).count() == 1
             _count, hits = await count_plan_hits(model.objects.filter(datetime__year=2024).count())
             assert hits == 1
         with override_timezone(use_timezone=False):
-            assert Timezone.get_rendered_zone_key() != aware_key
+            assert ZoneSettings.get_rendered_zone_key() != aware_key
             count, hits = await count_plan_hits(model.objects.filter(datetime__year=2024).count())
             assert (count, hits) == (1, 0)
     finally:

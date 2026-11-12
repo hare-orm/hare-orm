@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.gis.enums import GeometryType, SpatialFunctionType, SpatialRelation
 
 #: The ClickHouse type of each type of geometry it stores - x/y only, without an SRID.
 CLICKHOUSE_GEOMETRY_COLUMN_TYPES = {
-    GeometryType.POINT: "Point",
-    GeometryType.LINESTRING: "LineString",
-    GeometryType.POLYGON: "Polygon",
-    GeometryType.MULTILINESTRING: "MultiLineString",
-    GeometryType.MULTIPOLYGON: "MultiPolygon",
+    GeometryType.POINT: ClickhouseTypeName.POINT,
+    GeometryType.LINESTRING: ClickhouseTypeName.LINE_STRING,
+    GeometryType.POLYGON: ClickhouseTypeName.POLYGON,
+    GeometryType.MULTILINESTRING: ClickhouseTypeName.MULTI_LINE_STRING,
+    GeometryType.MULTIPOLYGON: ClickhouseTypeName.MULTI_POLYGON,
 }
 #: The types of geometry with an area - a polygon's functions take them.
 CLICKHOUSE_AREA_GEOMETRY_TYPES = frozenset({GeometryType.POLYGON, GeometryType.MULTIPOLYGON})

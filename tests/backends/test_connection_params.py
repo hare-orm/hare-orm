@@ -62,7 +62,6 @@ async def test_asyncpg_connection_params():
             )
 
 
-@pytest.mark.requires("native")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ssl_credential", ["ssl", "sslmode"])
 async def test_rust_pg_rejects_asyncpg_style_ssl_credential(ssl_credential):

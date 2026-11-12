@@ -1,5 +1,5 @@
-//! Safe wrappers over the CPython C API calls the hot loops use where PyO3's own API costs a lookup
-//! or an allocation per call. Every `unsafe` block of the crate lives here.
+//! CPython operations without an equivalent high-level call for the required behavior.
+//! Ordinary Python calls use PyO3; every `unsafe` block of the crate lives here.
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::ffi;
@@ -9,18 +9,6 @@ use pyo3::types::PyString;
 /// The error CPython set, or a `RuntimeError` naming `call` when it set none.
 fn take_error(py: Python<'_>, call: &str) -> PyErr {
     PyErr::take(py).unwrap_or_else(|| PyRuntimeError::new_err(format!("{call} failed")))
-}
-
-/// `object.__delattr__(instance, name)` - bypasses a class's own `__setattr__`.
-pub fn generic_delete_attribute(instance: &Bound<'_, PyAny>, name: &Bound<'_, PyString>) -> PyResult<()> {
-    // SAFETY: both pointers are live borrowed references for the duration of the call; a null
-    // value asks CPython to delete the attribute.
-    let result = unsafe { ffi::PyObject_GenericSetAttr(instance.as_ptr(), name.as_ptr(), std::ptr::null_mut()) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(take_error(instance.py(), "PyObject_GenericSetAttr"))
-    }
 }
 
 /// `object.__setattr__(instance, name, value)` - bypasses a class's own `__setattr__`.

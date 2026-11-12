@@ -155,7 +155,7 @@ class RustPgTransactionClient(PostgresqlTransactionClient, RustPgClient):
                 savepoint_lock.release(span)
                 raise
         try:
-            if (self._outer_transaction or self)._pending_savepoints:
+            if self._get_top_level_transaction()._pending_savepoints:
                 await PendingStatements.send_pending_savepoints(self)
             return await make_call(self._native_transaction)
         finally:

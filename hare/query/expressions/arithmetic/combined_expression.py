@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar
 
 from hare.dialects.enums import ParameterPosition
 from hare.exceptions import FieldError, QueryError
@@ -545,9 +545,9 @@ class CombinedExpression(CombinableExpression):
         left_interval_field = self.get_interval_field(self.left, left)
         right_interval_field = self.get_interval_field(self.right, right)
         if left is None:
-            left = self._get_literal_result(cast("Value", self.left), right_interval_field, expression_context)
+            left = self._get_literal_result(self.left, right_interval_field, expression_context)  # type: ignore[arg-type]
         if right is None:
-            right = self._get_literal_result(cast("Value", self.right), left_interval_field, expression_context)
+            right = self._get_literal_result(self.right, left_interval_field, expression_context)  # type: ignore[arg-type]
         left_operand = self._get_operand(self.left, left, right_interval_field)
         right_operand = self._get_operand(self.right, right, left_interval_field)
         for operand in (left_operand, right_operand):

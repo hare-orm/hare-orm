@@ -2,23 +2,28 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import itertools
-from collections.abc import AsyncGenerator, Callable, Iterable, Iterator, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import AsyncGenerator, Callable, Coroutine, Iterable, Iterator, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.classes.deferred_import import DeferredImport
 from hare.dialects.base.constants import CHUNK_SIZE
 from hare.dialects.base.results.statement_result import StatementResult
 from hare.exceptions import QueryError
+from hare.models.instances.dirty_fields import DirtyFields
+from hare.native.native_modules import NativeModules
+from hare.query.execution.query_execution import QueryExecution
 from hare.query.plans.statement.statement_plans import StatementPlans
+from hare.query.queryset.single_rows.get_exceptions import GetExceptions
 from hare.query.rows.model_rows.model_columns import ModelColumns
-from hare.query.rows.row_column import RowColumn
-from hare.query.rows.row_layout import RowLayout
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.dialects.base.types.type_registry import TypeRegistry
     from hare.fields.field import Field
     from hare.models import Model
+    from hare.query.queryset.query_specification import QuerySpecification
     from hare.query.relation_loading.prefetching.prefetch_request import PrefetchRequest
+    from hare.query.relation_loading.prefetching.prefetcher import Prefetcher
     from hare.query.rows.native.hydration_layout import HydrationEntry
 
 #: Per ``select_related()`` bucket: its model, how many columns it selects, its table, the model
@@ -32,9 +37,13 @@ class ModelRows:
     asked for are prefetched. The columns of each model are worked out once per result, and each row
     is decoded through the same ``RowLayout`` used for values results.
 
+    A reader follows from the query's shape and the dialect alone - it holds no connection, so the
+    one made for a plan is kept with it (``AwaitableQuery._get_call_plan_reading()``) and every
+    query of the plan reads its rows through it, on its own connection.
+
     Args:
         model: The queried model.
-        connection: The connection the rows are read on.
+        types: The type registry of the dialect the rows are read with - it decodes the annotations.
         select_related_buckets: The models the rows hold columns of, in column order - None for the
             queried model's own columns alone.
         decode_plan: The fields of the queried model's columns when the query knows them up front -
@@ -45,11 +54,18 @@ class ModelRows:
         annotations: The annotation columns, set on each instance by name.
         annotation_fields: The field an annotation's value is decoded through, by name - an
             annotation without one is set as the driver returns it.
+        prepared_columns: A fixed positional projection prepared with the statement plan. The
+            shared layout contains conversion metadata, never a connection or loaded instances.
     """
+
+    native_rows: ClassVar[Any] = NativeModules.rows
+    #: Prefetch builds querysets, so its class is imported only when rows need it.
+    prefetcher_class: ClassVar[DeferredImport[type[Prefetcher]]] = DeferredImport(
+        "hare.query.relation_loading.prefetching.prefetcher", "Prefetcher"
+    )
 
     __slots__ = (
         "model",
-        "connection",
         "select_related_buckets",
         "decode_plan",
         "decode_plan_is_partial",
@@ -57,44 +73,72 @@ class ModelRows:
         "annotations",
         "annotation_fields",
         "annotation_decoders",
+        "prepared_columns",
+        "prepared_result",
     )
 
     def __init__(
         self,
         model: type[Model],
-        connection: DatabaseClient,
+        types: TypeRegistry,
         *,
         select_related_buckets: Sequence[SelectRelatedBucket] | None = None,
         decode_plan: tuple[HydrationEntry, ...] | None = None,
         decode_plan_is_partial: bool = False,
         decode_plan_key: Sequence[str | None] | None = None,
         annotations: Sequence[str] = (),
-        annotation_fields: dict[str, Field[Any]] | None = None,
+        annotation_fields: Mapping[str, Field[Any]] | None = None,
+        prepared_columns: list[ModelColumns] | None = None,
+        prepared_column_names: tuple[str, ...] = (),
     ) -> None:
         self.model = model
-        self.connection = connection
+        self.prepared_columns = prepared_columns
         self.select_related_buckets = select_related_buckets
         self.decode_plan = decode_plan
         self.decode_plan_is_partial = decode_plan_is_partial
-        self.decode_plan_key = tuple(decode_plan_key) if decode_plan_key is not None else None
+        self.decode_plan_key = None if decode_plan_key is None else tuple(decode_plan_key)
         self.annotations = tuple(annotations)
-        self.annotation_fields = annotation_fields or {}
-        python_reader = connection.dialect.types.get_python_reader
-        self.annotation_decoders: dict[str, Callable[[Any], Any]] = {
-            name: python_reader(field) for name, field in self.annotation_fields.items()
-        }
+        if annotation_fields:
+            self.annotation_fields = annotation_fields
+            python_reader = types.get_python_reader
+            self.annotation_decoders: dict[str, Callable[[Any], Any]] = {
+                name: python_reader(field) for name, field in annotation_fields.items()
+            }
+        else:
+            self.annotation_fields = {}
+            self.annotation_decoders = {}
 
-    def get_columns(self, result: StatementResult) -> list[ModelColumns]:
+        self.prepared_result = (
+            self.get_result_layout(
+                prepared_columns,
+                tuple(
+                    (name, prepared_column_names.index(name), self.annotation_decoders.get(name))
+                    for name in self.annotations
+                ),
+            )
+            if prepared_columns is not None and prepared_column_names
+            else None
+        )
+
+    def get_result_layout(
+        self, columns: list[ModelColumns], annotations: tuple[tuple[str, int | str, Any], ...]
+    ) -> Any:
+        """Prepare model attachments and annotation readers without execution state."""
+        return self.native_rows.ModelResultLayout(columns, annotations)
+
+    def get_columns(self, connection: DatabaseClient, result: StatementResult) -> list[ModelColumns]:
         """The columns of each model the rows hold, the queried model first.
 
         Args:
+            connection: The connection the rows are read on.
             result: The fetched rows, at least one, with their column names.
 
         Returns:
             The columns of each model.
         """
+        if self.prepared_columns is not None:
+            return self.prepared_columns
         model = self.model
-        connection = self.connection
         by_position = connection.features.supports_positional_rows
         decode_plan = self.decode_plan
         column_names = result.column_names if decode_plan is None or not by_position else ()
@@ -113,7 +157,7 @@ class ModelRows:
             self.decode_plan_is_partial,
         )
         columns_bucket = (
-            StatementPlans.row_columns.get_model_bucket(model)
+            StatementPlans.row_columns.get_bucket(model)
             if decode_plan is None or self.decode_plan_key is not None
             else None
         )
@@ -153,7 +197,7 @@ class ModelRows:
                         [column_names[position].split(".", 1)[1] for position in bucket_positions],
                         [position if by_position else column_names[position] for position in bucket_positions],
                         # Relative to the queried model, whose own path every related path starts with.
-                        path=tuple(cast("Iterable[str]", full_path))[len(base_path) :],
+                        path=tuple(full_path)[len(base_path) :],  # type: ignore[arg-type]
                         is_related=True,
                     )
                 )
@@ -161,62 +205,27 @@ class ModelRows:
             columns_bucket[columns_key] = columns
         return columns
 
-    def read(self, result: StatementResult, columns: list[ModelColumns]) -> Iterator[Model]:
-        """The instance of each row, through its declared column layout.
-
-        Args:
-            result: The fetched rows, with their column names.
-            columns: The columns of each model the rows hold.
-
-        Yields:
-            The queried model's instance of each row.
-        """
-        connection_alias = self.connection.connection_alias
-        base_hydrate = columns[0].hydrate
-        related = [
-            (
-                model_columns.hydrate,
-                model_columns.path[:-1],
-                f"_{model_columns.path[-1]}",
-                model_columns.path,
-            )
-            for model_columns in columns[1:]
-        ]
-        annotation_layout = self.get_annotation_layout(result.column_names) if self.annotations else None
-        for row in result.rows:
-            instance = base_hydrate(row, connection_alias)
-            if related:
-                instances_by_path: dict[tuple[str, ...], Any] = {(): instance}
-                for hydrate, parent_path, cache_attribute, path in related:
-                    related_instance = hydrate(row, connection_alias)
-                    parent = instances_by_path.get(parent_path)
-                    if parent is not None:
-                        object.__setattr__(parent, cache_attribute, related_instance)
-                    if related_instance is not None:
-                        instances_by_path[path] = related_instance
-            if annotation_layout is not None:
-                annotation_layout.assign(instance, row, self.annotations)
-            yield instance
-
-    def get_annotation_layout(self, column_names: Sequence[str]) -> RowLayout:
+    def get_annotation_layout(
+        self, connection: DatabaseClient, column_names: Sequence[str]
+    ) -> tuple[tuple[str, int | str, Any], ...]:
         """The annotation columns in their attribute order, bound to this result's driver keys.
 
         Args:
+            connection: The connection the rows are read on.
             column_names: The result's column names, in order.
 
         Returns:
             The shared column layout used to assign annotation values.
         """
-        by_position = self.connection.features.supports_positional_rows
-        return RowLayout(
-            tuple(
-                RowColumn(column_names.index(name) if by_position else name, self.annotation_decoders.get(name))
-                for name in self.annotations
-            )
+        by_position = connection.features.supports_positional_rows
+        return tuple(
+            (name, column_names.index(name) if by_position else name, self.annotation_decoders.get(name))
+            for name in self.annotations
         )
 
     def read_combined(
         self,
+        connection: DatabaseClient,
         rows: Iterable[Any],
         column_names: Sequence[str],
         models: Iterable[type[Model]],
@@ -227,6 +236,7 @@ class ModelRows:
         ``app_column``/``model_column`` name.
 
         Args:
+            connection: The connection the rows are read on.
             rows: The rows.
             column_names: The result's column names, in order.
             models: The models the rows can belong to.
@@ -239,93 +249,122 @@ class ModelRows:
         Raises:
             QueryError: A row names none of ``models``.
         """
-        connection = self.connection
         by_position = connection.features.supports_positional_rows
         excluded = {*self.annotations, app_column, model_column}
         positions = [position for position, name in enumerate(column_names) if name not in excluded]
         names = [column_names[position] for position in positions]
         row_keys = [position if by_position else column_names[position] for position in positions]
-        hydrate_by_model = {
+        columns_by_model = {
             (model._meta.app, model.__name__): ModelColumns.build(
                 model, model._meta.get_hydration_layout(connection), names, row_keys
-            ).hydrate
+            )
             for model in models
         }
         connection_alias = connection.connection_alias
-        annotation_layout = self.get_annotation_layout(column_names) if self.annotations else None
+        annotation_layout = self.get_annotation_layout(connection, column_names)
+        layouts_by_model = {
+            key: self.native_rows.ModelResultLayout((columns,), annotation_layout)
+            for key, columns in columns_by_model.items()
+        }
         app_key = column_names.index(app_column) if by_position else app_column
         model_key = column_names.index(model_column) if by_position else model_column
         for row in rows:
-            hydrate = hydrate_by_model.get((row[app_key], row[model_key]))
-            if hydrate is None:
+            columns = columns_by_model.get((row[app_key], row[model_key]))
+            if columns is None:
                 raise QueryError(
                     f"A union row names {row[app_key]}.{row[model_key]}, which is none of the "
-                    f"models {sorted(f'{app}.{name}' for app, name in hydrate_by_model)} it was built from"
+                    f"models {sorted(f'{app}.{name}' for app, name in columns_by_model)} it was built from"
                 )
-            instance = hydrate(row, connection_alias)
-            if annotation_layout is not None:
-                annotation_layout.assign(instance, row, self.annotations)
-            yield instance
+            yield layouts_by_model[(row[app_key], row[model_key])].read_row(
+                row, connection_alias, DirtyFields.snapshot_dirty_fields
+            )
 
     async def fetch(
-        self, sql: str, values: list[Any] | None, prefetch: PrefetchRequest | None = None, *, retry_read: bool = False
-    ) -> list[Model]:
-        """Runs a query and reads its rows.
+        self,
+        connection: DatabaseClient,
+        sql: str,
+        values: list[Any] | None,
+        prefetch: PrefetchRequest | None = None,
+        *,
+        retry_read: bool = False,
+        specification: QuerySpecification[Any] | None = None,
+    ) -> Any:
+        """Runs a query and reads its rows - the one road of a read of instances, on a plan found by its
+        calls or on a query just built.
 
         Args:
+            connection: The connection the query runs on.
             sql: The statement.
             values: Its parameters.
             prefetch: The relations prefetched for the instances.
+            retry_read: Whether a lost connection may retry the read.
+            specification: The query read - its read checks made (``QueryExecution.check_read_lock()``,
+                ``raise_read_error()``) and its single row or list returned; None for the rows of a
+                write returning them.
 
         Returns:
-            The instances.
+            The instances - or the one instance of a single-row query.
         """
-        connection = self.connection
-        # Model rows - a SELECT, or a write RETURNING them; read by position where the driver can.
-        result = await connection.execute(
-            sql,
-            values,
-            returns_rows=True,
-            rows_by_position=connection.features.supports_positional_rows,
-            retry_read=retry_read,
-        )
-        if not result.rows:
-            return []
-        instances = await self.read_all(result)
-        if prefetch is not None:
-            # Deferred import: the prefetch module builds querysets, which import this module.
-            from hare.query.relation_loading.prefetching.prefetcher import Prefetcher
+        if specification is not None:
+            QueryExecution.check_read_lock(specification, connection)
+        try:
+            # Model rows - a SELECT, or a write RETURNING them; read by position where the driver can.
+            result = await connection.execute(
+                sql,
+                values,
+                returns_rows=True,
+                rows_by_position=connection.features.supports_positional_rows,
+                retry_read=retry_read,
+            )
+            instances = self.read_all(connection, result) if result.rows else []
+            if not isinstance(instances, list):
+                instances = await instances
+        except Exception as error:
+            if specification is not None:
+                QueryExecution.raise_read_error(connection, error)
+            raise
+        if prefetch is not None and instances:
+            await self.prefetcher_class(self.model, connection).prefetch(instances, prefetch)
+        return instances if specification is None else GetExceptions.single_or_list_result(specification, instances)
 
-            await Prefetcher(self.model, self.connection).prefetch(instances, prefetch)
-        return instances
-
-    async def read_all(self, result: StatementResult) -> list[Model]:
+    def read_all(
+        self, connection: DatabaseClient, result: StatementResult
+    ) -> list[Model] | Coroutine[Any, Any, list[Model]]:
         """The instances of fetched rows - in chunks, yielding to the event loop between them so
         a large result doesn't block it.
 
         Args:
+            connection: The connection the rows were read on.
             result: The fetched rows, at least one, with their column names.
 
         Returns:
             The instances.
         """
-        columns = self.get_columns(result)
-        hydrated_rows = self.read(result, columns)
+        layout = self.prepared_result or self.get_result_layout(
+            self.get_columns(connection, result),
+            self.get_annotation_layout(connection, result.column_names) if self.annotations else (),
+        )
+        if len(result.rows) < CHUNK_SIZE:
+            return self.read_batch(connection, result, layout)
+        return self.read_chunks(connection, result, layout)
+
+    async def read_chunks(self, connection: DatabaseClient, result: StatementResult, layout: Any) -> list[Model]:
+        """Yield between bounded hydration batches, preserving cancellation points."""
         instances: list[Model] = []
-        while True:
-            chunk = list(itertools.islice(hydrated_rows, CHUNK_SIZE))
-            instances.extend(chunk)
-            if len(chunk) < CHUNK_SIZE:
-                break
-            await asyncio.sleep(0)
+        for start in range(0, len(result.rows), CHUNK_SIZE):
+            stop = min(start + CHUNK_SIZE, len(result.rows))
+            instances.extend(self.read_batch(connection, result, layout, start=start, stop=stop))
+            if stop - start == CHUNK_SIZE:
+                await asyncio.sleep(0)
         return instances
 
     async def stream_batches(
-        self, sql: str, values: list[Any] | None, chunk_size: int = 0
+        self, connection: DatabaseClient, sql: str, values: list[Any] | None, chunk_size: int = 0
     ) -> AsyncGenerator[list[Model]]:
         """Runs a query off a server-side cursor, yielding the instances a batch of rows at a time.
 
         Args:
+            connection: The connection the query runs on.
             sql: The statement.
             values: Its parameters.
             chunk_size: How many rows to fetch per round trip, where the driver honors it.
@@ -333,8 +372,7 @@ class ModelRows:
         Yields:
             The instances.
         """
-        columns: list[ModelColumns] | None = None
-        connection = self.connection
+        layout = self.prepared_result
         async with contextlib.aclosing(connection.stream_batches(sql, values, chunk_size=chunk_size)) as batches:
             async for rows in batches:
                 if not rows:
@@ -342,18 +380,36 @@ class ModelRows:
                     continue
                 # A batch of the driver's rows, read by name too.
                 batch = StatementResult(len(rows), rows)
-                if columns is None:
-                    columns = self.get_columns(batch)
-                yield self.read_batch(batch, columns)
+                if layout is None:
+                    layout = self.get_result_layout(
+                        self.get_columns(connection, batch),
+                        self.get_annotation_layout(connection, batch.column_names) if self.annotations else (),
+                    )
+                yield self.read_batch(connection, batch, layout)
 
-    def read_batch(self, result: StatementResult, columns: list[ModelColumns]) -> list[Model]:
+    def read_batch(
+        self,
+        connection: DatabaseClient,
+        result: StatementResult,
+        layout: Any,
+        *,
+        start: int = 0,
+        stop: int | None = None,
+    ) -> list[Model]:
         """The instances of a batch, decoded through the selected models' column layouts.
 
         Args:
+            connection: The connection the rows were read on - the alias the instances keep.
             result: The rows, at least one, with their column names.
-            columns: The columns of each model the rows hold.
+            layout: The prepared model and annotation layout, shared by the result's batches.
 
         Returns:
             The instances.
         """
-        return list(self.read(result, columns))
+        return layout.read_batch(
+            result.rows,
+            start,
+            len(result.rows) if stop is None else stop,
+            connection.connection_alias,
+            DirtyFields.snapshot_dirty_fields,
+        )

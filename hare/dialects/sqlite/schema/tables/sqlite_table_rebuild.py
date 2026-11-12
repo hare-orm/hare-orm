@@ -29,7 +29,7 @@ from hare.fields.data.text.char_field import CharField
 from hare.fields.data.text.text_field import TextField
 from hare.fields.field import Field
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
-from hare.time import Timezone
+from hare.time.zone_settings import ZoneSettings
 
 if TYPE_CHECKING:
     from hare.dialects.sqlite.schema.sqlite_schema_editor import SqliteSchemaEditor
@@ -72,7 +72,9 @@ class SqliteTableRebuild(TableRebuild):
             template = SQLITE_TEXT_TO_DATE_SQL
         elif isinstance(new_field, DatetimeField) and isinstance(old_field, DateField):
             template = (
-                SQLITE_DATE_TO_AWARE_DATETIME_SQL if Timezone.get_use_timezone() else SQLITE_DATE_TO_NAIVE_DATETIME_SQL
+                SQLITE_DATE_TO_AWARE_DATETIME_SQL
+                if ZoneSettings.get_use_timezone()
+                else SQLITE_DATE_TO_NAIVE_DATETIME_SQL
             )
         if template is None:
             return quoted_column

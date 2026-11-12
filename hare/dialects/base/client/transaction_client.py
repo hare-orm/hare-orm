@@ -270,11 +270,8 @@ class TransactionClient(DatabaseClient, abc.ABC):
             TransactionManagementError: if this wrapper's savepoint or the whole transaction has
                 ended, or the transaction's COMMIT/ROLLBACK has already started.
         """
-        # _is_transaction_finished() and _get_top_level_transaction(), without their calls - this
-        # runs on every statement of a transaction.
-        outer_transaction = self._outer_transaction
-        top_level_transaction = self if outer_transaction is None else outer_transaction
-        if self.transaction_state.finished or top_level_transaction.transaction_state.finished:
+        top_level_transaction = self._get_top_level_transaction()
+        if self._is_transaction_finished():
             raise TransactionManagementError("Cannot execute query: transaction already finalised")
         if top_level_transaction.transaction_state.ending and not self._is_inside_ending_operation():
             raise TransactionManagementError(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import copy
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.sql.constants import DEFAULT_SQL_CONTEXT
 from hare.sql.enums import Arithmetic, Equality, Matching
@@ -65,7 +65,10 @@ class Term(Node):
         """Name the same value without changing its opaque expression identity."""
         renamed = copy(self) if getattr(self, "immutable", True) else self
         renamed.alias = alias
-        renamed.expression_identity = vars(self).setdefault("expression_identity", object())
+        attributes = vars(self)
+        if "expression_identity" not in attributes:
+            attributes["expression_identity"] = object()
+        renamed.expression_identity = attributes["expression_identity"]
         renamed.__dict__.pop("_hash_cache", None)
         return renamed
 
@@ -96,7 +99,7 @@ class Term(Node):
             other parts of the querybuilder are returned as inputted.
         """
         if isinstance(value, Node):
-            return cast("TNode", value)
+            return value  # type: ignore[return-value]
         if value is None:
             return null_value_terms.NullValue()
         if isinstance(value, list):
@@ -128,14 +131,11 @@ class Term(Node):
                 return node.replace_table(current_table, new_table)
             return None
 
-        return cast(
-            "Self",
-            NodeStructure.rewrite(
-                self,
-                replace,
-                get_attributes=NodeStructure.get_table_replacement_attributes,
-                rebuild_node=NodeStructure.rebuild_table_references,
-            ),
+        return NodeStructure.rewrite(  # type: ignore[return-value]
+            self,
+            replace,
+            get_attributes=NodeStructure.get_table_replacement_attributes,
+            rebuild_node=NodeStructure.rebuild_table_references,
         )
 
     def eq(self, other: Any) -> criteria_terms.BasicCriterion:

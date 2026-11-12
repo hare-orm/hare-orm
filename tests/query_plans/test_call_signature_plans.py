@@ -1,5 +1,6 @@
 """Repeated query shapes reuse prepared SQL while binding current values and row scopes."""
 
+import asyncio
 from unittest.mock import patch
 
 import pytest
@@ -18,9 +19,39 @@ from tests.shared_models.testmodels import IntFields, JSONFields, SoftDeleteStan
 pytestmark = pytest.mark.plan_verification_after_test
 
 
+@pytest.mark.asyncio
+async def test_model_plan_hit_binds_fresh_values_without_creating_a_statement(db):
+    from hare.query.statements.select.model_rows_query import ModelRowsQuery
+
+    await IntFields.objects.create(intnum=1)
+    await IntFields.objects.create(intnum=2)
+    assert [row.intnum for row in await IntFields.objects.filter(intnum__gte=1).order_by("intnum")] == [1, 2]
+    with patch.object(ModelRowsQuery, "__init__", side_effect=AssertionError("unexpected statement allocation")):
+        assert [row.intnum for row in await IntFields.objects.filter(intnum__gte=2).order_by("intnum")] == [2]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_plan_reads_leave_the_declaration_unbound(db):
+    from hare.query.statements.select.model_rows_query import ModelRowsQuery
+
+    await IntFields.objects.create(intnum=1)
+    queryset = IntFields.objects.filter(intnum=1)
+    assert [row.intnum for row in await queryset] == [1]
+
+    async def read():
+        return await queryset
+
+    with patch.object(ModelRowsQuery, "__init__", side_effect=AssertionError("unexpected statement allocation")):
+        first, second = await asyncio.gather(read(), read())
+    assert [row.intnum for row in first] == [1]
+    assert [row.intnum for row in second] == [1]
+    assert first[0] is not second[0]
+    assert queryset._connection is None
+
+
 def spy_on_plan_preparations():
     """Count new SQL templates at the shared plan preparation boundary."""
-    return patch.object(StatementPlan, "__init__", autospec=True, side_effect=StatementPlan.__init__)
+    return patch.object(StatementPlan, "prepare", wraps=StatementPlan.prepare)
 
 
 @pytest.mark.asyncio

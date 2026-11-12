@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import QueryError
 from hare.fields.relations.relation_values import RelationValues
@@ -34,7 +34,7 @@ class RelationKeyValues:
         # Local import: the models package imports the write package.
         from hare.models import Model
 
-        relation = cast("RelationalField[Model]", model._meta.fields_map[name])
+        relation: RelationalField[Model] = model._meta.fields_map[name]  # type: ignore[assignment]
         column_count = len(relation.source_fields)
         if value is None:
             return (None,) * column_count
@@ -47,4 +47,4 @@ class RelationKeyValues:
             )
         RelationValues.validate_relation_type(model, name, value)
         to_field_names = [to_field.model_field_name for to_field in relation.to_field_instances]
-        return tuple(RelationValues.get_relation_key_values(value, to_field_names, f"The write of {name!r}"))
+        return RelationValues.get_relation_key_values(value, to_field_names, f"The write of {name!r}")

@@ -18,6 +18,7 @@ from hare.dialects.clickhouse.constants import (
     CLICKHOUSE_TYPE_MAP,
     CLICKHOUSE_VIEWS_SQL,
 )
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.clickhouse.indexes import (
     BloomFilterIndex,
     MinMaxIndex,
@@ -47,10 +48,10 @@ from hare.dialects.clickhouse.schema.constants import (
 )
 from hare.dialects.clickhouse.types.clickhouse_physical_type import ClickhousePhysicalType
 from hare.dialects.clickhouse.types.clickhouse_type_names import ClickhouseTypeNames
+from hare.inspectdb.enums import SchemaPartType
 from hare.inspectdb.exceptions import SchemaNotFoundError
 from hare.inspectdb.introspection.catalog_snapshot import CatalogSnapshot
 from hare.inspectdb.introspection.column_info import ColumnInfo
-from hare.inspectdb.introspection.enums import SchemaPartType
 from hare.inspectdb.introspection.schema_introspector import SchemaIntrospector
 from hare.inspectdb.introspection.schema_part import SchemaPart
 from hare.inspectdb.introspection.table_info import TableInfo
@@ -130,7 +131,7 @@ class ClickhouseIntrospector(SchemaIntrospector):
         text_value_match = CLICKHOUSE_TEXT_VALUE_DEFAULT_PATTERN.fullmatch(sql)
         if text_value_match is not None:
             text = text_value_match.group(2)
-            return uuid.UUID(text) if text_value_match.group(1) == "UUID" else text
+            return uuid.UUID(text) if text_value_match.group(1) == ClickhouseTypeName.UUID else text
         return super().parse_db_default(sql)
 
     @classmethod
@@ -147,7 +148,11 @@ class ClickhouseIntrospector(SchemaIntrospector):
         """
         value = cls.parse_db_default(expression)
         type_name, arguments = ClickhouseTypeNames.get_type_parts(type_sql)
-        if type_name not in {"Enum8", "Enum16"} or isinstance(value, bool) or not isinstance(value, int | str):
+        if (
+            type_name not in {ClickhouseTypeName.ENUM8, ClickhouseTypeName.ENUM16}
+            or isinstance(value, bool)
+            or not isinstance(value, (int, str))
+        ):
             return value
         numbers_by_label = ClickhousePhysicalType.get_enum_members(arguments)
         specification = ClickhouseTypeParser.get_enum_specification(
@@ -285,6 +290,6 @@ class ClickhouseIntrospector(SchemaIntrospector):
             The precision and scale, None for any other type.
         """
         physical_type = ClickhousePhysicalType.from_sql(db_type)
-        if physical_type.name != "Decimal":
+        if physical_type.name != ClickhouseTypeName.DECIMAL:
             return None, None
         return physical_type.precision, physical_type.scale

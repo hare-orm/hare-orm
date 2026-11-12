@@ -9,7 +9,7 @@ from hare import Model, fields
 from hare.dialects.sqlite.sqlite_dialect import SqliteDialect
 from hare.migrations.state.state_apps import StateApps
 from hare.query.expressions import ExpressionContext
-from hare.query.expressions.value_references.cursor_value_reference import CursorValueReference
+from hare.query.expressions.value_references.literal_value_reference import LiteralValueReference
 from hare.query.lookup_info.bound_lookup_path import BoundLookupPath
 from hare.query.lookup_info.bound_ordering import BoundOrdering
 from hare.query.plans.statement.parameter_preparation import ParameterPreparation
@@ -83,14 +83,13 @@ def test_repeated_cursor_parameter_is_prepared_as_one_slot(ordering_context):
     criterion = (ordering.term > bound_term) | ((ordering.term == bound_term) & (context.table.id > 1))
     parameterizer = RecordingParameterizer()
     criterion.get_sql(DEFAULT_SQL_CONTEXT.copy(parameterizer=parameterizer))
-    prepared = ParameterPreparation(parameterizer, context.dialect.parameters).prepare(
-        CursorValueReference(source, path.field)
+    prepared = ParameterPreparation(parameterizer, context.dialect.parameters, context.dialect.types).prepare(
+        LiteralValueReference(source, context.dialect.types.get_read_column_encoder(path.field, context.model))
     )
-    assert isinstance(prepared, CursorValueReference)
+    assert isinstance(prepared, LiteralValueReference)
     assert len(prepared.wrapper.positions) == 2
     parameters = list(parameterizer.values)
-    for slot, value, always_parameterized in prepared.get_parameter_values("beta", context.model, context.dialect):
-        assert slot.bind(parameters, value, always_parameterized)
+    assert prepared.bind(parameters, "beta", context.model, context.dialect)
     assert parameters == ["beta", "beta", 1]
 
 

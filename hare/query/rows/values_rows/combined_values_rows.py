@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.exceptions import QueryError
@@ -43,7 +43,7 @@ class CombinedValuesRows:
         """The aliases of a built branch's columns, in output order."""
         if not isinstance(branch, SelectQuery):
             return branch._rows.get_output_aliases()
-        return list(ValuesOutput.get_output_aliases(cast("ValuesQuery", branch)))
+        return list(ValuesOutput.get_output_aliases(branch))  # type: ignore[arg-type]
 
     def get_default_orderings(self) -> list[tuple[str, Order]]:
         """The ordering of unordered rows ``first()``/``last()`` and ``iterator()`` take - every
@@ -75,11 +75,11 @@ class CombinedValuesRows:
             QueryError: The branch selects another number of columns.
         """
         if not isinstance(branch, SelectQuery):
-            nested_rows = cast("CombinedValuesRows", branch._rows)
+            nested_rows: CombinedValuesRows = branch._rows  # type: ignore[assignment]
             converters = nested_rows.column_converters
             value_fields = nested_rows.column_value_fields
         else:
-            values_query = cast("ValuesQuery", branch)
+            values_query: ValuesQuery = branch  # type: ignore[assignment]
             converters = ValuesOutput.get_column_converters(values_query)
             value_fields = [column[-1] for column in values_query._get_output_columns()]
         if not self.has_columns:
@@ -100,14 +100,8 @@ class CombinedValuesRows:
                 self.column_value_fields[position] = value_fields[position]
 
     def get_result_reading(self) -> tuple[Any, ...]:
-        """What reading the rows of the statement just built needs - kept with its plan."""
-        return (tuple(self.column_converters), tuple(self.column_value_fields))
-
-    def restore(self, result_reading: tuple[Any, ...]) -> None:
-        """Takes what reading the rows needs from the plan the query runs on."""
-        converters, value_fields = result_reading
-        self.column_converters = list(converters)
-        self.column_value_fields = list(value_fields)
+        """The immutable column readers; declaration fields belong only to the build."""
+        return tuple(self.column_converters)
 
     def get_output_columns(self) -> list[tuple[str, str, str, Field[Any] | None]]:
         """The combined columns, to read from them as a derived table - per column its output
@@ -119,12 +113,19 @@ class CombinedValuesRows:
             )
         ]
 
-    async def read(self, query: CombinedQuery, sql: str, parameters: list[Any]) -> list[Any]:
-        """Runs the statement and builds the rows."""
-        return await self.first_leaf._fetch_rows(query._connection, sql, parameters, self.column_converters)
+    async def read(
+        self, query: CombinedQuery, sql: str, parameters: list[Any], result_reading: tuple[Any, ...]
+    ) -> list[Any]:
+        """Runs the statement through the readers supplied by its plan or completed build."""
+        return await self.first_leaf._fetch_rows(query._connection, sql, parameters, result_reading)
 
     def stream_batches(
-        self, connection: DatabaseClient, sql: str, parameters: list[Any], chunk_size: int
+        self,
+        connection: DatabaseClient,
+        sql: str,
+        parameters: list[Any],
+        chunk_size: int,
+        result_reading: tuple[Any, ...],
     ) -> AsyncGenerator[list[Any]]:
         """Stream combined rows through the first branch's result shape and shared decoder."""
-        return self.first_leaf._rows.stream_batches(connection, sql, parameters, self.column_converters, chunk_size)
+        return self.first_leaf._rows.stream_batches(connection, sql, parameters, result_reading, chunk_size)

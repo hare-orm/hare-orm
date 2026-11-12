@@ -93,7 +93,7 @@ class ModelFactory(Generic[TModel]):
         return not (
             name.startswith("_")
             or name in FACTORY_CLASS_ATTRIBUTES
-            or isinstance(value, FunctionType | classmethod | staticmethod | property)
+            or isinstance(value, (FunctionType, classmethod, staticmethod, property))
         )
 
     @classmethod
@@ -118,7 +118,7 @@ class ModelFactory(Generic[TModel]):
         model = getattr(cls, "factory_model", None)
         if model is None:
             raise ConfigurationError(f"{cls.__name__} names no model - declare it as ModelFactory[TheModel]")
-        return typing.cast("type[TModel]", model)
+        return model
 
     @classmethod
     def reset_sequence(cls, number: int = 0) -> None:
@@ -188,7 +188,7 @@ class ModelFactory(Generic[TModel]):
             elif isinstance(declaration, FACTORY_COPIED_VALUE_TYPES):
                 # Each object gets a list, dict or set of its own - a change to one changes no other.
                 values[name] = copy.deepcopy(declaration)
-            elif not isinstance(declaration, LazyAttribute | PostDeclaration | SubFactory):
+            elif not isinstance(declaration, (LazyAttribute, PostDeclaration, SubFactory)):
                 values[name] = declaration
         for name, declaration in declarations.items():
             if isinstance(declaration, LazyAttribute):
@@ -273,7 +273,7 @@ class ModelFactory(Generic[TModel]):
             The objects, with their primary keys when the model declares one.
         """
         declarations, _post_values, _parameter_names = cls.get_declarations(given)
-        if any(isinstance(declaration, SubFactory | PostDeclaration) for declaration in declarations.values()):
+        if any(isinstance(declaration, (SubFactory, PostDeclaration)) for declaration in declarations.values()):
             return [await cls.create(**given) for _ in range(size)]
         model = cls.get_model()
         reads_back_keys = model._meta.generated_pk_field_name is not None

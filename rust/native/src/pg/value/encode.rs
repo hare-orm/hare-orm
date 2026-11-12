@@ -1,5 +1,6 @@
 //! `Value` -> wire bytes of a bind parameter, checked against the type the server resolved.
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use bytes::{BufMut, BytesMut};
@@ -30,19 +31,19 @@ impl Value {
     }
 
     /// The value's text form, used when the server resolved a text-family parameter type.
-    pub(crate) fn as_pg_text(&self) -> Option<String> {
+    pub(crate) fn as_pg_text(&self) -> Option<Cow<'_, str>> {
         match self {
-            Value::Bool(value) => Some(if *value { "true" } else { "false" }.to_string()),
-            Value::Int(value) => Some(value.to_string()),
-            Value::BigInt(value) | Value::Decimal(value) | Value::Json(value) => Some(value.clone()),
-            Value::Float(value) => Some(value.to_string()),
-            Value::Uuid(value) => Some(value.to_string()),
-            Value::NonFiniteDecimal(value) => Some(value.as_text().to_string()),
-            Value::Timestamp(value) => Some(value.format("%Y-%m-%d %H:%M:%S%.6f").to_string()),
-            Value::TimestampTz(value) => Some(value.to_rfc3339()),
-            Value::Date(value) => Some(value.format("%Y-%m-%d").to_string()),
-            Value::Time(value) => Some(value.format("%H:%M:%S%.6f").to_string()),
-            Value::TimeTz(value, offset) => Some(format!("{}{}", value.format("%H:%M:%S%.6f"), offset)),
+            Value::Bool(value) => Some(Cow::Borrowed(if *value { "true" } else { "false" })),
+            Value::Int(value) => Some(Cow::Owned(value.to_string())),
+            Value::BigInt(value) | Value::Decimal(value) | Value::Json(value) => Some(Cow::Borrowed(value)),
+            Value::Float(value) => Some(Cow::Owned(value.to_string())),
+            Value::Uuid(value) => Some(Cow::Owned(value.to_string())),
+            Value::NonFiniteDecimal(value) => Some(Cow::Borrowed(value.as_text())),
+            Value::Timestamp(value) => Some(Cow::Owned(value.format("%Y-%m-%d %H:%M:%S%.6f").to_string())),
+            Value::TimestampTz(value) => Some(Cow::Owned(value.to_rfc3339())),
+            Value::Date(value) => Some(Cow::Owned(value.format("%Y-%m-%d").to_string())),
+            Value::Time(value) => Some(Cow::Owned(value.format("%H:%M:%S%.6f").to_string())),
+            Value::TimeTz(value, offset) => Some(Cow::Owned(format!("{}{}", value.format("%H:%M:%S%.6f"), offset))),
             Value::Null
             | Value::DeferredText(_)
             | Value::Text(_)
@@ -466,6 +467,7 @@ impl ToSql for Value {
 }
 
 /// A value written where the binary format is required outright (a COPY BINARY column).
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug)]
 pub(crate) struct BinaryParameter<'a>(pub(crate) &'a Value);
 

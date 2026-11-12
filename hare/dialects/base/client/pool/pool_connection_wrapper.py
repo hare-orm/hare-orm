@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -24,7 +24,7 @@ class PoolConnectionWrapper(Generic[TConnection]):
         # The first available connection - waited for when none is idle.
         self.pool, connection = await self.client.acquire_from_open_pool()
         self.connection = connection
-        return cast("TConnection", connection)
+        return connection
 
     async def __aexit__(
         self,

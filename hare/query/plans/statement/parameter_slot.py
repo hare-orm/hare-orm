@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from hare.native.native_modules import NativeModules
 from hare.sql.terms.parameters.parameterizer import Parameterizer
+
+if TYPE_CHECKING:
+    from hare.query.plans.statement.declarations import ParameterBinder
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,21 +26,22 @@ class ParameterSlot:
     literal: bool = False
     value_options: Any = None
     value_options_getter: Callable[[Any], Any] | None = None
+    #: The shared executor of this immutable description; it retains no input value.
+    bind: ParameterBinder = field(init=False, compare=False, repr=False)
 
-    def bind(self, parameters: list[Any], value: Any, always_parameterized: bool = False) -> bool:
-        """Write a converted value to every occurrence, preserving the prepared SQL shape."""
-        if self.literal:
-            return False
-        if not self.positions:
-            return True
-        if (
-            type(value) is not self.value_type
-            or (self.value_options_getter is not None and self.value_options_getter(value) != self.value_options)
-            or (not always_parameterized and not Parameterizer.should_parameterize(value))
-        ):
-            return False
-        while isinstance(value, Enum):
-            value = value.value
-        for position in self.positions:
-            parameters[position] = value
-        return True
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "bind",
+            NativeModules.rows.ParameterSlot(
+                self.positions,
+                self.value_type,
+                self.literal,
+                self.value_options,
+                self.value_options_getter,
+                Parameterizer.should_parameterize
+                if issubclass(self.value_type, Parameterizer.conditionally_parameterized_types)
+                else None,
+                Enum if issubclass(self.value_type, Enum) else None,
+            ).bind,
+        )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.core.apps.model_connection_checks import ModelConnectionChecks
 from hare.core.config import HareConfig
@@ -57,7 +57,7 @@ async def makemigrations(
             raise ConfigurationError(f"Unknown app label {label}")
     safety_config = typed_config.migrations.safety if typed_config.migrations is not None else None
     async with MigrationSession(typed_config, target_app_labels, create_packages=True) as session:
-        apps = cast("Apps", session.context.apps)
+        apps: Apps = session.context.apps  # type: ignore[assignment]
         # A view declared as a queryset is written as that queryset's SQL.
         apps.bind_base_queries()
         # A constraint no migrate could apply isn't written into a migration.

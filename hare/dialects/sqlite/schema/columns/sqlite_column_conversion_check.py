@@ -130,6 +130,7 @@ class SqliteColumnConversionCheck(ColumnConversionCheck):
             The field's refusal of one such value, None when every one fits.
         """
         read_value = self.editor.client.dialect.types.get_python_reader(new_field)
+        write_value = self.editor.client.dialect.types.get_db_writer(new_field)
         _, rows = await self.editor.client.execute(
             f"SELECT DISTINCT {quoted_column} AS value FROM {qualified_table} "  # nosec B608
             f"WHERE {quoted_column} IS NOT NULL"
@@ -137,7 +138,7 @@ class SqliteColumnConversionCheck(ColumnConversionCheck):
         for row in rows:
             stored_value = dict(row)["value"]
             try:
-                self.editor.client.dialect.types.get_db_value(new_field, read_value(stored_value), None)
+                write_value(read_value(stored_value), None)
             except (ValidationError, ValueError, TypeError) as error:
                 return str(error)
         return None

@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
+
+from hare.classes.deferred_import import DeferredImport
+from hare.query.constants import PRIMARY_KEY_ALIAS
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
+    from hare.fields.relations.relation_values import RelationValues
     from hare.models import Model
-    from hare.query.expressions.value_references.value_reference_types import ParameterValues, ValueReference
+    from hare.query.expressions.value_references.value_reference_types import ValueReference
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RelatedKeyValueReference:
     """The value of a lookup on a to-many relation's own name (``tags=obj``, ``books__in=[...]``):
     an instance stands for its primary key, which the reference recorded comparing the related key
@@ -24,27 +28,33 @@ class RelatedKeyValueReference:
     #: The filter's key, for the error of an instance that didn't load the attribute it stands for.
     filter_key: str
     #: The attribute an instance stands for - the field a forward relation's ``to_field`` names.
-    key_name: str = "pk"
+    key_name: str = PRIMARY_KEY_ALIAS
 
-    def get_parameter_values(self, value: Any, model: type[Model], dialect: Dialect) -> ParameterValues | None:
+    #: Classes imported on first use because their modules import value references.
+    model_class: ClassVar[DeferredImport[type[Model]]]
+    relation_values_class: ClassVar[DeferredImport[type[RelationValues]]]
+
+    def bind(self, parameters: list[Any], value: Any, model: type[Model], dialect: Dialect) -> bool:
         """The parameters of a new value - each instance replaced by its primary key.
 
         Args:
+            parameters: The parameter buffer of this execution, filled in place.
             value: The new value - an instance, a key, or a list of either.
             model: The model queried.
             dialect: The dialect the query runs on.
 
         Returns:
-            The parameters the related key's reference gives, or None.
+            True when the prepared SQL shape accepts the value; False requests a fresh build.
+            Conversion and validation errors propagate to the caller.
         """
-        # Deferred import: the models package imports the query expressions.
-        from hare.models import Model
-
-        if isinstance(value, Model):
+        model_class = self.model_class
+        if isinstance(value, model_class):
             value = self.get_instance_key(value)
         elif self.converts_lists and isinstance(value, (list, tuple, set)):
-            value = [self.get_instance_key(element) if isinstance(element, Model) else element for element in value]
-        return self.reference.get_parameter_values(value, model, dialect)
+            value = [
+                self.get_instance_key(element) if isinstance(element, model_class) else element for element in value
+            ]
+        return self.reference.bind(parameters, value, model, dialect)
 
     def get_instance_key(self, obj: Model) -> Any:
         """The key an instance stands for.
@@ -59,9 +69,13 @@ class RelatedKeyValueReference:
             QueryError: The instance is of another model - a concrete subclass's too, whose rows live in a
                 table of their own - or didn't load the attribute (``.only()``/``.defer()``).
         """
-        # Deferred import: the relation fields import the query expressions.
-        from hare.fields.relations.relation_values import RelationValues
-
-        RelationValues.raise_if_not_of_model(obj, self.instance_class, self.filter_key)
-        (key,) = RelationValues.get_relation_key_values(obj, (self.key_name,), f"Filter '{self.filter_key}'")
+        relation_values = self.relation_values_class
+        relation_values.raise_if_not_of_model(obj, self.instance_class, self.filter_key)
+        (key,) = relation_values.get_relation_key_values(obj, (self.key_name,), f"Filter '{self.filter_key}'")
         return key
+
+
+DeferredImport("hare.models", "Model").install_on(RelatedKeyValueReference, "model_class")
+DeferredImport("hare.fields.relations.relation_values", "RelationValues").install_on(
+    RelatedKeyValueReference, "relation_values_class"
+)

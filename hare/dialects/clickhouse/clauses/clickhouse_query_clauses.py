@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from copy import copy
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.clauses.query_clauses import QueryClauses
 from hare.dialects.clickhouse.clauses.constants import (
@@ -33,7 +33,6 @@ if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.dialects.base.features import Features
     from hare.sql.builder.queries.query_builder import QueryBuilder
-    from hare.sql.builder.tables.table import Table
     from hare.sql.builder.update_from_values import UpdateFromValues
     from hare.sql.enums import SetOperation
     from hare.sql.sql_context import SqlContext
@@ -170,7 +169,7 @@ class ClickhouseQueryClauses(QueryClauses):
         # enclosing query reads would read the name as its own table. Its rows come from a derived
         # table: the name is the enclosing query's alone.
         if builder._table_sample is not None or builder._dialect_clauses:
-            return cast("str", source.get_sql(sql_context))
+            return source.get_sql(sql_context)
         return self.get_joined_source_sql(source, sql_context)
 
     def get_joined_source_sql(self, source: Any, sql_context: SqlContext) -> str:
@@ -179,7 +178,7 @@ class ClickhouseQueryClauses(QueryClauses):
         from hare.sql.builder.tables.table import Table
 
         if not isinstance(source, Table) or not source.alias:
-            return cast("str", source.get_sql(sql_context))
+            return source.get_sql(sql_context)
         unaliased_table = copy(source)
         unaliased_table.alias = None
         table_sql = unaliased_table.get_sql(sql_context)
@@ -238,9 +237,9 @@ class ClickhouseQueryClauses(QueryClauses):
             f"{field.get_sql(field_context)} = {value.get_sql(value_context)}" for field, value in builder._updates
         )
         where_sql = QuerySqlRendering.where_sql(builder, sql_context) if builder._wheres else " WHERE 1"
-        table_sql = ClickhousePlacementPlan.for_table(
-            cast("Table", builder._update_table), sql_context
-        ).get_mutation_target_sql(sql_context)
+        table_sql = ClickhousePlacementPlan.for_table(builder._update_table, sql_context).get_mutation_target_sql(  # type: ignore[arg-type]
+            sql_context
+        )
         update_sql = self.get_update_head_sql(builder._update_table, table_sql)
         return f"{update_sql} {assignments_sql}{where_sql}{self.get_statement_end_sql(builder, sql_context)}"
 
@@ -275,9 +274,9 @@ class ClickhouseQueryClauses(QueryClauses):
             )
         self.raise_if_server_rows_read(builder._from[0], [builder._wheres])
         where_sql = QuerySqlRendering.where_sql(builder, sql_context) if builder._wheres else " WHERE 1"
-        table_sql = ClickhousePlacementPlan.for_table(
-            cast("Table", builder._from[0]), sql_context
-        ).get_mutation_target_sql(sql_context)
+        table_sql = ClickhousePlacementPlan.for_table(builder._from[0], sql_context).get_mutation_target_sql(  # type: ignore[arg-type]
+            sql_context
+        )
         statement_end_sql = self.get_statement_end_sql(builder, sql_context)
         # The table and the condition are hare's own rendering; values are inlined literals. A
         # lightweight DELETE fails on a set operation in its condition (the server's mutation of it

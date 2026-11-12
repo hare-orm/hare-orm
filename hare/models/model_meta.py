@@ -37,7 +37,7 @@ class ModelMeta(type):
         # The C3 order of the ancestors, nearest first.
         canonical_mro = cls._linearize_mro(bases)
         meta_class = AbstractMetaInheritance.get_merged_meta_class(
-            attributes.get("Meta", type("Meta", (), {})), bases, canonical_mro
+            attributes["Meta"] if "Meta" in attributes else type("Meta", (), {}), bases, canonical_mro
         )
 
         # The fields of the bases, base by base in the order given - this sets the column order:
@@ -217,6 +217,7 @@ class ModelMeta(type):
             meta.pk_fields = tuple(fields_map[name] for name in primary_key_attribute)
         elif pk_field := fields_map.get(primary_key_attribute):
             meta.pk = pk_field
+            meta.pk_fields = (pk_field,)
             if pk_field.source_field:
                 meta.db_pk_column = pk_field.source_field
             elif isinstance(pk_field, OneToOneFieldInstance):

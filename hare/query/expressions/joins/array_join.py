@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import QueryError, UnSupportedError
 from hare.fields.data.containers.array_field import ArrayField
@@ -22,7 +22,6 @@ from hare.sql.terms.field import Field as SqlField
 if TYPE_CHECKING:
     from hare.fields.field import Field
     from hare.query.expressions.expression_result import TableCriterionTuple
-    from hare.sql.builder.tables.table import Table
 
 
 class ArrayJoin(NamedJoin):
@@ -92,7 +91,7 @@ class ArrayJoin(NamedJoin):
             )
         joined = ArrayJoinSource(self.name, array_result.term, left=self.left)
         # Joined like a table, with no condition.
-        return [*array_result.joins, (cast("Table", joined), TrueCriterion())], array_field.base_field
+        return [*array_result.joins, (joined, TrueCriterion())], array_field.base_field  # type: ignore[list-item]
 
     def get_path_result(self, path: str, expression_context: ExpressionContext) -> ExpressionResult:
         """What ``<name>__<path>`` reads - the element, with a path inside it.
@@ -104,7 +103,7 @@ class ArrayJoin(NamedJoin):
         transforms, output_field, remaining = FieldTransforms.get_path(element_field, path.split("__") if path else [])
         if remaining:
             raise QueryError(f"ArrayJoin {self.name!r}: {remaining[0]!r} reads nothing inside its element")
-        term = FieldTransforms.apply(transforms, SqlField(cast("str", self.name)))
+        term = FieldTransforms.apply(transforms, SqlField(self.name))  # type: ignore[arg-type]
         return ExpressionResult(term=term, joins=joins, output_field=output_field)
 
     def get_path_filter(
@@ -121,7 +120,7 @@ class ArrayJoin(NamedJoin):
         segments = path.split("__") if path else []
         transforms, output_field, remaining = FieldTransforms.get_path(element_field, segments)
         result = ExpressionResult(
-            term=FieldTransforms.apply(transforms, SqlField(cast("str", self.name))),
+            term=FieldTransforms.apply(transforms, SqlField(self.name)),  # type: ignore[arg-type]
             joins=joins,
             output_field=output_field,
         )

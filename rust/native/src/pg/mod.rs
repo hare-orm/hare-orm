@@ -5,37 +5,58 @@
 //! `execute_many` parameter type unification (`client`), the base of `Value` (`value`) and
 //! `DriverError` (`error`).
 
+#[cfg_attr(not(unix), allow(dead_code))]
 pub mod bounded_statement_tracker;
+#[cfg(unix)]
 pub mod client;
+#[cfg(unix)]
 pub mod closing_connect;
+#[cfg(unix)]
 pub(crate) mod connection_executor;
+#[cfg(unix)]
 pub(crate) mod connection_opening;
+#[cfg(unix)]
 pub mod copy;
 pub(crate) mod decode_context;
+#[cfg(unix)]
 pub mod described_rows;
 pub mod error;
+#[cfg(unix)]
 pub mod first_row;
+#[cfg_attr(not(unix), allow(dead_code))]
 pub mod managed_connection;
+#[cfg(unix)]
 pub mod one_round_trip;
 pub(crate) mod parameter_encoding;
+#[cfg(unix)]
 pub mod parameter_value_rows;
+#[cfg(unix)]
 pub mod parameter_values;
+#[cfg(unix)]
+pub(crate) mod pending_statements;
 pub mod result;
 pub mod result_columns;
 pub mod result_data;
 pub mod row;
 pub(crate) mod row_decoder;
+#[cfg(unix)]
 pub(crate) mod statement_lease;
+// The driver's errors name the manager's - compiled everywhere, used on Unix alone.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub mod timed_manager;
+#[cfg(unix)]
 pub(crate) mod tls;
+#[cfg(unix)]
 pub mod transaction;
 pub mod types;
 pub mod value;
 pub(crate) mod wire_reader;
 
+#[cfg(unix)]
 use pyo3::prelude::*;
 
-/// Fills the `pg` submodule.
+/// Fills the `pg` submodule - the driver is built on Unix alone (see the crate root).
+#[cfg(unix)]
 pub fn register(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<client::Client>()?;
     module.add_class::<client::PooledConnection>()?;

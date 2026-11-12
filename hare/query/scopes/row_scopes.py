@@ -85,9 +85,8 @@ class RowScopes:
         queryset = QuerySet(model)
         queryset._uses_default_scope = True
         queryset._visibility = visibility
-        if visibility is RowVisibility.DEFAULT:
-            # The queryset of a model's own manager - its queries run by the calls made on it.
-            queryset._call_signature = (QuerySet,)
+        # Its queries run by the calls made on it - the key of the calls holds the visibility.
+        queryset._call_signature = (QuerySet,)
         return queryset
 
     @staticmethod

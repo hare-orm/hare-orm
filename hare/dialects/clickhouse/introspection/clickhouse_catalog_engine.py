@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.dialects.clickhouse.clickhouse_engine import ClickhouseEngine
@@ -63,7 +63,7 @@ class ClickhouseCatalogEngine:
                 ]
                 if any(column is None for column in columns):
                     return ClickhouseEngine(name, sql=RawSQLTerm(sql), **options)
-                values.append(tuple(F(cast("str", column)) for column in columns))
+                values.append(tuple(F(column) for column in columns))  # type: ignore[arg-type]
         elif family == "GraphiteMergeTree":
             if len(arguments) != 1 or not arguments[0].strip().startswith("'"):
                 return ClickhouseEngine(name, sql=RawSQLTerm(sql), **options)

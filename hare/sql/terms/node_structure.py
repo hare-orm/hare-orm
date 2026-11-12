@@ -3,9 +3,11 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from copy import copy
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.classes.deferred_import import DeferredImport
 from hare.exceptions import QueryError
+from hare.sql.terms.enums import StructurePartType
 from hare.sql.terms.messages import CYCLIC_SQL_TREE
 from hare.sql.terms.structure_identity import StructureIdentity
 
@@ -23,6 +25,9 @@ class NodeStructure:
     declares attributes. Source references stop at their binding and nested query
     bodies are never inspected by an enclosing expression traversal.
     """
+
+    #: ``Node`` - imported at its first read, as its module imports this one.
+    node_class: ClassVar[DeferredImport[type[Node]]] = DeferredImport("hare.sql.terms.node", "Node")
 
     @staticmethod
     def get_source_bindings(query: QueryBuilder) -> dict[Any, SourceBinding]:
@@ -54,8 +59,6 @@ class NodeStructure:
         The key is flat, so hashing a deeply nested expression does not recurse.
         Unknown Python payloads and SQL nodes are distinguished by retained identity.
         """
-        from hare.sql.terms.node import Node
-
         result: list[Any] = []
         ancestors: set[int] = set()
         stack: list[tuple[Any, bool, bool]] = [(root, False, False)]
@@ -63,42 +66,42 @@ class NodeStructure:
             value, literal, leaving = stack.pop()
             if leaving:
                 ancestors.remove(id(value))
-                result.append(("end",))
+                result.append((StructurePartType.END,))
                 continue
-            if isinstance(value, Node) and not literal:
+            if isinstance(value, NodeStructure.node_class) and not literal:
                 # A Field's table is a source reference, not an inline copy of its query.
                 binding = vars(value).get("source_binding")
                 if binding is not None:
                     if source_bindings is not None:
                         binding = source_bindings.get(value, binding)
-                    result.append(("source", StructureIdentity(binding)))
+                    result.append((StructurePartType.SOURCE, StructureIdentity(binding)))
                     continue
                 attributes = NodeStructure.get_attributes(value)
                 if attributes is None or value.is_subquery or not value.has_repeatable_value:
                     identity = vars(value).get("expression_identity", value)
-                    result.append(("opaque", type(value), StructureIdentity(identity)))
+                    result.append((StructurePartType.OPAQUE, type(value), StructureIdentity(identity)))
                     continue
-                result.append(("node", type(value)))
+                result.append((StructurePartType.NODE, type(value)))
                 children = [(item, name in value.literal_attributes, False) for name, item in attributes]
                 # Attribute names distinguish optional settings that happen to share a value.
                 entries: list[tuple[Any, bool, bool]] = []
                 for (name, _), child in zip(attributes, children, strict=True):
                     entries.extend(((name, True, False), child))
             elif isinstance(value, (tuple, list)):
-                result.append(("sequence", type(value), len(value)))
+                result.append((StructurePartType.SEQUENCE, type(value), len(value)))
                 entries = [(item, literal, False) for item in value]
             elif isinstance(value, dict):
-                result.append(("mapping", type(value), len(value)))
+                result.append((StructurePartType.MAPPING, type(value), len(value)))
                 entries = [(item, literal, False) for pair in value.items() for item in pair]
             else:
                 if isinstance(value, Enum):
-                    result.append(("enum", type(value), value.name))
+                    result.append((StructurePartType.ENUM, type(value), value.name))
                 elif value is None or type(value) in (str, bytes, bool, int):
-                    result.append(("value", type(value), value))
+                    result.append((StructurePartType.VALUE, type(value), value))
                 elif type(value) is float:
-                    result.append(("float", value.hex()))
+                    result.append((StructurePartType.FLOAT, value.hex()))
                 else:
-                    result.append(("identity", type(value), StructureIdentity(value)))
+                    result.append((StructurePartType.IDENTITY, type(value), StructureIdentity(value)))
                 continue
             if id(value) in ancestors:
                 raise QueryError(CYCLIC_SQL_TREE)
@@ -111,7 +114,11 @@ class NodeStructure:
     def rebuild(node: Node, attributes: Mapping[str, Any]) -> Node:
         """Return a shallow node copy with its declared structural inputs replaced."""
         declared = NodeStructure.get_attributes(node)
-        if declared is None or any(name not in dict(declared) for name in attributes):
+        invalid_attributes = declared is None
+        if declared is not None and attributes:
+            declared_by_name = dict(declared)
+            invalid_attributes = any(name not in declared_by_name for name in attributes)
+        if invalid_attributes:
             raise QueryError(f"{type(node).__name__} does not declare these structural attributes")
         rebuilt = copy(node)
         vars(rebuilt).pop("_hash_cache", None)

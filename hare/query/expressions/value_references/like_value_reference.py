@@ -12,10 +12,9 @@ from hare.sql.terms.values.value_wrapper import ValueWrapper
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.models import Model
-    from hare.query.expressions.value_references.value_reference_types import ParameterValues
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class LikeValueReference:
     """A plan value reference of ``__contains``/``__startswith``/``__endswith`` and their insensitive variants: the
     pattern's parameter slot, the encoder converting the raw value, the field, and the
@@ -30,18 +29,20 @@ class LikeValueReference:
     prefix: bool
     suffix: bool
 
-    def get_parameter_values(self, value: Any, model: type[Model], dialect: Dialect) -> ParameterValues | None:
+    def bind(self, parameters: list[Any], value: Any, model: type[Model], dialect: Dialect) -> bool:
         """The pattern parameter of a new value - encoded, then escaped and wrapped in the
         recorded wildcards.
 
         Args:
+            parameters: The parameter buffer of this execution, filled in place.
             value: The new value.
             model: The model queried.
             dialect: The dialect the query runs on.
 
         Returns:
-            The parameters.
+            True when the prepared SQL shape accepts the value; False requests a fresh build.
+            Conversion and validation errors propagate to the caller.
         """
         encoded = self.value_encoder(value, model, self.field, dialect)
         pattern = Lookups.get_like_pattern_text(encoded, prefix=self.prefix, suffix=self.suffix)
-        return [(self.wrapper, pattern, False)]
+        return self.wrapper.bind(parameters, pattern, False)  # type: ignore[union-attr]

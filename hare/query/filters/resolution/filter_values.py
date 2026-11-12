@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Callable, Iterable
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.classes.deferred_import import DeferredImport
 from hare.exceptions import QueryError, UnSupportedError
 from hare.fields.data.temporal.date_field import DateField
 from hare.fields.data.temporal.datetime_field import DatetimeField
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
 from hare.fields.field import Field
 from hare.fields.generated_field import GeneratedField
-from hare.query.constants import PLAN_CACHE_MISS
+from hare.query.constants import PLAN_CACHE_MISS, PRIMARY_KEY_ALIAS
 from hare.query.expressions.constants import (
     LIST_LOOKUP_SUFFIXES,
     VALUE_COMPARISON_LOOKUPS,
@@ -46,12 +47,25 @@ from hare.sql.terms.parameters.parameterized_value_wrapper import ParameterizedV
 from hare.sql.terms.term import Term
 from hare.sql.terms.tuple import Tuple
 from hare.sql.terms.values.value_wrapper import ValueWrapper
-from hare.time import Timezone
+from hare.time.zone_settings import ZoneSettings
+
+if TYPE_CHECKING:
+    from hare.query.queryset import QuerySet
+    from hare.query.statements import AwaitableQuery
 
 
 class FilterValues:
     """The value a filter compares with: converted by the field, bound as a parameter or written into
     the SQL, a subquery or an expression resolved, a date compared with a timestamp."""
+
+    #: ``QuerySet`` - imported at its first read, as its module imports this one.
+    query_set_class: ClassVar[DeferredImport[type[QuerySet[Any, Any]]]] = DeferredImport(
+        "hare.query.queryset", "QuerySet"
+    )
+    #: ``AwaitableQuery`` - imported at its first read, as its module imports this one.
+    awaitable_query_class: ClassVar[DeferredImport[type[AwaitableQuery[Any]]]] = DeferredImport(
+        "hare.query.statements", "AwaitableQuery"
+    )
 
     @staticmethod
     def get_value_reference(
@@ -274,7 +288,7 @@ class FilterValues:
         container_values = container.values
         if not all(isinstance(container_value, ParameterizedValueWrapper) for container_value in container_values):
             return None
-        parameterized_values = cast("list[ParameterizedValueWrapper]", container_values)
+        parameterized_values: list[ParameterizedValueWrapper] = container_values  # type: ignore[assignment]
         # Identity again: the Tuple must wrap the encoded list's own elements.
         if not isinstance(encoded_value, (list, tuple, set)):
             return None
@@ -367,29 +381,24 @@ class FilterValues:
             A ``Subquery``, the built SELECT of a set operation's primary key, or ``filter_value``
             unchanged.
         """
-        # Deferred import: hare.query.queryset itself imports from this module at module level
-        # (Q/Expression/...), so a direct import here would be circular.
-        from hare.query.queryset import QuerySet
-        from hare.query.statements import AwaitableQuery
-
         if type(filter_value) is Subquery:
             source = filter_value.source_query
-            if isinstance(source, QuerySet) and source._selection is None:
+            if isinstance(source, FilterValues.query_set_class) and source._selection is None:
                 narrowed = FilterValues.get_subquery_filter_value(source, value_wrapper_references)
                 if isinstance(narrowed, Subquery):
                     narrowed.shares_outer_scope = filter_value.shares_outer_scope
                 return narrowed
-        if not isinstance(filter_value, (QuerySet, AwaitableQuery)):
+        if not isinstance(filter_value, (FilterValues.query_set_class, FilterValues.awaitable_query_class)):
             return filter_value
         # Imported only for a query value - an ordinary filter value loads no set-operation module.
         from hare.query.statements.select.combined_query import CombinedQuery
 
-        if isinstance(filter_value, QuerySet):
+        if isinstance(filter_value, FilterValues.query_set_class):
             # The values it selects, else its primary key - or the rows it combines.
             filter_value = filter_value._get_filter_value_compiler()
         if isinstance(filter_value, CombinedQuery) and not filter_value._combines_values:
-            return filter_value._get_field_values_query("pk", value_wrapper_references)
-        if isinstance(filter_value, AwaitableQuery):
+            return filter_value._get_field_values_query(PRIMARY_KEY_ALIAS, value_wrapper_references)
+        if isinstance(filter_value, FilterValues.awaitable_query_class):
             return Subquery(filter_value._get_filter_value_query())
         return filter_value
 
@@ -433,7 +442,7 @@ class FilterValues:
             return term
         filtered_field = GeneratedField.get_effective_field(field_object)
         compared_field = GeneratedField.get_effective_field(value_field)
-        zone_name = Timezone.get_aware_zone_name()
+        zone_name = ZoneSettings.get_aware_zone_name()
         if isinstance(filtered_field, DatetimeField) and isinstance(compared_field, DateField):
             return DateAsTimestamp(term, zone_name)
         if isinstance(filtered_field, DateField) and isinstance(compared_field, DatetimeField):

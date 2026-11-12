@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Generator, Iterable, Mapping, Sequence
 from copy import copy
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.dialects.base.clauses.enums import MergeAction, MergeMatch
@@ -24,7 +24,7 @@ from hare.models.write.rules.tenant_write_rules import TenantWriteRules
 from hare.models.write.rules.written_target_checks import WrittenTargetChecks
 from hare.models.write.update.expression_assignment import ExpressionAssignment
 from hare.models.write.write_steps import WriteSteps
-from hare.query.constants import MERGE_SOURCE_ALIAS, MERGE_SOURCE_KEY
+from hare.query.constants import MERGE_SOURCE_ALIAS, MERGE_SOURCE_KEY, PRIMARY_KEY_ALIAS
 from hare.query.enums import RowShape
 from hare.query.execution.bound_write import BoundWrite
 from hare.query.execution.query_execution import QueryExecution
@@ -60,7 +60,6 @@ if TYPE_CHECKING:
 
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.fields.field import Field
-    from hare.fields.relations.fields.relational_field import RelationalField
     from hare.instrumentation.capture.capture_needs import CaptureNeeds
     from hare.query.queryset.queryset import QuerySet
     from hare.sql.sql_context import SqlContext
@@ -390,8 +389,8 @@ class MergeQuery:
         action_column = self.get_action_column()
         meta = model._meta
         execution_query = self.target._get_execution_query(for_write=True)
-        WrittenTargetChecks.raise_if_refused_calls(execution_query)
-        connection = cast("DatabaseClient", execution_query._connection)
+        WrittenTargetChecks.raise_if_refused_calls(execution_query, execution_query.dialect)
+        connection: DatabaseClient = execution_query._connection  # type: ignore[assignment]
         self.raise_if_unmergeable(connection)
         if not self.source and all(when.match is not MergeMatch.NOT_MATCHED_BY_SOURCE for when in self.whens):
             # No source row - a branch of matched or new rows writes nothing.
@@ -461,7 +460,7 @@ class MergeQuery:
             returned=returned,
             action_alias_sql=sql_context.quote(action_column),
         )
-        parameters = cast("Parameterizer", sql_context.parameterizer).values
+        parameters = sql_context.parameterizer.values  # type: ignore[union-attr]
         command = WriteStatement(
             sql, parameters, returns_rows=capture_needs is not None or self.returned_rows is not None
         )
@@ -616,16 +615,18 @@ class MergeQuery:
             if isinstance(field, (ForeignKeyFieldInstance, OneToOneFieldInstance)) and len(field.source_fields) == 1:
                 field = meta.fields_map[field.source_fields[0]]
             fields.append(field if field is not None and field.model_field_name in meta.fields_db_projection else None)
+        writers = [None if field is None else dialect.types.get_db_writer(field) for field in fields]
         rows_sql: list[str] = []
         for row in rows:
             values_sql: list[str] = []
-            for column, field in zip(columns, fields, strict=True):
+            for column, field, write in zip(columns, fields, writers, strict=True):
                 value = self.get_source_value(column, row[column])
                 if field is None:
                     values_sql.append(ValueWrapper(value).get_sql(sql_context))
                     continue
                 # The row of a source of no rows is left out - its NULL is no value of the field.
-                db_value = None if matches_no_row else dialect.types.get_db_value(field, value, None)
+                assert write is not None  # nosec B101
+                db_value = None if matches_no_row else write(value, None)
                 value_wrapper = ValueWrapper(db_value)
                 # A sensitive field's value is never shown (QueryParameters).
                 value_wrapper.sensitive = field.sensitive
@@ -696,7 +697,7 @@ class MergeQuery:
         visibility = self.target._visibility
         if visibility.only_deleted:
             # Only the soft-deleted rows of the model itself - the scope a JOIN shares leaves it out.
-            soft_delete_column = model._meta.fields_db_projection[cast("str", model._meta.soft_delete_field)]
+            soft_delete_column = model._meta.fields_db_projection[model._meta.soft_delete_field]
             criteria.append(expression_context.table[soft_delete_column].notnull())
         scope = RowScopes.of(self.target.model).get_criterion(
             expression_context.table,
@@ -797,7 +798,9 @@ class MergeQuery:
             finds_rows_by_key=False,
         )
         values = (
-            InstanceInitialization.expand_pk_kwarg(model, when.values) if "pk" in when.values else dict(when.values)
+            InstanceInitialization.expand_pk_kwarg(model, when.values)
+            if PRIMARY_KEY_ALIAS in when.values
+            else dict(when.values)
         )
         all_tenants = self.target._visibility.all_tenants
         if is_insert:
@@ -812,7 +815,7 @@ class MergeQuery:
         relation_key_names = {
             key_name
             for relation_name in meta.foreign_key_fields | meta.one_to_one_fields
-            for key_name in cast("RelationalField[Any]", meta.fields_map[relation_name]).source_fields
+            for key_name in meta.fields_map[relation_name].source_fields
         }
         for name, value in values.items():
             field = meta.fields_map[name]

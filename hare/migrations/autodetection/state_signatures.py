@@ -94,7 +94,7 @@ class StateSignatures:
             # By what the enum holds, not by the class - an enum built while the application runs
             # is a new class after every restart.
             signature["enum_type"] = ComparableValues.get_enum_content(enum_type)
-        if isinstance(field, ForeignKeyFieldInstance | ManyToManyFieldInstance):
+        if isinstance(field, (ForeignKeyFieldInstance, ManyToManyFieldInstance)):
             signature.pop("related_name", None)
         if isinstance(field, ForeignKeyFieldInstance) and (
             len(field.source_fields) > 1

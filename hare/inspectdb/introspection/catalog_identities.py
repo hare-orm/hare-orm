@@ -8,13 +8,9 @@ from sqlparse import tokens
 from sqlparse.lexer import tokenize
 
 from hare.dialects.base.constants import SQL_DIALECT
-from hare.inspectdb.constants import (
-    CATALOG_SCHEMA_MEMBERS,
-    CATALOG_SQL_MEMBERS,
-    CATALOG_SQL_POSITIONAL_DECLARATIONS,
-    CATALOG_SQL_TEXT_PARTS,
-)
-from hare.inspectdb.introspection.enums import SchemaPartType
+from hare.inspectdb.constants import CATALOG_SCHEMA_MEMBERS, CATALOG_SQL_MEMBERS, CATALOG_SQL_POSITIONAL_DECLARATIONS
+from hare.inspectdb.enums import SchemaPartType
+from hare.inspectdb.introspection.constants import CATALOG_SQL_TEXT_PARTS
 
 if TYPE_CHECKING:
     from hare.inspectdb.introspection.schema_part import SchemaPart

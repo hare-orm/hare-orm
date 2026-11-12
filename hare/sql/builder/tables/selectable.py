@@ -74,6 +74,12 @@ class Selectable(Node):
     def get_table_name(self) -> str | None:
         return self.alias
 
+    def get_namespace(self, sql_context: SqlContext) -> str | None:
+        """The source alias selected by the current rendering scope, else its table name."""
+        if self.source_binding in sql_context.source_aliases:
+            return sql_context.source_aliases[self.source_binding]
+        return self.get_table_name()
+
     def get_column_sql(self, name: str, sql_context: SqlContext) -> str:
         """Render a column in this source's namespace.
 
@@ -81,9 +87,9 @@ class Selectable(Node):
         rendering. A caller never needs to replace text inside a completed statement.
         """
         column_sql = sql_context.quote(name)
-        name = sql_context.source_aliases.get(self.source_binding, self.get_table_name())
         if sql_context.with_namespace or self.alias or self.source_binding in sql_context.source_aliases:
-            return f"{sql_context.quote(name)}.{column_sql}"
+            namespace = self.get_namespace(sql_context)
+            return f"{sql_context.quote(namespace)}.{column_sql}"
         return column_sql
 
     def get_sql(self, sql_context: SqlContext) -> str:

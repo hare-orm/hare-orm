@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, cast
+from typing import Any
 
 from hare.ddl.indexes.index import Index
 from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
@@ -139,7 +139,7 @@ class PostgresqlSchemaEditor(BaseSchemaEditor):
         Returns:
             The options, None for a plain table.
         """
-        options = cast("PostgresqlTableOptions | None", model._meta.get_table_options(self.client.dialect))
+        options: PostgresqlTableOptions | None = model._meta.get_table_options(self.client.dialect)  # type: ignore[assignment]
         return options if options is not None and options.partitioning is not None else None
 
     def get_table_rename_plan(self, model: type[Model], old_name: str, new_name: str) -> SchemaChangePlan:
@@ -149,7 +149,7 @@ class PostgresqlSchemaEditor(BaseSchemaEditor):
         if options is None or old_name == new_name:
             return plan
         steps = list(plan.steps)
-        for partition_name in cast("Partitioning", options.partitioning).get_partition_names():
+        for partition_name in options.partitioning.get_partition_names():  # type: ignore[union-attr]
             old_partition = Partitioning.get_partition_table_name(old_name, partition_name)
             new_partition = Partitioning.get_partition_table_name(new_name, partition_name)
             steps.append(
@@ -205,7 +205,7 @@ class PostgresqlSchemaEditor(BaseSchemaEditor):
         statements = [
             self.index_statements.get_index_create_sql(model, index, indexed_table_sql=f"ONLY {qualified_table}")
         ]
-        for partition_name in cast("Partitioning", options.partitioning).get_partition_names():
+        for partition_name in options.partitioning.get_partition_names():  # type: ignore[union-attr]
             partition_table = Partitioning.get_partition_table_name(model._meta.db_table, partition_name)
             partition_index_name = Identifiers.get_within_limit(f"{partition_table}_{index_name}")
             statements.append(

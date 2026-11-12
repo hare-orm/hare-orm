@@ -6,9 +6,10 @@ from typing import Any
 from hare.dialects.base.connection.connection_option import ConnectionOption
 from hare.dialects.base.connection.connection_options import ConnectionOptions
 from hare.dialects.clickhouse.clickhouse_dialect import ClickhouseDialect
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.clickhouse.indexes.constants import CLICKHOUSE_BLOOM_FILTER_FALSE_POSITIVE
 from hare.dialects.enums import ConnectionOptionType
-from hare.inspectdb.introspection.enums import SchemaPartType
+from hare.inspectdb.enums import SchemaPartType
 
 #: The port of ClickHouse's HTTP interface.
 CLICKHOUSE_DEFAULT_HTTP_PORT = 8123
@@ -30,10 +31,10 @@ CLICKHOUSE_INTEGER_LITERAL_RANGE = (-(2**63), 2**63 - 1)
 #: The integer types wider than 64 bits and the numbers each holds - a literal beyond
 #: ``CLICKHOUSE_INTEGER_LITERAL_RANGE`` is read from its text as the first one holding it.
 CLICKHOUSE_WIDE_INTEGER_TYPES = (
-    ("Int128", -(2**127), 2**127 - 1),
-    ("UInt128", 0, 2**128 - 1),
-    ("Int256", -(2**255), 2**255 - 1),
-    ("UInt256", 0, 2**256 - 1),
+    (ClickhouseTypeName.INT128, -(2**127), 2**127 - 1),
+    (ClickhouseTypeName.UINT128, 0, 2**128 - 1),
+    (ClickhouseTypeName.INT256, -(2**255), 2**255 - 1),
+    (ClickhouseTypeName.UINT256, 0, 2**256 - 1),
 )
 #: The first and the last year a ``Date32`` column and a ``DateTime64`` column store, whole - the
 #: server turns a value outside them into the nearest one without an error, so hare refuses it.
@@ -120,13 +121,13 @@ CLICKHOUSE_NEVER_NULLABLE_TYPE_PREFIXES = (
     "Tuple(",
     "Nested(",
     "Variant(",
-    "Dynamic",
-    "Point",
-    "Ring",
-    "LineString",
-    "MultiLineString",
-    "Polygon",
-    "MultiPolygon",
+    ClickhouseTypeName.DYNAMIC,
+    ClickhouseTypeName.POINT,
+    ClickhouseTypeName.RING,
+    ClickhouseTypeName.LINE_STRING,
+    ClickhouseTypeName.MULTI_LINE_STRING,
+    ClickhouseTypeName.POLYGON,
+    ClickhouseTypeName.MULTI_POLYGON,
 )
 #: The name of the connection's database - the namespace of its tables.
 CLICKHOUSE_CURRENT_DATABASE_SQL = "SELECT currentDatabase() AS name"

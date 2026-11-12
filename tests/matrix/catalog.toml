@@ -5,12 +5,8 @@ poetry = "2.1.4"
 poetry_export = "1.9.0"
 uv = "0.12.7"
 
-[spatialite]
-version = "5.1.0"
-windows_archive_url = "https://www.gaia-gis.it/gaia-sins/windows-bin-amd64/mod_spatialite-5.1.0-win-amd64.7z"
-
 [versions]
-"python" = ["3.12", "3.13", "3.14"]
+"python" = ["3.12", "3.13", "3.14", "3.15"]
 "postgres" = ["14", "15", "16", "17", "18"]
 "pgbouncer" = ["1.22", "1.23", "1.24", "1.25", "1.26"]
 "clickhouse" = ["25.8", "25.10", "25.12", "26.3", "26.7", "26.8", "26.9"]
@@ -28,6 +24,9 @@ windows_archive_url = "https://www.gaia-gis.it/gaia-sins/windows-bin-amd64/mod_s
 [images.kafka]
 "3.9" = "apache/kafka:3.9.2"
 "4.3" = "apache/kafka:4.3.1"
+
+[unsupported_extras]
+"3.15" = ["robyn", "clickhouse-driver"]
 
 [database_driver_extras]
 "sqlite" = []
@@ -79,35 +78,23 @@ windows_archive_url = "https://www.gaia-gis.it/gaia-sins/windows-bin-amd64/mod_s
 "port_prefix" = 19
 
 [sqlite_releases."3.35.5"]
-"windows_dll" = "2021/sqlite-dll-win64-x64-3350500.zip"
 "amalgamation" = "2021/sqlite-amalgamation-3350500.zip"
 
 [sqlite_releases."3.37.2"]
-"windows_dll" = "2022/sqlite-dll-win64-x64-3370200.zip"
 "amalgamation" = "2022/sqlite-amalgamation-3370200.zip"
 
 [sqlite_releases."3.38.0"]
-"windows_dll" = "2022/sqlite-dll-win64-x64-3380000.zip"
 "amalgamation" = "2022/sqlite-amalgamation-3380000.zip"
 
 [sqlite_releases."3.41.0"]
-"windows_dll" = "2023/sqlite-dll-win64-x64-3410000.zip"
 "amalgamation" = "2023/sqlite-amalgamation-3410000.zip"
 
 [sqlite_releases."3.53.4"]
-"windows_dll" = "2026/sqlite-dll-win-x64-3530400.zip"
 "amalgamation" = "2026/sqlite-amalgamation-3530400.zip"
 
 [[environments]]
 name = "core"
 databases = ["sqlite", "postgresql", "clickhouse+clickhouse-connect", "clickhouse+clickhouse-driver"]
-whole_suite = true
-on_newest_servers_only = true
-
-[[environments]]
-name = "pure"
-databases = ["sqlite"]
-native = false
 whole_suite = true
 on_newest_servers_only = true
 
@@ -234,17 +221,62 @@ whole_suite = true
 database_independent = false
 all_extras = true
 
-[platforms]
-runners = ["ubuntu-24.04", "windows-2025", "macos-15"]
+# The platforms of a release's wheels (.github/workflows/platform-wheels.yml): the runner each is
+# built on, maturin's target and manylinux policy on Linux, and how its wheels are checked - `native`
+# installs them on the runner, `alpine` in the python:3.X-alpine images.
+[[wheel_platforms]]
+platform = "manylinux-x86_64"
+runner = "ubuntu-24.04"
+target = "x86_64"
+manylinux = "2014"
+check = "native"
 
-[ci.build-native]
-matrix = { "include" = [ { "os" = "windows-2025", "make_target" = "build_native_windows", "extension_files" = "rust/native.cp3*-win_amd64.pyd" }, { "os" = "macos-15", "make_target" = "build_native_macos", "extension_files" = "rust/native.cpython-3*-darwin.so" } ] }
+[[wheel_platforms]]
+platform = "manylinux-aarch64"
+runner = "ubuntu-24.04-arm"
+target = "aarch64"
+manylinux = "2014"
+check = "native"
+
+[[wheel_platforms]]
+platform = "musllinux-x86_64"
+runner = "ubuntu-24.04"
+target = "x86_64"
+manylinux = "musllinux_1_2"
+check = "alpine"
+
+[[wheel_platforms]]
+platform = "musllinux-aarch64"
+runner = "ubuntu-24.04-arm"
+target = "aarch64"
+manylinux = "musllinux_1_2"
+check = "alpine"
+
+[[wheel_platforms]]
+platform = "macos-x86_64"
+runner = "macos-15-intel"
+check = "native"
+
+[[wheel_platforms]]
+platform = "macos-arm64"
+runner = "macos-15"
+check = "native"
+
+[[wheel_platforms]]
+platform = "windows-x86_64"
+runner = "windows-2025"
+check = "native"
+
+[[wheel_platforms]]
+platform = "windows-arm64"
+runner = "windows-11-arm"
+check = "native"
 
 [ci.test-sqlite]
 axes = { "python" = "versions.python" }
 
 [ci.test-database-independent]
-axes = { "os" = "platforms.runners", "python" = "versions.python" }
+axes = { "python" = "versions.python" }
 
 [ci.test-postgres]
 axes = { "postgres" = "versions.postgres", "python" = "versions.python" }
@@ -257,8 +289,8 @@ axes = { "python" = "versions.python" }
 
 [ci.test-clickhouse]
 axes = { "clickhouse" = "versions.clickhouse" }
-newest_axes = { "python" = "versions.python" }
-matrix = { "include" = [ { "clickhouse" = "25.8", "python" = "3.12" }, { "clickhouse" = "25.8", "python" = "3.13" } ] }
+drivers = "urls.clickhouse"
+matrix = { "include" = [ { "clickhouse" = "25.8", "python" = "3.12", "driver" = "clickhouse-connect" }, { "clickhouse" = "25.8", "python" = "3.12", "driver" = "clickhouse-driver" }, { "clickhouse" = "25.8", "python" = "3.13", "driver" = "clickhouse-connect" }, { "clickhouse" = "25.8", "python" = "3.13", "driver" = "clickhouse-driver" } ] }
 
 [ci.test-pgbouncer]
 axes = { "pgbouncer" = "versions.pgbouncer" }
@@ -266,7 +298,11 @@ newest_axes = { "postgres" = "versions.postgres", "python" = "versions.python" }
 matrix = { "include" = [ { "pgbouncer" = "1.26", "postgres" = "14", "python" = "3.14" } ] }
 
 [ci.test-poetry-add]
-axes = { "os" = "platforms.runners", "python" = "versions.python" }
+axes = { "python" = "versions.python" }
+
+# The wheels built and installed on one runner of each OS - release.yml builds every platform.
+[ci.platform-wheels]
+platforms = ["manylinux-x86_64", "macos-arm64", "windows-x86_64"]
 
 [ci_gate]
-jobs = [ "catalog", "check", "build-native-linux", "build-native", "test-sqlite", "test-database-independent", "test-postgres", "test-lowest-dependencies", "test-brokers", "test-clickhouse", "test-pgbouncer", "test-poetry-add" ]
+jobs = [ "catalog", "check", "build-native-linux", "test-sqlite", "test-database-independent", "test-postgres", "test-lowest-dependencies", "test-brokers", "test-clickhouse", "test-pgbouncer", "test-poetry-add", "platform-wheels" ]

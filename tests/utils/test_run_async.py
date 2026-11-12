@@ -8,8 +8,6 @@ Note: These tests require no active HareContext when they start. If run after te
 that use the session-scoped `db` fixture, they will be skipped.
 """
 
-import os
-
 import pytest
 
 from hare import Hare
@@ -54,7 +52,6 @@ async def init_and_raise(holder):
     raise Exception("Some exception")
 
 
-@pytest.mark.skipif(os.name == "nt", reason="stuck with Windows")
 def test_run_async(holder, requires_no_context):
     """Test that run_async properly cleans up after successful execution."""
     # No context should be active before run_async
@@ -68,7 +65,6 @@ def test_run_async(holder, requires_no_context):
     assert holder["value"] == 2
 
 
-@pytest.mark.skipif(os.name == "nt", reason="stuck with Windows")
 def test_run_async_raised(holder, requires_no_context):
     """Test that run_async properly cleans up even when an exception is raised."""
     # No context should be active before run_async

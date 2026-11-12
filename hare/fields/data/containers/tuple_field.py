@@ -139,23 +139,47 @@ class TupleField(ContainerField):
     def encode_value(
         self, value: Any, instance: type[Model] | Model | None, types: TypeRegistry | None, path: str
     ) -> Any:
-        return TupleValue(
-            self.encode_child(field, element, instance, types, self.get_element_path(path, position))
-            for position, (field, element) in enumerate(
-                zip(self.fields_in_order, self.get_ordered_values(value, path), strict=True)
+        """Write one value through the same traversal a prepared column uses."""
+        return self._prepare_encoder(types)(value, instance, path)
+
+    def get_value_encoder(self, types: TypeRegistry | None) -> Callable[..., Any]:
+        """Prepare this shape while preserving an overridden encode_value hook."""
+        if getattr(self.encode_value, "__func__", None) is not TupleField.encode_value:
+            return super().get_value_encoder(types)
+        return self._prepare_encoder(types)
+
+    def _prepare_encoder(self, types: TypeRegistry | None) -> Callable[..., Any]:
+        encoders = tuple(self.get_child_encoder(field, types) for field in self.fields_in_order)
+
+        def encode_value(value: Any, instance: Any, path: str) -> Any:
+            elements = self.get_ordered_values(value, path)
+            return TupleValue(
+                encode(element, instance, self.get_element_path(path, position))
+                for position, (encode, element) in enumerate(zip(encoders, elements, strict=True))
             )
-        )
+
+        return encode_value
 
     def decode_value(self, value: Any, types: TypeRegistry | None) -> Any:
+        """Read one value through the same traversal a prepared column uses."""
+        return self._prepare_decoder(types)(value)
+
+    def get_value_decoder(self, types: TypeRegistry | None) -> Callable[[Any], Any]:
+        """Prepare this shape while preserving an overridden decode_value hook."""
+        if getattr(self.decode_value, "__func__", None) is not TupleField.decode_value:
+            return super().get_value_decoder(types)
+        return self._prepare_decoder(types)
+
+    def _prepare_decoder(self, types: TypeRegistry | None) -> Callable[[Any], Any]:
+        decoders = tuple(self.get_child_decoder(field, types) for field in self.fields_in_order)
         names = self.element_names
-        elements = [value[name] for name in names] if isinstance(value, Mapping) and names is not None else value
-        decoded = [
-            self.decode_child(field, element, types)
-            for field, element in zip(self.fields_in_order, elements, strict=True)
-        ]
-        if names is not None:
-            return dict(zip(names, decoded, strict=True))
-        return tuple(decoded)
+
+        def decode_value(value: Any) -> Any:
+            elements = [value[name] for name in names] if isinstance(value, Mapping) and names is not None else value
+            decoded = [decode(element) for decode, element in zip(decoders, elements, strict=True)]
+            return dict(zip(names, decoded, strict=True)) if names is not None else tuple(decoded)
+
+        return decode_value
 
     def normalize_value(self, value: Any, path: str) -> Any:
         names = self.element_names

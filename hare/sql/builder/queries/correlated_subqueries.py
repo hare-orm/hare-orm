@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from copy import copy
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.classes.deferred_import import DeferredImport
 from hare.exceptions import UnSupportedError
 from hare.sql.builder.joins.join_on import JoinOn
 from hare.sql.builder.queries.constants import ROW_COUNT_FREE_AGGREGATE_NAMES
@@ -24,6 +25,7 @@ from hare.sql.terms.tuple import Tuple
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from hare.sql.builder.queries.set_operation_query import SetOperationQuery
     from hare.sql.sql_context import SqlContext
     from hare.sql.terms.node import Node
     from hare.sql.terms.term import Term
@@ -34,6 +36,11 @@ class CorrelatedSubqueries:
     (``Features.supports_correlated_subqueries``). An ``EXISTS`` correlated by equalities of its
     columns with the outer query's is written as a membership test of the outer columns in its
     rows; any other correlated subquery is refused before the statement is sent."""
+
+    #: ``SetOperationQuery`` - imported at its first read, as its module imports this one.
+    set_operation_query_class: ClassVar[DeferredImport[type[SetOperationQuery]]] = DeferredImport(
+        "hare.sql.builder.queries.set_operation_query", "SetOperationQuery"
+    )
 
     @staticmethod
     def iterate_query_terms(query: QueryBuilder) -> Iterator[Term]:
@@ -63,10 +70,11 @@ class CorrelatedSubqueries:
     @staticmethod
     def is_query_boundary(node: Any) -> bool:
         """Whether a node introduces a child scope, including wrapped SQL queries."""
-        from hare.sql.builder.queries.set_operation_query import SetOperationQuery
 
         return (
-            isinstance(node, (QueryBuilder, SetOperationQuery, Field, QualifiedOuterField))
+            isinstance(
+                node, (QueryBuilder, CorrelatedSubqueries.set_operation_query_class, Field, QualifiedOuterField)
+            )
             or getattr(type(node), "rewrites_inner_correlation", False)
             or getattr(type(node), "holds_nested_query", False)
         )
@@ -74,7 +82,6 @@ class CorrelatedSubqueries:
     @classmethod
     def iterate_term_queries(cls, term: Node) -> Iterator[tuple[QueryBuilder, bool]]:
         """Yield immediate child queries without traversing their inner expressions twice."""
-        from hare.sql.builder.queries.set_operation_query import SetOperationQuery
 
         for node in NodeTraversal.walk(term, lambda child: not cls.is_query_boundary(child)):
             rewrites = bool(getattr(type(node), "rewrites_inner_correlation", False))
@@ -87,12 +94,12 @@ class CorrelatedSubqueries:
             )
             if isinstance(nested, QueryBuilder):
                 yield nested, rewrites
-            elif isinstance(nested, SetOperationQuery):
+            elif isinstance(nested, CorrelatedSubqueries.set_operation_query_class):
                 yield nested.base_query, rewrites
                 for _operation, branch in nested._set_operation:
                     yield branch, rewrites
                 for cte in nested._with:
-                    yield from cls.iterate_term_queries(cast("Node", cte.query))
+                    yield from cls.iterate_term_queries(cte.query)  # type: ignore[arg-type]
 
     @classmethod
     def iterate_nested_queries(cls, query: QueryBuilder) -> Iterator[tuple[QueryBuilder, bool]]:
@@ -100,7 +107,7 @@ class CorrelatedSubqueries:
         for source in (*query._from, *(join.item for join in query._joins)):
             yield from cls.iterate_term_queries(source)
         for cte in query._with:
-            yield from cls.iterate_term_queries(cast("Node", cte.query))
+            yield from cls.iterate_term_queries(cte.query)  # type: ignore[arg-type]
         for term in cls.iterate_query_terms(query):
             yield from cls.iterate_term_queries(term)
 
@@ -304,26 +311,22 @@ class CorrelatedSubqueries:
             if not isinstance(condition, EmptyCriterion)
         ]
         # Free of the columns the query selects - a column of a table may hold a space too.
-        taken_names = {name for select in query._selects if (name := select.alias or getattr(select, "name", None))}
+        taken_names = Identifiers(
+            {name for select in query._selects if (name := select.alias or getattr(select, "name", None))}
+        )
         condition_names = [
-            Identifiers.get_free_name(f"{CORRELATED_CONDITION_PREFIX}{position}", taken_names)
+            taken_names.get_free_name(f"{CORRELATED_CONDITION_PREFIX}{position}")
             for position in range(len(conditions))
         ]
         sort_key_names = [
-            Identifiers.get_free_name(f"{CORRELATED_SORT_KEY_PREFIX}{position}", taken_names)
+            taken_names.get_free_name(f"{CORRELATED_SORT_KEY_PREFIX}{position}")
             for position in range(len(query._orderbys))
         ]
         inner_query = copy(query)
         inner_query._selects = [
             *query._selects,
-            *(
-                cast("Field", copy(condition).as_(name))
-                for condition, name in zip(conditions, condition_names, strict=True)
-            ),
-            *(
-                cast("Field", copy(term).as_(name))
-                for (term, _direction), name in zip(query._orderbys, sort_key_names, strict=True)
-            ),
+            *(copy(condition).as_(name) for condition, name in zip(conditions, condition_names, strict=True)),
+            *(copy(term).as_(name) for (term, _direction), name in zip(query._orderbys, sort_key_names, strict=True)),
         ]
         inner_query._wheres = None
         inner_query._orderbys = []
@@ -428,7 +431,7 @@ class CorrelatedSubqueries:
             pairs = [
                 cls.get_column_pair(*sides, declared_sources) for sides in zip(left.values, right.values, strict=True)
             ]
-            return None if any(pair is None for pair in pairs) else cast("list[tuple[Term, Term]]", pairs)
+            return None if any(pair is None for pair in pairs) else pairs  # type: ignore[return-value]
         pair = cls.get_column_pair(left, right, declared_sources)
         return None if pair is None else [pair]
 

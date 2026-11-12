@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.enums import Lookup
 from hare.query.expressions.aggregate_paths.constants import (
     MULTIPLE_VALUE_TYPES,
@@ -371,7 +372,7 @@ class AggregatedMultiValuedPaths:
             if relation is None or related_model is None:
                 if not is_on_last_multi_valued_model or index != len(parts) - 1:
                     return None
-                if part == "pk":
+                if part == PRIMARY_KEY_ALIAS:
                     return current_model, tuple(current_model._meta.primary_key_attribute_names)
                 return (current_model, (part,)) if relation is not None else None
             if (
@@ -411,7 +412,7 @@ class AggregatedMultiValuedPaths:
         read_field_names = set(field_names)
         known_non_null_field_names = set(non_null_field_names)
         if meta.has_primary_key and (
-            "pk" in read_field_names or set(meta.primary_key_attribute_names) <= read_field_names
+            PRIMARY_KEY_ALIAS in read_field_names or set(meta.primary_key_attribute_names) <= read_field_names
         ):
             return True
         unique_field_sets: list[tuple[str, ...]] = [

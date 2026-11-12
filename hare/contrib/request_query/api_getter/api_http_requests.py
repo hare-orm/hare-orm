@@ -83,7 +83,10 @@ class ApiHttpRequests:
             reading the answer.
         """
         headers = await self.get_headers(source)
-        semaphore = self.semaphores.setdefault(id(source), asyncio.Semaphore(source.concurrency))
+        source_key = id(source)
+        semaphore = self.semaphores.get(source_key)
+        if semaphore is None:
+            semaphore = self.semaphores[source_key] = asyncio.Semaphore(source.concurrency)
         response: Any = None
         error: Exception | None = None
         async with semaphore:

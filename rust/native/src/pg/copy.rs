@@ -5,13 +5,11 @@
 
 use std::pin::pin;
 
-use crate::pg::timed_manager::Object;
 use tokio_postgres::binary_copy::BinaryCopyInWriter;
 use tokio_postgres::types::Type;
 
-use tokio_postgres::types::ToSql;
-
 use crate::pg::error::DriverError;
+use crate::pg::timed_manager::Object;
 use crate::pg::value::{BinaryParameter, Value};
 
 /// The COPY BINARY type of a column of SQL type `base_type_name` - every text type is `TEXT`, whose
@@ -94,11 +92,10 @@ pub(crate) async fn copy_in_records(
 
     let sink = client.copy_in(&sql).await?;
     let mut writer = pin!(BinaryCopyInWriter::new(sink, &types));
+    // A function pointer keeps the input/output borrow tied across the Send future's lifetime check.
+    let binary_parameter: fn(&Value) -> BinaryParameter<'_> = |value| BinaryParameter(value);
     for row in &records {
-        let parameters: Vec<BinaryParameter> = row.iter().map(BinaryParameter).collect();
-        let parameter_refs: Vec<&(dyn ToSql + Sync)> =
-            parameters.iter().map(|parameter| parameter as &(dyn ToSql + Sync)).collect();
-        writer.as_mut().write(&parameter_refs).await?;
+        writer.as_mut().write_raw(row.iter().map(binary_parameter)).await?;
     }
     Ok(writer.finish().await?)
 }

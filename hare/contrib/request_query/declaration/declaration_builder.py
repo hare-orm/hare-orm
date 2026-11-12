@@ -26,6 +26,7 @@ from hare.core.hare_context import HareContext
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.exceptions import ConfigurationError, FieldError, QueryError
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.enums import Lookup, LookupValueShape
 from hare.query.queryset import QuerySet
 
@@ -98,7 +99,7 @@ class DeclarationBuilder:
         self.check_ordering(queryset, ordering, pagination)
         self.described_models.add(queryset.model)
         key_ordering_paths = (
-            self.describe_ordering(queryset, "pk").paths if queryset.model._meta.has_primary_key else ()
+            self.describe_ordering(queryset, PRIMARY_KEY_ALIAS).paths if queryset.model._meta.has_primary_key else ()
         )
         return RequestQueryDeclaration(
             queryset=queryset,

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.classes.deferred_import import DeferredImport
 from hare.exceptions import QueryError, ValidationError
 from hare.fields.enums import RelationType
 from hare.fields.field import Field
@@ -11,12 +13,14 @@ from hare.models.write.rules.constants import ADD_METHOD_NAME, THROUGH_DEFAULTS_
 from hare.models.write.rules.enums import WriteType
 from hare.models.write.rules.relation_key_values import RelationKeyValues
 from hare.models.write.rules.row_write_rules import RowWriteRules
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.sql.builder.tables.table import Table
 
 if TYPE_CHECKING:
     from hare.dialects.base.types.type_registry import TypeRegistry
-    from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
     from hare.models import Model
+    from hare.models.tenancy.tenancy import Tenancy
+    from hare.models.write.rules.tenant_write_rules import TenantWriteRules
     from hare.query.queryset.relations.many_to_many_relation import ManyToManyRelation
     from hare.sql.terms.field import Field as SqlField
 
@@ -24,6 +28,13 @@ if TYPE_CHECKING:
 class ThroughDefaults:
     """The values of a through model's other fields a new link takes: ``through_defaults``, the model's
     defaults and the active tenant."""
+
+    #: ``Tenancy`` - imported at its first read, as its module imports this one.
+    tenancy: ClassVar[DeferredImport[type[Tenancy]]] = DeferredImport("hare.models.tenancy.tenancy", "Tenancy")
+    #: ``TenantWriteRules`` - imported at its first read, as its module imports this one.
+    tenant_write_rules: ClassVar[DeferredImport[type[TenantWriteRules]]] = DeferredImport(
+        "hare.models.write.rules.tenant_write_rules", "TenantWriteRules"
+    )
 
     @staticmethod
     def through_defaults_with_active_tenant(
@@ -40,18 +51,14 @@ class ThroughDefaults:
             QueryError: ``through_defaults`` gives a tenant outside the through model's scope, or
                 gives none under a scope of several values.
         """
-        # Local import: same package-init cycle as ManyToManyScopeChecks.check_instance_tenant().
-        from hare.models.tenancy.tenancy import Tenancy
-        from hare.models.write.rules.tenant_write_rules import TenantWriteRules
-
         through_model = relation.field.through_model_class
         if through_model is None or through_model._meta.tenant_field is None:
             return through_defaults
-        if Tenancy.get_scope(through_model) is None:
+        if ThroughDefaults.tenancy.get_scope(through_model) is None:
             # The through rows take the tenant given, if any - as the instances' own tenants are trusted.
             return through_defaults
         values = dict(through_defaults or {})
-        TenantWriteRules.fill_new_values(through_model, values, "add")
+        ThroughDefaults.tenant_write_rules.fill_new_values(through_model, values, "add")
         return values
 
     @staticmethod
@@ -66,7 +73,7 @@ class ThroughDefaults:
         given_names: set[str] = set()
         for name in through_defaults or ():
             given_names.add(name)
-            if name == "pk":
+            if name == PRIMARY_KEY_ALIAS:
                 primary_key_attribute = through_model._meta.primary_key_attribute
                 given_names.update(
                     (primary_key_attribute,) if isinstance(primary_key_attribute, str) else primary_key_attribute
@@ -77,7 +84,7 @@ class ThroughDefaults:
                 RelationType.FOREIGN_KEY,
                 RelationType.ONE_TO_ONE,
             }:
-                given_names.update(cast("ForeignKeyFieldInstance[Any]", field_object).source_fields)
+                given_names.update(field_object.source_fields)  # type: ignore[attr-defined]
         return given_names
 
     @staticmethod
@@ -160,7 +167,10 @@ class ThroughDefaults:
 
     @staticmethod
     async def through_model_default_values(
-        relation: ManyToManyRelation[Any], default_fields: list[tuple[str, Field[Any]]], types: TypeRegistry
+        relation: ManyToManyRelation[Any],
+        default_fields: list[tuple[str, Field[Any]]],
+        *,
+        writers: Sequence[Callable[[Any, Any], Any]],
     ) -> list[Any]:
         """One through row's DB-ready values for ``ThroughDefaults.through_model_default_fields()``'s fields,
         computed per row (a callable default such as ``uuid4`` must produce a fresh value for each
@@ -169,7 +179,7 @@ class ThroughDefaults:
         Args:
             relation: The many-to-many relation of an instance.
             default_fields: The fields ``through_model_default_fields()`` gave.
-            types: The type registry of the through table's connection.
+            writers: The prepared column writers, in default_fields order.
         """
         if not default_fields:
             return []
@@ -184,8 +194,8 @@ class ThroughDefaults:
             (row_instance,), InstanceValues()
         )
         return [
-            types.get_db_value(field_object, getattr(row_instance, field_object.model_field_name), row_instance)
-            for _, field_object in default_fields
+            write(getattr(row_instance, field.model_field_name), row_instance)
+            for (_column, field), write in zip(default_fields, writers, strict=True)
         ]
 
     @staticmethod
@@ -215,7 +225,7 @@ class ThroughDefaults:
                 "real through model (through=Model) to hold extra fields."
             )
         rules = RowWriteRules.get(through_model, WriteType.INSERT, through_defaults, THROUGH_DEFAULTS_METHOD_NAME)
-        if "pk" in through_defaults:
+        if PRIMARY_KEY_ALIAS in through_defaults:
             through_defaults = InstanceInitialization.expand_pk_kwarg(through_model, through_defaults)
         through_table = Table(relation.field.through, schema=relation.field.through_schema)
         relation_columns = set(relation.field.forward_keys) | set(relation.field.backward_keys)
@@ -225,7 +235,7 @@ class ThroughDefaults:
             field_object = through_model._meta.fields_map[field_name]
             column_name = field_object.source_field or field_object.model_field_name
             field_column_names = (
-                set(cast("ForeignKeyFieldInstance[Any]", field_object).db_column_names)
+                set(field_object.db_column_names)  # type: ignore[attr-defined]
                 if field_object.relation_type in {RelationType.FOREIGN_KEY, RelationType.ONE_TO_ONE}
                 else {column_name}
             )
@@ -237,7 +247,7 @@ class ThroughDefaults:
             if field_object.relation_type in {RelationType.FOREIGN_KEY, RelationType.ONE_TO_ONE}:
                 # A relation is written as its key columns - from an object, None, or a tuple of a composite
                 # key's values, as create() takes it.
-                key_names = cast("ForeignKeyFieldInstance[Any]", field_object).source_fields
+                key_names = field_object.source_fields  # type: ignore[attr-defined]
                 for key_name, key_value in zip(
                     key_names, RelationKeyValues.get_key_values(through_model, field_name, value), strict=True
                 ):

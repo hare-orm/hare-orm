@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import difflib
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.ddl.conditions.constraint_condition import ConstraintCondition
 from hare.ddl.conditions.tenant_condition import TenantCondition
@@ -31,6 +31,7 @@ from hare.models.class_building.constants import (
 )
 from hare.models.class_building.extension_model_options import ExtensionModelOptions
 from hare.models.enums import ModelOption
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.expressions import Expression
 from hare.sql.constants import IDENTIFIER_LENGTH_LIMIT
 
@@ -283,7 +284,7 @@ class ModelDefinitionChecks:
                 f"Meta.tenant_field {meta.tenant_field!r} is not a field on {meta._model.__name__}"
             )
         if meta.tenant_field in meta.foreign_key_fields or meta.tenant_field in meta.one_to_one_fields:
-            relation_field = cast("ForeignKeyFieldInstance[Any]", field)
+            relation_field: ForeignKeyFieldInstance[Any] = field  # type: ignore[assignment]
             if len(relation_field.source_fields) != 1:
                 raise ConfigurationError(
                     f"Meta.tenant_field {meta.tenant_field!r} on {meta._model.__name__} is a relation with a "
@@ -332,7 +333,7 @@ class ModelDefinitionChecks:
         if meta.tenant_schema:
             return
         for field_name in (*meta.foreign_key_fields, *meta.one_to_one_fields, *meta.many_to_many_fields):
-            relation_field = cast("ForeignKeyFieldInstance[Any]", meta.fields_map[field_name])
+            relation_field: ForeignKeyFieldInstance[Any] = meta.fields_map[field_name]  # type: ignore[assignment]
             if getattr(relation_field, "_generated", False):
                 continue
             # A relation to a swapped model has no target model.
@@ -445,7 +446,7 @@ class ModelDefinitionChecks:
         unknown_names = [
             name
             for name in meta.get_latest_by
-            if name.removeprefix("-").partition(LOOKUP_SEPARATOR)[0] not in {*meta.fields_map, "pk"}
+            if name.removeprefix("-").partition(LOOKUP_SEPARATOR)[0] not in {*meta.fields_map, PRIMARY_KEY_ALIAS}
         ]
         if unknown_names:
             raise ConfigurationError(

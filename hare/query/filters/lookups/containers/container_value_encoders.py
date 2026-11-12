@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import ValidationError
 from hare.fields.data.containers.container_field import ContainerField
@@ -8,8 +8,6 @@ from hare.sql.terms.containers import ArrayElementTerm, ContainerLiteral
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
-    from hare.fields.data.containers.array_field import ArrayField
-    from hare.fields.data.containers.map_field import MapField
     from hare.fields.field import Field
     from hare.models import Model
 
@@ -62,7 +60,7 @@ class ContainerValueEncoders:
         if not isinstance(value, (tuple, list)) or len(value) != 2:
             raise ValidationError(f"{field.model_field_name}__item expects an (index, value) pair")
         index, item_value = value
-        base_field = cast("ArrayField", field).base_field
+        base_field = field.base_field  # type: ignore[attr-defined]
         return (
             ArrayElementTerm.get_validated_index(index),
             ContainerValueEncoders.get_held_value_term(base_field, item_value, obj, dialect),
@@ -77,7 +75,7 @@ class ContainerValueEncoders:
         """
         if value is None:
             raise ValidationError(f"{field.model_field_name}: a map key is never None")
-        return dialect.types.get_db_value(cast("MapField", field).key_field, value, obj)
+        return dialect.types.get_db_value(field.key_field, value, obj)  # type: ignore[attr-defined]
 
     @staticmethod
     def encode_map_keys(value: Any, obj: Model, field: Field[Any], dialect: Dialect) -> list[Any]:

@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 from hare.dialects.base.results.statement_result import StatementResult
+from hare.native.native_modules import NativeModules
+from hare.query.rows.model_rows.model_columns import ModelColumns
 from hare.query.rows.row_column import RowColumn
 from hare.query.rows.row_layout import RowLayout
 from hare.query.rows.values_rows.dict_rows import DictRows
@@ -74,11 +76,43 @@ def test_attribute_assignment_preserves_column_selection_and_custom_readers(by_p
     names = ("ignored", "second", "first")
     row = raw if by_position else dict(zip(names, raw, strict=True))
     layout = RowLayout(tuple(RowColumn(key, decode) for key in ((2, 1) if by_position else ("first", "second"))))
-    instance = SimpleNamespace()
-    layout.assign(instance, row, ("first", "second"))
-    assert vars(instance) == dict(zip(("first", "second"), expected, strict=True))
+
+    class Loaded:
+        _meta = SimpleNamespace(default_custom_generated_pk=False, track_dirty_fields=False)
+
+    columns = ModelColumns(
+        Loaded,
+        (("first", None, decode), ("second", None, decode)),
+        tuple(column.key for column in layout.columns),
+        False,
+    )
+    instance = NativeModules.rows.ModelResultLayout((columns,), ()).read_row(row, None, lambda obj: None)
+    assert (instance.first, instance.second) == expected
     assert calls == [raw[2], raw[1]]
     assert row == (raw if by_position else dict(zip(names, raw, strict=True)))
+
+
+def test_batch_conversion_stops_at_first_failure_and_reads_keys_before_callbacks():
+    calls = []
+
+    def convert(value):
+        calls.append(value)
+        return int(value)
+
+    reader = TupleRows(("first", "second"), (("first",), ("second",)))
+    connection = SimpleNamespace(features=SimpleNamespace(supports_positional_rows=False))
+    with pytest.raises(KeyError):
+        reader.convert_batch(
+            connection, StatementResult(1, [{"first": "1"}]), [("first", convert), ("second", convert)]
+        )
+    assert calls == []
+    with pytest.raises(ValueError):
+        reader.convert_batch(
+            connection,
+            StatementResult(2, [{"first": "1", "second": "bad"}, {"first": "3", "second": "4"}]),
+            [("first", convert), ("second", convert)],
+        )
+    assert calls == ["1", "bad"]
 
 
 @pytest.mark.parametrize("row_type", [DictRows, TupleRows, FlatRows, NamedRows])

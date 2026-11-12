@@ -4,8 +4,8 @@ backticks or square brackets - its introspector reads every one of them back."""
 import pytest
 
 from hare.dialects.sqlite.drivers.aiosqlite.client import AiosqliteClient
+from hare.inspectdb.enums import CatalogDiagnosticCode
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
-from hare.inspectdb.introspection.enums import CatalogDiagnosticCode
 
 pytestmark = pytest.mark.sqlite_only
 

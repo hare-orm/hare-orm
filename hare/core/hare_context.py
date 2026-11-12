@@ -9,10 +9,9 @@ import importlib
 import logging
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
-from types import ModuleType
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
-from hare.core.caching.caches import Caches
+from hare.classes.deferred_import import DeferredImport
 from hare.core.config import ConfigSecrets, HareConfig
 from hare.core.connections.connection_handler import ConnectionHandler
 from hare.core.constants import DEFAULT_CONNECTION_NAME, INITIALIZATION_RELEASE_FAILED
@@ -25,16 +24,18 @@ from hare.instrumentation.constants import OBSERVER_SHUTDOWN_WAIT_TIMEOUT_SECOND
 from hare.instrumentation.observers.observer import ObserverCallback
 from hare.instrumentation.observers.observer_set import ObserverSet
 from hare.instrumentation.observers.observers import Observers
-from hare.time import Timezone
 from hare.time.constants import DEFAULT_TIMEZONE
+from hare.time.zone_names import ZoneNames
 
 if TYPE_CHECKING:
     from types import TracebackType
 
     from hare.core.apps import Apps
     from hare.core.apps.declarations import ModelReference
+    from hare.core.apps.live_model_registration import LiveModelRegistration
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.models import Model
+
 
 TCallback = TypeVar("TCallback", bound=ObserverCallback)
 
@@ -55,6 +56,10 @@ class HareContext:
             await context.generate_schemas()
             user = await User.objects.create(name="test")
     """
+
+    live_model_registration: ClassVar[DeferredImport[type[LiveModelRegistration]]] = DeferredImport(
+        "hare.core.apps.live_model_registration", "LiveModelRegistration"
+    )
 
     #: The context current in this task - None outside one.
     current_context: ClassVar[contextvars.ContextVar[HareContext | None]] = contextvars.ContextVar(
@@ -192,10 +197,12 @@ class HareContext:
                 current._apps.bind_models()
 
     def __init__(self) -> None:
+        from hare.fields.encrypted.encryption_keyring import EncryptionBinding
         from hare.fields.encrypted.field_encryption import FieldEncryption
 
         self.identity = object()
         self.encryption_keyring = FieldEncryption.default_keyring
+        self.encryption_binding = EncryptionBinding(self.identity, self.encryption_keyring)
         self._connections: ConnectionHandler | None = None
         self._apps: Apps | None = None
         # Whether this context bound the model classes to its configuration - kept after
@@ -334,7 +341,7 @@ class HareContext:
         effective_use_timezone = typed_config.use_timezone if typed_config.use_timezone is not None else use_timezone
         effective_timezone = typed_config.timezone if typed_config.timezone is not None else timezone
         effective_routers = typed_config.routers if typed_config.routers is not None else routers
-        Timezone.validate(effective_timezone)
+        ZoneNames.validate(effective_timezone)
 
         if not connect and _create_db:
             raise ConfigurationError("connect=False cannot be used with _create_db=True")
@@ -688,63 +695,8 @@ class HareContext:
                 the same name is already registered under ``app_label``, a model belongs to another app,
                 or a relation can't be set up.
         """
-        # A label of a model is "<app>.<Model>": an empty app or one with a dot reads as another.
-        if not isinstance(app_label, str) or not app_label or "." in app_label:
-            raise ConfigurationError(f"register_live_models() needs an app label without a dot, got {app_label!r}")
-        # Local import: the registry imports the models, which import the transactions and this module.
-        from hare.core.apps import Apps
-        from hare.core.apps.cross_connection_checks import CrossConnectionChecks
-        from hare.core.apps.enum_member_checks import EnumMemberChecks
-        from hare.core.apps.model_binding_graph import ModelBindingGraph
-        from hare.core.apps.relation_linking import RelationLinking
-
-        if connection_alias not in self.connections.db_config:
-            raise ConfigurationError(f"Unknown connection {connection_alias!r}")
-        if self._apps is None:
-            self._apps = Apps({}, self.connections, self._table_name_generator)
-        self._models_bound = True
-        apps = self._apps
-        models = list(dict.fromkeys(models))
-        registered_models = apps.apps.get(app_label, {})
-        seen_model_names: set[str] = set()
-        for model in models:
-            if model.__name__ in seen_model_names:
-                raise ConfigurationError(f"Two models named {model.__name__!r} were passed for app {app_label!r}.")
-            seen_model_names.add(model.__name__)
-            registered_model = registered_models.get(model.__name__)
-            if registered_model is not None and registered_model is not model:
-                raise ConfigurationError(
-                    f'A different model named "{app_label}.{model.__name__}" is already registered - '
-                    "call unregister_live_models() on it first."
-                )
-            if model._meta.app and model._meta.app != app_label:
-                raise ConfigurationError(
-                    f"Model {model.__name__!r} belongs to app {model._meta.app!r} - it can't be "
-                    f"registered under {app_label!r}."
-                )
-        new_models = [model for model in models if registered_models.get(model.__name__) is not model]
-        module = ModuleType(f"hare.register_live_models.{app_label}")
-        module.__models__ = models  # type: ignore[attr-defined]
-        # Like loading the configured apps: the models are registered first (their relations
-        # set up later), then bound to the connection, then the relations are set up - so the
-        # table-name collision check sees the models' real connection.
-        with ModelBindingGraph(apps, models):
-            if managed is not None:
-                for model in models:
-                    model._meta.managed = managed
-            apps.init_app(app_label, [module], init_relations=False)
-            for model in models:
-                model._meta.default_connection = connection_alias
-                model._meta.registered_live = True
-            CrossConnectionChecks.check_cross_connection_constraints(apps)
-            apps.init_relations()
-            EnumMemberChecks.add_to_models(models, self.connections)
-            CrossConnectionChecks.check_change_capture_connections(apps)
-            apps.build_initial_querysets()
-        # The targets gained backward relations; caches of the registered model set are stale too,
-        # including when a newly registered model has no relations.
-        Caches.forget_model_caches(
-            set(new_models) | {target for model in models for target in RelationLinking.get_relation_targets(model)}
+        return self.live_model_registration.register_live_models(
+            self, models, app_label, connection_alias, managed=managed
         )
 
     def unregister_live_models(self, models: Iterable[ModelReference]) -> None:
@@ -761,11 +713,7 @@ class HareContext:
             ConfigurationError: One of ``models`` isn't registered, or a model outside ``models``
                 still has a relation pointing at one of them.
         """
-        references = list(models)
-        if self._apps is None:
-            names = ", ".join(getattr(reference, "__name__", str(reference)) for reference in references)
-            raise ConfigurationError(f"Model(s) {names!r} not registered.")
-        self._apps.remove_models([self._apps.get_model(reference) for reference in references])
+        return self.live_model_registration.unregister_live_models(self, models)
 
     async def drop_databases(self) -> None:
         """Drops every database of this context's connections and forgets its models - for tests.

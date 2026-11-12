@@ -37,28 +37,24 @@ class DeclaredUniqueness:
         meta = model._meta
         # A model without a primary key (``Meta.primary_key = None``) declares no uniqueness of it.
         declared = (
-            [cls(tuple(cls.get_attribute_names(model, meta.primary_key_attribute_names)))]
+            [cls(cls.get_attribute_names(model, meta.primary_key_attribute_names))]
             if meta.primary_key_attribute_names
             else []
         )
+        relation_names = meta.foreign_key_fields | meta.one_to_one_fields
         for field_name, field in meta.fields_map.items():
             if (
                 getattr(field, "unique", False)
                 and not getattr(field, "pk", False)
-                and (
-                    field_name in meta.fields_db_projection
-                    or field_name in meta.foreign_key_fields | meta.one_to_one_fields
-                )
+                and (field_name in meta.fields_db_projection or field_name in relation_names)
             ):
-                declared.append(cls(tuple(cls.get_attribute_names(model, (field_name,)))))
+                declared.append(cls(cls.get_attribute_names(model, (field_name,))))
         for constraint in meta.constraints:
             if isinstance(constraint, UniqueConstraint) and constraint.fields:
-                declared.append(cls(tuple(cls.get_attribute_names(model, constraint.fields)), constraint.condition))
+                declared.append(cls(cls.get_attribute_names(model, constraint.fields), constraint.condition))
         for index in meta.indexes:
             if isinstance(index, Index) and index.unique and index.fields and not index.declared_expressions:
-                declared.append(
-                    cls(tuple(cls.get_attribute_names(model, index.fields)), getattr(index, "condition", None))
-                )
+                declared.append(cls(cls.get_attribute_names(model, index.fields), getattr(index, "condition", None)))
         return list(dict.fromkeys(declared))
 
     @staticmethod
@@ -76,7 +72,7 @@ class DeclaredUniqueness:
         )
 
     @staticmethod
-    def get_attribute_names(model: type[Model], field_names: Any) -> list[str]:
+    def get_attribute_names(model: type[Model], field_names: Any) -> tuple[str, ...]:
         """The attributes of an instance holding fields' values.
 
         Args:
@@ -88,12 +84,13 @@ class DeclaredUniqueness:
         """
         meta = model._meta
         attribute_names = []
+        relation_names = meta.foreign_key_fields | meta.one_to_one_fields
         for field_name in field_names:
             field_name = field_name.lstrip("-")
             field = meta.fields_map[field_name]
             source_fields = getattr(field, "source_fields", ())
-            if field_name in meta.foreign_key_fields | meta.one_to_one_fields and source_fields:
+            if field_name in relation_names and source_fields:
                 attribute_names.extend(source_fields)
             else:
                 attribute_names.append(field_name)
-        return attribute_names
+        return tuple(attribute_names)

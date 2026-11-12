@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Coroutine, Iterable
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.contrib.request_query.api_getter.api_http_requests import ApiHttpRequests
 from hare.contrib.request_query.api_getter.api_value_paths import ApiValuePaths
@@ -124,4 +124,4 @@ class ApiEnrichmentBatch:
                 results[position] = await operation(value)
 
         await ApiEnrichmentBatch.run_together([worker() for _ in range(concurrency)])
-        return cast("list[TResult]", results)
+        return results  # type: ignore[return-value]

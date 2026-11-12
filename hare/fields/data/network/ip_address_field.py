@@ -48,7 +48,7 @@ class IPAddressField(Field[Any]):
         Raises:
             ValueError: The value is no address of the field's family.
         """
-        address = value if isinstance(value, ipaddress.IPv4Address | ipaddress.IPv6Address) else None
+        address = value if isinstance(value, (ipaddress.IPv4Address, ipaddress.IPv6Address)) else None
         if address is None:
             address = ipaddress.ip_address(value.decode() if isinstance(value, bytes) else str(value))
         if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:

@@ -7,7 +7,7 @@ from typing import Any
 from hare.ddl.constants import GRANT_TARGET_PRIVILEGES
 from hare.ddl.enums import GrantTarget, Privilege
 from hare.ddl.security.grant import Grant
-from hare.inspectdb.introspection.enums import SchemaPartType
+from hare.inspectdb.enums import SchemaPartType
 from hare.inspectdb.introspection.schema_part import SchemaPart
 
 

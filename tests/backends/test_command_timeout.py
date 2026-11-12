@@ -1,5 +1,5 @@
 """``command_timeout`` - the optional per-command timeout on both Postgres drivers, enforced on the
-hare side (PostgresqlClient._run_with_command_timeout): asyncpg's native option never fires
+hare side (StatementOptions.run_with_command_timeout): asyncpg's native option never fires
 against a server that stopped answering, and rust_pg has no such option."""
 
 import asyncio
@@ -13,11 +13,13 @@ import pytest
 from hare import Connections
 from hare.contrib.test import requires_features
 from hare.dialects.base.client.enums import StatementForm
+from hare.dialects.base.client.statement_options import StatementOptions
 from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
 from hare.dialects.postgresql.client.postgresql_client import PostgresqlClient
 from hare.exceptions import ConfigurationError
 from tests.utils.constants import POSTGRES_CLIENT_PATHS
 from tests.utils.driver_classes import DriverClasses
+from tests.utils.waiting import wait_until
 
 CLIENT_CLASSES = DriverClasses.get_parameters(*POSTGRES_CLIENT_PATHS)
 
@@ -78,7 +80,7 @@ async def test_command_timeout_type_error_belongs_to_the_asyncio_boundary(client
     client = make_client(client_class, command_timeout=[1])
     operation = AsyncMock()
     with pytest.raises(TypeError):
-        await client._run_with_command_timeout(operation)
+        await StatementOptions.run_with_command_timeout(operation, client)
     operation.assert_not_awaited()
 
 
@@ -224,7 +226,6 @@ async def test_without_command_timeout_a_slow_query_is_never_cut_off(client_clas
     assert result == (1, ["row"])
 
 
-@pytest.mark.requires("native")
 @pytest.mark.timing
 @pytest.mark.asyncio
 async def test_rust_pg_command_timeout_applies_inside_a_transaction():
@@ -258,14 +259,15 @@ async def test_asyncpg_command_timeout_applies_inside_a_transaction():
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
-async def test_command_timeout_does_not_bound_transaction_control_methods():
+async def test_command_timeout_does_not_bound_transaction_control_methods(monkeypatch):
     """Cancelling a commit/rollback/begin mid-flight would leave the transaction state unknown."""
     timeout = AsyncMock(side_effect=AssertionError("control call must not be timed out"))
+    monkeypatch.setattr(StatementOptions, "run_with_command_timeout", timeout)
     client = SimpleNamespace(
+        runs_statement_options=PostgresqlClient.runs_statement_options,
         command_timeout=0.2,
         password_provider=None,
         is_transaction_client=False,
-        _run_with_command_timeout=timeout,
         get_driver_error=lambda error, args: None,
     )
 
@@ -353,16 +355,15 @@ async def test_real_postgres_command_timeout_stops_the_query_on_the_server(db_si
         await client.create_connection(with_db=True)
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(client.execute(f"SELECT pg_sleep(5) AS {marker}"), 30)
-        deadline = time.monotonic() + 2
-        while True:
+
+        async def the_query_is_gone() -> bool:
             _, rows = await shared.execute(
                 "SELECT count(*) AS running FROM pg_stat_activity "
                 f"WHERE state = 'active' AND query LIKE '%{marker}%' AND pid <> pg_backend_pid()"
             )
-            if rows[0]["running"] == 0 or time.monotonic() > deadline:
-                break
-            await asyncio.sleep(0.1)
-        assert rows[0]["running"] == 0
+            return rows[0]["running"] == 0
+
+        await wait_until(the_query_is_gone)
     finally:
         await client.close()
 
@@ -434,3 +435,30 @@ async def test_real_postgres_command_timeout_ends_a_command_of_a_server_that_sto
     finally:
         await proxy.stop()
         await client.close()
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+async def test_statement_chains_share_class_storage_and_read_current_client_settings():
+    class Client:
+        runs_statement_options = True
+        is_transaction_client = False
+        password_provider = None
+
+        def __init__(self, timeout):
+            self.command_timeout = timeout
+
+    async def execute(client):
+        return client.command_timeout
+
+    first, second = Client(1), Client(2)
+    operation = StatementOptions.get_operation(first, execute, True)
+    assert StatementOptions.get_operation(second, execute, True) is operation
+    assert await operation(first) == 1
+    assert await operation(second) == 2
+    first.command_timeout = 3
+    assert await operation(first) == 3
+    first.command_timeout = None
+    assert StatementOptions.get_operation(first, execute, True) is execute
+    assert "cache_buckets" not in vars(first)
+    assert "cache_buckets" in vars(Client)

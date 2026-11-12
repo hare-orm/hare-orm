@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 from hare.gis.fields.geometry_field import GeometryField
 from hare.gis.geometries.geometry import Geometry
@@ -36,7 +36,7 @@ class GeometryArguments:
         geometry = GeometryArguments.get_geometry(value, field)
         term = GeometryValue(
             geometry,
-            field.srid if field is not None else cast("int", geometry.srid),
+            field.srid if field is not None else geometry.srid,  # type: ignore[arg-type]
             field.geography if field is not None else False,
         )
         if field is not None:

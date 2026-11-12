@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.query.enums import RowShape
 from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import AggregatedMultiValuedPaths
@@ -28,11 +28,14 @@ class StatementSelection:
     of their keys or of one field."""
 
     @staticmethod
-    def get_select_query(queryset: QuerySet[Any, Any]) -> SelectQuery[Any] | CombinedQuery:
+    def get_select_query(
+        queryset: QuerySet[Any, Any], *, model_query_class: type[ModelRowsQuery[Any]] | None = None
+    ) -> SelectQuery[Any] | CombinedQuery:
         """The query of this queryset's rows, made for the caller alone.
 
         Args:
             queryset: The queryset.
+            model_query_class: The executor of model rows; values and combinations keep theirs.
 
         Returns:
             The query of the combined rows, of the selected values, else of model instances.
@@ -41,7 +44,7 @@ class StatementSelection:
             return QuerySetCombination.get_combined_query(queryset)
         if queryset._selection is not None:
             return StatementSelection.get_values_query(queryset)
-        return ModelRowsQuery(queryset)
+        return (ModelRowsQuery if model_query_class is None else model_query_class)(queryset)
 
     @staticmethod
     def get_rows_source(queryset: SameQuerySet) -> SameQuerySet | ValuesQuery | CombinedQuery:
@@ -73,7 +76,7 @@ class StatementSelection:
         """
         from hare.query.statements.select.values_query import ValuesQuery
 
-        selection = cast("ValuesSelection", queryset._selection)
+        selection: ValuesSelection = queryset._selection  # type: ignore[assignment]
         annotations = queryset._annotations
         if selection.shape is RowShape.DICT:
             if selection.selects_every_field:
@@ -170,6 +173,16 @@ class StatementSelection:
         Returns:
             The query, or None when the rows are the plain matching rows.
         """
+        if not StatementSelection.rows_repeat_for_summary(queryset):
+            return None
+        unsliced_queryset = queryset._clone()
+        unsliced_queryset._limit = None
+        unsliced_queryset._offset = None
+        return StatementSelection.get_primary_key_values_query(unsliced_queryset)
+
+    @staticmethod
+    def rows_repeat_for_summary(queryset: QuerySet[Any, Any]) -> bool:
+        """Whether a summary needs a derived row selection, without constructing that selection."""
         orderings = queryset._apply_default_ordering(queryset._orderings)
         # A composite primary key has no single column for COUNT(DISTINCT ...) - a .distinct()
         # then counts its distinct rows as a derived table.
@@ -188,11 +201,8 @@ class StatementSelection:
             )
             and not StatementSelection.get_distinct_row_multiplying_annotation_names(queryset)
         ):
-            return None
-        unsliced_queryset = queryset._clone()
-        unsliced_queryset._limit = None
-        unsliced_queryset._offset = None
-        return StatementSelection.get_primary_key_values_query(unsliced_queryset)
+            return False
+        return True
 
     @staticmethod
     def get_distinct_row_multiplying_annotation_names(queryset: QuerySet[Any, Any]) -> list[str]:

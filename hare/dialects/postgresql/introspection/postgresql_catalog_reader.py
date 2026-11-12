@@ -14,9 +14,9 @@ from hare.dialects.postgresql.constants import (
 )
 from hare.dialects.postgresql.introspection.constants import POSTGRESQL_TABLE_CATALOG_QUERIES
 from hare.fields.data.json.json_codec import JsonCodec
+from hare.inspectdb.enums import SchemaPartType
 from hare.inspectdb.exceptions import SchemaNotFoundError, TableNotFoundError
 from hare.inspectdb.introspection.catalog_snapshot import CatalogSnapshot
-from hare.inspectdb.introspection.enums import SchemaPartType
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient

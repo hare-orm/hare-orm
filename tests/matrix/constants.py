@@ -10,16 +10,12 @@ SUITE_ENVIRONMENT_OPTION = "--hare-suite-environment"
 FEW_TEST_RUNS_AT_ONCE = 4
 #: The start of the name of each SQLite suite - ``sqlite-3.35.5``, ``sqlite-regexp``.
 SQLITE_SUITE_PREFIX = "sqlite-"
-#: The environment of a run naming none - nothing optional installed.
-CORE_SUITE_ENVIRONMENT = "core"
 #: The run of the tests of every environment at once - in a virtualenv installing everything (make deps,
 #: the lowest dependencies' one).
 EVERY_SUITE_ENVIRONMENT = "all"
 #: The marker of a test requiring extras or groups besides its module's.
 REQUIRES_MARKER = "requires"
-#: The requirement of a test needing hare's compiled extension - the pure wheel has none.
-NATIVE_REQUIREMENT = "native"
-#: The module of that extension.
+#: The module of hare's compiled extension - every run needs it built.
 NATIVE_MODULE = "rust.native"
 #: The extra of each database's driver - it joins the virtualenv of a run on that database.
 MATRIX_DATABASE_DRIVER_EXTRAS = {
@@ -27,11 +23,9 @@ MATRIX_DATABASE_DRIVER_EXTRAS = {
 }
 #: The database of each driver of the matrix's suites - ``MATRIX_POSTGRES_URLS``, ``MATRIX_CLICKHOUSE_URLS``.
 MATRIX_DATABASES_BY_DRIVER = dict(MatrixCatalog.get("databases_by_driver"))
-#: The pytest plugin hiding rust.native - the runs of an environment without it load it.
-WITHOUT_NATIVE_PLUGIN = "tests.matrix.without_native"
 #: The environments of the test suites. Every test of a database runs in ``all`` on every server version, as
-#: a user installing extras runs hare; hare without its optional packages (``core``) and without
-#: rust.native (``pure``) run on the newest server of each database - and with each extra alone on none.
+#: a user installing extras runs hare; hare without its optional packages (``core``) runs on the newest
+#: server of each database - and with each extra alone on none.
 SUITE_ENVIRONMENTS = MatrixCatalog.get_environments()
 
 #: The Python versions of the matrix - each one's virtualenv is ``.venv-<version>``.

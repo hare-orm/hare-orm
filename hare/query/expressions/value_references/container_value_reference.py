@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -10,7 +11,6 @@ if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.fields.field import Field
     from hare.models import Model
-    from hare.query.expressions.value_references.value_reference_types import ParameterValues
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,7 +23,10 @@ class ContainerValueReference:
 
     wrapper: ParameterSlot | ValueWrapper
     field: Field[Any]
+    #: The dialect's conversion of ``field`` - ``(value, model) -> value`` - resolved once when the plan
+    #: is published (``ParameterPreparation``); None while the plan is prepared.
+    convert: Callable[[Any, Any], Any] | None = None
 
-    def get_parameter_values(self, value: Any, model: type[Model], dialect: Dialect) -> ParameterValues | None:
-        converted = dialect.types.get_db_value(self.field, value, model)
-        return None if converted is None else [(self.wrapper, converted, False)]
+    def bind(self, parameters: list[Any], value: Any, model: type[Model], dialect: Dialect) -> bool:
+        converted = self.convert(value, model)  # type: ignore[misc]
+        return converted is not None and self.wrapper.bind(parameters, converted)  # type: ignore[union-attr]

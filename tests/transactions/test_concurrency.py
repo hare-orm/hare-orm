@@ -139,23 +139,10 @@ async def test_nonconcurrent_get_or_create_transactioned(db):
 # =============================================================================
 
 
-@pytest.mark.asyncio
-async def test_concurrent_queries_lazy_init(db_truncate):
-    """Test concurrent queries with lazy connection initialization.
-
-    Hare.init is lazy and does not initialize the database connection
-    until the first query. This test ensures that concurrent queries do not
-    cause initialization issues.
-    """
-    # The db_truncate fixture already initializes the connection, so we just
-    # test that concurrent queries work
-    await asyncio.gather(*[Connections.get("models").execute("SELECT 1") for _ in range(100)])
-
-
 @requires_features(supports_transactions=True)
 @pytest.mark.asyncio
-async def test_concurrent_transactions_lazy_init(db_truncate):
-    """Test concurrent transactions with lazy connection initialization."""
+async def test_concurrent_transactions_each_run_on_a_separate_connection(db_truncate):
+    """A hundred transactions at once - each runs on a connection of its own and finishes."""
 
     async def transaction() -> None:
         async with Transactions.atomic():

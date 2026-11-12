@@ -9,7 +9,7 @@ import os
 import sqlite3
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -39,10 +39,6 @@ from tests.utils.constants import (
 from tests.utils.database_under_test import DatabaseUnderTest
 from tests.utils.driver_classes import DriverClasses
 from tests.utils.kept_shared_test_database import KeptSharedTestDatabase
-from tests.utils.power_throttling import PowerThrottling
-
-if TYPE_CHECKING:
-    from hare.dialects.postgresql.client.postgresql_client import PostgresqlClient
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -113,8 +109,6 @@ def _get_test_database_url() -> str:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    # Runs in every xdist worker too - a worker Windows throttles runs at half the speed.
-    PowerThrottling.turn_off()
     # The shared models of the run's environment (KeptSharedTestDatabase.get_modules()) read it.
     SuiteEnvironments.set_current(config)
     # A run on a prepared SQLite version (tests/sqlite_versions) stops when another one is loaded -
@@ -299,7 +293,7 @@ async def db_module(_shared_test_db_url):
         _generate_schemas=False,
         _drop_db_on_exit=False,
     ) as ctx:
-        await ReusableTestSchemas.reset_rows(cast("PostgresqlClient", ctx.get_connection()))
+        await ReusableTestSchemas.reset_rows(ctx.get_connection())  # type: ignore[arg-type]
         yield ctx
 
 

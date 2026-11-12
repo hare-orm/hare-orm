@@ -3,7 +3,6 @@
 import asyncio
 import contextvars
 import gc
-import sys
 import threading
 import weakref
 
@@ -66,6 +65,47 @@ async def test_native_future_callbacks_and_closed_loop_collection(db_simple):
     await wait_until(lambda: loops_collected(weak_loops))
 
 
+def close_loop_before_native_start(context, weak_loops):
+    """Close in the callback creating the future, before the batched start callback can run."""
+    loop = asyncio.new_event_loop()
+    weak_loops.append(weakref.ref(loop))
+    pending = []
+
+    async def open_client():
+        client = Connections.current().create_independent("models", {"min_size": 1, "max_size": 1})
+        await client.execute_dicts("SELECT 1 AS one")
+        return client
+
+    client = context.run(loop.run_until_complete, open_client())
+
+    def queue_and_stop():
+        # A caller context can legitimately contain its loop. Nothing native may root it.
+        marker = contextvars.ContextVar("native_start_loop")
+        marker.set(loop)
+        pending.append(client._pool.fetch_all("SELECT 2 AS two", []))
+        loop.stop()
+
+    try:
+        loop.call_soon(queue_and_stop)
+        loop.run_forever()
+    finally:
+        loop.close()
+    pending.clear()
+    return client
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+async def test_closing_before_batched_start_releases_the_loop(db_simple):
+    if not isinstance(Connections.get("models"), RustPgClient):
+        pytest.skip("native PostgreSQL bridge")
+    weak_loops = []
+    client = await asyncio.to_thread(close_loop_before_native_start, contextvars.copy_context(), weak_loops)
+    await client.close()
+    del client
+    await wait_until(lambda: loops_collected(weak_loops))
+
+
 async def start_pending_query(weak_loops):
     weak_loops.append(weakref.ref(asyncio.get_running_loop()))
     client = Connections.current().create_independent("models", {"min_size": 1, "max_size": 1})
@@ -88,27 +128,7 @@ def close_loop_before_completion(context, weak_loops):
 async def test_completion_after_forced_loop_close_releases_bridge_references(db_simple, capsys):
     if not isinstance(Connections.get("models"), RustPgClient):
         pytest.skip("native PostgreSQL bridge")
-    # Python retains the latest printed traceback for a debugger. Releasing that
-    # reference is separate from checking references retained by the bridge itself.
-    names = ("last_exc", "last_type", "last_value", "last_traceback")
-    previous = {name: getattr(sys, name) for name in names if hasattr(sys, name)}
     weak_loops = []
-
-    def collected():
-        error = getattr(sys, "last_exc", getattr(sys, "last_value", None))
-        if isinstance(error, RuntimeError) and str(error) == "Event loop is closed":
-            for name in names:
-                if hasattr(sys, name):
-                    delattr(sys, name)
-        return loops_collected(weak_loops)
-
-    try:
-        await asyncio.to_thread(close_loop_before_completion, contextvars.copy_context(), weak_loops)
-        await wait_until(collected)
-        assert "Event loop is closed" in capsys.readouterr().err
-    finally:
-        for name in names:
-            if name in previous:
-                setattr(sys, name, previous[name])
-            elif hasattr(sys, name):
-                delattr(sys, name)
+    await asyncio.to_thread(close_loop_before_completion, contextvars.copy_context(), weak_loops)
+    await wait_until(lambda: loops_collected(weak_loops))
+    assert "Event loop is closed" not in capsys.readouterr().err

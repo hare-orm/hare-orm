@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Collection
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.ddl.table_options import TableOptions
 from hare.fields.constants import ROLLBACK_RESTORE_UNSET
@@ -39,7 +39,7 @@ class InstanceRefresh:
         meta = model._meta
         refreshed = dict.fromkeys(field_names)
         for relation_name in meta.foreign_key_fields | meta.one_to_one_fields:
-            source_fields = cast("RelationalField[Any]", meta.fields_map[relation_name]).source_fields
+            source_fields = meta.fields_map[relation_name].source_fields  # type: ignore[attr-defined]
             if len(source_fields) > 1 and refreshed.keys() & set(source_fields):
                 refreshed.update(dict.fromkeys(source_fields))
         return list(refreshed)
@@ -139,7 +139,7 @@ class InstanceRefresh:
         """
         meta = obj._meta
         for relation_name in meta.foreign_key_fields | meta.one_to_one_fields:
-            relation_field = cast("RelationalField[Any]", meta.fields_map[relation_name])
+            relation_field: RelationalField[Any] = meta.fields_map[relation_name]  # type: ignore[assignment]
             if getattr(relation_field, "lazy", None) not in {RelationLoadStrategy.JOINED, RelationLoadStrategy.SELECT}:
                 continue
             if not set(relation_field.source_fields) & refresh_fields:
@@ -169,7 +169,7 @@ class InstanceRefresh:
         # A lazy="select" many-to-many relation is prefetched onto the row by the refresh query
         # itself - its fresh result is handed to the obj's own relation, just reset.
         for relation_name in meta.many_to_many_fields:
-            relation_field = cast("RelationalField[Any]", meta.fields_map[relation_name])
+            relation_field: RelationalField[Any] = meta.fields_map[relation_name]  # type: ignore[assignment]
             if getattr(relation_field, "lazy", None) != RelationLoadStrategy.SELECT:
                 continue
             refreshed_relation = RelationAccessors.get_relation(refreshed_obj, relation_name)

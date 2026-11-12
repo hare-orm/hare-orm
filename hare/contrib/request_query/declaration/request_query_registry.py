@@ -3,9 +3,10 @@ from __future__ import annotations
 from collections.abc import Iterable
 from threading import RLock
 from typing import TYPE_CHECKING, Any, ClassVar
-from weakref import ReferenceType, WeakSet
+from weakref import ReferenceType, WeakKeyDictionary, WeakSet
 
 from hare.contrib.request_query.declaration.request_query_declaration import RequestQueryDeclaration
+from hare.core.caching.cache import Cache
 from hare.exceptions import ConfigurationError
 from hare.models import Model
 
@@ -22,6 +23,11 @@ class RequestQueryRegistry:
 
     lock: ClassVar[RLock] = RLock()
     revision: ClassVar[int] = 0
+    #: Completed declarations follow each request query class's lifetime through its bucket.
+    declarations: ClassVar[Cache[Any]] = Cache(holds_sql=False)
+    #: Both ends are weak: invalidation must not keep a runtime model or query class alive.
+    classes_by_model: ClassVar[WeakKeyDictionary[type[Model], WeakSet[type]]] = WeakKeyDictionary()
+    bound_models: ClassVar[WeakSet[type[Model]]] = WeakSet()
 
     @staticmethod
     def check_model_registered(query_class: type[RequestQuery[Any]], model: type[Model]) -> None:
@@ -35,10 +41,7 @@ class RequestQueryRegistry:
         Raises:
             ConfigurationError: The model was bound once and no longer is.
         """
-        # Local import: the request query module imports this module.
-        from hare.contrib.request_query.request_query import RequestQuery
-
-        if model in RequestQuery.bound_models and not model._meta.is_bound:
+        if model in RequestQueryRegistry.bound_models and not model._meta.is_bound:
             raise ConfigurationError(
                 f"{query_class.__qualname__}.Meta.queryset is a queryset of {model.__name__}, which was "
                 "unregistered - build the request query for the model registered in its place"
@@ -52,11 +55,12 @@ class RequestQueryRegistry:
             query_class: The request query class.
             models: The models.
         """
-        # Local import: the request query module imports this module.
-        from hare.contrib.request_query.request_query import RequestQuery
-
-        for model in models:
-            RequestQuery.classes_by_model.setdefault(model, WeakSet()).add(query_class)
+        with RequestQueryRegistry.lock:
+            for model in models:
+                classes = RequestQueryRegistry.classes_by_model.get(model)
+                if classes is None:
+                    classes = RequestQueryRegistry.classes_by_model.setdefault(model, WeakSet())
+                classes.add(query_class)
 
     @staticmethod
     def track_described_models(
@@ -82,9 +86,22 @@ class RequestQueryRegistry:
         Args:
             query_class: The request query class.
         """
-        # Local import: the request query module imports this module.
-        from hare.contrib.request_query.request_query import RequestQuery
-
         with RequestQueryRegistry.lock:
             RequestQueryRegistry.revision += 1
-            RequestQuery.declarations.forget_holder(query_class)
+            RequestQueryRegistry.declarations.forget_holder(query_class)
+
+    @staticmethod
+    def forget_model(model: type[Model]) -> None:
+        """Invalidate declarations that depend on the model, preserving completed generations."""
+        with RequestQueryRegistry.lock:
+            RequestQueryRegistry.revision += 1
+            for query_class in tuple(RequestQueryRegistry.classes_by_model.pop(model, ())):
+                RequestQueryRegistry.forget_parameters(query_class)
+
+    @staticmethod
+    def forget_all() -> None:
+        """Invalidate all future declaration reads without changing existing request instances."""
+        with RequestQueryRegistry.lock:
+            RequestQueryRegistry.revision += 1
+            RequestQueryRegistry.declarations.clear()
+            RequestQueryRegistry.classes_by_model.clear()

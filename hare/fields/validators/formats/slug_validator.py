@@ -6,6 +6,7 @@ from typing import Any
 from hare.fields.constants import SLUG_PATTERN, UNICODE_SLUG_PATTERN
 from hare.fields.validators.exceptions import InvalidSlug
 from hare.fields.validators.validator import Validator
+from hare.native.native_modules import NativeModules
 
 
 class SlugValidator(Validator):
@@ -23,10 +24,11 @@ class SlugValidator(Validator):
     def __init__(self, allow_unicode: bool = False, message: str | None = None) -> None:
         self.allow_unicode = allow_unicode
         self.regex = re.compile(UNICODE_SLUG_PATTERN if allow_unicode else SLUG_PATTERN)
+        self.check = NativeModules.rows.ValueCheck.pattern(self.regex, "fullmatch", True)
         super().__init__(message)
 
     def __call__(self, value: Any) -> None:
-        if not isinstance(value, str) or self.regex.fullmatch(value) is None:
+        if self.check.failure(value) is not None:
             raise InvalidSlug(self.message)
 
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.fields.relations.declarations import RelationProperty
 from hare.fields.relations.fields.backward_foreign_key_relation import BackwardForeignKeyRelation
@@ -34,7 +34,7 @@ class LazyRelationFields:
 
         for key in keys:
             _key = f"_{key}"
-            field_object = cast("ForeignKeyFieldInstance[Any] | OneToOneFieldInstance[Any]", meta.fields_map[key])
+            field_object: ForeignKeyFieldInstance[Any] | OneToOneFieldInstance[Any] = meta.fields_map[key]  # type: ignore[assignment]
             relation_fields = field_object.source_fields
             to_fields = tuple(to_field.model_field_name for to_field in field_object.to_field_instances)
             for relation_field in relation_fields:
@@ -64,9 +64,7 @@ class LazyRelationFields:
         """
         for key in keys:
             _key = f"_{key}"
-            field_object = cast(
-                "BackwardForeignKeyRelation[Any] | BackwardOneToOneRelation[Any]", meta.fields_map[key]
-            )
+            field_object: BackwardForeignKeyRelation[Any] | BackwardOneToOneRelation[Any] = meta.fields_map[key]  # type: ignore[assignment]
             LazyRelationFields.set_relation_property(
                 meta,
                 key,
@@ -100,7 +98,7 @@ class LazyRelationFields:
         # Create lazy M2M fields on model.
         for key in meta.many_to_many_fields:
             _key = f"_{key}"
-            field_object = cast("ManyToManyFieldInstance[Any]", meta.fields_map[key])
+            field_object: ManyToManyFieldInstance[Any] = meta.fields_map[key]  # type: ignore[assignment]
             LazyRelationFields.set_relation_property(
                 meta, key, RelationAccessors.make_many_to_many_property(_key, field_object)
             )

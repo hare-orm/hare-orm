@@ -4,7 +4,7 @@ import typing
 from collections.abc import Collection
 from contextlib import suppress
 from graphlib import CycleError, TopologicalSorter
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from hare import Hare
 from hare.core.hare_context import HareContext
@@ -70,9 +70,9 @@ async def truncate_all_models(
         auto_through_tables: dict[tuple[str | None, str], None] = {}
         for model in connection_models:
             for many_to_many_field_name in sorted(model._meta.many_to_many_fields):
-                many_to_many_field = cast(
-                    "ManyToManyFieldInstance[typing.Any]", model._meta.fields_map[many_to_many_field_name]
-                )
+                many_to_many_field: ManyToManyFieldInstance[typing.Any] = model._meta.fields_map[  # type: ignore[assignment]
+                    many_to_many_field_name
+                ]
                 if (
                     many_to_many_field._generated
                     or many_to_many_field.through_model is not None

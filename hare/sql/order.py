@@ -16,14 +16,14 @@ class Order(StrEnum):
 
     @property
     def is_ascending(self) -> bool:
-        return self.value.startswith("ASC")
+        return self is Order.ASC or self is Order.ASC_NULLS_FIRST or self is Order.ASC_NULLS_LAST
 
     @property
     def nulls_first(self) -> bool | None:
         """True/False for an explicit NULLS FIRST/NULLS LAST, None when left to the dialect."""
-        if self.value.endswith("NULLS FIRST"):
+        if self is Order.ASC_NULLS_FIRST or self is Order.DESC_NULLS_FIRST:
             return True
-        if self.value.endswith("NULLS LAST"):
+        if self is Order.ASC_NULLS_LAST or self is Order.DESC_NULLS_LAST:
             return False
         return None
 
@@ -35,10 +35,11 @@ class Order(StrEnum):
             is_ascending: True for ASC, False for DESC.
             nulls_first: True for NULLS FIRST, False for NULLS LAST, None to leave it to the dialect.
         """
-        value = "ASC" if is_ascending else "DESC"
-        if nulls_first is not None:
-            value += " NULLS FIRST" if nulls_first else " NULLS LAST"
-        return cls(value)
+        if nulls_first is None:
+            return cls.ASC if is_ascending else cls.DESC
+        if is_ascending:
+            return cls.ASC_NULLS_FIRST if nulls_first else cls.ASC_NULLS_LAST
+        return cls.DESC_NULLS_FIRST if nulls_first else cls.DESC_NULLS_LAST
 
     def get_reversed(self) -> Order:
         """The exact opposite ordering: the direction is inverted and an explicit NULL placement

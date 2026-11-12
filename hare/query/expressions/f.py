@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.exceptions import FieldError, QueryError
 from hare.fields.data.json.json_field import JSONField
 from hare.fields.encrypted.encrypted_json_field import EncryptedJSONField
 from hare.fields.relations.fields.relational_field import RelationalField
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import AggregatedMultiValuedPaths
 from hare.query.expressions.arithmetic.combinable_expression import CombinableExpression
 from hare.query.expressions.expression import Expression
@@ -51,7 +52,7 @@ class F(CombinableExpression):
         self.name = name
 
     def __eq__(self, other: object) -> bool:
-        return type(other) is type(self) and cast("F", other).name == self.name
+        return type(other) is type(self) and other.name == self.name  # type: ignore[attr-defined]
 
     def __hash__(self) -> int:
         return hash((type(self), self.name))
@@ -234,7 +235,7 @@ class F(CombinableExpression):
         else:
             # a regular model field, e.g. F("id")
             meta = expression_context.model._meta
-            if self.name == "pk" and meta.has_composite_primary_key:
+            if self.name == PRIMARY_KEY_ALIAS and meta.has_composite_primary_key:
                 # A composite key is the row of its columns - a filter or an ordering reads its fields.
                 table = expression_context.table
                 term = Tuple(*(table[column] for column in KeyColumns.get_source_columns(meta)))

@@ -116,9 +116,12 @@ class ClickhouseDictionaries(Dictionaries):
 
     def get_model_drop_sqls(self, model: type[Model]) -> list[str]:
         """Compile dependent-object removal before changing the table."""
+        if not model._meta.dictionaries:
+            return []
+        on_cluster = self.editor.get_schema_cluster_sql(model._meta.schema)
         return [
             CLICKHOUSE_DICTIONARY_DROP_TEMPLATE.format(
-                on_cluster=self.editor.get_schema_cluster_sql(model._meta.schema),
+                on_cluster=on_cluster,
                 if_exists="IF EXISTS ",
                 dictionary=self.editor.qualify_object_name(model, declaration.name),
             )

@@ -1,8 +1,15 @@
 # Custom fields
 
-Field conversion and validation run in Python for individual writes, bulk writes,
-filters and result materialization. Native drivers decode database wire formats;
+Fields define conversion and validation for individual writes, bulk writes, filters
+and result materialization. Native drivers decode database wire formats;
 they do not provide a second implementation of ORM field rules.
+
+A column writer is bound once to the field or dialect conversion. Exact scalar values
+declared by `get_unchanged_write_types()` may pass through the native serializer unchanged;
+the field's `validate()` still runs once. Other values call the ordinary writer, including
+its validation. Conversion or validation failures propagate without retrying the writer
+or a user validator. Decimal rounding uses `decimal`; UUID, duration and JSON helpers share
+their native implementation with direct field calls.
 
 Container subclasses implement `encode_value(value, instance, types, path)`,
 `decode_value(value, types)` and `normalize_value(value, path)`. These hooks apply
@@ -10,16 +17,30 @@ to root columns and nested values. The explicit `types` argument supplies child
 conversions, and `path` identifies the nested value in an error. Dialect container
 conversion calls these hooks for both root and nested values.
 
-Long arrays of scalar values can bind a standard registry's element reader or writer once.
-Each non-NULL value still calls the field conversion in input order; write validation and
-indexed errors use the same child handler. Custom registry value/selection methods and
-custom child handlers retain per-element dispatch. Small arrays use that path as well.
+Arrays, maps and tuples prepare child readers or writers from their declared structure,
+including nested containers and every tuple position. The prepared callbacks are reused for the
+column's values; container length does not select another conversion algorithm. Direct calls use
+the same traversal. Each non-NULL value retains its field conversion, validation and indexed error
+path in traversal order. Overridden registry value or converter-selection methods remain live per
+element, and overridden container and child handlers keep their original invocation contract.
+Each map key is converted before its value; an invalid key stops processing that entry.
+
+Prepared writers and readers preserve overrides of `TypeRegistry.get_db_value()`,
+`get_lookup_value()`, `get_python_value()` and their converter-selection methods. Standard
+selection is performed during preparation; an overridden value or selection method remains
+part of each conversion. Writers receive the current model or instance at invocation time.
+Preparation does not retain query values, tenant bindings or execution connections.
+
+Lookup lists share `TypeRegistry.get_lookup_values()` and `Field.to_lookup_values()` for
+batch conversion. NULL positions are preserved without converting NULL, and each applicable
+validation still runs. Scalar and batch paths use the same field rules; a batch hook must
+preserve the values and failures of the corresponding scalar conversions.
 
 `JSONField.prepare_value()` validates a declared type and checks the document before
 encoding. The default encoder receives its JSON representation; a custom encoder
 receives the Python representation, with plain inputs preserved. Non-finite numbers,
 circular references and excessive nesting are rejected before encoding. The default
-codec preserves integers beyond 64 bits. Optional JSON acceleration runs only after
+codec preserves integers beyond 64 bits. The required native JSON codec runs only after
 this preparation and does not change field policy or the raw driver API.
 
 A field of your own subclasses `hare.fields.Field`.
@@ -172,6 +193,20 @@ A `TypeMapping` leaves to the field whatever it doesn't set:
 `field.get_function_cast(dialect)` read the result; a field computing them from its own configuration
 overrides these methods.
 
+
+A `TypeMapping` converter can be a `PreparedConverter` from
+`hare.dialects.base.types.prepared_converter`. Its factory receives the field and returns the
+ordinary writer `(value, instance) -> value` or reader `(value) -> value`. Preparation may bind
+field metadata and child converters; current values, instances, tenant scopes and connections
+must remain invocation arguments or be read at invocation time. A direct converter call prepares
+and invokes this same callable, while a column writer or reader retains it. There is no separate
+conversion implementation and no global cache of prepared field objects.
+
+Generated and low-cardinality fields prepare their child conversions. Variant fields prepare
+alternative writers/readers; the value still chooses its alternative on every call. Declared
+column types are prepared independently of Dynamic value inference. Database-specific container
+shape checks and typed literals remain in the dialect implementation. Preparation failures are
+reported directly; row validation and conversion exceptions are never retried through another path.
 
 ## <a id="declaration-snapshots"></a>Declaration snapshots
 

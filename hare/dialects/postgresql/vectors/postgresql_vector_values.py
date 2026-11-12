@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import struct
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.fields.data.numeric.float_field import FloatField
 
 if TYPE_CHECKING:
     from hare.fields.field import Field
     from hare.models import Model
-    from hare.vectors.vector_field import VectorField
 
 
 class PostgresqlVectorValues:
@@ -26,7 +25,7 @@ class PostgresqlVectorValues:
         Returns:
             The column type.
         """
-        return f"vector({cast('VectorField', field).dimensions})"
+        return f"vector({field.dimensions})"  # type: ignore[attr-defined]
 
     @staticmethod
     def to_db(field: Field[Any], value: Sequence[float] | None, instance: type[Model] | Model) -> str | None:
@@ -61,7 +60,7 @@ class PostgresqlVectorValues:
         """
         if isinstance(value, str):
             return PostgresqlVectorValues.parse_vector_text(value)
-        return cast("list[float] | None", field.to_python(value))
+        return field.to_python(value)
 
     @staticmethod
     def format_vector_text(values: Sequence[float]) -> str:

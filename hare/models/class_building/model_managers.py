@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import inspect
-from typing import Any, cast
+from typing import Any
 
 from hare.models.enums import ModelOption
 from hare.query.managers.manager import Manager
@@ -34,7 +34,7 @@ class ModelManagers:
         """
         objects = attributes.get("objects")
         if declares_objects:
-            return cast("Manager[Any]", objects)
+            return objects  # type: ignore[return-value]
         # Read without running the manager's descriptor - off a class it gives a queryset.
         if inspect.getattr_static(meta_class, ModelOption.MANAGER, None) is None and isinstance(objects, Manager):
             return objects

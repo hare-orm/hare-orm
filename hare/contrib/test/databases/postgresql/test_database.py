@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import cast
 
 from hare.contrib.test.databases.declarations import TestDatabaseLease
 from hare.contrib.test.databases.kept_test_schema import KeptTestSchema
@@ -123,7 +122,7 @@ class PostgresqlTestDatabase(TestDatabaseResource):
         """
         settings = TransactionPooler.get_direct_settings(self.client)
         await ResourceCompletion.wait(self.client.close())
-        client = cast("PostgresqlClient", self.client.create_independent_client({**settings, "min_size": 0}))
+        client: PostgresqlClient = self.client.create_independent_client({**settings, "min_size": 0})  # type: ignore[assignment]
         cleanup = ResourceCleanup()
         cleanup.push(client.close)
         original: BaseException | None = None

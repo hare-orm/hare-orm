@@ -48,12 +48,12 @@ class AsyncpgExtensionTypeCodecs:
             "tsvector",
             schema="pg_catalog",
             encoder=AsyncpgTsvectorCodec.encode,
-            decoder=AsyncpgTsvectorCodec.get_decoder(),
+            decoder=AsyncpgTsvectorCodec.decoder,
             format="binary",
         )
         codecs = {
             "ltree": (cls.encode_ltree, cls.decode_ltree),
-            "hstore": (AsyncpgHstoreCodec.encode, AsyncpgHstoreCodec.get_decoder()),
+            "hstore": (AsyncpgHstoreCodec.encode, AsyncpgHstoreCodec.decoder),
         }
         installed_oids = set()
         for type_name, schema, oid in await connection.fetch(

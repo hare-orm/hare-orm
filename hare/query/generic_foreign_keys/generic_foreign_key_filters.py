@@ -213,6 +213,14 @@ class GenericForeignKeyFilters:
             The conditions and the keyword filters - the ones given when nothing names a generic
             foreign key.
         """
+        if not conditions and not model._meta.generic_foreign_key_fields:
+            has_nested_path = False
+            for key in kwargs:
+                if "__" in key:
+                    has_nested_path = True
+                    break
+            if not has_nested_path:
+                return conditions, kwargs
         changed = False
         rewritten_conditions = conditions
         if conditions:
@@ -225,14 +233,18 @@ class GenericForeignKeyFilters:
                     changed = True
                     rewritten_conditions = tuple(rewritten_list)
                     break
-        branch_conditions: list[Q] = []
-        plain_kwargs: dict[str, Any] = {}
+        branch_conditions: list[Q] | None = None
+        plain_kwargs = kwargs
         for key, value in kwargs.items():
             branch_q = GenericForeignKeyFilters.get_branch_q(model, key, value)
-            if branch_q is None:
-                plain_kwargs[key] = value
-            else:
+            if branch_q is not None:
+                if branch_conditions is None:
+                    branch_conditions = []
+                    plain_kwargs = kwargs.copy()
                 branch_conditions.append(branch_q)
-        if not branch_conditions and not changed:
-            return conditions, kwargs
+                del plain_kwargs[key]
+        if branch_conditions is None:
+            if not changed:
+                return conditions, kwargs
+            return rewritten_conditions, kwargs
         return (*rewritten_conditions, *branch_conditions), plain_kwargs

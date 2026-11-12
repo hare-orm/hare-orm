@@ -84,7 +84,7 @@ async def test_the_rows_come_in_the_reported_order(db):
 def test_field_names_given_as_text_are_parsed_once(db):
     OrderingArguments.plain_orderings.forget_all()
     first = Event.objects.all().order_by("tournament", "-name")
-    kept = OrderingArguments.plain_orderings.get_model_bucket(Event).get((("tournament", "-name"),))
+    kept = OrderingArguments.plain_orderings.get_bucket(Event).get((("tournament", "-name"),))
     assert kept == (("tournament_id", Order.ASC), ("name", Order.DESC))
     second = Event.objects.filter(name="x").order_by("tournament", "-name")
     assert first.orderings == second.orderings == kept
@@ -109,4 +109,4 @@ def test_a_name_of_an_annotation_orders_by_the_annotation(db):
     Tournament.objects.all().order_by("name")
     queryset = Tournament.objects.annotate(name_length=Length("name")).order_by("name_length", "name")
     assert queryset.orderings == (("name_length", Order.ASC), ("name", Order.ASC))
-    assert OrderingArguments.plain_orderings.get_model_bucket(Tournament).get((("name_length", "name"),)) is None
+    assert OrderingArguments.plain_orderings.get_bucket(Tournament).get((("name_length", "name"),)) is None

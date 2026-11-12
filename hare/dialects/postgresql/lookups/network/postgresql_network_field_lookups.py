@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from hare.dialects.postgresql.enums import PostgresqlLookup
+from hare.dialects.postgresql.lookups.constants import ORDERED_VALUE_GENERIC_LOOKUPS
 from hare.dialects.postgresql.lookups.network.postgresql_network_lookups import PostgresqlNetworkLookups
 
 if TYPE_CHECKING:
@@ -16,7 +17,7 @@ class PostgresqlNetworkFieldLookups:
     an address or a network."""
 
     #: The generic lookups an address or a network keeps.
-    KEPT_GENERIC_LOOKUPS = ("", "not", "in", "not_in", "isnull", "not_isnull", "gte", "lte", "gt", "lt", "range")
+    KEPT_GENERIC_LOOKUPS = ORDERED_VALUE_GENERIC_LOOKUPS
 
     @classmethod
     def get_lookups(cls, field: Field[object]) -> dict[str, FieldLookup]:
@@ -34,7 +35,7 @@ class PostgresqlNetworkFieldLookups:
         from hare.query.filters.lookups.field_lookups import FieldLookups
 
         generic = FieldLookups.get_generic(field)
-        lookups = {name: generic[name] for name in cls.KEPT_GENERIC_LOOKUPS}
+        lookups: dict[str, FieldLookup] = {name: generic[name] for name in cls.KEPT_GENERIC_LOOKUPS}
         for lookup_name, network_operator in (
             (PostgresqlLookup.NET_CONTAINED, PostgresqlNetworkLookups.contained),
             (PostgresqlLookup.NET_CONTAINED_OR_EQUAL, PostgresqlNetworkLookups.contained_or_equal),

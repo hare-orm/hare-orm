@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from hare.inspectdb.introspection.enums import SchemaPartType
+from hare.inspectdb.enums import SchemaPartType
 from hare.migrations.operations import (
     AddDictionary,
     AddFunction,

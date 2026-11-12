@@ -34,7 +34,8 @@ chrono = "0.4"
 # Exact finite-float coefficients for NUMERIC, without a private big-integer implementation.
 num-bigint = "0.4"
 # JSON numbers kept as their text - compared as exact decimals.
-serde_json = { version = "1", features = ["arbitrary_precision"] }
+serde_json = { version = "1", features = ["arbitrary_precision", "unbounded_depth"] }
+serde = "1"
 # The MD5 and SHA digests of the text functions.
 md-5 = "0.11"
 sha1 = "0.11"

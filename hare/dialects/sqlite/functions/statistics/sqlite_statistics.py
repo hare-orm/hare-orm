@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import Any, ClassVar
+from typing import ClassVar
 
 import aiosqlite
 
@@ -30,16 +30,13 @@ class SqliteStatistics:
     @classmethod
     async def install(cls, connection: aiosqlite.Connection) -> None:
         """Registers every statistic as a window function, usable as a plain aggregate too."""
-        native_functions = SqliteNativeFunctions.module
         for statistic_name, statistic_class in cls.CLASSES.items():
-            aggregate: Any = statistic_class
-            if native_functions is not None:
-                aggregate = partial(
-                    native_functions.Statistic,
-                    statistic_class.sample,
-                    statistic_class.is_deviation,
-                    SqliteStatistic.get_statistic,
-                )
+            aggregate = partial(
+                SqliteNativeFunctions.module.Statistic,
+                statistic_class.sample,
+                statistic_class.is_deviation,
+                SqliteStatistic.get_statistic,
+            )
             # aiosqlite wraps create_function() but not create_window_function().
             await connection._execute(  # type: ignore[no-untyped-call]
                 connection._conn.create_window_function,

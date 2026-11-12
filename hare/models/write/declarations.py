@@ -30,6 +30,7 @@ class InstanceWriteTemplates:
     delete_sql: str
     delete_without_tenant_scope_sql: str
     insert_rules: RowWriteRules
+    update_rules: RowWriteRules
 
 
 @dataclass(eq=False, slots=True)
@@ -43,7 +44,8 @@ class RollbackRestoreLayer:
 
     client: TransactionClient
     span: SavepointSpan | None
-    snapshot: InstanceSnapshot
+    snapshots: list[InstanceSnapshot]
+    field_names: set[str] | None = None
 
 
 @dataclass(frozen=True, slots=True)

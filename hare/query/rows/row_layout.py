@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
+from hare.native.native_modules import NativeModules
+from hare.query.enums import RowShape
 from hare.query.rows.row_column import RowColumn
 
 
@@ -19,23 +20,18 @@ class RowLayout:
 
     columns: tuple[RowColumn, ...]
     groups: tuple[int, ...] = ()
+    _native_layout: Any = field(default=None, init=False, repr=False, compare=False)
 
-    def is_absent(self, row: Any) -> bool:
-        """Whether every raw column of an optional joined row is NULL."""
-        return all(row[column.key] is None for column in self.columns)
+    @property
+    def native_layout(self) -> Any:
+        """The native decoder of these immutable columns, prepared on first values read.
 
-    def assign(self, instance: Any, row: Any, names: Sequence[str]) -> None:
-        """Decode physical columns directly into the corresponding instance attributes.
-
-        Field readers retain their NULL and custom-conversion contracts. Assignment uses
-        the selected column order without allocating an intermediate values tuple;
-        logical composite groups are assembled separately by ``read()``.
+        Model readers use their own model layout and need no values decoder. A values
+        plan retains this decoder across executions; it contains no execution inputs.
         """
-        for name, column in zip(names, self.columns, strict=True):
-            value = row[column.key]
-            if column.reader is not None:
-                value = column.reader(value)
-            object.__setattr__(instance, name, value)
+        if self._native_layout is None:
+            object.__setattr__(self, "_native_layout", NativeModules.rows.ValueLayout(self))
+        return self._native_layout
 
     def read(self, row: Any) -> tuple[Any, ...]:
         """Decode selected columns in order, then assemble their logical groups.
@@ -43,22 +39,8 @@ class RowLayout:
         Each field reader receives its raw value once, including NULL. Conversions
         finish before composite groups are assembled; driver rows stay unchanged.
         """
-        converted_values: list[Any] = []
-        for column in self.columns:
-            value = row[column.key]
-            if column.reader is not None:
-                value = column.reader(value)
-            converted_values.append(value)
-        values = tuple(converted_values)
-        if not self.groups:
-            return values
-        grouped = []
-        position = 0
-        for width in self.groups:
-            if width == 1:
-                grouped.append(values[position])
-            else:
-                components = values[position : position + width]
-                grouped.append(None if all(value is None for value in components) else components)
-            position += width
-        return tuple(grouped)
+        return NativeModules.rows.read_row_values(row, self)
+
+    def read_many(self, rows: Any) -> list[tuple[Any, ...]]:
+        """Decode rows in order with the same column callbacks and NULL grouping as read()."""
+        return NativeModules.rows.read_values_batch(rows, self, RowShape.TUPLE, (), None)

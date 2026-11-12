@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import ConfigurationError
-from hare.fields import Field
 from hare.migrations.exceptions import IncompatibleStateError
 from hare.migrations.operations.constants import DIRECT_RELATION_FIELDS
 from hare.migrations.operations.declared_uniqueness_checks import DeclaredUniquenessChecks
@@ -82,13 +81,7 @@ class AddField(FieldAddRemoveOperation):
 
     def get_required_dependencies(self, app_label: str, state: State) -> list[OperationDependency]:
         """The model and fields the relation needs, and the field's ENUM type."""
-        dependencies = RelationDependencies.get_required_for_relation(app_label, self.model_name, self.field, state)
-        enum_type = getattr(self.field, "requires_enum_type", None)
-        if enum_type is not None:
-            dependencies.append(
-                OperationDependency.of_enum_type(enum_type.schema, enum_type.name, DependencyType.CREATED)
-            )
-        return dependencies
+        return RelationDependencies.get_required_for_field(app_label, self.model_name, self.field, state)
 
     def describe(self) -> str:
         if self.not_valid:
@@ -101,7 +94,7 @@ class AddField(FieldAddRemoveOperation):
         if self.name in model_state.fields:
             raise IncompatibleStateError(f"Field {self.name} already present on model {app_label}.{self.model_name}")
 
-        model_state.set_field(self.name, cast("Field[Any]", self.field).snapshot())
+        model_state.set_field(self.name, self.field.snapshot())  # type: ignore[union-attr]
         state.mark_models_changed(self.get_changed_model_keys(app_label, self.field, state))
 
     async def database_forward(

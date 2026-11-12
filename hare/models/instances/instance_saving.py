@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, NoReturn, cast
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from hare.exceptions import FieldError, IncompleteInstanceError, IntegrityError, QueryError, StaleObjectError
-from hare.fields.relations.fields.relational_field import RelationalField
 from hare.models.constants import PARTIAL_INSTANCE_WITHOUT_KEY_MESSAGE
 from hare.models.tenancy.tenancy import Tenancy
 from hare.models.write.instance_writer import InstanceWriter
@@ -12,6 +11,7 @@ from hare.models.write.rules.constants import SAVE_METHOD_NAME
 from hare.models.write.rules.enums import WriteType
 from hare.models.write.rules.row_write_rules import RowWriteRules
 from hare.models.write.write_finalizer import WriteFinalizer
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.queryset.arguments.collection_arguments import CollectionArguments
 from hare.query.scopes.row_scopes import RowScopes
 from hare.query.scopes.row_visibility import RowVisibility
@@ -240,7 +240,7 @@ class InstanceSaving:
             connection,
             outcome,
             updated_fields=None
-            if partial_update_fields is None
+            if partial_update_fields is None or not obj._meta.track_dirty_fields
             else writer.get_update_rules(partial_update_fields, WriteType.UPDATE).get_updated_names(),
             reported_fields=partial_update_fields,
         )
@@ -320,9 +320,12 @@ class InstanceSaving:
         # The version is the one the row is matched by - bumped as on every save().
         version_field = meta.optimistic_lock_field
         rules = RowWriteRules.get(
-            type(obj), WriteType.UPDATE, [name for name in names if name != version_field], SAVE_METHOD_NAME
+            type(obj),
+            WriteType.UPDATE,
+            names if version_field is None else [name for name in names if name != version_field],
+            SAVE_METHOD_NAME,
         )
-        return cast("tuple[str, ...]", rules.named_field_names)
+        return rules.named_field_names
 
     @staticmethod
     def get_changed_update_fields(
@@ -395,18 +398,18 @@ class InstanceSaving:
         field_names = CollectionArguments.get_list(field_names, f"'{argument_name}'")
         validated_names: dict[str, None] = {}
         for field_name in field_names:
-            if field_name == "pk":
+            if field_name == PRIMARY_KEY_ALIAS:
                 validated_names.update(dict.fromkeys(meta.primary_key_attribute_names))
             elif field_name in meta.fields_db_projection:
                 validated_names[field_name] = None
             elif field_name in meta.foreign_key_fields or field_name in meta.one_to_one_fields:
                 # A forward relation stands for its key column(s), like Django.
-                source_fields = cast("RelationalField[Any]", meta.fields_map[field_name]).source_fields
+                source_fields = meta.fields_map[field_name].source_fields  # type: ignore[attr-defined]
                 validated_names.update(dict.fromkeys(source_fields))
             elif field_name in meta.generic_foreign_key_fields:
                 # A generic foreign key stands for the key columns of all its branches.
                 for branch_name in meta.generic_foreign_key_fields[field_name].branch_names:
-                    source_fields = cast("RelationalField[Any]", meta.fields_map[branch_name]).source_fields
+                    source_fields = meta.fields_map[branch_name].source_fields  # type: ignore[attr-defined]
                     validated_names.update(dict.fromkeys(source_fields))
             elif (
                 field_name in meta.backward_foreign_key_fields

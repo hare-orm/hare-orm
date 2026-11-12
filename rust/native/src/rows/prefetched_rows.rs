@@ -3,7 +3,26 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString};
 
-use crate::python::ffi::generic_delete_attribute;
+/// The entries grouped by their value of `attribute`, in entry order: `{value: [entry, ...]}` - or,
+/// without `many`, `{value: entry}`, the last entry of a value.
+#[pyfunction]
+pub fn group_by_attribute<'py>(
+    entries: &Bound<'py, PyAny>,
+    attribute: &Bound<'py, PyString>,
+    many: bool,
+) -> PyResult<Bound<'py, PyDict>> {
+    let groups = PyDict::new(entries.py());
+    for entry in entries.try_iter()? {
+        let entry = entry?;
+        let key = entry.getattr(attribute)?;
+        if many {
+            append_to_group(&groups, key, entry)?;
+        } else {
+            groups.set_item(key, entry)?;
+        }
+    }
+    Ok(groups)
+}
 
 /// Appends `value` to the list `groups` holds under `key`, starting the list when there is none.
 fn append_to_group<'py>(groups: &Bound<'py, PyDict>, key: Bound<'py, PyAny>, value: Bound<'py, PyAny>) -> PyResult<()> {
@@ -47,37 +66,6 @@ pub fn group_related<'py>(
         for owner in owners.try_iter()? {
             append_to_group(&groups, owner?, entry.clone())?;
         }
-    }
-    Ok(groups)
-}
-
-/// Groups related rows read once per owner - each carrying its owner's key in `owner_attribute` -
-/// by that owner, in row order: `{owner: [entry, ...]}`. The rows of one related object (equal
-/// `key_attribute` values) are one instance in every owner's list - the first row's - and
-/// `owner_attribute` is removed from it.
-#[pyfunction]
-pub fn group_rows_by_owner<'py>(
-    entries: &Bound<'py, PyAny>,
-    key_attribute: &Bound<'py, PyString>,
-    owner_attribute: &Bound<'py, PyString>,
-) -> PyResult<Bound<'py, PyDict>> {
-    let py = entries.py();
-    let groups = PyDict::new(py);
-    let shared_entries = PyDict::new(py);
-    for entry in entries.try_iter()? {
-        let entry = entry?;
-        let owner = entry.getattr(owner_attribute)?;
-        let key = entry.getattr(key_attribute)?;
-        let shared_entry = if let Some(shared_entry) = shared_entries.get_item(&key)? {
-            shared_entry
-        } else {
-            shared_entries.set_item(key, &entry)?;
-            entry
-        };
-        append_to_group(&groups, owner, shared_entry)?;
-    }
-    for shared_entry in shared_entries.values() {
-        generic_delete_attribute(&shared_entry, owner_attribute)?;
     }
     Ok(groups)
 }

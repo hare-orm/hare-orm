@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TypedDict, Union, assert_type, cast
+from typing import TypedDict, Union, assert_type
 
 import pytest
 import pytest_asyncio
@@ -120,7 +120,7 @@ async def test_execute_hare_sql_pydantic_schema(query_api_db) -> None:
     table = QueryModel.get_table()
     query = Query.from_(table).select(table.id, table.name).where(table.name == "alpha")
 
-    result = cast(SqlQueryResult[QueryRow], await execute_sql(query, schema=QueryRow))
+    result: SqlQueryResult[QueryRow] = await execute_sql(query, schema=QueryRow)
 
     assert isinstance(result.rows[0], QueryRow)
     assert result.rows[0].model_dump() == {"id": 1, "name": "alpha"}

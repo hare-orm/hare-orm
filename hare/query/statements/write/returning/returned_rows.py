@@ -9,6 +9,7 @@ from hare.exceptions import FieldError
 from hare.models.write.rules.constants import RETURNING_METHOD_NAME
 from hare.models.write.rules.row_write_rules import RowWriteRules
 from hare.query.hare_column_names import HareColumnNames
+from hare.query.key_columns import KeyColumns
 from hare.query.rows.row_column import RowColumn
 from hare.query.rows.row_layout import RowLayout
 from hare.query.statements.constants import RETURNING_OLD_VALUES_KEY
@@ -69,18 +70,18 @@ class ReturnedRows:
         """What the returned rows hold - part of a plan's key."""
         return self.field_names, tuple(self.old_source_names_by_name)
 
-    def get_call_signature_type_part(self, type_part: tuple[Any, list[Any]]) -> tuple[Any, list[Any]]:
+    def get_call_signature_type_part(self, type_part: tuple[Any, Sequence[Any]]) -> tuple[Any, Sequence[Any]]:
         """The part of a write's call-signature key these rows add.
 
         Args:
             type_part: The write's own structure and values.
 
         Returns:
-            The structure and values - ``(None, [])`` for a write keeping no plan by its calls.
+            The structure and values - ``(None, ())`` for a write keeping no plan by its calls.
         """
         structure, values = type_part
         if structure is None:
-            return None, []
+            return None, ()
         return (structure, ("returning", self.plan_key)), values
 
     def get_old_value_terms(self) -> list[OldRowValue]:
@@ -158,7 +159,10 @@ class ReturnedRows:
 
         if not raw_rows:
             return []
-        return await ModelRows(self.model, connection).read_all(StatementResult(len(raw_rows), raw_rows))
+        instances = ModelRows(self.model, connection.dialect.types).read_all(
+            connection, StatementResult(len(raw_rows), raw_rows)
+        )
+        return instances if isinstance(instances, list) else await instances
 
     def get_rows(self, types: TypeRegistry, raw_rows: Sequence[Any]) -> list[dict[str, Any]]:
         """The named fields of ``RETURNING`` rows.
@@ -229,11 +233,12 @@ class ReturnedRows:
         key_fields: list[tuple[Field[Any], str]] = [
             (meta.fields_map[name], meta.fields_db_projection[name]) for name in meta.primary_key_attribute_names
         ]
-        keys: list[Any] = []
-        for raw_row in raw_rows:
-            key_values = [types.get_python_value(field, raw_row[column]) for field, column in key_fields]
-            keys.append(key_values[0] if len(key_values) == 1 else tuple(key_values))
-        return keys
+        return [
+            values[0] if len(values) == 1 else values
+            for values in KeyColumns.read_rows(
+                [field for field, _column in key_fields], [column for _field, column in key_fields], raw_rows, types
+            )
+        ]
 
     async def read(self, connection: DatabaseClient, visibility: RowVisibility, keys: Sequence[Any]) -> list[Any]:
         """The rows of ``keys`` as they are now - instances, or dicts of the named fields - in the

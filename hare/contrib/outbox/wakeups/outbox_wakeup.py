@@ -5,7 +5,7 @@ import contextlib
 from collections.abc import Awaitable, Callable, Iterable
 from functools import partial
 from threading import RLock
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 from weakref import WeakKeyDictionary
 
 from hare.contrib.outbox.constants import OUTBOX_RELEASE_FAILED
@@ -74,7 +74,7 @@ class OutboxWakeup:
         if not ChangeCapturing.is_in_transaction(connection):
             await self.signal_safely(frozenset(topics))
             return
-        connection_transaction = cast("TransactionClient", connection)
+        connection_transaction: TransactionClient = connection  # type: ignore[assignment]
         transaction = connection_transaction._get_top_level_transaction()
         savepoint_span = TransactionCallbacks.get_registration_span(connection_transaction)
         pending_by_savepoint = self.pending_topics.setdefault(transaction, {})

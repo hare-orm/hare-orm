@@ -1422,7 +1422,7 @@ def test_a_model_index_evicts_its_oldest_entry_past_max_size(request, monkeypatc
     request.addfinalizer(lambda: Caches.registered.remove(storage))
     request.addfinalizer(storage.clear)
     monkeypatch.setattr(PydanticModelCreator, index_name, storage)
-    model_index = storage.get_model_bucket(IntFields)
+    model_index = storage.get_bucket(IntFields)
 
     # IntFields (no relational fields) - pydantic_model_creator() recurses into related models'
     # own configurations too (Address has a relation, which would add its own extra MODEL_INDEX
@@ -1458,7 +1458,7 @@ def test_pydantic_queryset_creator_caches_identical_calls(db):
     second = pydantic_queryset_creator(Address)
 
     assert first is second
-    assert len(PydanticModelCreator.QUERYSET_MODEL_INDEX.get_model_bucket(Address)) == 1
+    assert len(PydanticModelCreator.QUERYSET_MODEL_INDEX.get_bucket(Address)) == 1
 
 
 def test_pydantic_queryset_creator_distinct_configs_get_distinct_classes(db):

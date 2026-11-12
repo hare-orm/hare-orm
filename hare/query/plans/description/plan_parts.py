@@ -1,13 +1,19 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.classes.deferred_import import DeferredImport
+from hare.query.expressions.constants import NULL_ARGUMENT_STRUCTURE
 from hare.query.plans.constants import OPTIONAL_VALUE_ORIGIN
 from hare.query.plans.description.plan_context import PlanContext
 from hare.query.plans.description.plan_description import PlanDescription
 from hare.query.plans.plan_origins import PlanOrigins
+from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
+    from hare.query.expressions.expression import Expression
+    from hare.query.expressions.value import Value
+    from hare.query.plans.description.term_plan_descriptions import TermPlanDescriptions
     from hare.query.plans.plan_origins import ValueOrigin
 
 
@@ -15,6 +21,17 @@ class PlanParts:
     """What the generated descriptions of plannable classes (``PlanDescriberCompiler``) share: an
     argument and a field read, each described with the origins of its values while a query records
     its plan."""
+
+    #: ``Expression`` - imported at its first read, as its module imports this one.
+    expression_class: ClassVar[DeferredImport[type[Expression]]] = DeferredImport(
+        "hare.query.expressions.expression", "Expression"
+    )
+    #: ``TermPlanDescriptions`` - imported at its first read, as its module imports this one.
+    term_plan_descriptions: ClassVar[DeferredImport[type[TermPlanDescriptions]]] = DeferredImport(
+        "hare.query.plans.description.term_plan_descriptions", "TermPlanDescriptions"
+    )
+    #: ``Value`` - imported at its first read, as its module imports this one.
+    value_class: ClassVar[DeferredImport[type[Value]]] = DeferredImport("hare.query.expressions.value", "Value")
 
     @staticmethod
     def describe_argument(
@@ -40,20 +57,12 @@ class PlanParts:
         Returns:
             The description, None for a list or tuple literal not bound whole.
         """
-        # Imported here: the plans package is imported by the expressions it describes.
-        from hare.query.expressions.constants import NULL_ARGUMENT_STRUCTURE
-        from hare.query.expressions.expression import Expression
-        from hare.sql.terms.term import Term
-
-        if isinstance(value, Expression):
+        if isinstance(value, PlanParts.expression_class):
             return value.get_plan_description(context)
         if value is None:
             return PlanDescription(NULL_ARGUMENT_STRUCTURE, [], [])
         if isinstance(value, Term):
-            # Imported here: the term descriptions import the expressions package.
-            from hare.query.plans.description.term_plan_descriptions import TermPlanDescriptions
-
-            return TermPlanDescriptions.describe(value)
+            return PlanParts.term_plan_descriptions.describe(value)
         if isinstance(value, (list, tuple)) and not binds_sequence:
             return None
         return PlanDescription(
@@ -73,10 +82,7 @@ class PlanParts:
         Returns:
             The structure.
         """
-        # Imported here: the plans package is imported by the expressions it describes.
-        from hare.query.expressions.value import Value
-
-        return ("literal", Value.get_literal_structure(value))
+        return ("literal", PlanParts.value_class.get_literal_structure(value))
 
     @staticmethod
     def describe_field(field: Any, context: PlanContext) -> PlanDescription | None:
@@ -91,19 +97,12 @@ class PlanParts:
         Returns:
             The description, None for anything else.
         """
-        # Imported here: the plans package is imported by the expressions it describes.
-        from hare.query.expressions.expression import Expression
-        from hare.sql.terms.term import Term
-
-        if isinstance(field, Expression):
+        if isinstance(field, PlanParts.expression_class):
             return field.get_plan_description(context)
         if isinstance(field, str):
             return PlanDescription(field, [], [])
         if isinstance(field, Term):
-            # Imported here: the term descriptions import the expressions package.
-            from hare.query.plans.description.term_plan_descriptions import TermPlanDescriptions
-
-            return TermPlanDescriptions.describe(field)
+            return PlanParts.term_plan_descriptions.describe(field)
         return None
 
     @staticmethod

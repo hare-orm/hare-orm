@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.classes.class_path import ClassPath
 from hare.ddl.constants import INDEX_KEYS_REQUIRE_MODEL
@@ -91,7 +91,7 @@ class Index:
                 )
         if expressions and not fields and all(self.is_field_key(expression) for expression in expressions):
             # F("a")/F("a").desc() keys are the fields ["a"]/["-a"] - one index, one declaration.
-            fields = [self.get_field_key_name(cast("F | Ordering", expression)) for expression in expressions]
+            fields = [self.get_field_key_name(expression) for expression in expressions]  # type: ignore[arg-type]
             expressions = ()
         self.fields, self.field_orders = self.get_fields_and_orders(fields or ())
         if len(set(self.fields)) != len(self.fields):
@@ -138,7 +138,7 @@ class Index:
     def get_field_key_name(expression: F | Ordering) -> str:
         """The declared field name of a plain field key - ``"-name"`` when descending."""
         if isinstance(expression, Ordering):
-            field_name = cast("str", expression.target)
+            field_name: str = expression.target  # type: ignore[assignment]
             return field_name if expression.order.is_ascending else f"-{field_name}"
         return expression.name
 
@@ -423,7 +423,7 @@ class Index:
                 column = self.get_key_column(model, expression.target)
                 key_terms.append(OrderedIndexKey(column, expression.order))
             elif isinstance(expression, Ordering):
-                term = DeclaredExpressions.get_term(cast("Expression", expression.target), model, dialect)
+                term = DeclaredExpressions.get_term(expression.target, model, dialect)
                 key_terms.append(OrderedIndexKey(term, expression.order))
             elif type(expression) is F and expression.name in model._meta.fields_db_projection:
                 key_terms.append(self.get_key_column(model, expression.name))

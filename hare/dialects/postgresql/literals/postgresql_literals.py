@@ -5,7 +5,7 @@ from collections.abc import Callable, Collection, Sequence
 from typing import Any
 
 from hare.dialects.base.literals.sql_literals import SqlLiterals
-from hare.time import Timezone
+from hare.time.system_zone import SystemZone
 
 
 class PostgresqlLiterals(SqlLiterals):
@@ -45,7 +45,7 @@ class PostgresqlLiterals(SqlLiterals):
             The literal.
         """
         if value.tzinfo is None:
-            value = Timezone.make_system_local_aware(value)
+            value = SystemZone.make_system_local_aware(value)
         return self.get_iso_literal_sql(value)
 
     def get_utc_time_literal_sql(self, value: datetime.time) -> str:
@@ -84,7 +84,7 @@ class PostgresqlLiterals(SqlLiterals):
         if isinstance(value, str):
             escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("'", "''")
             return f'"{escaped}"'
-        if isinstance(value, list | tuple | set | frozenset):
+        if isinstance(value, (list, tuple, set, frozenset)):
             return "{" + ",".join(self.get_array_element_literal_sql(item) for item in value) + "}"
         if isinstance(value, bool):
             return "true" if value else "false"

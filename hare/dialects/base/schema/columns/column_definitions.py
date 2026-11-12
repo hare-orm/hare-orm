@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, cast
+from typing import Any
 
 from hare.ddl.constraints.foreign_key_constraint import ForeignKeyConstraint
 from hare.ddl.enums import GeneratedNamePrefix
@@ -35,7 +35,7 @@ class ColumnDefinitions(SchemaEditorPart):
         required_feature = getattr(db_default, "required_feature", None)
         if required_feature is not None and not getattr(self.editor.client.features, required_feature):
             raise UnSupportedError(f"{db_default!r} needs a newer {self.editor.client.dialect} server")
-        return cast("str", db_default.get_sql(self.editor.client.dialect))
+        return db_default.get_sql(self.editor.client.dialect)
 
     def get_field_db_default_sql(self, field: Field[Any], model: type[Model]) -> str:
         """The SQL of a field's ``db_default`` - an expression's own, a value as its literal.
@@ -339,8 +339,8 @@ class ColumnDefinitions(SchemaEditorPart):
         composite_foreign_key_constraints: list[ForeignKeyConstraint] = []
         deferred_foreign_key_constraints: list[ForeignKeyConstraint] = []
         for field_name, db_field in model._meta.fields_db_projection.items():
-            reference = cast(
-                "ForeignKeyFieldInstance[Model] | None", getattr(model._meta.fields_map[field_name], "reference", None)
+            reference: ForeignKeyFieldInstance[Model] | None = getattr(
+                model._meta.fields_map[field_name], "reference", None
             )
             if not reference:
                 column_definitions.append(self.get_column_definition(model, field_name))
@@ -412,7 +412,7 @@ class ColumnDefinitions(SchemaEditorPart):
             The column definition.
         """
         key_field = model._meta.fields_map[key_field_name]
-        foreign_key_field = cast("ForeignKeyFieldInstance[Model]", key_field.reference)
+        foreign_key_field: ForeignKeyFieldInstance[Model] = key_field.reference  # type: ignore[assignment]
         db_field = model._meta.fields_db_projection[key_field_name]
         comment = self.get_column_trailing_sql(
             model, key_field_name, self.get_column_description(model, key_field_name)

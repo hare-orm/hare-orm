@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Iterable, Sequence
 from contextlib import asynccontextmanager
 from copy import copy
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.ddl.constraints.check_constraint import CheckConstraint
 from hare.ddl.constraints.unique_constraint import UniqueConstraint
@@ -133,7 +133,7 @@ class SqliteSchemaEditor(BaseSchemaEditor):
         into the tables referencing it. The pragma can only be changed outside a transaction - the
         executor enters this block before opening one.
         """
-        original = cast("SqliteClient", self.client).pragmas.get("foreign_keys", SQLITE_DEFAULT_FOREIGN_KEYS)
+        original = self.client.pragmas.get("foreign_keys", SQLITE_DEFAULT_FOREIGN_KEYS)  # type: ignore[attr-defined]
         self.foreign_key_check_required = str(original).strip().lower() in SQLITE_PRAGMA_ENABLED_VALUES
         switched_off = SqliteClient.foreign_keys_switched_off
         token = switched_off.set(switched_off.get() | {self.client.connection_alias})

@@ -1,4 +1,4 @@
-use pyo3_async_runtimes::tokio::future_into_py;
+use crate::asyncio::future_into_py;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 

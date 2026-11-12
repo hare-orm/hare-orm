@@ -29,9 +29,8 @@ connections = {
 }
 ```
 
-If the Rust extension is missing — the pure wheel on a platform without a prebuilt wheel, or a source
-checkout that hasn't been built — a `postgresql` connection raises `ConfigurationError` naming the
-`make build_native` command that builds it; `postgresql+asyncpg` needs no extension.
+`rust_pg` runs on Linux and macOS. On Windows the extension is built without it: a `postgresql`
+connection raises `ConfigurationError`, and PostgreSQL is reached through `postgresql+asyncpg`.
 
 ### <a id="rust-pg-threads"></a>The worker threads of `rust_pg`
 
@@ -45,12 +44,17 @@ before hare is imported:
 TOKIO_WORKER_THREADS=4 python app.py
 ```
 
-The native driver uses `pyo3-async-runtimes` to bridge Rust futures to the caller's event loop,
-preserving task context. Cancelling the Python future drops the Rust operation; a separate database
-guard cancels the SQL and protects the connection while cancellation is delivered. Close clients
-before closing their event loop. Forcibly closing a loop with pending native work prevents delivery
-of its result: the bridge reports `RuntimeError: Event loop is closed`, and Python may retain that
-diagnostic's traceback in `sys.last_exc`. This is not a successful cancellation of the database work.
+The native driver targets Linux event loops supporting the public `add_reader()` API. Each loop
+has an owned Unix socket pair: Tokio workers queue completions and signal the loop once per batch,
+without entering Python. Native operations started in one loop turn are submitted together.
+`pyo3-async-runtimes` supplies the Tokio runtime. A native operation runs without the caller's
+`contextvars` — no native code calls back into Python with them; callbacks added to the returned
+future run in the context they were added in, as usual in asyncio. Completion and Python value
+conversion run on the caller's loop thread. Cancelling the Python future drops the Rust operation; a separate
+database guard cancels the SQL and protects the connection while cancellation is delivered.
+Close clients before closing their event loop. Forcibly closing a loop prevents result delivery;
+its undelivered results and socket pair are released when the loop is collected. Closing a loop
+alone does not cancel work already running in the database.
 
 ## <a id="connection-resilience"></a>Connection parameters
 

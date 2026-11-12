@@ -4,11 +4,14 @@ from copy import copy
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.exceptions import QueryError
+from hare.query.execution.query_execution import QueryExecution
 from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
 from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
+from hare.query.plans.constants import NO_CALL_PLAN
 from hare.query.plans.description.plan_context import PlanContext
 from hare.query.plans.description.plan_description import PlanDescription
 from hare.query.plans.enums import PlanKeyForm
+from hare.query.plans.statement.declarations import CallPlanHit
 from hare.query.plans.statement.declared_plan_slots import DeclaredPlanSlots
 from hare.query.plans.statement.statement_plan_descriptions import StatementPlanDescriptions
 from hare.query.statements.awaitable_query import AwaitableQuery
@@ -18,11 +21,14 @@ from hare.sql.terms.criteria.basic_criterion import BasicCriterion
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
+    from hare.dialects.base.client.database_client import DatabaseClient
     from hare.sql.builder.queries.query_builder import QueryBuilder
 
 
 class ExistsQuery(RowsSummaryQuery):
     """``queryset.exists()`` - whether the queryset has any row."""
+
+    rows_source_method_name = "_get_exists_source"
 
     #: A plain SELECT 1 ... LIMIT 1 - see AwaitableQuery.is_read_only. Inherited by ContainsQuery
     #: below, which only adds a WHERE criterion on top of the same read-only query.
@@ -65,6 +71,7 @@ class ExistsQuery(RowsSummaryQuery):
         Returns:
             The description, None for a query that keeps no plan.
         """
+        self._make_selected_rows_summary()
         if self._rows_query is not None:
             return self._describe_over_rows(True)
         if not StatementPlanDescriptions.query_state_is_plannable(self):
@@ -136,15 +143,31 @@ class ExistsQuery(RowsSummaryQuery):
     async def _execute_bound(self) -> bool:
         if self._is_none or self._limit == 0:
             return await self._execute_none()
-        query = self._get_execution_query()
-        query._make_query_to_run()
-        return await query._execute_reading(query._execute())
+        lookup = NO_CALL_PLAN
+        connection: DatabaseClient | None = None
+        if self._call_signature is not None:
+            connection = self.get_connection()
+            call_plan = self._find_call_plan(connection)
+            if isinstance(call_plan, CallPlanHit):
+                return await QueryExecution.read(
+                    self, connection, self._exists(connection, call_plan.sql, call_plan.parameters)
+                )
+            lookup = call_plan
+        query = self._get_execution_query_to_build(lookup, connection)
+        statement = query._make_query_to_run()
+        return await QueryExecution.read(query, query._connection, query._exists(query._connection, *statement))
 
     async def _execute_none(self) -> bool:
         return False
 
-    async def _execute(
-        self,
-    ) -> bool:
-        result, _ = await self._connection.execute(*self._get_parameterized_sql(), returns_rows=True, retry_read=True)
+    @staticmethod
+    async def _exists(connection: DatabaseClient, sql: str, parameters: list[Any]) -> bool:
+        """Runs the statement and tells whether it returned a row.
+
+        Args:
+            connection: This execution's connection.
+            sql: The statement.
+            parameters: Its parameters.
+        """
+        result, _ = await connection.execute(sql, parameters, returns_rows=True, retry_read=True)
         return bool(result)

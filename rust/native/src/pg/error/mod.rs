@@ -114,6 +114,7 @@ pub fn to_pyerr(error: impl Into<DriverError>) -> PyErr {
     }
 }
 
+#[cfg(unix)]
 pub fn register(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("ConnectionError", py.get_type::<ConnectionError>())?;
     module.add("QueryError", py.get_type::<QueryError>())?;

@@ -1,38 +1,22 @@
 from __future__ import annotations
 
-from collections.abc import (
-    Callable,
-    Collection,
-    Iterable,
-    Mapping,
-    Sequence,
-)
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from copy import copy
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, Self, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Self, TypeVar
 
+from hare.classes.deferred_import import DeferredImport
 from hare.classes.value_descriptions import ValueDescriptions
+from hare.core.connections.model_connection_choice import ModelConnectionChoice
 from hare.core.hare_context import HareContext
-from hare.core.registries import Registries
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.dialects.base.dialect import Dialect
 from hare.dialects.base.features import Features
-from hare.exceptions import (
-    ConfigurationError,
-    FieldError,
-    QueryError,
-    UnSupportedError,
-)
+from hare.exceptions import FieldError, QueryError, UnSupportedError
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
-from hare.models.constants import MISSING_DEFAULT_CONNECTION_MESSAGE
 from hare.models.tenancy.tenancy import Tenancy
-from hare.query.constants import AMBIENT_TENANT_NOT_OVERRIDDEN
+from hare.query.constants import AMBIENT_TENANT_NOT_OVERRIDDEN, PRIMARY_KEY_ALIAS
 from hare.query.enums import Connector, SpecificationSlotPlanRole
-from hare.query.expressions import (
-    Expression,
-    ExpressionContext,
-    Ordering,
-    Q,
-)
+from hare.query.expressions import Expression, ExpressionContext, Ordering, Q
 from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import AggregatedMultiValuedPaths
 from hare.query.expressions.subqueries.outer_scope import OuterScope
 from hare.query.lookup_info.lookup_path import LookupPath
@@ -63,12 +47,15 @@ from hare.sql.identifiers import Identifiers
 from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
+    from hare.core.caching.cache_bucket import CacheBucket
     from hare.models import Model
     from hare.query.execution.query_dependency import QueryDependency
     from hare.query.queryset.combination.combination import Combination
     from hare.query.queryset.queryset import QuerySet
     from hare.query.queryset.selection.values_selection import ValuesSelection
     from hare.query.scopes.row_scope_provider import RowScopeProvider
+    from hare.query.statements.query_sql import QuerySql
+
 
 TModel = TypeVar("TModel", bound="Model")
 
@@ -80,6 +67,8 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
     slice and the other settings the chained methods declare. ``QuerySet`` adds the methods changing
     it; an ``AwaitableQuery`` takes one over, builds and runs its SQL.
     """
+
+    query_sql: ClassVar[DeferredImport[type[QuerySql]]] = DeferredImport("hare.query.statements.query_sql", "QuerySql")
 
     __slots__ = (
         "model",
@@ -255,6 +244,14 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
                 f"{sorted(set(cls.SLOT_PLAN_ROLES) - set(cls.SPECIFICATION_SLOTS))}"
             )
 
+    #: The Cache-managed storage of this class's immutable copy metadata. Invalidation
+    #: clears the bucket in place; a prepared handle never keeps detached stale entries.
+    copy_plan_bucket: ClassVar[CacheBucket[Any]]
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        cls.copy_plan_bucket = SpecificationCopying.slot_copy_plans.get_bucket(cls)
+
     def __init__(self, model: type[TModel]) -> None:
         self.model: type[TModel] = model
         self._execution_dependencies: tuple[QueryDependency, ...] = ()
@@ -309,10 +306,17 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
         """Adds the relations the model loads by default (``lazy=``) and ``.defer_related()``
         didn't switch off to the ones this query joins or prefetches - on the copy a build makes,
         before it reads them."""
-        joined, prefetched = LazyRelationNames.get(self.model)
-        self._select_related.update(joined - self._deferred_related_fields)
-        for field_name in prefetched - self._deferred_related_fields:
+        self._select_related.update(LazyRelationNames.get(self.model)[0] - self._deferred_related_fields)
+        for field_name in self._get_default_prefetched_relations():
             self._prefetch_map.setdefault(field_name, set())
+
+    def _get_default_prefetched_relations(self) -> frozenset[str]:
+        """The relations the model prefetches by default (``lazy="select"``) that ``.defer_related()``
+        didn't switch off."""
+        relations = LazyRelationNames.get(self.model)[1]
+        if not relations or not self._deferred_related_fields:
+            return relations
+        return relations - self._deferred_related_fields
 
     def _model_is_set_up(self) -> bool:
         """Whether ``Hare.init()`` has set the model up - its relations resolved. A query built
@@ -328,7 +332,8 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
         if self._selection is not None:
             return False
         joined, prefetched = LazyRelationNames.get(self.model)
-        return bool((joined | prefetched) - self._deferred_related_fields)
+        deferred = self._deferred_related_fields
+        return not joined.issubset(deferred) or not prefetched.issubset(deferred)
 
     def _take_rows_of(
         self, source: QuerySpecification[Any], *, keeps_ordering: bool = False, keeps_grouping: bool = False
@@ -344,6 +349,17 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
             keeps_grouping: Keep the ``.group_by()`` fields.
         """
         SpecificationCopying.copy_specification(source, self)
+        self._configure_rows_source(source, keeps_ordering=keeps_ordering, keeps_grouping=keeps_grouping)
+
+    def _configure_rows_source(
+        self, source: QuerySpecification[Any], *, keeps_ordering: bool, keeps_grouping: bool
+    ) -> None:
+        """Keep only settings selecting source rows, after copying or sharing its declaration.
+
+        Group names are checked before being removed. Cursor boundaries still need the
+        source ordering even when the caller does not otherwise retain it. Containers
+        describing returned relations are replaced, never cleared on the source.
+        """
         self._single = False
         self._raise_does_not_exist = False
         self._prefetch_map = {}
@@ -351,15 +367,15 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
         self._select_related = set()
         self._selection = None
         self._combination = None
-        options = self._options
+        options = source._options
         if options is not QueryOptions.DEFAULT:
             if not keeps_grouping and options.group_bys:
                 source._raise_if_group_names_invalid()
-            options = options.without(*QueryOptions.ROW_RETURN_SETTINGS)
-            self._options = options if keeps_grouping else options.without("group_bys")
-            if not keeps_ordering and not (options.cursor_values or options.before_cursor_values):
-                self._orderings = []
-        elif not keeps_ordering:
+            removed_options = QueryOptions.ROW_RETURN_SETTINGS
+            if not keeps_grouping:
+                removed_options += ("group_bys",)
+            self._options = options.without(*removed_options)
+        if not keeps_ordering and not (options.cursor_values or options.before_cursor_values):
             self._orderings = []
 
     def _raise_if_group_names_invalid(self) -> None:
@@ -380,12 +396,13 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
                 if term.contains_aggregate:
                     raise FieldError(AGGREGATE_GROUP_NAME_MESSAGE.format(name=name))
                 continue
-            if name == "pk":
+            if name == PRIMARY_KEY_ALIAS:
                 continue
             lookup_path = LookupPath.parse(self.model, name)
             # Refused on model rows too, which group by the primary key and would leave it unread.
-            EncryptedFieldBase.raise_if_encrypted(lookup_path.get_target_field(), "GROUP BY")
-            if lookup_path.get_target_field() is None and lookup_path.rest != ("pk",):
+            target_field = lookup_path.get_target_field()
+            EncryptedFieldBase.raise_if_encrypted(target_field, "GROUP BY")
+            if target_field is None and lookup_path.rest != (PRIMARY_KEY_ALIAS,):
                 missing_name = lookup_path.rest[0] if lookup_path.rest else name
                 raise FieldError(f"Unknown field {name!r}: {lookup_path.model.__name__} has no field {missing_name!r}")
 
@@ -735,16 +752,21 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
     if not TYPE_CHECKING:
 
         def __getattr__(self, name: str) -> Any:
-            # A QuerySet method a dialect registered (QuerySetExtensions).
-            if self.accepts_extension_methods and name in QuerySetExtensions.get_registered():
-                return QuerySetExtensions.get_method(cast("QuerySet[Any]", self), name)
+            # A QuerySet method a dialect registered (QuerySetExtensions) - never a private name, which
+            # registration refuses.
+            if (
+                not name.startswith("_")
+                and self.accepts_extension_methods
+                and name in QuerySetExtensions.get_registered()
+            ):
+                return QuerySetExtensions.get_method(self, name)
             raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
     # The slot names of the class, cached per subclass.
 
     # The slots holding a mutable container, each with a factory for an empty container of its type
     # - a clone gets its own shallow copy.
-    mutable_clone_slots: ClassVar[dict[str, Callable[[], Any]]] = {}
+    mutable_clone_slots: ClassVar[dict[str, Callable[[], Any]]] = MUTABLE_SPECIFICATION_SLOTS
 
     def __copy__(self) -> Self:
         cls = type(self)
@@ -789,8 +811,7 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
         """
         if self._connection:
             return self._connection
-        # HareContext.require_current() - its calls left for the error.
-        context = HareContext.current_context.get() or HareContext.global_context or HareContext.require_current()
+        context = HareContext.require_current()
         # The connection is chosen under the tenant this query's WHERE was built for, not the one
         # active when the query is awaited - a router routing by tenant, or a connection with a schema
         # per tenant, would otherwise pick another tenant's database or schema.
@@ -802,35 +823,16 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
             or tenant_snapshot is Tenancy.current.get()
             else Tenancy.current.set(tenant_snapshot)
         )
-        # One method, not two: this is the hottest path of the ORM, and a try costs nothing until
-        # something raises.
         try:
-            # HareContext.router/connections and ConnectionRouter.db_for_read/write() when there are
-            # routers - read without their calls.
-            router = context._router
-            connection = (
-                (router.db_for_write(self.model) if for_write else router.db_for_read(self.model))
-                if router is not None and router._routers
-                else None
-            )
-            meta = self.model._meta
+            connection = ModelConnectionChoice.get_routed(context, self.model, for_write)
             if connection is None:
-                connections = context._connections if context._connections is not None else context.connections
                 if self._instance_connection_alias is not None:
-                    connection = connections.get(self._instance_connection_alias)
+                    connection = context.connections.get(self._instance_connection_alias)
                 elif self._router_fallback_connection is not None:
                     connection = self._router_fallback_connection
                 else:
-                    # The model's default connection, read from the context already in hand.
-                    default_connection = meta.default_connection
-                    if default_connection is None:
-                        raise ConfigurationError(
-                            MISSING_DEFAULT_CONNECTION_MESSAGE.format(model_name=self.model.__name__)
-                        )
-                    connection = connections.get(default_connection)
-            if meta.checks_tenant_client:
-                meta.check_tenant_client(connection)
-            return connection
+                    connection = ModelConnectionChoice.get_default(context, self.model)
+            return ModelConnectionChoice.get_checked(self.model, connection)
         finally:
             if tenant_token is not None:
                 Tenancy.current.reset(tenant_token)
@@ -850,11 +852,7 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
         Returns:
             The query builder.
         """
-        meta = self.model._meta
-        connection = self._connection if self._connection is not None else meta.connection
-        if connection.query_class is meta.query_class:
-            return self._get_sampled_query(copy(meta.basequery), connection)
-        return self._get_sampled_query(connection.query_class.from_(meta.basetable), connection)
+        return self.query_sql._get_base_query(self)
 
     def _get_base_query_all_fields(self) -> QueryBuilder:
         """``_get_base_query()`` selecting every column of the model.
@@ -862,53 +860,26 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
         Returns:
             The query builder.
         """
-        meta = self.model._meta
-        connection = self._connection if self._connection is not None else meta.connection
-        if connection.query_class is meta.query_class:
-            return self._get_sampled_query(copy(meta.basequery_all_fields), connection)
-        return self._get_sampled_query(
-            connection.query_class.from_(meta.basetable).select(*meta.db_fields), connection
-        )
+        return self.query_sql._get_base_query_all_fields(self)
 
-    def _get_sampled_query(self, query: QueryBuilder, connection: DatabaseClient) -> QueryBuilder:
-        """``query`` reading the sample of the model's table ``sample()`` asked for.
-
-        Args:
-            query: A ``SELECT ... FROM`` the model's table.
-            connection: The connection the query runs on.
-
-        Returns:
-            The query - itself without a sample.
-
-        Raises:
-            UnSupportedError: The database can't read a sample of a table.
-            QueryError: The model's table options allow no sample (``TableOptions.raise_if_unsampled()``).
-        """
-        table_sample = self._table_sample
-        if table_sample is None:
-            return query
-        if not connection.features.supports_table_sample:
-            raise UnSupportedError(f"sample() needs TABLESAMPLE, which {connection.dialect} doesn't have")
-        table_options = self.model._meta.get_table_options(connection.dialect)
-        if table_options is not None:
-            table_options.raise_if_unsampled(self.model)
-        return query.sample(table_sample.method, table_sample.percent, table_sample.seed)
-
-    def _get_execution_query(self, for_write: bool = False) -> Self:
+    def _get_execution_query(self, for_write: bool = False, connection: DatabaseClient | None = None) -> Self:
         """Return a separate query for this execution, preserving an explicitly pinned connection.
 
-        Otherwise choose a connection afresh, so later evaluations can follow another
-        transaction or task without changing the original declaration.
+        Otherwise take the connection this execution already chose, or choose one afresh, so later
+        evaluations can follow another transaction or task without changing the original declaration.
 
         Args:
             for_write: Whether the connection is chosen for a write.
+            connection: The connection this execution already chose - chosen here when None.
 
         Returns:
             The query bound to a connection.
         """
         execution_query = copy(self)
         if execution_query._connection is None:
-            execution_query._apply_connection(execution_query.get_connection(for_write=for_write))
+            execution_query._apply_connection(
+                execution_query.get_connection(for_write=for_write) if connection is None else connection
+            )
         return execution_query
 
     def _get_compiler(self) -> QuerySpecification[Any]:
@@ -920,7 +891,7 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
         """
         return self
 
-    def _make_query(self) -> None:
+    def _make_query(self) -> Any:
         """Builds the query for the connection it runs on."""
         raise NotImplementedError()
 
@@ -942,26 +913,6 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
             ``(table, column)`` of each column.
         """
         raise NotImplementedError()
-
-    def _get_explain_statements(
-        self, statements: list[tuple[str, list[Any]]], output_format: str | None, options: dict[str, bool]
-    ) -> list[tuple[str, list[Any]]]:
-        """The EXPLAIN statement of each statement, in the dialect of the connection the query runs on.
-
-        Args:
-            statements: ``(sql, bound values)`` of each explained statement.
-            output_format: The plan's output format, None for the dialect's default.
-            options: The EXPLAIN options.
-
-        Returns:
-            ``(sql, bound values)`` of each EXPLAIN statement.
-        """
-        connection = cast("DatabaseClient", self._connection)
-        clauses = connection.dialect.clauses
-        return [
-            (clauses.get_explain_sql(sql, output_format, options, connection.features), values)
-            for sql, values in statements
-        ]
 
     def sql(
         self,
@@ -986,14 +937,9 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
             QueryError: ``output_format`` or an EXPLAIN option is given without ``explain=True``.
             UnSupportedError: The dialect has no such EXPLAIN format or option.
         """
-        if not explain and (output_format is not None or explain_options):
-            raise QueryError("output_format and EXPLAIN options apply only with explain=True")
-        with Registries.bind():
-            execution_query = self._get_compiler()._get_execution_query()
-            statements = execution_query._get_statements(parameters_inline)
-            if explain:
-                statements = execution_query._get_explain_statements(statements, output_format, explain_options)
-            return ";".join(sql for sql, _values in statements)
+        return self.query_sql.sql(
+            self, parameters_inline, explain=explain, output_format=output_format, **explain_options
+        )
 
     def get_read_columns(self) -> set[tuple[str, str]]:
         """The columns the query reads - in its joins and subqueries too - by the tables they belong to:
@@ -1002,8 +948,7 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
         Returns:
             ``(table, column)`` of each column.
         """
-        with Registries.bind():
-            return self._get_compiler()._get_execution_query()._get_read_columns()
+        return self.query_sql.get_read_columns(self)
 
     async def explain(self, output_format: str | None = None, **options: bool) -> list[dict[str, Any]]:
         """Runs the query's ``EXPLAIN`` statement - the one ``sql(explain=True)`` returns - and
@@ -1021,18 +966,13 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
         Raises:
             UnSupportedError: The dialect has no such format or option.
         """
-        execution_query = self._get_compiler()._get_execution_query()
-        connection = cast("DatabaseClient", execution_query._connection)
-        statements = execution_query._get_explain_statements(
-            execution_query._get_statements(parameters_inline=False), output_format, options
-        )
-        rows: list[dict[str, Any]] = []
-        for sql, values in statements:
-            rows.extend(dict(row) for row in (await connection.execute(sql, values))[1])
-        return rows
+        return await self.query_sql.explain(self, output_format, **options)
 
 
 # The query classes are defined above, and the expressions imported - a value of any of them is
 # written into a statement or a subquery, never bound as a parameter.
 StatementPlan.unbindable_value_classes = (Term, Expression, QuerySpecification)
 QuerySpecification.raise_if_slots_unclassified()
+
+
+QuerySpecification.copy_plan_bucket = SpecificationCopying.slot_copy_plans.get_bucket(QuerySpecification)

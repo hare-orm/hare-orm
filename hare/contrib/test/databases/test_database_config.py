@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.contrib.test.constants import ENV_PYTEST_XDIST_WORKER
 from hare.contrib.test.databases.declarations import TestDatabaseIdentity, TestDatabaseLease
@@ -16,7 +16,6 @@ from hare.dialects.sqlite.connection.sqlite_driver import SqliteDriver
 if TYPE_CHECKING:
     from hare.contrib.test.databases.test_database_resource import TestDatabaseResource
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.dialects.postgresql.client.postgresql_client import PostgresqlClient
 
 
 @dataclass(slots=True)
@@ -63,5 +62,5 @@ class TestDatabaseConfig:
         if self.lease is not None:
             from hare.contrib.test.databases.postgresql.test_database import PostgresqlTestDatabase
 
-            return PostgresqlTestDatabase(cast("PostgresqlClient", client), self.lease)
+            return PostgresqlTestDatabase(client, self.lease)  # type: ignore[arg-type]
         return TestDatabaseResource(client)

@@ -1,19 +1,14 @@
 from __future__ import annotations
 
+from rust.native import clock, rows
+
 
 class NativeModules:
-    """The parts of hare's compiled extension ``rust.native`` the Python code speeds itself up with -
-    None for a part where the extension isn't built, and the Python code does the same work there.
-    """
+    """The parts of hare's compiled extension ``rust.native`` the Python code works through - built on
+    every platform hare installs on."""
 
     #: ``rust.native.rows`` - attribute operations, relation grouping and value-format helpers.
-    try:
-        from rust.native import rows
-    except ImportError:
-        rows = None
+    rows = rows
 
     #: ``rust.native.clock`` - the system's precise wall clock.
-    try:
-        from rust.native import clock
-    except ImportError:
-        clock = None
+    clock = clock

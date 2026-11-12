@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ConfigDict, Field as PydanticField, create_model
 
@@ -166,10 +166,8 @@ def pydantic_queryset_creator(
     list_model_name = name or f"{submodel.__name__}_list"
 
     queryset_index_key = (model, submodel, list_model_name)
-    if (
-        list_model := PydanticModelCreator.QUERYSET_MODEL_INDEX.get_model_bucket(model).get(queryset_index_key)
-    ) is not None:
-        return cast("type[PydanticListModel]", list_model)
+    if (list_model := PydanticModelCreator.QUERYSET_MODEL_INDEX.get_bucket(model).get(queryset_index_key)) is not None:
+        return list_model
 
     new_list_model = create_model(
         list_model_name,
@@ -180,5 +178,5 @@ def pydantic_queryset_creator(
     new_list_model.model_config["title"] = name or f"{submodel.model_config['title']}_list"
     new_list_model.model_config["submodel"] = submodel  # type: ignore[typeddict-unknown-key]
 
-    PydanticModelCreator.QUERYSET_MODEL_INDEX.get_model_bucket(model)[queryset_index_key] = new_list_model
+    PydanticModelCreator.QUERYSET_MODEL_INDEX.get_bucket(model)[queryset_index_key] = new_list_model
     return new_list_model

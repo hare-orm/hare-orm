@@ -13,17 +13,16 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.log import db_client_logger
-from hare.core.resource_completion import ResourceCompletion
+from hare.dialects.base.client.client_pool_status import ClientPoolStatus
+from hare.dialects.base.client.client_schema import ClientSchema
 from hare.dialects.base.client.connection_ping import ConnectionPing
-from hare.dialects.base.client.constants import (
-    DISCARDED_CLIENT_MESSAGE,
-    PING_TIMEOUT_SECONDS,
-    UNENCODABLE_SURROGATE_REASON,
-)
+from hare.dialects.base.client.connection_wrapper import ConnectionWrapper
+from hare.dialects.base.client.constants import PING_TIMEOUT_SECONDS, UNENCODABLE_SURROGATE_REASON
 from hare.dialects.base.client.enums import StatementForm
+from hare.dialects.base.client.pool.pool_connection_wrapper import PoolConnectionWrapper
 from hare.dialects.base.client.pool.pool_statistics import PoolStatistics
-from hare.dialects.base.client.schema_cache_invalidation import SchemaCacheInvalidation
 from hare.dialects.base.client.statement_execution import StatementExecution
+from hare.dialects.base.client.tenant_clients import TenantClients
 from hare.dialects.base.dialect import Dialect
 from hare.dialects.base.features import Features
 from hare.dialects.base.results.described_result import DescribedResult
@@ -32,12 +31,7 @@ from hare.dialects.base.transactions.contexts.non_transactional_context import N
 from hare.dialects.base.transactions.contexts.top_level_transaction_context import TopLevelTransactionContext
 from hare.dialects.base.transactions.contexts.transaction_context import TransactionContext
 from hare.dialects.dialect_registry import DialectRegistry
-from hare.exceptions import (
-    DBConnectionError,
-    OperationalError,
-    TransactionRetryError,
-    UnSupportedError,
-)
+from hare.exceptions import OperationalError, TransactionRetryError, UnSupportedError
 from hare.instrumentation.declarations import PoolStatus
 from hare.instrumentation.enums import PoolRole
 from hare.instrumentation.pools.pool_registry import PoolRegistry
@@ -55,8 +49,6 @@ if TYPE_CHECKING:
     from hare.models import Model
     from hare.sql.builder.tables.table import Table
     from hare.sql.sql_context import SqlContext
-from hare.dialects.base.client.connection_wrapper import ConnectionWrapper
-from hare.dialects.base.client.pool.pool_connection_wrapper import PoolConnectionWrapper
 
 
 class DatabaseClient(abc.ABC):
@@ -327,15 +319,7 @@ class DatabaseClient(abc.ABC):
         Returns:
             The client.
         """
-        if self.tenant_schema is not None or self.tenant_schema_template is None:
-            return self
-        # Local import: the tenant schemas import the models, which import the dialects.
-        from hare.models.tenancy.tenant_schemas import TenantSchemas
-
-        schema_name = TenantSchemas.get_active_schema_name(self)
-        if schema_name is None:
-            return self
-        return self.get_schema_client(schema_name)
+        return TenantClients.get_tenant_client(self)
 
     def get_schema_client(self, schema_name: str) -> DatabaseClient:
         """The client of one tenant's schema, made on its first use.
@@ -351,18 +335,7 @@ class DatabaseClient(abc.ABC):
             DBConnectionError: This client was closed and dropped, and nothing replaced it - a client made
                 now would open connections nothing closes.
         """
-        tenant_client = self.tenant_clients.get(schema_name)
-        if tenant_client is None:
-            if self.discarded:
-                successor = self.get_successor()
-                if successor is None:
-                    raise DBConnectionError(DISCARDED_CLIENT_MESSAGE.format(alias=self.connection_alias))
-                return successor.get_schema_client(schema_name)
-            tenant_client = self.tenant_clients[schema_name] = self._create_client(
-                {}, self.get_tenant_client_settings(schema_name), schema_name
-            )
-            tenant_client.pool_role = PoolRole.TENANT_SCHEMA
-        return tenant_client
+        return TenantClients.get_schema_client(self, schema_name)
 
     def create_independent_client(self, settings: Mapping[str, Any] | None = None) -> DatabaseClient:
         """A new connection to this client's database, apart from it and in the same tenant schema.
@@ -374,32 +347,7 @@ class DatabaseClient(abc.ABC):
         Returns:
             The client.
         """
-        return self._create_client(settings or {}, self.tenant_client_settings, self.tenant_schema)
-
-    def _create_client(
-        self, settings: Mapping[str, Any], tenant_client_settings: Mapping[str, Any], tenant_schema: str | None
-    ) -> DatabaseClient:
-        """A new connection to this client's database.
-
-        Args:
-            settings: Settings replacing the connection's own.
-            tenant_client_settings: The settings of the tenant schema it works in.
-            tenant_schema: The tenant schema it works in, None for none.
-
-        Returns:
-            The client.
-        """
-        # Local import: the connections import the dialects.
-        from hare.core.connections.connections import Connections
-
-        connections = self.connection_handler if self.connection_handler is not None else Connections.current()
-        client = connections.create_independent(
-            self.connection_alias, {**settings, **tenant_client_settings}, config=self.connection_config
-        )
-        client.tenant_schema_template = self.tenant_schema_template
-        client.tenant_schema = tenant_schema
-        client.tenant_client_settings = tenant_client_settings
-        return client
+        return TenantClients.create_independent_client(self, settings)
 
     async def enter_tenant_schema(self, schema_name: str) -> str:
         """Runs the rest of the transaction in another tenant's schema, in place of its own.
@@ -442,9 +390,7 @@ class DatabaseClient(abc.ABC):
 
     async def close_tenant_clients(self) -> None:
         """Close every tenant client, including after a sibling failure or caller cancellation."""
-        tenant_clients = list(self.tenant_clients.values())
-        self.tenant_clients.clear()
-        await ResourceCompletion.wait_all(*(tenant_client.close() for tenant_client in tenant_clients))
+        return await TenantClients.close_tenant_clients(self)
 
     def abandon_connections(self) -> None:
         """Drops the connections opened on an event loop that is closed - they can't be closed through
@@ -516,36 +462,7 @@ class DatabaseClient(abc.ABC):
         Raises:
             UnSupportedError: The client reports no pool status (``Features.supports_pool_status``).
         """
-        if not self.features.supports_pool_status:
-            raise UnSupportedError(
-                f"The {self.driver_name} client of {self.connection_alias!r} reports no pool status"
-            )
-        acquire_count, acquire_timeouts, acquire_wait_seconds_total, connect_count, connect_failures = (
-            self.pool_statistics.get_counts()
-        )
-        occupancy = self.get_pool_occupancy()
-        if occupancy is None:
-            if not connect_failures:
-                return None
-            # A pool failing to open - its failures are what there is to see.
-            occupancy = (0, 0, 0, *self.get_pool_bounds())
-        size, idle, waiting, min_size, max_size = occupancy
-        return PoolStatus(
-            self.connection_alias,
-            self.pool_role,
-            self.tenant_schema,
-            size,
-            idle,
-            size - idle,
-            waiting,
-            min_size,
-            max_size,
-            acquire_count,
-            acquire_timeouts,
-            acquire_wait_seconds_total,
-            connect_count,
-            connect_failures,
-        )
+        return ClientPoolStatus.get_pool_status(self)
 
     def get_server_client(self) -> DatabaseClient:
         """The client of the database server itself, past any pooler the connection goes through -
@@ -1079,7 +996,7 @@ class DatabaseClient(abc.ABC):
         Returns:
             The DDL script.
         """
-        return self.dialect.schema_editor_class(self).table_creation.get_create_schema_sql(safe)
+        return ClientSchema.get_schema_sql(self, safe)
 
     async def generate_schema(self, safe: bool) -> None:
         """Creates every model of this connection in the database.
@@ -1087,14 +1004,7 @@ class DatabaseClient(abc.ABC):
         Args:
             safe: Whether each object is created only when it doesn't exist yet.
         """
-        # Connected first, so the DDL is written for the features of the server's own version.
-        async with self.acquire_connection():
-            pass
-        schema = self.get_schema_sql(safe)
-        self.log.debug("Creating schema: %s", schema)
-        if schema:
-            async with SchemaCacheInvalidation.run(self):
-                await self.execute_built_script(schema)
+        return await ClientSchema.generate_schema(self, safe)
 
     async def ping(self, timeout: float = PING_TIMEOUT_SECONDS) -> bool:
         """Runs ``SELECT 1`` and reports whether the connection is usable. Only

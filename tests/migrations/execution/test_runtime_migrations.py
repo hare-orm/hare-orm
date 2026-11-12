@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import importlib
 from pathlib import Path
-from typing import cast
 
 import pytest
 
@@ -11,7 +10,6 @@ from hare import fields
 from hare.contrib.test import requires_features
 from hare.core.connections.connection_handler import ConnectionHandler
 from hare.core.hare_context import HareContext
-from hare.dialects.base.client import DatabaseClient
 from hare.dialects.base.client.statement_recovery import StatementRecovery
 from hare.dialects.base.features import Features
 from hare.dialects.base.results import StatementResult
@@ -524,7 +522,7 @@ async def test_loader_builds_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         async def applied_migrations(self):
             return []
 
-    loader = MigrationLoader(apps_config, cast(MigrationRecorder, FakeRecorder()))
+    loader = MigrationLoader(apps_config, FakeRecorder())
     await loader.build_graph()
 
     key1 = MigrationKey(app_label="app", name="0001_initial")
@@ -543,7 +541,7 @@ async def test_loader_missing_module_raises(tmp_path: Path) -> None:
         async def applied_migrations(self):
             return []
 
-    loader = MigrationLoader(apps_config, cast(MigrationRecorder, FakeRecorder()))
+    loader = MigrationLoader(apps_config, FakeRecorder())
     with pytest.raises(MigrationLoadError, match="nope.migrations"):
         await loader.build_graph()
 
@@ -563,7 +561,7 @@ async def test_executor_plan_forward_and_backward(tmp_path: Path, monkeypatch: p
 
     apps_config = {"app": {"models": [], "default_connection": "default", "migrations": module_path}}
     connection = FakeConnection()
-    executor = MigrationExecutor(cast(DatabaseClient, connection), apps_config)
+    executor = MigrationExecutor(connection, apps_config)
 
     steps = await plan_migrations(executor)
     assert [step.backward for step in steps] == [False, False]
@@ -574,7 +572,7 @@ async def test_executor_plan_forward_and_backward(tmp_path: Path, monkeypatch: p
         MigrationKey(app_label="app", name="0002_second"),
     ]
     connection = FakeConnection(applied=applied)
-    executor = MigrationExecutor(cast(DatabaseClient, connection), apps_config)
+    executor = MigrationExecutor(connection, apps_config)
     steps = await plan_migrations(executor, [MigrationTarget(app_label="app", name="zero")])
     assert [step.backward for step in steps] == [True, True]
     assert [step.migration.name for step in steps] == ["0002_second", "0001_initial"]
@@ -592,7 +590,7 @@ async def test_executor_plan_cross_app_dependency(tmp_path: Path, monkeypatch: p
         "app2": {"models": [], "default_connection": "default", "migrations": app2_module},
     }
     connection = FakeConnection()
-    executor = MigrationExecutor(cast(DatabaseClient, connection), apps_config)
+    executor = MigrationExecutor(connection, apps_config)
 
     steps = await plan_migrations(executor, [MigrationTarget(app_label="app2", name="__latest__")])
     assert [step.migration.app_label for step in steps] == ["app1", "app2"]
@@ -623,13 +621,13 @@ async def test_migration_apply_and_unapply_flags() -> None:
     state = State()
 
     after = await migration.apply(state, dry_run=True, schema_editor=None)
-    marker = cast(MarkerOperation, migration.operations[0])
+    marker = migration.operations[0]
     assert marker.calls == []
     assert after.schemas == {"prepared"}
     assert state.schemas == set()
 
     before = await migration.unapply(state, dry_run=True, schema_editor=None)
-    marker = cast(MarkerOperation, migration.operations[0])
+    marker = migration.operations[0]
     assert marker.calls == []
     assert before.schemas == state.schemas == set()
 
@@ -690,7 +688,7 @@ async def test_executor_plan_ordering(tmp_path: Path, monkeypatch: pytest.Monkey
 
     apps_config = {"app": {"models": [], "default_connection": "default", "migrations": module_path}}
     connection = FakeConnection()
-    executor = MigrationExecutor(cast(DatabaseClient, connection), apps_config)
+    executor = MigrationExecutor(connection, apps_config)
     steps = await plan_migrations(executor, [MigrationTarget(app_label="app", name="__latest__")])
 
     assert [step.migration.name for step in steps] == ["0001_initial", "0002_second"]
@@ -981,7 +979,7 @@ async def test_executor_plan_sees_earlier_targets_effects(
             MigrationKey("mixedmain", "0001_initial"),
         ]
     )
-    executor = MigrationExecutor(cast(DatabaseClient, connection), apps_config)
+    executor = MigrationExecutor(connection, apps_config)
 
     with pytest.raises(ValueError, match="Conflicting migration directions"):
         await plan_migrations(executor, targets)
@@ -1004,7 +1002,7 @@ async def test_executor_plan_multiple_rollback_targets(tmp_path: Path, monkeypat
             MigrationKey("mixedmain", "0002_needs_other"),
         ]
     )
-    executor = MigrationExecutor(cast(DatabaseClient, connection), apps_config)
+    executor = MigrationExecutor(connection, apps_config)
 
     steps = await plan_migrations(
         executor, [MigrationTarget("mixedmain", "0001_initial"), MigrationTarget("mixedother", "0001_initial")]

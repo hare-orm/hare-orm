@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING
 
 from hare.exceptions import ConfigurationError
 from hare.models import Model
-from hare.stubs.constants import PRIMARY_KEY_ATTRIBUTE_NAME, STUB_HEADER
+from hare.query.constants import PRIMARY_KEY_ALIAS
+from hare.stubs.constants import STUB_HEADER
 from hare.stubs.messages import STUB_DEPENDENCIES_REQUIRED
 from hare.stubs.model_stub import ModelStub
 from hare.stubs.stub_imports import StubImports
@@ -73,7 +74,7 @@ class ModuleStub:
             attributes.update(model_stub.get_manager_declarations())
             primary_key_lines = model_stub.get_primary_key_lines()
             if primary_key_lines:
-                attributes[PRIMARY_KEY_ATTRIBUTE_NAME] = "\n".join(primary_key_lines)
+                attributes[PRIMARY_KEY_ALIAS] = "\n".join(primary_key_lines)
             members[model.__name__] = attributes
             declarations.extend(["", *model_stub.get_declarations()])
         text = ClassStubEditor.update(text, members)

@@ -35,9 +35,11 @@ from hare.dialects.sqlite.parameters.sqlite_parameter_adapters import SqlitePara
 from hare.dialects.sqlite.types.sqlite_types import SqliteTypes
 from hare.fields import ArrayField
 from hare.fields.validators import MaxValueValidator, MinLengthValidator, MinValueValidator, Validator
+from hare.models.instances.dirty_fields import DirtyFields
 from hare.models.write.instance_values import InstanceValues
 from hare.models.write.rules.enums import WriteType
 from hare.models.write.rules.row_write_rules import RowWriteRules
+from hare.native.native_modules import NativeModules
 from hare.query.rows.model_rows.model_columns import ModelColumns
 from hare.query.rows.native.hydration_layout import HydrationLayout
 from hare.query.rows.row_column import RowColumn
@@ -66,20 +68,14 @@ pytestmark = pytest.mark.database_independent
 
 SQLITE_TYPES = SqliteTypes.build()
 POSTGRESQL_TYPES = PostgresqlTypes.build()
-#: (name, type registry, the driver's native Python types)
+#: (name, type registry, the driver's native Python types, parameter adapters)
 CONNECTIONS = [
-    ("sqlite", SQLITE_TYPES, AiosqliteClient.native_python_types),
-    ("rust_pg", POSTGRESQL_TYPES, PostgresqlClient.native_python_types),
-    ("generic", TypeRegistry(), DatabaseClient.native_python_types),
+    ("sqlite", SQLITE_TYPES, AiosqliteClient.native_python_types, SqliteParameterAdapters()),
+    ("rust_pg", POSTGRESQL_TYPES, PostgresqlClient.native_python_types, None),
+    ("generic", TypeRegistry(), DatabaseClient.native_python_types, None),
 ]
 #: (use_timezone, zone)
 ZONES = [(False, "UTC"), (True, "UTC"), (True, "Europe/Berlin"), (True, "America/Sao_Paulo"), (True, "Asia/Kolkata")]
-SQLITE_ADAPTERS = {
-    datetime.datetime: SqliteParameterAdapters.adapt_datetime,
-    datetime.date: datetime.date.isoformat,
-    datetime.time: datetime.time.isoformat,
-    Decimal: SqliteParameterAdapters.adapt_decimal,
-}
 UTC = datetime.UTC
 BERLIN = ZoneInfo("Europe/Berlin")
 PLUS_0530 = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
@@ -165,10 +161,13 @@ def get_layout(model: Any, types: Any, native_types: frozenset[type]) -> Hydrati
 
 
 def assert_reads_match(
-    model: Any, field_name: str, raw_values: list[Any], connections: list[tuple[str, Any, Any]] = CONNECTIONS
+    model: Any,
+    field_name: str,
+    raw_values: list[Any],
+    connections: list[tuple[str, Any, Any, SqliteParameterAdapters | None]] = CONNECTIONS,
 ) -> None:
     """Reads every raw value with the codec and with the field, on every connection and zone."""
-    for connection_alias, types, native_types in connections:
+    for connection_alias, types, native_types, _adapters in connections:
         layout = get_layout(model, types, native_types)
         column, field, bound_reader = layout.entry_by_field_name[field_name]
         reader = (lambda value: value) if bound_reader is None else types.get_python_reader(field)
@@ -181,16 +180,23 @@ def assert_reads_match(
                         f"use_timezone={use_timezone}"
                     )
                     assert_same_outcome(
-                        run(lambda value: getattr(columns.hydrate((value,), None), field_name), raw),
+                        run(
+                            lambda value: getattr(
+                                NativeModules.rows.ModelResultLayout((columns,), ()).read_row(
+                                    (value,), None, DirtyFields.snapshot_dirty_fields
+                                ),
+                                field_name,
+                            ),
+                            raw,
+                        ),
                         run(reader, raw),
                         label,
                     )
 
 
-def bind(value: Any, types: Any, decode_through: Any = None) -> Any:
+def bind(value: Any, types: Any, adapters: SqliteParameterAdapters | None, decode_through: Any = None) -> Any:
     """The bound value, optionally decoded for comparison of randomized ciphertexts."""
-    adapter = SQLITE_ADAPTERS.get(type(value)) if type(value) in types.bound_as_text else None
-    bound = adapter(value) if adapter is not None else value
+    bound = adapters.adapt(value) if adapters is not None else value
     return types.get_python_value(decode_through, bound) if decode_through is not None else bound
 
 
@@ -198,12 +204,12 @@ def assert_writes_match(
     field: Any,
     values: list[Any],
     instance: Any = None,
-    connections: list[tuple[str, Any, Any]] = CONNECTIONS,
+    connections: list[tuple[str, Any, Any, SqliteParameterAdapters | None]] = CONNECTIONS,
     *,
     compare_decoded: bool = False,
 ) -> None:
     """Writes every value with the codec and with the field, on every connection and zone."""
-    for connection_alias, types, _native_types in connections:
+    for connection_alias, types, _native_types, adapters in connections:
         for use_timezone, zone in ZONES:
             with override_timezone(use_timezone=use_timezone, timezone=zone):
                 writer = types.get_db_writer(field)
@@ -214,12 +220,17 @@ def assert_writes_match(
                     )
                     assert_same_outcome(
                         run(
-                            lambda value: bind(writer(value, instance), types, field if compare_decoded else None),
+                            lambda value: bind(
+                                writer(value, instance), types, adapters, field if compare_decoded else None
+                            ),
                             value,
                         ),
                         run(
                             lambda value: bind(
-                                types.get_db_value(field, value, instance), types, field if compare_decoded else None
+                                types.get_db_value(field, value, instance),
+                                types,
+                                adapters,
+                                field if compare_decoded else None,
                             ),
                             value,
                         ),
@@ -295,7 +306,7 @@ def test_a_stamp_writes_like_the_field_and_the_write_leaves_the_instance_as_it_i
     """The stamp a write gives an auto_now/auto_now_add field is written by the codec as by the field -
     and neither changes the instance: the stamp is the write's, set before the values are written."""
     field = DatetimeFields._meta.fields_map[field_name]
-    for _connection_name, types, _native_types in CONNECTIONS:
+    for _connection_name, types, _native_types, adapters in CONNECTIONS:
         for use_timezone, zone in ZONES:
             with override_timezone(use_timezone=use_timezone, timezone=zone):
                 writer = types.get_db_writer(field)
@@ -306,8 +317,8 @@ def test_a_stamp_writes_like_the_field_and_the_write_leaves_the_instance_as_it_i
                 stamp = getattr(instance, field_name)
                 assert stamp is not None
                 assert_same_outcome(
-                    run(lambda value: bind(writer(value, instance), types), stamp),
-                    run(lambda value: bind(types.get_db_value(field, value, instance), types), stamp),
+                    run(lambda value: bind(writer(value, instance), types, adapters), stamp),
+                    run(lambda value: bind(types.get_db_value(field, value, instance), types, adapters), stamp),
                     f"{field_name} stamp, {zone} use_timezone={use_timezone}",
                 )
                 assert getattr(instance, field_name) is stamp
@@ -667,7 +678,7 @@ EXPRESSION_VALUES = [
 
 @pytest.mark.parametrize("field", EXPRESSION_FIELDS, ids=lambda field: field.model_field_name)
 def test_expression_column_reads_match(field):
-    for connection_alias, types, _native_types in CONNECTIONS:
+    for connection_alias, types, _native_types, _adapters in CONNECTIONS:
         reader = types.get_python_reader(field)
         layout = RowLayout((RowColumn("result", reader),))
         for use_timezone, zone in ZONES:

@@ -13,6 +13,7 @@ from hare.exceptions import ConfigurationError
 from hare.fields.data.containers.container_field import ContainerField
 from hare.fields.data.json.json_field import JSONField
 from hare.fields.generated_field import GeneratedField
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.expressions.ordering import Ordering
 
 if TYPE_CHECKING:
@@ -54,7 +55,7 @@ class CursorPagination(Pagination):
 
     def check_ordering(self, owner: str, name: str, ordering_info: OrderingInfo) -> None:
         first_part = name.split("__", 1)[0]
-        if first_part != "pk" and first_part not in ordering_info.model._meta.fields_map:
+        if first_part != PRIMARY_KEY_ALIAS and first_part not in ordering_info.model._meta.fields_map:
             raise ConfigurationError(
                 f"{owner}.Meta.ordering: a cursor pagination can't order by the annotation {name!r}"
             )

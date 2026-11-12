@@ -271,7 +271,7 @@ DB_URL = "sqlite+aiosqlite://db.sqlite3?load_spatialite=true"
 | Setting | Meaning |
 |---|---|
 | `load_spatialite` | `true` loads SpatiaLite into every connection — `Features.supports_spatial` |
-| `spatialite_path` | The library: a name the system's loader finds (`mod_spatialite`, the default — Debian/Ubuntu's `libsqlite3-mod-spatialite`, Homebrew's `libspatialite`) or a path. On Windows a path with a directory also loads the libraries SpatiaLite needs (GEOS, PROJ, ...) from that directory |
+| `spatialite_path` | The library: a name the system's loader finds (`mod_spatialite`, the default — Debian/Ubuntu's `libsqlite3-mod-spatialite`, Homebrew's `libspatialite`) or a path. Its dependencies (GEOS, PROJ, ...) must be discoverable by the system's library loader |
 | `spatialite_proj_database` | The path of PROJ's `proj.db`, which a transformation between SRIDs reads — needed when PROJ doesn't find its own (the Windows build carries it next to the library) |
 | `spatialite_metadata` | The spatial metadata hare creates in a database without any: `wgs84` (the default), `full` or `none` — see [`spatialite_metadata`](#spatialite-metadata) |
 

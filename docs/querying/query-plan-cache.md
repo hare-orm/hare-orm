@@ -1,5 +1,12 @@
 # Query plan cache
 
+A published plan retains prepared parameter bindings and the result's immutable column
+layout. One native executor traverses the bindings and checks their rendering constraints,
+calling the field and dialect conversions before writing into a fresh parameter buffer. A values reader
+retains its native decoder for the selected column order; neither decoder nor binder retains
+the current connection, tenant or returned instances. Execution installs only context bindings
+that differ from the caller's, with dependencies, registries, encryption and row scopes kept separate.
+
 hare caches the *structure* of a query — its **shape** — so that calling the same `.filter()`/
 `.annotate()`/`.order_by()` chain again with different values skips re-walking the filter tree,
 re-resolving every lookup, and rebuilding the underlying `hare.sql` query object from scratch. This is a
@@ -7,7 +14,70 @@ fully internal optimization: there's no `Meta` option and no `Hare.init()` kwarg
 is an environment variable capping its size (see [Scope and lifetime](#scope-and-lifetime) below). This
 page exists to explain what it does and doesn't cover, so a query's actual behavior is never a mystery.
 
+The result keeps immutable column names; DB-API descriptions supplied by a driver are preserved,
+and descriptions for positional native results are built only when requested. A fixed SELECT
+prepares annotation positions alongside its model columns. Raw and dynamic results determine
+positions from their actual returned names, including empty results with explicit metadata.
+
+Model plans retain one connection-free reader for both plan indexes. Its native result layout
+prepares relation attachment positions and annotation readers once; chunks reuse that layout.
+Grouped reads also prepare key positions, while their shared-instance map belongs to one execution.
+Dynamic projections prepare a layout from the actual result once and reuse it across its chunks.
+Batch readers receive that completed layout directly. A prepared projection does not look up its
+columns again, and streaming results reuse their layout without preparing it for each batch.
+
+Values plans share physical conversion metadata. A call-plan entry retains its result shape's
+logical layout: selecting a composite key as one value must remain different from selecting its
+components separately, even when the SQL columns match. Known projections use that layout directly;
+other results retain column-name-based preparation. M2M through rows with simple keys use the same
+batch decoder as values results.
+
+Plan preparation returns the rendered SQL and current parameters alongside the reusable plan.
+The first execution uses that SQL without rendering again; extension calls finish before publication.
+Origin recording describes the query without a second cache lookup. Current parameters and SQL
+source trees are never retained by a published plan.
+
+Default field validation runs the current Python validators in order through one native loop.
+It preserves nullable values, enum handling, custom validation overrides and field error formatting;
+it does not compile a second set of validation rules. Statement option chains keep unbound functions
+in a Cache bucket on the client class, reading the executing client's timeout and credentials each time.
+
+Before publication, parameter preparation replaces temporary SQL sources with immutable slots
+and prepares field converters. Only published references are bound during execution: list
+bindings consume those slots and converters directly. Shape changes request a new build;
+conversion and validation exceptions propagate to the caller.
+
 ## <a id="shape-vs-value"></a>The core idea: shape vs. value
+
+Model hydration, related model attachment, annotation assignment and `union()` model rows use one
+native row constructor. It invokes the model's public `__new__`, Python field readers and descriptors
+in row order, including NULL values, and takes dirty snapshots before attaching related rows. Values
+results decode and assemble dicts, tuples, flat values and namedtuples natively through the same
+ordered column layout; composite groups collapse to `None` only when every converted component is
+`None`. Bulk and single-instance serialization call the registered Python writers with both value and
+instance. For a many-to-many join, the same column readers decode every input row before grouping
+by its converted key. Only construction is shared: each distinct key creates one instance, reused
+across parents and hydration batches. Attachments remain detached until prefetch succeeds. Other
+prefetch shapes use their ordinary grouped reads, and
+JSON text decoding reads numbers (including arbitrary-precision integers) while rejecting non-finite
+floats. These loops call each field's reader as the field gives it (`Field.get_db_value_reader()`):
+a built-in `JSONField` column is decoded natively by the decoder its `from_db_value()` calls, every
+other reader runs as written.
+
+Iterator pages are fetched and decoded under the execution context; their already materialized rows
+are yielded outside it. Dependency conditions inherited by a nested operation are copied only when
+the nested operation writes a new condition. Scope-provider storage and its context are created on
+first use, and the active encryption binding lives on the context directly. The dialect's conversion
+of each value a plan binds (a filter value's lookup conversion, an assigned value's write conversion)
+is resolved once, when the plan is published. Plan-slot readers are
+bound once when each query class is defined, while connection settings remain freshly read for each
+plan key and are not cached as a tuple. A model's instances are constructed by its native constructor,
+a fact of the model: a keyword already of a type `to_python()` keeps, or an expression, is assigned as
+it is, any other goes through the field's `to_python()`, and a relation, `pk`, a callable value, an
+async or computed default go through hare's Python functions for them. Single-instance writes reuse
+cached `RowWriteRules` and templates per model and connection
+shape, and `update()` parses assignment fields once per query while evaluating values and
+`Timezone.now()` on each execution.
 
 Two calls have the **same shape** when they build the identical filter/annotation/join/ordering
 *structure* — same fields, same operators, same relations joined — differing only in the literal values
@@ -50,11 +120,35 @@ The cached plan retains SQL text, immutable parameter slots and result metadata.
 retain the first query's SQL tree or its replaceable input values. Repeated occurrences share the
 same fresh converted value, and sensitive parameter positions stay hidden on every execution.
 
+For positional model results whose column names are known at compilation, the plan retains
+the shared column layout in its result metadata, including joined models and annotations.
+Other projections use the result's column description. Each execution supplies its current
+connection and constructs fresh model instances; no connection or tenant is retained in the plan.
+
+Derived operations (`count()`, `exists()`, `aggregate()`, `update()` and `delete()`) share their
+source declaration's settings by reference instead of copying them at the method call: a run on a
+plan only reads them, and building SQL works on a copy with its own containers. Every check still
+happens at the method call; awaiting only runs the operation.
+
+Writes bind SQL on the actual transaction connection. Capture and deletion helpers narrow a separate
+row declaration; automatic stamps belong to one execution and are reused if it needs to build SQL.
+Bulk updates keep completed and skipped objects in execution state, not on the reusable declaration.
+This mechanism does not add a statement-plan cache for `bulk_update()`, `insert_from()` or `merge()`.
+
+A simple `get()` from the unchanged base of a standard manager creates a fresh query
+declaration directly. Configured querysets and custom managers or queryset subclasses
+keep their normal cloning path. Both paths retain scopes and choose the connection
+when executed; retaining `Model.objects` before application initialization is supported.
+
 ## <a id="shape-key"></a>What's part of the shape (the cache key)
 
 The structural and call-signature indexes use the same connection settings: connection alias,
 dialect features, native Python types, parameter binding and SQL rendering context. Each index
 also includes the query dependencies it needs.
+
+`StatementPlanRuns.find_call_plan()` constructs the call-signature key and looks up the plan in one
+step. `StatementPlan.bind()` binds both the declaration's values and the current values of default
+scopes folded into JOINs, for either index. A changed scope structure requires a full query build.
 
 Ordinary and named `values_list()` tuples can share a SQL plan and column converters. Each query
 retains its requested row reader, so sharing a plan preserves tuple names and decoded values.
@@ -88,10 +182,18 @@ part of the key) and values that are plain, expressions (`F("other") + 1`) or qu
 of field names, `limit()`/`offset()`, `first()`/`last()`, `get()`, `only()`, `select_related()`,
 `values()`/`values_list()` of field names, `group_by()`, `prefetch_related()`, and
 `count()`/`exists()`/`aggregate()` at the end — runs on an entry found by the calls themselves: its
-filters aren't even built. Both a cache hit and a fresh compilation run through the same statement
-executor. The plan supplies SQL, parameters and row layout; the executor applies the query's result
-shape, single-row policy and relation loading. Each call's values — a filter's, an expression's literals — are
-found
+filters aren't even built. Model and values reads, summaries and queryset writes look up their
+call-chain plan before materializing SQL-building state.
+It chooses a fresh connection and binds the current values, then uses the same row reader,
+single-row rules, relation loading and error handling as the ordinary statement path. The reader of
+a model entry's rows is made once, when the entry is kept, from the calls and the dialect, together with
+the native layout making the instances of each selected model; it holds no connection — every query on
+the entry reads its rows through it on its own connection. A model with
+a manager scope or queryset extensions takes the ordinary preparation path so those hooks still run.
+Default joined and select-loaded relations are represented by cached result metadata.
+Awaiting a queryset does not bind it permanently
+to that execution's connection or tenant. Each call's values — a filter's, an expression's literals —
+are found
 among the entry's values by where they come from, so the entry's own order of values (the annotations'
 before the filters') doesn't have to be the order of the calls. A `prefetch_related()` call keys the
 relations it prefetches — a forward relation's key column is selected for its prefetch even past `only()`
@@ -323,9 +425,9 @@ model alive after its application context is released.
 
 `Cache` and `ModelCache` use the same `CacheBucket` implementation:
 
-- `cache.get_model_bucket(model)` explicitly selects model storage. SQL buckets
-  are invalidated when the model's query builder changes.
-- `cache.get_bucket(holder)` selects storage attached to another class or object.
+- `cache.get_bucket(holder)` selects storage attached to a model (kept in its metadata) or to
+  another class or object. When a model is bound to another query builder (another dialect), the
+  caches holding SQL (`Cache(holds_sql=True)`, the default) drop its entries at that moment.
 - `cache.new_shared_bucket()` creates storage retained by its callers.
 - `cache.get_value(holder)` and `set_value(holder, value)` store one derived value.
 - The mapping interface on `Cache` addresses global entries. Keys are opaque:
@@ -338,8 +440,10 @@ invalidation. Generation belongs to the bucket; callers do not compare generatio
 or maintain parallel metadata dictionaries. Holder buckets use `max_size`, or
 the default holder bound when no size is supplied.
 
-Individual bucket reads, writes and invalidations are synchronized across threads, including
-LRU maintenance. Concurrent callers share the same bucket for a holder. A computation between
+Bucket writes, evictions and invalidations hold the bucket's lock; a read takes none. hare runs
+only with the GIL, under which a single dictionary read and the LRU reorder of a hit are each
+atomic; a hit whose entry another thread evicts at that moment still returns the value it read.
+Concurrent callers share the same bucket for a holder. A computation between
 reading and writing the cache can still run more than once; cache access does not serialize
 query execution or make a sequence of mapping operations atomic.
 
@@ -372,6 +476,23 @@ silent data-correctness bug, not just a missed optimization. Two rules follow fr
   timezones at runtime (`Timezone.override()`, another `init()`) can't silently keep extracting in a
   stale cached zone. Without `use_timezone` a datetime expression converts from the machine's own zone
   instead, and that zone's name is part of the key the same way.
+
+Write assignments belong to one execution. Change capture obtains a moved composite key from
+those same converted assignments and decodes it for matching; it does not convert the input again.
+Bulk RETURNING prepares column readers once per chunk while assignments and rollback registration
+remain per object. Conflict grouping and returned-row matching use the same tuple-shaped stored-key
+normalization; NULL-distinctness and database-default handling remain decisions of conflict grouping.
+
+`count()`, `exists()` and `aggregate()` use a source description to choose model rows or a
+derived table. Values and combined queries defer that choice until their selected rows are built;
+the existing summary executor is initialized from the description, without constructing and
+copying another summary. Slices, grouping, row multiplication, scopes and connection selection
+remain properties of the source. This description belongs to a query, not to a reusable plan cache.
+
+QuerySet argument preparation normalizes generic relation filters, ordering/grouping aliases and
+projection expressions before publishing the resulting query state. Selected annotations and
+non-selected aliases share publication, while keeping their different selection and plan-call
+semantics. Public alias and custom filter hooks remain part of their respective operations.
 
 ## <a id="performance"></a>Performance
 

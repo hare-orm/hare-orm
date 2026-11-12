@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from hare.dialects.base.schema.columns.column_conversion_check import ColumnConversionCheck
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.clickhouse.schema.constants import (
     CLICKHOUSE_APPLY_DELETED_MASK_TEMPLATE,
     CLICKHOUSE_COLUMN_TYPES_QUERY,
@@ -140,9 +141,9 @@ class ClickhouseColumnConversionCheck(ColumnConversionCheck):
         physical = new_type.unwrapped
         if physical.name in CLICKHOUSE_UNCHECKED_CONVERSION_TYPES:
             return None
-        if physical.name == "JSON":
+        if physical.name == ClickhouseTypeName.JSON:
             return CLICKHOUSE_UNCONVERTED_JSON_TEMPLATE.format(column=quoted_column)
-        if physical.name in {"Enum8", "Enum16"}:
+        if physical.name in {ClickhouseTypeName.ENUM8, ClickhouseTypeName.ENUM16}:
             literals = self.editor.client.dialect.literals
             labels_sql = ", ".join(
                 literals.get_string_literal_sql(label) for label in physical.get_enum_members(physical.arguments)
@@ -157,8 +158,8 @@ class ClickhouseColumnConversionCheck(ColumnConversionCheck):
         value_sql = CLICKHOUSE_CONVERTED_VALUE_TEMPLATE.format(
             column=quoted_column, type=self.editor.client.dialect.literals.get_literal_sql(physical.sql)
         )
-        if physical.name in {"Date", "Date32"}:
+        if physical.name in {ClickhouseTypeName.DATE, ClickhouseTypeName.DATE32}:
             return CLICKHOUSE_UNCONVERTED_DATE_TEMPLATE.format(value=value_sql, column=quoted_column)
-        if physical.name in {"DateTime", "DateTime64"}:
+        if physical.name in {ClickhouseTypeName.DATETIME, ClickhouseTypeName.DATETIME64}:
             return CLICKHOUSE_UNCONVERTED_MOMENT_TEMPLATE.format(value=value_sql, column=quoted_column)
         return f"{value_sql} IS NULL"

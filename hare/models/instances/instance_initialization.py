@@ -2,16 +2,18 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, NoReturn, cast
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from hare.classes.value_descriptions import ValueDescriptions
+from hare.core.caching.model_cache import ModelCache
 from hare.exceptions import FieldError, QueryError
 from hare.fields.field import Field
 from hare.fields.relations.fields.relational_field import RelationalField
 from hare.fields.relations.relation_values import RelationValues
-from hare.models.class_building.generic_foreign_keys import GenericForeignKeys
 from hare.models.deletion.soft_deletion import SoftDeletion
 from hare.models.write.rules.constants import GENERATED_REASON, REFUSED_FIELD_MESSAGE
+from hare.native.native_modules import NativeModules
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.expressions.expression import Expression
 
 if TYPE_CHECKING:
@@ -21,7 +23,83 @@ if TYPE_CHECKING:
 class InstanceInitialization:
     """How a new instance takes its constructor's arguments: a composite primary key given as pk spread
     over its fields, a relation and its key columns checked to agree, every keyword set, and every
-    field left out given its default."""
+    field left out given its default. The model's constructor (``get_constructor()``) assigns them; the
+    special cases it hands over are the functions here."""
+
+    @staticmethod
+    @ModelCache.fact()
+    def get_constructor(model: type[Model]) -> Any:
+        """The constructor of ``model``'s instances (``rust.native.rows.InstanceConstructor``) - how its
+        keywords and defaults are assigned, a fact of the model; the values are the construction's own.
+
+        Args:
+            model: The model.
+
+        Returns:
+            The constructor.
+        """
+        # Local import: the model module imports this one.
+        from hare.models.model import Model
+
+        meta = model._meta
+        relations = meta.foreign_key_fields | meta.one_to_one_fields
+        generated_pk_field_name = meta.generated_pk_field_name
+        fields = [
+            (
+                name,
+                field,
+                name in relations,
+                frozenset() if name in relations else field.get_assign_normalized_types(),
+                field.null,
+                name == generated_pk_field_name,
+                name == meta.soft_delete_field,
+            )
+            for name, field in meta.fields_map.items()
+            if name in relations or name in meta.fields_db_projection
+        ]
+        automatic_keys = tuple(
+            name
+            for name, field in meta.fields_map.items()
+            if field.pk and (field.generated or field.default is not None or field.has_db_default())
+        )
+        # A new instance has nothing for Model.__setattr__ to refresh on a plain column; a relation, an
+        # automatic primary key and a model overriding __setattr__ still go through it.
+        sets_columns_directly = model.__setattr__ is Model.__setattr__
+        defaults = []
+        # A fetch field is filled by its own query; a field the database computes holds no value
+        # until a row of the instance is read.
+        for name in meta.fields - meta.computed_field_names - meta.fetch_fields:
+            field = meta.fields_map[name]
+            field_default = field.default
+            has_db_default = field.has_db_default()
+            normalized_types = field.get_assign_normalized_types()
+            # An automatic primary key left None hands the key to the database - Model.__setattr__ has nothing
+            # to clear on a new instance then; a default value of it goes through Model.__setattr__.
+            sets_directly = (
+                sets_columns_directly
+                and name in meta.fields_db_projection
+                and (name != generated_pk_field_name or (field_default is None and not has_db_default))
+            )
+            is_static = (field_default is None and not has_db_default) or (
+                not callable(field_default)
+                and isinstance(field_default, (int, float, str, bool, bytes))
+                and type(field_default) in normalized_types
+            )
+            defaults.append(
+                (
+                    name,
+                    field,
+                    object.__setattr__ if sets_directly else setattr,
+                    sets_directly,
+                    has_db_default,
+                    normalized_types,
+                    is_static,
+                    field_default if is_static else None,
+                )
+            )
+        return NativeModules.rows.InstanceConstructor(
+            model, fields, automatic_keys, defaults, sets_columns_directly, Expression, InstanceInitialization
+        )
 
     @staticmethod
     def add_pending_default(obj: Model, field_name: str, default: Any) -> None:
@@ -51,28 +129,50 @@ class InstanceInitialization:
                 obj, else ``setattr``.
         """
         field_object = obj._meta.fields_map[key]
+        InstanceInitialization.assign_field_default(
+            obj,
+            key,
+            field_object,
+            set_value,
+            field_object.has_db_default(),
+            field_object.get_assign_normalized_types(),
+        )
+
+    @staticmethod
+    def assign_field_default(
+        obj: Model,
+        key: str,
+        field_object: Field[Any],
+        set_value: Callable[[Any, str, Any], None],
+        has_db_default: bool,
+        normalized_types: frozenset[type],
+    ) -> None:
+        """Sets a field the constructor wasn't given a value for to its default.
+
+        Args:
+            obj: The model obj.
+            key: The field name.
+            field_object: The field.
+            set_value: How the value is set.
+            has_db_default: Whether the field has a ``db_default``.
+            normalized_types: The types a default is assigned as it is, without ``to_python()``.
+        """
         field_default = field_object.default
-        if field_object._default_is_coroutine:
+        if field_default is None:
+            set_value(obj, key, field_object.get_db_default_value() if has_db_default else None)
+        elif field_object._default_is_coroutine:
             InstanceInitialization.add_pending_default(obj, key, field_default)
         elif callable(field_default):
             value = field_default()
-            normalized_types = field_object.assign_normalized_types
-            if normalized_types is None or (value is not None and type(value) not in normalized_types):
+            if value is not None and type(value) not in normalized_types:
                 value = field_object.get_default_value_on_assign(value)
             set_value(obj, key, value)
-        elif field_default is not None:
-            # A default already in its assigned form (checked once per field) skips the to_python
-            # call - the common case stays a plain assignment.
-            if field_object.static_default_is_normalized is not True:
-                set_value(obj, key, field_object.get_static_default_value())
-            elif isinstance(field_default, (int, float, str, bool, bytes)):
-                set_value(obj, key, field_default)
-            else:
-                set_value(obj, key, deepcopy(field_default))
-        elif field_object.has_db_default():
-            set_value(obj, key, field_object.get_db_default_value())
+        elif field_object.get_binding().static_default_is_normalized is not True:
+            set_value(obj, key, field_object.get_static_default_value())
+        elif isinstance(field_default, (int, float, str, bool, bytes)):
+            set_value(obj, key, field_default)
         else:
-            set_value(obj, key, None)
+            set_value(obj, key, deepcopy(field_default))
 
     @staticmethod
     def set_constructed_defaults(obj: Model, field_names: Iterable[str]) -> None:
@@ -140,7 +240,7 @@ class InstanceInitialization:
         """
         meta = model._meta
         meta.raise_if_no_primary_key(f"{model.__name__}(pk=...)")
-        pk_value = kwargs["pk"]
+        pk_value = kwargs[PRIMARY_KEY_ALIAS]
         if meta.has_composite_primary_key:
             if not isinstance(pk_value, tuple) or len(pk_value) != len(meta.primary_key_attribute):
                 raise QueryError(
@@ -149,118 +249,92 @@ class InstanceInitialization:
                 )
             pk_kwargs = dict(zip(meta.primary_key_attribute, pk_value, strict=True))
         else:
-            pk_kwargs = {cast("str", meta.primary_key_attribute): pk_value}
+            pk_kwargs = {meta.primary_key_attribute: pk_value}  # type: ignore[dict-item]
         for pk_field_name in pk_kwargs:
             if pk_field_name in kwargs:
                 raise QueryError(f"Can't set both 'pk' and {pk_field_name!r} - they name the same field")
-        expanded_kwargs = {key: value for key, value in kwargs.items() if key != "pk"}
+        expanded_kwargs = {key: value for key, value in kwargs.items() if key != PRIMARY_KEY_ALIAS}
         expanded_kwargs.update(pk_kwargs)
         return expanded_kwargs
 
     @staticmethod
-    def get_kwargs_without_unset_automatic_pk(obj: Model, kwargs: dict[str, Any]) -> dict[str, Any]:
+    def get_kwargs_without_unset_automatic_pk(
+        kwargs: dict[str, Any], automatic_keys: tuple[str, ...]
+    ) -> dict[str, Any]:
         """Drops a primary key passed as ``None`` when the database generates it or the field has
         a ``default``/``db_default`` - "not assigned yet", so the generated or default value
         applies, and ``Model(**dict(obj))`` round-trips instead of rejecting the ``None``.
 
         Args:
-            obj: The model obj.
             kwargs: Raw constructor/create kwargs.
+            automatic_keys: The model's automatic primary-key fields.
 
         Returns:
             ``kwargs`` itself if nothing was dropped, otherwise a filtered copy.
         """
-        fields_map = obj._meta.fields_map
-        unset_keys = [
-            key
-            for key, value in kwargs.items()
-            if value is None
-            and key in fields_map
-            and fields_map[key].pk
-            and (fields_map[key].generated or fields_map[key].default is not None or fields_map[key].has_db_default())
-        ]
-        if not unset_keys:
-            return kwargs
-        return {key: value for key, value in kwargs.items() if key not in unset_keys}
+        for key in automatic_keys:
+            if kwargs.get(key, True) is None:
+                return {
+                    field_key: field_value
+                    for field_key, field_value in kwargs.items()
+                    if not (field_value is None and field_key in automatic_keys)
+                }
+        return kwargs
 
     @staticmethod
-    def set_kwargs(obj: Model, kwargs: dict[str, Any], *, assigns_directly: bool = False) -> set[str]:
-        """Validates, converts and assigns field values given by name.
+    def check_relation_kwarg(
+        obj: Model, relation_field: RelationalField[Any], key: str, value: Any, kwargs: dict[str, Any]
+    ) -> tuple[str, ...]:
+        """Checks a relation given to the constructor: its type, None only for a nullable one, and
+        its source columns given too naming the same row.
 
         Args:
             obj: The model obj.
-            kwargs: The values, by field name (``pk`` included).
-            assigns_directly: Whether a value may skip ``Model.__setattr__`` - for a new obj (nothing
-                cached, pending or saved on it yet to refresh) of a model keeping ``Model.__setattr__``.
+            relation_field: The FK/O2O field.
+            key: Its name.
+            value: The related obj, or None.
+            kwargs: Every value given in the same call.
 
         Returns:
-            The names of the fields given, a relation's source columns included.
+            The relation's source columns - given by it.
+
+        Raises:
+            QueryError: None for a relation that doesn't take it, or a source column given another value.
         """
-        meta = obj._meta
-        if meta.generic_foreign_key_fields:
-            kwargs = GenericForeignKeys.expand_kwargs(meta, kwargs, apply_defaults=False)
-        if "pk" in kwargs:
-            kwargs = InstanceInitialization.expand_pk_kwarg(type(obj), kwargs)
-        kwargs = InstanceInitialization.get_kwargs_without_unset_automatic_pk(obj, kwargs)
+        model = type(obj)
+        RelationValues.validate_relation_type(model, key, value)
+        if value is None and not relation_field.null:
+            raise QueryError(f"{model.__name__}.{key} doesn't take None")
+        InstanceInitialization.check_relation_kwargs_agree(obj, relation_field, value, kwargs)
+        return relation_field.source_fields
 
-        # Assign values and do type conversions
-        passed_fields = {*kwargs.keys()} | meta.fetch_fields
+    @staticmethod
+    def check_soft_delete_kwarg(obj: Model, key: str) -> None:
+        """Checks a value given to the soft-delete field (``SoftDeletion.check_soft_delete_write_allowed()``).
 
-        # Every value is validated and converted before the first is assigned - a failure leaves the
-        # obj untouched. Relations are assigned after the plain fields.
-        direct_assignments: list[tuple[str, Any]] = []
-        relation_assignments: list[tuple[str, Any]] = []
+        Args:
+            obj: The model obj.
+            key: The soft-delete field.
+        """
+        SoftDeletion.check_soft_delete_write_allowed(obj, key)
 
-        for key, value in kwargs.items():
-            if key in meta.foreign_key_fields or key in meta.one_to_one_fields:
-                relation_field = cast("RelationalField[Any]", meta.fields_map[key])
-                RelationValues.validate_relation_type(type(obj), key, value)
-                if value is None and not relation_field.null:
-                    raise QueryError(f"{type(obj).__name__}.{key} doesn't take None")
-                InstanceInitialization.check_relation_kwargs_agree(obj, relation_field, value, kwargs)
-                relation_assignments.append((key, value))
-                passed_fields.update(relation_field.source_fields)
-            elif key in meta.fields_db_projection:
-                field_object = meta.fields_map[key]
-                if key == meta.soft_delete_field:
-                    SoftDeletion.check_soft_delete_write_allowed(obj, key)
-                normalized_types = field_object.assign_normalized_types
-                if normalized_types is None:
-                    normalized_types = field_object.assign_normalized_types = (
-                        field_object.get_assign_normalized_types()
-                    )
-                if type(value) in normalized_types or isinstance(value, Expression):
-                    # Already the type to_python() returns unchanged (and not a callable) - the
-                    # common case, assigned as it is. An expression isn't converted either, as in a
-                    # plain `obj.field = F(...)` assignment: the write applies it.
-                    direct_assignments.append((key, value))
-                elif callable(value):
-                    InstanceInitialization.take_callable_kwarg(obj, key, value, field_object, direct_assignments)
-                else:
-                    if value is None and not field_object.null:
-                        raise QueryError(f"{type(obj).__name__}.{key} doesn't take None")
-                    direct_assignments.append((key, field_object.to_python(value)))
-            else:
-                InstanceInitialization.raise_for_unsettable_kwarg(obj, key)
+    @staticmethod
+    def raise_for_none(model: type[Model], key: str) -> NoReturn:
+        """Raises for None given to a field that doesn't take it.
 
-        # A new obj has no cached related object, pending async default or saved state for
-        # Model.__setattr__ to refresh on a plain column - only an automatic primary key keeps its
-        # own bookkeeping there.
-        generated_pk_field_name = meta.generated_pk_field_name
-        for key, value in direct_assignments:
-            if assigns_directly and key != generated_pk_field_name:
-                object.__setattr__(obj, key, value)
-            else:
-                setattr(obj, key, value)
-        for key, value in relation_assignments:
-            setattr(obj, key, value)
+        Args:
+            model: The model.
+            key: The field.
 
-        return passed_fields
+        Raises:
+            QueryError: Always.
+        """
+        raise QueryError(f"{model.__name__}.{key} doesn't take None")
 
     @staticmethod
     def take_callable_kwarg(
-        obj: Model, key: str, value: Callable[[], Any], field_object: Field[Any], assignments: list[tuple[str, Any]]
-    ) -> None:
+        obj: Model, key: str, value: Callable[[], Any], field_object: Field[Any]
+    ) -> tuple[bool, Any]:
         """Takes a callable given as a field's value: an async one is awaited when the obj is saved,
         another is called for the value now.
 
@@ -269,12 +343,14 @@ class InstanceInitialization:
             key: The field name.
             value: The callable.
             field_object: The field.
-            assignments: The values to assign, by field name - added to.
+
+        Returns:
+            Whether there is a value to assign now, and the value.
         """
         if Field._is_async_default(value):
             InstanceInitialization.add_pending_default(obj, key, value)
-        else:
-            assignments.append((key, field_object.to_python(value())))
+            return False, None
+        return True, field_object.to_python(value())
 
     @staticmethod
     def raise_for_computed_fields(model: type[Model], values: dict[str, Any]) -> NoReturn:

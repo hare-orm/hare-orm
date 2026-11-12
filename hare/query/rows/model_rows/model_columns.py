@@ -5,7 +5,7 @@ from dataclasses import dataclass, field as dataclass_field
 from operator import itemgetter
 from typing import TYPE_CHECKING, Any
 
-from hare.models.instances.dirty_fields import DirtyFields
+from hare.native.native_modules import NativeModules
 from hare.query.rows.native.hydration_layout import HydrationLayout
 from hare.query.rows.row_column import RowColumn
 from hare.query.rows.row_layout import RowLayout
@@ -28,6 +28,8 @@ class ModelColumns:
         path: The relation path to the instance - empty for the queried model itself.
         is_related: Whether the columns are those of a joined relation - all NULL when the
             LEFT JOIN matched no row.
+        native_layout: How the instances are made from the rows (``rust.native.rows.ModelRowLayout``) -
+            made once with the columns, so a plan keeping the columns keeps it too.
     """
 
     model: type[Model]
@@ -38,12 +40,14 @@ class ModelColumns:
     is_related: bool = False
     row_layout: RowLayout = dataclass_field(init=False)
     field_names: tuple[str, ...] = dataclass_field(init=False)
+    native_layout: Any = dataclass_field(init=False, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         self.field_names = tuple(map(itemgetter(0), self.entries))
         self.row_layout = RowLayout(
             tuple(RowColumn(key, reader) for (_name, _field, reader), key in zip(self.entries, self.keys, strict=True))
         )
+        self.native_layout = NativeModules.rows.ModelRowLayout(self)
 
     @staticmethod
     def build(
@@ -89,25 +93,3 @@ class ModelColumns:
             path,
             is_related,
         )
-
-    def hydrate(self, row: Any, connection_alias: str | None) -> Any:
-        """Read one row using Python field semantics and initialize its loaded state.
-
-        An all-NULL joined row represents an absent related object. Missing selected fields
-        remain unloaded; constructing a database result does not invoke defaults or __init__.
-        """
-        if self.is_related and self.row_layout.is_absent(row):
-            return None
-        model = self.model
-        meta = model._meta
-        obj = model.__new__(model)
-        if self.is_partial:
-            object.__setattr__(obj, "_partial", True)
-        object.__setattr__(obj, "_saved_in_db", True)
-        if meta.default_custom_generated_pk:
-            object.__setattr__(obj, "_custom_generated_pk", True)
-        object.__setattr__(obj, "_connection_alias", connection_alias)
-        self.row_layout.assign(obj, row, self.field_names)
-        if meta.track_dirty_fields:
-            DirtyFields.snapshot_dirty_fields(obj)
-        return obj

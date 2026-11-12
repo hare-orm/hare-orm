@@ -12,9 +12,9 @@ from hare.ddl.indexes.index import Index
 from hare.ddl.security.grant import Grant
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.fields.relations.swappable_model_reference import SwappableModelReference
+from hare.inspectdb.enums import SchemaPartType
 from hare.inspectdb.introspection.composite_foreign_key_info import CompositeForeignKeyInfo
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
-from hare.inspectdb.introspection.enums import SchemaPartType
 from hare.inspectdb.introspection.foreign_key_info import ForeignKeyInfo
 from hare.inspectdb.introspection.index_info import IndexInfo
 from hare.inspectdb.introspection.schema_part import SchemaPart

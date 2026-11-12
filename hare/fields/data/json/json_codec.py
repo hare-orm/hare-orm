@@ -2,27 +2,28 @@ from __future__ import annotations
 
 import datetime
 import json
-from typing import Any, ClassVar, cast
+from collections.abc import Callable
+from typing import Any, ClassVar
 from uuid import UUID
 
-from hare.fields.constants import JSON_LONG_INTEGER_MARKER, JSON_LONG_INTEGER_MIN_DIGITS
-from hare.fields.data.constants import JSON_DIGIT_MARKER_TABLE
+import orjson
+
 from hare.native.native_modules import NativeModules
 
 
 class JsonCodec:
-    """The default JSONField encoder/decoder pair - orjson (an optional accelerator) when it's
-    installed, the standard library otherwise."""
-
-    orjson: Any
-    try:
-        import orjson
-    except ImportError:
-        orjson = None
+    """The default JSONField encoder/decoder pair - orjson, and the standard library's encoder for an
+    integer past orjson's range."""
 
     #: rust.native.rows.check_json_storable() - JSONField.check_storable_value()'s walk, done
-    #: natively - None without the compiled accelerator or with a build without it.
-    storable_value_checker: ClassVar[Any] = getattr(NativeModules.rows, "check_json_storable", None)
+    #: natively.
+    storable_value_checker: ClassVar[Any] = NativeModules.rows.check_json_storable
+    #: rust.native.rows.loads_json() - decodes JSON text (``str`` or ``bytes``) with orjson, or with the
+    #: native parser reading an integer of any size exactly when a run of 19 digits may be one past
+    #: orjson's range. NaN and Infinity aren't JSON and are refused; invalid text raises ValueError.
+    loads: ClassVar[Callable[[str | bytes], Any]] = NativeModules.rows.loads_json
+    #: Shared ``rust.native.rows.dumps_json()`` encoding: ``orjson.dumps(value, default=default).decode()``.
+    native_dumps: ClassVar[Callable[[Any, Callable[[Any], Any]], str]] = NativeModules.rows.dumps_json
 
     @staticmethod
     def dumps(value: Any) -> str:
@@ -34,21 +35,16 @@ class JsonCodec:
         Returns:
             The JSON text.
         """
-        if JsonCodec.orjson is None:
-            return JsonCodec.dumps_exact(value)
         try:
-            return cast("str", JsonCodec.orjson.dumps(value, default=JsonCodec.get_orjson_compatible_value).decode())
+            return JsonCodec.native_dumps(value, JsonCodec.get_orjson_compatible_value)
         except TypeError:
             # orjson takes no str subclass as a dict key (a StrEnum member) unless told to - a key of
             # another type stays refused.
             if not JsonCodec.has_only_text_keys(value):
                 raise
-        return cast(
-            "str",
-            JsonCodec.orjson.dumps(
-                value, default=JsonCodec.get_orjson_compatible_value, option=JsonCodec.orjson.OPT_NON_STR_KEYS
-            ).decode(),
-        )
+        return orjson.dumps(
+            value, default=JsonCodec.get_orjson_compatible_value, option=orjson.OPT_NON_STR_KEYS
+        ).decode()
 
     @staticmethod
     def has_only_text_keys(value: Any) -> bool:
@@ -116,32 +112,3 @@ class JsonCodec:
         if isinstance(value, float):
             return float(value)
         raise TypeError(f"Type is not JSON serializable: {type(value).__name__}")
-
-    @staticmethod
-    def has_long_integer(text: str | bytes) -> bool:
-        """Whether ``text`` has a digit run long enough to be an integer orjson can't decode exactly.
-
-        Args:
-            text: JSON text.
-
-        Returns:
-            True for a run of at least ``JSON_LONG_INTEGER_MIN_DIGITS`` digits.
-        """
-        if len(text) < JSON_LONG_INTEGER_MIN_DIGITS:
-            return False
-        encoded_text = text.encode() if isinstance(text, str) else bytes(text)
-        return JSON_LONG_INTEGER_MARKER in encoded_text.translate(JSON_DIGIT_MARKER_TABLE)
-
-    @staticmethod
-    def loads(text: str | bytes) -> Any:
-        """Decodes JSON text, reading an integer of any size exactly.
-
-        Args:
-            text: The JSON text.
-
-        Returns:
-            The decoded value.
-        """
-        if JsonCodec.orjson is None or JsonCodec.has_long_integer(text):
-            return json.loads(text)
-        return JsonCodec.orjson.loads(text)

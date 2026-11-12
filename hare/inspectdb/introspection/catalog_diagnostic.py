@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from hare.inspectdb.introspection.enums import CatalogDiagnosticCode
+from hare.inspectdb.enums import CatalogDiagnosticCode
 
 
 @dataclass(frozen=True, slots=True)

@@ -30,8 +30,9 @@ class BindingDelta:
             self.apply(self.after)
 
     def apply(self, attributes: dict[str, Any]) -> None:
-        for name in vars(self.model).keys() - attributes.keys():
+        namespace = vars(self.model)
+        for name in namespace.keys() - attributes.keys():
             type.__delattr__(self.model, name)
         for name, value in attributes.items():
-            if name not in vars(self.model) or vars(self.model)[name] is not value:
+            if name not in namespace or namespace[name] is not value:
                 type.__setattr__(self.model, name, value)

@@ -3,6 +3,9 @@
 `hare.contrib.frameworks.robyn` connects hare to a [Robyn](https://robyn.tech) application. Install it
 with the `robyn` extra (Robyn 0.88, pydantic).
 
+The Robyn 0.88 integration needs Python 3.12–3.14: that Robyn version has no
+Python 3.15 wheel. Core support for Python 3.15 does not remove this restriction.
+
 ```python
 from pydantic import BaseModel, ConfigDict
 

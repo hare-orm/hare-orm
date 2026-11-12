@@ -122,9 +122,10 @@ async def check(dialect, operations: list[Operation], **migration_options) -> li
     client = FakeClient(dialect.name)
     # Safety rules inspect the dialect capabilities, not the recording fake's non-transactional execution mode.
     client.features = dialect.features
+    migration = make_migration(operations, **migration_options)
     return await MigrationSafetyChecker().check(
-        make_migration(operations, **migration_options),
-        get_initial_state(),
+        migration,
+        migration.prepare(get_initial_state()),
         client=client,
         read_catalog=False,
     )
@@ -436,7 +437,7 @@ async def test_nested_safety_uses_each_physical_table_before_and_after_changes(m
             ]
         )
     migration = make_migration([SeparateDatabaseAndState(database_operations=operations)])
-    risks = await MigrationSafetyChecker(large_table_rows=10).check(migration, state, client=client)
+    risks = await MigrationSafetyChecker(large_table_rows=10).check(migration, migration.prepare(state), client=client)
     index_risks = [risk for risk in risks if risk.code is R.ADD_INDEX_WITHOUT_CONCURRENTLY]
     assert len(index_risks) == (0 if scenario == "created" else 1)
     if scenario in {"renamed", "recreated"}:
@@ -520,8 +521,9 @@ async def test_the_database_tells_a_small_table_from_a_large_one(db_simple):
             (3, [MigrationRiskCode.RENAME_FIELD, MigrationRiskCode.ADD_FIELD_BACKFILLS_ROWS]),
             (4, [MigrationRiskCode.RENAME_FIELD]),
         ]:
+            migration = make_migration(operations)
             risks = await MigrationSafetyChecker(large_table_rows=large_table_rows).check(
-                make_migration(operations), state, client=connection
+                migration, migration.prepare(state), client=connection
             )
             assert [risk.code for risk in risks] == expected_codes
         # A model the database has no table for yet holds no rows.
@@ -553,7 +555,8 @@ async def test_a_column_with_no_default_is_a_risk_only_on_a_table_holding_rows(d
         ]:
             if insert_sql is not None:
                 await connection.execute_script(insert_sql)
-            risks = await MigrationSafetyChecker().check(make_migration(operations), state, client=connection)
+            migration = make_migration(operations)
+            risks = await MigrationSafetyChecker().check(migration, migration.prepare(state), client=connection)
             assert [risk.code for risk in risks] == expected_codes
     finally:
         for table in (BOOK_TABLE, AUTHOR_TABLE):
@@ -643,3 +646,22 @@ async def test_an_alter_field_of_the_index_only_creates_or_drops_the_index(db_si
             await connection.execute_script(
                 f"DROP TABLE IF EXISTS {connection.dialect.literals.quote_identifier(table)}"
             )
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+async def test_safety_reads_prepared_states_without_preparing_again(monkeypatch):
+    migration = make_migration([AddField("Book", "isbn", CharField(max_length=13))])
+    state = get_initial_state()
+    prepared = migration.prepare(state)
+    prepare = Mock(side_effect=AssertionError("operation states are already prepared"))
+    monkeypatch.setattr(migration, "prepare", prepare)
+    client = FakeClient(SQLITE_DIALECT.name)
+    client.features = SQLITE_DIALECT.features
+
+    risks = await MigrationSafetyChecker().check(migration, prepared, client=client, read_catalog=False)
+
+    assert MigrationRiskCode.ADD_FIELD_WITHOUT_DEFAULT in {risk.code for risk in risks}
+    assert "isbn" not in state.models[("models", "Book")].fields
+    assert "isbn" in prepared.after.models[("models", "Book")].fields
+    prepare.assert_not_called()

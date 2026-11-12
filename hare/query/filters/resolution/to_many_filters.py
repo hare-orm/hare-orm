@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import QueryError, UnSupportedError
@@ -33,7 +33,6 @@ from hare.sql.terms.term import Term
 if TYPE_CHECKING:
     from hare.models import Model
     from hare.query.expressions.conditions.q import Q
-    from hare.query.filters.lookups.field_lookup import FieldLookup
 
 
 class ToManyFilters:
@@ -195,7 +194,7 @@ class ToManyFilters:
         relation_field = expression_context.model._meta.fields_map.get(relation_name)
         if not isinstance(relation_field, (BackwardForeignKeyRelation, ManyToManyFieldInstance)):
             return None
-        if lookup in {"", "not"} and value is None:
+        if lookup in {Lookup.EXACT, Lookup.NOT} and value is None:
             # Like Django, `relation=None` keeps the rows with no related row at all.
             isnull_kwarg: dict[str, Any] = {f"{relation_name}__isnull": lookup == Lookup.EXACT}
             isnull_q = Q(**isnull_kwarg)
@@ -290,9 +289,7 @@ class ToManyFilters:
         target_column_name = (
             target_primary_key_attribute_names[0]
             if target_meta.has_primary_key
-            else target_meta.fields_db_projection_reverse[
-                cast("BackwardForeignKeyRelation[Any]", relation_field).relation_source_fields[0]
-            ]
+            else target_meta.fields_db_projection_reverse[relation_field.relation_source_fields[0]]  # type: ignore[union-attr]
         )
         nested_key = f"{relation_name}__{target_column_name}"
         if lookup:
@@ -373,7 +370,7 @@ class ToManyFilters:
 
         relation_name = key.partition("__")[0]
         lookup_info = FilterKwargs.get_key_lookup_info(expression_context, key)
-        filter_value, value_joins, value_field = FilterValues.get_filter_value(expression_context, key, value)
+        filter_value, value_joins, _ = FilterValues.get_filter_value(expression_context, key, value)
         _, _, relation_joins = RelationFilters.get_relation_joins(
             condition,
             expression_context,
@@ -383,11 +380,11 @@ class ToManyFilters:
             through_only=LookupPaths.crosses_connections(relation_field),
         )
         through_join = relation_joins[0]
-        criterion, _, _, _, _, operator, encoded_value = FilterKwargs.process_filter_kwarg(
+        criterion, _, _, encoder_field, value_encoder, operator, encoded_value = FilterKwargs.process_filter_kwarg(
             expression_context, lookup_info, filter_value, expression_context.table, join_table=through_join[0]
         )
         modifier = QueryModifier(joins=value_joins) & QueryModifier(where_criterion=criterion, joins=[through_join])
-        if not reads_plain_value or filter_value is not value:
+        if not reads_plain_value or filter_value is not value or encoder_field is None:
             return modifier, None
         value_reference = FilterValues.get_value_reference(
             expression_context,
@@ -395,8 +392,8 @@ class ToManyFilters:
             operator,
             filter_value,
             encoded_value,
-            relation_field,
-            cast("FieldLookup", lookup_info.field_lookup).value_encoder,
+            encoder_field,
+            value_encoder,
         )
         if value_reference is None:
             return modifier, None

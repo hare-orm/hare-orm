@@ -86,7 +86,15 @@ def test_stored_keys_preserve_conversion_dispatch_and_order(count, conversion, m
         types.get_native_key_type(field)
     objs = [Book(name="BOOK" if index != 1 else None, payload={"a": [index, None]}) for index in range(count)]
     events.clear()
-    expected = [ReturnedValues.get_stored_key(types, selected, ("name", "payload"), obj) for obj in objs]
+    expected = [
+        tuple(
+            None
+            if value is None
+            else ReturnedValues.get_hashable(types.get_python_value(field, types.get_db_value(field, value, obj)))
+            for field, value in zip(selected, (obj.name, obj.payload), strict=True)
+        )
+        for obj in objs
+    ]
     expected_events = list(events)
     events.clear()
     assert ReturnedValues.get_stored_keys(types, selected, ("name", "payload"), objs) == expected

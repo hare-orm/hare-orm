@@ -24,8 +24,7 @@ class InstanceValues:
 
     __slots__ = ("old_values",)
 
-    #: The compiled ``rust.native.rows`` - remembers the values of many instances in one call; None
-    #: where it isn't built.
+    #: The compiled ``rust.native.rows`` - remembers the values of many instances in one call.
     native_rows: ClassVar[Any] = NativeModules.rows
 
     def __init__(self) -> None:
@@ -43,18 +42,7 @@ class InstanceValues:
         """
         if not field_names:
             return
-        if self.native_rows is not None:
-            self.native_rows.capture_attribute_values(self.old_values, objs, list(field_names), ROLLBACK_RESTORE_UNSET)
-            return
-        old_values = self.old_values
-        for instance in objs:
-            entry = old_values.get(id(instance))
-            if entry is None:
-                entry = old_values[id(instance)] = (instance, {})
-            values = entry[1]
-            for name in field_names:
-                if name not in values:
-                    values[name] = getattr(instance, name, ROLLBACK_RESTORE_UNSET)
+        self.native_rows.capture_attribute_values(self.old_values, objs, list(field_names), ROLLBACK_RESTORE_UNSET)
 
     def bump_optimistic_lock(self, obj: Model, field_name: str, connection: DatabaseClient | None = None) -> Any:
         """Increments the optimistic lock field of an obj, remembering its value.
@@ -104,16 +92,16 @@ class InstanceValues:
         if not connection.is_transaction_client:
             # Outside a transaction a write can't be rolled back.
             return
-        RollbackRestores.register_rollback_restores(connection, self.get_rollback_restores(instances))
+        RollbackRestores.register_snapshots(connection, self.get_rollback_snapshots(instances))
 
-    def get_rollback_restores(self, instances: Iterable[Model] | None = None) -> list[tuple[Model, str, Any]]:
+    def get_rollback_snapshots(self, instances: Iterable[Model] | None = None) -> list[InstanceSnapshot]:
         """The new values ``keep()`` registers putting back - each changed one with its old value.
 
         Args:
             instances: The instances whose write succeeded; every remembered one when None.
 
         Returns:
-            ``(instance, field name, old value)`` of each.
+            One independent snapshot per instance, with changed fields in capture order.
         """
         entries = (
             list(self.old_values.values())
@@ -121,8 +109,13 @@ class InstanceValues:
             else [entry for instance in instances if (entry := self.old_values.get(id(instance))) is not None]
         )
         return [
-            (instance, name, old_value)
+            InstanceSnapshot(
+                instance,
+                {
+                    name: old_value
+                    for name, old_value in values.items()
+                    if getattr(instance, name, ROLLBACK_RESTORE_UNSET) is not old_value
+                },
+            )
             for instance, values in entries
-            for name, old_value in values.items()
-            if getattr(instance, name, ROLLBACK_RESTORE_UNSET) is not old_value
         ]

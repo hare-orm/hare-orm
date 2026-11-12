@@ -52,7 +52,7 @@ class WindowFunction(ExpressionDeclaration, Plannable, abstract=True):
             QueryError: It isn't one.
         """
 
-        if not isinstance(field, str | Expression) or not field:
+        if not isinstance(field, (str, Expression)) or not field:
             raise QueryError(f"{function_name}() reads a field name or an expression, got {field!r}")
 
     @staticmethod

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar
 
 from hare.dialects.base.schema.plans.enums import SchemaEffect
 from hare.dialects.clickhouse.schema.constants import CLICKHOUSE_REBUILD_CHECK_PREVIEW
@@ -28,7 +28,7 @@ class ClickhouseRebuildCheck:
 
     async def execute(self, editor: BaseSchemaEditor) -> None:
         """Reject a placement that would copy only a fraction of the table's rows."""
-        schema_editor = cast("ClickhouseSchemaEditor", editor)
+        schema_editor: ClickhouseSchemaEditor = editor  # type: ignore[assignment]
         if schema_editor.collect_sql:
             schema_editor.collected_sql.append(CLICKHOUSE_REBUILD_CHECK_PREVIEW)
             return

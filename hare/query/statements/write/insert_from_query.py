@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Generator, Sequence
 from operator import itemgetter
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import FieldError, QueryError, UnSupportedError
@@ -309,8 +309,8 @@ class InsertFromQuery:
         """
         model = self.target.model
         execution_query = self.target._get_execution_query(for_write=True)
-        WrittenTargetChecks.raise_if_refused_calls(execution_query)
-        connection = cast("DatabaseClient", execution_query._connection)
+        WrittenTargetChecks.raise_if_refused_calls(execution_query, execution_query.dialect)
+        connection: DatabaseClient = execution_query._connection  # type: ignore[assignment]
         self.raise_if_literals_refused(self.source, connection.dialect)
         constant_columns = self.get_constant_columns()
         source = self.source
@@ -377,7 +377,7 @@ class InsertFromQuery:
             insert_query = insert_query.returning(*capture_needs.columns)
         command = WriteStatement(insert_query.get_sql(), parameters, returns_rows=returns_rows)
         if capture_needs is not None and not returns_rows:
-            return await WriteSteps.run_whole(
+            return await WriteSteps.get_whole_run(
                 connection,
                 self._insert_captured_by_reading(connection, capture_needs, command, select_sql, columns),
             )

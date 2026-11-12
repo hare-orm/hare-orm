@@ -150,11 +150,10 @@ async def test_json_object_writes_every_type(rows):
 
 @pytest.mark.asyncio
 async def test_json_object_writes_a_float_as_its_database_does(rows):
-    """PostgreSQL writes a double's shortest digits, SQLite 15 significant digits before 3.53 and 17
-    from 3.53 on."""
+    """JSON objects use their database's number format, independently of text casts."""
     ratios = [value["ratio"] for value in await get_objects(JSONObject(ratio="ratio"))]
     if is_sqlite():
-        assert ratios == [1.5, 1e20, 2.0, float(SqliteFloatText.get(0.1 + 0.2)), 1e-07]
+        assert ratios == [1.5, 1e20, 2.0, float(SqliteFloatText.get_json(0.1 + 0.2)), 1e-07]
     else:
         assert ratios == [1.5, 10**20, 2, 0.30000000000000004, 1e-07]
 
@@ -479,10 +478,10 @@ async def get_ids(queryset: Any) -> list[int]:
 @pytest.mark.parametrize("column", COLUMNS)
 async def test_json_path_compares_with_its_typed_column(rows, column):
     """The value a JSONObject wrote from a column compares equal to the column itself, both ways -
-    except a float SQLite before 3.53 wrote to 15 significant digits."""
+    except when SQLite's JSON representation rounds a floating-point value."""
     queryset = TypedRow.objects.annotate(written=JSONObject(**{column: column}))
     expected = [row.id for row in rows if getattr(row, column) is not None]
-    cut = [4] if column == "ratio" and is_sqlite() and not SqliteFloatText.keeps_every_digit() else []
+    cut = [4] if column == "ratio" and is_sqlite() and float(SqliteFloatText.get_json(0.1 + 0.2)) != 0.1 + 0.2 else []
     expected = [row_id for row_id in expected if row_id not in cut]
     assert await get_ids(queryset.filter(**{f"written__{column}": F(column)})) == expected
     assert await get_ids(queryset.filter(**{f"written__{column}__gte": F(column)})) == expected

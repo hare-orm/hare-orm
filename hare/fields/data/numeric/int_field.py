@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeVar, overload
 
@@ -11,6 +12,7 @@ from hare.fields.narrowing.integer_range_limit import IntegerRangeLimit
 from hare.fields.narrowing.narrowing_limit import NarrowingLimit
 from hare.fields.validators.limits.max_value_validator import MaxValueValidator
 from hare.fields.validators.limits.min_value_validator import MinValueValidator
+from hare.native.native_modules import NativeModules
 from hare.query.enums import Lookup
 from hare.sql import functions
 from hare.sql.terms.values.value_wrapper import ValueWrapper
@@ -120,6 +122,13 @@ class IntField(Field[TInt]):
             value = Field.to_python(self, value)
         return self.to_python(value)
 
+    def get_db_value_reader(self) -> Callable[[Any], Any]:
+        # This class's from_db_value() and to_python() return NULL and an int unchanged.
+        field_class = type(self)
+        if field_class.from_db_value is IntField.from_db_value and field_class.to_python is IntField.to_python:
+            return NativeModules.rows.TypedColumnReader(int, self.from_db_value)
+        return super().get_db_value_reader()
+
     def to_lookup_values(self, values: list[Any], instance: type[Model] | Model | None) -> list[Any]:
         # Plain ints - every key of a long `id__in` list, say - are checked in one pass.
         if type(self).to_lookup_value is IntField.to_lookup_value and type(self).to_db_value is IntField.to_db_value:
@@ -127,11 +136,6 @@ class IntField(Field[TInt]):
             if validated_values is not None:
                 return validated_values
         return [self.to_lookup_value(value, instance) for value in values]
-
-    def to_lookup_value(self, value: Any, instance: type[Model] | Model | None) -> Any:
-        # Equality and membership take an int alone, as a write does - a comparison takes a fraction
-        # too (get_compared_value()).
-        return self.to_db_value(value, instance)
 
     def get_compared_value(self, value: Any, instance: type[Model] | Model, dialect: Dialect) -> Any:
         """The value a comparison (``gt``/``gte``/``lt``/``lte``/``range``) binds - a float or a
@@ -236,3 +240,9 @@ class IntField(Field[TInt]):
             else:
                 kwargs["generated"] = self.generated
         return path, args, kwargs
+
+    def get_unchanged_write_types(self, converter: Callable[..., Any] | None) -> tuple[type, ...] | None:
+        # This class's to_db_value() writes an int as it is.
+        if converter is None and type(self).to_db_value is IntField.to_db_value:
+            return (int,)
+        return None

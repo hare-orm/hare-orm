@@ -34,7 +34,7 @@ class MigrationTableRows:
         self.client = client
         self.large_table_rows = large_table_rows
         self.tables = {
-            self.get_identity(model): TableRowEstimate(self.get_identity(model), count_pending=read_catalog)
+            (identity := self.get_identity(model)): TableRowEstimate(identity, count_pending=read_catalog)
             for model in state.models.values()
             if self.has_physical_table(model)
         }

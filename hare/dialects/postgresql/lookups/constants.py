@@ -4,6 +4,8 @@ import datetime
 import decimal
 import uuid
 
+from hare.query.enums import Lookup
+
 #: Array element SQL type a large ``__in``/``__not_in`` list with no known field type is bound as,
 #: by the Python type of its values - looked up along each value's MRO, so an ``IntEnum`` member
 #: binds as a plain integer. ``datetime`` is decided separately (aware vs naive), since it is also a
@@ -42,3 +44,19 @@ TRIGRAM_EXTENSION = "pg_trgm"
 
 #: The extension ``unaccent()`` comes from.
 UNACCENT_EXTENSION = "unaccent"
+
+#: The generic lookups an ordered PostgreSQL value keeps (``ltree``, network addresses) - equality, membership,
+#: ``isnull`` and the comparisons.
+ORDERED_VALUE_GENERIC_LOOKUPS = (
+    Lookup.EXACT,
+    Lookup.NOT,
+    Lookup.IN,
+    Lookup.NOT_IN,
+    Lookup.ISNULL,
+    Lookup.NOT_ISNULL,
+    Lookup.GTE,
+    Lookup.LTE,
+    Lookup.GT,
+    Lookup.LT,
+    Lookup.RANGE,
+)

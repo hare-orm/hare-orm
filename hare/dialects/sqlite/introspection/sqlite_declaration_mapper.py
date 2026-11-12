@@ -21,10 +21,10 @@ from hare.dialects.sqlite.constants import (
 from hare.dialects.sqlite.introspection.sqlite_constraint_clauses import SqliteConstraintClauses
 from hare.dialects.sqlite.introspection.sqlite_foreign_key_clauses import SqliteForeignKeyClauses
 from hare.fields.enums import OnDelete
+from hare.inspectdb.enums import CatalogDiagnosticCode
 from hare.inspectdb.introspection.catalog_diagnostic import CatalogDiagnostic
 from hare.inspectdb.introspection.catalog_snapshot import CatalogSnapshot
 from hare.inspectdb.introspection.composite_foreign_key_info import CompositeForeignKeyInfo
-from hare.inspectdb.introspection.enums import CatalogDiagnosticCode
 from hare.inspectdb.introspection.foreign_key_info import ForeignKeyInfo
 from hare.inspectdb.introspection.index_info import IndexInfo
 from hare.inspectdb.introspection.schema_introspector import SchemaIntrospector
@@ -307,7 +307,7 @@ class SqliteDeclarationMapper:
                         target_table=ordered_rows[0]["table"],
                         on_delete=(
                             OnDelete(ordered_rows[0]["on_delete"])
-                            if ordered_rows[0]["on_delete"] in set(OnDelete)
+                            if ordered_rows[0]["on_delete"] in OnDelete
                             else OnDelete.CASCADE
                         ),
                         on_update=ordered_rows[0]["on_update"],
@@ -320,7 +320,7 @@ class SqliteDeclarationMapper:
                 column=row["from"],
                 target_table=row["table"],
                 target_column=row["to"],
-                on_delete=OnDelete(row["on_delete"]) if row["on_delete"] in set(OnDelete) else OnDelete.CASCADE,
+                on_delete=OnDelete(row["on_delete"]) if row["on_delete"] in OnDelete else OnDelete.CASCADE,
                 to_field=row["to"] if target_pk_columns != [row["to"]] else None,
                 on_update=row["on_update"],
                 deferral=deferrals[foreign_key_id],

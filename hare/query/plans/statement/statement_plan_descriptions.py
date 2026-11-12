@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.query.expressions.subqueries.outer_scope import OuterScope
 from hare.query.lookup_info.lookup_paths import LookupPaths
@@ -15,7 +15,7 @@ from hare.query.plans.plan_origins import PlanOrigins
 from hare.query.query_connection import QueryConnection
 from hare.query.queryset.options.query_options import QueryOptions
 from hare.query.statements.building.query_annotations import QueryAnnotations
-from hare.time import Timezone
+from hare.time.zone_settings import ZoneSettings
 
 if TYPE_CHECKING:
     from hare.fields.relations.fields.relational_field import RelationalField
@@ -243,7 +243,7 @@ class StatementPlanDescriptions:
         values: list[Any] = []
         origins: list[Any] | None = [] if PlanOrigins.records else None
         for path, condition in paths_and_conditions:
-            relation = cast("RelationalField[Any]", LookupPaths.expand_expression(model, path)[-1])
+            relation: RelationalField[Any] = LookupPaths.expand_expression(model, path)[-1]  # type: ignore[assignment]
             related_model = relation.related_model
             description = condition.get_plan_description(PlanContext(model=related_model))
             if description is None:
@@ -417,7 +417,7 @@ class StatementPlanDescriptions:
         Returns:
             The zone's name, or the mark of naive datetimes with the machine's zone name.
         """
-        return Timezone.get_rendered_zone_key()
+        return ZoneSettings.get_rendered_zone_key()
 
     @staticmethod
     def get_visibility_structure(query: AwaitableQuery[Any]) -> tuple[Any, ...]:

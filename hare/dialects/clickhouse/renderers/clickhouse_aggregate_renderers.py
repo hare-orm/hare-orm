@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import copy
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from hare.dialects.clickhouse.functions.aggregates.parametric_aggregate_function import ParametricAggregateFunction
 from hare.dialects.clickhouse.functions.aggregates.parametric_analytic_function import ParametricAnalyticFunction
@@ -66,7 +66,7 @@ class ClickhouseAggregateRenderers:
         Raises:
             UnSupportedError: The orderings go both up and down - ClickHouse sorts an array one way.
         """
-        aggregate = cast("DistinctOptionFunction", function)
+        aggregate: DistinctOptionFunction = function  # type: ignore[assignment]
         orderings = aggregate._argument_orderings
         directions = {order is None or order.is_ascending for _, order in orderings}
         if len(directions) > 1:

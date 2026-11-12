@@ -6,7 +6,6 @@ from mypy.nodes import ARG_NAMED, ARG_POS, CallExpr, ListExpr, MemberExpr, SetEx
 
 from hare.contrib.mypy.annotation_types import AnnotationTypes
 from hare.contrib.mypy.constants import (
-    LOOKUP_SEPARATOR,
     MULTI_VALUED_RELATION_MESSAGE,
     NOT_DIRECT_FIELD_MESSAGE,
     NOT_RELATION_MESSAGE,
@@ -17,6 +16,7 @@ from hare.contrib.mypy.constants import (
 from hare.contrib.mypy.mypy_types import MypyTypes
 from hare.exceptions import HareError
 from hare.fields.constants import GENERIC_FOREIGN_KEY_TYPE_FIELD
+from hare.query.constants import LOOKUP_SEPARATOR
 from hare.query.generic_foreign_keys.generic_foreign_key_paths import GenericForeignKeyPaths
 from hare.query.lookup_info.lookup_path import LookupPath
 

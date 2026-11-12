@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.exceptions import FieldError
 from hare.fields.generated_field import GeneratedField
 from hare.query.expressions import Expression
 from hare.query.queryset.constants import DATES_ORDERS, DATES_VALUE_ALIAS
+from hare.sql.order import Order
 
 if TYPE_CHECKING:
     from hare.fields.field import Field
@@ -67,12 +68,11 @@ class DateLists:
         Returns:
             A ``values_list(flat=True)`` queryset.
         """
-        ordering = DATES_VALUE_ALIAS if order == "ASC" else f"-{DATES_VALUE_ALIAS}"
-        return cast(
-            "SameQuerySet",
-            queryset._alias({DATES_VALUE_ALIAS: truncated})
+        ordering = DATES_VALUE_ALIAS if order == Order.ASC else f"-{DATES_VALUE_ALIAS}"
+        return (
+            queryset._alias({DATES_VALUE_ALIAS: truncated})  # type: ignore[return-value]
             .filter(**{f"{DATES_VALUE_ALIAS}__isnull": False})
             .order_by(ordering)
             .values_list(DATES_VALUE_ALIAS, flat=True)
-            .distinct(),
+            .distinct()
         )

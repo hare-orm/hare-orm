@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import patch
 
 from hare.models import Model
+from hare.query.plans.call_signatures.call_signature_plans import CallSignaturePlans
 from hare.query.plans.statement.statement_plan_runs import StatementPlanRuns
 from hare.query.plans.statement.statement_plans import StatementPlans
 
@@ -19,7 +20,7 @@ class StatementPlanChecks:
         """Require populated model caches and preserve each plan's identity across a repeated read."""
         previous = []
         for model in models:
-            bucket = StatementPlans.decode_plans.get_model_bucket(model)
+            bucket = StatementPlans.decode_plans.get_bucket(model)
             assert bucket, f"{model.__name__} has no decode plans to reuse"
             previous.append((bucket, dict(bucket)))
         yield
@@ -28,9 +29,14 @@ class StatementPlanChecks:
             assert all(bucket[key] is plan for key, plan in plans.items())
 
     @staticmethod
-    def full_build() -> Any:
+    @contextmanager
+    def full_build() -> Generator[None, None, None]:
         """Runs the queries of its block built in full, as they ran before plans."""
-        return patch.object(StatementPlanRuns, "run_on_plan", lambda *args, **kwargs: False)
+        with (
+            patch.object(StatementPlanRuns, "find_plan", return_value=None),
+            patch.object(CallSignaturePlans, "find_with_value_positions", return_value=None),
+        ):
+            yield
 
     @classmethod
     async def assert_a_later_query_runs_on_its_plan(

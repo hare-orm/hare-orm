@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import partial
-from typing import cast
 
 from hare.query.statements.select.values.constants import WINDOW_FILTER_OPERAND_CRITERION_TYPES
 from hare.sql.builder.tables.selectable import Selectable
@@ -31,9 +30,7 @@ class WindowFilterWrapping:
         Returns:
             The rewritten term.
         """
-        return cast(
-            "Term", NodeStructure.rewrite(term, partial(WindowFilterWrapping.get_replacement, get_column=get_column))
-        )
+        return NodeStructure.rewrite(term, partial(WindowFilterWrapping.get_replacement, get_column=get_column))  # type: ignore[return-value]
 
     @staticmethod
     def get_replacement(node: Node, *, get_column: Callable[[Term], Field]) -> Node | None:

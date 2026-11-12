@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, TypeGuard, cast
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 from hare.core.apps.model_binding_graph import ModelBindingGraph
 from hare.fields.field import Field
@@ -11,6 +11,7 @@ from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
 
 if TYPE_CHECKING:
+    from hare.core.apps.declarations import TableIdentity
     from hare.migrations.state.migration_environment import MigrationEnvironment
     from hare.migrations.state.model_state import ModelState
 
@@ -102,33 +103,39 @@ class StateRendering:
         Args:
             model_states: The state's model states.
         """
-        apps = cast("StateApps", self.apps)
+        apps: StateApps = self.apps  # type: ignore[assignment]
         added_keys, changed_keys, removed_keys = self.added_keys, self.changed_keys, self.removed_keys
         with ModelBindingGraph(apps):
-            if not changed_keys and self.removes_in_place(removed_keys):
+            models_by_table = self.get_models_by_table() if changed_keys or removed_keys else {}
+            if not changed_keys and self.removes_in_place(removed_keys, models_by_table):
                 self.remove_models(removed_keys)
                 self.add_models([key for key in added_keys if key in model_states], model_states)
             else:
                 # Find dependants while the previous classes are still registered.
-                related_keys: set[tuple[str, str]] = set()
-                for key in changed_keys | removed_keys:
-                    related_keys |= self.find_related_models(key)
+                related_keys = self.get_related_model_keys(changed_keys | removed_keys, models_by_table)
                 for app_label, model_name in removed_keys:
                     apps.unregister_model(app_label, model_name)
                 reloaded_keys = {key for key in related_keys | changed_keys | added_keys if key in model_states}
                 self.reload_models(reloaded_keys, model_states)
         self.added_keys, self.changed_keys, self.removed_keys = set(), set(), set()
 
-    def removes_in_place(self, keys: set[tuple[str, str]]) -> bool:
+    def removes_in_place(
+        self, keys: set[tuple[str, str]], models_by_table: dict[TableIdentity, list[type[Model]]]
+    ) -> bool:
         """Whether removed models can be taken out of the rendered classes in place - no model left is a
         subclass of one of them or points at one of them.
 
         Args:
             keys: The removed models' (app, model name) keys.
+            models_by_table: Historical names grouped by physical table.
         """
-        apps = cast("StateApps", self.apps)
+        apps: StateApps = self.apps  # type: ignore[assignment]
         removed_models = {apps.get_model(".".join(key)) for key in keys if StateRendering.is_rendered(apps, key)}
         for model in removed_models:
+            table_key = apps.get_table_identity(model, model._meta.schema, model._meta.db_table)
+            if any(alias not in removed_models for alias in models_by_table[table_key]):
+                # Its reverse accessors must be rebuilt for the surviving historical name.
+                return False
             for subclass in model.__subclasses__():
                 subclass_app = getattr(subclass._meta, "app", None) if issubclass(subclass, Model) else None
                 if subclass not in removed_models and subclass_app is not None:
@@ -144,7 +151,7 @@ class StateRendering:
             ):
                 return False
             for name in meta.fetch_fields:
-                target = cast("RelationalField[Model]", meta.fields_map[name]).related_model
+                target = meta.fields_map[name].related_model  # type: ignore[attr-defined]
                 if target is None or target in removed_models:
                     continue
                 # A through model points at the model whose many-to-many relation goes through it.
@@ -161,12 +168,12 @@ class StateRendering:
         Args:
             keys: The removed models' (app, model name) keys.
         """
-        apps = cast("StateApps", self.apps)
+        apps: StateApps = self.apps  # type: ignore[assignment]
         removed_models = {apps.get_model(".".join(key)) for key in keys if StateRendering.is_rendered(apps, key)}
         targets: dict[type[Model], None] = {}
         for model in removed_models:
             for field_name in model._meta.fetch_fields:
-                target = cast("RelationalField[Model]", model._meta.fields_map[field_name]).related_model
+                target = model._meta.fields_map[field_name].related_model  # type: ignore[attr-defined]
                 if target is not None and target not in removed_models:
                     targets[target] = None
         for target in targets:
@@ -205,23 +212,32 @@ class StateRendering:
         """
         return key[1] in apps.apps.get(key[0], {})
 
-    def find_related_models(self, key: tuple[str, str]) -> set[tuple[str, str]]:
-        """A model and every model it reaches through subclassing or a relation, transitively, as
-        rendered now.
+    def get_models_by_table(self) -> dict[TableIdentity, list[type[Model]]]:
+        """Group rendered historical names so shared reverse accessors do not hide dependencies."""
+        apps: StateApps = self.apps  # type: ignore[assignment]
+        models_by_table: dict[TableIdentity, list[type[Model]]] = {}
+        for model in apps.get_models_iterable():
+            table_key = apps.get_table_identity(model, model._meta.schema, model._meta.db_table)
+            models_by_table.setdefault(table_key, []).append(model)
+        return models_by_table
 
-        Args:
-            key: The model's (app, model name) key.
+    def get_related_model_keys(
+        self, keys: set[tuple[str, str]], models_by_table: dict[TableIdentity, list[type[Model]]]
+    ) -> set[tuple[str, str]]:
+        """Find dependants of all changed roots before changing the rendered registry.
 
-        Returns:
-            The keys, the model's own among them.
+        A single visited set covers overlapping relation graphs, including inheritance,
+        hidden reverse relations and models sharing a physical table. Missing roots remain
+        in the result so the caller can reconcile them with the new model states.
         """
-        apps = cast("StateApps", self.apps)
-        related_keys: set[tuple[str, str]] = {key}
-        try:
-            model = apps.get_model(".".join(key))
-        except KeyError:
-            return related_keys
-        pending_models = self.get_related_models(model)
+        apps: StateApps = self.apps  # type: ignore[assignment]
+        related_keys: set[tuple[str, str]] = set()
+        pending_models: list[type[Model]] = []
+        for key in keys:
+            try:
+                pending_models.append(apps.get_model(".".join(key)))
+            except KeyError:
+                related_keys.add(key)
         while pending_models:
             related_model = pending_models.pop()
             app_label = related_model._meta.app
@@ -232,7 +248,11 @@ class StateRendering:
                 continue
             related_keys.add(related_key)
             pending_models.extend(self.get_related_models(related_model))
-        return related_keys
+            table_key = apps.get_table_identity(
+                related_model, related_model._meta.schema, related_model._meta.db_table
+            )
+            pending_models.extend(models_by_table.get(table_key, ()))
+        return related_keys | keys
 
     @staticmethod
     def get_related_models(model: type[Model]) -> list[type[Model]]:
@@ -246,7 +266,7 @@ class StateRendering:
         """
         related_models = [subclass for subclass in model.__subclasses__() if issubclass(subclass, Model)]
         for field_name in model._meta.fetch_fields:
-            field = cast("RelationalField[Model]", model._meta.fields_map[field_name])
+            field: RelationalField[Model] = model._meta.fields_map[field_name]  # type: ignore[assignment]
             # A target not rendered yet (a CreateModel still to come) has no class.
             if field.related_model is not None:
                 related_models.append(field.related_model)
@@ -262,7 +282,7 @@ class StateRendering:
             keys: The models' (app, model name) keys.
             model_states: The state's model states.
         """
-        apps = cast("StateApps", self.apps)
+        apps: StateApps = self.apps  # type: ignore[assignment]
         for app_label, model_name in keys:
             apps.unregister_model(app_label, model_name)
             apps.register_model(app_label, model_states[(app_label, model_name)].render())
@@ -281,7 +301,7 @@ class StateRendering:
         """
         if not keys:
             return
-        apps = cast("StateApps", self.apps)
+        apps: StateApps = self.apps  # type: ignore[assignment]
         for app_label, model_name in keys:
             apps.register_model(app_label, model_states[(app_label, model_name)].render())
         uninited_models = [model for app in apps.apps.values() for model in app.values() if not model._meta._inited]
@@ -293,7 +313,7 @@ class StateRendering:
                 continue
             linked_models[linked_model] = None
             for field_name in linked_model._meta.fetch_fields:
-                related_model = cast("RelationalField[Model]", linked_model._meta.fields_map[field_name]).related_model
+                related_model = linked_model._meta.fields_map[field_name].related_model  # type: ignore[attr-defined]
                 if related_model is not None:
                     linked_models[related_model] = None
         for linked_model in linked_models:

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING, Any, ClassVar, Generator, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Generator, TypeVar
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.core.connections.connections import Connections
-from hare.core.hare_context import HareContext
+from hare.core.connections.model_connection_choice import ModelConnectionChoice
 from hare.exceptions import (
-    ConfigurationError,
     FieldError,
     IncompleteInstanceError,
     NoValuesFetched,
@@ -20,7 +19,6 @@ from hare.models.class_building.generic_foreign_keys import GenericForeignKeys
 from hare.models.constants import (
     CLONE_PK_NOT_GIVEN,
     EMPTY_PENDING_DEFAULTS,
-    MISSING_DEFAULT_CONNECTION_MESSAGE,
     PARTIAL_INSTANCE_WITHOUT_KEY_MESSAGE,
 )
 from hare.models.deletion.cascade.deletion_collector import DeletionCollector
@@ -41,6 +39,7 @@ from hare.models.write.declarations import RollbackRestoreLayer
 from hare.models.write.instance_writer import InstanceWriter
 from hare.models.write.rules.tenant_write_rules import TenantWriteRules
 from hare.models.write.write_steps import WriteSteps
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.managers.base_manager import BaseManager
 from hare.query.queryset.relations.related_queryset.relation_rows import RelationRows
 from hare.sql import Table
@@ -94,29 +93,8 @@ class Model(metaclass=ModelMeta):
             InstanceInitialization.raise_for_computed_fields(type(self), kwargs)
         if meta.generic_foreign_key_fields:
             kwargs = GenericForeignKeys.expand_kwargs(meta, kwargs, apply_defaults=True)
-        # Not field names - set past the overridden __setattr__.
-        _setattr = object.__setattr__
-        _setattr(self, "_saved_in_db", False)
-
-        # Assign defaults for missing fields. A plain column of the new instance is set directly,
-        # as in InstanceInitialization.set_kwargs() - Model.__setattr__ has nothing to refresh on it
-        # yet; a relation, an automatic primary key and a model overriding __setattr__ still go
-        # through it.
-        sets_columns_directly = type(self).__setattr__ is Model.__setattr__
-        fields_db_projection = meta.fields_db_projection
-        generated_pk_field_name = meta.generated_pk_field_name
-        # A field the database computes holds no value until a row of the instance is read.
-        for key in meta.fields.difference(
-            InstanceInitialization.set_kwargs(self, kwargs, assigns_directly=sets_columns_directly),
-            meta.computed_field_names,
-        ):
-            InstanceInitialization.assign_default(
-                self,
-                key,
-                object.__setattr__
-                if sets_columns_directly and key in fields_db_projection and key != generated_pk_field_name
-                else setattr,
-            )
+        # The keywords assigned and every field left out given its default - by the model's constructor.
+        InstanceInitialization.get_constructor(type(self)).construct(self, kwargs)
 
     def __setattr__(self, key: str, value: Any) -> None:
         meta = self._meta
@@ -200,7 +178,7 @@ class Model(metaclass=ModelMeta):
         # internal cache attribute misses at no extra cost.
         if name[:1] != "_" and (self._partial or name in self._meta.fields_map):
             meta = self._meta
-            if name == "pk" or name in meta.primary_key_attribute_names:
+            if name == PRIMARY_KEY_ALIAS or name in meta.primary_key_attribute_names:
                 # The pk property raised too - refresh_from_db() needs the key itself.
                 raise NoValuesFetched(
                     f"{type(self).__name__}.{name} wasn't fetched - a .only()/.defer() query left the primary key "
@@ -312,7 +290,7 @@ class Model(metaclass=ModelMeta):
             for name, part in zip(self._meta.primary_key_attribute, value, strict=True):
                 setattr(self, name, part)
             return
-        setattr(self, cast("str", self._meta.primary_key_attribute), value)
+        setattr(self, self._meta.primary_key_attribute, value)  # type: ignore[arg-type]
 
     pk = property(_get_pk_value, _set_pk_value)
     """The value of the model's primary key - a tuple of a composite one. ``pk`` names the key in
@@ -390,7 +368,7 @@ class Model(metaclass=ModelMeta):
                 # FK/O2O: store at _{key} for property getter, also set source field(s) - one
                 # per composite-PK-target component when the target's PK isn't a single column.
                 _setattr(self, f"_{key}", value)
-                foreign_key_field = cast("RelationalField[Any]", meta.fields_map[key])
+                foreign_key_field: RelationalField[Any] = meta.fields_map[key]  # type: ignore[assignment]
                 if foreign_key_field.to_field_instances:
                     for source_field, to_field_instance in zip(
                         foreign_key_field.source_fields, foreign_key_field.to_field_instances, strict=True
@@ -437,11 +415,11 @@ class Model(metaclass=ModelMeta):
             ValidationError: A field rejects a value.
         """
         meta = self._meta
-        # Unknown keys are dropped here - InstanceInitialization.set_kwargs() raises for them.
+        # Unknown keys are dropped here - the model's constructor raises for them.
         known_data = {
             key: value
             for key, value in data.items()
-            if key == "pk"
+            if key == PRIMARY_KEY_ALIAS
             or key in meta.foreign_key_fields
             or key in meta.one_to_one_fields
             or key in meta.fields_db_projection
@@ -450,7 +428,9 @@ class Model(metaclass=ModelMeta):
             or key in meta.many_to_many_fields
             or key in meta.generic_foreign_key_fields
         }
-        InstanceInitialization.set_kwargs(self, known_data)
+        if meta.generic_foreign_key_fields:
+            known_data = GenericForeignKeys.expand_kwargs(meta, known_data, apply_defaults=False)
+        InstanceInitialization.get_constructor(type(self)).assign(self, known_data)
         return self
 
     @classmethod
@@ -472,20 +452,7 @@ class Model(metaclass=ModelMeta):
                 tenants.
         """
         cls._meta.check_not_swapped()
-        context = HareContext.require_current()
-        router = context.router
-        connection = router.db_for_write(cls) if for_write else router.db_for_read(cls)
-        meta = cls._meta
-        if connection is None:
-            # MetaInfo.connection inlined - the context is already at hand, and this is the hottest path of
-            # the ORM.
-            default_connection = meta.default_connection
-            if default_connection is None:
-                raise ConfigurationError(MISSING_DEFAULT_CONNECTION_MESSAGE.format(model_name=cls.__name__))
-            connection = context.connections.get(default_connection)
-        if meta.checks_tenant_client:
-            meta.check_tenant_client(connection)
-        return connection
+        return ModelConnectionChoice.get(cls, for_write)
 
     @classmethod
     def get_routed_connection(cls, *, for_write: bool = False) -> DatabaseClient:
@@ -504,12 +471,7 @@ class Model(metaclass=ModelMeta):
                 connection.
         """
         cls._meta.check_not_swapped()
-        context = HareContext.require_current()
-        router = context.router
-        connection = router.db_for_write(cls) if for_write else router.db_for_read(cls)
-        if connection is not None:
-            return connection
-        return cls._meta.connection
+        return ModelConnectionChoice.get_unchecked(cls, for_write)
 
     def __await__(self: TModel) -> Generator[Any, None, TModel]:
         async def _self() -> TModel:
@@ -592,14 +554,17 @@ class Model(metaclass=ModelMeta):
         connection = Connections.get_client(using) or InstanceConnections.get_connection_for_instance(self, True)
         if Tenancy.has_tenant_scoped_relations(self.__class__):
             await Tenancy.check_relation_targets(
-                self.__class__, [Tenancy.get_relation_row(self)], connection, update_fields
+                self.__class__,
+                [Tenancy.get_relation_row(self, Tenancy.get_relation_field_names(self.__class__))],
+                connection,
+                update_fields,
             )
         writer = InstanceWriter(self.__class__, connection)
         if self._partial:
             InstanceSaving.check_partial_instance_saving(self, update_fields)
 
         # On a database without transactions the row and its report are one step a cancel can't split.
-        await WriteSteps.run_whole(
+        await WriteSteps.get_whole_run(
             connection,
             InstanceSaving.write_row(
                 self, writer, connection, update_fields, force_create=force_create, force_update=force_update

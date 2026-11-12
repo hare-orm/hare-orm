@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Sequence
 from copy import copy
-from typing import TYPE_CHECKING, Any, ClassVar, Self, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Self, TypeVar
 
 from hare.exceptions import QueryError
 from hare.fields.data.constants import INT32_MAX
@@ -17,6 +17,8 @@ from hare.sql import Order
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.models import Model
+    from hare.query.plans.statement.declarations import CallPlanHit
+    from hare.query.queryset.queryset import QuerySet
 
 TModel = TypeVar("TModel", bound="Model")
 
@@ -34,8 +36,8 @@ class RowsQuery(AwaitableQuery[TModel], abstract=True):
         if self._is_none:
             return await self._execute_none()
         query = self._get_execution_query(self._select_for_update)
-        query._make_query_to_run()
-        result = await query._execute_reading(query._execute())
+        statement = query._make_query_to_run()
+        result = await query._execute(statement)
         return (
             QuerySetExtensions.transform_result(query, result)
             if query._extension_calls and query._applies_result_transform
@@ -44,6 +46,24 @@ class RowsQuery(AwaitableQuery[TModel], abstract=True):
 
     async def _execute_none(self) -> Any:
         return GetExceptions.empty_single_or_list_result(self)
+
+    def _execute(self, statement: tuple[str, list[Any]]) -> Coroutine[Any, Any, Any]:
+        """The read of the built statement - the one road a plan found by the calls takes too
+        (``read_call_plan()``), with the read checks of ``QueryExecution``."""
+        raise NotImplementedError
+
+    @staticmethod
+    def read_call_plan(
+        queryset: QuerySet[Any, Any], connection: DatabaseClient, hit: CallPlanHit
+    ) -> Coroutine[Any, Any, Any]:
+        """Reads a queryset's rows on the plan of its calls, with no query object made.
+
+        Args:
+            queryset: The queryset.
+            connection: This execution's connection.
+            hit: The plan found (``StatementPlanRuns.find_call_plan()``).
+        """
+        raise NotImplementedError()
 
     def iterator(self, chunk_size: int = 1000) -> AsyncIterator[Any]:
         """Pages through the rows ``chunk_size`` at a time - see ``iterate_query()``.
@@ -63,11 +83,12 @@ class RowsQuery(AwaitableQuery[TModel], abstract=True):
         query._check_chunk_size(chunk_size)
         iterator = QueryExecution.iterate(query, RowsQuery._iterate_rows(query, chunk_size))
         async with contextlib.aclosing(iterator):
-            async for row in iterator:
-                yield row
+            async for page in iterator:
+                for row in page:
+                    yield row
 
     @staticmethod
-    async def _iterate_rows(rows_query: RowsQuery[Any], chunk_size: int) -> AsyncGenerator[Any]:
+    async def _iterate_rows(rows_query: RowsQuery[Any], chunk_size: int) -> AsyncGenerator[list[Any]]:
         """Pages through the rows of the prepared query,
         ``chunk_size`` at a time - one generator hands out every row. An unordered query follows its
         default iteration order; a tie-breaker makes the ordering unique per row. Pages by keyset
@@ -103,7 +124,7 @@ class RowsQuery(AwaitableQuery[TModel], abstract=True):
             page._limit = page_size + 1 if probes_next_page else page_size
             page._offset = offset
             page._cursor_values = cursor_values
-            rows = await cast("Awaitable[list[Any]]", page)
+            rows = await page
             has_next_page = len(rows) > page_size
             if has_next_page:
                 rows = rows[:page_size]
@@ -121,8 +142,7 @@ class RowsQuery(AwaitableQuery[TModel], abstract=True):
         while remaining is None or remaining > 0:
             page_size = chunk_size if remaining is None else min(chunk_size, remaining)
             rows, has_next_page = await fetch_page(page_size, remaining is None or remaining > page_size)
-            for row in rows:
-                yield row
+            yield rows
             if not has_next_page:
                 return
             if remaining is not None:
@@ -210,8 +230,8 @@ class RowsQuery(AwaitableQuery[TModel], abstract=True):
         query = rows_query._get_execution_query(rows_query._select_for_update)
         connection = rows_query._check_streamable(query._connection)
         query._raise_if_not_streamable()
-        query._make_query_to_run()
-        batches = query._stream_batches(connection, chunk_size)
+        statement = query._make_query_to_run()
+        batches = query._stream_batches(connection, chunk_size, statement)
         # Closing this generator (break + aclose(), cancellation) closes the driver's cursor right
         # away instead of whenever the garbage collector finalizes the inner generators.
         async with contextlib.aclosing(batches):
@@ -223,6 +243,8 @@ class RowsQuery(AwaitableQuery[TModel], abstract=True):
     def _raise_if_not_streamable(self) -> None:
         """Rejects streaming rows that can't be read one at a time. Rejects none by default."""
 
-    def _stream_batches(self, connection: DatabaseClient, chunk_size: int) -> AsyncGenerator[list[Any]]:
+    def _stream_batches(
+        self, connection: DatabaseClient, chunk_size: int, statement: tuple[str, list[Any]]
+    ) -> AsyncGenerator[list[Any]]:
         """The rows of the built statement, read off a server-side cursor a batch at a time."""
         raise NotImplementedError()

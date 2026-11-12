@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any
 
 from hare.core.caching.model_cache import ModelCache
 from hare.models.class_building.constants import LOOKUP_SEPARATOR
+from hare.query.constants import PRIMARY_KEY_ALIAS
 
 if TYPE_CHECKING:
     from hare.fields.field import Field
@@ -34,7 +35,7 @@ class SensitiveFilterKeys:
         relation_model = model
         for segment in key.split(LOOKUP_SEPARATOR):
             meta = model._meta
-            names = meta.primary_key_attribute_names if segment == "pk" else (segment,)
+            names = meta.primary_key_attribute_names if segment == PRIMARY_KEY_ALIAS else (segment,)
             fields = [meta.fields_map.get(name) for name in names]
             if None in fields:
                 # A lookup or a key inside a value - after a relation, it compares the related keys.

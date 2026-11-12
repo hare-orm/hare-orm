@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.parameters.large_in_list import LargeInList
 from hare.dialects.sqlite.lookups.in_list.json_array_row_values import JsonArrayRowValues
@@ -42,7 +42,7 @@ class SqliteLargeInList(LargeInList):
         from hare.dialects.sqlite.constants import SQLITE_AIOSQLITE_DRIVER_NAME
 
         client_class = DialectRegistry.get_driver(SQLITE_AIOSQLITE_DRIVER_NAME).get_client_classes()[0]
-        return cast("SqliteFeatures", client_class.features)
+        return client_class.features  # type: ignore[return-value]
 
     def get_container(self, non_null_values: list[Any]) -> JsonArrayValues | None:
         """The one-parameter JSON array container for a long value list.

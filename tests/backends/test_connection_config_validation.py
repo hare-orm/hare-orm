@@ -113,7 +113,7 @@ def test_asyncpg_accepts_its_own_connection_parameters():
 @pytest.mark.parametrize(
     "engine",
     [
-        pytest.param("postgresql", marks=pytest.mark.requires("native")),
+        "postgresql",
         pytest.param("postgresql+asyncpg", marks=pytest.mark.requires("asyncpg")),
     ],
 )

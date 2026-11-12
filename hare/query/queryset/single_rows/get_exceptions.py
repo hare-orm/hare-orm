@@ -16,6 +16,17 @@ class GetExceptions:
     DoesNotExist and MultipleObjectsReturned, the exceptions get() was given, or None."""
 
     @staticmethod
+    def single_or_list_result(specification: QuerySpecification[Any], rows: list[Any]) -> Any:
+        """Apply single-row exceptions and cursor result ordering to already decoded rows."""
+        if specification._single:
+            if len(rows) == 1:
+                return rows[0]
+            if not rows:
+                return GetExceptions.empty_single_or_list_result(specification)
+            GetExceptions.raise_multiple_objects_returned(specification)
+        return rows[::-1] if specification._reverse_result_order else rows
+
+    @staticmethod
     def raise_object_does_not_exist(specification: QuerySpecification[Any]) -> NoReturn:
         """Raises for a query that matched no row: ``DoesNotExist``, or the exception ``.get(...,
         does_not_exist_exception=...)`` named - a class is instantiated with no arguments, an

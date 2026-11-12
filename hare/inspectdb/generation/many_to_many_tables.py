@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import replace
 from itertools import product
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.ddl.enums import GeneratedNamePrefix
 from hare.ddl.generated_names import GeneratedNames
@@ -12,6 +12,7 @@ from hare.fields.relations.fields.many_to_many_field import ManyToManyField
 from hare.inspectdb.constants import FOREIGN_KEY_NO_ACTION
 from hare.inspectdb.generation.model_naming import ModelNaming
 from hare.inspectdb.introspection.schema_introspector import SchemaIntrospector
+from hare.sql.order import Order
 
 if TYPE_CHECKING:
     from hare.fields.field import Field
@@ -65,19 +66,16 @@ class ManyToManyTables:
             )
             field = None
             for unique, db_index in product((True, False), repeat=2):
-                candidate = cast(
-                    "ManyToManyFieldInstance[Any]",
-                    ManyToManyField(
-                        class_references[other_table],
-                        through=table_info.name,
-                        forward_key=other_column,
-                        backward_key=owner_column,
-                        related_name=ModelNaming.get_field_name(f"{table_info.name}_set"),
-                        unique=unique,
-                        db_index=db_index,
-                        on_delete=table_info.foreign_keys[owner_column].on_delete,
-                        description=table_info.table_description,
-                    ),
+                candidate: ManyToManyFieldInstance[Any] = ManyToManyField(  # type: ignore[assignment]
+                    class_references[other_table],
+                    through=table_info.name,
+                    forward_key=other_column,
+                    backward_key=owner_column,
+                    related_name=ModelNaming.get_field_name(f"{table_info.name}_set"),
+                    unique=unique,
+                    db_index=db_index,
+                    on_delete=table_info.foreign_keys[owner_column].on_delete,
+                    description=table_info.table_description,
                 )
                 candidate.backward_keys = (owner_column,)
                 candidate.forward_keys = (other_column,)
@@ -205,7 +203,7 @@ class ManyToManyTables:
             or index.without_overlaps
             or not index.is_valid
             or index.unrepresentable_properties
-            or any(order not in {"ASC", "ASC NULLS LAST"} for order in index.key_orders)
+            or any(order not in {Order.ASC, Order.ASC_NULLS_LAST} for order in index.key_orders)
         )
 
     @classmethod

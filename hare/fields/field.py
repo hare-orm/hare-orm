@@ -2,18 +2,20 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import functools
 import inspect
 import warnings
 from collections.abc import Callable, Generator
 from copy import deepcopy
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, overload
 
 from hare.classes.class_path import ClassPath
 from hare.core.caching.cache import Cache
 from hare.core.extensions.declarations import ExtensionContribution, LookupRegistration, TransformRegistration
 from hare.core.registries import Registries
 from hare.dialects.base.literals.constants import SQL_NULL_BYTE
+from hare.dialects.base.types.prepared_converter import PreparedConverter
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.exceptions import ConfigurationError, DatabaseError, UnSupportedError, ValidationError
 from hare.fields.bound_field import BoundField
@@ -30,6 +32,7 @@ from hare.fields.json_values import JsonValues
 from hare.fields.registrations.registered_lookup import RegisteredLookup
 from hare.fields.registrations.registered_transform import RegisteredTransform
 from hare.fields.validators.validator import Validator
+from hare.native.native_modules import NativeModules
 from hare.query.enums import LookupValueShape
 from hare.sql.enums import DateTruncSource
 from hare.sql.terms.term import Term
@@ -441,7 +444,7 @@ class Field(Generic[TValue], metaclass=FieldMeta):
             attributes, slots = state
             state = {**(attributes or {}), **slots}
         else:
-            state = dict(cast("dict[str, Any] | None", state) or {})
+            state = dict(state or {})  # type: ignore[call-overload]
         state.pop("cache_buckets", None)
         if self._binding is not None:
             state["_binding"] = self._binding.copy_runtime()
@@ -492,7 +495,7 @@ class Field(Generic[TValue], metaclass=FieldMeta):
 
     @property
     def model(self) -> type[Model]:
-        return cast("type[Model]", self._binding.model if self._binding is not None else None)
+        return self._binding.model if self._binding is not None else None  # type: ignore[return-value]
 
     @model.setter
     def model(self, value: type[Model]) -> None:
@@ -546,7 +549,7 @@ class Field(Generic[TValue], metaclass=FieldMeta):
         this method for extra external handles, retaining the supplied memo when
         copying nested declarations.
         """
-        return cast("Self", DeclarationSnapshot.field(self, memo))
+        return DeclarationSnapshot.field(self, memo)  # type: ignore[return-value]
 
     def to_db_value(self, value: Any, instance: type[Model] | Model | None) -> Any:
         """The value written into the column for a Python value - converted to ``field_type`` and validated.
@@ -714,6 +717,73 @@ class Field(Generic[TValue], metaclass=FieldMeta):
         """
         return self.to_python(value)
 
+    def get_db_value_reader(self) -> Callable[[Any], Any]:
+        """What reads a column of the field where the dialect registers no reader of its own -
+        ``from_db_value()``; a field whose ``from_db_value()`` returns NULL and a value of exactly its type
+        unchanged (this class's ``from_db_value()`` and ``to_python()``) gives the native reader keeping
+        such a value without calling it.
+
+        Returns:
+            The reader, called with the value the driver returned.
+        """
+        field_class = type(self)
+        if (
+            field_class.from_db_value is Field.from_db_value
+            and field_class.to_python is Field.to_python
+            and isinstance(self.field_type, type)
+        ):
+            return NativeModules.rows.TypedColumnReader(self.field_type, self.from_db_value)
+        return self.from_db_value
+
+    def get_db_value_writer(self, converter: Callable[..., Any] | None = None) -> Callable[[Any, Any], Any]:
+        """Bind the field's one column writer, preserving custom conversion and validation.
+
+        A value whose exact type needs no conversion may stay in the native serializer.
+        It still runs this field's validation once. Every value needing conversion goes
+        through the same field or dialect method used by a direct call.
+
+        Args:
+            converter: The dialect's column conversion, None for ``to_db_value()``.
+
+        Returns:
+            The writer, called with the value and the model or instance written for.
+        """
+        field_writer = (
+            self.to_db_value
+            if converter is None
+            else converter.prepare(self)
+            if isinstance(converter, PreparedConverter)
+            else functools.partial(converter, self)
+        )
+        if self.sensitive or type(self).validate is not Field.validate:
+            return field_writer
+        exact_types = self.get_unchanged_write_types(converter)
+        if exact_types is None:
+            return field_writer
+        return NativeModules.rows.TypedColumnWriter(exact_types, self.null, self.validate, field_writer)
+
+    def get_unchanged_write_types(self, converter: Callable[..., Any] | None) -> tuple[type, ...] | None:
+        """Exact types whose values the declared writer leaves unchanged before validation.
+
+        A custom writer supplies its conversion through the normal column callback.
+        These types describe identity only; no alternative conversion is declared.
+        """
+        if converter is None and type(self).to_db_value is Field.to_db_value and isinstance(self.field_type, type):
+            return (self.field_type,)
+        return None
+
+    def get_lookup_value_writer(self) -> Callable[[Any, Any], Any]:
+        """What converts a filter's value for a column of the field where the dialect registers no ``to_lookup``
+        - ``to_lookup_value()``; a field comparing with the written value (this class's ``to_lookup_value()``)
+        gives its writer (``get_db_value_writer()``).
+
+        Returns:
+            The converter - ``(value, instance) -> value``.
+        """
+        if type(self).to_lookup_value is Field.to_lookup_value:
+            return self.get_db_value_writer()
+        return self.to_lookup_value
+
     def get_assign_normalized_types(self) -> frozenset[type]:
         """Returns the exact types whose values ``to_python`` always returns
         unchanged - a default value of one of them skips that call on instance construction.
@@ -733,9 +803,11 @@ class Field(Generic[TValue], metaclass=FieldMeta):
         Returns:
             The normalized value.
         """
-        if self.assign_normalized_types is None:
-            self.assign_normalized_types = self.get_assign_normalized_types()
-        if value is None or type(value) in self.assign_normalized_types:
+        binding = self.get_binding()
+        normalized_types = binding.assign_normalized_types
+        if normalized_types is None:
+            normalized_types = binding.assign_normalized_types = self.get_assign_normalized_types()
+        if value is None or type(value) in normalized_types:
             return value
         return self.to_python(value)
 
@@ -748,9 +820,11 @@ class Field(Generic[TValue], metaclass=FieldMeta):
         """
         default = self.default
         value = default if isinstance(default, (int, float, str, bool, bytes)) else deepcopy(default)
-        if self.static_default_is_normalized is None:
-            self.static_default_is_normalized = type(default) in self.get_assign_normalized_types()
-        if self.static_default_is_normalized:
+        binding = self.get_binding()
+        is_normalized = binding.static_default_is_normalized
+        if is_normalized is None:
+            is_normalized = binding.static_default_is_normalized = type(default) in self.get_assign_normalized_types()
+        if is_normalized:
             return value
         return self.to_python(value)
 
@@ -763,21 +837,7 @@ class Field(Generic[TValue], metaclass=FieldMeta):
         Raises:
             ValidationError: A validator refuses the value.
         """
-        if self.null and value is None:
-            return
-        for validator in self.validators:
-            validation_error = None
-            try:
-                if isinstance(value, Enum):
-                    validator(value.value)
-                else:
-                    validator(value)
-            except Exception as error:
-                # A validator may be a plain callable raising anything - wrapped into
-                # ValidationError.
-                validation_error = self.get_validation_error(error, value)
-            if validation_error is not None:
-                raise validation_error
+        NativeModules.rows.validate_field(self, value, Enum)
 
     def get_validated_values(self, values: list[Any]) -> list[Any] | None:
         """``values`` as ``Field.to_db_value()`` of each gives them, checked in one pass - when every
@@ -787,17 +847,16 @@ class Field(Generic[TValue], metaclass=FieldMeta):
             values: The values.
 
         Returns:
-            The values themselves; None when one isn't exactly ``field_type`` or fails a validator -
-            converting them one by one then converts them, or raises the first one's error.
+            The values themselves; None when one is not exactly ``field_type`` and needs conversion.
+
+        Raises:
+            ValidationError: The first value refused by a validator, without retrying it.
         """
         field_type = self.field_type
         if set(map(type, values)) != {field_type}:
             return None
-        try:
-            for value in values:
-                self.validate(value)
-        except ValidationError:
-            return None
+        for value in values:
+            self.validate(value)
         return values
 
     def to_db_values(self, values: list[Any], instance: type[Model] | Model | None) -> list[Any]:

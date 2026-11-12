@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ConfigDict
 
@@ -131,7 +131,7 @@ class PydanticMetaReading:
         """
         pconfig: ConfigDict = PydanticModel.model_config.copy()
         if creator.meta.model_config:
-            pconfig.update(cast("ConfigDict", creator.meta.model_config))
+            pconfig.update(creator.meta.model_config)  # type: ignore[typeddict-item]
         if "title" not in pconfig:
             pconfig["title"] = creator._title
         if "extra" not in pconfig:

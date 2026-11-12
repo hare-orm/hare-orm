@@ -281,7 +281,7 @@ class ClickhouseLiterals(SqlLiterals):
         column_type_sql = self.get_string_literal_sql(value.column_type)
         if value.value is None:
             value_sql = "NULL"
-        elif isinstance(value.value, list | dict) and not value.value:
+        elif isinstance(value.value, (list, dict)) and not value.value:
             value_sql = f"defaultValueOfTypeName({column_type_sql})"
         else:
             value_sql = f"CAST({self.get_literal_sql(value.value)}, {column_type_sql})"

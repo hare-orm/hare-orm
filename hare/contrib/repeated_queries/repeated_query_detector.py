@@ -5,7 +5,7 @@ import os
 import time
 import traceback
 from types import TracebackType
-from typing import ClassVar, cast
+from typing import ClassVar
 
 from hare.contrib.repeated_queries.constants import WARN_ACTION
 from hare.contrib.repeated_queries.repeated_query_collection import RepeatedQueryCollection
@@ -51,9 +51,7 @@ class RepeatedQueryDetector:
     def __init__(
         self, *, threshold: int = 10, window_seconds: float = 1.0, action: ReportAction | str = WARN_ACTION
     ) -> None:
-        self.action: ReportAction = (
-            RepeatedQueryDetector.warn if action == WARN_ACTION else cast("ReportAction", action)
-        )
+        self.action: ReportAction = RepeatedQueryDetector.warn if action == WARN_ACTION else action  # type: ignore[assignment]
         self.threshold = threshold
         self.window_seconds = window_seconds
 

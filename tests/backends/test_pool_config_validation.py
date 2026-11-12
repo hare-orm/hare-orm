@@ -67,7 +67,6 @@ def test_valid_pool_credentials_are_accepted(client_class, credentials, expected
     assert (client.pool_minsize, client.pool_maxsize, client.pool_acquire_timeout) == expected
 
 
-@pytest.mark.requires("native")
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_rust_driver_rejects_a_negative_acquire_timeout_without_panicking():

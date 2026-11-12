@@ -1,9 +1,11 @@
 """Model row decoding preserves value errors, exact JSON and joined relation state."""
 
+from dataclasses import replace
+
 import pytest
 
 from hare.contrib.test import capture_queries
-from hare.query.rows.model_rows.model_columns import ModelColumns
+from hare.query.rows.model_rows.model_rows import ModelRows
 from hare.query.statements.write.bulk.bulk_write_batches import BulkWriteBatches
 from tests.shared_models.testmodels import DoubleFK, IntFields, JSONFields
 
@@ -13,11 +15,22 @@ async def test_row_reader_error_propagates_without_retry(db, monkeypatch):
     await IntFields.objects.create(intnum=1)
     calls = []
 
-    def fail_read(self, row, connection_alias):
-        calls.append(row)
+    def fail_read(value):
+        calls.append(value)
         raise TypeError("row cannot be read")
 
-    monkeypatch.setattr(ModelColumns, "hydrate", fail_read)
+    get_columns = ModelRows.get_columns
+
+    def failing_columns(self, connection, result):
+        columns = get_columns(self, connection, result)
+        return [
+            replace(
+                columns[0], entries=tuple((name, field, fail_read) for name, field, _reader in columns[0].entries)
+            ),
+            *columns[1:],
+        ]
+
+    monkeypatch.setattr(ModelRows, "get_columns", failing_columns)
     with pytest.raises(TypeError, match="row cannot be read"):
         await IntFields.objects.all()
     assert len(calls) == 1

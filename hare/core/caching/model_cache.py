@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, MutableMapping
 from functools import wraps
-from typing import TYPE_CHECKING, Any, Concatenate, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Concatenate, ParamSpec, TypeVar
 from weakref import WeakSet
 
 from hare.core.caching.cache import Cache
@@ -60,10 +60,11 @@ class ModelCache(MutableMapping["type[Model]", TCachedValue]):
             compute: Callable[Concatenate[type[Model], P], TFact],
         ) -> Callable[Concatenate[type[Model], P], TFact]:
             cache: ModelCache[TFact] = ModelCache(depends_on_other_models)
+            read_value = cache.storage.get_model_value
 
             @wraps(compute)
             def get(model: type[Model], *args: P.args, **kwargs: P.kwargs) -> TFact:
-                value: Any = cache.get(model, CACHE_MISS)
+                value: Any = read_value(model, CACHE_MISS)
                 if value is CACHE_MISS:
                     value = cache[model] = compute(model, *args, **kwargs)
                 return value
@@ -74,16 +75,16 @@ class ModelCache(MutableMapping["type[Model]", TCachedValue]):
         return decorator
 
     def get(self, model: type[Model], default: Any = None) -> Any:
-        return self.storage.get_value(model, default)
+        return self.storage.get_model_value(model, default)
 
     def __getitem__(self, model: type[Model]) -> TCachedValue:
         value = self.get(model, CACHE_MISS)
         if value is CACHE_MISS:
             raise KeyError(model)
-        return cast("TCachedValue", value)
+        return value
 
     def __contains__(self, model: object) -> bool:
-        return hasattr(model, "_meta") and self.get(cast("type[Model]", model), CACHE_MISS) is not CACHE_MISS
+        return hasattr(model, "_meta") and self.get(model, CACHE_MISS) is not CACHE_MISS  # type: ignore[arg-type]
 
     def __setitem__(self, model: type[Model], value: TCachedValue) -> None:
         with self.storage.lock:

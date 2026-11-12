@@ -145,7 +145,10 @@ def mypy_errors(tmp_path_factory) -> dict[str, dict[tuple[str, int], list[str]]]
 
 @pytest.mark.parametrize(
     ("run_name", "file_name"),
-    [*(("cases", name) for name in CASE_FILES), *(("postgresql_cases", name) for name in POSTGRESQL_CASE_FILES)],
+    [
+        *(("cases", name) for name in CASE_FILES),
+        *(("postgresql_cases", name) for name in POSTGRESQL_CASE_FILES),
+    ],
 )
 def test_a_case_file_gets_exactly_its_expected_errors(mypy_errors, run_name, file_name):
     expected_by_line = {

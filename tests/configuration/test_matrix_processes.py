@@ -27,13 +27,17 @@ def test_stopped_process_group_refuses_queued_launches(tmp_path):
         )
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object lifecycle")
-@pytest.mark.parametrize("cancel", [True, False], ids=["cancel-run", "root-exits-first"])
-def test_windows_job_closes_descendants_even_after_the_root_exits(tmp_path, cancel):
-    import win32api
-    import win32con
-    import win32event
+def is_running(pid: int) -> bool:
+    """Whether a process is alive - a zombie no init reaped (PID 1 of a container) counts as ended."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except FileNotFoundError:
+        return False
+    return stat.rsplit(")", 1)[1].split()[0] != "Z"
 
+
+@pytest.mark.parametrize("cancel", [True, False], ids=["cancel-run", "root-exits-first"])
+def test_the_session_ends_descendants_even_after_the_root_exits(tmp_path, cancel):
     groups = ProcessGroups()
     ready, release = tmp_path / "ready", tmp_path / "release"
     code = (
@@ -49,20 +53,16 @@ def test_windows_job_closes_descendants_even_after_the_root_exits(tmp_path, canc
         )
         try:
             asyncio.run(wait_until(ready.exists))
-            child = win32api.OpenProcess(
-                win32con.SYNCHRONIZE | win32con.PROCESS_QUERY_INFORMATION, False, int(ready.read_text())
-            )
-            try:
-                if cancel:
-                    groups.stop()
-                else:
-                    release.touch()
-                status = future.result(timeout=10)
-                assert win32event.WaitForSingleObject(child, 5000) == win32event.WAIT_OBJECT_0
-                assert not groups.processes
-                if not cancel:
-                    assert status == 0
-            finally:
-                child.Close()
+            child_pid = int(ready.read_text())
+            assert is_running(child_pid)
+            if cancel:
+                groups.stop()
+            else:
+                release.touch()
+            status = future.result(timeout=10)
+            asyncio.run(wait_until(lambda: not is_running(child_pid)))
+            assert not groups.processes
+            if not cancel:
+                assert status == 0
         finally:
             groups.stop()

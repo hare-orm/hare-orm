@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import ConfigurationError
 from hare.fields.field import Field
@@ -184,7 +184,7 @@ class SwappableSettingCheck:
         if related_model is None:
             return []
         expected_tables = {model._meta.db_table, related_model._meta.db_table}
-        setting_name = cast("SwappableModelReference", field.model_name).setting
+        setting_name = field.model_name.setting  # type: ignore[union-attr]
         return [
             (
                 column_name,

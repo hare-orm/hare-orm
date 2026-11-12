@@ -268,10 +268,9 @@ class BulkCreateReports:
         # A key an earlier row of the call inserted - a later object of that key updates the row.
         inserted_keys: set[tuple[Any, ...]] = set()
         inserted_flag_column = HareColumnNames.get_free_name(UPSERT_INSERTED_FLAG_ALIAS, (bulk_create.model,))
+        readers = tuple(types.get_python_reader(field) for field in pk_fields)
         for row in bulk_create._reported_rows or ():
-            key = tuple(
-                types.get_python_value(field, row[column]) for field, column in zip(pk_fields, pk_columns, strict=True)
-            )
+            key = tuple(read(row[column]) for read, column in zip(readers, pk_columns, strict=True))
             pk = key if len(key) > 1 else key[0]
             if inserted_flag_column in row:
                 inserted = bool(row[inserted_flag_column])

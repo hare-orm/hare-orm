@@ -6,7 +6,7 @@ from collections.abc import Callable
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Any, cast
+from typing import Any
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import QueryError, UnSupportedError, ValidationError
@@ -41,10 +41,10 @@ class JsonFilterGuards:
         Lookup.HAS_ANY_KEYS: JsonLookups.has_any_keys,
         Lookup.IN: Lookups.is_in,
         Lookup.NOT_IN: Lookups.not_in,
-        Lookup.GTE: cast("Callable[..., Criterion]", operator.ge),
-        Lookup.GT: cast("Callable[..., Criterion]", operator.gt),
-        Lookup.LTE: cast("Callable[..., Criterion]", operator.le),
-        Lookup.LT: cast("Callable[..., Criterion]", operator.lt),
+        Lookup.GTE: operator.ge,
+        Lookup.GT: operator.gt,
+        Lookup.LTE: operator.le,
+        Lookup.LT: operator.lt,
         Lookup.RANGE: Lookups.between,
         Lookup.CONTAINS: Lookups.contains,
         Lookup.STARTSWITH: Lookups.starts_with,
@@ -75,10 +75,10 @@ class JsonFilterGuards:
         DatePartLookups.year_equal,
     )
     ORDERING_OPERATORS: tuple[Callable[..., Criterion], ...] = (
-        cast("Callable[..., Criterion]", operator.gt),
-        cast("Callable[..., Criterion]", operator.ge),
-        cast("Callable[..., Criterion]", operator.lt),
-        cast("Callable[..., Criterion]", operator.le),
+        operator.gt,
+        operator.ge,
+        operator.lt,
+        operator.le,
         Lookups.between,
     )
     TEXT_OPERATORS: tuple[Callable[..., Criterion], ...] = (

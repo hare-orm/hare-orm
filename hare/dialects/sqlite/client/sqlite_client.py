@@ -8,7 +8,7 @@ import os
 import sqlite3
 from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar
 
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.dialects.base.client.declarations import ShellCommand
@@ -298,7 +298,7 @@ class SqliteClient(DatabaseClient):
         text = option.parse(raw_value)
         if not text:
             raise ConfigurationError(f"{option.name} must be a non-empty string")
-        return cast("str", text)
+        return text
 
     @abc.abstractmethod
     async def swap_busy_timeout(self, connection: Any, milliseconds: int) -> int:

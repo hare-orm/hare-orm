@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.caching.cache import Cache
 from hare.fields.data.choices.int_enum_field_instance import IntEnumFieldInstance
@@ -189,7 +189,7 @@ class NumericTyping:
             # Room for as many whole digits at every scale - Round(price, 1000) of 7.35 has 1001 digits.
             output_field = DecimalField(max_digits=DECIMAL_OUTPUT_FIELD_MAX_DIGITS + scale, decimal_places=scale)
             cls.DECIMAL_OUTPUT_FIELDS[(scale,)] = output_field
-        return cast("DecimalField[Decimal]", output_field)
+        return output_field
 
     @classmethod
     def get_field_type(cls, field: Field[Any] | None, *, timedelta_as_integer: bool = False) -> NumericType | None:

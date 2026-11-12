@@ -100,9 +100,9 @@ The rest is SQLite's own:
 - a value read as text is SQLite's stored text, without spaces after `,` and `:`, and so is a `Cast()` to
   text and a `Concat()` of it; a text lookup of a path matches the text `json_extract()` gives;
 - `JSONObject()` uses `json_object()` and `JSONArray()` uses `json_array()`: a boolean as 1 or 0,
-  a float with 15 significant digits (17 from SQLite 3.53), a moment or a time as its stored text,
-  bytes as uppercase hex, a
-  JSON value nested;
+  a float in SQLite's JSON number format, a moment or a time as its stored text, bytes as uppercase
+  hex, a JSON value nested. JSON number formatting can round a double and need not match
+  `CAST(... AS TEXT)`;
 - a null byte inside a JSON value is stored as it is.
 
 See [`JSONField`](../../querying/filters.md#jsonfield) for the lookups themselves.
@@ -124,9 +124,9 @@ keeps the function's own message and raises `OperationalError` with it.
 
 ## <a id="compiled-functions"></a>Compiled versions
 
-The `rust.native` extension (see [Wheels](../../getting-started/installation.md#wheels)) holds compiled
-versions of the functions SQLite calls once per row. Where it is installed, hare registers
-them in place of the Python ones; the results are the same.
+The functions SQLite calls once per row are compiled in the `rust.native` extension (see
+[Wheels](../../getting-started/installation.md#wheels)): the common inputs are computed there, the
+others are handed to hare's Python code, with the same results.
 
 ## <a id="in-constraints-and-indexes"></a>In constraints and indexes
 

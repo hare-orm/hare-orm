@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import struct
+from collections.abc import Callable
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeVar, overload
 
@@ -104,3 +105,9 @@ class FloatField(Field[TFloat]):
         if type(value) is not float and value is not None:
             self.raise_if_not_number(value)
         return super().to_python(value)
+
+    def get_unchanged_write_types(self, converter: Callable[..., Any] | None) -> tuple[type, ...] | None:
+        # This class's to_db_value() writes a float as it is.
+        if converter is None and type(self).to_db_value is FloatField.to_db_value:
+            return (float,)
+        return None

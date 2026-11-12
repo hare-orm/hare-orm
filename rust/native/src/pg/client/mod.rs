@@ -7,6 +7,7 @@
 //! with libpq's `sslmode` semantics - and `unified_param_types()`/`widen_pg_type()`. The rest is
 //! hare-orm's own.
 
+use crate::asyncio::future_into_py;
 use crate::pg::closing_connect::ClosingConnect;
 use crate::pg::connection_opening::open_connection;
 use crate::pg::described_rows::DescribedRows;
@@ -29,7 +30,6 @@ use futures_util::stream::poll_fn;
 use futures_util::StreamExt;
 use pyo3::prelude::*;
 use pyo3::types::{PyWeakrefMethods, PyWeakrefReference};
-use pyo3_async_runtimes::tokio::future_into_py;
 use std::collections::HashMap;
 use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -513,11 +513,11 @@ impl Client {
         let cancel_target = self.cancel_target.clone();
         future_into_py(py, async move {
             let client = PoolCheckout::get(&pool, &counters).await.map_err(to_pyerr)?;
-            Transaction::begin(client, isolation.as_deref(), caching, tls, cancel_target).await.map_err(to_pyerr)
+            Transaction::begin(client, isolation.as_deref(), caching, tls, cancel_target).map_err(to_pyerr)
         })
     }
 
-    /// Takes a checked-out connection and returns a transaction after the server confirms BEGIN.
+    /// Takes a checked-out connection; BEGIN is sent with the transaction's first operation.
     fn begin_on<'py>(
         &self,
         py: Python<'py>,
@@ -539,7 +539,7 @@ impl Client {
             }
             let client = guard.take().ok_or_else(connection_released)?;
             drop(guard);
-            Transaction::begin(client, isolation.as_deref(), caching, tls, cancel_target).await.map_err(to_pyerr)
+            Transaction::begin(client, isolation.as_deref(), caching, tls, cancel_target).map_err(to_pyerr)
         })
     }
 

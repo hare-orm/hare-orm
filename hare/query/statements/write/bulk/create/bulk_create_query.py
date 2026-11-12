@@ -509,7 +509,7 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
         query = self._get_execution_query(True)
         query._validate_dialect_dependent_options()
         if query.model._meta.change_capture_needs is not None:
-            return await WriteSteps.run_whole(query._connection, query._run_captured())
+            return await WriteSteps.get_whole_run(query._connection, query._run_captured())
         return await WriteSteps.get_whole_run(query._connection, query._run_reported())
 
     async def _run_captured(self) -> list[TModel]:
@@ -596,7 +596,7 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
         # The stamps and blind indexes of the insert - one moment for every object, put back when the call
         # fails.
         stamped_values = InstanceValues()
-        snapshots = [InstanceSnapshot.capture_persistence(obj) for obj in self._objects]
+        snapshots = InstanceSnapshot.capture_persistence_of_all(self.model, self._objects)
         returned_values = InstanceValues()
         omit_fields: set[str] = set()
         write_started = False
@@ -696,13 +696,13 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
             ReturnedValues.leave_unloaded(
                 self.model, written, self.model._meta.recomputed_db_fields, connection=self._connection
             )
-        written_ids = {id(obj) for obj in written}
-        stamped_values.restore(obj for obj in self._objects if id(obj) not in written_ids)
+        if self._inserted_objects is not None:
+            # Rows skipped as conflicting: their objects keep the state they had.
+            written_ids = {id(obj) for obj in written}
+            stamped_values.restore(obj for obj in self._objects if id(obj) not in written_ids)
+            snapshots = [snapshot for snapshot in snapshots if id(snapshot.instance) in written_ids]
         stamped_values.keep(self._connection, written)
-        outcome = WriteOutcome(RowOperation.INSERT, None)
-        for snapshot in snapshots:
-            if id(snapshot.instance) in written_ids:
-                WriteFinalizer.publish_saved(snapshot, self._connection, outcome)
+        WriteFinalizer.publish_saved(snapshots, self._connection, WriteOutcome(RowOperation.INSERT, None))
 
     def _prepare_preview_objects(self) -> tuple[str, ...]:
         """Copy input objects and identify values that cannot be obtained by inspection.

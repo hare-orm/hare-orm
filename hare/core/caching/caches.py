@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, ClassVar, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from hare.core.registries import Registries
 
@@ -20,6 +20,8 @@ class Caches:
 
     #: Every registered cache.
     registered: ClassVar[list[ForgettableCache]] = []
+    #: The caches holding SQL a model's query builder rendered (``Cache(holds_sql=True)``).
+    sql_caches: ClassVar[list[Any]] = []
 
     @classmethod
     def register(cls, cache: TForgettableCache) -> TForgettableCache:
@@ -53,6 +55,16 @@ class Caches:
         for cache in cls.registered:
             for model in models:
                 cache.forget_model(model)
+
+    @classmethod
+    def forget_model_sql(cls, model: type[Model]) -> None:
+        """Drops what the SQL caches hold for ``model`` - when it is bound to another query builder.
+
+        Args:
+            model: The model class.
+        """
+        for cache in cls.sql_caches:
+            cache.forget_holder(model)
 
 
 Registries.forget_all_caches = Caches.forget_all_caches

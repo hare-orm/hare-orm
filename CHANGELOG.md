@@ -24,6 +24,11 @@ renames that section to its version and date.
 
 ### Breaking changes
 
+- `MigrationSafetyChecker.check()` now takes `migration.prepare(state)` as its second argument,
+  rather than `State`. Update custom checker overrides to accept `PreparedOperationStates`;
+  sequential checks can advance from `prepared.after.clone()` without another dry run.
+- Every supported platform requires the native extension, supplied in platform wheels. The native
+  PostgreSQL driver is available on Linux and macOS; use `postgresql+asyncpg://` on Windows.
 - Replace `PostGISField`, `STDistance` and `STDWithin` with `PointField(geography=True, srid=4326)`,
   `Distance` and `DWithin`; construct coordinates as `Point(longitude, latitude)`.
 - Declare reusable row restrictions with `Manager(scope=...)`; filters in a custom `get_queryset()` are no
@@ -50,6 +55,10 @@ renames that section to its version and date.
 
 ### Added
 
+- Support CPython 3.15 for the core and compatible integrations, with an upper Python bound of
+  `<3.16`. Robyn 0.88 and ClickHouse TCP remain on Python 3.12–3.14; dependency installation and
+  CI select compatible extras and retain TCP coverage on 3.14.
+
 - GIS geometry values and fields cover points, lines, polygons, multi-geometries and collections with explicit
   SRIDs.
 - `TSVectorField(expression=...)` supports composed `SearchVector` expressions; the `source_fields`, `config`,
@@ -58,8 +67,12 @@ renames that section to its version and date.
 
 ### Changed
 
+- Batch native asyncio delivery and model hydration, and execute cached model plans without allocating statements.
 - Reduce repeated work in query cloning, row materialization and bulk key/array conversion while preserving
   custom conversion hooks and validation.
+- Reduce intermediate allocations in native parameter and result conversion, prepare annotation readers
+  once per batch, and reuse comparison and dependency metadata within migration preparation.
+  Ordinary native-to-Python callbacks use PyO3 instead of custom vectorcall wrappers.
 - Connection clones retain effective construction settings; transactions, migrations and integrations use
   their owning context instead of an unrelated ambient connection.
 - Migration preparation snapshots declarations and assembles schema changes before execution; progress
@@ -78,7 +91,8 @@ renames that section to its version and date.
 - Preserve dependent schema objects across generated-column replacement, renames and table/schema changes, and
   retain representable catalog details during introspection.
 - Correct expression traversal, query-plan reuse and value conversion across nested queries, containers,
-  projections and dialect-specific clauses.
+  projections and dialect-specific clauses. Map keys are converted before their values; reverse relations compare relation keys consistently
+  when creating, adding or removing objects.
 - Preserve cancellation and primary failures while draining connection, stream, integration and outbox
   resources; lost Keeper ownership interrupts the protected migration scope.
 

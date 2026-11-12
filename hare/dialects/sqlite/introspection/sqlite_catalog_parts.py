@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from collections import defaultdict
 from operator import itemgetter
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.dialects.sqlite.constants import SQLITE_PRIMARY_KEY_INDEX_ORIGIN, SQLITE_ROW_ID_TYPE
 from hare.dialects.sqlite.introspection.sqlite_column_declarations import SqliteColumnDeclarations
 from hare.dialects.sqlite.introspection.sqlite_foreign_key_clauses import SqliteForeignKeyClauses
 from hare.dialects.sqlite.sqlite_table_options import SqliteTableOptions
 from hare.dialects.sqlite.types.sqlite_physical_type import SqlitePhysicalType
-from hare.inspectdb.introspection.enums import SchemaPartType
+from hare.inspectdb.enums import SchemaPartType
 from hare.inspectdb.introspection.schema_introspector import SchemaIntrospector
 from hare.inspectdb.introspection.table_parts import TableParts
 
@@ -41,7 +41,7 @@ class SqliteCatalogParts:
         for raw in records.get("tables", []):
             table = raw["table_name"]
             info = table_infos[table]
-            options = cast("SqliteTableOptions | None", info.table_options)
+            options: SqliteTableOptions | None = info.table_options  # type: ignore[assignment]
             columns = {column.name: column for column in info.columns}
             column_declarations = SqliteColumnDeclarations.get_columns(
                 raw["table_rows"][0]["sql"], {row["name"] for row in raw["columns"]}

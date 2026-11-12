@@ -35,7 +35,7 @@ class RelationValues:
             )
 
     @staticmethod
-    def get_relation_key_values(obj: Model, field_names: Iterable[str], usage: str) -> list[Any]:
+    def get_relation_key_values(obj: Model, field_names: Iterable[str], usage: str) -> tuple[Any, ...]:
         """The values of the fields a relation references this obj by.
 
         Args:
@@ -51,14 +51,16 @@ class RelationValues:
         """
         values = []
         for field_name in field_names:
-            if not hasattr(obj, field_name):
+            try:
+                value = getattr(obj, field_name)
+            except AttributeError:
                 model_name = type(obj).__name__
                 raise QueryError(
                     f"{usage} needs {model_name}.{field_name}, which this {model_name} instance didn't load "
                     f"(left out by .only()/.defer()) - load {field_name!r} too"
-                )
-            values.append(getattr(obj, field_name))
-        return values
+                ) from None
+            values.append(value)
+        return tuple(values)
 
     @staticmethod
     def validate_relation_type(model: type[Model], field_key: str, value: Model | None) -> None:

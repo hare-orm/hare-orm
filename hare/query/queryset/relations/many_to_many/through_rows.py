@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.fields.field import Field
 from hare.instrumentation.enums import RowOperation
@@ -47,7 +47,7 @@ class ThroughRows:
         return any(
             field.sensitive
             for meta in (type(relation.instance)._meta, relation.model._meta)
-            for field in (meta.pk_fields if meta.has_composite_primary_key else (meta.pk,))
+            for field in meta.pk_fields
         )
 
     @staticmethod
@@ -105,10 +105,8 @@ class ThroughRows:
         else:
             related_meta = relation.model._meta
             owner_meta = type(relation.instance)._meta
-            related_key_fields = (
-                related_meta.pk_fields if related_meta.has_composite_primary_key else (related_meta.pk,)
-            )
-            owner_key_fields = owner_meta.pk_fields if owner_meta.has_composite_primary_key else (owner_meta.pk,)
+            related_key_fields = related_meta.pk_fields
+            owner_key_fields = owner_meta.pk_fields
             fields_by_column = {
                 **dict(zip(relation.field.forward_keys, related_key_fields, strict=True)),
                 **dict(zip(relation.field.backward_keys, owner_key_fields, strict=True)),
@@ -116,7 +114,7 @@ class ThroughRows:
         column_fields = [fields_by_column.get(column.name) for column in columns]
         if any(field is None for field in column_fields):
             return None
-        return cast("list[Field[Any]]", column_fields)
+        return column_fields  # type: ignore[return-value]
 
     @staticmethod
     async def report_links(

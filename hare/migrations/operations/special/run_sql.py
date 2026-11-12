@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import ConfigurationError
 from hare.migrations.operations.hare_operation import HareOperation
@@ -82,7 +82,7 @@ class RunSQL(HareOperation):
                 if isinstance(sql, Sequence) and not isinstance(sql, (str, bytes, bytearray)):
                     elements = len(sql)
                     if elements == 2:
-                        sql, parameters = cast("Sequence[Any]", sql)
+                        sql, parameters = sql  # type: ignore[misc]
                         takes_parameters = True
                     else:
                         raise ConfigurationError(f"Expected a 2-tuple but got {elements}")

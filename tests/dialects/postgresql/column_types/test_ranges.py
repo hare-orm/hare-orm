@@ -17,7 +17,7 @@ from hare.dialects.postgresql.lookups.postgresql_value_encoders import Postgresq
 from hare.exceptions import ValidationError
 from hare.query.expressions import F
 from hare.sql.functions import Cast
-from hare.time import Timezone
+from hare.time.system_zone import SystemZone
 from tests.dialects.postgresql.column_types.models_ranges import (
     DateRangeThing,
     DateTimeRangeThing,
@@ -451,7 +451,7 @@ def test_datetime_range_bounds_follow_datetime_field_conversion():
     with override_timezone(use_timezone=False):
         read = field.from_db_value(Range(utc_lower, utc_upper))
         assert read.lower.tzinfo is None
-        assert read.lower == Timezone.get_system_local_naive(utc_lower)
+        assert read.lower == SystemZone.get_system_local_naive(utc_lower)
         assigned = field.to_python(Range(datetime.datetime(2024, 6, 1, 9, 0), None))
         assert assigned.lower == datetime.datetime(2024, 6, 1, 9, 0)
 

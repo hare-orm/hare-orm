@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import copy
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.ddl.schema_objects.view_creation_order import ViewCreationOrder
 from hare.migrations.autodetection.constants import CREATE_MODEL_DEFERRED_OPTIONS
@@ -162,9 +162,7 @@ class SchemaObjectOperations:
                 # A view and a materialized view are created each after the ones it reads.
                 view_operations = [*self.additions_by_type[ViewDiff], *self.additions_by_type[MaterializedViewDiff]]
                 operations.extend(
-                    ViewCreationOrder.get_ordered(
-                        view_operations, lambda operation: cast("Any", operation).schema_object
-                    )
+                    ViewCreationOrder.get_ordered(view_operations, lambda operation: operation.schema_object)  # type: ignore[attr-defined]
                 )
             elif diff_class is not MaterializedViewDiff:
                 operations.extend(self.additions_by_type[diff_class])

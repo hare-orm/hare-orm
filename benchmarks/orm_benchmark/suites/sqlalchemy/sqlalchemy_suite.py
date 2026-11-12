@@ -175,7 +175,7 @@ class SqlAlchemySuite:
 
     @staticmethod
     async def get_ids(session_factory: Any, model: Any, limit: int) -> list[int]:
-        """The keys of a model's first rows.
+        """The keys of a model's first rows, in primary-key order.
 
         Args:
             session_factory: Makes the sessions.
@@ -188,7 +188,7 @@ class SqlAlchemySuite:
         from sqlalchemy import select
 
         async with session_factory() as session:
-            return list((await session.scalars(select(model.id).limit(limit))).all())
+            return list((await session.scalars(select(model.id).order_by(model.id).limit(limit))).all())
 
     @staticmethod
     async def run_and_commit(session_factory: Any, statement: Any, parameters: Any = None) -> None:

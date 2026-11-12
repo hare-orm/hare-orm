@@ -4,6 +4,7 @@ from collections.abc import Collection
 from typing import TYPE_CHECKING
 
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.statements.building.query_annotations import QueryAnnotations
 
 if TYPE_CHECKING:
@@ -33,7 +34,7 @@ class ValuesDistinct:
         if isinstance(primary_key_attribute, tuple):
             if set(primary_key_attribute) <= selected_field_names:
                 return
-        elif selected_field_names & {primary_key_attribute, "pk"}:
+        elif selected_field_names & {primary_key_attribute, PRIMARY_KEY_ALIAS}:
             return
         for field_name in output_field_names:
             EncryptedFieldBase.raise_if_encrypted(

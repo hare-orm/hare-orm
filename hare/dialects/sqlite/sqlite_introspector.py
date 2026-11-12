@@ -542,7 +542,7 @@ class SqliteIntrospector(SchemaIntrospector):
         unrepresentable_properties: list[str] = []
         for term in index_terms:
             order_match = SQLITE_INDEX_TERM_ORDER_RE.search(term)
-            is_descending = order_match is not None and order_match.group("direction").upper() == "DESC"
+            is_descending = order_match is not None and order_match.group("direction").upper() == Order.DESC
             key_orders.append((Order.DESC_NULLS_FIRST if is_descending else Order.ASC_NULLS_LAST).value)
             unordered_term = term[: order_match.start()].strip() if order_match else term
             unordered_terms.append(unordered_term)

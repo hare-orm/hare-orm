@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, cast
 
 from hare.dialects.base.renderers.json_renderers import JsonRenderers
 from hare.dialects.clickhouse.lookups.constants import CLICKHOUSE_JSON_TYPED_VALUE_SQL, CLICKHOUSE_JSON_VALUE_TEXT_SQL
@@ -9,10 +8,6 @@ from hare.dialects.clickhouse.renderers.clickhouse_json_texts import ClickhouseJ
 from hare.sql import functions
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms import criteria
-
-if TYPE_CHECKING:
-    from hare.sql.functions.json.json_value import JsonValue
-    from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 
 class ClickhouseJsonRenderers(JsonRenderers):
@@ -24,10 +19,10 @@ class ClickhouseJsonRenderers(JsonRenderers):
         """The object's JSON text - each key a JSON string, each value its JSON text, in order."""
         parts_sql = []
         for position, (key, value) in enumerate(zip(function.args[::2], function.args[1::2], strict=True)):
-            key_text = ("," if position else "{") + json.dumps(cast("ValueWrapper", key).value) + ":"
+            key_text = ("," if position else "{") + json.dumps(key.value) + ":"  # type: ignore[attr-defined, operator]
             parts_sql += [
                 sql_context.dialect.literals.get_string_literal_sql(key_text),
-                ClickhouseJsonTexts.get_json_text_sql(cast("JsonValue", value), sql_context),
+                ClickhouseJsonTexts.get_json_text_sql(value, sql_context),  # type: ignore[arg-type]
             ]
         if not parts_sql:
             return "'{}'"
@@ -36,9 +31,7 @@ class ClickhouseJsonRenderers(JsonRenderers):
     @staticmethod
     def render_json_array(function: functions.JsonArray, sql_context: SqlContext) -> str:
         """The array's JSON text - each value its JSON text, in order."""
-        values_sql = [
-            ClickhouseJsonTexts.get_json_text_sql(cast("JsonValue", value), sql_context) for value in function.args
-        ]
+        values_sql = [ClickhouseJsonTexts.get_json_text_sql(value, sql_context) for value in function.args]  # type: ignore[arg-type]
         if not values_sql:
             return "'[]'"
         separated_sql = ", ',', ".join(values_sql)

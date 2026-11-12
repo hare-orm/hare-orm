@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.fields.relations.fields.backward_foreign_key_relation import BackwardForeignKeyRelation
 from hare.fields.relations.fields.declarations import BackwardOneToOneRelation
@@ -258,10 +258,7 @@ class RelatedRows:
             for_write=True
         ).dialect.features.supports_unique_constraints
         all_tenants = keeps_keys_unique or Tenancy.get_scope(related_model) is None
-        return cast(
-            "QuerySet[Any]",
-            RowScopes.get_base_queryset(related_model, RowVisibility(all_tenants=all_tenants)),
-        )
+        return RowScopes.get_base_queryset(related_model, RowVisibility(all_tenants=all_tenants))
 
     @staticmethod
     def include_soft_deleted(queryset: QuerySet[Any]) -> QuerySet[Any]:
@@ -283,7 +280,7 @@ class RelatedRows:
                 connection runs on it, inside its transaction; a model on another connection,
                 or every model when None, uses its own.
         """
-        soft_delete_field = cast("str", model._meta.soft_delete_field)
+        soft_delete_field: str = model._meta.soft_delete_field  # type: ignore[assignment]
         primary_key_attribute_names = model._meta.primary_key_attribute_names
         model_connection = RelatedRows.get_connection_for(model, connection)
         lookup_connection = model_connection or model.get_connection(for_write=False)
@@ -316,7 +313,7 @@ class RelatedRows:
         Returns:
             ``{pk: soft-delete value}`` for every row that exists.
         """
-        soft_delete_field = cast("str", model._meta.soft_delete_field)
+        soft_delete_field: str = model._meta.soft_delete_field  # type: ignore[assignment]
         primary_key_attribute_names = model._meta.primary_key_attribute_names
         pk_column_count = len(primary_key_attribute_names)
         lookup_connection = RelatedRows.get_connection_for(model, connection) or model.get_connection(for_write=True)
@@ -336,7 +333,7 @@ class RelatedRows:
     def get_foreign_key_value(row: Model, foreign_key_field: ForeignKeyFieldInstance[Any]) -> Any:
         """The value ``row`` stores in ``foreign_key_field``'s shadow column(s) - a tuple for a composite FK."""
         if len(foreign_key_field.source_fields) == 1:
-            return getattr(row, cast("str", foreign_key_field.source_field))
+            return getattr(row, foreign_key_field.source_field)  # type: ignore[arg-type]
         return tuple(getattr(row, source_field) for source_field in foreign_key_field.source_fields)
 
     @staticmethod
@@ -406,14 +403,10 @@ class RelatedRows:
         )
         through_table = Table(many_to_many_field.through, schema=many_to_many_field.through_schema)
         backward_columns = [through_table[column_name] for column_name in many_to_many_field.backward_keys]
-        pk_fields = model._meta.pk_fields if model._meta.has_composite_primary_key else (model._meta.pk,)
-        pk_value_rows = [
-            tuple(
-                chosen_connection.dialect.types.get_db_value(pk_field, pk_component, model)
-                for pk_field, pk_component in zip(pk_fields, pk if len(pk_fields) > 1 else (pk,), strict=True)
-            )
-            for pk in pks
-        ]
+        pk_fields = model._meta.pk_fields
+        pk_value_rows = KeyColumns.write_rows(
+            pk_fields, (pk if len(pk_fields) > 1 else (pk,) for pk in pks), chosen_connection.dialect.types, model
+        )
         criteria = [
             KeyColumns.row_is_in(backward_columns, batch)
             for batch in RelatedRows.split_into_batches(pk_value_rows, chosen_connection, len(backward_columns))

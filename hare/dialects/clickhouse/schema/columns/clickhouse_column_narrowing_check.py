@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.schema.columns.column_narrowing_check import ColumnNarrowingCheck
 from hare.dialects.clickhouse.fields.constants import UINT64_RANGE
@@ -27,7 +27,6 @@ from hare.fields.narrowing.text_length_limit import TextLengthLimit
 from hare.migrations.exceptions import FieldNarrowingDataLossError
 
 if TYPE_CHECKING:
-    from hare.dialects.clickhouse.literals.clickhouse_literals import ClickhouseLiterals
     from hare.fields.data.containers.container_field import HeldValuePath
     from hare.fields.field import Field
     from hare.fields.narrowing.narrowing_limit import NarrowingLimit
@@ -172,9 +171,7 @@ class ClickhouseColumnNarrowingCheck(ColumnNarrowingCheck):
             lowest_sql, highest_sql = (
                 str(bound)
                 if INT64_MIN <= bound <= UINT64_RANGE[1]
-                else cast("ClickhouseLiterals", self.editor.client.dialect.literals).get_wide_integer_literal_sql(
-                    bound
-                )
+                else self.editor.client.dialect.literals.get_wide_integer_literal_sql(bound)  # type: ignore[attr-defined]
                 for bound in (limit.lowest, limit.highest)
             )
             return f"{quoted_column} < {lowest_sql} OR {quoted_column} > {highest_sql}"

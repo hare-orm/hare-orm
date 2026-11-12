@@ -20,6 +20,7 @@ from hare.sql.terms.parameters.query_parameters import QueryParameters
 
 
 class _FakeClient:
+    runs_statement_options = PostgresqlClient.runs_statement_options
     command_timeout = None
     connection_alias = "default"
     is_transaction_client = False

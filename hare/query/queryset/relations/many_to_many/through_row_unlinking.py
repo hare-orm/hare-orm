@@ -123,8 +123,12 @@ class ThroughRowUnlinking:
             related_meta = type(related_instances[0])._meta
             related_instances = [
                 instance
-                for instance in related_instances
-                if KeyColumns.get_db_values(related_meta, instance, connection.dialect.types) in linked_pk_values
+                for instance, key in zip(
+                    related_instances,
+                    KeyColumns.get_db_rows(related_meta, related_instances, connection.dialect.types),
+                    strict=True,
+                )
+                if key in linked_pk_values
             ]
         unlinked_count = await ThroughRowUnlinking.unlink(
             relation,
@@ -187,9 +191,7 @@ class ThroughRowUnlinking:
         condition = KeyColumns.row_equality(backward_columns, backward_key_values)
         if instances:
             related_meta = type(instances[0])._meta
-            forward_pk_values = [
-                KeyColumns.get_db_values(related_meta, instance, connection.dialect.types) for instance in instances
-            ]
+            forward_pk_values = KeyColumns.get_db_rows(related_meta, instances, connection.dialect.types)
         if forward_pk_values:
             forward_columns = [through_table[column] for column in relation.field.forward_keys]
             condition &= (
@@ -244,9 +246,17 @@ class ThroughRowUnlinking:
             _, before_rows = await connection.execute(*ThroughRows.get_statement(relation, before_query, connection))
             types = connection.dialect.types
             before_by_pk = {}
+            names = (
+                *through_model._meta.primary_key_attribute_names,
+                *((capture_needs.tenant_field_name,) if capture_needs.tenant_field_name else ()),
+            )
+            key_layout = ChangeCapturing.get_row_layout(through_model, names, types)
+            values_layout = ChangeCapturing.get_row_layout(through_model, capture_needs.field_names, types)
             for row in map(dict, before_rows):
-                pk, _tenant = ChangeCapturing.get_row_key(through_model, capture_needs, types, row)
-                before_by_pk[pk] = ChangeCapturing.get_row_values(through_model, capture_needs, types, row)
+                pk, _tenant = ChangeCapturing.get_row_key(through_model, capture_needs, types, row, layout=key_layout)
+                before_by_pk[pk] = ChangeCapturing.get_row_values(
+                    through_model, capture_needs, types, row, layout=values_layout
+                )
         query = ThroughRowUnlinking.get_unlink_statement(
             connection, relation, through_table, condition, now
         ).returning(*capture_needs.columns)

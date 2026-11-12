@@ -87,4 +87,11 @@ A validator is skipped entirely when the field is `null=True` and the value is `
 
 `LengthValidator` and `NumericValidator` are the bases of the length and the value validators: their
 `_validate_type(value)` raises `ValidationError` for a value that isn't a string, list, tuple or bytes —
-or a number (`int`, `float`, `Decimal`) — before the check itself.
+or a number (`int`, `float`, `Decimal`) — before the check itself. A value of exactly one of these
+types (`exact_types`) is taken as it is, without the call; a subclass of them goes through it.
+
+The built-in value, length, digits, regex, slug, E.164 and UUID version validators use shared
+native checks from their `__call__()` methods. Field writers call the validators through
+`Field.validate()` once per value; custom validators and subclasses retain their `__call__()`.
+A failure stops validation immediately, without repeating the validator. URL, email, domain and
+IP address validators parse values with the standard library.

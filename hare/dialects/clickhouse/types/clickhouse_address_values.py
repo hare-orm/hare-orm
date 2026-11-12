@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from hare.fields.data.network.ip_address_field import IPAddressField
@@ -25,7 +25,7 @@ class ClickhouseAddressValues:
         Returns:
             The address, None for None.
         """
-        address_field = cast("IPAddressField", field)
+        address_field: IPAddressField = field  # type: ignore[assignment]
         text = address_field.to_db_zoneless_value(value, instance)
         if text is None:
             return None

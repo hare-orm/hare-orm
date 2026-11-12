@@ -1,5 +1,10 @@
 # Создание диалекта: драйвер и клиент
 
+Клиент служит публичным фасадом соединения. `TenantClients` управляет клиентами схем,
+`ClientPoolStatus` собирает состояние пула, `ClientSchema` выполняет создание схемы.
+Hooks драйвера задают настройки схем, заполненность пула, перевод ошибок и работу с протоколом.
+Подготовка значений выделена в `AsyncpgParameters` и `ClickhouseInsertValues`.
+
 Шаги 1 и 2 [создания диалекта](index.ru.md): подключение через драйвер базы и клиент, который выполняет
 на нём запросы.
 
@@ -132,8 +137,9 @@ class ColstoreClient(DatabaseClient):
 импортируется из `hare.dialects.base.client.enums`: `SQL` принимает query/values, `BULK_LOAD` —
 table/columns, `MANY` и `SCRIPT` исполняют пачку или скрипт, `CONTROL` не содержит SQL. За операциями
 курсора наблюдает внешняя граница потока; она же переводит ошибки. Имя метода служит только меткой события.
-`StatementExecution` связывает
-`StatementRequest`, размещает метки через `QueryClauses.get_tagged_statement_sql(sql, comment)` и
+`StatementExecution` читает SQL и параметры
+вызова (`retry_read=` и `recovery=` — собственные ключевые аргументы обёртки, драйвер их не получает),
+размещает метки через `QueryClauses.get_tagged_statement_sql(sql, comment)` и
 выполняет вызов внутри обёрток запросов, если они
 установлены (`Observers.run_wrapped(QueryCall(...), proceed)`), сообщает о нём наблюдателям, когда он
 завершился, успешно или нет (`Observers.record_query()`), и выбрасывает вместо исключения драйвера то,

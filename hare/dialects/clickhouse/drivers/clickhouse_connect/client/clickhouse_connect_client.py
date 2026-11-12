@@ -25,6 +25,7 @@ from hare.dialects.base.results.described_result import DescribedResult
 from hare.dialects.base.results.statement_result import StatementResult
 from hare.dialects.clickhouse.client.clickhouse_client import ClickhouseClient
 from hare.dialects.clickhouse.client.clickhouse_external_sets import ClickhouseExternalSets
+from hare.dialects.clickhouse.client.clickhouse_insert_values import ClickhouseInsertValues
 from hare.dialects.clickhouse.client.clickhouse_streamed_row import ClickhouseStreamedRow
 from hare.dialects.clickhouse.client.constants import (
     CLICKHOUSE_BEGIN_TRANSACTION_SQL,
@@ -47,10 +48,7 @@ from hare.dialects.clickhouse.drivers.clickhouse_connect.constants import (
     CLICKHOUSE_CONNECT_REPEATED_QUERY_ERROR_CODE,
     CLICKHOUSE_CONNECT_UNREADABLE_SERVER_ERROR_MARK,
 )
-from hare.dialects.clickhouse.drivers.constants import (
-    CLICKHOUSE_CONNECT_DRIVER_NAME,
-    CLICKHOUSE_MOMENT_EPOCH,
-)
+from hare.dialects.clickhouse.drivers.constants import CLICKHOUSE_CONNECT_DRIVER_NAME, CLICKHOUSE_MOMENT_EPOCH
 from hare.exceptions import DBConnectionError
 from hare.native.native_modules import NativeModules
 
@@ -68,7 +66,7 @@ class ClickhouseConnectClient(ClickhouseClient):
     driver_errors = ClickhouseDriverErrors(
         server=DatabaseError, connection=ClickHouseOperationalError, driver=(ClickHouseError, ClientPayloadError)
     )
-    #: ``rust.native.rows`` - converts a column's moments to ticks; None where it isn't built.
+    #: ``rust.native.rows`` - converts a column's moments to ticks.
     native_rows: ClassVar[Any] = NativeModules.rows
     #: (host, port, database, table, columns) -> the library's type of each column, as the server named
     #: it before the first insert - the library asks the server before every insert. Emptied by every
@@ -280,7 +278,7 @@ class ClickhouseConnectClient(ClickhouseClient):
         """
         if self.log.isEnabledFor(logging.DEBUG):
             self.log.debug("INSERT %s(%s): %d record(s)", table, columns, len(records))
-        inserted_columns = self._get_inserted_columns(records)
+        inserted_columns = ClickhouseInsertValues.get_columns(type(self), records)
         async with self.acquire_connection() as connection:
             async with self.insert_context(connection, table, columns, schema) as context:
                 connection._transform.prepare_insert(context)
@@ -343,8 +341,6 @@ class ClickhouseConnectClient(ClickhouseClient):
         Returns:
             The columns to insert.
         """
-        if cls.native_rows is None:
-            return columns
         tick_columns = list(columns)
         for position, (column, column_type) in enumerate(zip(columns, column_types, strict=True)):
             if (

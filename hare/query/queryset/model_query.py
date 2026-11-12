@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
+    from hare.ddl.raw_sql_term import RawSQLTerm
     from hare.models import Model
     from hare.query.queryset.queryset import QuerySet
 
@@ -70,6 +71,19 @@ class ModelQuery:
                 f"ModelQuery of {self.model.__name__}: the calls must end in a queryset, got {queryset!r}"
             )
         return queryset
+
+    @staticmethod
+    def get_declared_queryset(query: RawSQLTerm | QuerySet[Any, Any] | ModelQuery) -> QuerySet[Any, Any] | None:
+        """The queryset of a schema declaration, None for opaque SQL.
+
+        Recorded model calls are applied through ``get_queryset()`` and require their
+        declaring model to be bound. A supplied queryset is returned unchanged.
+        """
+        from hare.ddl.raw_sql_term import RawSQLTerm
+
+        if isinstance(query, RawSQLTerm):
+            return None
+        return query.get_queryset() if isinstance(query, ModelQuery) else query
 
     def __repr__(self) -> str:
         calls = "".join(

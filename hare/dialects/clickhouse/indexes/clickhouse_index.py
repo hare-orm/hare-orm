@@ -131,7 +131,7 @@ class ClickhouseIndex(Index):
 
         if not isinstance(dialect, ClickhouseDialect):
             raise UnSupportedError(
-                f"{type(self).__name__}(fields={list(self.get_declared_fields())!r}) is an index of ClickHouse - the "
+                f"{type(self).__name__}(fields={self.get_declared_fields()!r}) is an index of ClickHouse - the "
                 f"{dialect} dialect has none: declare an index of that database in the model, or change the migration"
             )
 

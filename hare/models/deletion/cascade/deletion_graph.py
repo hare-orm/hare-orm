@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.core.caching.model_cache import ModelCache
 from hare.fields.enums import OnDelete
@@ -30,15 +30,15 @@ class DeletionGraph:
         """
         relations = []
         backward_fields = [
-            cast("BackwardForeignKeyRelation[Any] | BackwardOneToOneRelation[Any]", model._meta.fields_map[field_name])
+            model._meta.fields_map[field_name]
             for field_name in sorted(model._meta.backward_foreign_key_fields | model._meta.backward_one_to_one_fields)
         ]
         backward_fields.extend(model._meta.hidden_backward_relations.values())
         for backward_field in backward_fields:
-            shadow_column = backward_field.related_model._meta.fields_map[backward_field.relation_field]
-            foreign_key_field = cast("ForeignKeyFieldInstance[Any]", shadow_column.reference)
+            shadow_column = backward_field.related_model._meta.fields_map[backward_field.relation_field]  # type: ignore[attr-defined]
+            foreign_key_field: ForeignKeyFieldInstance[Any] = shadow_column.reference
             relations.append((backward_field, foreign_key_field))
-        return relations
+        return relations  # type: ignore[return-value]
 
     @staticmethod
     @ModelCache.fact()
@@ -183,10 +183,7 @@ class DeletionGraph:
         """Every M2M field touching ``model`` - declared on it, or the backward field of a relation
         declared on the other side.
         """
-        return [
-            cast("ManyToManyFieldInstance[Any]", model._meta.fields_map[name])
-            for name in sorted(model._meta.many_to_many_fields)
-        ]
+        return [model._meta.fields_map[name] for name in sorted(model._meta.many_to_many_fields)]  # type: ignore[misc]
 
     @staticmethod
     def has_unconstrained_relations(model: type[Model]) -> bool:

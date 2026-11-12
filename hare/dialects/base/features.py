@@ -4,7 +4,7 @@ import dataclasses
 import itertools
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any, ClassVar, Self, cast
+from typing import Any, ClassVar, Self
 
 from hare.core.caching.cache import Cache
 from hare.dialects.base.search.enums import TextSearchOperation
@@ -370,4 +370,4 @@ class Features:
         kept = Features.replaced_features.get((replaced,))
         if kept is None:
             Features.replaced_features[(replaced,)] = kept = replaced
-        return cast("Self", kept)
+        return kept

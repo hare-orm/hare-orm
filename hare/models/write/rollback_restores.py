@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.client.transaction_lifecycle.transaction_callbacks import TransactionCallbacks
 from hare.models.write.declarations import RollbackRestoreLayer
@@ -40,29 +40,39 @@ class RollbackRestores:
             field_name: The written field.
             old_value: Its value before the write - ``ROLLBACK_RESTORE_UNSET`` when it wasn't loaded.
         """
-        RollbackRestores.register_rollback_restores(using, ((obj, field_name, old_value),))
+        RollbackRestores.register_snapshots(using, (InstanceSnapshot(obj, {field_name: old_value}),))
 
     @staticmethod
-    def register_rollback_restores(using: DatabaseClient, restores: Iterable[tuple[Model, str, Any]]) -> None:
-        """``RollbackRestores.register_rollback_restore()`` of many instances at once - the layers the write opens
-        are restored by one rollback callback and dropped by one commit callback, not two per
-        instance.
+    def register_snapshots(using: DatabaseClient, snapshots: Iterable[InstanceSnapshot]) -> None:
+        """Retain each undo snapshot as one entry until rollback needs its field values.
 
-        Args:
-            using: The connection the write ran on.
-            restores: ``(instance, field name, old value)`` in registration order.
+        A later snapshot containing only fields already remembered in this savepoint is
+        discarded. Repeated saves therefore do not grow the retained undo state. Entries
+        are merged in capture order only when that scope rolls back.
         """
         if not using.is_transaction_client:
             return
-        transaction = cast("TransactionClient", using)
+        transaction: TransactionClient = using  # type: ignore[assignment]
         registered_on = transaction._get_top_level_transaction()
         current_span = TransactionCallbacks.get_registration_span(transaction)
         new_layers: list[tuple[Model, RollbackRestoreLayer]] = []
-        for instance, field_name, old_value in restores:
+        for snapshot in snapshots:
+            if not snapshot.values:
+                continue
+            instance = snapshot.instance
             layer, is_new_layer = RollbackRestores.get_rollback_restore_layer(instance, registered_on, current_span)
             if is_new_layer:
                 new_layers.append((instance, layer))
-            layer.snapshot.remember(field_name, old_value)
+            if not layer.snapshots:
+                layer.snapshots.append(snapshot)
+            elif layer.field_names is None:
+                first_values = layer.snapshots[0].values
+                if not snapshot.values.keys() <= first_values.keys():
+                    layer.field_names = set(first_values) | snapshot.values.keys()
+                    layer.snapshots.append(snapshot)
+            elif not snapshot.values.keys() <= layer.field_names:
+                layer.field_names.update(snapshot.values)
+                layer.snapshots.append(snapshot)
         if not new_layers:
             return
 
@@ -116,7 +126,7 @@ class RollbackRestores:
         for entry in reversed(stack):
             if entry.client is registered_on and entry.span is current_span:
                 return entry, False
-        layer = RollbackRestoreLayer(registered_on, current_span, InstanceSnapshot(obj))
+        layer = RollbackRestoreLayer(registered_on, current_span, [])
         stack.append(layer)
         object.__setattr__(obj, "_pending_rollback_restore_stack", stack)
         return layer, True
@@ -141,4 +151,11 @@ class RollbackRestores:
         rolled_back = [entry for entry in stack[index:] if entry.client is layer.client]
         for entry in rolled_back:
             RollbackRestores.pop_pending_rollback_restore_layer(obj, entry)
-        return [entry.snapshot for entry in rolled_back]
+        snapshots = []
+        for entry in rolled_back:
+            values: dict[str, Any] = {}
+            for snapshot in entry.snapshots:
+                for name, value in snapshot.values.items():
+                    values.setdefault(name, value)
+            snapshots.append(InstanceSnapshot(obj, values))
+        return snapshots

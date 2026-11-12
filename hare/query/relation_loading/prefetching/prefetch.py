@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import FieldError, QueryError
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.enums import RowShape
 
 if TYPE_CHECKING:
@@ -212,7 +213,7 @@ class Prefetch:
             if related_model is None:
                 return
             model = related_model
-        if to_attribute in model._meta.fields_map or to_attribute == "pk" or hasattr(model, to_attribute):
+        if to_attribute in model._meta.fields_map or to_attribute == PRIMARY_KEY_ALIAS or hasattr(model, to_attribute):
             raise QueryError(
                 f"Prefetch({self.relation!r}, to_attribute={to_attribute!r}) conflicts with the attribute "
                 f"{model.__name__}.{to_attribute} - pick a to_attribute that isn't a field, relation or "

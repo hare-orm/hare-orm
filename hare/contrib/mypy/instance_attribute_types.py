@@ -5,11 +5,12 @@ from typing import TYPE_CHECKING, Any
 from mypy.typeops import make_simplified_union
 from mypy.types import AnyType, Instance, NoneType, Type, get_proper_type
 
-from hare.contrib.mypy.constants import DICT_FULLNAME, PRIMARY_KEY_ATTRIBUTE_NAME, STR_FULLNAME
+from hare.contrib.mypy.constants import DICT_FULLNAME, STR_FULLNAME
 from hare.contrib.mypy.mypy_types import MypyTypes
 from hare.exceptions import HareError
 from hare.fields.relations.fields.generic_foreign_key_field_instance import GenericForeignKeyFieldInstance
 from hare.fields.relations.fields.relational_field import RelationalField
+from hare.query.constants import PRIMARY_KEY_ALIAS
 
 if TYPE_CHECKING:
     from mypy.plugin import AttributeContext, Plugin
@@ -49,7 +50,7 @@ class InstanceAttributeTypes:
         if model is None:
             return attribute_context.default_attr_type
         mypy_types = MypyTypes(self.plugin, attribute_context.api, self.model_registry)
-        if name == PRIMARY_KEY_ATTRIBUTE_NAME:
+        if name == PRIMARY_KEY_ALIAS:
             return self.get_primary_key_type(attribute_context, mypy_types, model)
         generic_field = model._meta.generic_foreign_key_fields.get(name)
         if generic_field is not None:
@@ -131,7 +132,7 @@ class InstanceAttributeTypes:
         if not model._meta.primary_key_attribute:
             return attribute_context.default_attr_type
         try:
-            key_type = mypy_types.get_selected_value_type(model._meta.get_lookup_info(PRIMARY_KEY_ATTRIBUTE_NAME))
+            key_type = mypy_types.get_selected_value_type(model._meta.get_lookup_info(PRIMARY_KEY_ALIAS))
         except HareError:
             return attribute_context.default_attr_type
         return make_simplified_union([key_type, NoneType()]) if attribute_context.is_lvalue else key_type

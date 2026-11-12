@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.exceptions import ProtectedError
 from hare.fields.enums import OnDelete
@@ -113,7 +113,7 @@ class DeletionCollector:
             pks: Their primary keys.
         """
         # A walk locks rows on a transaction alone (RelatedRows.locks_rows_of()).
-        connection = cast("DatabaseClient", self.connection)
+        connection: DatabaseClient = self.connection  # type: ignore[assignment]
         primary_key_attribute_names = model._meta.primary_key_attribute_names
         for batch in RelatedRows.split_into_batches(pks, connection, len(primary_key_attribute_names)):
             queryset = RelatedRows.include_soft_deleted(
@@ -159,9 +159,9 @@ class DeletionCollector:
         reads_version = reads_state and self.reads_versions and bool(meta.optimistic_lock_field)
         value_names = [meta.primary_key_attribute_names[0], backward_field.relation_field]
         if reads_state:
-            value_names.append(cast(str, meta.soft_delete_field))
+            value_names.append(meta.soft_delete_field)  # type: ignore[arg-type]
         if reads_version:
-            value_names.append(cast(str, meta.optimistic_lock_field))
+            value_names.append(meta.optimistic_lock_field)  # type: ignore[arg-type]
         rows = await RelatedRows.get_tree_rows(backward_field, plan.root_pks, self.connection, value_names)
         if rows is None:
             return False
@@ -329,9 +329,9 @@ class DeletionCollector:
         primary_key_attribute_names = meta.primary_key_attribute_names
         pk_column_count = len(primary_key_attribute_names)
         reads_version = self.reads_versions and bool(meta.optimistic_lock_field)
-        value_names = [*primary_key_attribute_names, cast(str, meta.soft_delete_field)]
+        value_names = [*primary_key_attribute_names, meta.soft_delete_field]
         if reads_version:
-            value_names.append(cast(str, meta.optimistic_lock_field))
+            value_names.append(meta.optimistic_lock_field)
         rows: list[tuple[Any, bool]] = []
         for queryset in RelatedRows.get_pointing_querysets(
             backward_field, target_values, self.connection, lock=self.locks_rows

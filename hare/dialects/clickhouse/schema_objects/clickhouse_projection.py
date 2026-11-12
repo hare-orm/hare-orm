@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.classes.class_path import ClassPath
 from hare.classes.value_descriptions import ValueDescriptions
@@ -50,7 +50,7 @@ class ClickhouseProjection:
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip():
             raise ConfigurationError(f"ClickhouseProjection.name must be a non-empty string, got {self.name!r}")
-        if isinstance(cast("object", self.read_columns), str) or not all(
+        if isinstance(self.read_columns, str) or not all(  # type: ignore[unreachable]
             isinstance(column, str) and column for column in self.read_columns
         ):
             raise ConfigurationError(
@@ -87,14 +87,14 @@ class ClickhouseProjection:
         return dataclasses.replace(self, query=self.query.for_model(model))
 
     def get_queryset(self) -> QuerySet[Any, Any] | None:
-        """The queryset the projection selects - None for raw SQL."""
-        if isinstance(self.query, RawSQLTerm):
-            return None
+        """The queryset the projection selects, None for raw SQL.
+
+        Raises:
+            ConfigurationError: A recorded model query has no declaring model.
+        """
         from hare.query.queryset.model_query import ModelQuery
 
-        if isinstance(self.query, ModelQuery):
-            return self.query.get_queryset()
-        return self.query
+        return ModelQuery.get_declared_queryset(self.query)
 
     def get_query_sql(self, client: DatabaseClient | None = None) -> str:
         """Compile a SELECT without FROM; raw SQL is returned verbatim."""

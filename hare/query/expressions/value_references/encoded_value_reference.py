@@ -14,10 +14,9 @@ from hare.sql.terms.values.value_wrapper import ValueWrapper
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.models import Model
-    from hare.query.expressions.value_references.value_reference_types import ParameterValues
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class EncodedValueReference:
     """One encoded lookup parameter, held by a scalar wrapper or a bound array.
 
@@ -30,17 +29,18 @@ class EncodedValueReference:
     value_encoder: Callable[..., Any]
     item_key: str | None = None
 
-    def get_parameter_values(self, value: Any, model: type[Model], dialect: Dialect) -> ParameterValues | None:
+    def bind(self, parameters: list[Any], value: Any, model: type[Model], dialect: Dialect) -> bool:
         """The parameter of a new value - through the recorded encoder.
 
         Args:
+            parameters: The parameter buffer of this execution, filled in place.
             value: The new value.
             model: The model queried.
             dialect: The dialect the query runs on.
 
         Returns:
-            The parameters, or None when the encoded value isn't a plain value (an IntField's cast
-            for a fraction) and the query has to be built again.
+            True when the prepared SQL shape accepts the value; False requests a fresh build.
+            Conversion and validation errors propagate to the caller.
         """
         encoded_value = self.value_encoder(value, model, self.field, dialect)
         if self.item_key is not None:
@@ -48,5 +48,5 @@ class EncodedValueReference:
             if isinstance(encoded_value, (int, float, Decimal)):
                 encoded_value = dialect.parameters.get_bindable_number(encoded_value)
         if isinstance(encoded_value, Term):
-            return None
-        return [(self.wrapper, encoded_value, False)]
+            return False
+        return self.wrapper.bind(parameters, encoded_value, False)  # type: ignore[union-attr]

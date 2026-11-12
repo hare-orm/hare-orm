@@ -9,6 +9,18 @@
 "tests/writes/rules" = ["encryption"]
 
 [modules]
+"tests/migrations/tables/test_schema_rollback.py" = { requires = [], cells = [] }
+"tests/multiple_connections/test_router_consulted_once.py" = { requires = [], cells = [] }
+"tests/fields/value_types/test_json_column_reader.py" = { requires = [], cells = [] }
+"tests/fields/value_types/test_limit_validators.py" = { requires = [], cells = [] }
+"tests/fields/value_types/test_native_column_writers.py" = { requires = [], cells = [] }
+"tests/model_instances/test_instance_constructor.py" = { requires = [], cells = [] }
+"tests/model_instances/test_instance_constructor_setattr.py" = { requires = [], cells = [] }
+"tests/package/test_deferred_import.py" = { requires = [], cells = [] }
+"tests/package/test_public_imports.py" = { requires = [], cells = [] }
+"tests/query_plans/test_resolved_conversions.py" = { requires = [], cells = [] }
+"tests/writes/test_bulk_persistence_publication.py" = { requires = [], cells = [] }
+"tests/query_plans/test_rows_source_execution.py" = { requires = [], cells = [] }
 "tests/connections/test_connection_wrapper_cancellation.py" = { requires = [], cells = [] }
 "tests/contrib/mypy/test_model_fingerprint.py" = { requires = ["mypy"], cells = [] }
 "tests/contrib/outbox/test_normalized_keys.py" = { requires = [], cells = [] }
@@ -71,9 +83,9 @@
 "tests/backends/test_read_query_retry.py" = { requires = ["asyncpg"], cells = ["asyncpg"] }
 "tests/backends/test_reconnect.py" = { requires = [], cells = [] }
 "tests/backends/test_resource_completion.py" = { requires = [], cells = [] }
-"tests/backends/test_rust_pg_async_bridge.py" = { requires = ["native"], cells = [] }
+"tests/backends/test_rust_pg_async_bridge.py" = { requires = [], cells = [] }
 "tests/backends/test_rust_pg_transactions.py" = { requires = [], cells = [] }
-"tests/backends/test_rust_pg_listen.py" = { requires = ["native"], cells = [] }
+"tests/backends/test_rust_pg_listen.py" = { requires = [], cells = [] }
 "tests/backends/test_sqlite_cancellation.py" = { requires = [], cells = [] }
 "tests/backends/test_sqlite_client.py" = { requires = [], cells = [] }
 "tests/backends/test_sqlite_process_exit.py" = { requires = [], cells = [] }
@@ -405,14 +417,14 @@
 "tests/dialects/postgresql/tenancy/test_tenant_schema_model_scopes.py" = { requires = [], cells = [] }
 "tests/dialects/postgresql/tenancy/test_tenant_schema_shared_deletes.py" = { requires = [], cells = [] }
 "tests/dialects/postgresql/tenancy/test_tenant_schemas.py" = { requires = [], cells = [] }
-"tests/dialects/sqlite/native_functions/test_date_functions_native.py" = { requires = ["native"], cells = [] }
-"tests/dialects/sqlite/native_functions/test_date_timestamp_native.py" = { requires = ["native"], cells = [] }
-"tests/dialects/sqlite/native_functions/test_greatest_least_native.py" = { requires = ["native"], cells = [] }
-"tests/dialects/sqlite/native_functions/test_json_path_values_native.py" = { requires = ["native"], cells = [] }
-"tests/dialects/sqlite/native_functions/test_math_native.py" = { requires = ["native"], cells = [] }
-"tests/dialects/sqlite/native_functions/test_statistic_native.py" = { requires = ["native"], cells = [] }
-"tests/dialects/sqlite/native_functions/test_temporal_arithmetic_native.py" = { requires = ["native"], cells = [] }
-"tests/dialects/sqlite/native_functions/test_text_native.py" = { requires = ["native"], cells = [] }
+"tests/dialects/sqlite/native_functions/test_date_functions_native.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/native_functions/test_date_timestamp_native.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/native_functions/test_greatest_least_native.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/native_functions/test_json_path_values_native.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/native_functions/test_math_native.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/native_functions/test_statistic_native.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/native_functions/test_temporal_arithmetic_native.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/native_functions/test_text_native.py" = { requires = [], cells = [] }
 "tests/dialects/sqlite/test_aiosqlite_driver.py" = { requires = [], cells = [] }
 "tests/dialects/sqlite/test_alter_relation_in_place.py" = { requires = [], cells = [] }
 "tests/dialects/sqlite/test_attached_databases.py" = { requires = [], cells = [] }
@@ -497,6 +509,7 @@
 "tests/fields/value_types/test_json_values.py" = { requires = [], cells = ["phone", "pydantic"] }
 "tests/fields/value_types/test_literal_value_conversion.py" = { requires = [], cells = ["phone", "pydantic"] }
 "tests/fields/value_types/test_ordered_values.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_prepared_conversions.py" = { requires = [], cells = [] }
 "tests/fields/value_types/test_text.py" = { requires = [], cells = ["phone", "pydantic"] }
 "tests/fields/value_types/test_text_format_fields.py" = { requires = [], cells = ["phone", "pydantic"] }
 "tests/fields/value_types/test_text_format_fields_phone.py" = { requires = ["phone"], cells = ["phone", "pydantic"] }
@@ -682,6 +695,7 @@
 "tests/native_acceleration/test_field_codecs_asyncpg.py" = { requires = ["asyncpg"], cells = ["asyncpg"] }
 "tests/native_acceleration/test_field_codecs_pydantic.py" = { requires = ["pydantic"], cells = ["pydantic"] }
 "tests/native_acceleration/test_model_constructor.py" = { requires = [], cells = [] }
+"tests/native_acceleration/test_model_batch.py" = { requires = [], cells = [] }
 "tests/native_acceleration/test_pg_result_reading.py" = { requires = [], cells = [] }
 "tests/native_acceleration/test_positional_hydration.py" = { requires = [], cells = [] }
 "tests/native_acceleration/test_prefetch_native_layout.py" = { requires = [], cells = [] }
@@ -691,7 +705,7 @@
 "tests/native_acceleration/test_rust_serialize_parity_pydantic.py" = { requires = ["pydantic"], cells = ["pydantic"] }
 "tests/native_acceleration/test_text_format_field_codecs.py" = { requires = [], cells = ["phone"] }
 "tests/native_acceleration/test_write_path_fast_paths.py" = { requires = [], cells = ["asyncpg"] }
-"tests/native_acceleration/test_written_parameters.py" = { requires = ["native"], cells = [] }
+"tests/native_acceleration/test_written_parameters.py" = { requires = [], cells = [] }
 "tests/observability/test_change_events.py" = { requires = [], cells = [] }
 "tests/observability/test_driver_exception_cause.py" = { requires = [], cells = [] }
 "tests/observability/test_duration_records.py" = { requires = [], cells = [] }
@@ -836,6 +850,7 @@
 "tests/query_plans/test_plan_key_coverage.py" = { requires = [], cells = [] }
 "tests/query_plans/test_plan_origins.py" = { requires = [], cells = [] }
 "tests/query_plans/test_plan_verification.py" = { requires = [], cells = [] }
+"tests/query_plans/test_prepared_model_columns.py" = { requires = [], cells = [] }
 "tests/query_plans/test_query_plans_time_zones.py" = { requires = [], cells = ["tzlocal"] }
 "tests/query_plans/test_query_shape_cache.py" = { requires = [], cells = [] }
 "tests/query_plans/test_query_shape_cache_manager_scope.py" = { requires = [], cells = [] }

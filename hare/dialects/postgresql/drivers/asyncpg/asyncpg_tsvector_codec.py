@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import struct
-from collections.abc import Callable
 from operator import itemgetter
 from typing import Any, ClassVar
 
 from hare.dialects.postgresql.drivers.asyncpg.constants import (
-    TSVECTOR_LETTERS_BY_WEIGHT,
     TSVECTOR_LEXEME_BYTES_LIMIT,
     TSVECTOR_MAX_BYTES,
     TSVECTOR_MAX_POSITION,
@@ -23,8 +21,8 @@ class AsyncpgTsvectorCodec:
     reads and writes. asyncpg has none of its own, and its text array parser crashes on an empty
     ``tsvector`` in an array; the text is read as ``tsvectorin`` reads it."""
 
-    #: The compiled decoder - None without the compiled extension.
-    native_decoder: ClassVar[Any] = getattr(NativeModules.rows, "read_tsvector_text", None)
+    #: The compiled decoder of the binary value into its text, as ``tsvectorout`` writes it.
+    decoder: ClassVar[Any] = NativeModules.rows.read_tsvector_text
 
     @classmethod
     def encode(cls, value: str) -> bytes:
@@ -222,44 +220,3 @@ class AsyncpgTsvectorCodec:
                     cls.raise_syntax_error(text)
                 index += 1
             positions.append((position, weight))
-
-    @classmethod
-    def get_decoder(cls) -> Callable[[bytes], str]:
-        """The decoder of the binary value - the compiled one, ``decode()`` without it."""
-        return cls.native_decoder or cls.decode
-
-    @staticmethod
-    def decode(value: bytes) -> str:
-        """Decodes PostgreSQL's binary ``tsvector`` into its text, as ``tsvectorout`` writes it.
-
-        Args:
-            value: The binary value.
-
-        Returns:
-            The text.
-        """
-        letters = TSVECTOR_LETTERS_BY_WEIGHT
-        count = int.from_bytes(value[:4], "big")
-        offset = 4
-        parts = []
-        for __ in range(count):
-            end = value.index(b"\x00", offset)
-            lexeme = value[offset:end].decode()
-            if "'" in lexeme or "\\" in lexeme:
-                lexeme = lexeme.replace("\\", "\\\\").replace("'", "''")
-            position_count = value[end + 1] << 8 | value[end + 2]
-            offset = end + 3
-            if not position_count:
-                parts.append(f"'{lexeme}'")
-                continue
-            stop = offset + 2 * position_count
-            # A position's two bytes: the weight in the upper two bits, the position below.
-            written_positions = ",".join(
-                [
-                    f"{(value[index] & 63) << 8 | value[index + 1]}{letters[value[index] >> 6]}"
-                    for index in range(offset, stop, 2)
-                ]
-            )
-            offset = stop
-            parts.append(f"'{lexeme}':{written_positions}")
-        return " ".join(parts)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, TypeVar, overload
 
 from hare.exceptions import (
     ConfigurationError,
@@ -75,7 +75,7 @@ class RelationalField(Field[TModel]):
 
     @property
     def related_model(self) -> type[TModel]:
-        return cast("type[TModel]", self.get_relation_binding().related_model)
+        return self.get_relation_binding().related_model  # type: ignore[return-value]
 
     @related_model.setter
     def related_model(self, value: type[TModel]) -> None:
@@ -83,7 +83,7 @@ class RelationalField(Field[TModel]):
 
     @property
     def to_field_instance(self) -> Field[Any]:
-        return cast("Field[Any]", self.get_relation_binding().to_field_instance)
+        return self.get_relation_binding().to_field_instance  # type: ignore[return-value]
 
     @to_field_instance.setter
     def to_field_instance(self, value: Field[Any]) -> None:

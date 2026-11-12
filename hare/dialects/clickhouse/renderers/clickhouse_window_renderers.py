@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import copy
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from hare.dialects.clickhouse.renderers.constants import (
     CLICKHOUSE_OFFSET_FUNCTION_NAMES,
@@ -48,7 +48,7 @@ class ClickhouseWindowRenderers:
         """The value of the row ``offset`` rows away in the partition, the default (NULL without one)
         past its edge - cast to the value's type, which ClickHouse requires of it; a value of a type that is
         never ``Nullable`` (a container, a ``Dynamic``) is read as it is."""
-        window_function = cast("AnalyticFunction", function)
+        window_function: AnalyticFunction = function  # type: ignore[assignment]
         value_sql, offset_sql, default_sql = (window_function.get_arg_sql(arg, sql_context) for arg in function.args)
         nullable_value_sql = (
             f"toNullable({value_sql})"
@@ -84,7 +84,7 @@ class ClickhouseWindowRenderers:
     @staticmethod
     def render_cumulative_distribution(function: Function, sql_context: SqlContext) -> str:
         """The share of the partition's rows ordered up to the current one's peers."""
-        partition_sql = cast("AnalyticFunction", function).get_partition_sql(sql_context)
+        partition_sql = function.get_partition_sql(sql_context)  # type: ignore[attr-defined]
         return (
             f"(toFloat64(count() OVER({partition_sql} {CLICKHOUSE_UP_TO_PEERS_FRAME})) "
             f"/ count() OVER({partition_sql} {CLICKHOUSE_WHOLE_PARTITION_FRAME}))"
@@ -110,7 +110,7 @@ class ClickhouseWindowRenderers:
     def render_nth_value(function: Function, sql_context: SqlContext) -> str:
         """``NTH_VALUE`` of the value made nullable - past the partition's rows ClickHouse gives the
         value type's default (0), not NULL; a type holding NULL itself (a ``Dynamic``) as it is."""
-        if not ClickhouseWindowRenderers.takes_nullable(cast("AnalyticFunction", function), sql_context):
+        if not ClickhouseWindowRenderers.takes_nullable(function, sql_context):  # type: ignore[arg-type]
             return function.get_function_sql(sql_context)
         nullable_function = copy(function)
         nullable_function.args = [Function("toNullable", function.args[0]), *function.args[1:]]

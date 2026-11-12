@@ -1,6 +1,6 @@
 """The moments of a ClickHouse binary insert are written as the whole ticks of their column - by the
-native module where it is built, exactly as the Python conversion (clickhouse-driver) and the
-library's own conversion (clickhouse-connect) write them."""
+native module (clickhouse-driver) exactly as timedelta arithmetic counts them, and exactly as the
+library's own conversion (clickhouse-connect) writes them."""
 
 import datetime
 import zoneinfo
@@ -8,7 +8,6 @@ import zoneinfo
 import pytest
 
 from hare.dialects.clickhouse.drivers.constants import CLICKHOUSE_MOMENT_EPOCH
-from hare.native.native_modules import NativeModules
 
 pytestmark = pytest.mark.database_independent
 
@@ -58,25 +57,24 @@ MOMENTS = [
 ]
 
 
-@pytest.fixture
-def native_rows():
-    if NativeModules.rows is None:
-        pytest.skip("the native module isn't built")
-    return NativeModules.rows
+def get_expected_ticks(moment, moment_scale):
+    """The ticks of a moment at a scale, from timedelta arithmetic - finer than a tick rounds down."""
+    microseconds = (moment - CLICKHOUSE_MOMENT_EPOCH) // datetime.timedelta(microseconds=1)
+    if moment_scale > 6:
+        return microseconds * 10 ** (moment_scale - 6)
+    return microseconds // 10 ** (6 - moment_scale)
 
 
 @pytest.mark.requires("clickhouse-driver")
 @pytest.mark.parametrize("moment_scale", range(10))
-def test_clickhouse_driver_ticks_are_the_python_conversion_s(native_rows, monkeypatch, moment_scale):
+def test_clickhouse_driver_ticks_are_the_whole_ticks_since_the_epoch(moment_scale):
     from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_library_client import (
         ClickhouseDriverLibraryClient,
     )
 
     # None and ticks already are kept as they are.
     values = [*MOMENTS, None, 1_700_000_000_123_456]
-    monkeypatch.setattr(ClickhouseDriverLibraryClient, "native_rows", None)
-    expected = ClickhouseDriverLibraryClient._get_moment_ticks(values, moment_scale)
-    monkeypatch.setattr(ClickhouseDriverLibraryClient, "native_rows", native_rows)
+    expected = [*(get_expected_ticks(moment, moment_scale) for moment in MOMENTS), None, 1_700_000_000_123_456]
     ticks = ClickhouseDriverLibraryClient._get_moment_ticks(values, moment_scale)
     assert ticks == expected
     assert [type(tick) for tick in ticks] == [type(tick) for tick in expected]
@@ -84,23 +82,22 @@ def test_clickhouse_driver_ticks_are_the_python_conversion_s(native_rows, monkey
 
 
 @pytest.mark.requires("clickhouse-driver")
-def test_a_naive_moment_fails_as_in_the_python_conversion(native_rows, monkeypatch):
+def test_a_naive_moment_fails_as_the_subtraction_from_the_epoch_does():
     from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_library_client import (
         ClickhouseDriverLibraryClient,
     )
 
-    messages = []
-    for rows in (None, native_rows):
-        monkeypatch.setattr(ClickhouseDriverLibraryClient, "native_rows", rows)
-        with pytest.raises(TypeError) as error:
-            ClickhouseDriverLibraryClient._get_moment_ticks([datetime.datetime(2020, 1, 1)], 6)
-        messages.append(str(error.value))
-    assert messages[0] == messages[1]
+    naive_moment = datetime.datetime(2020, 1, 1)
+    with pytest.raises(TypeError) as subtraction_error:
+        naive_moment - CLICKHOUSE_MOMENT_EPOCH
+    with pytest.raises(TypeError) as error:
+        ClickhouseDriverLibraryClient._get_moment_ticks([naive_moment], 6)
+    assert str(error.value) == str(subtraction_error.value)
 
 
 @pytest.mark.requires("clickhouse-connect")
 @pytest.mark.parametrize("moment_scale", range(10))
-def test_clickhouse_connect_ticks_are_the_library_s(native_rows, moment_scale):
+def test_clickhouse_connect_ticks_are_the_library_s(moment_scale):
     from clickhouse_connect.datatypes.registry import get_from_name
 
     from hare.dialects.clickhouse.drivers.clickhouse_connect.client.clickhouse_connect_client import (
@@ -114,7 +111,7 @@ def test_clickhouse_connect_ticks_are_the_library_s(native_rows, moment_scale):
 
 
 @pytest.mark.requires("clickhouse-connect")
-def test_clickhouse_connect_leaves_other_columns_to_the_library(native_rows):
+def test_clickhouse_connect_leaves_other_columns_to_the_library():
     from clickhouse_connect.datatypes.registry import get_from_name
 
     from hare.dialects.clickhouse.drivers.clickhouse_connect.client.clickhouse_connect_client import (

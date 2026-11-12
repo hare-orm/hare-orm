@@ -162,6 +162,16 @@ class BenchmarkPages:
         ]
         if report.get("hare_release"):
             rows.append((self.text("hare-orm release", "Релиз hare-orm"), report["hare_release"]))
+        execution = self.charts.data.conditions.get("execution", {})
+        for key, english, russian in (
+            ("platform", "Execution", "Среда выполнения"),
+            ("cpu_allocation", "CPU allocation", "Распределение CPU"),
+            ("storage", "Storage", "Хранение данных"),
+            ("postgresql_durability", "PostgreSQL durability", "Долговечность PostgreSQL"),
+            ("source", "Source snapshot", "Снимок исходников"),
+        ):
+            if value := execution.get(key):
+                rows.append((self.text(english, russian), value))
         runs = str(report["runs"])
         if report["runs"] > 1:
             runs += self.text(", median", ", медиана")

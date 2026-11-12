@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import struct
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import Any, ClassVar
 
 from hare.dialects.postgresql.drivers.asyncpg.constants import HSTORE_NULL_LENGTH
@@ -14,8 +14,8 @@ class AsyncpgHstoreCodec:
     reads and writes (a mapping is taken too). asyncpg reads ``hstore`` as text otherwise, and its
     text array parser crashes on an empty ``hstore`` in an array."""
 
-    #: The compiled decoder - None without the compiled extension.
-    native_decoder: ClassVar[Any] = getattr(NativeModules.rows, "read_hstore_text", None)
+    #: The compiled decoder of the binary value into its text, as ``hstore_out`` writes it.
+    decoder: ClassVar[Any] = NativeModules.rows.read_hstore_text
 
     @staticmethod
     def encode(value: Any) -> bytes:
@@ -50,35 +50,3 @@ class AsyncpgHstoreCodec:
                 item_bytes = item.encode()
                 parts.append(struct.pack("!i", len(item_bytes)) + item_bytes)
         return b"".join(parts)
-
-    @classmethod
-    def get_decoder(cls) -> Callable[[bytes], str]:
-        """The decoder of the binary value - the compiled one, ``decode()`` without it."""
-        return cls.native_decoder or cls.decode
-
-    @staticmethod
-    def decode(value: bytes) -> str:
-        """Decodes PostgreSQL's binary ``hstore`` into its text, as ``hstore_out`` writes it.
-
-        Args:
-            value: The binary value.
-
-        Returns:
-            The text.
-        """
-        count = int.from_bytes(value[:4], "big")
-        offset = 4
-        parts = []
-        for __ in range(count):
-            key_length = int.from_bytes(value[offset : offset + 4], "big")
-            offset += 4
-            key = HStoreText.quote(value[offset : offset + key_length].decode())
-            offset += key_length
-            item_length = int.from_bytes(value[offset : offset + 4], "big", signed=True)
-            offset += 4
-            if item_length == HSTORE_NULL_LENGTH:
-                parts.append(f"{key}=>NULL")
-                continue
-            parts.append(f"{key}=>{HStoreText.quote(value[offset : offset + item_length].decode())}")
-            offset += item_length
-        return ", ".join(parts)

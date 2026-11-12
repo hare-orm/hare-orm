@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -61,7 +61,7 @@ def test_model_state_keeps_effective_relation_schema_without_live_bindings() -> 
     state = State.from_models((Author, Book, Credit))
     for snapshot in (state, state.clone()):
         credit = snapshot.models[("blog", "Credit")]
-        book_field = cast(ForeignKeyFieldInstance, credit.fields["book"])
+        book_field: ForeignKeyFieldInstance = credit.fields["book"]
         assert book_field.on_delete is fields.SET_NULL
         assert book_field.index is False
         assert book_field.to_field == "id"
@@ -135,5 +135,5 @@ def test_state_apps_builds_relations_before_querysets() -> None:
         ).state_forward("blog", state)
 
         post_model = state.apps.get_model("blog.Post")
-        author_field = cast(ForeignKeyFieldInstance, post_model._meta.fields_map["author"])
+        author_field: ForeignKeyFieldInstance = post_model._meta.fields_map["author"]
         assert author_field.to_field_instance is not None

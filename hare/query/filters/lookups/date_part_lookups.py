@@ -24,7 +24,7 @@ from hare.sql.terms.term import Term
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
 from hare.query.filters.lookups.lookups import Lookups
-from hare.time import Timezone
+from hare.time.zone_settings import ZoneSettings
 
 
 class DatePartLookups:
@@ -39,8 +39,8 @@ class DatePartLookups:
         Returns:
             ``(zone name under use_timezone, whether a naive value is read in the local zone)``.
         """
-        use_timezone = Timezone.get_use_timezone()
-        zone_name = Timezone.name() if is_datetime_field and use_timezone else None
+        use_timezone = ZoneSettings.get_use_timezone()
+        zone_name = ZoneSettings.name() if is_datetime_field and use_timezone else None
         return zone_name, is_datetime_field and not use_timezone
 
     @classmethod

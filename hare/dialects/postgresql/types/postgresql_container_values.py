@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import ValidationError
 
@@ -8,7 +9,6 @@ if TYPE_CHECKING:
     from hare.dialects.base.types.type_registry import TypeRegistry
     from hare.fields.data.containers.array_field import ArrayField
     from hare.fields.field import Field
-    from hare.models import Model
 
 
 class PostgresqlContainerValues:
@@ -35,37 +35,30 @@ class PostgresqlContainerValues:
         # Local import: the dialect constants import the types module.
         from hare.dialects.postgresql.constants import POSTGRESQL_DIALECT
 
-        base_field = cast("ArrayField", field).base_field
+        base_field = field.base_field  # type: ignore[attr-defined]
         if not base_field.exists_on(POSTGRESQL_DIALECT):
             return None
         return f"{base_field.get_column_type(POSTGRESQL_DIALECT)}[]"
 
-    def to_db(self, field: Field[Any], value: Any, instance: type[Model] | Model | None) -> Any:
-        """The array as the driver binds it.
+    def prepare_db(self, field: Field[Any]) -> Callable[[Any, Any], Any]:
+        """Prepare child conversions; rectangular shape remains a per-value database rule."""
+        array_field: ArrayField = field  # type: ignore[assignment]
+        write = array_field.get_dialect_db_writer(self.types)
+        nested = isinstance(array_field.base_field, type(array_field))
 
-        Args:
-            field: The array field.
-            value: The Python value.
-            instance: The model (class) it is written or compared for.
+        def write_value(value: Any, instance: Any) -> Any:
+            db_value = write(value, instance)
+            if isinstance(db_value, list) and nested:
+                try:
+                    self.get_shape(db_value)
+                except ValueError:
+                    raise ValidationError(
+                        f"{array_field.get_path()}: a PostgreSQL array of arrays holds sub-arrays of one length at "
+                        f"each depth, got {array_field.get_value_for_message(value)}"
+                    ) from None
+            return db_value
 
-        Returns:
-            The list of element values.
-
-        Raises:
-            ValidationError: An array of arrays holds sub-arrays of other lengths at one depth, or a
-                value beside a sub-array - PostgreSQL's arrays are rectangular.
-        """
-        array_field = cast("ArrayField", field)
-        db_value = array_field.get_dialect_db_value(value, instance, self.types)
-        if isinstance(db_value, list) and isinstance(array_field.base_field, type(array_field)):
-            try:
-                self.get_shape(db_value)
-            except ValueError:
-                raise ValidationError(
-                    f"{array_field.get_path()}: a PostgreSQL array of arrays holds sub-arrays of one length at "
-                    f"each depth, got {array_field.get_value_for_message(value)}"
-                ) from None
-        return db_value
+        return write_value
 
     @classmethod
     def get_shape(cls, value: list[Any]) -> tuple[int, ...]:
@@ -91,14 +84,6 @@ class PostgresqlContainerValues:
             raise ValueError(shapes)
         return (len(value), *shapes.pop())
 
-    def to_python(self, field: Field[Any], value: Any) -> Any:
-        """The Python value of an array the driver returned.
-
-        Args:
-            field: The array field.
-            value: The value.
-
-        Returns:
-            The list of element values.
-        """
-        return cast("ArrayField", field).get_dialect_python_value(value, self.types)
+    def prepare_python(self, field: Field[Any]) -> Callable[[Any], Any]:
+        """Prepare the array's sole read traversal."""
+        return field.get_dialect_python_reader(self.types)  # type: ignore[attr-defined]

@@ -1,21 +1,20 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Sequence
-from copy import copy
-from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.core.routing.written_connections import WrittenConnections
 from hare.exceptions import UnSupportedError
 from hare.fields.data.temporal.datetime_field import DatetimeField
 from hare.fields.data.temporal.time_field import TimeField
 from hare.fields.field import Field
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.one_to_one_field_instance import OneToOneFieldInstance
-from hare.fields.relations.fields.relational_field import RelationalField
 from hare.instrumentation.capture.captured_write import CapturedWrite
 from hare.instrumentation.capture.change_capturing import ChangeCapturing
 from hare.instrumentation.change_events import ChangeEvents
 from hare.instrumentation.enums import RowOperation
-from hare.models.tenancy.tenancy import Tenancy
+from hare.models.tenancy.update_relation_tenants import UpdateRelationTenants
 from hare.models.write.rules.constants import UPDATE_METHOD_NAME
 from hare.models.write.rules.enums import WriteType
 from hare.models.write.rules.relation_key_values import RelationKeyValues
@@ -24,7 +23,7 @@ from hare.models.write.rules.tenant_write_rules import TenantWriteRules
 from hare.models.write.update.expression_assignment import ExpressionAssignment
 from hare.models.write.write_steps import WriteSteps
 from hare.query.execution.prepared_write import PreparedWrite
-from hare.query.expressions import Expression, ExpressionContext, Value
+from hare.query.expressions import Expression, ExpressionContext
 from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
 from hare.query.expressions.value_references.write_value_reference import WriteValueReference
 from hare.query.plans.description.plan_context import PlanContext
@@ -32,6 +31,7 @@ from hare.query.plans.description.plan_description import PlanDescription
 from hare.query.plans.description.plan_parts import PlanParts
 from hare.query.plans.enums import PlanKeyForm
 from hare.query.plans.plan_origins import PlanOrigins
+from hare.query.plans.statement.declarations import CallPlanHit
 from hare.query.plans.statement.declared_plan_slots import DeclaredPlanSlots
 from hare.query.queryset.query_specification import QuerySpecification
 from hare.query.statements.building.query_ctes import QueryCtes
@@ -39,14 +39,16 @@ from hare.query.statements.constants import MOVED_KEY_EXPRESSION_MESSAGE
 from hare.query.statements.write.matching_rows_query import MatchingRowsQuery
 from hare.query.statements.write.returning.returned_rows import ReturnedRows
 from hare.sql import Table
-from hare.sql.functions.cast import Cast
 from hare.sql.terms.term import Term
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 from hare.time import Timezone
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.dialects.base.dialect import Dialect
     from hare.instrumentation.capture.capture_needs import CaptureNeeds
+    from hare.query.queryset.queryset import QuerySet
+    from hare.query.scopes.row_visibility import RowVisibility
     from hare.query.statements.write.returning.update_returning_query import UpdateReturningQuery
 
 
@@ -61,6 +63,7 @@ class UpdateQuery(MatchingRowsQuery):
         "_rules",
         "_method_name",
         "_prepared_write",
+        "_assignment_fields",
     )
 
     ordering_can_reference_annotation_alias: ClassVar[bool] = False
@@ -104,33 +107,44 @@ class UpdateQuery(MatchingRowsQuery):
         self.given_values = update_kwargs
         #: The values written - the blind index of each encrypted field among them.
         self.update_kwargs = self._rules.add_blind_index_values(update_kwargs)
+        fields = self.model._meta.fields_map
+        self._assignment_fields = tuple(
+            (
+                name,
+                fields[name],
+                tuple(fields[source] for source in fields[name].source_fields)
+                if isinstance(fields[name], (ForeignKeyFieldInstance, OneToOneFieldInstance))
+                else (),
+            )
+            for name in self.update_kwargs
+        )
         self._prepared_write: PreparedWrite | None = None
 
-    def _get_execution_query(self, for_write: bool = False) -> Self:
-        query = super()._get_execution_query(for_write)
-        if not self._is_execution_query:
-            query._prepared_write = None
-        query._prepare_write_values()
-        return query
-
     def _prepare_write_values(self) -> PreparedWrite:
-        """Bind direct assignments and automatic stamps once for this execution.
+        """Bind direct assignments and automatic stamps once for the execution this query is made for
+        - see ``_make_prepared_write()``."""
+        if self._prepared_write is None:
+            self._prepared_write = self._make_prepared_write(self.dialect)
+        return self._prepared_write
+
+    def _make_prepared_write(self, dialect: Dialect) -> PreparedWrite:
+        """Bind direct assignments and automatic stamps for one execution - this query is only read.
 
         Expressions keep their own parameter descriptions. Relation assignments are
         checked and expanded before compilation, so both plan hits and full builds
         consume the same column values, including one shared automatic timestamp.
+
+        Args:
+            dialect: The dialect of the execution's connection.
         """
-        if self._prepared_write is not None:
-            return self._prepared_write
-        fields = self.model._meta.fields_map
         assignments: list[tuple[str, int, Field[Any], Any]] = []
-        for name, value in self.update_kwargs.items():
-            field = fields[name]
-            if isinstance(field, (ForeignKeyFieldInstance, OneToOneFieldInstance)):
+        for name, field, source_fields in self._assignment_fields:
+            value = self.update_kwargs[name]
+            if source_fields:
                 values = RelationKeyValues.get_key_values(self.model, name, value)
                 assignments.extend(
-                    (name, index, fields[source], item)
-                    for index, (source, item) in enumerate(zip(field.source_fields, values, strict=True))
+                    (name, index, source_field, item)
+                    for index, (source_field, item) in enumerate(zip(source_fields, values, strict=True))
                 )
             else:
                 value = ExpressionAssignment.get_assigned_value(value)
@@ -138,12 +152,11 @@ class UpdateQuery(MatchingRowsQuery):
                     assignments.append((name, 0, field, value))
         automatic_fields = self._get_auto_now_fields()
         now = Timezone.now() if automatic_fields else None
-        self._prepared_write = PreparedWrite(
-            self.dialect,
+        return PreparedWrite(
+            dialect,
             assignments,
             ((name, field, field.get_auto_now_value(now)) for name, field in automatic_fields),
         )
-        return self._prepared_write
 
     def _get_written_method_name(self) -> str:
         return self._method_name
@@ -155,16 +168,22 @@ class UpdateQuery(MatchingRowsQuery):
     def _prepare_build(self) -> None:
         super()._prepare_build()
         self._prepare_write_values()
-        # A literal an expression may write is checked by its field as a plain value is - on a plan
-        # hit too, whose literals bind without their field.
-        fields_map = self.model._meta.fields_map
-        for key, value in self.update_kwargs.items():
-            field_object = fields_map.get(key)
-            if field_object is None or isinstance(field_object, (ForeignKeyFieldInstance, OneToOneFieldInstance)):
+        self._check_expression_literals(self.dialect)
+
+    def _check_expression_literals(self, dialect: Dialect) -> None:
+        """Checks each literal an expression may write by its field, as a plain value is - on a run on a
+        plan too, whose literals bind without their field. This query is only read.
+
+        Args:
+            dialect: The dialect of the execution's connection.
+        """
+        update_kwargs = self.update_kwargs
+        for key, field_object, source_fields in self._assignment_fields:
+            if source_fields:
                 continue
-            value = ExpressionAssignment.get_assigned_value(value)
+            value = ExpressionAssignment.get_assigned_value(update_kwargs[key])
             if isinstance(value, Expression):
-                ExpressionAssignment.raise_if_literal_refused(key, field_object, value, self.dialect)
+                ExpressionAssignment.raise_if_literal_refused(key, field_object, value, dialect)
 
     def _get_update_plan_description(self) -> PlanDescription | None:
         """Describes the assigned values - their structures, and the values bound.
@@ -178,12 +197,17 @@ class UpdateQuery(MatchingRowsQuery):
         update_values, update_value_origins = self._get_update_values()
         return PlanDescription(update_value_structures, update_values, update_value_origins)
 
-    def _get_call_signature_type_part(self) -> tuple[Any, list[Any]]:
-        # The assigned values - their structure in the key, the values bound after the filters'.
+    def _get_call_signature_type_part(self, prepared: PreparedWrite | None = None) -> tuple[Any, Sequence[Any]]:
+        """The assigned values - their structure in the key, the values bound after the filters'.
+
+        Args:
+            prepared: The values of the execution run on a plan of the calls - this query's own
+                (``_prepare_write_values()``) when None.
+        """
         update_value_structures = self._get_update_value_structures()
-        if update_value_structures is None or self._get_ctes_description().values:
-            return None, []
-        return update_value_structures, self._get_update_values()[0]
+        if update_value_structures is None or self._options.with_ctes:
+            return None, ()
+        return update_value_structures, self._get_update_values(prepared)[0]
 
     def _build_statement(
         self, value_wrapper_references: RecordedValueReferences | None, *, records_for_caller: bool
@@ -194,7 +218,7 @@ class UpdateQuery(MatchingRowsQuery):
         self._apply_update_values(table, value_wrapper_references)
         # The keys of a relation computed by the update, whose tenant is checked, are read by a SELECT
         # built from this query - run on its built query, never on a plan.
-        return not self._get_tenant_checked_computed_relations()
+        return not UpdateRelationTenants.get_tenant_checked_computed_relations(self)
 
     def _get_auto_now_fields(self) -> list[tuple[str, DatetimeField[Any] | TimeField[Any]]]:
         """The ``auto_now`` fields the update doesn't assign itself - each is set to the moment
@@ -213,18 +237,16 @@ class UpdateQuery(MatchingRowsQuery):
             The structures, or None when a value can't be bound into a plan - a bare SQL term, an
             expression keeping no plan. An unknown field gives None too: the build raises for it.
         """
-        fields_map = self.model._meta.fields_map
+        update_kwargs = self.update_kwargs
         structures: list[tuple[str, Any]] = []
-        for key, value in self.update_kwargs.items():
-            field_object = fields_map.get(key)
-            if field_object is None:
-                return None
-            if isinstance(field_object, (ForeignKeyFieldInstance, OneToOneFieldInstance)):
-                if len(field_object.source_fields) > 1:
+        for key, _field_object, source_fields in self._assignment_fields:
+            value = update_kwargs[key]
+            if source_fields:
+                if len(source_fields) > 1:
                     key_values = RelationKeyValues.get_key_values(self.model, key, value)
                     structures.append((key, tuple(type(key_value) for key_value in key_values)))
-                    continue
-                structures.append((key, type(value)))
+                else:
+                    structures.append((key, type(value)))
                 continue
             value = ExpressionAssignment.get_assigned_value(value)
             if isinstance(value, Expression):
@@ -236,9 +258,12 @@ class UpdateQuery(MatchingRowsQuery):
                 structures.append((key, type(value)))
         return tuple(structures)
 
-    def _get_update_values(self) -> tuple[list[Any], list[Any] | None]:
+    def _get_update_values(self, prepared: PreparedWrite | None = None) -> tuple[list[Any], list[Any] | None]:
         """The values the statement assigns: each given value, then the moment every ``auto_now``
         field is set to.
+
+        Args:
+            prepared: The execution's values - this query's own (``_prepare_write_values()``) when None.
 
         Returns:
             The values, and their origins while the statement records its plan (else None).
@@ -247,29 +272,26 @@ class UpdateQuery(MatchingRowsQuery):
             ValidationError: A relation is assigned an instance of another model.
             QueryError: A relation is assigned an unsaved instance.
         """
-        fields_map = self.model._meta.fields_map
         update_kwargs = self.update_kwargs
-        prepared = self._prepare_write_values()
+        if prepared is None:
+            prepared = self._prepare_write_values()
         values: list[Any] = []
         origins: list[Any] | None = [] if PlanOrigins.records else None
-        for key, value in update_kwargs.items():
-            field_object = fields_map[key]
-            if isinstance(field_object, (ForeignKeyFieldInstance, OneToOneFieldInstance)) and (
-                len(field_object.source_fields) > 1
-            ):
-                key_values = [prepared.values[key, index] for index in range(len(field_object.source_fields))]
+        for key, _field_object, source_fields in self._assignment_fields:
+            if len(source_fields) > 1:
+                key_values = [prepared.values[key, index] for index in range(len(source_fields))]
                 values.extend(key_values)
                 if origins is not None:
                     origins += [
                         PlanOrigins.get_value_origin(update_kwargs, key, index) for index in range(len(key_values))
                     ]
                 continue
-            if isinstance(field_object, (ForeignKeyFieldInstance, OneToOneFieldInstance)):
+            if source_fields:
                 values.append(prepared.values[key, 0])
                 if origins is not None:
                     origins.append(PlanOrigins.get_value_origin(update_kwargs, key))
                 continue
-            value = ExpressionAssignment.get_assigned_value(value)
+            value = ExpressionAssignment.get_assigned_value(update_kwargs[key])
             if isinstance(value, Expression):
                 value_description: PlanDescription = value.get_plan_description(PlanContext(model=self.model))  # type: ignore[assignment]
                 values.extend(value_description.values)
@@ -398,7 +420,7 @@ class UpdateQuery(MatchingRowsQuery):
         foreign_key_field: str = field_object.source_field  # type: ignore[assignment]
         value_field_object = self.model._meta.fields_map[foreign_key_field]
         db_value = self._prepare_write_values().values[key, 0].database_value
-        return cast("str", value_field_object.source_field), db_value, value_field_object
+        return value_field_object.source_field, db_value, value_field_object
 
     def _get_assigned_column_value(
         self,
@@ -557,36 +579,42 @@ class UpdateQuery(MatchingRowsQuery):
     async def _execute_bound(self) -> int | None | list[Any]:
         if self._is_none:
             return await self._execute_none()
-        query = self._get_execution_query(True)
-        capture_needs = query.model._meta.change_capture_needs
+        connection = self.get_connection(for_write=True)
+        prepared = self._make_prepared_write(connection.dialect)
+        if WrittenConnections.is_recording:
+            WrittenConnections.record(connection.connection_alias)
+        capture_needs = self.model._meta.change_capture_needs
         if capture_needs is not None and capture_needs.captures(RowOperation.UPDATE):
-            return await WriteSteps.run_whole(query._connection, query._execute_captured(capture_needs))
-        query._make_query_to_run()
-        return await WriteSteps.get_whole_run(query._connection, query._report_update(query._run_statement()))
+            return await WriteSteps.get_whole_run(
+                connection, self._execute_captured(capture_needs, connection, prepared)
+            )
+        return await WriteSteps.get_whole_run(
+            connection, self._report_update(self._run_on(connection, prepared), connection)
+        )
 
-    def _get_query_on(self, connection: DatabaseClient) -> Self:
-        """This update on its transaction connection, retaining its prepared assignments.
+    async def _run_on(
+        self,
+        connection: DatabaseClient,
+        prepared: PreparedWrite,
+        source: QuerySet[Any] | None = None,
+        *,
+        returns_rows: bool = False,
+    ) -> tuple[int | None, Sequence[Any]]:
+        """Find or build this update's statement on the execution connection, without rebinding the declaration."""
+        statement = self._get_statement_on(
+            connection, source, type_part=self._get_call_signature_type_part(prepared), prepared=prepared
+        )
+        if isinstance(statement, CallPlanHit):
+            self._check_expression_literals(connection.dialect)
+            return await self._run_statement_on(
+                connection, statement.sql, statement.parameters, statement.visibility, returns_rows=returns_rows
+            )
+        query, command = statement
+        return await query._run_statement_on(connection, *command, query._visibility, returns_rows=returns_rows)
 
-        The clone keeps the concrete query type and returning specification. Build state is
-        reset for the new connection; automatic stamps and encoded assignments belong to the
-        same execution and are not prepared a second time.
-
-        Args:
-            connection: The connection.
-
-        Returns:
-            The update.
-        """
-        query = copy(self)
-        query._init_build_state()
-        query._limit_term = None
-        query._apply_connection(connection)
-        query._connection_explicitly_chosen = True
-        query._prepared_write = self._prepare_write_values()
-        query._is_execution_query = True
-        return query
-
-    async def _execute_captured(self, capture_needs: CaptureNeeds) -> int | None:
+    async def _execute_captured(
+        self, capture_needs: CaptureNeeds, execution_connection: DatabaseClient, prepared: PreparedWrite
+    ) -> int | None:
         """Runs the update of a model with ``Meta.change_capture`` and captures the rows it wrote, in
         one transaction.
 
@@ -596,18 +624,27 @@ class UpdateQuery(MatchingRowsQuery):
         Returns:
             How many rows it updated.
         """
-        captured = self._get_captured_write(capture_needs, self._connection)
+        captured = self._get_captured_write(capture_needs, execution_connection)
         async with captured.transaction() as connection:
-            query = self if connection is self._connection else self._get_query_on(connection)
             if connection.features.supports_returning:
-                count, raw_rows = await query._run_captured(captured)
-                pks = [change_pk for change_pk, _tenant in self._get_returned_keys(capture_needs, raw_rows)]
+                count, raw_rows = await self._run_captured(captured, prepared)
+                pks = [
+                    change_pk for change_pk, _tenant in self._get_returned_keys(capture_needs, raw_rows, connection)
+                ]
             else:
-                count, pks = await query._run_captured_by_reading(captured, query._run_built_statement)
+
+                async def run_statement(source: QuerySet[Any]) -> int | None:
+                    return (await self._run_on(connection, prepared, source))[0]
+
+                count, pks = await self._run_captured_by_reading(
+                    captured,
+                    run_statement,
+                    get_moved_keys=lambda keys: self._get_moved_keys(keys, connection, prepared),
+                )
         # A count the database doesn't report - the rows read are the changed ones.
         if count or (count is None and pks):
             await WriteSteps.report(
-                self._connection, self.model, RowOperation.UPDATE, pks=pks, fields=self._rules.changed_field_names
+                execution_connection, self.model, RowOperation.UPDATE, pks=pks, fields=self._rules.changed_field_names
             )
         return count
 
@@ -625,7 +662,9 @@ class UpdateQuery(MatchingRowsQuery):
             self.model, capture_needs, connection, RowOperation.UPDATE, changed=self._rules.changed_field_names
         )
 
-    def _get_returned_keys(self, capture_needs: CaptureNeeds, raw_rows: Sequence[Any]) -> list[tuple[Any, Any]]:
+    def _get_returned_keys(
+        self, capture_needs: CaptureNeeds, raw_rows: Sequence[Any], connection: DatabaseClient
+    ) -> list[tuple[Any, Any]]:
         """The primary keys and tenants of the rows the update returned.
 
         Args:
@@ -635,10 +674,19 @@ class UpdateQuery(MatchingRowsQuery):
         Returns:
             ``(primary key, tenant)`` per row.
         """
-        types = self._connection.dialect.types
-        return [ChangeCapturing.get_row_key(self.model, capture_needs, types, dict(row)) for row in raw_rows]
+        types = connection.dialect.types
+        names = (
+            *self.model._meta.primary_key_attribute_names,
+            *((capture_needs.tenant_field_name,) if capture_needs.tenant_field_name else ()),
+        )
+        layout = ChangeCapturing.get_row_layout(self.model, names, types)
+        return [
+            ChangeCapturing.get_row_key(self.model, capture_needs, types, dict(row), layout=layout) for row in raw_rows
+        ]
 
-    async def _run_captured(self, captured: CapturedWrite) -> tuple[int | None, Sequence[Any]]:
+    async def _run_captured(
+        self, captured: CapturedWrite, prepared: PreparedWrite
+    ) -> tuple[int | None, Sequence[Any]]:
         """Runs the update - on a transaction - returning its rows, and gives their changes to the
         model's sink. The rows as they were come from ``RETURNING OLD``, else from reading the matched
         rows first, locked, in one query - the update then writes those rows alone, so a row committed
@@ -651,34 +699,36 @@ class UpdateQuery(MatchingRowsQuery):
             The number of updated rows and the returned rows.
         """
         capture_needs = captured.needs
-        returns_old = capture_needs.reads_before and self._connection.features.supports_returning_old_new
+        connection = captured.connection
+        returns_old = capture_needs.reads_before and connection.features.supports_returning_old_new
         before_by_pk: dict[Any, Any] | None = None
+        source = None
         if capture_needs.reads_before and not returns_old:
             # Local import: the queryset package imports the query statements.
             from hare.query.queryset.selection.statement_selection import StatementSelection
 
-            before_by_pk = await captured.read_before(
-                StatementSelection.get_primary_key_values_query(self._matching_queryset())
-            )
+            source = self._matching_queryset(connection)
+            before_by_pk = await captured.read_before(StatementSelection.get_primary_key_values_query(source))
             if not before_by_pk:
                 return 0, []
             restricted_keys = list(before_by_pk)
-            moved_keys = self._get_moved_keys(restricted_keys)
+            moved_keys = self._get_moved_keys(restricted_keys, connection, prepared)
             if moved_keys:
                 # The returned rows hold the keys the update gave them.
                 before_by_pk = {moved_keys[pk]: values for pk, values in before_by_pk.items()}
-            self._restrict_to_keys(restricted_keys)
-        self._make_query_to_run()
-        count, raw_rows = await self._run_statement(returns_rows=True)
+            source = self._filter_matching_rows(source, pk__in=restricted_keys)
+        count, raw_rows = await self._run_on(connection, prepared, source, returns_rows=True)
         await captured.capture_returned(raw_rows, returns_old=returns_old, before_by_pk=before_by_pk)
         return count, raw_rows
 
-    def _get_moved_keys(self, keys: list[Any]) -> dict[Any, Any]:
+    def _get_moved_keys(self, keys: list[Any], connection: DatabaseClient, prepared: PreparedWrite) -> dict[Any, Any]:
         """The primary key each row of ``keys`` has after the update - an update setting a column of a composite
         primary key moves its rows.
 
         Args:
             keys: The keys of the rows updated.
+            connection: The execution connection whose readers decode the written keys.
+            prepared: The very assignments passed to the UPDATE; never convert them again.
 
         Returns:
             The key after the update by the key before it; empty for an update setting no key column.
@@ -692,71 +742,76 @@ class UpdateQuery(MatchingRowsQuery):
             return {}
         key_names = meta.primary_key_attribute_names
         new_values: dict[str, Any] = {}
-        for name, value in self.given_values.items():
-            stored_names = RowWriteRules.get_stored_field_names(model, [name], UPDATE_METHOD_NAME)
-            if not any(stored_name in key_names for stored_name in stored_names):
+        types = connection.dialect.types
+        for name, field, source_fields in self._assignment_fields:
+            stored_fields = source_fields or (field,)
+            if not any(column.model_field_name in key_names for column in stored_fields):
                 continue
-            if isinstance(value, (Expression, Term)):
+            if isinstance(self.update_kwargs[name], (Expression, Term)):
                 raise UnSupportedError(MOVED_KEY_EXPRESSION_MESSAGE.format(model=model.__name__, field=name))
-            relation = meta.fields_map.get(name)
-            stored_values = (
-                RelationKeyValues.get_key_values(model, name, value)
-                if isinstance(relation, (ForeignKeyFieldInstance, OneToOneFieldInstance))
-                else (value,)
-            )
-            for stored_name, stored_value in zip(stored_names, stored_values, strict=True):
-                if stored_name in key_names:
-                    field = meta.fields_map[stored_name]
-                    types = self._connection.dialect.types
-                    new_values[stored_name] = types.get_python_value(
-                        field, types.get_db_value(field, stored_value, model)
-                    )
+            for index, column in enumerate(stored_fields):
+                if column.model_field_name in key_names:
+                    value = prepared.values[name, index]
+                    new_values[column.model_field_name] = types.get_python_value(column, value.database_value)
+        for name, value in prepared.automatic_values:
+            if name in key_names:
+                new_values[name] = types.get_python_value(value.field, value.database_value)
         if not new_values:
             return {}
         return {
             key: tuple(new_values.get(name, part) for name, part in zip(key_names, key, strict=True)) for key in keys
         }
 
-    async def _run_built_statement(self) -> int | None:
-        """Builds and runs the update.
-
-        Returns:
-            How many rows it updated.
-        """
-        self._make_query_to_run()
-        return (await self._run_statement())[0]
-
-    async def _report_update(self, update: Awaitable[tuple[int | None, Sequence[Any]]]) -> int | None:
+    async def _report_update(
+        self, update: Awaitable[tuple[int | None, Sequence[Any]]], connection: DatabaseClient
+    ) -> int | None:
         """Runs the update and reports the rows it changed (``ChangeEvents``).
 
         Args:
-            update: The update's statement (``_run_statement()``).
+            update: The update's statement.
+            connection: The execution's connection.
 
         Returns:
             How many rows it updated.
         """
         count = (await update)[0]
-        await self._report_updated_rows(count)
+        await self._report_updated_rows(count, connection)
         return count
 
-    async def _report_updated_rows(self, count: int | None) -> None:
+    async def _report_updated_rows(self, count: int | None, connection: DatabaseClient) -> None:
         """Reports the rows an update changed (``ChangeEvents``).
 
         Args:
             count: How many rows it updated.
+            connection: The execution's connection.
         """
         if (count is None or count) and ChangeEvents.is_observed(self.model):
             await WriteSteps.report(
-                self._connection, self.model, RowOperation.UPDATE, fields=self._rules.changed_field_names
+                connection,
+                self.model,
+                RowOperation.UPDATE,
+                fields=self._rules.changed_field_names,
             )
 
     async def _execute_none(self) -> int:
         return 0
 
-    async def _run_statement(self, *, returns_rows: bool = False) -> tuple[int | None, Sequence[Any]]:
-        """Checks the tenants the update writes and runs the built ``UPDATE``.
+    async def _run_statement_on(
+        self,
+        connection: DatabaseClient,
+        sql: str,
+        parameters: list[Any],
+        visibility: RowVisibility,
+        *,
+        returns_rows: bool = False,
+    ) -> tuple[int | None, Sequence[Any]]:
+        """Checks the tenants the update writes and runs its ``UPDATE`` - built, or a plan's.
 
         Args:
+            connection: The execution's connection.
+            sql: The statement.
+            parameters: Its parameters.
+            visibility: The visibility the execution resolved.
             returns_rows: Whether the statement returns rows of its own (``returning()``).
 
         Returns:
@@ -764,123 +819,15 @@ class UpdateQuery(MatchingRowsQuery):
         """
         if self.model._meta.tenant_field:
             TenantWriteRules.raise_if_rows_leave_scope(
-                self.model, self.update_kwargs, self._visibility.all_tenants, UPDATE_METHOD_NAME, requires_scope=True
+                self.model, self.update_kwargs, visibility.all_tenants, UPDATE_METHOD_NAME, requires_scope=True
             )
-        await self._check_relation_tenants()
-        parameterized_sql = self._get_parameterized_sql()
-        if not parameterized_sql[0]:
+        await UpdateRelationTenants.check_relation_tenants(self, connection, visibility)
+        if not sql:
             # Nothing to set builds no statement - no row is updated, on every driver.
             return 0, []
-        return await self._connection.execute(
-            *parameterized_sql,
+        return await connection.execute(
+            sql,
+            parameters,
             returns_rows=returns_rows,
-            recovery=self._connection.get_write_recovery(self.model._meta.basetable),
-        )
-
-    async def _check_relation_tenants(self) -> None:
-        """Rejects an update pointing a relation at a row its model's tenant scope doesn't show.
-
-        Raises:
-            QueryError: A relation value names another tenant's row.
-        """
-        if self._visibility.all_tenants or not Tenancy.has_tenant_scoped_relations(self.model):
-            return
-
-        meta = self.model._meta
-        await self._check_computed_relation_tenants()
-        row: dict[str, Any] = {}
-        for key, value in self.update_kwargs.items():
-            value = self._get_constant_value(value)
-            if isinstance(value, (Expression, Term)):
-                continue
-            field_object = meta.fields_map.get(key)
-            if isinstance(field_object, (ForeignKeyFieldInstance, OneToOneFieldInstance)):
-                key_values = RelationKeyValues.get_key_values(self.model, key, value)
-                row.update(zip(field_object.source_fields, key_values, strict=True))
-            else:
-                row[key] = value
-        await Tenancy.check_relation_targets(self.model, [row], self._connection, set(self.update_kwargs))
-
-    @staticmethod
-    def _get_constant_value(value: Any) -> Any:
-        """The value a ``Value(...)`` stands for - a constant the update writes as given - else the
-        value itself.
-
-        Args:
-            value: An update value.
-
-        Returns:
-            The value.
-        """
-        return value.value if type(value) is Value else value
-
-    def _get_computed_relations(self) -> list[RelationalField[Any]]:
-        """The forward relations whose new key the update's values don't give alone - set from an
-        expression, or one column of a key of several set while the others keep the row's.
-
-        Returns:
-            The relations.
-        """
-        meta = self.model._meta
-        relations: list[RelationalField[Any]] = []
-        for relation_name in sorted(meta.foreign_key_fields | meta.one_to_one_fields):
-            relation = cast("RelationalField[Any]", meta.fields_map[relation_name])
-            set_names = [name for name in (relation_name, *relation.source_fields) if name in self.update_kwargs]
-            if not set_names:
-                continue
-            sets_expression = any(
-                isinstance(self._get_constant_value(self.update_kwargs[name]), (Expression, Term))
-                for name in set_names
-            )
-            sets_part_of_key = relation_name not in set_names and len(set_names) < len(relation.source_fields)
-            if sets_expression or sets_part_of_key:
-                relations.append(relation)
-        return relations
-
-    def _get_tenant_checked_computed_relations(self) -> list[RelationalField[Any]]:
-        """The relations of ``_get_computed_relations()`` to a tenant-scoped model."""
-        return [relation for relation in self._get_computed_relations() if relation.related_model._meta.tenant_field]
-
-    async def _check_computed_relation_tenants(self) -> None:
-        """Rejects an update leaving a relation pointing at a row its model's tenant scope doesn't
-        show, where the new key is computed - read by a ``SELECT`` of what the update writes into the
-        key columns, for the rows it matches, before it runs.
-
-        Raises:
-            QueryError: A row's new key names another tenant's row.
-        """
-        relations = self._get_tenant_checked_computed_relations()
-        if not relations:
-            return
-        meta = self.model._meta
-        table = meta.basetable
-        assigned_terms = {field.name: term for field, term in self.query._updates}
-        key_field_names = [source_field for relation in relations for source_field in relation.source_fields]
-        dialect = self._connection.dialect
-        selected_terms = []
-        for key_field_name in key_field_names:
-            column = meta.fields_db_projection[key_field_name]
-            assigned_term = assigned_terms.get(column)
-            if assigned_term is None:
-                selected_terms.append(table[column].as_(key_field_name))
-                continue
-            # A value bound alone in the select list has no type of its own - the column's is given.
-            column_type = meta.fields_map[key_field_name].get_column_type(dialect)
-            selected_terms.append(Cast(assigned_term, column_type).as_(key_field_name))
-        values_query = self._connection.query_class.from_(table).select(*selected_terms)
-        # The conditions and the values may read the CTEs of the update.
-        values_query._with = list(self.query._with)
-        if self.query._wheres is not None:
-            values_query = values_query.where(self.query._wheres)
-        _row_count, raw_rows = await self._connection.execute(*values_query.get_parameterized_sql(), returns_rows=True)
-        types = self._connection.dialect.types
-        rows = []
-        for raw_row in raw_rows:
-            row = {}
-            for name in key_field_names:
-                value = raw_row[name]
-                row[name] = None if value is None else types.get_python_value(meta.fields_map[name], value)
-            rows.append(row)
-        await Tenancy.check_relation_targets(
-            self.model, rows, self._connection, {relation.model_field_name for relation in relations}
+            recovery=connection.get_write_recovery(self.model._meta.basetable),
         )

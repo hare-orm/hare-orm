@@ -38,7 +38,7 @@ class LinkedKeys:
             query = query.where(visible_target_criterion)
         _, rows = await connection.execute(*ThroughRows.get_statement(relation, query, connection))
         related_meta = relation.model._meta
-        related_pk_fields = related_meta.pk_fields if related_meta.has_composite_primary_key else (related_meta.pk,)
+        related_pk_fields = related_meta.pk_fields
         types = connection.dialect.types
         forward_keys = relation.field.forward_keys
         if LinkedKeys.keys_read_as_stored(related_pk_fields, connection):
@@ -47,19 +47,16 @@ class LinkedKeys:
                 for row in rows
                 if None not in (values := tuple(row[column_name] for column_name in forward_keys))
             )
-        linked_pk_values: list[tuple[Any, ...]] = []
-        for row in rows:
-            if any(row[column_name] is None for column_name in relation.field.forward_keys):
-                continue
-            # Read as the field reads it, then written back - a dialect storing a value otherwise
-            # (a UUID in 16 bytes) returns the stored form.
-            linked_pk_values.append(
-                tuple(
-                    types.get_db_value(pk_field, types.get_python_value(pk_field, row[column_name]), relation.model)
-                    for pk_field, column_name in zip(related_pk_fields, relation.field.forward_keys, strict=True)
-                )
+        return frozenset(
+            KeyColumns.transfer_rows(
+                related_pk_fields,
+                forward_keys,
+                (row for row in rows if all(row[column] is not None for column in forward_keys)),
+                types,
+                types,
+                relation.model,
             )
-        return frozenset(linked_pk_values)
+        )
 
     @staticmethod
     def keys_read_as_stored(key_fields: Sequence[Field[Any]], connection: DatabaseClient) -> bool:
@@ -135,15 +132,14 @@ class LinkedKeys:
         query = LinkedKeys.get_links_query(relation, connection, through_table)
         _, rows = await connection.execute(*ThroughRows.get_statement(relation, query, connection))
         related_meta = relation.model._meta
-        related_pk_fields = related_meta.pk_fields if related_meta.has_composite_primary_key else (related_meta.pk,)
+        related_pk_fields = related_meta.pk_fields
         types = connection.dialect.types
-        keys: list[Any] = []
-        for row in rows:
-            if any(row[column_name] is None for column_name in relation.field.forward_keys):
-                continue
-            key = tuple(
-                types.get_python_value(pk_field, row[column_name])
-                for pk_field, column_name in zip(related_pk_fields, relation.field.forward_keys, strict=True)
+        return [
+            key if len(key) > 1 else key[0]
+            for key in KeyColumns.read_rows(
+                related_pk_fields,
+                relation.field.forward_keys,
+                (row for row in rows if all(row[column] is not None for column in relation.field.forward_keys)),
+                types,
             )
-            keys.append(key if len(key) > 1 else key[0])
-        return keys
+        ]

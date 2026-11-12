@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import re
 
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.clickhouse.types.clickhouse_physical_type import ClickhousePhysicalType
 from hare.dialects.clickhouse.types.constants import (
     CLICKHOUSE_ISO_TYPE_NAME_PATTERN,
     CLICKHOUSE_ISO_TYPE_NAMES,
-    CLICKHOUSE_NULLABLE_TYPE,
     CLICKHOUSE_READ_PYTHON_TYPES,
 )
 
@@ -58,11 +58,11 @@ class ClickhouseTypeNames:
             The type.
         """
         physical_type = ClickhousePhysicalType.from_sql(type_sql)
-        if physical_type.name == CLICKHOUSE_NULLABLE_TYPE and len(physical_type.elements) == 1:
+        if physical_type.name == ClickhouseTypeName.NULLABLE and len(physical_type.elements) == 1:
             return physical_type.elements[0].sql
-        if physical_type.name == "LowCardinality" and len(physical_type.elements) == 1:
+        if physical_type.name == ClickhouseTypeName.LOW_CARDINALITY and len(physical_type.elements) == 1:
             inner = physical_type.elements[0]
-            if inner.name == CLICKHOUSE_NULLABLE_TYPE and len(inner.elements) == 1:
+            if inner.name == ClickhouseTypeName.NULLABLE and len(inner.elements) == 1:
                 return f"LowCardinality({inner.elements[0].sql})"
         return type_sql
 
@@ -80,21 +80,21 @@ class ClickhouseTypeNames:
         """
         if first_type == second_type:
             return first_type
-        if first_type == "Nothing":
+        if first_type == ClickhouseTypeName.NOTHING:
             return second_type
-        if second_type == "Nothing":
+        if second_type == ClickhouseTypeName.NOTHING:
             return first_type
         first_name, first_arguments = cls.get_type_parts(first_type)
         second_name, second_arguments = cls.get_type_parts(second_type)
-        if first_name == "Nullable" or second_name == "Nullable":
-            first_inner = first_arguments[0] if first_name == "Nullable" else first_type
-            second_inner = second_arguments[0] if second_name == "Nullable" else second_type
+        if first_name == ClickhouseTypeName.NULLABLE or second_name == ClickhouseTypeName.NULLABLE:
+            first_inner = first_arguments[0] if first_name == ClickhouseTypeName.NULLABLE else first_type
+            second_inner = second_arguments[0] if second_name == ClickhouseTypeName.NULLABLE else second_type
             merged_inner = cls.get_merged_type(first_inner, second_inner)
             return None if merged_inner is None else f"Nullable({merged_inner})"
         if (
             first_name != second_name
             or len(first_arguments) != len(second_arguments)
-            or first_name not in {"Array", "Map", "Tuple"}
+            or first_name not in {ClickhouseTypeName.ARRAY, ClickhouseTypeName.MAP, ClickhouseTypeName.TUPLE}
         ):
             return None
         merged_arguments = [

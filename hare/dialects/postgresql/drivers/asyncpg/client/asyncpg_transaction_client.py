@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncGenerator
-from typing import Any, cast
+from typing import Any
 
 import asyncpg
 from asyncpg.transaction import Transaction
@@ -15,6 +15,7 @@ from hare.dialects.base.transactions.savepoints.nested_savepoint_lock import Nes
 from hare.dialects.postgresql.client.postgresql_client import PostgresqlClient
 from hare.dialects.postgresql.client.postgresql_transaction_client import PostgresqlTransactionClient
 from hare.dialects.postgresql.drivers.asyncpg.client.asyncpg_client import AsyncpgClient
+from hare.dialects.postgresql.drivers.asyncpg.client.asyncpg_parameters import AsyncpgParameters
 from hare.dialects.postgresql.drivers.asyncpg.client.asyncpg_transaction_connection_wrapper import (
     AsyncpgTransactionConnectionWrapper,
 )
@@ -108,7 +109,7 @@ class AsyncpgTransactionClient(PostgresqlTransactionClient, AsyncpgClient):
         return self._parent.get_connection_pool()
 
     async def _driver_send_begin(self) -> None:
-        await cast("Transaction", self.transaction).start()
+        await self.transaction.start()  # type: ignore[union-attr]
 
     @PostgresqlClient.translate_exceptions(StatementForm.MANY)
     async def execute_many(self, query: str, values: list[Any]) -> None:
@@ -116,7 +117,7 @@ class AsyncpgTransactionClient(PostgresqlTransactionClient, AsyncpgClient):
             if self.log.isEnabledFor(logging.DEBUG):
                 self.log.debug("%s: %s", query, values)
             await AsyncpgClient.run_ending_connection_on_cancel(
-                connection, connection.executemany(query, [self._asyncpg_bind_values(row) for row in values])
+                connection, connection.executemany(query, [AsyncpgParameters.get_bound_values(row) for row in values])
             )
 
     async def _driver_stream_batches(
@@ -133,7 +134,7 @@ class AsyncpgTransactionClient(PostgresqlTransactionClient, AsyncpgClient):
             self.log.debug("%s: %s", query, values)
         batch_size = chunk_size or DEFAULT_STREAM_PREFETCH
         async with self.acquire_connection() as connection:
-            cursor = await connection.cursor(query, *self._asyncpg_bind_values(values))
+            cursor = await connection.cursor(query, *AsyncpgParameters.get_bound_values(values))
         while True:
             async with self.acquire_connection():
                 records = await cursor.fetch(batch_size)
@@ -151,11 +152,11 @@ class AsyncpgTransactionClient(PostgresqlTransactionClient, AsyncpgClient):
 
     async def _driver_commit(self) -> None:
         async with self._lock:
-            await cast("Transaction", self.transaction).commit()
+            await self.transaction.commit()  # type: ignore[union-attr]
 
     async def _driver_rollback(self) -> None:
         async with self._lock:
-            await cast("Transaction", self.transaction).rollback()
+            await self.transaction.rollback()  # type: ignore[union-attr]
 
     async def _driver_savepoint(self, name: str) -> None:
         # Sent ahead of a statement (PendingStatements.send_pending_savepoints()), the connection lock already held.

@@ -12,10 +12,9 @@ from hare.sql.terms.values.value_wrapper import ValueWrapper
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.models import Model
-    from hare.query.expressions.value_references.value_reference_types import ParameterValues
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OpenRangeValueReference:
     """A plan value reference of ``__range`` with one bound given - the plain comparison of the bound
     (``>=`` without an upper one, ``<=`` without a lower one): its parameter slot, which side is
@@ -27,29 +26,33 @@ class OpenRangeValueReference:
     lower_is_open: bool
     field: Field[Any]
     value_encoder: Callable[..., list[Any]] | None = None
+    #: The dialect's conversion of ``field`` - ``(value, model) -> value`` - resolved once when the plan
+    #: is published (``ParameterPreparation``); None while the plan is prepared.
+    convert: Callable[[Any, Any], Any] | None = None
 
-    def get_parameter_values(self, value: Any, model: type[Model], dialect: Dialect) -> ParameterValues | None:
+    def bind(self, parameters: list[Any], value: Any, model: type[Model], dialect: Dialect) -> bool:
         """The parameter of a new ``(lower, upper)`` pair open on the same side.
 
         Args:
+            parameters: The parameter buffer of this execution, filled in place.
             value: The new pair.
             model: The model queried.
             dialect: The dialect the query runs on.
 
         Returns:
-            The parameter, or None for anything but a two-item pair open on this side alone, or a
-            bound that converts to a term.
+            True when the prepared SQL shape accepts the value; False requests a fresh build.
+            Conversion and validation errors propagate to the caller.
         """
         if not isinstance(value, (list, tuple)) or len(value) != 2:
-            return None
+            return False
         lower, upper = value
         if (lower is None) != self.lower_is_open or (upper is None) == self.lower_is_open:
-            return None
+            return False
         if self.value_encoder is not None:
             encoded_lower, encoded_upper = self.value_encoder(value, model, self.field, dialect)
             bound = encoded_upper if self.lower_is_open else encoded_lower
         else:
-            bound = dialect.types.get_lookup_value(self.field, upper if self.lower_is_open else lower, model)
+            bound = self.convert(upper if self.lower_is_open else lower, model)  # type: ignore[misc]
         if isinstance(bound, Term):
-            return None
-        return [(self.bound, bound, False)]
+            return False
+        return self.bound.bind(parameters, bound, False)  # type: ignore[union-attr]

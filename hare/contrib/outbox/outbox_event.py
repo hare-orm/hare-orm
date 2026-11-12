@@ -1,35 +1,28 @@
 from __future__ import annotations
 
-import itertools
 from collections.abc import Iterable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Self, cast
+from typing import TYPE_CHECKING, Any, Self
 
 from hare import fields
-from hare.contrib.outbox.constants import (
-    ENQUEUE_ARGUMENT_FIELD_NAMES,
-    OUTBOX_KEY_MAX_LENGTH,
-    OUTBOX_WAKEUP_META_OPTION,
-    RELAY_MANAGED_FIELD_NAMES,
-)
+from hare.contrib.outbox.constants import OUTBOX_KEY_MAX_LENGTH, OUTBOX_WAKEUP_META_OPTION
+from hare.contrib.outbox.outbox_enqueue import OutboxEnqueue
+from hare.contrib.outbox.outbox_idempotency import OutboxIdempotency
 from hare.contrib.outbox.outbox_json_encoding import OutboxJsonEncoding
-from hare.core.connections.connections import Connections
-from hare.ddl.constraints.unique_constraint import UniqueConstraint
+from hare.contrib.outbox.outbox_validation import OutboxValidation
+from hare.contrib.outbox.outbox_wakeups import OutboxWakeups
 from hare.ddl.indexes.index import Index
 from hare.ddl.indexes.partial_index import PartialIndex
 from hare.dialects.base.client.database_client import DatabaseClient
-from hare.dialects.base.client.transaction_client import TransactionClient
-from hare.exceptions import ConfigurationError, IntegrityError, ValidationError
 from hare.fields.data.json.json_text_field import JSONTextField
 from hare.fields.uuid7 import Uuid7
 from hare.models import Model
 from hare.models.class_building.extension_model_options import ExtensionModelOptions
-from hare.models.tenancy.tenancy import Tenancy
-from hare.query.enums import Connector
 from hare.query.expressions import Q
 
 if TYPE_CHECKING:
     from hare.contrib.outbox.outbox_message import OutboxMessage
     from hare.contrib.outbox.wakeups.outbox_wakeup import OutboxWakeup
+
 
 ExtensionModelOptions.allow(OUTBOX_WAKEUP_META_OPTION)
 
@@ -107,7 +100,7 @@ class OutboxEvent(Model):
         Returns:
             The wakeup, None when the model declares none.
         """
-        return getattr(cls._meta.meta, OUTBOX_WAKEUP_META_OPTION, None)
+        return OutboxWakeups.get_wakeup(cls)
 
     @classmethod
     async def enqueue(
@@ -159,22 +152,17 @@ class OutboxEvent(Model):
                 wakeup can't signal on the connection's database (``ListenNotifyWakeup`` without
                 listen/notify) - refused before the event is written.
         """
-        cls.validate_enqueue_options(topic, idempotency_key, ordering_key, headers, extra_field_values)
-        field_values = dict(extra_field_values or {})
-        write_connection = cls.get_write_connection(using)
-        cls.raise_if_wakeup_unsupported(write_connection, wakeup)
-        if idempotency_key is None:
-            event = await cls.objects.using(write_connection).create(
-                topic=topic, payload=payload, ordering_key=ordering_key, headers=dict(headers or {}), **field_values
-            )
-            is_new = True
-        else:
-            event, is_new = await cls.insert_or_get_by_idempotency_key(
-                topic, payload, idempotency_key, ordering_key, dict(headers or {}), write_connection, field_values
-            )
-        if is_new:
-            await cls.signal_wakeup(write_connection, (topic,), wakeup)
-        return event
+        return await OutboxEnqueue.enqueue(
+            cls,
+            topic,
+            payload,
+            using=using,
+            idempotency_key=idempotency_key,
+            ordering_key=ordering_key,
+            headers=headers,
+            extra_field_values=extra_field_values,
+            wakeup=wakeup,
+        )
 
     @classmethod
     async def enqueue_many(
@@ -203,36 +191,7 @@ class OutboxEvent(Model):
             IntegrityError: An idempotency key conflicts with an event this call can't see.
             ConfigurationError: As ``enqueue()``.
         """
-        # Deferred import: the transactions package imports the models.
-        from hare.transactions.atomic.atomic import Atomic
-        from hare.transactions.transaction_options import TransactionOptions
-
-        messages = list(messages)
-        if not messages:
-            return []
-        for message in messages:
-            cls.validate_enqueue_options(
-                message.topic,
-                message.idempotency_key,
-                message.ordering_key,
-                message.headers,
-                message.extra_field_values,
-            )
-        write_connection = cls.get_write_connection(using, "enqueue_many")
-        cls.raise_if_wakeup_unsupported(write_connection, wakeup)
-        events: list[Self] = []
-        inserted_topics: set[str] = set()
-        async with Atomic(lambda: write_connection, TransactionOptions.DEFAULT) as transaction_connection:
-            for (has_idempotency_key, _), run in itertools.groupby(messages, key=cls.get_enqueue_run_key):
-                run_messages = list(run)
-                run_events, run_topics = await cls.write_enqueue_run(
-                    run_messages, has_idempotency_key, transaction_connection
-                )
-                events.extend(run_events)
-                inserted_topics.update(run_topics)
-            if inserted_topics:
-                await cls.signal_wakeup(transaction_connection, inserted_topics, wakeup)
-        return events
+        return await OutboxEnqueue.enqueue_many(cls, messages, using=using, wakeup=wakeup)
 
     @classmethod
     def get_enqueue_run_key(cls, message: OutboxMessage) -> tuple[bool, Any]:
@@ -245,11 +204,7 @@ class OutboxEvent(Model):
         Returns:
             The key.
         """
-        tenant: Any = None
-        if cls._meta.tenant_field and Tenancy.get_scope(cls) is None:
-            tenant_given, given_tenant, _ = Tenancy.get_given_tenant(cls, dict(message.extra_field_values or {}))
-            tenant = given_tenant if tenant_given else None
-        return message.idempotency_key is not None, tenant
+        return OutboxEnqueue.get_enqueue_run_key(cls, message)
 
     @classmethod
     async def write_enqueue_run(
@@ -266,11 +221,7 @@ class OutboxEvent(Model):
         Returns:
             The events of the messages, in their order, and the topics of the ones inserted.
         """
-        _, tenant = cls.get_enqueue_run_key(messages[0])
-        if tenant is not None:
-            with Tenancy.scope(tenant):
-                return await cls.write_enqueue_run_in_scope(messages, has_idempotency_key, connection)
-        return await cls.write_enqueue_run_in_scope(messages, has_idempotency_key, connection)
+        return await OutboxEnqueue.write_enqueue_run(cls, messages, has_idempotency_key, connection)
 
     @classmethod
     async def write_enqueue_run_in_scope(
@@ -289,64 +240,7 @@ class OutboxEvent(Model):
         Raises:
             IntegrityError: An idempotency key is taken by an event not visible to this call.
         """
-        candidates = [
-            cls(
-                topic=message.topic,
-                payload=message.payload,
-                idempotency_key=message.idempotency_key,
-                ordering_key=message.ordering_key,
-                headers=dict(message.headers or {}),
-                **dict(message.extra_field_values or {}),
-            )
-            for message in messages
-        ]
-        if not has_idempotency_key:
-            topics = {candidate.topic for candidate in candidates}
-            if connection.features.supports_returning and connection.features.guarantees_returning_order:
-                await cls.objects.using(connection).bulk_create(candidates, returning=True)
-                return candidates, topics
-            await cls.objects.using(connection).bulk_create(candidates)
-            # RETURNING's rows come in no order here - the events are read back by the ids they were given.
-            stored_by_id = {
-                stored.id: stored
-                for stored in await cls.objects.using(connection).filter(id__in=[event.id for event in candidates])
-            }
-            return [stored_by_id[candidate.id] for candidate in candidates], topics
-        conflict_field_names = cls.get_idempotency_conflict_field_names()
-        inserted = await cls.objects.using(connection).bulk_create(
-            candidates, ignore_conflicts=True, on_conflict=conflict_field_names
-        )
-        inserted_ids = {id(event) for event in inserted}
-        events_by_key: dict[tuple[Any, ...], Self] = {
-            tuple(getattr(event, name) for name in conflict_field_names): event for event in inserted
-        }
-        missing_keys = {
-            key
-            for candidate in candidates
-            if id(candidate) not in inserted_ids
-            for key in [tuple(getattr(candidate, name) for name in conflict_field_names)]
-            if key not in events_by_key
-        }
-        if missing_keys:
-            condition = Q.with_connector(
-                Connector.OR, *(Q(**dict(zip(conflict_field_names, key, strict=True))) for key in missing_keys)
-            )
-            queryset = cls.objects.filter(condition).using(connection)
-            if cls._meta.soft_delete_field:
-                queryset = queryset.include_deleted()
-            for stored in await queryset:
-                events_by_key[tuple(getattr(stored, name) for name in conflict_field_names)] = stored
-        events: list[Self] = []
-        for candidate in candidates:
-            event = events_by_key.get(tuple(getattr(candidate, name) for name in conflict_field_names))
-            if event is None:
-                raise IntegrityError(
-                    f"{cls.__name__}.enqueue_many(): idempotency_key {candidate.idempotency_key!r} is already used "
-                    "by an event not visible here (another tenant's, or committed after this transaction's "
-                    "snapshot)"
-                )
-            events.append(event)
-        return events, {event.topic for event in inserted}
+        return await OutboxEnqueue.write_enqueue_run_in_scope(cls, messages, has_idempotency_key, connection)
 
     @classmethod
     def get_write_connection(cls, using: str | DatabaseClient | None, method_name: str = "enqueue") -> DatabaseClient:
@@ -363,23 +257,7 @@ class OutboxEvent(Model):
             ConfigurationError: ``using`` wasn't given, the model's connection has no open
                 transaction and another connection has one.
         """
-        if using is not None:
-            return cast("DatabaseClient", Connections.get_client(using))
-        write_connection = cls.get_connection(for_write=True)
-        if not write_connection.is_transaction_client:
-            for connection_alias in Connections.aliases():
-                if connection_alias != write_connection.connection_alias and isinstance(
-                    Connections.get(connection_alias), TransactionClient
-                ):
-                    raise ConfigurationError(
-                        f"{cls.__name__}.{method_name}() would write on connection "
-                        f"{write_connection.connection_alias!r}, "
-                        "which has no open transaction, "
-                        f"while connection {connection_alias!r} has one - the event would commit on its own, "
-                        "not with that transaction's write. Pass using= naming that transaction's connection, "
-                        f"or put {cls.__name__} on the connection of the models it reports on."
-                    )
-        return write_connection
+        return OutboxEnqueue.get_write_connection(cls, using, method_name)
 
     @classmethod
     def raise_if_wakeup_unsupported(cls, connection: DatabaseClient, wakeup: OutboxWakeup | None = None) -> None:
@@ -393,9 +271,7 @@ class OutboxEvent(Model):
         Raises:
             ConfigurationError: The wakeup can't signal on the connection's database.
         """
-        wakeup = wakeup if wakeup is not None else cls.get_wakeup()
-        if wakeup is not None:
-            wakeup.raise_if_unsupported(connection)
+        return OutboxWakeups.raise_if_wakeup_unsupported(cls, connection, wakeup)
 
     @classmethod
     async def signal_wakeup(
@@ -409,12 +285,11 @@ class OutboxEvent(Model):
             topics: Their topics.
             wakeup: The wakeup, the model's ``Meta.outbox_wakeup`` when None.
         """
-        wakeup = wakeup if wakeup is not None else cls.get_wakeup()
-        if wakeup is not None:
-            await wakeup.signal_written(connection, topics)
+        return await OutboxWakeups.signal_wakeup(cls, connection, topics, wakeup)
 
-    @staticmethod
+    @classmethod
     def validate_enqueue_options(
+        cls,
         topic: Any,
         idempotency_key: Any,
         ordering_key: Any,
@@ -428,20 +303,9 @@ class OutboxEvent(Model):
                 ``extra_field_values`` sets a field of an argument or of the relay, or ``headers`` isn't
                 a mapping of non-empty text names.
         """
-        OutboxEvent.validate_keys(topic, idempotency_key, ordering_key)
-        extra_field_names = set(extra_field_values or ())
-        argument_field_names = sorted(ENQUEUE_ARGUMENT_FIELD_NAMES & extra_field_names)
-        if argument_field_names:
-            raise ValidationError(
-                f"extra_field_values can't set {', '.join(argument_field_names)} - pass them as enqueue() arguments"
-            )
-        relay_managed_field_names = sorted(RELAY_MANAGED_FIELD_NAMES & extra_field_names)
-        if relay_managed_field_names:
-            raise ValidationError(
-                f"extra_field_values can't set {', '.join(relay_managed_field_names)} - the ORM and "
-                "OutboxRelay maintain them"
-            )
-        OutboxEvent.validate_headers(headers)
+        return OutboxValidation.validate_enqueue_options(
+            cls, topic, idempotency_key, ordering_key, headers, extra_field_values
+        )
 
     @staticmethod
     def validate_keys(topic: Any, idempotency_key: Any, ordering_key: Any) -> None:
@@ -455,9 +319,7 @@ class OutboxEvent(Model):
         Raises:
             ValidationError: One of them is empty text.
         """
-        for name, value in (("topic", topic), ("idempotency_key", idempotency_key), ("ordering_key", ordering_key)):
-            if value == "":
-                raise ValidationError(f"{name} must be text of 1 to {OUTBOX_KEY_MAX_LENGTH} characters, got ''")
+        return OutboxValidation.validate_keys(topic, idempotency_key, ordering_key)
 
     @staticmethod
     def validate_headers(headers: Mapping[str, Any] | None) -> None:
@@ -469,10 +331,7 @@ class OutboxEvent(Model):
         Raises:
             ValidationError: They aren't a mapping of non-empty text names.
         """
-        if headers is not None and (
-            not isinstance(headers, Mapping) or not all(isinstance(name, str) and name for name in headers)
-        ):
-            raise ValidationError(f"headers must be a mapping of non-empty text names, got {headers!r}")
+        return OutboxValidation.validate_headers(headers)
 
     @classmethod
     async def insert_or_get_by_idempotency_key(
@@ -504,51 +363,9 @@ class OutboxEvent(Model):
             ConfigurationError: ``Meta.tenant_field`` is set, ``field_values`` names no tenant and
                 no tenant scope is active; or the named tenant conflicts with the active scope.
         """
-        if cls._meta.tenant_field and Tenancy.get_scope(cls) is None:
-            tenant_given, given_tenant, _ = Tenancy.get_given_tenant(cls, dict(field_values))
-            if tenant_given and given_tenant is not None:
-                # An explicitly named tenant is trusted with no active scope, as create() does.
-                with Tenancy.scope(given_tenant):
-                    return await cls.insert_or_get_by_idempotency_key(
-                        topic, payload, idempotency_key, ordering_key, headers, write_connection, field_values
-                    )
-        candidate = cls(
-            topic=topic,
-            payload=payload,
-            idempotency_key=idempotency_key,
-            ordering_key=ordering_key,
-            headers=headers,
-            **field_values,
+        return await OutboxIdempotency.insert_or_get_by_idempotency_key(
+            cls, topic, payload, idempotency_key, ordering_key, headers, write_connection, field_values
         )
-        # RETURNING tells exactly whether the row was written - where bulk_create() can return rows
-        # at all, which needs the database to return them in the order they were written.
-        read_back_inserted_row = write_connection.features.guarantees_returning_order
-        conflict_field_names = cls.get_idempotency_conflict_field_names()
-        await cls.objects.using(write_connection).bulk_create(
-            [candidate],
-            ignore_conflicts=True,
-            on_conflict=conflict_field_names,
-            returning=True if read_back_inserted_row else None,
-        )
-        # The row stored under the key is the one the insert conflicted with - the same values of
-        # every field the key is unique with (a tenant, under a scope showing several).
-        stored_row_filter = {field_name: getattr(candidate, field_name) for field_name in conflict_field_names}
-        queryset = cls.objects.filter(**stored_row_filter).using(write_connection)
-        if cls._meta.soft_delete_field:
-            queryset = queryset.include_deleted()
-        stored = await queryset.first()
-        if stored is None:
-            raise IntegrityError(
-                f"{cls.__name__}.enqueue(): idempotency_key {idempotency_key!r} is already used by an event "
-                "not visible here (another tenant's, or committed after this transaction's snapshot)"
-            )
-        if read_back_inserted_row:
-            is_new = candidate._saved_in_db
-        else:
-            # An explicit id alone can't tell this insert apart from an earlier event stored under the
-            # same key and id - the created_at this insert wrote can.
-            is_new = stored.id == candidate.id and stored.created_at == candidate.created_at
-        return stored, is_new
 
     @classmethod
     def get_idempotency_conflict_field_names(cls) -> list[str]:
@@ -561,19 +378,7 @@ class OutboxEvent(Model):
         Raises:
             ConfigurationError: No unique constraint covers ``idempotency_key``.
         """
-        if cls._meta.fields_map["idempotency_key"].unique:
-            return ["idempotency_key"]
-        for constraint in cls._meta.constraints:
-            if (
-                isinstance(constraint, UniqueConstraint)
-                and constraint.condition is None
-                and "idempotency_key" in constraint.fields
-            ):
-                return list(constraint.fields)
-        raise ConfigurationError(
-            f"{cls.__name__}.idempotency_key isn't unique - enqueue(idempotency_key=...) needs a unique "
-            "constraint covering it to deduplicate on"
-        )
+        return OutboxIdempotency.get_idempotency_conflict_field_names(cls)
 
     def __repr__(self) -> str:
         return f"<{type(self).__name__} id={self.id} topic={self.topic!r} published_at={self.published_at!r}>"

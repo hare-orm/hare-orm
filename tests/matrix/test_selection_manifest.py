@@ -68,7 +68,6 @@ class TestSelectionManifest:
         """Refuse a collected cell whose requirements were not available to preselection."""
         relative = path.absolute().relative_to(REPOSITORY_DIRECTORY).as_posix()
         module = self.modules[relative]
-        # Native is selected by the environment's independent native flag, not an extra.
-        unexpected = requirements - self.get_path_requirements(path) - module.cells - {"native"}
+        unexpected = requirements - self.get_path_requirements(path) - module.cells
         if unexpected:
             raise ValueError(f"{relative}: undeclared cell requirements {sorted(unexpected)} in selection.toml")

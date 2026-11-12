@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.ddl.conditions.constraint_condition import ConstraintCondition
 from hare.ddl.constraints.check_constraint import CheckConstraint
@@ -77,6 +77,7 @@ class ModelConnectionChecks:
         features = meta.connection.features
         database = f"the {meta.connection.dialect.name} database of connection {meta.default_connection!r}"
         if not features.supports_unique_constraints:
+            relation_names = meta.foreign_key_fields | meta.one_to_one_fields
             declarations = [
                 f"{field_name} (unique=True)"
                 for field_name, field in meta.fields_map.items()
@@ -84,15 +85,12 @@ class ModelConnectionChecks:
                 and not getattr(field, "pk", False)
                 # The key field of a unique relation - the relation itself is named.
                 and field.reference is None
-                and (
-                    field_name in meta.fields_db_projection
-                    or field_name in meta.foreign_key_fields | meta.one_to_one_fields
-                )
+                and (field_name in meta.fields_db_projection or field_name in relation_names)
             ]
             declarations.extend(
                 f"{type(schema_object).__name__}({schema_object.name or ', '.join(schema_object.fields)})"
                 for schema_object in (*meta.constraints, *meta.indexes)
-                if isinstance(schema_object, UniqueConstraint | Index)
+                if isinstance(schema_object, (UniqueConstraint, Index))
                 and DeclaredUniqueness.is_declared_by(schema_object)
             )
             if declarations:
@@ -121,7 +119,7 @@ class ModelConnectionChecks:
                 if getattr(field := meta.fields_map[field_name], "db_constraint", False)
                 and getattr(field, "through_model", None) is None
                 and not getattr(field, "_generated", False)
-                and cast("Any", field).related_model._meta.schema != meta.schema
+                and field.related_model._meta.schema != meta.schema  # type: ignore[attr-defined]
             ]
             if crossing_names:
                 raise ConfigurationError(

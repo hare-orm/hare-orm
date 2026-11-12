@@ -29,15 +29,27 @@
 
 ## Подготовка окружения
 
-Нужны Python 3.12, 3.13 или 3.14 и [Poetry](https://python-poetry.org/).
+Разработка и проверки hare выполняются в Linux-контейнере Docker, в том числе на Windows и macOS.
+Нужны Python 3.12, 3.13, 3.14 или 3.15, [Poetry](https://python-poetry.org/) и
+[rustup](https://rustup.rs/): каждому прогону тестов нужно собранное расширение `rust.native`
+([Сборка расширений на Rust](#сборка-расширений-на-rust)).
 
 ```bash
 make deps
+make build_native
 ```
 
-Команда выполняет `poetry install --all-extras --with pyright-cli,pytz`: устанавливает все extras и
+Команда выбирает совместимые с Python extras через `tests/matrix/catalog.toml` и передаёт их
+в `poetry install --with pyright-cli,pytz`: устанавливает доступные extras и
 инструменты разработки, тестирования и документации, включая необязательные группы pyright и pytz.
 Изолированные окружения матрицы ниже устанавливают только зависимости своего прогона.
+На Python 3.15 команды `make test_clickhouse` и `make test_clickhouse_cluster` проверяют HTTP
+и явно сообщают о недоступности TCP; CI сохраняет проверки TCP на Python 3.14. Тесты Robyn
+также идут на Python 3.12–3.14, а остальные совместимые интеграции — и на 3.15.
+Проверки включают Python-скрипты сборки и установки wheels из `.github/scripts/`.
+Задания CI `check` и `test-poetry-add` скачивают Linux-артефакт расширения перед импортом hare;
+workflow документации собирает расширение для своего интерпретатора. Сборка wheels использует
+версию Maturin из `poetry.lock`, а проверка установки — новейший PostgreSQL из каталога матрицы.
 
 Один раз установите git-хуки, чтобы ошибки стиля и типов ловились до CI:
 
@@ -79,7 +91,7 @@ actionlint запускается в Docker (см. [Стиль кода и пр�
 | `hare/health/` | Проверки здоровья подключений и критерии, по которым их оценивают. |
 | `hare/stubs/` | Заглушки модулей моделей для pyright — команда `hare stubs`. |
 | `hare/typing_info/` | Что знают о моделях инструменты типизации — плагин mypy и `hare stubs`. |
-| `hare/classes/` | Пути классов, которые пишет и читает миграция, свойства классов, объявленные подклассы. |
+| `hare/classes/` | Пути классов, которые пишет и читает миграция, свойства классов, объявленные подклассы, атрибуты классов с импортом модуля, который импортирует их модуль (`DeferredImport`). |
 | `hare/lazy_loading/` | То, что hare готовит при первом использовании, а не при импорте: регулярные выражения, классы pydantic. |
 | `hare/native/` | Части скомпилированного расширения hare `rust.native`, которыми ускоряется код на Python. |
 | `hare/numbers/` | Отличие конечного числа от всего остального, чем может оказаться параметр или аргумент. |
@@ -107,6 +119,20 @@ actionlint запускается в Docker (см. [Стиль кода и пр�
 Класс, который не хранит план, объявляет `plannable = False`; класс, который не делает ни того ни
 другого, падает уже при определении, а `--verify-plans` падает на атрибуте, который не объявлен ни
 одной частью. Ключи планов никогда не собираются обходом частей запроса снаружи.
+
+Подготовка данных остаётся у той подсистемы, которая их использует. `Identifiers(taken_names)` хранит
+занятые имена без учёта регистра в пределах одной операции выбора имён; `get_free_name(name)` только
+выбирает имя, а `add(name)` занимает его. При сборке проекции используйте один такой объект вместо
+повторного построения набора для каждой колонки. Карты имён, зависящие от модели, по-прежнему используют
+`ModelCache`.
+
+Сопоставление схем создаёт объекты `SchemaObjectComparison` на один вызов
+`SchemaObjectDiff.get_operations()`. Имена, сигнатуры деклараций, возможность переименования и
+зависимости от изменяемых колонок вычисляются по необходимости через методы diff.
+`is_unchanged()` получает эти объекты, а построители операций — исходные декларации.
+Подготовленные сведения не переживают сравнение или изменение состояния. `PreparedOperationGraph`
+однократно подготавливает ключи предоставляемых зависимостей для своей последовательности операций;
+после её изменения новый граф заново подготавливает ключи и границы состояний для требований.
 
 ## Запуск тестов
 
@@ -211,7 +237,7 @@ make test_postgres_asyncpg HARE_POSTGRES_HOST=db.local HARE_POSTGRES_PORT=5432
 
 ```bash
 make test_db_up test_pgbouncer_up && make test_pgbouncer   # набор PostgreSQL через PgBouncer (порт 6432), оба драйвера
-make test_clickhouse_up && make test_clickhouse            # тесты диалекта ClickHouse на обоих драйверах, ClickHouse 25.8 на портах 8124 (HTTP) и 9124 (родной протокол)
+make test_clickhouse_up && make test_clickhouse            # совместимые драйверы, ClickHouse 25.8 на портах 8124 (HTTP) и 9124 (родной протокол)
 make test_brokers_up && make test_brokers                  # outbox на Redis (6390), RabbitMQ (5673), Kafka (9095)
 ```
 
@@ -241,27 +267,42 @@ HARE_TEST_DB=sqlite+aiosqlite://:memory: poetry run pytest --verify-plans tests/
 
 ## Сборка расширений на Rust
 
-Для `test_postgres_rust` и любой локальной работы с `rust/` нужны [rustup](https://rustup.rs/) и
-[maturin](https://www.maturin.rs/). `rust-toolchain.toml` закрепляет версию Rust, которую использует и
-CI, — rustup ставит её при первом вызове `cargo` в checkout. Платформенный код нужно проверять на
-целевой системе: успешный локальный прогон не подтверждает результат на других платформах CI:
+Без `rust.native` hare не работает; для его сборки нужны [rustup](https://rustup.rs/) и
+[maturin](https://www.maturin.rs/) (зависимость для разработки). `rust-toolchain.toml` закрепляет
+версию Rust, которую использует и CI, — rustup ставит её при первом вызове `cargo` в checkout:
 
 ```bash
-make build_native           # rust.native для текущей ОС и текущего Python, в rust/
-make build_native_linux     # rust.native для Linux и Python 3.12-3.14, в Docker
-make build_native_windows   # rust.native для Windows и Python 3.12-3.14 (.venv-3.X-core)
-make build_native_macos     # rust.native для macOS и Python 3.12-3.14 (.venv-3.X-core), universal2
+make build_native           # rust.native для текущего Python, в rust/
+make build_native_linux     # rust.native для Linux и Python 3.12-3.15, в Docker
 make rust_check             # cargo fmt --check, clippy и модульные тесты Rust (входит в make check)
 ```
 
 `rust.native` (`rust/native/`) содержит драйвер PostgreSQL для адресов `postgresql://` (`rust.native.pg`)
-и отдельные операции с атрибутами, JSON и форматами значений (`rust.native.rows`). Создание моделей
-и семантика полей остаются в Python; нативные помощники ускоряют отдельные операции. Расширение
-необязательно: без него используйте адреса `postgresql+asyncpg://` и помощники на Python. CI собирает его
-при каждом запуске для Python 3.12, 3.13 и 3.14 на Linux, Windows и macOS (под macOS — один файл
-universal2 на версию Python для Apple silicon и Intel) и передаёт всем заданиям, которым он нужен.
+и отдельные операции с атрибутами, JSON и форматами значений (`rust.native.rows`). Пакетное чтение
+вызывает Python-методы `__new__`, преобразования полей и снимки dirty fields; обработка связей и
+аннотаций общая с Python-читателем. Строки обрабатываются ограниченными пачками, между которыми
+управление возвращается циклу событий. Преобразования вызываются по порядку строк, в том числе для
+NULL; первая ошибка останавливает пачку. Второго набора кодеков полей нет. У кода hare на Python нет
+второй версии того, что делает расширение: его несёт каждый wheel — на Windows без драйвера PostgreSQL
+(`rust.native.pg`, `rust.native.pool`), который собирается только на Linux и macOS. CI собирает его
+при каждом запуске для Python 3.12, 3.13, 3.14 и 3.15 на Linux и передаёт всем заданиям, которым он нужен.
 Собранные файлы не коммитятся: в checkout `rust.native` нет, пока его не соберёт `make build_native`
 инструментарием Rust, который закрепляет `rust-toolchain.toml`; колёса на PyPI несут его собранным.
+
+Native-читатели аннотаций классифицируются один раз на ограниченную пачку; преобразования значений
+и присваивания атрибутов по-прежнему выполняются для каждой строки по порядку. Обычные Python-callbacks
+вызываются через PyO3 `call1` с Rust-кортежами. Небольшой модуль CPython FFI сохраняет общее присваивание
+атрибутов и извлечение точного целого: их поведение отличается от обычного вызова Python-метода.
+Параметры PostgreSQL bind и COPY передаются итераторами по подготовленным значениям; бинарный COPY
+сохраняет свою обёртку бинарного параметра. Преобразование коллекций и форматирование строк обходятся
+без промежуточных векторов и копий строк там, где достаточно заимствованного значения или одного
+выходного буфера. Эти изменения не добавляют вторые кодеки полей и не обходят пользовательские
+readers, writers, валидацию или отмену запроса.
+
+При сравнении checkout используйте отдельный `CARGO_TARGET_DIR` для каждого дерева исходников и
+версии Python. Соберите release-расширение из этого дерева и до замера проверьте пути импортированных
+`hare` и `rust.native`: editable-установка или другой пакет `rust` в `PYTHONPATH` могут выбрать
+другое дерево. См. [сравнение изменений](benchmarks/README.ru.md#comparing-changes).
 
 ## Матрица тестов и CI
 
@@ -269,7 +310,7 @@ universal2 на версию Python для Apple silicon и Intel) и перед
 
 | Ось | Версии |
 | --- | --- |
-| Python | 3.12, 3.13, 3.14 |
+| Python | 3.12, 3.13, 3.14, 3.15 |
 | SQLite | 3.35.5 (самая старая поддерживаемая), 3.37.2 (собственная в Ubuntu 22.04; таблицы `STRICT` с 3.37), 3.38.0 (`->>`), 3.41.0 (`unhex()`) и 3.53.4 (новейшая), а также новейшая с установленными функциями регулярных выражений SQLite; на Linux |
 | PostgreSQL | 14, 15, 16, 17, 18 — каждая через `asyncpg` (`postgresql+asyncpg://`) и через драйвер на Rust (`postgresql://`); на Linux |
 | PgBouncer | 1.22, 1.23, 1.24, 1.25, 1.26 — каждая перед PostgreSQL 18, 1.26 ещё и перед 14, через оба драйвера PostgreSQL; на Linux |
@@ -293,35 +334,26 @@ Native-сборки устанавливают версии Python из ката
 небольшие прогоны сохраняют отдельный лимит. Профиль очищает унаследованные `HARE_TEST_*` и применяет
 своё окружение. JSON-отчёты рядом с логами хранят counts pytest, фактический random seed и версии
 инструментов. Код 5 считается ошибкой без явного разрешения пустой выборки; отсутствие отчёта тоже.
-При отмене группы процессов завершаются до ожидания воркеров: POSIX-сессии и Windows Job Objects
-через тестовую зависимость `pywin32`. Подготовка каталога и wheel не требует Windows-биндингов.
+При отмене сессия процессов каждого прогона завершается до ожидания воркеров.
 
 Версии SQLite и пути загрузки перечислены в таблице `sqlite_releases` каталога. Прогон на одной из них загружает
-именно эту версию, с какой бы SQLite ни был собран Python:
-
-- **Linux**: `libsqlite3.so.0`, собранная из amalgamation этой версии и найденная через
-  `LD_LIBRARY_PATH`;
-- **Windows**: официальная `sqlite3.dll` этой версии рядом с копией собственного `_sqlite3.pyd`
-  Python, первой в `PYTHONPATH`;
-- **macOS**: `libsqlite3.0.dylib`, собранная из amalgamation, через `DYLD_LIBRARY_PATH`. В сборках
-  python.org (их ставит `actions/setup-python`) SQLite вкомпонована в `_sqlite3` статически, и путь
-  поиска библиотек там ничего не меняет: тогда модуль `_sqlite3` собирается из исходников CPython
-  той версии Python, что запущена (скачиваются с python.org), с собранной библиотекой и ставится
-  первым в `PYTHONPATH`. То же происходит на Linux для Python, чей `_sqlite3` находит SQLite через
-  собственный `RPATH` (сборки manylinux).
+именно эту версию, с какой бы SQLite ни был собран Python: `libsqlite3.so.0`, собранную из
+amalgamation этой версии и найденную через `LD_LIBRARY_PATH`. Для Python, чей `_sqlite3` находит SQLite
+через собственный `RPATH` (сборки manylinux), путь поиска библиотек ничего не меняет: тогда модуль
+`_sqlite3` собирается из исходников CPython той версии Python, что запущена (скачиваются с python.org),
+с собранной библиотекой и ставится первым в `PYTHONPATH`.
 
 Подготовка версии проверяет новым интерпретатором, что `sqlite3.sqlite_version` равна запрошенной,
 и иначе падает; кроме того, каждый прогон тестов получает `HARE_TEST_SQLITE_VERSION` и
 останавливается до первого теста, если загружена другая SQLite, — прогон никогда молча не
 переходит на системную SQLite.
 
-Библиотеки SQLite, модули SQLite для Python и Windows-сборка SpatiaLite используют подготовку артефактов
+Библиотеки SQLite и модули SQLite для Python используют подготовку артефактов
 из `tests/artifacts/`. Описание сборки хранит хеши исходников, платформу, компилятор и параметры, а для
 модуля Python — полный ABI. Готовые файлы используются только при совпадении манифеста и хешей.
 Загрузка и сборка идут во временных каталогах; проверка загрузки и версии предшествует публикации
 неизменяемого каталога артефакта. Файлы выбора для младшей версии Python указывают на эти каталоги,
 поэтому прерванная или одновременная подготовка не заменяет библиотеку, используемую другим процессом.
-SpatiaLite проверяется загрузкой расширения и чтением `spatialite_version()` до вывода путей для тестов.
 
 ### Окружения тестов
 
@@ -332,16 +364,16 @@ SpatiaLite проверяется загрузкой расширения и ч�
 Отказ получения блокировки останавливает setup; частично открытая сессия закрывается.
 
 Каждый тест идёт в одном окружении из `tests/matrix/catalog.toml` — в том, что ставит
-ровно нужные ему пакеты: `core` не ставит ни одного extra, `litestar` — extra `litestar`, `pure` — ничего
-необязательного и без `rust.native` (чистый wheel). Код, который ломается без пакета, ловят окружения без
+ровно нужные ему пакеты: `core` не ставит ни одного extra, `litestar` — extra `litestar`. Код, который
+ломается без пакета, ловят окружения без
 него, а тест никогда не пропускается из-за того, что пакета нет.
 
-Матрица гоняет окружения extras на тестах, которые не читают базу, — один раз на Python и ОС; каждое
+Матрица гоняет окружения extras на тестах, которые не читают базу, — один раз на Python; каждое
 собирает только подходящие модули из `tests/matrix/selection.toml`. Манифест читается стандартной
 библиотекой до импорта тестов и фикстур; исходники тестов не интерпретируются.
 Окружение без подходящих модулей не запускается. На базе
-каждый тест идёт в `all`, где стоят все extras, на каждой версии сервера — один прогон на версию и
-драйвер; `core` и `pure` идут там только на новейшем сервере каждой базы и новейшем Python.
+каждый доступный тест идёт в `all`, где стоят совместимые extras, на каждой версии сервера — один прогон на версию и
+драйвер; `core` идёт там только на новейшем сервере каждой базы и новейшем Python.
 
 - Каждый модуль `test_*.py` имеет запись в `[modules]` манифеста. `requires` перечисляет требования
   для его импорта; `[scopes]` добавляет требования целым каталогам, включая их фикстуры.
@@ -353,14 +385,15 @@ SpatiaLite проверяется загрузкой расширения и ч�
 - Каждый прогон проверяет незаявленные модули и отсутствующие файлы. Сбор, включая `all`, отвергает
   незаявленные требования ячеек. При изменении отбора сравнивайте выбранные node IDs со сбором
   all-extras: совпадение списков подходящих модулей само по себе не доказывает полноту покрытия.
-- `native` — требование теста, которому нужен `rust.native`: такой тест не идёт в `pure`.
 - Тест, требующий того, что ни одно окружение не ставит в точности, роняет сбор: добавьте окружение.
 - Тест, параметризованный драйверами PostgreSQL, берёт их классы по пути
   (`DriverClasses.get_parameters(*POSTGRES_CLIENT_PATHS)`, фикстура `client_class` с `indirect=True`), и
   параметр asyncpg идёт только там, где asyncpg установлен.
 
 `pytest --hare-suite-environment=<имя>` выполняет тесты одного окружения; без параметра идут тесты всех
-окружений (`all`), для этого нужно виртуальное окружение со всем — `make deps`. Матрица выполняет каждое
+доступных окружений (`all`); для этого нужно виртуальное окружение из `make deps`.
+На Python 3.15 Robyn и ClickHouse TCP исключаются до установки и импорта тестов; остальные
+интеграции проверяются. `core` выбирает новейший совместимый Python отдельно для каждого драйвера. Матрица выполняет каждое
 окружение в своём виртуальном окружении `.venv-<python>-<окружение>[-<extra драйвера>]`; для прогона на базе
 к нему добавляется extra её драйвера:
 
@@ -404,11 +437,10 @@ make test_environment ENVIRONMENT=litestar HARE_TEST_DB=postgresql://postgres:po
 
 ### Матрица на своей машине
 
-Нужны Python 3.12, 3.13 и 3.14 (`py -3.X` на Windows, `python3.X` на остальных системах), Docker для
-серверов, а на Linux и macOS — компилятор C для библиотек SQLite. Прогоны rust_pg берут
-локальные сборки `rust.native` из `rust/`. Перед матрицей выполните `make build_native_linux`,
-`make build_native_windows` или `make build_native_macos` для нужной платформы и пересобирайте после
-изменений в `rust/`; бинарные файлы в репозиторий не включаются.
+Нужны Linux, Python 3.12, 3.13, 3.14 и 3.15 (`python3.X`), Docker для серверов и компилятор C для
+библиотек SQLite. Прогоны rust_pg берут локальные сборки `rust.native` из `rust/`.
+Перед матрицей выполните `make build_native_linux` и пересобирайте после изменений в `rust/`;
+бинарные файлы в репозиторий не включаются.
 
 ```bash
 make matrix_venvs         # виртуальное окружение каждого Python, окружения и драйвера базы прогонов
@@ -458,10 +490,8 @@ make test_pgbouncer_matrix_up matrix_pgbouncer_versions=1.22 matrix_postgres_ver
 Тесты SpatiaLite (`tests/dialects/sqlite/test_spatialite.py`) загружают библиотеку, которую называет
 `HARE_TEST_SPATIALITE_PATH`, — имя, которое находит загрузчик системы, или путь, — и указывают PROJ на
 `HARE_TEST_SPATIALITE_PROJ_DATABASE`, если она задана; без библиотеки они пропускаются. В Linux
-установите `libsqlite3-mod-spatialite` и задайте `HARE_TEST_SPATIALITE_PATH=mod_spatialite`; в macOS —
-`brew install libspatialite` и `HARE_TEST_SPATIALITE_PATH=$(brew --prefix)/lib/mod_spatialite`; в
-Windows `make spatialite` скачивает официальную сборку в `tests/spatialite/` и печатает обе переменные.
-CI задаёт их в заданиях `test-sqlite`.
+установите `libsqlite3-mod-spatialite` и задайте `HARE_TEST_SPATIALITE_PATH=mod_spatialite`. CI задаёт
+её в заданиях `test-sqlite`.
 
 ### Нижние версии зависимостей
 
@@ -498,16 +528,16 @@ CI (`.github/workflows/ci.yml`) запускается для каждого п�
 | Задание | Что делает | Цели Makefile |
 | --- | --- | --- |
 | `check` | проверка форматирования ruff, ruff, mypy и bandit на Python 3.12; cargo fmt, clippy и модульные тесты Rust; actionlint; строгая сборка документации | `make deps`, `make check` |
-| `build-native-linux` | `rust.native` для Python 3.12, 3.13 и 3.14 под Linux, в образе maturin (manylinux2014) | `make build_native_linux` |
-| `build-native` | `rust.native` для Python 3.12, 3.13 и 3.14 под Windows и под macOS (universal2), по заданию на систему | `make deps`, `make build_native_windows`, `make build_native_macos` |
+| `build-native-linux` | `rust.native` для Python 3.12, 3.13, 3.14 и 3.15 под Linux, в образе maturin (manylinux2014) | `make build_native_linux` |
 | `test-sqlite` | все версии SQLite и `sqlite-regexp`, на Linux, по заданию на версию Python | `make matrix_venvs`, `make sqlite_versions`, `make test_matrix` |
-| `test-database-independent` | тесты, не читающие тестовую базу (`database-independent`), по заданию на ОС (Linux, Windows, macOS) и версию Python | `make matrix_venvs`, `make test_matrix` |
+| `test-database-independent` | тесты, не читающие тестовую базу, по заданию на версию Python | `make matrix_venvs`, `make test_matrix` |
 | `test-postgres` | одна версия PostgreSQL через оба драйвера, по заданию на версию PostgreSQL и Python | `make test_db_matrix_up`, `make matrix_venvs`, `make test_matrix` |
 | `test-lowest-dependencies` | нижние версии зависимостей, по заданию на версию Python | `make test_db_up`, `make lowest_dependencies_venv`, `make test_lowest_dependencies` |
-| `test-pgbouncer` | набор PostgreSQL через один PgBouncer перед одним PostgreSQL, оба драйвера, на Python 3.14: каждый PgBouncer перед PostgreSQL 18, 1.26 ещё и перед 14 | `make test_db_matrix_up`, `make test_pgbouncer_matrix_up`, `make matrix_venvs`, `make test_matrix` |
-| `test-clickhouse` | тесты диалекта ClickHouse на одной версии ClickHouse и на кластере из неё, оба драйвера: каждая версия на Python 3.14, 25.8 ещё и на 3.12 и 3.13 | `make test_clickhouse_matrix_up`, `make test_clickhouse_cluster_matrix_up`, `make matrix_venvs`, `make test_matrix` |
+| `test-pgbouncer` | набор PostgreSQL через один PgBouncer перед одним PostgreSQL, оба драйвера: каждый PgBouncer перед PostgreSQL 18 на Python 3.15, 1.26 ещё и перед 14 на Python 3.14 | `make test_db_matrix_up`, `make test_pgbouncer_matrix_up`, `make matrix_venvs`, `make test_matrix` |
+| `test-clickhouse` | тесты диалекта ClickHouse на одной версии ClickHouse и на кластере из неё, оба драйвера: каждая версия через HTTP на Python 3.15, через TCP на 3.14; 25.8 ещё и на 3.12 и 3.13 | `make test_clickhouse_matrix_up`, `make test_clickhouse_cluster_matrix_up`, `make matrix_venvs`, `make test_matrix` |
 | `test-brokers` | обработчики пробуждения и доставки outbox на самых старых и новейших Redis, RabbitMQ и Kafka, по заданию на версию Python | `make test_brokers_matrix_up`, `make matrix_venvs`, `make test_matrix` |
-| `test-poetry-add` | новый проект poetry добавляет hare-orm из checkout, по заданию на ОС (Linux, Windows, macOS) и версию Python | `make deps`, `make test_poetry_add` |
+| `test-poetry-add` | новый проект poetry добавляет hare-orm из checkout, по заданию на версию Python | `make deps`, `make test_poetry_add` |
+| `platform-wheels` | wheel-пакеты Linux (manylinux x86-64), macOS (ARM64) и Windows (x86-64) собираются и устанавливаются, каждый проверяется так же, как при выпуске | — |
 | `ci-passed` | проходит, когда каждое задание выше прошло или пропущено для пул-реквеста из `dev` в `main`, — статус, который требуют правила веток | — |
 
 Задания тестов работают с `rust.native`, собранным из этого коммита, и выкладывают логи `.test-matrix/` как артефакты; вывод упавшего прогона печатается и в логе
@@ -533,6 +563,13 @@ pre-commit) — не спорьте с форматтером,
 описательные имена (без сокращённых переменных и идентификаторов) и подробные, точные докстринги и
 комментарии, объясняющие, *почему* код устроен так (неочевидное ограничение, особенность базы
 данных), — придерживайтесь этого стиля в новом коде и комментариях.
+
+Не используйте `typing.cast()` и `typing_extensions.cast()`, в том числе через алиасы: эти вызовы
+не выполняют преобразований или проверок во время выполнения. Выражайте контракт аннотациями;
+если типизатор не может его вывести, используйте адресный `# type: ignore[код-ошибки]` у нужной строки.
+Не заменяйте cast функцией идентичности, assert или проверкой типов только ради типизатора.
+SQL-приведения и Rust/PyO3 cast выполняют другие операции и сохраняют своё поведение.
+Соблюдение этого правила проверяет Ruff.
 
 ## Документация
 
@@ -729,13 +766,13 @@ git push --force-with-lease
 После этого процесс `release` проверяет, что тег совпадает с версией в `pyproject.toml`, что в
 журнале изменений есть раздел для неё и что помеченный коммит находится в `main`, и прогоняет на этом
 коммите всю [матрицу тестов](#матрица-тестов-и-ci) — без неё ничего не публикуется. На раннере каждой
-платформы — Linux x86-64 и ARM64 (manylinux2014 и musllinux 1.2), macOS Intel и Apple Silicon,
-Windows x64 и ARM64 — он собирает расширение на Rust для Python 3.12, 3.13 и 3.14 (maturin
-`--interpreter` со всеми тремя) и wheel hare-orm с ним на каждую версию Python
+платформы — Linux x86-64 и ARM64 (manylinux2014 и musllinux 1.2), macOS x86-64 и ARM64, Windows x86-64
+и ARM64 (`.github/workflows/platform-wheels.yml`) — он собирает расширение на Rust для Python 3.12, 3.13,
+3.14 и 3.15 (maturin `--interpreter` со всеми четырьмя) и wheel hare-orm с ним на каждую версию Python
 (`.github/scripts/build_wheel.py`), а затем ставит каждый wheel в чистое окружение его версии Python,
 чтобы выполнить запросы hare к SQLite, а на Linux ещё и к PostgreSQL через драйвер на Rust (wheel
-musllinux — в образах `python:3.X-alpine`). Кроме того, он собирает универсальный wheel для остальных платформ и sdist — в них нет
-собранных расширений. Публикация на PyPI ждёт одобрения мейнтейнером окружения `pypi`; затем
+musllinux — в образах `python:3.X-alpine`). hare публикует только эти wheel-пакеты — ни wheel, ни sdist
+без расширения нет. Публикация на PyPI ждёт одобрения мейнтейнером окружения `pypi`; затем
 создаётся выпуск на GitHub с текстом раздела журнала изменений.
 
 Чтобы проверить сборку выпуска без публикации, запустите процесс `release` вручную (Actions →

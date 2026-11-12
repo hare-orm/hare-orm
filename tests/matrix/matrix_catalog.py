@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 import tomllib
+from itertools import product
 from typing import Any, ClassVar
 
 from tests.matrix.paths import MATRIX_CATALOG_PATH
@@ -37,11 +38,24 @@ class MatrixCatalog:
         return value
 
     @classmethod
-    def get_environments(cls) -> tuple[SuiteEnvironment, ...]:
-        """Construct environment declarations, expanding the final all-extras entry."""
-        environments = []
+    def get_unsupported_extras(cls, python_version: str) -> frozenset[str]:
+        """Extras unavailable on one Python, shared by installation and test selection."""
+        return frozenset(cls.read().get("unsupported_extras", {}).get(python_version, ()))
+
+    @classmethod
+    def get_environments(cls, python_version: str | None = None) -> tuple[SuiteEnvironment, ...]:
+        """Expand the available environments and their aggregate for a selected Python.
+
+        Without a Python, return every declaration for manifest validation. A selected
+        Python omits unavailable extras and database drivers before installation.
+        """
+        unsupported = cls.get_unsupported_extras(python_version) if python_version is not None else frozenset()
+        driver_extras = cls.get("database_driver_extras")
+        environments: list[SuiteEnvironment] = []
         for declaration in cls.get("environments"):
-            values = {name: tuple(value) if isinstance(value, list) else value for name, value in declaration.items()}
+            values: dict[str, Any] = {
+                name: tuple(value) if isinstance(value, list) else value for name, value in declaration.items()
+            }
             if values.pop("all_extras", False):
                 values["extras"] = tuple(
                     dict.fromkeys(extra for environment in environments for extra in environment.extras)
@@ -49,17 +63,54 @@ class MatrixCatalog:
                 values["groups"] = tuple(
                     dict.fromkeys(group for environment in environments for group in environment.groups)
                 )
+            elif unsupported.intersection(values.get("extras", ())):
+                continue
+            if "databases" in values:
+                values["databases"] = tuple(
+                    database
+                    for database in values["databases"]
+                    if not unsupported.intersection(driver_extras[database])
+                )
             environments.append(SuiteEnvironment(**values))
         return tuple(environments)
 
     @classmethod
+    def get_latest_python(cls, environment_name: str, database: str) -> str | None:
+        """The newest Python on which this environment can exercise the database."""
+        for python_version in reversed(cls.get("versions.python")):
+            for environment in cls.get_environments(python_version):
+                if environment.name == environment_name and database in environment.databases:
+                    return python_version
+        return None
+
+    @classmethod
     def get_ci_matrices(cls) -> dict[str, dict[str, Any]]:
-        """Expand shared version axes while retaining the explicitly reduced CI profiles."""
+        """Expand shared version axes while retaining the explicitly reduced CI profiles; a profile
+        naming ``platforms`` includes those entries of ``wheel_platforms``."""
         matrices = {}
         for name, profile in cls.get("ci").items():
             matrix = {axis: cls.get(path) for axis, path in profile.get("axes", {}).items()}
+            if "platforms" in profile:
+                matrix["include"] = [
+                    platform for platform in cls.get("wheel_platforms") if platform["platform"] in profile["platforms"]
+                ]
             matrix.update({axis: cls.get(path)[-1:] for axis, path in profile.get("newest_axes", {}).items()})
-            matrix.update(profile.get("matrix", {}))
+            if drivers := profile.get("drivers"):
+                combinations = [dict(zip(matrix, values, strict=True)) for values in product(*matrix.values())]
+                matrix = {
+                    "include": [
+                        {
+                            **combination,
+                            "driver": driver,
+                            "python": cls.get_latest_python("all", cls.get("databases_by_driver")[driver]),
+                        }
+                        for combination in combinations
+                        for driver in cls.get(drivers)
+                    ]
+                }
+                matrix["include"].extend(profile.get("matrix", {}).get("include", ()))
+            else:
+                matrix.update(profile.get("matrix", {}))
             matrices[name] = matrix
         return matrices
 
@@ -69,9 +120,16 @@ class MatrixCatalog:
         parser = argparse.ArgumentParser(description="Read the shared test matrix catalog.")
         parser.add_argument("path", help="Dotted catalog path, for example versions.python or images.pgbouncer")
         parser.add_argument("--json", action="store_true", help="Emit structured JSON for CI")
+        parser.add_argument("--python-version", default=f"{sys.version_info.major}.{sys.version_info.minor}")
+        parser.add_argument("--prefix", default="", help="Prefix each selected extra for installer arguments")
         arguments = parser.parse_args()
-        value = cls.get_ci_matrices() if arguments.path == "ci" else cls.get(arguments.path)
-        sys.stdout.reconfigure(newline="\n")
+        value: Any
+        if arguments.path == "extras":
+            environment = next(item for item in cls.get_environments(arguments.python_version) if item.name == "all")
+            value = [arguments.prefix + extra for extra in environment.extras]
+        else:
+            value = cls.get_ci_matrices() if arguments.path == "ci" else cls.get(arguments.path)
+        sys.stdout.reconfigure(newline="\n")  # type: ignore[union-attr]
         if arguments.json:
             print(json.dumps(value))
         elif isinstance(value, dict):

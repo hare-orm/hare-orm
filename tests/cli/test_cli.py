@@ -2449,7 +2449,6 @@ HARE_ORM = {
     assert "widget" in result.output.lower()
 
 
-@pytest.mark.requires("native")
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_sqlmigrate_postgres_wraps_in_transaction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2730,7 +2729,6 @@ async def test_inspectdb_unknown_connection_maps_to_cli_error(tmp_path: Path, mo
     assert "Unknown connection" in result.output, diagnostics
 
 
-@pytest.mark.requires("native")
 @pytest.mark.asyncio
 async def test_migrate_unreachable_postgres_maps_to_cli_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An unreachable connection used to let hare.exceptions.DBConnectionError escape all the way

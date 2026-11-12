@@ -121,8 +121,7 @@ class ConflictClause:
         types = bulk_create.dialect.types
         key_fields = [bulk_create.model._meta.fields_map[name] for name in key_field_names]
         nulls_distinct = ConflictClause.has_distinct_nulls(bulk_create, key_field_names)
-        field_native_types = [types.get_native_key_type(field) for field in key_fields]
-        native_key_types = tuple(field_native_types) if None not in field_native_types else ()
+        read_key = ReturnedValues.get_stored_key_reader(types, key_fields, key_field_names, len(objects))
         single_field_name = key_field_names[0] if len(key_field_names) == 1 else None
         has_database_defaults = any(field.has_db_default() for field in key_fields)
         groups: list[list[TModel]] = [[]]
@@ -148,15 +147,7 @@ class ConflictClause:
             if nulls_distinct and (key is None or (single_field_name is None and any(value is None for value in key))):
                 groups[-1].append(obj)
                 continue
-            if native_key_types and (
-                type(key) is native_key_types[0]
-                if single_field_name is not None
-                else all(type(value) is expected for value, expected in zip(key, native_key_types, strict=True))
-            ):
-                # The real write validates these values; comparing their native form needs no codec.
-                pass
-            else:
-                key = ReturnedValues.get_stored_key(types, key_fields, key_field_names, obj)
+            key = read_key(obj)
             if key in seen_keys:
                 groups.append([])
                 seen_keys = set()
@@ -172,12 +163,16 @@ class ConflictClause:
         unique index: split NULL keys when any matching declaration compares NULLs as equal.
         For a partial index this may split more rows than necessary, while preserving order.
         """
+        field_name_set: set[str] | None = None
         for constraint in bulk_create.model._meta.constraints:
             if not isinstance(constraint, UniqueConstraint) or constraint.nulls_distinct is not False:
                 continue
             if bulk_create._on_conflict_constraint:
                 if constraint.name == bulk_create._on_conflict_constraint:
                     return False
-            elif set(bulk_create.get_conflict_field_names(bulk_create.model, constraint.fields)) == set(field_names):
-                return False
+            else:
+                if field_name_set is None:
+                    field_name_set = set(field_names)
+                if set(bulk_create.get_conflict_field_names(bulk_create.model, constraint.fields)) == field_name_set:
+                    return False
         return True

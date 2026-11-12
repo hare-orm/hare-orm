@@ -95,6 +95,5 @@ class SqliteJsonDatetime:
     @classmethod
     async def install(cls, connection: aiosqlite.Connection) -> None:
         """Registers ``normalize`` on ``connection`` as ``SQLITE_JSON_DATETIME_FUNCTION_NAME``."""
-        native_functions = SqliteNativeFunctions.module
-        normalize: Any = cls.normalize if native_functions is None else native_functions.JsonDatetime(cls).normalize
+        normalize = SqliteNativeFunctions.module.JsonDatetime(cls).normalize
         await connection.create_function(SQLITE_JSON_DATETIME_FUNCTION_NAME, 2, normalize, deterministic=True)

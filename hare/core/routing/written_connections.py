@@ -22,6 +22,7 @@ class WrittenConnections:
 
     #: The writes of the current task, None before its first one.
     current: ClassVar[ContextVar[WrittenConnections | None]] = ContextVar("hare_written_connections", default=None)
+    empty_writes: ClassVar[Mapping[str, float]] = MappingProxyType({})
 
     writes: Mapping[object, Mapping[str, float]] = field(default_factory=lambda: MappingProxyType({}))
 
@@ -36,7 +37,7 @@ class WrittenConnections:
         from hare.core.hare_context import HareContext
 
         context = HareContext.get_current()
-        return self.writes.get(None if context is None else context.identity, MappingProxyType({}))
+        return self.writes.get(None if context is None else context.identity, WrittenConnections.empty_writes)
 
     @classmethod
     def record(cls, connection_alias: str) -> None:

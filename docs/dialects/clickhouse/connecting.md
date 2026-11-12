@@ -8,6 +8,10 @@ hare runs on ClickHouse, the columnar database for analytics, over either of the
 | `clickhouse+clickhouse-connect` | [clickhouse-connect](https://clickhouse.com/docs/integrations/python)'s asyncio client, over the HTTP interface (port 8123) | `pip install "hare-orm[clickhouse-connect]"` |
 | `clickhouse+clickhouse-driver` | [clickhouse-driver](https://clickhouse-driver.readthedocs.io/), over the native TCP protocol (port 9000) | `pip install "hare-orm[clickhouse-driver]"` |
 
+On Python 3.15 use HTTP with `clickhouse-connect` 1.12 or newer. The TCP driver
+and `clickhouse-cityhash` currently have no compatible 3.15 wheels;
+`clickhouse-driver` is supported on Python 3.12–3.14.
+
 ```python
 await Hare.init(
     config={

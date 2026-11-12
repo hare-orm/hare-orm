@@ -90,3 +90,38 @@ pub fn stamp_attribute_values(
     }
     Ok(())
 }
+
+/// Copies a query's slots to its clone through `getattr`/`setattr` - a custom setter of the target runs;
+/// a slot the source never set is skipped, so it stays unset on the target too. Each of `plain_names`
+/// is copied as it is; each `(name, factory)` of `container_slots` gets a copy of its container
+/// (`.copy()`), or a new empty one from `factory` when it is empty.
+#[pyfunction]
+pub fn copy_slot_values(
+    source: &Bound<'_, PyAny>,
+    target: &Bound<'_, PyAny>,
+    plain_names: &Bound<'_, pyo3::types::PyTuple>,
+    container_slots: &Bound<'_, pyo3::types::PyTuple>,
+) -> PyResult<()> {
+    let py = source.py();
+    for name in plain_names.iter() {
+        let name = name.cast_into::<PyString>()?;
+        let value = match source.getattr(&name) {
+            Ok(value) => value,
+            Err(error) if error.is_instance_of::<PyAttributeError>(py) => continue,
+            Err(error) => return Err(error),
+        };
+        target.setattr(&name, value)?;
+    }
+    for slot in container_slots.iter() {
+        let (name, factory): (Bound<'_, PyString>, Bound<'_, PyAny>) = slot.extract()?;
+        let value = match source.getattr(&name) {
+            Ok(value) => value,
+            Err(error) if error.is_instance_of::<PyAttributeError>(py) => continue,
+            Err(error) => return Err(error),
+        };
+        let copied =
+            if value.is_truthy()? { value.call_method0(pyo3::intern!(py, "copy"))? } else { factory.call0()? };
+        target.setattr(&name, copied)?;
+    }
+    Ok(())
+}

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Iterable
-from typing import TYPE_CHECKING
+from collections.abc import AsyncGenerator, Coroutine, Iterable
+from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.results.statement_result import StatementResult
 from hare.query.execution.write_statements import WriteCommand, WriteCopy, WriteMany
@@ -39,19 +39,29 @@ class BoundWrite:
             yield await self.execute_command(connection, command)
 
     @staticmethod
-    async def execute_command(connection: DatabaseClient, command: WriteCommand) -> StatementResult:
-        """Send one prepared command without consulting the original model values."""
+    def execute_command(connection: DatabaseClient, command: WriteCommand) -> Coroutine[Any, Any, StatementResult]:
+        """Send one prepared command without consulting the original model values.
+
+        Returns:
+            What to await for the command's result - a single statement is the connection's own
+            coroutine.
+        """
+        if isinstance(command, (WriteCopy, WriteMany)):
+            return BoundWrite.execute_rows_command(connection, command)
+        if command.recovery is None:
+            return connection.execute(command.sql, command.parameters, returns_rows=command.returns_rows)
+        return connection.execute(
+            command.sql, command.parameters, returns_rows=command.returns_rows, recovery=command.recovery
+        )
+
+    @staticmethod
+    async def execute_rows_command(connection: DatabaseClient, command: WriteCopy | WriteMany) -> StatementResult:
+        """Send a command of many rows - a bulk copy or an ``executemany`` - whose count isn't reported."""
         if isinstance(command, WriteCopy):
             await connection.copy(command.table, command.columns, command.rows, command.column_types, command.schema)
             return StatementResult(None, ())
-        if isinstance(command, WriteMany):
-            if command.recovery is None:
-                await connection.execute_many(command.sql, command.rows)
-            else:
-                await connection.execute_many(command.sql, command.rows, recovery=command.recovery)
-            return StatementResult(None, ())
         if command.recovery is None:
-            return await connection.execute(command.sql, command.parameters, returns_rows=command.returns_rows)
-        return await connection.execute(
-            command.sql, command.parameters, returns_rows=command.returns_rows, recovery=command.recovery
-        )
+            await connection.execute_many(command.sql, command.rows)
+        else:
+            await connection.execute_many(command.sql, command.rows, recovery=command.recovery)
+        return StatementResult(None, ())

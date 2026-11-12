@@ -4,8 +4,7 @@ import datetime
 import json
 from collections.abc import Callable
 from decimal import Decimal
-from functools import partial
-from typing import Any, cast
+from typing import Any
 
 from hare.dialects.sqlite.constants import SQLITE_JSON_DATETIME_FUNCTION_NAME
 from hare.dialects.sqlite.functions.json.sqlite_json_datetime import SqliteJsonDatetime
@@ -57,7 +56,7 @@ class SqliteJsonFilterGuards(JsonFilterGuards):
         self, key_parts: list[str | int], field_term: Term, operator_: Callable[..., Any], value: Any
     ) -> Criterion:
         if operator_ in self.DATE_PART_OPERATORS and not self.is_container_value(operator_, value):
-            date_part = cast("partial[Criterion]", operator_).args[0]
+            date_part = operator_.args[0]  # type: ignore[attr-defined]
             guard = self.get_type_guard(field_term, key_parts, SQLITE_JSON_TYPE_NAMES["string"])
             part_term = SqliteConnectionFunction(
                 SQLITE_JSON_DATETIME_FUNCTION_NAME,

@@ -1,5 +1,3 @@
-from typing import Any, cast
-
 import pytest
 import pytest_asyncio
 
@@ -24,7 +22,7 @@ class DefaultSchemaModel(Model):
 
 
 def _get_table(model: type[Model]) -> Table:
-    return cast(Any, model).get_table()
+    return model.get_table()
 
 
 @pytest_asyncio.fixture(scope="module")

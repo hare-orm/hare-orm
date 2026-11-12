@@ -98,12 +98,13 @@ def test_cached_readers_follow_native_result_types(cache_path, field_class, fiel
         reader = (
             InstanceHydration.get_model_rows_reader(query)
             if cache_path == "prepared_columns"
-            else ModelRows(Number, client, decode_plan=query._decode_plan if query is not None else None)
+            else ModelRows(Number, client.dialect.types, decode_plan=query._decode_plan if query is not None else None)
         )
         result = StatementResult(1, [(1, raw)])
         result.description = (("id",), ("number",))
-        columns = reader.get_columns(result)
-        decoded.append(reader.read_batch(result, columns)[0].number)
+        columns = reader.get_columns(client, result)
+        layout = reader.prepared_result or reader.get_result_layout(columns, ())
+        decoded.append(reader.read_batch(client, result, layout)[0].number)
         if cache_path in ("row_columns", "prepared_columns"):
             plans.append(columns)
         elif cache_path == "decode_plan":
@@ -154,14 +155,14 @@ def test_prepared_columns_allow_unhashable_readers_and_follow_invalidation(colum
     def read(value, prefix):
         reader = ModelRows(
             model,
-            client,
+            client.dialect.types,
             decode_plan=(("title", field, Reader(prefix)),),
             decode_plan_is_partial=True,
             decode_plan_key=("title",),
         )
         # Positional prepared results need no driver description or keys() method.
         result = StatementResult(1, [(value,)] if by_position else [{"title": value}])
-        return reader.read_batch(result, reader.get_columns(result))[0]
+        return reader.read_batch(client, result, reader.get_result_layout(reader.get_columns(client, result), ()))[0]
 
     assert read("first", "A:").title == "A:first"
     assert read("second", "A:").title == "A:second"
@@ -178,8 +179,11 @@ def test_explicit_decode_plans_without_a_compiler_key_keep_their_readers(column_
     result = StatementResult(1, [("mixed",)])
     actual = []
     for convert in (str.upper, str.lower):
-        reader = ModelRows(model, client, decode_plan=(("title", field, convert),), decode_plan_is_partial=True)
-        actual.append(reader.read_batch(result, reader.get_columns(result))[0].title)
+        reader = ModelRows(
+            model, client.dialect.types, decode_plan=(("title", field, convert),), decode_plan_is_partial=True
+        )
+        layout = reader.get_result_layout(reader.get_columns(client, result), ())
+        actual.append(reader.read_batch(client, result, layout)[0].title)
     assert actual == ["MIXED", "mixed"]
 
 
@@ -224,17 +228,19 @@ async def test_model_stream_binds_nonempty_batches_and_closes(column_binding_mod
     )
     if combined:
         reader = CombinedModelRows(model, {model}, ())
-        stream = reader.stream_batches(client, "SELECT title", [7], chunk_size=1)
+        stream = reader.stream_batches(
+            client, "SELECT title", [7], chunk_size=1, result_reading=reader.get_result_reading()
+        )
         expected = [[], ["one"], [], ["two"]]
     else:
         reader = ModelRows(
             model,
-            client,
+            client.dialect.types,
             decode_plan=(("title", model._meta.fields_map["title"], str.upper),),
             decode_plan_is_partial=True,
             decode_plan_key=("title",),
         )
-        stream = reader.stream_batches("SELECT title", [7], chunk_size=1)
+        stream = reader.stream_batches(client, "SELECT title", [7], chunk_size=1)
         expected = [[], ["ONE"], [], ["TWO"]]
     batches = []
     async with aclosing(stream) as source_batches:

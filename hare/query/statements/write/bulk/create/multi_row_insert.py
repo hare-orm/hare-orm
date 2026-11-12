@@ -205,7 +205,7 @@ class MultiRowInsert:
         )
         cacheable = True
         try:
-            template = StatementPlans.insert_templates.get_model_bucket(bulk_create.model).get(key)
+            template = StatementPlans.insert_templates.get_bucket(bulk_create.model).get(key)
         except TypeError:
             # A tenant value the conflict update is limited to that can't be hashed - built each time.
             cacheable = False
@@ -224,7 +224,7 @@ class MultiRowInsert:
             )
             template = TemplateInsert.get_row_template_sql(query, len(db_columns))
             if cacheable:
-                StatementPlans.insert_templates.get_model_bucket(bulk_create.model)[key] = template
+                StatementPlans.insert_templates.get_bucket(bulk_create.model)[key] = template
         if template is None:
             # A row's placeholders are one string in one LiteralValue term, not a Parameter per value.
             dialect = bulk_create._connection.dialect
@@ -252,7 +252,7 @@ class MultiRowInsert:
             )
             template = TemplateInsert.get_row_template_sql(query, row_count * column_count)
             if cacheable:
-                StatementPlans.insert_templates.get_model_bucket(bulk_create.model)[key] = template
+                StatementPlans.insert_templates.get_bucket(bulk_create.model)[key] = template
         return template
 
     @staticmethod

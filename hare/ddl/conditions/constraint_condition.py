@@ -122,6 +122,7 @@ class ConstraintCondition:
 
         if not isinstance(condition, Q):
             return
+        relation_names = model._meta.foreign_key_fields | model._meta.one_to_one_fields
         try:
             for node in ExpressionTraversal.walk(condition):
                 if isinstance(node, (Aggregate, Window, QuerySpecification)) or (
@@ -141,8 +142,7 @@ class ConstraintCondition:
                 local_relation = (
                     lookup.target is LookupTarget.RELATION
                     and len(lookup.relations) == 1
-                    and lookup.relations[0].model_field_name
-                    in model._meta.foreign_key_fields | model._meta.one_to_one_fields
+                    and lookup.relations[0].model_field_name in relation_names
                 )
                 if not local_relation:
                     raise QueryError(ROW_CONDITION_RELATION_MESSAGE)

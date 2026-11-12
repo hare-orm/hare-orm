@@ -44,10 +44,7 @@ impl<'py> IntoPyObject<'py> for &Value {
             Value::Float(value) => value.into_pyobject(py)?.into_any(),
             Value::Text(value) | Value::Json(value) => PyString::new(py, value).into_any(),
             Value::Bytes(value) => PyBytes::new(py, value).into_any(),
-            Value::Array(items) => {
-                PyList::new(py, items.iter().map(|item| item.into_pyobject(py)).collect::<PyResult<Vec<_>>>()?)?
-                    .into_any()
-            }
+            Value::Array(items) => PyList::new(py, items.iter())?.into_any(),
             Value::Range(range) => range_to_py(py, range)?,
             Value::Uuid(value) => new_uuid(py, value.as_u128())?,
             Value::Decimal(text) => decimal_type(py)?.call1((text.as_str(),))?.into_any(),
@@ -74,10 +71,7 @@ impl<'py> IntoPyObject<'py> for &Value {
             }
             Value::Interval(interval) => interval_to_py(py, *interval)?,
             Value::Network(network) => network_to_py(py, *network)?,
-            Value::Composite(items) => {
-                let converted = items.iter().map(|item| item.into_pyobject(py)).collect::<PyResult<Vec<_>>>()?;
-                PyTuple::new(py, converted)?.into_any()
-            }
+            Value::Composite(items) => PyTuple::new(py, items.iter())?.into_any(),
         };
         Ok(obj)
     }

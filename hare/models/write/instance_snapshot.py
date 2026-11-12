@@ -1,10 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any
+from collections.abc import Iterable, Sequence
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.fields.constants import ROLLBACK_RESTORE_UNSET
-from hare.models.constants import INSTANCE_RESTORE_FAILURES_MESSAGE, INSTANCE_STATE_ATTRIBUTE_NAMES
+from hare.models.constants import (
+    INSTANCE_RESTORE_FAILURES_MESSAGE,
+    INSTANCE_STATE_ATTRIBUTE_NAMES,
+    PERSISTENCE_STATE_ATTRIBUTE_NAMES,
+)
+from hare.native.native_modules import NativeModules
 
 if TYPE_CHECKING:
     from hare.models.model import Model
@@ -20,6 +25,9 @@ class InstanceSnapshot:
     """
 
     __slots__ = ("instance", "values")
+
+    #: The compiled ``rust.native.rows`` - captures the snapshots of many instances in one call.
+    native_rows: ClassVar[Any] = NativeModules.rows
 
     def __init__(self, instance: Model, values: dict[str, Any] | None = None) -> None:
         self.instance = instance
@@ -38,15 +46,36 @@ class InstanceSnapshot:
         Read publication can omit this synthetic key entry and capture its selected
         key columns directly, avoiding a second key setter after restoring relations.
         """
-        values = {
-            name: instance.__dict__.get(name, ROLLBACK_RESTORE_UNSET)
-            for name in ("_saved_in_db", "_custom_generated_pk", "_connection_alias", "_dirty_snapshot")
-        }
-        if isinstance(values["_dirty_snapshot"], dict):
-            values["_dirty_snapshot"] = dict(values["_dirty_snapshot"])
-        if include_primary_key and instance._meta.has_primary_key:
-            values["pk"] = instance.pk
-        return InstanceSnapshot(instance, values)
+        snapshots: list[InstanceSnapshot] = InstanceSnapshot.native_rows.capture_persistence_snapshots(
+            InstanceSnapshot,
+            (instance,),
+            PERSISTENCE_STATE_ATTRIBUTE_NAMES,
+            ROLLBACK_RESTORE_UNSET,
+            include_primary_key and instance._meta.has_primary_key,
+        )
+        return snapshots[0]
+
+    @staticmethod
+    def capture_persistence_of_all(
+        model: type[Model], instances: Sequence[Model], *, include_primary_key: bool = True
+    ) -> list[InstanceSnapshot]:
+        """``capture_persistence()`` of each of many instances of a model, in one call.
+
+        Args:
+            model: The instances' model.
+            instances: The instances.
+            include_primary_key: Whether each snapshot holds the instance's ``pk`` too.
+
+        Returns:
+            The snapshots, in the instances' order.
+        """
+        return InstanceSnapshot.native_rows.capture_persistence_snapshots(
+            InstanceSnapshot,
+            instances,
+            PERSISTENCE_STATE_ATTRIBUTE_NAMES,
+            ROLLBACK_RESTORE_UNSET,
+            include_primary_key and model._meta.has_primary_key,
+        )
 
     @staticmethod
     def restore_all(snapshots: Iterable[InstanceSnapshot]) -> None:

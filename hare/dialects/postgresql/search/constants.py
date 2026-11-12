@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import re
 
+from hare.search.enums import SearchOperator, SearchType
+
 #: The tsquery function per search type, keyed by ``SearchType`` values.
 SEARCH_TYPE_FUNCTIONS: dict[str, str] = {
-    "plain": "PLAINTO_TSQUERY",
-    "phrase": "PHRASETO_TSQUERY",
-    "raw": "TO_TSQUERY",
-    "websearch": "WEBSEARCH_TO_TSQUERY",
+    SearchType.PLAIN: "PLAINTO_TSQUERY",
+    SearchType.PHRASE: "PHRASETO_TSQUERY",
+    SearchType.RAW: "TO_TSQUERY",
+    SearchType.WEBSEARCH: "WEBSEARCH_TO_TSQUERY",
 }
 
 #: The tsquery operator joining two queries, keyed by ``SearchOperator`` values.
-POSTGRESQL_SEARCH_QUERY_OPERATORS: dict[str, str] = {"and": " && ", "or": " || "}
+POSTGRESQL_SEARCH_QUERY_OPERATORS: dict[str, str] = {SearchOperator.AND: " && ", SearchOperator.OR: " || "}
 
 #: The ``ts_headline()`` option of each ``SearchHeadline`` argument.
 POSTGRESQL_HEADLINE_OPTION_NAMES: dict[str, str] = {

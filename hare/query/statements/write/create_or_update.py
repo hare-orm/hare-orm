@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
+from hare.classes.deferred_import import DeferredImport
 from hare.ddl.table_options import TableOptions
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.dialects.base.client.transaction_client import TransactionClient
@@ -9,6 +10,7 @@ from hare.exceptions import DoesNotExist, IntegrityError, QueryError
 from hare.models.write.rules.constants import UPDATE_OR_CREATE_METHOD_NAME
 from hare.models.write.rules.enums import WriteType
 from hare.models.write.rules.row_write_rules import RowWriteRules
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.enums import GetException
 from hare.query.queryset.single_rows.query_set_single import QuerySetSingle
 from hare.sql.constants import HIDDEN_PARAMETER_TEXT
@@ -27,6 +29,9 @@ class CreateOrUpdate:
     """get_or_create() and update_or_create(): the row matching the lookups read inside a transaction
     on the connection writes go to, created from the lookups and the defaults when none matches - a
     concurrent create of the same row read back instead of failing."""
+
+    #: ``Model`` - imported at its first read, as its module imports this one.
+    model_class: ClassVar[DeferredImport[type[Model]]] = DeferredImport("hare.models", "Model")
 
     @staticmethod
     async def create_or_get(
@@ -49,12 +54,13 @@ class CreateOrUpdate:
             QueryError: ``defaults`` conflicts with an exact ``kwargs`` value.
             IntegrityError: The create failed for a reason other than the row already existing.
         """
-        from hare.models import Model
-
         create_values = CreateOrUpdate.get_create_values(queryset.model, defaults, kwargs)
-        pinned_connection = cast("DatabaseClient", queryset._connection)
+        pinned_connection: DatabaseClient = queryset._connection  # type: ignore[assignment]
         try:
-            if isinstance(pinned_connection, TransactionClient) or queryset.model.save is not Model.save:
+            if (
+                isinstance(pinned_connection, TransactionClient)
+                or queryset.model.save is not CreateOrUpdate.model_class.save
+            ):
                 async with pinned_connection._in_transaction() as connection:
                     return await queryset.using(connection).create(**create_values), True
             return await queryset.create(**create_values), True
@@ -120,7 +126,7 @@ class CreateOrUpdate:
             meta.backward_foreign_key_fields
             | meta.backward_one_to_one_fields
             | meta.many_to_many_fields
-            | {"pk", *meta.primary_key_attribute_names}
+            | {PRIMARY_KEY_ALIAS, *meta.primary_key_attribute_names}
         )
         RowWriteRules.get(
             queryset.model,
@@ -142,14 +148,11 @@ class CreateOrUpdate:
         Returns:
             The awaitable single-row query.
         """
-        return cast(
-            "QuerySetSingle[TModel]",
-            TableOptions.get_key_read_queryset(queryset)._get_single_queryset(
-                (),
-                kwargs,
-                does_not_exist_exception=GetException.STANDARD,
-                multiple_objects_returned_exception=GetException.STANDARD,
-            ),
+        return TableOptions.get_key_read_queryset(queryset)._get_single_queryset(  # type: ignore[return-value]
+            (),
+            kwargs,
+            does_not_exist_exception=GetException.STANDARD,
+            multiple_objects_returned_exception=GetException.STANDARD,
         )
 
     @staticmethod

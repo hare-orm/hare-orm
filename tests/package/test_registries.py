@@ -24,6 +24,7 @@ from tests.shared_models.testmodels import Tournament
 NOT_REGISTRIES = {
     ("hare/cli/plugins/cli_command_registry.py", "register"): "a CLI command",
     ("hare/core/hare_context.py", "register_live_models"): "binds models, which build their own caches",
+    ("hare/core/apps/live_model_registration.py", "register_live_models"): "binds models and invalidates model caches",
     ("hare/core/hare.py", "register_live_models"): "passes the models to HareContext.register_live_models()",
     ("hare/migrations/state/state_apps.py", "register_model"): "a migration state's model",
     ("hare/core/caching/caches.py", "register"): "a cache, dropped by the registries' changes",
@@ -32,6 +33,7 @@ NOT_REGISTRIES = {
         "client-local adapters, identified by the client's parameter_binding_key"
     ),
     ("hare/models/write/write_finalizer.py", "register_snapshots"): "instance values restored on rollback",
+    ("hare/models/write/rollback_restores.py", "register_snapshots"): "lazy instance snapshots restored on rollback",
     (
         "hare/dialects/sqlite/renderers/sqlite_defaults.py",
         "register",
@@ -99,9 +101,6 @@ NOT_REGISTRIES = {
     ),
     ("hare/models/write/rollback_restores.py", "register_rollback_restore"): (
         "an instance value put back when its transaction rolls back"
-    ),
-    ("hare/models/write/rollback_restores.py", "register_rollback_restores"): (
-        "instance values put back when their transaction rolls back"
     ),
     ("hare/query/statements/select/values/values_output.py", "register_selected_annotations"): (
         "the selected annotations of one values() query"
@@ -224,13 +223,13 @@ async def test_a_renderer_registered_after_queries_ran_changes_their_sql(db):
     queryset = Tournament.objects.annotate(shouted=Upper("name")).values_list("shouted", flat=True)
     assert await queryset == ["FIRST"]
     assert StatementPlans.plans.entry_count > 0
-    assert HydrationLayout.layouts.get_model_bucket(Tournament)
+    assert HydrationLayout.layouts.get_bucket(Tournament)
 
     previous_snapshot = Registries.snapshot
     renderers.register_name(functions.Upper, lambda function, ctx: "LOWER")
     try:
         assert StatementPlans.plans.entry_count == 0
-        assert not HydrationLayout.layouts.get_model_bucket(Tournament)
+        assert not HydrationLayout.layouts.get_bucket(Tournament)
         async with capture_queries() as counter:
             assert await queryset == ["first"]
         assert "LOWER(" in counter.queries[-1]

@@ -1,23 +1,21 @@
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
 from itertools import chain
 from types import ModuleType
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.core.apps.many_to_many_linking import ManyToManyLinking
 from hare.core.apps.model_binding_graph import ModelBindingGraph
 from hare.core.apps.model_connection_checks import ModelConnectionChecks
 from hare.core.apps.model_discovery import ModelDiscovery
+from hare.core.apps.model_name_checks import ModelNameChecks
 from hare.core.apps.relation_linking import RelationLinking
 from hare.core.apps.swappable_models import SwappableModels
 from hare.core.apps.table_names import TableNames
 from hare.core.caching.caches import Caches
 from hare.core.connections.connection_handler import ConnectionHandler
 from hare.core.constants import DEFAULT_CONNECTION_NAME
-from hare.ddl.constraints.exclusion_constraint import ExclusionConstraint
-from hare.ddl.constraints.unique_constraint import UniqueConstraint
-from hare.ddl.indexes.index import Index
 from hare.exceptions import ConfigurationError
 from hare.fields.relations.fields.backward_foreign_key_relation import BackwardForeignKeyRelation
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
@@ -25,10 +23,8 @@ from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyF
 from hare.fields.relations.swappable_model_reference import SwappableModelReference
 from hare.models import Model
 from hare.models.class_building.generic_foreign_keys import GenericForeignKeys
-from hare.query.lookup_info.lookup_info_builder import LookupInfoBuilder
 from hare.sql import Table
 from hare.sql.builder.queries.query_builder import QueryBuilder
-from hare.sql.identifiers import Identifiers
 
 if TYPE_CHECKING:
     from hare.core.apps.declarations import ModelReference, TableIdentity
@@ -157,6 +153,7 @@ class Apps:
             model: The model whose table metadata and database fields are ready.
             connection: The client providing the query class for this binding.
         """
+        previous_query_class = model._meta.query_class
         model._meta.basetable = Table(
             name=model._meta.db_table,
             schema=model._meta.schema,
@@ -165,6 +162,9 @@ class Apps:
         basequery = connection.query_class.from_(model._meta.basetable)
         model._meta.basequery = basequery
         model._meta.basequery_all_fields = basequery.select(*model._meta.db_fields)
+        if connection.query_class is not previous_query_class:
+            # The SQL cached for the model was rendered by the previous builder's dialect.
+            Caches.forget_model_sql(model)
 
     def get_swappable_label(self, setting: str) -> str:
         """The ``app_label.ModelName`` label a ``swappable`` setting points at - the configured
@@ -177,12 +177,7 @@ class Apps:
             ConfigurationError: The setting is neither configured nor declared by exactly one model.
         """
         if setting in self.swappable_settings:
-            label = self.swappable_settings[setting]
-            if isinstance(label, dict):
-                raise ConfigurationError(
-                    f"Swappable setting {setting!r} names several models - only a GenericForeignKeyField takes it"
-                )
-            return label
+            return SwappableModels.get_single_model_label(setting, self.swappable_settings[setting])
         default_labels = [
             f"{app_label}.{model_name}"
             for app_label, app in self.apps.items()
@@ -222,29 +217,6 @@ class Apps:
                 f"table_name_generator returned {table_name!r} for {model.__name__} - expected a table name"
             )
         return table_name
-
-    def _check_table_name_collisions(self) -> None:
-        """Refuses two registered models resolving to the same table on one connection.
-
-        Raises:
-            ConfigurationError: Two models share a table.
-        """
-        # Two models defaulting to one table name are rejected here, naming both - per (connection,
-        # schema), as schema generation groups them.
-        model_by_table: dict[TableIdentity, type[Model]] = {}
-        for app in self.apps.values():
-            for model in app.values():
-                if model._meta.swapped is not None:
-                    continue
-                table_key = self.get_table_identity(model, model._meta.schema, model._meta.db_table)
-                colliding_model = model_by_table.get(table_key)
-                if colliding_model is not None and colliding_model is not model:
-                    raise ConfigurationError(
-                        f"Models {colliding_model._meta.full_name!r} and {model._meta.full_name!r} both "
-                        f"resolve to table {model._meta.db_table!r} on connection "
-                        f"{model._meta.default_connection!r} - give one of them an explicit Meta.table name."
-                    )
-                model_by_table[table_key] = model
 
     def get_models_referencing(self, model: type[Model]) -> list[str]:
         """``"<Model>.<field>"`` for every OTHER registered model whose own forward FK/O2O/M2M
@@ -320,7 +292,7 @@ class Apps:
         for model in models_to_discard:
             meta = model._meta
             for field_name in meta.foreign_key_fields | meta.one_to_one_fields:
-                relation_field = cast("ForeignKeyFieldInstance[Any]", meta.fields_map[field_name])
+                relation_field: ForeignKeyFieldInstance[Any] = meta.fields_map[field_name]  # type: ignore[assignment]
                 for shadow_name in relation_field.source_fields:
                     if shadow_name != field_name and shadow_name in meta.fields_map:
                         meta.remove_field(shadow_name)
@@ -451,6 +423,10 @@ class Apps:
                 for model in app.values():
                     model._meta.finalise_model()
 
+    def _check_table_name_collisions(self) -> None:
+        """Check a live registry's tables; a migration registry may retain aliases of one table."""
+        ModelNameChecks._check_table_name_collisions(self)
+
     def link_relations(self) -> None:
         """Wires the relations of every model not inited yet - both sides of each - and marks it
         inited; no model is finalised."""
@@ -465,7 +441,7 @@ class Apps:
                 if model._meta.generic_foreign_key_fields and not model._meta._inited:
                     GenericForeignKeys.expand_swappable_targets(model, swappable_targets)
 
-        self._check_object_names()
+        ModelNameChecks._check_object_names(self)
 
         table_holders = RelationLinking.get_table_holders(self)
         for app_name, app in self.apps.items():
@@ -474,150 +450,13 @@ class Apps:
                     continue
                 RelationLinking.ensure_foreign_key_or_one_to_one_inited(self, model)
                 for field in sorted(model._meta.many_to_many_fields):
-                    self._link_many_to_many(app_name, model_name, model, field, table_holders)
+                    ManyToManyLinking._link_many_to_many(self, app_name, model_name, model, field, table_holders)
                 for generic_field in model._meta.generic_foreign_key_fields.values():
                     if generic_field.branch_names:
                         generic_field.bind_branches()
                 # Only once every relation of the model resolved - a model whose initialisation
                 # raised part-way must not look finished to a later init_relations() pass.
                 model._meta._inited = True
-
-    def _check_object_names(self) -> None:
-        """Refuses two models declaring a database object of the same name on one connection and
-        schema, and one model declaring two constraints or indexes of one name.
-
-        Raises:
-            ConfigurationError: Such objects are declared.
-        """
-        # An explicitly named unique or exclusion constraint, index or trigger inherited from an
-        # abstract base would give every concrete subclass a database object of the same name -
-        # rejected here, naming both models. A check constraint's name is per table and is exempt.
-        constraint_by_name: dict[tuple[str | None, str | None, str], type[Model]] = {}
-        for app in self.apps.values():
-            for model in app.values():
-                if model._meta.swapped is not None:
-                    continue
-                names = [
-                    constraint.name
-                    for constraint in model._meta.constraints
-                    if isinstance(constraint, (UniqueConstraint, ExclusionConstraint)) and constraint.name
-                ]
-                names.extend(index.name for index in model._meta.indexes if isinstance(index, Index) and index.name)
-                # Constraints and indexes share their names; a trigger and its function may share one.
-                repeated_names = sorted(name for name, count in Counter(names).items() if count > 1)
-                if repeated_names:
-                    raise ConfigurationError(
-                        f"Model {model._meta.full_name!r} declares more than one constraint/index named "
-                        f"{repeated_names[0]!r} - give each its own name."
-                    )
-                if model._meta.triggers:
-                    # Imported only for a model declaring triggers - importing it here for every
-                    # init would load hare.migrations, which imports this module.
-                    from hare.ddl.schema_objects.trigger import Trigger
-
-                    names.extend(trigger.name for trigger in model._meta.triggers if isinstance(trigger, Trigger))
-                names.extend(
-                    schema_object.name
-                    for schema_object in (
-                        *model._meta.views,
-                        *model._meta.materialized_views,
-                        *model._meta.dictionaries,
-                        *model._meta.sequences,
-                        *model._meta.functions,
-                    )
-                )
-                for name in names:
-                    constraint_key = (model._meta.default_connection, model._meta.schema, name)
-                    colliding_model = constraint_by_name.get(constraint_key)
-                    if colliding_model is not None and colliding_model is not model:
-                        raise ConfigurationError(
-                            f"Models {colliding_model._meta.full_name!r} and {model._meta.full_name!r} both "
-                            f"declare a constraint/index named {name!r} on connection "
-                            f"{model._meta.default_connection!r} - likely inherited unchanged from a shared "
-                            "abstract base. Give each subclass its own explicit name."
-                        )
-                    constraint_by_name[constraint_key] = model
-
-    def _link_many_to_many(
-        self,
-        app_name: str,
-        model_name: str,
-        model: type[Model],
-        field: str,
-        table_holders: dict[TableIdentity, tuple[type[Model], str | None]],
-    ) -> None:
-        """Links a many-to-many field declared on a model: its target, its through table and keys,
-        its backward name, and the generated field of the other side.
-
-        Args:
-            app_name: The model's app.
-            model_name: The model's name in it.
-            model: The model.
-            field: The field's name.
-            table_holders: Who holds each table name - ``RelationLinking.get_table_holders()``.
-
-        Raises:
-            ConfigurationError: A model of the relation has no primary key, a self-referential
-                relation goes through a model, or the backward name is taken or reserved.
-        """
-        many_to_many_object = cast("ManyToManyFieldInstance[Any]", model._meta.fields_map[field])
-        if many_to_many_object._generated:
-            return
-
-        related_model, related_model_name = RelationLinking.get_related_model(self, many_to_many_object.model_name)
-        many_to_many_object.related_model = related_model
-        # A link row names both rows by their keys.
-        model._meta.raise_if_no_primary_key(f'ManyToManyField "{model.__name__}.{field}"')
-        related_model._meta.raise_if_no_primary_key(f'ManyToManyField "{model.__name__}.{field}" to it')
-
-        through_model, forward_keys, backward_keys, generated_on_delete = self._get_many_to_many_through_keys(
-            model, field, many_to_many_object, related_model
-        )
-        many_to_many_object.forward_key, many_to_many_object.forward_keys = forward_keys[0], forward_keys
-        many_to_many_object.backward_key, many_to_many_object.backward_keys = backward_keys[0], backward_keys
-
-        backward_relation_name = many_to_many_object.related_name = cast(
-            "str",
-            RelationLinking.get_backward_relation_name(
-                many_to_many_object.related_name, model._meta.db_table, model._meta.app, model.__name__
-            ),
-        )
-        is_swapped = model._meta.swapped is not None
-        if not is_swapped and backward_relation_name in related_model._meta.fields:
-            raise ConfigurationError(
-                f"backward relation {backward_relation_name!r} duplicates in model {related_model_name}"
-                ' - use a related_name template such as "%(app_label)s_%(class)s_..." to give each'
-                " concrete model a distinct backward-accessor name."
-            )
-        if not is_swapped:
-            RelationLinking.check_related_name_not_reserved(related_model, backward_relation_name, model, field)
-
-        self._set_many_to_many_through_table(
-            model, field, many_to_many_object, related_model, through_model, is_swapped, table_holders
-        )
-
-        # The through model is passed as the class, with its reconciled on_delete.
-        many_to_many_relation = ManyToManyFieldInstance(
-            f"{app_name}.{model_name}",
-            through_model if through_model is not None else many_to_many_object.through,
-            forward_key=many_to_many_object.backward_key,
-            backward_key=many_to_many_object.forward_key,
-            related_name=field,
-            on_delete=generated_on_delete,
-            field_type=model,
-            description=many_to_many_object.description,
-        )
-        many_to_many_relation._generated = True
-        many_to_many_relation.through = many_to_many_object.through
-        many_to_many_relation.through_schema = many_to_many_object.through_schema
-        many_to_many_relation.through_model = through_model
-        many_to_many_relation.through_model_class = through_model
-        # Swapped from the owning side, which already resolved both sides.
-        many_to_many_relation.forward_keys = many_to_many_object.backward_keys
-        many_to_many_relation.backward_keys = many_to_many_object.forward_keys
-        LookupInfoBuilder.forget_descriptions()
-        if not is_swapped:
-            related_model._meta.add_field(backward_relation_name, many_to_many_relation)
 
     def get_table_identity(self, model: type[Model], schema: str | None, table: str) -> TableIdentity:
         """Identify a physical table using the connection's identifier comparison rules.
@@ -641,144 +480,5 @@ class Apps:
         Returns:
             Its key.
         """
-        connection_alias = cast("str", model._meta.default_connection)
+        connection_alias: str = model._meta.default_connection  # type: ignore[assignment]
         return self._connections.get_dialect(connection_alias).literals.get_identifier_key(name)
-
-    def _get_many_to_many_through_keys(
-        self,
-        model: type[Model],
-        field: str,
-        many_to_many_object: ManyToManyFieldInstance[Any],
-        related_model: type[Model],
-    ) -> tuple[type[Model] | None, tuple[str, ...], tuple[str, ...], Any]:
-        """The through model of a many-to-many field, the columns of its keys to each side, and the
-        ``on_delete`` of the generated other side.
-
-        Args:
-            model: The model declaring the field.
-            field: The field's name.
-            many_to_many_object: The field.
-            related_model: The target.
-
-        Returns:
-            The through model (None for a through table of its own), the forward keys, the backward
-            keys and the generated side's ``on_delete``.
-
-        Raises:
-            ConfigurationError: A self-referential relation goes through a model.
-        """
-        through_model: type[Model] | None = None
-        if many_to_many_object.through_model is not None:
-            # The through model's own foreign keys must be resolved first. The declared
-            # reference isn't overwritten - migration state copies the field as
-            # declared.
-            through_model, _ = RelationLinking.get_related_model(self, many_to_many_object.through_model)
-            many_to_many_object.through_model_class = through_model
-            RelationLinking.ensure_foreign_key_or_one_to_one_inited(self, through_model)
-            if self.model_identity(model) == self.model_identity(related_model):
-                raise ConfigurationError(
-                    f'ManyToManyField "{model.__name__}.{field}" is self-referential '
-                    f"through {through_model.__name__!r} - hare cannot auto-detect "
-                    "which of the through model's two FK fields belongs to which "
-                    "side. Use a plain opaque through= table name instead for a "
-                    "self-referential relation."
-                )
-            backward_foreign_key = RelationLinking.find_many_to_many_through_foreign_key(
-                through_model, model, "owning"
-            )
-            forward_foreign_key = RelationLinking.find_many_to_many_through_foreign_key(
-                through_model, related_model, "related"
-            )
-            forward_keys = forward_foreign_key.db_column_names
-            backward_keys = backward_foreign_key.db_column_names
-            # The declared on_delete, taken before the reconciliations below overwrite
-            # it.
-            declared_on_delete = many_to_many_object.on_delete
-            many_to_many_object.on_delete = RelationLinking.reconcile_many_to_many_through_on_delete(
-                declared_on_delete, backward_foreign_key, field, model.__name__
-            )
-            generated_on_delete = RelationLinking.reconcile_many_to_many_through_on_delete(
-                declared_on_delete, forward_foreign_key, field, related_model.__name__
-            )
-        else:
-            # The class name, not db_table - the related model may not have been visited
-            # yet.
-            # Expanded from the keys as declared - never from columns an earlier linking filled in.
-            forward_keys = RelationLinking.expand_many_to_many_key(
-                many_to_many_object.declared_forward_key,
-                related_model.__name__.lower(),
-                related_model._meta.primary_key_attribute_names,
-            )
-            backward_keys = RelationLinking.expand_many_to_many_key(
-                many_to_many_object.declared_backward_key,
-                model._meta.db_table,
-                model._meta.primary_key_attribute_names,
-            )
-            if not many_to_many_object.declared_backward_key and backward_keys == forward_keys:
-                # Self-referential: the default backward side would collide with the
-                # forward side's columns.
-                backward_keys = RelationLinking.expand_many_to_many_key(
-                    "", f"{model._meta.db_table}_rel", model._meta.primary_key_attribute_names
-                )
-            # Both sides are columns of one table hare creates - a name twice, as its database tells names
-            # apart, failed its CREATE TABLE.
-            clashing_keys = {self.get_identifier_key(model, key) for key in forward_keys} & {
-                self.get_identifier_key(model, key) for key in backward_keys
-            }
-            if clashing_keys:
-                raise ConfigurationError(
-                    f'ManyToManyField "{model.__name__}.{field}": forward_key and backward_key name the same '
-                    f"column {sorted(clashing_keys)} of the through table - give the two sides different names"
-                )
-            # The automatic through table has no foreign key field of its own - both
-            # directions share the declared on_delete.
-            generated_on_delete = many_to_many_object.on_delete
-        return through_model, forward_keys, backward_keys, generated_on_delete
-
-    def _set_many_to_many_through_table(
-        self,
-        model: type[Model],
-        field: str,
-        many_to_many_object: ManyToManyFieldInstance[Any],
-        related_model: type[Model],
-        through_model: type[Model] | None,
-        is_swapped: bool,
-        table_holders: dict[TableIdentity, tuple[type[Model], str | None]],
-    ) -> None:
-        """Sets a many-to-many field's through table and schema - the through model's, else the
-        declared table, else one named after both models.
-
-        Args:
-            model: The model declaring the field.
-            field: The field's name.
-            many_to_many_object: The field.
-            related_model: The target.
-            through_model: The through model, None for a through table of its own.
-            is_swapped: Whether the model is swapped out.
-            table_holders: Who holds each table name - the field's automatic through table added.
-
-        Raises:
-            ConfigurationError: The generated table name is taken.
-        """
-        if through_model is not None:
-            # The through model's own table, in its own schema.
-            many_to_many_object.through = through_model._meta.db_table
-            many_to_many_object.through_schema = through_model._meta.schema
-        else:
-            if not many_to_many_object.through:
-                # A model referenced by class but not registered here gets the name its
-                # registry's generator would give.
-                related_model_table_name = related_model._meta.db_table or self.get_generated_table_name(related_model)
-                # A swappable target is named by the field, not by the model the
-                # setting happens to point at - the table must not depend on it.
-                through = (
-                    f"{model._meta.db_table}_{field}"
-                    if isinstance(many_to_many_object.model_name, SwappableModelReference)
-                    else f"{model._meta.db_table}_{related_model_table_name}"
-                )
-                # Shortened with a digest to fit the identifier limit.
-                through = Identifiers.get_within_limit(through)
-                if not is_swapped:
-                    RelationLinking.check_auto_through_table_name_free(self, table_holders, through, model, field)
-                many_to_many_object.through = through
-            many_to_many_object.through_schema = model._meta.schema

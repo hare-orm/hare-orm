@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 from copy import copy
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import (
@@ -11,6 +11,7 @@ from hare.exceptions import (
 )
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.one_to_one_field_instance import OneToOneFieldInstance
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import AggregatedMultiValuedPaths
 from hare.query.expressions.arithmetic.combinable_expression import CombinableExpression
 from hare.query.expressions.expression_context import ExpressionContext
@@ -98,7 +99,7 @@ class OuterReference(CombinableExpression):
         # table.
         field_name = (
             outer_meta.primary_key_attribute
-            if self.field == "pk" and isinstance(outer_meta.primary_key_attribute, str)
+            if self.field == PRIMARY_KEY_ALIAS and isinstance(outer_meta.primary_key_attribute, str)
             else self.field
         )
         field_object = outer_meta.fields_map.get(field_name)
@@ -111,7 +112,7 @@ class OuterReference(CombinableExpression):
                     f"OuterReference({self.field!r}): {outer_context.model.__name__}.{self.field} is a "
                     "composite relation - reference each of its key columns separately instead."
                 )
-            field_name = cast("str", field_object.source_field)
+            field_name = field_object.source_field  # type: ignore[assignment]
             field_object = outer_meta.fields_map.get(field_name)
         column = outer_meta.fields_db_projection.get(field_name)
         if column is not None:
@@ -155,8 +156,8 @@ class OuterReference(CombinableExpression):
                 extra_joins.extend(annotation_result.joins)
             self._record_outer_reference_terms(annotation_term.get_group_by_column_terms())
             return ExpressionResult(term=annotation_term, output_field=annotation_result.output_field)
-        if self.field == "pk" and outer_meta.has_composite_primary_key:
-            key_names = ", ".join(cast("tuple[str, ...]", outer_meta.primary_key_attribute))
+        if self.field == PRIMARY_KEY_ALIAS and outer_meta.has_composite_primary_key:
+            key_names = ", ".join(outer_meta.primary_key_attribute)
             raise FieldError(
                 f"OuterReference('pk'): the primary key of {outer_context.model.__name__} is composite "
                 f"({key_names}) - compare it with a relation to {outer_context.model.__name__} "

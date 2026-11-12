@@ -4,12 +4,14 @@ import gc
 import sys
 import types
 import weakref
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from hare import Hare, fields
 from hare.contrib.test.isolated_contexts import hare_test_context
+from hare.core.apps.apps import Apps
 from hare.core.caching.cache import Cache
 from hare.core.config import HareConfig
 from hare.core.hare_context import HareContext
@@ -20,7 +22,7 @@ from hare.models.deletion.cascade.deletion_graph import DeletionGraph
 from hare.query.plans.statement.statement_plans import StatementPlans
 from hare.query.queryset.lazy_relation_names import LazyRelationNames
 from hare.query.statements.write.bulk.bulk_write_batches import BulkWriteBatches
-from hare.sql.builder.queries.query_builder import QueryBuilder
+from hare.sql.builder.queries.query import Query
 from tests.shared_models.testmodels import Author, Book
 
 
@@ -98,7 +100,7 @@ async def test_replaced_live_model_class_is_garbage_collected_after_queries_and_
         await live_widget.objects.bulk_create([live_widget(name="c")])
         await live_widget.objects.filter(name="c").update(name="d")
         await widget.delete()
-        assert StatementPlans.plans.get_model_bucket(live_widget)
+        assert StatementPlans.plans.get_bucket(live_widget)
         return weakref.ref(live_widget)
 
     async with HareContext():
@@ -154,14 +156,14 @@ async def test_serialize_instances_cache_isolates_replaced_model_into_its_own_bu
         Hare.register_live_models([first_widget], app_label="gc_live_serialize")
         # A different class under the same name needs the old one unregistered first.
         Hare.unregister_live_models([first_widget])
-        first_serializer = BulkWriteBatches.get_instance_serializer(first_widget, ("name",), SQLITE_DIALECT.types)
+        first_serializer = BulkWriteBatches.get_instance_writers(first_widget, ("name",), SQLITE_DIALECT.types)
 
         second_widget = build_live_widget()
         Hare.register_live_models([second_widget], app_label="gc_live_serialize")
-        second_serializer = BulkWriteBatches.get_instance_serializer(second_widget, ("name",), SQLITE_DIALECT.types)
+        second_serializer = BulkWriteBatches.get_instance_writers(second_widget, ("name",), SQLITE_DIALECT.types)
 
-        assert BulkWriteBatches.SERIALIZE_INSTANCES_CACHE.get_model_bucket(first_widget)
-        assert BulkWriteBatches.SERIALIZE_INSTANCES_CACHE.get_model_bucket(second_widget)
+        assert BulkWriteBatches.SERIALIZE_INSTANCES_CACHE.get_bucket(first_widget)
+        assert BulkWriteBatches.SERIALIZE_INSTANCES_CACHE.get_bucket(second_widget)
         assert first_serializer is not second_serializer
 
 
@@ -213,15 +215,17 @@ async def test_a_value_without_sql_is_served_whichever_builder_the_model_is_boun
     cache: Cache[str] = Cache(max_size=8, holds_sql=False)
     sql_cache: Cache[str] = Cache(max_size=8)
     try:
-        cache.get_model_bucket(Author)[("schema",)] = "value"
-        sql_cache.get_model_bucket(Author)[("schema",)] = "sql"
+        cache.get_bucket(Author)[("schema",)] = "value"
+        sql_cache.get_bucket(Author)[("schema",)] = "sql"
         # As if Author were bound to another context's builder.
-        monkeypatch.setattr(Author._meta, "basequery", QueryBuilder())
-        assert cache.get_model_bucket(Author)[("schema",)] == "value"
-        assert list(cache.get_model_bucket(Author)) == [("schema",)]
-        assert ("schema",) not in sql_cache.get_model_bucket(Author)
+        for name in ("basetable", "basequery", "basequery_all_fields"):
+            monkeypatch.setattr(Author._meta, name, getattr(Author._meta, name))
+        Apps.bind_model_base_queries(Author, SimpleNamespace(query_class=Query))
+        assert cache.get_bucket(Author)[("schema",)] == "value"
+        assert list(cache.get_bucket(Author)) == [("schema",)]
+        assert ("schema",) not in sql_cache.get_bucket(Author)
         cache.forget_model(Author)
-        assert ("schema",) not in cache.get_model_bucket(Author)
+        assert ("schema",) not in cache.get_bucket(Author)
     finally:
         cache.clear()
         sql_cache.clear()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 
 from hare.exceptions import ValidationError
@@ -64,3 +65,9 @@ class BooleanField(Field[TBool]):
             ValidationError: Always.
         """
         raise ValidationError(f"{self.model_field_name}: expected a bool, got {type(value).__name__}")
+
+    def get_unchanged_write_types(self, converter: Callable[..., Any] | None) -> tuple[type, ...] | None:
+        # This class's to_db_value() writes a bool as it is.
+        if converter is None and type(self).to_db_value is BooleanField.to_db_value:
+            return (bool,)
+        return None

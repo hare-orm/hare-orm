@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.dialects.clickhouse.enums import ClickhouseClause
@@ -39,7 +39,7 @@ class ClickhouseProjectionCompiler:
             projection = projection.for_model(model)
         if isinstance(projection.query, RawSQLTerm):
             return projection.query.sql, projection.read_columns
-        queryset = cast("QuerySet[Any, Any]", projection.get_queryset())
+        queryset: QuerySet[Any, Any] = projection.get_queryset()  # type: ignore[assignment]
         if model is not None and queryset.model is not model:
             raise ConfigurationError(
                 PROJECTION_WRONG_MODEL.format(

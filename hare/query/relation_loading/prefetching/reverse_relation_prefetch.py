@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.constants import PREFETCH_MAX_SLICED_COMPOSITE_PARENTS
+from hare.native.native_modules import NativeModules
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.expressions import Subquery
 from hare.query.relation_loading.prefetching.enums import PrefetchRowsStrategy
 from hare.query.relation_loading.prefetching.prefetch_checks import PrefetchChecks
@@ -70,7 +73,7 @@ class ReverseRelationPrefetch:
                 numbered_keys = SlicedPrefetch.get_numbered_rows(
                     related_query, relation_fields, parent_condition
                 ).values(*key_names)
-                key_path = "pk" if len(key_names) > 1 else key_names[0]
+                key_path = PRIMARY_KEY_ALIAS if len(key_names) > 1 else key_names[0]
                 unsliced = unsliced.filter(**{f"{key_path}__in": Subquery(numbered_keys)})
             related_query = unsliced
 
@@ -84,10 +87,9 @@ class ReverseRelationPrefetch:
                 **{f"{field_name}__in": key_values for field_name, key_values in related_objects_for_fetch.items()}
             )
 
-            related_object_map: dict[Any, list[Model]] = {}
-            for entry in related_object_list:
-                object_id = getattr(entry, relation_field)
-                related_object_map.setdefault(object_id, []).append(entry)
+            related_object_map: dict[Any, list[Model]] = NativeModules.rows.group_by_attribute(
+                related_object_list, relation_field, True
+            )
             for instance in objs:
                 instance_rows = related_object_map.get(getattr(instance, related_field_name), [])
                 result.add_many(
@@ -98,12 +100,12 @@ class ReverseRelationPrefetch:
                 )
             return
 
-        related_object_map = {}
+        related_object_map = defaultdict(list)
         for entry in await RelatedRowsFetch.fetch_by_composite_keys(
             objs, related_query, related_field_names, relation_fields
         ):
             object_id = PrefetchKeys.get_value(entry, relation_fields)
-            related_object_map.setdefault(object_id, []).append(entry)
+            related_object_map[object_id].append(entry)
 
         for instance in objs:
             row = PrefetchKeys.get_value(instance, related_field_names)
@@ -142,8 +144,7 @@ class ReverseRelationPrefetch:
             related_object_list = await related_queryset.filter(
                 **{f"{field_name}__in": key_values for field_name, key_values in related_objects_for_fetch.items()}
             )
-            for entry in related_object_list:
-                related_object_map[getattr(entry, relation_field)] = entry
+            related_object_map = NativeModules.rows.group_by_attribute(related_object_list, relation_field, False)
             for instance in objs:
                 obj = related_object_map.get(getattr(instance, related_field_name))
                 # A to_attribute prefetch leaves the bare relation unfetched - several Prefetch(field,

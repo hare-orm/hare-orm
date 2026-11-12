@@ -9,6 +9,7 @@ import pytest
 
 from hare.query.expressions import F, RawSQL
 from hare.query.functions import Count, Max, Upper
+from hare.query.plans.call_signatures.call_signature_plans import CallSignaturePlans
 from hare.query.plans.statement.statement_plan_runs import StatementPlanRuns
 from hare.sql.builder.queries import QueryBuilder
 from tests.shared_models.testmodels import Event, Tournament
@@ -27,8 +28,8 @@ async def create_tournaments() -> list[Tournament]:
 def full_build():
     """Runs a query the way it ran before compiled statements: always built and rendered."""
     with (
-        patch.object(StatementPlanRuns, "run_on_plan", lambda *args, **kwargs: False),
-        patch.object(StatementPlanRuns, "run_on_call_signature_plan", lambda *args, **kwargs: False),
+        patch.object(CallSignaturePlans, "find_with_value_positions", return_value=None),
+        patch.object(StatementPlanRuns, "find_plan", return_value=None),
     ):
         yield
 

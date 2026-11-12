@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime
 import warnings
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 
 from hare.core.constants import HARE_PACKAGE_DIRECTORY
 from hare.exceptions import ValidationError
@@ -21,6 +21,8 @@ if TYPE_CHECKING:
     from hare.query.filters.lookups.field_lookup import FieldLookup
 from hare.fields.data.temporal.parse_datetime import parse_datetime
 from hare.fields.data.temporal.temporal_values import TemporalValues
+from hare.time.system_zone import SystemZone
+from hare.time.zone_settings import ZoneSettings
 
 TDatetime = TypeVar("TDatetime", datetime.datetime, datetime.datetime | None)
 
@@ -93,17 +95,11 @@ class DatetimeField(Field[TDatetime]):
             The value.
         """
         if now is not None:
-            return cast("datetime.datetime", self.to_python(now))
-        zone = Timezone.get_aware_zone()
+            return self.to_python(now)  # type: ignore[return-value]
+        zone = ZoneSettings.get_aware_zone()
         if zone is None:
             return SystemClock.get_local_now()
-        utc_now = SystemClock.get_utc_now()
-        # As from_db_value() reads an aware UTC value, without its calls.
-        if zone is utc_now.tzinfo:
-            return utc_now
-        if getattr(zone, "key", None) == DEFAULT_TIMEZONE:
-            return utc_now.replace(tzinfo=zone, fold=0)
-        return cast("datetime.datetime", self.get_python_value_with_timezone(utc_now, True, zone))
+        return self.get_python_value_with_timezone(SystemClock.get_utc_now(), True, zone)  # type: ignore[return-value]
 
     def to_python(self, value: Any) -> datetime.datetime | None:
         if isinstance(value, int):
@@ -112,18 +108,8 @@ class DatetimeField(Field[TDatetime]):
 
     def from_db_value(self, value: Any) -> datetime.datetime | None:
         # The zone and use_timezone of the context, read once - a value is converted for every field assigned.
-        zone = Timezone.get_aware_zone()
-        if zone is None:
-            return self.get_python_value_with_timezone(value, False, None)
-        # The values most often assigned - an aware datetime in the configured zone, or in UTC where
-        # the zone is UTC - converted as _convert_to_configured_zone() converts them, without its calls.
-        if value.__class__ is datetime.datetime:
-            value_zone = value.tzinfo
-            if value_zone is zone:
-                return value
-            if value_zone is datetime.UTC and getattr(zone, "key", None) == DEFAULT_TIMEZONE:
-                return value.replace(tzinfo=zone, fold=0)
-        return self.get_python_value_with_timezone(value, True, zone)
+        zone = ZoneSettings.get_aware_zone()
+        return self.get_python_value_with_timezone(value, zone is not None, zone)
 
     def get_python_value_with_timezone(
         self, value: Any, use_timezone: bool, timezone: datetime.tzinfo | None
@@ -201,7 +187,7 @@ class DatetimeField(Field[TDatetime]):
                     # An aware datetime.max/datetime.min in UTC is the same moment beyond the
                     # range another driver reads as a naive one.
                     return value.replace(tzinfo=None)
-                value = Timezone.get_system_local_naive(value)
+                value = SystemZone.get_system_local_naive(value)
         return value
 
     def raise_if_number(self, value: Any) -> None:
@@ -237,7 +223,7 @@ class DatetimeField(Field[TDatetime]):
         if isinstance(value, datetime.datetime):
             return value
         if isinstance(value, datetime.date):
-            if Timezone.get_use_timezone():
+            if ZoneSettings.get_use_timezone():
                 return Timezone.get_start_of_day(value)
             return datetime.datetime.combine(value, datetime.time.min)
         if isinstance(value, int) and not isinstance(value, bool):
@@ -337,7 +323,7 @@ class DatetimeField(Field[TDatetime]):
         Raises:
             OverflowError: The value's UTC instant falls outside the datetime range.
         """
-        if Timezone.get_use_timezone():
+        if ZoneSettings.get_use_timezone():
             if Timezone.is_naive(value):
                 shown_value = SENSITIVE_VALUE_PLACEHOLDER if self.sensitive else value
                 warnings.warn(
@@ -360,16 +346,16 @@ class DatetimeField(Field[TDatetime]):
             if value.utcoffset() == datetime.timedelta(0) and value.replace(tzinfo=None) in NAIVE_INFINITY_DATETIMES:
                 # The naive extreme an assignment of it keeps - not a local time past the range.
                 return value if stores_utc_instants else value.replace(tzinfo=None)
-            local_value = Timezone.get_system_local_naive(value)
+            local_value = SystemZone.get_system_local_naive(value)
             return value if stores_utc_instants else local_value
         if value in NAIVE_INFINITY_DATETIMES:
             # datetime.min/datetime.max is the moment it is in UTC - a driver binding a naive value as a local
             # wall clock would move it past the range, a row no read could convert.
             return value.replace(tzinfo=datetime.UTC) if stores_utc_instants else value
         if value.year in (datetime.MINYEAR, datetime.MAXYEAR):
-            Timezone.make_system_local_aware(value).astimezone(datetime.UTC)
+            SystemZone.make_system_local_aware(value).astimezone(datetime.UTC)
         if stores_utc_instants:
-            return Timezone.make_system_local_aware(value)
+            return SystemZone.make_system_local_aware(value)
         return value
 
     @property

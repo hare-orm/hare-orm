@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Collection
-from typing import TYPE_CHECKING, ClassVar, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar, TypeVar
 
 from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
 from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
@@ -11,6 +11,7 @@ from hare.query.statements.building.query_ctes import QueryCtes
 from hare.query.statements.building.query_grouping import QueryGrouping
 from hare.query.statements.building.row_locks import RowLocks
 from hare.query.statements.select.rows_query import RowsQuery
+from hare.sql.terms.field import Field
 
 if TYPE_CHECKING:
     from hare.models import Model
@@ -25,6 +26,11 @@ class SelectQuery(RowsQuery[TModel], abstract=True):
 
     binds_expression_term_values: ClassVar[bool] = True
     plan_binds_slice: ClassVar[bool] = True
+
+    def _get_result_column_names(self) -> tuple[str, ...]:
+        """The final physical projection, or no names when a term has no declared output name."""
+        names = tuple(term.alias or (term.name if isinstance(term, Field) else None) for term in self.query._selects)
+        return names if all(name is not None for name in names) else ()  # type: ignore[return-value]
 
     def _build_statement(
         self, value_wrapper_references: RecordedValueReferences | None, *, records_for_caller: bool
@@ -55,7 +61,7 @@ class SelectQuery(RowsQuery[TModel], abstract=True):
             # UPDATE rejects - the lock is narrowed to the base table unless of=(...) says more.
             RowLocks.apply_select_for_update(self)
         if records_for_caller:
-            recorded_references = cast("RecordedValueReferences", value_wrapper_references)
+            recorded_references: RecordedValueReferences = value_wrapper_references  # type: ignore[assignment]
             recorded_references.extend(QueryAnnotations.get_expression_term_value_references(self))
             # A query built into another one has its slice among its values - the enclosing
             # query binds it.

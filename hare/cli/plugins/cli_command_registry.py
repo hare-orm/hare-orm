@@ -4,12 +4,10 @@ import argparse
 import importlib
 import importlib.metadata
 import sys
-from typing import cast
 
 from hare.cli.constants import CLI_COMMAND_ENTRY_POINT_GROUP, CLI_COMMAND_REFERENCE_SEPARATOR
 from hare.cli.context.cli_context import CLIContext
 from hare.cli.context.command_context import CommandContext
-from hare.cli.plugins.cli_command import CLICommand
 from hare.cli.plugins.loaded_cli_command import LoadedCLICommand
 from hare.exceptions import ConfigurationError
 
@@ -38,7 +36,7 @@ class CLICommandRegistry:
         Returns:
             The loaded command.
         """
-        return LoadedCLICommand(command=cast("type[CLICommand]", command_class)(), source=source)
+        return LoadedCLICommand(command=command_class(), source=source)  # type: ignore[operator]
 
     @staticmethod
     def load_entry_point_commands() -> list[LoadedCLICommand]:

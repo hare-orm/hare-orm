@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Mapping
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import QueryError
 from hare.models.tenancy.tenancy import Tenancy
@@ -41,7 +41,7 @@ class TenantWriteRules:
                 has several values; or the model has no scope and either ``requires_active`` is set or an
                 object has no tenant.
         """
-        tenant_field = cast("str", model._meta.tenant_field)
+        tenant_field: str = model._meta.tenant_field  # type: ignore[assignment]
         scope = Tenancy.get_scope(model)
         if scope is None and requires_active:
             raise QueryError(
@@ -142,7 +142,7 @@ class TenantWriteRules:
         elif tenant_relation_name is not None and tenant_relation_name in values:
             tenant = values[tenant_relation_name]
             if isinstance(tenant, Model):
-                relation_field = cast("RelationalField[Any]", model._meta.fields_map[tenant_relation_name])
+                relation_field: RelationalField[Any] = model._meta.fields_map[tenant_relation_name]  # type: ignore[assignment]
                 to_field = relation_field.to_field_instances[relation_field.source_fields.index(tenant_field)]
                 tenant = getattr(tenant, to_field.model_field_name)
         else:
@@ -230,7 +230,7 @@ class TenantWriteRules:
             return
         meta = model._meta
         for relation_name in meta.foreign_key_fields | meta.one_to_one_fields:
-            relation = cast("RelationalField[Any]", meta.fields_map[relation_name])
+            relation: RelationalField[Any] = meta.fields_map[relation_name]  # type: ignore[assignment]
             key_names = relation.source_fields
             written_names = [name for name in (relation_name, *key_names) if name in values]
             if not written_names:
@@ -283,7 +283,7 @@ class TenantWriteRules:
                 "leave it out to write the active tenant, or call all_tenants() on the target"
             )
         for relation_name in meta.foreign_key_fields | meta.one_to_one_fields:
-            relation = cast("RelationalField[Any]", meta.fields_map[relation_name])
+            relation: RelationalField[Any] = meta.fields_map[relation_name]  # type: ignore[assignment]
             related_model = relation.related_model
             if (
                 related_model._meta.tenant_field

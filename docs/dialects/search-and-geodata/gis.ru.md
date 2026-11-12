@@ -274,7 +274,7 @@ DB_URL = "sqlite+aiosqlite://db.sqlite3?load_spatialite=true"
 | Настройка | Что задаёт |
 |---|---|
 | `load_spatialite` | `true` загружает SpatiaLite в каждое соединение — `Features.supports_spatial` |
-| `spatialite_path` | Библиотека: имя, которое находит загрузчик системы (`mod_spatialite`, по умолчанию — `libsqlite3-mod-spatialite` в Debian/Ubuntu, `libspatialite` в Homebrew), или путь. В Windows путь с каталогом загружает из этого каталога и библиотеки, нужные SpatiaLite (GEOS, PROJ, ...) |
+| `spatialite_path` | Библиотека: имя, которое находит загрузчик системы (`mod_spatialite`, по умолчанию — `libsqlite3-mod-spatialite` в Debian/Ubuntu, `libspatialite` в Homebrew), или путь. Её зависимости (GEOS, PROJ, ...) должны находиться системным загрузчиком библиотек |
 | `spatialite_proj_database` | Путь к `proj.db` библиотеки PROJ, который читает преобразование между SRID, — нужен, когда PROJ не находит свой (сборка для Windows кладёт его рядом с библиотекой) |
 | `spatialite_metadata` | Пространственные метаданные, которые hare создаёт в базе без них: `wgs84` (по умолчанию), `full` или `none` — см. [`spatialite_metadata`](#spatialite-metadata) |
 

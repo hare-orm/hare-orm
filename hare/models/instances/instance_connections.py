@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from hare.core.connections.model_connection_choice import ModelConnectionChoice
 from hare.core.hare_context import HareContext
 
 if TYPE_CHECKING:
@@ -36,7 +37,7 @@ class InstanceConnections:
         context = HareContext.require_current()
         router = context.router
         if router.has_routers:
-            connection = router.db_for_write(queried_model) if for_write else router.db_for_read(queried_model)
+            connection = ModelConnectionChoice.get_routed(context, queried_model, for_write)
             if connection is not None:
                 return connection
             if queried_model is not type(obj) and InstanceConnections.is_routed(type(obj), for_write):
@@ -54,8 +55,9 @@ class InstanceConnections:
         Returns:
             True when a router has an opinion for this model.
         """
-        router = HareContext.require_current().router
+        context = HareContext.require_current()
+        router = context.router
         if not router.has_routers:
             return False
-        connection = router.db_for_write(model) if for_write else router.db_for_read(model)
+        connection = ModelConnectionChoice.get_routed(context, model, for_write)
         return connection is not None

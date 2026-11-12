@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Collection, Mapping, Sequence
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.ddl.enums import GrantTarget
 from hare.ddl.schema_objects.enum_type import EnumType
@@ -67,11 +67,11 @@ from hare.inspectdb.constants import (
     BASE_FIELD_SENTINEL_KWARG,
     INSPECTED_ENUM_MODULE_NAME,
 )
+from hare.inspectdb.enums import SchemaPartType
 from hare.inspectdb.exceptions import SchemaNotFoundError
 from hare.inspectdb.generation.model_naming import ModelNaming
 from hare.inspectdb.introspection.catalog_snapshot import CatalogSnapshot
 from hare.inspectdb.introspection.column_info import ColumnInfo
-from hare.inspectdb.introspection.enums import SchemaPartType
 from hare.inspectdb.introspection.inspected_field_specification import InspectedFieldSpecification
 from hare.inspectdb.introspection.schema_introspector import SchemaIntrospector
 from hare.inspectdb.introspection.schema_part import SchemaPart
@@ -270,9 +270,7 @@ class PostgresqlIntrospector(SchemaIntrospector):
     ) -> tuple[str, dict[str, Any]] | None:
         if column.udt_name != POSTGRESQL_TS_VECTOR_TYPE_NAME or not column.generated_stored:
             return None
-        kwargs = TSVectorExpressionReader.get_field_kwargs(
-            cast("str", column.generated_expression), attribute_names_by_column
-        )
+        kwargs = TSVectorExpressionReader.get_field_kwargs(column.generated_expression, attribute_names_by_column)  # type: ignore[arg-type]
         return None if kwargs is None else (POSTGRESQL_TS_VECTOR_FIELD_PATH, kwargs)
 
     @staticmethod

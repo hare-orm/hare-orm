@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime
 import warnings
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 
 from hare.core.constants import HARE_PACKAGE_DIRECTORY
 from hare.exceptions import ValidationError
@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from hare.models import Model
     from hare.query.filters.lookups.field_lookup import FieldLookup
 from hare.fields.data.temporal.temporal_values import TemporalValues
+from hare.time.zone_settings import ZoneSettings
 
 TTime = TypeVar("TTime", datetime.time, datetime.time | None)
 
@@ -85,7 +86,7 @@ class TimeField(Field[TTime]):
         """
         if now is None:
             now = Timezone.now()
-        if Timezone.get_use_timezone():
+        if ZoneSettings.get_use_timezone():
             return Timezone.localtime(now).time().replace(tzinfo=Timezone.get_fixed_offset())
         return now.time()
 
@@ -99,12 +100,12 @@ class TimeField(Field[TTime]):
         Returns:
             The value.
         """
-        return cast("datetime.time", self.to_python(self.get_auto_now_value(now)))
+        return self.to_python(self.get_auto_now_value(now))  # type: ignore[return-value]
 
     def to_python(self, value: Any) -> datetime.time | None:
         self.raise_if_duration(value)
         # A timedelta is refused above - what is read is a time or None.
-        return cast("datetime.time | None", self.from_db_value(value))
+        return self.from_db_value(value)  # type: ignore[return-value]
 
     def from_db_value(self, value: Any) -> datetime.time | datetime.timedelta | None:
         if value is not None:
@@ -114,7 +115,7 @@ class TimeField(Field[TTime]):
                 # A duration a driver reads from a column - kept as it is read.
                 return value
             self.raise_if_not_time(value)
-            if Timezone.get_use_timezone():
+            if ZoneSettings.get_use_timezone():
                 if Timezone.is_naive(value):
                     # A fixed offset, not the configured zone itself: a bare time has no date for
                     # a named zone to resolve its offset against, so attaching one leaves the
@@ -167,8 +168,8 @@ class TimeField(Field[TTime]):
             # A span of time is no time of day - one database refused it, another stored its text.
             self.raise_if_duration(value)
             self.raise_if_not_time(value)
-            value = cast("datetime.time", value)
-            if Timezone.get_use_timezone():
+            value = value
+            if ZoneSettings.get_use_timezone():
                 if Timezone.is_naive(value):
                     shown_value = SENSITIVE_VALUE_PLACEHOLDER if self.sensitive else value
                     warnings.warn(
