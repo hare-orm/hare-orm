@@ -63,15 +63,15 @@ hare-orm против SQLAlchemy, tortoise-orm, yara-orm и Django на SQLite: 
 
 | | |
 |---|---|
-| Дата | 2026-11-12 |
+| Дата | 2026-11-21 |
 | Машина | Linux 6.6.114.1-microsoft-standard-WSL2, 13th Gen Intel(R) Core(TM) i5-13400, 16 CPU |
 | Python | 3.14.8 |
-| Релиз hare-orm | 0.13.0-dev (working tree; package metadata 0.12.0) |
-| Среда выполнения | Linux Docker on Windows 11; WSL process pinned to host P-cores 0-11 |
-| Распределение CPU | benchmark:4 vCPUs (8-11); PostgreSQL:4 (0-3); ClickHouse:4 (4-7) |
-| Хранение данных | SQLite:Linux ext4 Docker volume; PostgreSQL and ClickHouse data:tmpfs |
-| Долговечность PostgreSQL | fsync=off; synchronous_commit=off; full_page_writes=off |
-| Снимок исходников | release-0.13.0; git 02bf9c1b6180; dirty snapshot 9f1c9fab4760 |
+| Релиз hare-orm | 0.13.0-dev (package metadata 0.12.0) |
+| Среда выполнения | Linux Docker on Windows 11 (WSL2) |
+| Распределение CPU | benchmark:4 vCPUs (8-11), PostgreSQL:4 (4-7), ClickHouse:2 (0-1) |
+| Хранение данных | SQLite: Linux ext4 Docker volume, PostgreSQL and ClickHouse data: tmpfs |
+| Долговечность PostgreSQL | fsync=off, synchronous_commit=off, full_page_writes=off |
+| Снимок исходников | release-0.13.0, git 6066803746ca |
 | Прогонов | 3, медиана |
 | SQLite | 3.45.1 |
 | aiosqlite | 0.22.1 |

@@ -64,15 +64,15 @@ run to the worst.
 
 | | |
 |---|---|
-| Date | 2026-11-12 |
+| Date | 2026-11-21 |
 | Machine | Linux 6.6.114.1-microsoft-standard-WSL2, 13th Gen Intel(R) Core(TM) i5-13400, 16 CPU |
 | Python | 3.14.8 |
-| hare-orm release | 0.13.0-dev (working tree; package metadata 0.12.0) |
-| Execution | Linux Docker on Windows 11; WSL process pinned to host P-cores 0-11 |
-| CPU allocation | benchmark:4 vCPUs (8-11); PostgreSQL:4 (0-3); ClickHouse:4 (4-7) |
-| Storage | SQLite:Linux ext4 Docker volume; PostgreSQL and ClickHouse data:tmpfs |
-| PostgreSQL durability | fsync=off; synchronous_commit=off; full_page_writes=off |
-| Source snapshot | release-0.13.0; git 02bf9c1b6180; dirty snapshot 9f1c9fab4760 |
+| hare-orm release | 0.13.0-dev (package metadata 0.12.0) |
+| Execution | Linux Docker on Windows 11 (WSL2) |
+| CPU allocation | benchmark:4 vCPUs (8-11), PostgreSQL:4 (4-7), ClickHouse:2 (0-1) |
+| Storage | SQLite: Linux ext4 Docker volume, PostgreSQL and ClickHouse data: tmpfs |
+| PostgreSQL durability | fsync=off, synchronous_commit=off, full_page_writes=off |
+| Source snapshot | release-0.13.0, git 6066803746ca |
 | Runs | 3, median |
 | PostgreSQL | 18.6 (Debian 18.6-1.pgdg13+2) |
 | asyncpg | 0.31.0 |
