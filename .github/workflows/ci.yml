@@ -159,6 +159,7 @@ jobs:
         with:
           name: matrix-logs-sqlite-${{ matrix.python }}
           path: .test-matrix/
+          include-hidden-files: true
           if-no-files-found: ignore
 
   # The tests reading no test database - the CLI, the mypy plugin, the stubs, the pytest plugin, the
@@ -200,6 +201,7 @@ jobs:
         with:
           name: matrix-logs-database-independent-${{ matrix.python }}
           path: .test-matrix/
+          include-hidden-files: true
           if-no-files-found: ignore
 
   # The whole suite on each PostgreSQL version through both drivers, asyncpg and rust_pg, on each
@@ -242,6 +244,7 @@ jobs:
         with:
           name: matrix-logs-postgres-${{ matrix.postgres }}-${{ matrix.python }}
           path: .test-matrix/
+          include-hidden-files: true
           if-no-files-found: ignore
 
   # hare's direct dependencies at the lowest versions their declared bounds allow, on each Python
@@ -311,6 +314,7 @@ jobs:
         with:
           name: matrix-logs-brokers-${{ matrix.python }}
           path: .test-matrix/
+          include-hidden-files: true
           if-no-files-found: ignore
 
   # ClickHouse dialect, shared and contract suites on each version through both drivers, and the cluster
@@ -359,6 +363,7 @@ jobs:
         with:
           name: matrix-logs-clickhouse-${{ matrix.clickhouse }}-${{ matrix.driver }}-${{ matrix.python }}
           path: .test-matrix/
+          include-hidden-files: true
           if-no-files-found: ignore
 
   # The PostgreSQL suite through each PgBouncer version (1.22.1+: prepared statements across transactions)
@@ -403,6 +408,7 @@ jobs:
         with:
           name: matrix-logs-pgbouncer-${{ matrix.pgbouncer }}-${{ matrix.postgres }}-${{ matrix.python }}
           path: .test-matrix/
+          include-hidden-files: true
           if-no-files-found: ignore
 
   # A poetry project adding hare-orm from this checkout as its dependency, on each Python -
