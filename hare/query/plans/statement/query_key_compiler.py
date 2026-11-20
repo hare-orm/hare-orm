@@ -1,37 +1,50 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, ClassVar, cast
+from operator import attrgetter, methodcaller
+from typing import TYPE_CHECKING, Any, ClassVar
 
-from hare.query.plans.description.plan_context import PlanContext
+from hare.query.plans.constants import KEY_ONLY_PLAN_KEY_FORMS
 from hare.query.plans.description.plan_description import PlanDescription
 from hare.query.plans.description.plan_parts import PlanParts
 from hare.query.plans.enums import PlanKeyForm
 from hare.query.plans.plan_origins import PlanOrigins
+from hare.query.plans.statement.declared_plan_slots import CompiledKeyPosition, CompiledPlanSlot
+
+if TYPE_CHECKING:
+    from hare.dialects.base.client.database_client import DatabaseClient
 
 
 class QueryKeyCompiler:
-    """Generates the description of a query class's statement from the slots it declares - once,
-    when the class is made - so a class only declares how each of its settings meets the plan key.
-    The generated function runs what a description written by hand would: the key is the query's
-    class, the declaration's name and each slot's part; the values are bound in the order of the
-    slots, each with its origin while a query records its plan."""
+    """Bind a query's slot declarations to one statement-description interpreter.
 
-    #: Each declaration a query class may make, with the method its description is generated as:
-    #: the statement itself, the short one of the most frequent query, the statement over a rows
-    #: query.
+    The descriptor contains structure only. Values, origins and connection identity are read
+    from the query on every call, with no generated Python or retained query instance.
+    """
+
+    #: Each slot declaration a query class may hold, with the method its description is installed as.
     DECLARATIONS: ClassVar[tuple[tuple[str, str], ...]] = (
         ("plan_slots", "_describe_statement"),
         ("plain_plan_slots", "_describe_plain_statement"),
         ("rows_plan_slots", "_describe_over_rows"),
     )
+    #: The connection settings of an unbound query's key (``get_connection_structure()``).
+    UNBOUND_CONNECTION_STRUCTURE: ClassVar[tuple[None, ...]] = (None, None, None, None, None, None)
+    #: The forms whose slot names a method of the query, called for the value.
+    METHOD_PLAN_KEY_FORMS: ClassVar[frozenset[PlanKeyForm]] = frozenset(
+        {PlanKeyForm.DESCRIBED, PlanKeyForm.BOUND_VALUES_METHOD, PlanKeyForm.METHOD}
+    )
+    #: The forms whose value the plan binds as a parameter.
+    BOUND_VALUE_PLAN_KEY_FORMS: ClassVar[frozenset[PlanKeyForm]] = frozenset(
+        {PlanKeyForm.BOUND, PlanKeyForm.BOUND_WHEN_TRUE, PlanKeyForm.BOUND_INTO_ANOTHER}
+    )
 
     @classmethod
     def compile_declared(cls, query_class: type) -> None:
-        """Generates the description of each declaration the class makes itself.
+        """Install descriptors for declarations introduced by this class.
 
         Args:
-            query_class: The query class.
+            query_class: The statement class.
         """
         for declaration_name, method_name in cls.DECLARATIONS:
             if declaration_name in query_class.__dict__:
@@ -39,133 +52,175 @@ class QueryKeyCompiler:
 
     @staticmethod
     def compile(query_class: type, declaration_name: str) -> Callable[[Any, bool], PlanDescription | None]:
-        """Generates a description ``(query, built_into_another) -> PlanDescription | None``.
+        """Bind a snapshot of declared slots to a description function.
 
         Args:
-            query_class: The query class.
-            declaration_name: The class attribute holding the slots.
+            query_class: The statement class.
+            declaration_name: The attribute containing its slot declarations.
 
         Returns:
-            The function.
+            A function describing a query and whether it is embedded in another query.
 
         Raises:
-            TypeError: A slot of an unknown form.
+            TypeError: A slot has an unknown form.
         """
-        head = ["type(self)", repr(declaration_name)]
-        body: list[str] = []
-        namespace: dict[str, Any] = {
-            "PlanContext": PlanContext,
-            "PlanDescription": PlanDescription,
-            "PlanOrigins": PlanOrigins,
-            "PlanParts": PlanParts,
-        }
-        for index, (slot, form) in enumerate(getattr(query_class, declaration_name)):
-            key = f"key_{index}"
-            if callable(slot):
-                # A function every type of query describes the same part with.
-                namespace[f"slot_{index}"] = slot
-                call = f"slot_{index}(self)"
-                attribute = None
-            else:
-                call = f"self.{slot}()"
-                attribute = slot
-            if form is PlanKeyForm.VALUE:
-                head.append(f"self.{attribute}")
-            elif form is PlanKeyForm.TUPLE:
-                head.append(f"tuple(self.{attribute})")
-            elif form is PlanKeyForm.SORTED_TUPLE:
-                head.append(f"tuple(sorted(self.{attribute}))")
-            elif form is PlanKeyForm.PRESENCE:
-                head.append(f"self.{attribute} is not None")
-            elif form is PlanKeyForm.METHOD:
-                head.append(call)
-            elif form is PlanKeyForm.CONNECTION:
-                body += [
-                    "    connection = self._connection",
-                    "    connection_alias = connection.connection_alias if connection is not None else None",
-                    "    features_key = connection.features.plan_key if connection is not None else None",
-                ]
-                head.append(
-                    "*((connection_alias, features_key) if built_into_another "
-                    "else (self.dialect, connection_alias, features_key))"
-                )
-            elif form is PlanKeyForm.DESCRIBED:
-                body += [
-                    f"    description = {call}",
-                    "    if description is None:",
-                    "        return None",
-                    f"    {key} = description.structure",
-                    "    values += description.values",
-                    "    if origins is not None:",
-                    "        origins = PlanParts.get_origins(description, origins)",
-                ]
-                head.append(key)
-            elif form is PlanKeyForm.CONDITIONS:
-                namespace.update(QueryKeyCompiler.get_conditions_namespace())
-                body += [
-                    "    # The model tells a generic foreign key from a field of its name on another model.",
-                    "    context = PlanContext(model=self.model) if GenericForeignKeyFieldInstance.declared_names "
-                    "else PlanContext.EMPTY",
-                    "    structures = []",
-                    f"    for condition in self.{attribute}:",
-                    "        description = condition.get_plan_description(context)",
-                    "        if description is None:",
-                    "            return None",
-                    "        structures.append(description.structure)",
-                    "        values += description.values",
-                    "        if origins is not None:",
-                    "            origins = PlanParts.get_origins(description, origins)",
-                    f"    {key} = tuple(structures)",
-                ]
-                head.append(key)
-            elif form in {PlanKeyForm.BOUND, PlanKeyForm.BOUND_WHEN_TRUE, PlanKeyForm.BOUND_INTO_ANOTHER}:
-                test = {
-                    PlanKeyForm.BOUND: "value is not None",
-                    PlanKeyForm.BOUND_WHEN_TRUE: "bool(value)",
-                    PlanKeyForm.BOUND_INTO_ANOTHER: "value is not None",
-                }[form]
-                bound_test = f"{key} and built_into_another" if form is PlanKeyForm.BOUND_INTO_ANOTHER else key
-                body += [
-                    f"    value = self.{attribute}",
-                    f"    {key} = {test}",
-                    f"    if {bound_test}:",
-                    "        values.append(value)",
-                    "        if origins is not None:",
-                    f"            origins.append(PlanOrigins.get_value_origin(self, {attribute!r}))",
-                ]
-                head.append(key)
-            elif form is PlanKeyForm.BOUND_VALUES_METHOD:
-                body += [
-                    f"    bound_values = {call}",
-                    f"    {key} = len(bound_values)",
-                    "    values += bound_values",
-                    "    if origins is not None:",
-                    f"        origins += [PlanOrigins.get_value_origin(self, {attribute!r}, value_index) "
-                    "for value_index in range(len(bound_values))]",
-                ]
-                head.append(key)
-            else:
+        slots = tuple(getattr(query_class, declaration_name))
+        compiled_slots: list[CompiledPlanSlot] = []
+        for slot, form in slots:
+            if all(form is not candidate for candidate in PlanKeyForm):
                 raise TypeError(f"{query_class.__qualname__}.{declaration_name}: unknown form {form!r} of {slot!r}")
-        source = "\n".join(
-            [
-                "def describe(self, built_into_another):",
-                "    values = []",
-                "    origins = [] if PlanOrigins.records else None",
-                *body,
-                f"    return PlanDescription(({', '.join(head)},), values, origins)",
-            ]
-        )
-        exec(source, namespace)  # nosec B102 - class-derived source, no external input
-        return cast("Callable[[Any, bool], PlanDescription | None]", namespace["describe"])
+            if callable(slot):
+                reader: Callable[[Any], Any] = slot
+                origin_attribute: str | None = None
+            else:
+                attribute_name: str = slot
+                reader = (
+                    methodcaller(attribute_name)
+                    if form in QueryKeyCompiler.METHOD_PLAN_KEY_FORMS
+                    else attrgetter(attribute_name)
+                )
+                origin_attribute = attribute_name
+            compiled_slots.append((form, reader, origin_attribute))
+        bound_slots = tuple(compiled_slots)
+        outer_positions = QueryKeyCompiler.get_key_positions(bound_slots, built_into_another=False)
+        nested_positions = QueryKeyCompiler.get_key_positions(bound_slots, built_into_another=True)
+
+        def describe(query: Any, built_into_another: bool) -> PlanDescription | None:
+            return QueryKeyCompiler.describe_compiled(
+                query,
+                declaration_name,
+                bound_slots,
+                nested_positions if built_into_another else outer_positions,
+                built_into_another,
+            )
+
+        return describe
 
     @staticmethod
-    def get_conditions_namespace() -> dict[str, Any]:
-        """What the lines of a sequence of conditions read.
+    def get_key_positions(
+        slots: tuple[CompiledPlanSlot, ...], *, built_into_another: bool
+    ) -> tuple[CompiledKeyPosition, ...]:
+        """Prepare fixed key-only positions after the query type and declaration name.
+
+        A connection contributes its five settings, plus the dialect outside a nested query.
+        Its flag records whether the first pass needs a deferred dialect read: readers may
+        change the query, so the second pass must not check the connection again.
+
+        Args:
+            slots: The declaration's bound readers, in parameter-reading order.
+            built_into_another: Whether the enclosing query supplies the dialect.
 
         Returns:
-            The names.
+            Positions and connection flags containing no query values or connection instances.
         """
-        # Imported here: the field classes import the plans package.
-        from hare.fields.relations.fields.generic_foreign_key_field_instance import GenericForeignKeyFieldInstance
+        positions: list[CompiledKeyPosition] = []
+        position = 2
+        connection_bit = 1
+        for form, reader, _origin_attribute in slots:
+            if form is PlanKeyForm.CONNECTION:
+                if not built_into_another:
+                    positions.append((position, reader, form, connection_bit))
+                position += len(QueryKeyCompiler.UNBOUND_CONNECTION_STRUCTURE) + (not built_into_another)
+                connection_bit <<= 1
+            else:
+                if form in KEY_ONLY_PLAN_KEY_FORMS:
+                    positions.append((position, reader, form, 0))
+                position += 1
+        return tuple(positions)
 
-        return {"GenericForeignKeyFieldInstance": GenericForeignKeyFieldInstance}
+    @staticmethod
+    def get_connection_structure(connection: DatabaseClient | None) -> tuple[Any, ...]:
+        """The settings of a connection a plan key holds - read on every description, so a changed
+        setting selects another plan; absent ones for an unbound query. Whether the client has
+        installed transaction tenants is structural too: a plan using related tables cannot
+        skip their client checks by crossing from that transaction to an ordinary client.
+
+        Args:
+            connection: The connection, None for an unbound query.
+
+        Returns:
+            The settings, in order.
+        """
+        if connection is None:
+            return QueryKeyCompiler.UNBOUND_CONNECTION_STRUCTURE
+        return (
+            connection.connection_alias,
+            connection.features.plan_key,
+            connection.native_python_types,
+            connection.parameter_binding_key,
+            connection.sql_context_key,
+            connection.sets_tenants,
+        )
+
+    @staticmethod
+    def describe_compiled(
+        query: Any,
+        declaration_name: str,
+        slots: tuple[CompiledPlanSlot, ...],
+        key_positions: tuple[CompiledKeyPosition, ...],
+        built_into_another: bool,
+    ) -> PlanDescription | None:
+        """Read a prebound slot declaration in parameter order, then its key-only attributes."""
+        structure: list[Any] = [type(query), declaration_name]
+        values: list[Any] = []
+        origins: list[Any] | None = [] if PlanOrigins.records else None
+        deferred_connections = 0
+        connection_bit = 1
+        for form, reader, origin_attribute in slots:
+            if form in KEY_ONLY_PLAN_KEY_FORMS:
+                structure.append(None)
+            elif form is PlanKeyForm.CONNECTION:
+                connection = query._connection
+                if connection is None:
+                    if not built_into_another:
+                        deferred_connections |= connection_bit
+                        structure.append(None)
+                    structure.extend(QueryKeyCompiler.UNBOUND_CONNECTION_STRUCTURE)
+                else:
+                    # Built into another query, the dialect is that query's.
+                    if not built_into_another:
+                        structure.append(connection.dialect)
+                    structure.extend(QueryKeyCompiler.get_connection_structure(connection))
+                connection_bit <<= 1
+            elif form is PlanKeyForm.DESCRIBED:
+                description = reader(query)
+                if description is None:
+                    return None
+                structure.append(description.structure)
+                values.extend(description.values)
+                if origins is not None:
+                    origins = PlanParts.get_origins(description, origins)
+            elif form in QueryKeyCompiler.BOUND_VALUE_PLAN_KEY_FORMS:
+                value = reader(query)
+                present = bool(value) if form is PlanKeyForm.BOUND_WHEN_TRUE else value is not None
+                structure.append(present)
+                if present and (form is not PlanKeyForm.BOUND_INTO_ANOTHER or built_into_another):
+                    values.append(value)
+                    if origins is not None:
+                        origins.append(PlanOrigins.get_value_origin(query, origin_attribute))
+            elif form is PlanKeyForm.BOUND_VALUES_METHOD:
+                bound_values = reader(query)
+                structure.append(len(bound_values))
+                values.extend(bound_values)
+                if origins is not None:
+                    origins.extend(
+                        PlanOrigins.get_value_origin(query, origin_attribute, index)
+                        for index in range(len(bound_values))
+                    )
+        for position, reader, form, connection_flag in key_positions:
+            if form is PlanKeyForm.CONNECTION:
+                if not (deferred_connections & connection_flag):
+                    continue
+                value = query.dialect
+            elif form is PlanKeyForm.VALUE or form is PlanKeyForm.METHOD:
+                value = reader(query)
+            else:
+                value = reader(query)
+                if form is PlanKeyForm.TUPLE:
+                    value = tuple(value)
+                elif form is PlanKeyForm.SORTED_TUPLE:
+                    value = tuple(sorted(value))
+                elif form is PlanKeyForm.PRESENCE:
+                    value = value is not None
+            structure[position] = value
+        return PlanDescription(tuple(structure), values, origins)

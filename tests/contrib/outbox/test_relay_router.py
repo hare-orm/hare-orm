@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import sys
 import types
+from datetime import timedelta
 from typing import Any
 from unittest import mock
 
@@ -122,12 +123,12 @@ async def test_the_claim_resolves_the_router_alias_enqueue_used(routed_outbox):
 async def test_the_wakeup_subscription_uses_the_router_resolved_connection(routed_outbox):
     """The relay subscribes its wakeup on the connection enqueue() writes through - the
     router-chosen one, not the model's static default connection."""
-    _ctx, RoutedOutboxEvent = routed_outbox
-    subscribed: list[str] = []
+    ctx, RoutedOutboxEvent = routed_outbox
+    subscribed: list[Any] = []
 
     class RecordingWakeup(OutboxWakeup):
-        async def subscribe(self, callback: Any, connection_alias: str) -> None:
-            subscribed.append(connection_alias)
+        async def subscribe(self, callback: Any, connection: Any) -> None:
+            subscribed.append(connection)
 
         async def unsubscribe(self, callback: Any) -> None:
             pass
@@ -138,4 +139,27 @@ async def test_the_wakeup_subscription_uses_the_router_resolved_connection(route
     async with OutboxRelay(RoutedOutboxEvent, deliver, wakeup=RecordingWakeup()):
         pass
 
-    assert subscribed == ["outbox_router_target"]
+    assert len(subscribed) == 1
+    assert subscribed[0] is ctx.connections.get("outbox_router_target")
+
+
+@pytest.mark.asyncio
+async def test_explicit_client_controls_claim_outcome_backlog_and_cleanup(routed_outbox):
+    ctx, event_model = routed_outbox
+    selected = ctx.connections.get("outbox_default")
+    routed = ctx.connections.get("outbox_router_target")
+    event = await event_model.enqueue("book.changed", {}, using=selected)
+    await event_model.enqueue("book.changed", {}, using=routed)
+
+    async def deliver(event):
+        pass
+
+    relay = OutboxRelay(event_model, deliver, using=selected)
+    assert (await relay.get_backlog()).pending == 1
+    assert await relay.poll_once() == 1
+    assert (await event_model.objects.using(selected).get(id=event.id)).published_at is not None
+    assert (await event_model.objects.using(routed).get()).published_at is None
+    assert (await relay.get_backlog()).pending == 0
+    assert await relay.cleanup_published(timedelta()) == 1
+    assert await event_model.objects.using(selected).count() == 0
+    assert await event_model.objects.using(routed).count() == 1

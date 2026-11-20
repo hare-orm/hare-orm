@@ -8,8 +8,6 @@ import pytest
 from hare.dialects.sqlite.functions.comparison.sqlite_greatest_least import SqliteGreatestLeast
 from hare.dialects.sqlite.functions.sqlite_native_functions import SqliteNativeFunctions
 
-REQUIRES = ("native",)
-
 pytestmark = [
     pytest.mark.database_independent,
 ]
@@ -20,7 +18,7 @@ ARGUMENTS = [None, 0, 1, -1, 2**70, 0.5, 1.0, -2.5, "1", "1.0", "0.50", "-3", "1
 def test_greatest_and_least() -> None:
     functions = SqliteNativeFunctions.module.GreatestLeast(SqliteGreatestLeast.pick)
     for comparison_type in ("number", "text"):
-        for size in (1, 2, 3):
+        for size in (0, 1, 2, 3):
             for values in itertools.product(ARGUMENTS, repeat=size):
                 for is_greatest, native in ((True, functions.greatest), (False, functions.least)):
                     try:

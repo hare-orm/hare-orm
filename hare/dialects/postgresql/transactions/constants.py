@@ -20,3 +20,6 @@ POSTGRESQL_SET_TENANT_SETTING_TEMPLATE = "SELECT set_config('{setting}', {value}
 POSTGRESQL_PREPARED_TRANSACTIONS_DISABLED_MESSAGE = "prepared transactions are disabled"
 
 POSTGRESQL_PREPARED_TRANSACTIONS_LIMIT_REACHED_MESSAGE = "maximum number of prepared transactions reached"
+
+#: PREPARE refuses an identifier already owned by a prepared transaction.
+POSTGRESQL_PREPARED_TRANSACTION_CONFLICT_SQLSTATE = "42710"

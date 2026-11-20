@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from decimal import Decimal
+from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeVar, overload
 
 from hare.exceptions import ValidationError
 from hare.fields.data.constants import INT32_MAX, INT32_MIN, INT_LOOKUP_LITERAL_CAST_SQL_TYPE
-from hare.fields.enums import NativeWriteCheck
 from hare.fields.field import Field
 from hare.fields.narrowing.integer_range_limit import IntegerRangeLimit
 from hare.fields.narrowing.narrowing_limit import NarrowingLimit
 from hare.fields.validators.limits.max_value_validator import MaxValueValidator
 from hare.fields.validators.limits.min_value_validator import MinValueValidator
+from hare.native.native_modules import NativeModules
 from hare.query.enums import Lookup
 from hare.sql import functions
 from hare.sql.terms.values.value_wrapper import ValueWrapper
@@ -37,6 +39,8 @@ class IntField(Field[TInt]):
     COLUMN_TYPE_RANGE: ClassVar[tuple[int, int]] = (INT32_MIN, INT32_MAX)
     allows_generated = True
     generated_requires_primary_key = True
+    #: The implicit generation setting when this field is declared as a primary key.
+    generated_primary_key_default: ClassVar[bool] = True
     #: An int the driver returns is the value - to_python() only converts what is assigned.
     keeps_native_db_values = True
 
@@ -60,14 +64,12 @@ class IntField(Field[TInt]):
 
     def __init__(self, primary_key: bool | None = None, **kwargs: Any) -> None:
         if primary_key or kwargs.get("pk"):
-            kwargs["generated"] = bool(kwargs.get("generated", True))
+            kwargs["generated"] = bool(kwargs.get("generated", self.generated_primary_key_default))
         super().__init__(primary_key=primary_key, **kwargs)
         # The column type doesn't enforce the bounds on the Python side - validators do.
         bounds = self.constraints
         self.validators.append(MinValueValidator(bounds["ge"]))
         self.validators.append(MaxValueValidator(bounds["le"]))
-
-    native_write_check = NativeWriteCheck.NOTHING
 
     def to_db_value(self, value: Any, instance: type[Model] | Model | None) -> Any:
         # A plain int - the common case - needs no check.
@@ -102,10 +104,21 @@ class IntField(Field[TInt]):
             return value.is_integer()
         return value.is_finite() and value == value.to_integral_value()
 
+    def get_assign_normalized_types(self) -> frozenset[type]:
+        return self._get_unchanged_assign_types(IntField.to_python, self.field_type)
+
     def to_python(self, value: Any) -> Any:
         if type(value) is not int and value is not None:
             self.raise_if_not_int(value)
         return super().to_python(value)
+
+    def get_path_key_value(self, segment: str) -> Any:
+        """Parse an integer key's path text before its normal assignment conversion.
+
+        Direct assignments remain integer-only. Integer enums and custom integer
+        normalizers receive the parsed number through their ordinary ``to_python`` hook.
+        """
+        return self.to_python(Field.to_python(self, segment))
 
     def from_db_value(self, value: Any) -> Any:
         # An integer expression a database computes as a fraction (a SUM of a wider type divided)
@@ -121,18 +134,21 @@ class IntField(Field[TInt]):
             value = Field.to_python(self, value)
         return self.to_python(value)
 
+    def get_db_value_reader(self) -> Callable[[Any], Any]:
+        # This class's from_db_value() and to_python() return NULL and an int unchanged.
+        field_class = type(self)
+        if field_class.from_db_value is IntField.from_db_value and field_class.to_python is IntField.to_python:
+            return NativeModules.rows.TypedColumnReader(int, self.from_db_value)
+        return super().get_db_value_reader()
+
     def to_lookup_values(self, values: list[Any], instance: type[Model] | Model | None) -> list[Any]:
         # Plain ints - every key of a long `id__in` list, say - are checked in one pass.
-        if type(self).to_lookup_value is IntField.to_lookup_value and type(self).to_db_value is IntField.to_db_value:
+        field_class = type(self)
+        if field_class.to_lookup_value is IntField.to_lookup_value and field_class.to_db_value is IntField.to_db_value:
             validated_values = self.get_validated_values(values)
             if validated_values is not None:
                 return validated_values
         return [self.to_lookup_value(value, instance) for value in values]
-
-    def to_lookup_value(self, value: Any, instance: type[Model] | Model | None) -> Any:
-        # Equality and membership take an int alone, as a write does - a comparison takes a fraction
-        # too (get_compared_value()).
-        return self.to_db_value(value, instance)
 
     def get_compared_value(self, value: Any, instance: type[Model] | Model, dialect: Dialect) -> Any:
         """The value a comparison (``gt``/``gte``/``lt``/``lte``/``range``) binds - a float or a
@@ -150,7 +166,7 @@ class IntField(Field[TInt]):
             ValidationError: ``value`` is NaN, past the field's bounds or no number.
         """
         if isinstance(value, (float, Decimal)):
-            if value != value:
+            if value.is_nan() if isinstance(value, Decimal) else value != value:
                 # NaN - a value no write stores, compared differently by every database.
                 raise ValidationError(f"{self.model_field_name}: NaN is no number to compare with")
             self.validate(value)
@@ -192,21 +208,62 @@ class IntField(Field[TInt]):
         # Local import: the filters import the fields.
         from hare.query.filters.lookups.value_encoders import ValueEncoders
 
-        if not isinstance(values, (list, tuple, set)):
-            # Refused as every list lookup refuses it.
-            return ValueEncoders.encode_list(values, obj, field, dialect)
+        ValueEncoders.check_list_values(values, field)
         return [None if value is None else self.get_compared_value(value, obj, dialect) for value in values]
+
+    def encode_column_bound(
+        self,
+        value: Any,
+        obj: Model | type[Model],
+        field: Field[Any],
+        dialect: Dialect,
+        *,
+        round_bound: Callable[[Decimal], int],
+    ) -> Any:
+        """Use an equivalent integer threshold when the dialect requires it."""
+        if (
+            dialect.features.rounds_integer_lookup_bounds
+            and isinstance(value, Decimal)
+            and value.is_finite()
+            and type(self).get_compared_value is IntField.get_compared_value
+        ):
+            self.validate(value)
+            return round_bound(value)
+        return self.encode_compared_value(value, obj, field, dialect)
+
+    def encode_column_bounds(
+        self, values: Any, obj: Model | type[Model], field: Field[Any], dialect: Dialect
+    ) -> list[Any]:
+        """Encode the inclusive lower and upper bounds of a stored integer column."""
+        if not isinstance(values, (list, tuple, set)) or len(values) != 2:
+            return self.encode_compared_values(values, obj, field, dialect)
+        lower, upper = values
+        return [
+            self.encode_column_bound(lower, obj, field, dialect, round_bound=math.ceil),
+            self.encode_column_bound(upper, obj, field, dialect, round_bound=math.floor),
+        ]
 
     def get_lookups(self) -> dict[str, FieldLookup]:
         lookups = super().get_lookups()
         compared_lookups: dict[str, FieldLookup] = {
-            suffix: lookups[suffix].with_changes(value_encoder=self.encode_compared_value)
-            for suffix in (Lookup.GT, Lookup.GTE, Lookup.LT, Lookup.LTE)
+            suffix: lookups[suffix].with_changes(
+                value_encoder=self.encode_compared_value,
+                column_value_encoder=partial(self.encode_column_bound, round_bound=round_bound),
+            )
+            for suffix, round_bound in (
+                (Lookup.GT, math.floor),
+                (Lookup.GTE, math.ceil),
+                (Lookup.LT, math.ceil),
+                (Lookup.LTE, math.floor),
+            )
         }
         return {
             **lookups,
             **compared_lookups,
-            Lookup.RANGE: lookups[Lookup.RANGE].with_changes(value_encoder=self.encode_compared_values),
+            Lookup.RANGE: lookups[Lookup.RANGE].with_changes(
+                value_encoder=self.encode_compared_values,
+                column_value_encoder=self.encode_column_bounds,
+            ),
         }
 
     @property
@@ -230,10 +287,16 @@ class IntField(Field[TInt]):
 
     def deconstruct(self) -> tuple[str, list[Any], dict[str, Any]]:
         path, args, kwargs = super().deconstruct()
-        # A primary key defaults to generated=True - only an opt-out is written.
+        # Write only deviations from this field type's primary-key generation default.
         if self.pk:
-            if self.generated:
+            if self.generated == self.generated_primary_key_default:
                 kwargs.pop("generated", None)
             else:
-                kwargs["generated"] = False
+                kwargs["generated"] = self.generated
         return path, args, kwargs
+
+    def get_unchanged_write_types(self, converter: Callable[..., Any] | None) -> tuple[type, ...] | None:
+        # This class's to_db_value() writes an int as it is.
+        if converter is None and type(self).to_db_value is IntField.to_db_value:
+            return (int,)
+        return None

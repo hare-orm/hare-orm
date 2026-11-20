@@ -1,14 +1,22 @@
 """JSONField with pydantic: a field_type that is a pydantic model, an encoder writing one."""
 
+import sys
+from dataclasses import dataclass
+from types import ModuleType
+from typing import Any
+
 import pytest
 from pydantic import BaseModel
 
+from hare import Model, fields
+from hare.contrib.test import hare_test_context
 from hare.ddl.indexes import Index
 from hare.exceptions import ValidationError
 from hare.fields import JSONField
 from tests.shared_models import testmodels, testmodels_pydantic
+from tests.utils.database_under_test import DatabaseUnderTest
 
-REQUIRES = ("pydantic",)
+pytestmark = pytest.mark.usefixtures("model_conversion_context")
 
 
 class MyPydanticModel(BaseModel):
@@ -58,7 +66,7 @@ async def test_data_pydantic_matching_shape_still_succeeds(db):
 def test_to_db_value_pydantic_field_type_shape_mismatch_raises_immediately():
     """Direct to_db_value() call (no DB round trip) - the shape mismatch must be caught before
     any encoding/DB interaction happens at all, not merely by the time a full create() runs."""
-    field = testmodels_pydantic.PydanticJSONFields._meta.fields_map["data_pydantic"]
+    field = testmodels_pydantic.PydanticJSONFields._declaration.fields_map["data_pydantic"]
     with pytest.raises(ValidationError):
         field.to_db_value({"foo": "not an int", "bar": "baz"}, testmodels_pydantic.PydanticJSONFields)
 
@@ -112,6 +120,68 @@ def test_deconstruct_writes_a_declared_field_type():
 def test_a_stored_non_object_of_a_model_field_type_raises_validation_error():
     """A stored value that decodes to valid JSON but isn't a dict (schema drift, a manual DB edit, a row
     written before field_type was added) reached a bare `self.field_type(**data)` call - a TypeError."""
-    field = testmodels_pydantic.PydanticJSONFields._meta.fields_map["data_pydantic"]
+    field = testmodels_pydantic.PydanticJSONFields._declaration.fields_map["data_pydantic"]
     with pytest.raises(ValidationError):
         field.from_db_value("5")
+
+
+class MutableDocument(BaseModel):
+    data: dict[str, Any]
+
+
+@dataclass
+class MutableDataclassDocument:
+    data: dict[str, Any]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("new_value", (True, 1.0, 2), ids=("bool", "float", "changed-integer"))
+@pytest.mark.parametrize("json_field", (fields.JSONField, fields.JSONTextField))
+async def test_dirty_tracking_compares_the_json_form_of_typed_documents(monkeypatch, new_value, json_field):
+    if json_field is fields.JSONField and DatabaseUnderTest.get_dialect().name == "clickhouse":
+        pytest.skip("A native JSON column holds an object, not a top-level document list")
+
+    class Document(Model):
+        id = fields.IntField(primary_key=True, generated=False)
+        item = json_field(field_type=MutableDocument)
+        items = json_field(field_type=list[MutableDocument])
+        by_name = json_field(field_type=dict[str, MutableDocument])
+        dataclass_item = json_field(field_type=MutableDataclassDocument)
+        plain = json_field()
+
+        class Meta:
+            track_dirty_fields = True
+
+    module = ModuleType("tests._typed_document_dirty_fields")
+    module.__models__ = [Document]
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    async with hare_test_context([module.__name__], DatabaseUnderTest.get_url()):
+        value = {"data": {"values": [1]}}
+        obj = await Document.objects.create(
+            id=1, item=value, items=[value], by_name={"entry": value}, dataclass_item=value, plain=value
+        )
+        baseline = obj.snapshot()
+        for data in (
+            obj.item.data,
+            obj.items[0].data,
+            obj.by_name["entry"].data,
+            obj.dataclass_item.data,
+            obj.plain["data"],
+        ):
+            data["values"][0] = new_value
+        expected_fields = {"item", "items", "by_name", "dataclass_item", "plain"}
+        assert set(obj.get_dirty_fields()) == set(obj.diff_against(baseline)) == expected_fields
+        assert type(baseline["item"].data["values"][0]) is int
+        assert type(baseline["dataclass_item"].data["values"][0]) is int
+        await obj.save(changed_only=True)
+        stored = await Document.objects.get(id=1)
+        for data in (
+            stored.item.data,
+            stored.items[0].data,
+            stored.by_name["entry"].data,
+            stored.dataclass_item.data,
+            stored.plain["data"],
+        ):
+            assert type(data["values"][0]) is type(new_value)
+            assert data["values"][0] == new_value
+        assert obj.get_dirty_fields() == {}

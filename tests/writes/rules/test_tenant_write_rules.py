@@ -101,7 +101,8 @@ async def test_an_upsert_leaves_the_row_of_another_tenant_alone(rules_db):
     with Tenancy.scope("a"):
         document = RuleTenantDocument(id=1, title="mine")
         await RuleTenantDocument.objects.bulk_create([document], update_fields=["title"], on_conflict=["id"])
-    assert (document.company, document._saved_in_db) == ("a", False)
+    # No row was written: automatic tenant preparation returns to the supplied state too.
+    assert (document.company, document._saved_in_db) == (None, False)
     assert await RuleTenantDocument.objects.all_tenants().values_list("company", "title") == [("b", "theirs")]
 
 

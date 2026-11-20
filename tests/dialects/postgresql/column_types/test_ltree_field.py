@@ -5,11 +5,11 @@ from __future__ import annotations
 
 import pytest
 
-from hare.dialects.postgresql.enums import PostgresqlDialectName
+from hare.core.hare_context import HareContext
 from hare.dialects.postgresql.fields.ltree_field import LtreeField
 from hare.dialects.postgresql.functions.ltree import Subpath
+from hare.dialects.postgresql.postgresql_introspector import PostgresqlIntrospector
 from hare.exceptions import ValidationError
-from hare.inspectdb.generation.column_type_mapper import ColumnTypeMapper
 from hare.inspectdb.introspection.column_info import ColumnInfo
 from hare.query.expressions import F
 from tests.dialects.postgresql.column_types.models_ltree import TreeCategory
@@ -159,12 +159,12 @@ def test_inspectdb_maps_ltree_and_network_columns():
         column = ColumnInfo(
             name="value", db_type=db_type, nullable=True, is_pk=False, is_unique=False, udt_name=udt_name
         )
-        assert ColumnTypeMapper.map_column_type(PostgresqlDialectName.POSTGRESQL, column)[::2] == (
+        assert PostgresqlIntrospector.map_column_type(column)[::2] == (
             expected_path,
             False,
         )
     macaddr8 = ColumnInfo(name="value", db_type="macaddr8", nullable=True, is_pk=False, is_unique=False)
-    assert ColumnTypeMapper.map_column_type(PostgresqlDialectName.POSTGRESQL, macaddr8)[2] is True
+    assert PostgresqlIntrospector.map_column_type(macaddr8)[2] is True
 
 
 @pytest.mark.asyncio
@@ -172,8 +172,11 @@ async def test_an_empty_path_in_an_array_is_read_back(db_ltree):
     """asyncpg's text array parser crashed the process on an empty ltree in an array."""
     await TreeCategory.objects.create(id=30, path="")
     await TreeCategory.objects.create(id=31, path="Top")
-    rows = await TreeCategory._meta.connection.execute_dicts(
-        "SELECT array_agg(path ORDER BY id) AS paths FROM ltree_tree_category WHERE id IN (30, 31)"
+    rows = (
+        await HareContext.require_current()
+        .apps.get_queryset(TreeCategory)
+        .get_connection()
+        .execute_dicts("SELECT array_agg(path ORDER BY id) AS paths FROM ltree_tree_category WHERE id IN (30, 31)")
     )
     assert rows[0]["paths"] == ["", "Top"]
     assert await get_paths(path="") == [""]

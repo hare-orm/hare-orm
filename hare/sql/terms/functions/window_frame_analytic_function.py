@@ -1,38 +1,29 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.sql.builder_methods import BuilderMethods
 from hare.sql.sql_context import SqlContext
+from hare.sql.terms.functions.analytic_function import AnalyticFunction
+from hare.sql.terms.functions.window_frame_edge import WindowFrameEdge
 
 if TYPE_CHECKING:
     from typing import Self
-
-from hare.sql.terms.functions.analytic_function import AnalyticFunction
-
-EdgeT = TypeVar("EdgeT", bound="WindowFrameAnalyticFunction.Edge")
 
 
 class WindowFrameAnalyticFunction(AnalyticFunction):
     """A window function with a frame - ``ROWS`` or ``RANGE`` between two edges."""
 
-    class Edge:
-        def __init__(self, value: str | int | None = None) -> None:
-            self.value = value
-
-        def __str__(self) -> str:
-            # Only None is unbounded - 0 PRECEDING is the current row.
-            return "{value} {modifier}".format(
-                value=self.value if self.value is not None else "UNBOUNDED",
-                modifier=self.modifier,  # type:ignore[attr-defined]
-            )
+    structure_attributes: ClassVar[tuple[str, ...]] = ("bound", "frame")
 
     def __init__(self, name: str, *args: Any, **kwargs: Any) -> None:
         super().__init__(name, *args, **kwargs)
         self.frame: str | None = None
         self.bound: Any = None
 
-    def _set_frame_and_bounds(self, frame: str, bound: str | EdgeT, and_bound: EdgeT | None) -> None:
+    def _set_frame_and_bounds(
+        self, frame: str, bound: str | WindowFrameEdge, and_bound: WindowFrameEdge | None
+    ) -> None:
         if self.frame or self.bound:
             raise AttributeError()
 
@@ -40,12 +31,12 @@ class WindowFrameAnalyticFunction(AnalyticFunction):
         self.bound = (bound, and_bound) if and_bound else bound
 
     @BuilderMethods.builder
-    def rows(self, bound: str | EdgeT, and_bound: EdgeT | None = None) -> Self:
+    def rows(self, bound: str | WindowFrameEdge, and_bound: WindowFrameEdge | None = None) -> Self:
         self._set_frame_and_bounds("ROWS", bound, and_bound)
         return self
 
     @BuilderMethods.builder
-    def range(self, bound: str | EdgeT, and_bound: EdgeT | None = None) -> Self:
+    def range(self, bound: str | WindowFrameEdge, and_bound: WindowFrameEdge | None = None) -> Self:
         self._set_frame_and_bounds("RANGE", bound, and_bound)
         return self
 
@@ -55,7 +46,7 @@ class WindowFrameAnalyticFunction(AnalyticFunction):
         if self.frame != "RANGE":
             return False
         edges = self.bound if isinstance(self.bound, tuple) else (self.bound,)
-        return any(isinstance(edge, WindowFrameAnalyticFunction.Edge) and edge.value is not None for edge in edges)
+        return any(isinstance(edge, WindowFrameEdge) and edge.value is not None for edge in edges)
 
     def get_frame_sql(self) -> str:
         if not isinstance(self.bound, tuple):

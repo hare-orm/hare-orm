@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeVar, overload
 
 from hare.exceptions import ValidationError
 from hare.fields.constants import SENSITIVE_VALUE_PLACEHOLDER
 from hare.fields.data.constants import INT64_MAX, INT64_MIN
 from hare.fields.field import Field
-from hare.sql.constants import MICROSECONDS_PER_DAY, MICROSECONDS_PER_SECOND
+from hare.native.native_modules import NativeModules
 
 if TYPE_CHECKING:
     from hare.models import Model
@@ -20,6 +20,8 @@ class TimeDeltaField(Field[TTimedelta]):
     """A duration - a ``timedelta`` stored as its whole number of microseconds in a ``BIGINT`` column."""
 
     field_type = datetime.timedelta
+    #: Shared duration conversion from ``rust.native.rows``.
+    native_rows: ClassVar[Any] = NativeModules.rows
     SQL_TYPE = "BIGINT"
 
     @overload
@@ -35,6 +37,9 @@ class TimeDeltaField(Field[TTimedelta]):
         if value is None or isinstance(value, datetime.timedelta):
             return value
         return self.get_timedelta(value)
+
+    def get_assign_normalized_types(self) -> frozenset[type]:
+        return self._get_unchanged_assign_types(TimeDeltaField.to_python, self.field_type)
 
     def to_python(self, value: Any) -> datetime.timedelta | None:
         # A number is no duration - only one read from the column is microseconds.
@@ -92,7 +97,7 @@ class TimeDeltaField(Field[TTimedelta]):
         Returns:
             The signed total number of microseconds.
         """
-        return (value.days * MICROSECONDS_PER_DAY) + (value.seconds * MICROSECONDS_PER_SECOND) + value.microseconds
+        return TimeDeltaField.native_rows.get_timedelta_microseconds(value)
 
     def to_db_value(self, value: datetime.timedelta | None, instance: type[Model] | Model | None) -> int | None:
         if value is not None:

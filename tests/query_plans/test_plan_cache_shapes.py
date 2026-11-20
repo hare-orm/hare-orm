@@ -14,8 +14,8 @@ import pytest_asyncio
 
 from hare.contrib.test import RollbackIsolation, hare_test_context, requires_features
 from hare.core.caching.caches import Caches
-from hare.query.plans.statement.statement_plans import StatementPlans
 from tests.query_plans.plan_cache_shapes_models import Category, Edition, Note, Post, Review, Shelf, Tag, Writer
+from tests.utils.statement_plan_checks import StatementPlanChecks
 
 
 @pytest_asyncio.fixture(scope="module")
@@ -65,7 +65,7 @@ async def assert_runs_on_its_plan(
     """Runs a shape with each call's values: each result is the expected one, and every call after
     the first runs on the plan the first one kept - or ``hits`` of them, for a shape keeping a plan
     per something of its values."""
-    with patch.object(StatementPlans, "count_hit", side_effect=StatementPlans.count_hit) as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         for values, expected in calls:
             assert await run(*values) == expected
     assert spy.call_count == (len(calls) - 1 if hits is None else hits)
@@ -562,17 +562,20 @@ async def test_a_values_query_crossing_a_relation_selected_with_a_condition(db):
 
 
 @pytest.mark.asyncio
-async def test_a_values_queryset_of_simple_calls_runs_without_a_query(db):
-    from hare.query.plans.call_signatures.call_signature_runs import CallSignatureRuns
+async def test_a_values_queryset_reads_its_call_plan_on_cache_hits(db):
+    from hare.query.statements.select.values_query import ValuesQuery
 
     async def run(writer_id):
         return await Post.objects.filter(writer_id=writer_id).order_by("id").values_list("id", flat=True)
 
-    with patch.object(
-        CallSignatureRuns, "fetch_values_on_plan", side_effect=CallSignatureRuns.fetch_values_on_plan
-    ) as spy:
+    with (
+        patch.object(ValuesQuery, "_execute", autospec=True, side_effect=ValuesQuery._execute) as built,
+        patch.object(ValuesQuery, "read_call_plan", side_effect=ValuesQuery.read_call_plan) as read_on_plan,
+    ):
         await assert_runs_on_its_plan(run, [((2,), [1, 4]), ((3,), [2]), ((1,), [3])])
-    assert spy.call_count == 2
+    # The first call builds the statement; the others read the plan its calls keep.
+    assert built.call_count == 1
+    assert read_on_plan.call_count == 2
 
 
 @pytest.mark.asyncio

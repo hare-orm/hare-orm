@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.dialect import Dialect
+from hare.dialects.base.schema.columns.column_narrowing_check import ColumnNarrowingCheck
 from hare.dialects.base.schema.columns.column_type_changes import ColumnTypeChanges
 from hare.dialects.base.schema.tables.table_rebuild import TableRebuild
 from hare.fields.constants import DB_DEFAULT_NOT_SET
 from hare.fields.field import Field
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
-from hare.models import Model
 
 if TYPE_CHECKING:
     from hare.dialects.sqlite.schema.sqlite_schema_editor import SqliteSchemaEditor
@@ -21,31 +21,6 @@ class SqliteColumnTypeChanges(ColumnTypeChanges):
     __slots__ = ()
 
     editor: SqliteSchemaEditor
-
-    @classmethod
-    def rewrites_table_on_alter(
-        cls, old_model: type[Model], new_model: type[Model], field_name: str, dialect: Dialect
-    ) -> bool:
-        """SQLite alters a column only by rebuilding its table - everything but a pure rename of a
-        plain column, and a many-to-many relation, whose through table holds its columns.
-
-        Args:
-            old_model: The model rendered from the state before the change.
-            new_model: The model rendered from the state after it.
-            field_name: The altered field's name.
-            dialect: The database's dialect.
-
-        Returns:
-            True when the table is rebuilt.
-        """
-        altered_columns = cls.get_altered_columns(old_model, new_model, field_name)
-        if not altered_columns:
-            return False
-        old_field = old_model._meta.fields_map[field_name]
-        new_field = new_model._meta.fields_map[field_name]
-        return not cls.only_renames_column(old_field, new_field, dialect) and not cls.keeps_table(
-            old_field, new_field, dialect
-        )
 
     @classmethod
     def keeps_table(cls, old_field: Field[Any], new_field: Field[Any], dialect: Dialect) -> bool:
@@ -65,11 +40,11 @@ class SqliteColumnTypeChanges(ColumnTypeChanges):
         if isinstance(old_field, ForeignKeyFieldInstance):
             return type(old_field) is type(new_field) and cls.get_relation_declaration(
                 old_field, dialect
-            ) == cls.get_relation_declaration(cast("ForeignKeyFieldInstance[Any]", new_field), dialect)
+            ) == cls.get_relation_declaration(new_field, dialect)  # type: ignore[arg-type]
         return (
             not isinstance(old_field, ManyToManyFieldInstance)
             and type(old_field) is type(new_field)
-            and new_field.get_narrowing_limit(old_field) is None
+            and not ColumnNarrowingCheck.has_narrowing_limits(old_field, new_field)
             and TableRebuild.get_remake_column_name(old_field) == TableRebuild.get_remake_column_name(new_field)
             and cls.get_column_declaration(old_field, dialect) == cls.get_column_declaration(new_field, dialect)
         )
@@ -86,12 +61,12 @@ class SqliteColumnTypeChanges(ColumnTypeChanges):
         Returns:
             The declaration's parts.
         """
-        related_meta = field.related_model._meta
-        fields_map = field.model._meta.fields_map
+        related_meta = field.get_related_binding()
+        fields_map = field.get_binding().model_binding.fields_map  # type: ignore[union-attr]
         return (
             related_meta.db_table,
             related_meta.schema,
-            tuple(to_field.source_field or to_field.model_field_name for to_field in field.to_field_instances),
+            field.to_column_names,
             field.db_on_delete,
             field.db_constraint,
             field.db_column_names,
@@ -136,6 +111,7 @@ class SqliteColumnTypeChanges(ColumnTypeChanges):
         """
         return (
             not isinstance(old_field, ForeignKeyFieldInstance)
+            and not ColumnNarrowingCheck.has_narrowing_limits(old_field, new_field)
             and TableRebuild.get_remake_column_name(old_field) != TableRebuild.get_remake_column_name(new_field)
             and old_field.null == new_field.null
             and old_field.unique == new_field.unique

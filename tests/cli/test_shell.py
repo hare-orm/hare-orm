@@ -5,6 +5,7 @@ import types
 
 import pytest
 
+from hare import Hare, Model, fields
 from hare.cli.shell_launcher import ShellLauncher
 from hare.core.hare_context import HareContext
 
@@ -64,9 +65,9 @@ async def test_build_namespace_collision_keeps_both_models_reachable(capsys: pyt
         )
         namespace = ShellLauncher.build_namespace(ctx)
 
-    assert namespace["Item"]._meta.app in ("shop", "warehouse")
-    assert namespace["shop_Item"]._meta.app == "shop"
-    assert namespace["warehouse_Item"]._meta.app == "warehouse"
+    assert namespace["apps"].get_binding(namespace["Item"]).app in ("shop", "warehouse")
+    assert namespace["apps"].get_binding(namespace["shop_Item"]).app == "shop"
+    assert namespace["apps"].get_binding(namespace["warehouse_Item"]).app == "warehouse"
 
     captured = capsys.readouterr()
     assert "Item" in captured.out
@@ -91,7 +92,59 @@ async def test_build_namespace_no_collision_no_warning(capsys: pytest.CaptureFix
         )
         namespace = ShellLauncher.build_namespace(ctx)
 
-    assert namespace["Item"]._meta.app == "lonely"
+    assert namespace["apps"].get_binding(namespace["Item"]).app == "lonely"
     assert namespace["lonely_Item"] is namespace["Item"]
     captured = capsys.readouterr()
     assert captured.out == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("composite", [False, True], ids=["scalar", "composite"])
+async def test_shell_names_preserve_services_and_unambiguous_qualified_models(monkeypatch, capsys, reverse, composite):
+    cases = (
+        (("shop", "Item"), ("warehouse", "shop_Item")),
+        (("shop", "Warehouse_Item"), ("shop_Warehouse", "Item")),
+        (("shop", "Hare"), ("shop", "hare"), ("shop", "apps")),
+    )
+    for case_number, declarations in enumerate(cases):
+        modules = {}
+        expected = {}
+        for app_label, model_name in reversed(declarations) if reverse else declarations:
+            module_name = f"scratch_shell_names_{case_number}_{app_label}"
+            if app_label not in modules:
+                modules[app_label] = types.ModuleType(module_name)
+                monkeypatch.setitem(sys.modules, module_name, modules[app_label])
+            attributes = {
+                "__module__": module_name,
+                "number": fields.IntField(primary_key=not composite, generated=False),
+                "Meta": type("Meta", (), {"app": app_label, "table": f"shell_{case_number}_{len(expected)}"}),
+            }
+            if composite:
+                attributes.update(region=fields.IntField(), pk=fields.CompositePrimaryKey("region", "number"))
+            model = type(model_name, (Model,), attributes)
+            setattr(modules[app_label], model_name, model)
+            expected[app_label, model_name] = model
+        async with HareContext() as context:
+            await context.init(
+                config={
+                    "connections": {"default": "sqlite+aiosqlite://:memory:"},
+                    "apps": {label: {"models": [module]} for label, module in modules.items()},
+                },
+                connect=False,
+            )
+            namespace = ShellLauncher.build_namespace(context)
+            assert namespace["Hare"] is Hare
+            assert namespace["hare"] is context
+            assert namespace["apps"] is context.apps
+            for (app_label, model_name), model in expected.items():
+                assert namespace["apps"][app_label][model_name] is model
+                qualified_name = f"{app_label}_{model_name}"
+                if case_number == 1:
+                    assert qualified_name not in namespace
+                else:
+                    assert namespace[qualified_name] is model
+        output = capsys.readouterr().out
+        assert "Warning:" in output
+        if case_number == 1:
+            assert "alias is omitted" in output

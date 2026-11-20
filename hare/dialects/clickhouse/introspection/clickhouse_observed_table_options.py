@@ -1,23 +1,20 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from operator import attrgetter
+from typing import Any
 
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
-from hare.dialects.clickhouse.client.constants import CLICKHOUSE_DEFAULT_DATABASE
+from hare.dialects.clickhouse.introspection.clickhouse_catalog_engine import ClickhouseCatalogEngine
 from hare.dialects.clickhouse.introspection.clickhouse_sql_parts import ClickhouseSqlParts
 from hare.dialects.clickhouse.introspection.constants import (
     CLICKHOUSE_CODEC_PREFIX,
-    CLICKHOUSE_CURRENT_DATABASE_SQL_FUNCTION,
-    CLICKHOUSE_DISTRIBUTED_ENGINE_NAME,
     CLICKHOUSE_ENGINE_CLAUSES,
-    CLICKHOUSE_ESCAPED_CHARACTER_PATTERN,
     CLICKHOUSE_INTEGER_SETTING_PATTERN,
     CLICKHOUSE_NO_SORT_SQL,
     CLICKHOUSE_ORDER_BY_CLAUSE,
     CLICKHOUSE_PROJECTION_DEFINITION_PREFIX,
     CLICKHOUSE_SETTINGS_CLAUSE,
-    CLICKHOUSE_TABLE_SETTING_DEFAULTS_SQL,
     CLICKHOUSE_TTL_CLAUSE,
     CLICKHOUSE_VERSIONED_COLLAPSING_ENGINE_NAME,
 )
@@ -28,9 +25,8 @@ from hare.dialects.clickhouse.schema.constants import (
     CLICKHOUSE_PROJECTION_REBUILD_SETTINGS,
 )
 from hare.dialects.clickhouse.schema_objects.clickhouse_projection import ClickhouseProjection
-
-if TYPE_CHECKING:
-    from hare.dialects.base.client.database_client import DatabaseClient
+from hare.inspectdb.introspection.catalog_sql import CatalogSql
+from hare.query.expressions import F
 
 
 class ClickhouseObservedTableOptions:
@@ -39,9 +35,10 @@ class ClickhouseObservedTableOptions:
     reports of the table."""
 
     @classmethod
-    async def fetch(
+    def get(
         cls,
-        connection: DatabaseClient,
+        default_database: str,
+        server_values: dict[str, str],
         table_row: dict[str, Any],
         column_rows: list[dict[str, Any]],
         primary_key_columns: list[str],
@@ -49,7 +46,8 @@ class ClickhouseObservedTableOptions:
         """Builds a table's options.
 
         Args:
-            connection: The connection.
+            default_database: The connection's database captured with the catalog.
+            server_values: The catalog snapshot of server setting defaults.
             table_row: The table's row of ``system.tables``.
             column_rows: Its rows of ``system.columns``.
             primary_key_columns: The columns of its primary key, in the key's order.
@@ -78,18 +76,18 @@ class ClickhouseObservedTableOptions:
         if lightweight_updates:
             for name in CLICKHOUSE_LIGHTWEIGHT_UPDATE_SETTINGS:
                 del table_settings[name]
-        settings = await cls.fetch_changed_settings(
-            connection,
+        settings = cls.get_changed_settings(
             table_settings,
+            server_values,
             has_projections=bool(projections),
         )
         return ClickhouseTableOptions.from_observed(
             {
-                "engine": cls.get_engine_of_any_database(connection, clauses[""]),
+                "engine": ClickhouseCatalogEngine.get(clauses[""], default_database),
                 # A sample is picked by a key of the sort the options name.
                 "order_by": () if list(order_by) == primary_key_columns and not sampling_key_sql else order_by,
                 "sample_by": cls.get_key(sampling_key_sql, column_names) if sampling_key_sql else None,
-                "partition_by": RawSQLTerm(partition_key_sql) if partition_key_sql else None,
+                "partition_by": cls.get_key(partition_key_sql, column_names) if partition_key_sql else None,
                 "ttl": RawSQLTerm(clauses[CLICKHOUSE_TTL_CLAUSE]) if clauses.get(CLICKHOUSE_TTL_CLAUSE) else None,
                 "settings": tuple(settings.items()),
                 "column_codecs": tuple(
@@ -100,35 +98,10 @@ class ClickhouseObservedTableOptions:
                 "column_ttls": tuple(column_ttls),
                 # The server keeps its projections in the order they were added - a migration changing one adds it
                 # last; they are told apart by their names.
-                "projections": tuple(sorted(projections, key=lambda projection: projection.name)),
+                "projections": tuple(sorted(projections, key=attrgetter("name"))),
                 "lightweight_updates": lightweight_updates,
             }
         )
-
-    @staticmethod
-    def get_engine_of_any_database(connection: DatabaseClient, engine_sql: str) -> str:
-        """A table's engine as a model declares it for whichever database it is created in - a
-        ``Distributed`` engine reading the tables of the table's own database names it
-        ``currentDatabase()``, as hare writes it, not by the name the server resolved.
-
-        Args:
-            connection: The connection.
-            engine_sql: The engine, as the server reports it.
-
-        Returns:
-            The engine.
-        """
-        name = ClickhouseSqlParts.get_before_parentheses(engine_sql).strip()
-        if name != CLICKHOUSE_DISTRIBUTED_ENGINE_NAME:
-            return engine_sql
-        arguments = ClickhouseSqlParts.split(ClickhouseSqlParts.get_parenthesised(engine_sql)[0])
-        database_literal = connection.dialect.literals.get_string_literal_sql(
-            getattr(connection, "database", None) or CLICKHOUSE_DEFAULT_DATABASE
-        )
-        if len(arguments) < 3 or arguments[1].strip() != database_literal:
-            return engine_sql
-        arguments[1] = CLICKHOUSE_CURRENT_DATABASE_SQL_FUNCTION
-        return f"{name}({', '.join(argument.strip() for argument in arguments)})"
 
     @staticmethod
     def get_declared_sorting_key_sqls(sorting_key_sql: str, engine_sql: str, order_by_sql: str) -> list[str]:
@@ -145,20 +118,20 @@ class ClickhouseObservedTableOptions:
             The keys.
         """
         key_sqls = ClickhouseSqlParts.split(sorting_key_sql)
-        if ClickhouseSqlParts.get_before_parentheses(engine_sql).endswith(CLICKHOUSE_VERSIONED_COLLAPSING_ENGINE_NAME):
-            arguments_sql, _ = ClickhouseSqlParts.get_parenthesised(engine_sql)
-            arguments = ClickhouseSqlParts.split(arguments_sql)
+        engine_name, arguments_sql, _ = CatalogSql.get_parenthesized_parts(engine_sql)
+        if engine_name.endswith(CLICKHOUSE_VERSIONED_COLLAPSING_ENGINE_NAME):
+            arguments = ClickhouseSqlParts.split(arguments_sql or "")
             declared_sql = ClickhouseSqlParts.get_unwrapped(order_by_sql)
             declared_count = (
                 0 if declared_sql in ("", CLICKHOUSE_NO_SORT_SQL) else len(ClickhouseSqlParts.split(declared_sql))
             )
             appended = len(key_sqls) > declared_count
-            if appended and arguments and key_sqls and key_sqls[-1].strip() == arguments[-1].strip():
+            if appended and arguments and key_sqls and key_sqls[-1] == arguments[-1]:
                 return key_sqls[:-1]
         return key_sqls
 
     @staticmethod
-    def get_key(key_sql: str, column_names: set[str]) -> str | RawSQLTerm:
+    def get_key(key_sql: str, column_names: set[str]) -> str | F | RawSQLTerm:
         """A key of a table as its options name it.
 
         Args:
@@ -172,7 +145,9 @@ class ClickhouseObservedTableOptions:
         # (id) reports "(id), version".
         key_sql = ClickhouseSqlParts.get_unwrapped(key_sql)
         identifier = ClickhouseSqlParts.get_identifier(key_sql)
-        return identifier if identifier in column_names else RawSQLTerm(key_sql)
+        if identifier in column_names:
+            return identifier if identifier.isidentifier() else F(identifier)
+        return RawSQLTerm(key_sql)
 
     @staticmethod
     def get_settings(settings_sql: str) -> dict[str, str | int]:
@@ -189,47 +164,29 @@ class ClickhouseObservedTableOptions:
             name, _, value_sql = setting_sql.partition("=")
             value_sql = value_sql.strip()
             if value_sql.startswith("'"):
-                settings[name.strip()] = CLICKHOUSE_ESCAPED_CHARACTER_PATTERN.sub(r"\1", value_sql[1:-1])
+                settings[name.strip()] = ClickhouseSqlParts.get_string_text(value_sql)
             elif CLICKHOUSE_INTEGER_SETTING_PATTERN.fullmatch(value_sql):
                 settings[name.strip()] = int(value_sql)
             else:
                 settings[name.strip()] = value_sql
         return settings
 
-    @staticmethod
-    async def fetch_server_setting_values(connection: DatabaseClient, names: list[str]) -> dict[str, str]:
-        """The server's own values of table settings.
-
-        Args:
-            connection: The connection.
-            names: The settings.
-
-        Returns:
-            The value of each setting the server knows, by its name.
-        """
-        names_sql = ", ".join(f"'{name}'" for name in names if name.isidentifier())
-        if not names_sql:
-            return {}
-        rows = await connection.execute_dicts(CLICKHOUSE_TABLE_SETTING_DEFAULTS_SQL.format(names=names_sql))
-        return {str(row["name"]): str(row["value"]) for row in rows}
-
     @classmethod
-    async def fetch_changed_settings(
-        cls, connection: DatabaseClient, settings: dict[str, str | int], *, has_projections: bool
+    def get_changed_settings(
+        cls, settings: dict[str, str | int], server_values: dict[str, str], *, has_projections: bool
     ) -> dict[str, str | int]:
         """The settings of a table a declaration of it names: not the ones holding the server's own
         value (the server writes ``index_granularity`` into every table), not the ones a table with
         projections gets for them.
 
         Args:
-            connection: The connection.
+            server_values: Captured server defaults by setting name.
             settings: The table's settings.
             has_projections: Whether the table has projections.
 
         Returns:
             The settings.
         """
-        server_values = await cls.fetch_server_setting_values(connection, list(settings))
         return {
             name: value
             for name, value in settings.items()

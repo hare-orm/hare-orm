@@ -17,10 +17,8 @@ from decimal import Decimal
 import pytest
 
 from hare import fields
+from hare.core.hare_context import HareContext
 from hare.dialects.dialect_registry import DialectRegistry
-from hare.exceptions import (
-    QueryError,
-)
 from hare.fields.database_default import DatabaseDefault
 from hare.time import UTC
 from tests.shared_models.testmodels import NoFetchDefaultModel, SqlDefaultModel
@@ -175,12 +173,13 @@ class TestBulkCreateWithDbDefault:
 
     @pytest.mark.postgresql_models
     @pytest.mark.asyncio
-    async def test_bulk_create_mixed_raises(self, db):
-        """Mixed usage (some default, some explicit) for same field raises OperationalError."""
+    async def test_bulk_create_mixed_defaults_keep_each_objects_value(self, db):
+        """Each consecutive default shape is inserted without reordering the objects."""
         inst1 = DefaultModel(int_default=99)
         inst2 = DefaultModel()  # int_default is DatabaseDefault
-        with pytest.raises(QueryError, match="Cannot use bulk_create"):
-            await DefaultModel.objects.bulk_create([inst1, inst2])
+        inst3 = DefaultModel(int_default=77)
+        await DefaultModel.objects.bulk_create([inst1, inst2, inst3])
+        assert await DefaultModel.objects.order_by("id").values_list("int_default", flat=True) == [99, 1, 77]
 
     @pytest.mark.asyncio
     async def test_bulk_create_sql_default_all_defaults_omits_column(self, db):
@@ -333,11 +332,11 @@ class TestNowDbDefaultTimezone:
         assert lower <= created_moscow <= upper, f"{created_moscow} not within [{lower}, {upper}]"
 
 
-class TestMetaInfo:
+class TestModelBinding:
     @pytest.mark.postgresql_models
     @pytest.mark.asyncio
     async def test_db_default_meta_attributes(self, db):
-        meta = DefaultModel._meta
+        meta = HareContext.require_current().apps.get_binding(DefaultModel)
         assert len(meta.db_default_db_columns) > 0
         assert "int_default" in meta.db_default_db_columns
         assert "char_default" in meta.db_default_db_columns

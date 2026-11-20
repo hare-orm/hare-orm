@@ -10,7 +10,31 @@ import textwrap
 import pytest
 
 from hare.exceptions import IntegrityError
+from hare.migrations import operations as ops
 from tests.utils.database_under_test import DatabaseUnderTest
+
+
+@pytest.mark.asyncio
+async def test_recording_an_explicit_default_table_name_keeps_it_when_the_model_is_renamed(project_factory):
+    project = await project_factory()
+    model = "class {name}(Model):\n    id = fields.IntField(primary_key=True)\n{meta}"
+    explicit = '    class Meta:\n        table = "book"\n'
+    project.write_models(model.format(name="Book", meta=""))
+    await project.cli_ok("makemigrations")
+    await project.cli_ok("migrate")
+    await project.query("INSERT INTO book (id) VALUES (11)")
+    project.write_models(model.format(name="Book", meta=explicit))
+    await project.cli_ok("makemigrations")
+    [change] = project.get_latest_migration("app").operations
+    assert isinstance(change, ops.AlterModelTable)
+    assert change.table == "book"
+    await project.cli_ok("migrate")
+
+    project.write_models(model.format(name="BookRecord", meta=explicit))
+    await project.cli_ok("makemigrations", "--rename", "app.Book=BookRecord")
+    await project.cli_ok("migrate")
+    await project.cli_ok("makemigrations", "--check")
+    assert await project.query("SELECT id FROM book") == [{"id": 11}]
 
 
 @pytest.mark.asyncio
@@ -32,11 +56,11 @@ async def test_a_confirmed_rename_recreates_the_generated_field_rewritten_for_th
 
     project.write_models(template.format(column="amount"))
     await project.cli_ok("makemigrations", "--rename", "app.Item.price=amount")
-    migration_source = project.read_latest_migration()
+    operation_types = [type(operation) for operation in project.get_latest_migration().operations]
     assert (
-        migration_source.index("ops.RemoveField(")
-        < migration_source.index("ops.RenameField(")
-        < migration_source.index("ops.AddField(")
+        operation_types.index(ops.RemoveField)
+        < operation_types.index(ops.RenameField)
+        < operation_types.index(ops.AddField)
     )
     await project.cli_ok("migrate")
     await project.assert_in_sync()
@@ -76,10 +100,10 @@ async def test_a_generated_field_of_an_expression_of_hare_follows_a_rename_of_a_
 
     project.write_models(template.format(column="amount"))
     await project.cli_ok("makemigrations", "--rename", "app.Item.price=amount")
-    migration_source = project.read_latest_migration()
-    assert "ops.RenameField(" in migration_source
-    assert "ops.RemoveField(" not in migration_source
-    assert "ops.AddField(" not in migration_source
+    operation_types = [type(operation) for operation in project.get_latest_migration().operations]
+    assert ops.RenameField in operation_types
+    assert ops.RemoveField not in operation_types
+    assert ops.AddField not in operation_types
     await project.cli_ok("migrate")
     await project.assert_in_sync()
     await project.query("INSERT INTO item (id, amount, qty) VALUES (2, 5, 10)")
@@ -279,7 +303,7 @@ async def test_a_renamed_field_is_renamed_in_the_views_policies_and_sequences_re
     await project.query("INSERT INTO ledger (id, number) VALUES (1, 5)")
     project.write_models(template.format(name="num"))
     await project.cli_ok("makemigrations", "--rename", "app.Ledger.number=num")
-    assert "ops.RenameField(" in project.read_latest_migration()
+    assert any(isinstance(operation, ops.RenameField) for operation in project.get_latest_migration().operations)
     await project.cli_ok("migrate")
     await project.assert_in_sync()
     assert await project.query("SELECT id, num FROM ledger_numbers") == [{"id": 1, "num": 5}]
@@ -292,13 +316,13 @@ async def test_a_renamed_field_is_renamed_in_the_views_policies_and_sequences_re
 @pytest.mark.parametrize(
     ("operation", "new_table", "class_name"),
     [
-        ("ops.RenameModel(", "book", "Book"),
-        ("ops.AlterModelTable(", "books", "Ledger"),
+        (ops.RenameModel, "book", "Book"),
+        (ops.AlterModelTable, "books", "Ledger"),
     ],
     ids=["model_renamed", "table_named"],
 )
 async def test_the_raw_views_rewritten_for_a_renamed_table_are_recreated_around_the_rename(
-    project_factory, operation: str, new_table: str, class_name: str
+    project_factory, operation: type[ops.Operation], new_table: str, class_name: str
 ) -> None:
     """The views' raw SQL is the user's: rewritten in the model for the new table, they're removed before
     the table is renamed and added after it."""
@@ -324,11 +348,9 @@ async def test_the_raw_views_rewritten_for_a_renamed_table_are_recreated_around_
     project.write_models(template.format(class_name=class_name, table=new_table, table_option=table_option))
     rename_answers = ("--rename", "app.Ledger=Book") if class_name == "Book" else ()
     await project.cli_ok("makemigrations", *rename_answers)
-    migration_source = project.read_latest_migration()
+    operation_types = [type(item) for item in project.get_latest_migration().operations]
     assert (
-        migration_source.index("ops.RemoveView(")
-        < migration_source.index(operation)
-        < migration_source.index("ops.AddView(")
+        operation_types.index(ops.RemoveView) < operation_types.index(operation) < operation_types.index(ops.AddView)
     )
     await project.cli_ok("migrate")
     await project.assert_in_sync()
@@ -358,7 +380,7 @@ async def test_a_field_renamed_over_its_column_takes_its_old_name_back(project_f
     await project.assert_in_sync()
     project.write_models(template.format(field="a = fields.IntField()"))
     await project.cli_ok("makemigrations")
-    assert "RenameField" in project.read_latest_migration()
+    assert any(isinstance(operation, ops.RenameField) for operation in project.get_latest_migration().operations)
     await project.cli_ok("migrate")
     await project.assert_in_sync()
     assert await project.query("SELECT a FROM thing") == [{"a": 5}]

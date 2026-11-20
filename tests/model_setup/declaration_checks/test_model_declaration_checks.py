@@ -4,6 +4,7 @@ mistake - not by a raw error of the database or of the first query reaching it."
 import pytest
 
 from hare import fields
+from hare.core.apps.model_binding_graph import ModelBindingGraph
 from hare.ddl import CheckConstraint, Index, PartialIndex, Policy, UniqueConstraint
 from hare.ddl.conditions.constraint_condition import ConstraintCondition
 from hare.exceptions import ConfigurationError
@@ -12,6 +13,7 @@ from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
 from hare.query.expressions import Exists, Q
 from hare.query.functions import Lower
+from tests.utils.model_bindings import ModelBindings
 
 pytestmark = pytest.mark.database_independent
 
@@ -83,6 +85,8 @@ def test_get_latest_by_naming_an_unknown_field_is_refused():
 
 
 def test_get_latest_by_takes_a_relation_path_and_pk():
+    declaration_graph = ModelBindingGraph()
+
     class LatestTarget(Model):
         id = fields.IntField(primary_key=True)
         name = fields.CharField(max_length=10)
@@ -95,7 +99,7 @@ def test_get_latest_by_takes_a_relation_path_and_pk():
             get_latest_by = ("target__name", "-pk")
 
     bind(LatestTarget, LatestSource)
-    assert LatestSource._meta.get_latest_by == ("target__name", "-pk")
+    assert declaration_graph.include(LatestSource).get_latest_by == ("target__name", "-pk")
 
 
 def test_a_self_relation_in_a_composite_primary_key_is_refused():
@@ -362,4 +366,6 @@ def test_an_expression_nested_in_a_condition_is_refused():
     condition = Q(Q(Exists(owner.objects.all())), slot=1)
 
     with pytest.raises(ConfigurationError, match="reads only the model's own columns"):
-        ConstraintCondition.raise_if_reads_other_columns(condition, relating_model)
+        ConstraintCondition.raise_if_reads_other_columns(
+            condition, ModelBindings.prepare(owner, relating_model).get_binding(relating_model)
+        )

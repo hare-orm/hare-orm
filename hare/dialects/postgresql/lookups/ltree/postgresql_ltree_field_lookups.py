@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from hare.dialects.postgresql.enums import PostgresqlLookup
+from hare.dialects.postgresql.lookups.constants import ORDERED_VALUE_GENERIC_LOOKUPS
 from hare.dialects.postgresql.lookups.ltree.postgresql_ltree_lookups import PostgresqlLtreeLookups
 
 if TYPE_CHECKING:
@@ -17,7 +18,7 @@ class PostgresqlLtreeFieldLookups:
     ``ltxtquery``."""
 
     #: The generic lookups an ltree path keeps.
-    KEPT_GENERIC_LOOKUPS = ("", "not", "in", "not_in", "isnull", "not_isnull", "gte", "lte", "gt", "lt", "range")
+    KEPT_GENERIC_LOOKUPS = ORDERED_VALUE_GENERIC_LOOKUPS
 
     @classmethod
     def get_lookups(cls, field: Field[Any]) -> dict[str, FieldLookup]:
@@ -35,7 +36,7 @@ class PostgresqlLtreeFieldLookups:
         from hare.query.filters.lookups.field_lookups import FieldLookups
 
         generic = FieldLookups.get_generic(field)
-        lookups = {name: generic[name] for name in cls.KEPT_GENERIC_LOOKUPS}
+        lookups: dict[str, FieldLookup] = {name: generic[name] for name in cls.KEPT_GENERIC_LOOKUPS}
         lookups[PostgresqlLookup.ANCESTOR_OF] = FieldLookup(
             PostgresqlLtreeLookups.ancestor_of, PostgresqlValueEncoders.encode_ltree
         )

@@ -10,7 +10,7 @@ import functools
 from collections.abc import Generator, Iterable
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.dialects.base.client.transaction_lifecycle.transaction_callbacks import TransactionCallbacks
 from hare.fields.constants import SENSITIVE_VALUE_PLACEHOLDER
@@ -22,7 +22,7 @@ from hare.instrumentation.observers.observers import Observers
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class ChangeEvents:
@@ -38,16 +38,17 @@ class ChangeEvents:
     reported_as_a_whole: ClassVar[ContextVar[bool]] = ContextVar("hare_change_events_whole_write", default=False)
 
     @staticmethod
-    def is_observed(model: type[Model] | None = None) -> bool:
+    def is_observed(binding: ModelBinding | None = None) -> bool:
         """Whether an observer gets the changes of ``model`` - of any model without it.
 
         Args:
-            model: The model.
+            binding: The model.
 
         Returns:
             True when such an observer exists.
         """
-        return Observers.is_observed(RowsChanged, model)
+        model = None if binding is None else binding._model
+        return Observers.is_observed(RowsChanged, model, binding=binding)
 
     @classmethod
     @contextmanager
@@ -75,7 +76,7 @@ class ChangeEvents:
     async def report(
         cls,
         client: DatabaseClient,
-        model: type[Model],
+        binding: ModelBinding,
         operation: RowOperation,
         *,
         pks: Iterable[Any] | None = None,
@@ -85,18 +86,18 @@ class ChangeEvents:
 
         Args:
             client: The connection the write ran on - a transaction's client inside one.
-            model: The model.
+            binding: The model.
             operation: What the write did.
             pks: The primary keys of the rows, None when it names no rows.
             fields: The fields it set, None when not known.
         """
         if cls.reported_as_a_whole.get() or not Observers.is_observed(RowsChanged):
             return
-        await cls.deliver(client, [cls.build_event(client, model, operation, pks, fields)])
+        await cls.deliver(client, [cls.build_event(client, binding, operation, pks, fields)])
 
     @classmethod
     async def report_deletion(
-        cls, client: DatabaseClient, model: type[Model], *, pks: Iterable[Any] | None = None, soft: bool = False
+        cls, client: DatabaseClient, binding: ModelBinding, *, pks: Iterable[Any] | None = None, soft: bool = False
     ) -> None:
         """Reports deleted rows and what their ``on_delete`` reaches: ``CASCADE`` rows deleted too (a soft
         delete soft-deletes those of a model with ``Meta.soft_delete_field`` and keeps the others, unless
@@ -105,7 +106,7 @@ class ChangeEvents:
 
         Args:
             client: The connection the delete ran on.
-            model: The model the rows were deleted from.
+            binding: The model the rows were deleted from.
             pks: The primary keys, None when it names no rows.
             soft: A soft delete - the rows are updated, not removed.
         """
@@ -115,38 +116,49 @@ class ChangeEvents:
         from hare.models.deletion.cascade.deletion_graph import DeletionGraph
 
         deletion = RowOperation.UPDATE if soft else RowOperation.DELETE
-        soft_delete_fields = (model._meta.soft_delete_field,) if soft and model._meta.soft_delete_field else None
-        events = [cls.build_event(client, model, deletion, pks, soft_delete_fields)]
+        soft_delete_fields = (binding.soft_delete_field,) if soft and binding.soft_delete_field else None
+        events = [cls.build_event(client, binding, deletion, pks, soft_delete_fields)]
         reached = (
-            DeletionGraph.get_soft_delete_cascade_models(model)
+            DeletionGraph.get_soft_delete_cascade_models(binding)
             if soft_delete_fields
-            else [(cascade_model, False) for cascade_model in DeletionGraph.get_cascade_models(model)]
+            else [(cascade_model, False) for cascade_model in DeletionGraph.get_cascade_models(binding)]
         )
+        reached_bindings = {binding._model: binding}
         for cascade_model, is_soft in reached[1:]:
+            cascade_binding = binding.graph.get_binding(cascade_model)
+            reached_bindings[cascade_model] = cascade_binding
             if is_soft:
-                soft_delete_field = cast("str", cascade_model._meta.soft_delete_field)
-                events.append(cls.build_event(client, cascade_model, RowOperation.UPDATE, None, (soft_delete_field,)))
+                soft_delete_field: str = cascade_binding.soft_delete_field  # type: ignore[assignment]
+                events.append(
+                    cls.build_event(
+                        client,
+                        cascade_binding,
+                        RowOperation.UPDATE,
+                        None,
+                        (soft_delete_field,),
+                    )
+                )
             else:
-                events.append(cls.build_event(client, cascade_model, RowOperation.DELETE, None, None))
-        for reached_model in dict.fromkeys(cascade_model for cascade_model, _is_soft in reached):
-            for backward_field, foreign_key in DeletionGraph.get_backward_relations(reached_model):
+                events.append(cls.build_event(client, cascade_binding, RowOperation.DELETE, None, None))
+        for reached_binding in reached_bindings.values():
+            for backward_field, foreign_key in DeletionGraph.get_backward_relations(reached_binding):
                 if foreign_key.on_delete in {OnDelete.SET_NULL, OnDelete.SET_DEFAULT}:
                     events.append(
                         cls.build_event(
                             client,
-                            backward_field.related_model,
+                            backward_field.get_related_binding(),
                             RowOperation.UPDATE,
                             None,
                             (foreign_key.model_field_name,),
                         )
                     )
-            for relation_name in sorted(reached_model._meta.many_to_many_fields):
-                relation = cast("ManyToManyFieldInstance[Any]", reached_model._meta.fields_map[relation_name])
+            for relation_name in sorted(reached_binding.many_to_many_fields):
+                relation: ManyToManyFieldInstance[Any] = reached_binding.fields_map[relation_name]  # type: ignore[assignment]
                 related_name = getattr(relation, "related_name", None)
                 events.append(
                     cls.build_event(
                         client,
-                        relation.related_model,
+                        relation.get_related_binding(),
                         RowOperation.UPDATE,
                         None,
                         (related_name,) if related_name else None,
@@ -157,7 +169,7 @@ class ChangeEvents:
     @staticmethod
     def build_event(
         client: DatabaseClient,
-        model: type[Model],
+        binding: ModelBinding,
         operation: RowOperation,
         pks: Iterable[Any] | None,
         fields: Iterable[str] | None,
@@ -166,7 +178,7 @@ class ChangeEvents:
 
         Args:
             client: The connection the write ran on.
-            model: The model.
+            binding: The model.
             operation: What the write did.
             pks: The primary keys, None when not known.
             fields: The fields set, None when not known.
@@ -174,29 +186,30 @@ class ChangeEvents:
         Returns:
             The event.
         """
+        model = binding._model
         return RowsChanged(
             model=model,
+            binding=binding,
             operation=operation,
-            pks=None if pks is None else ChangeEvents.get_shown_pks(model, pks),
+            pks=None if pks is None else ChangeEvents.get_shown_pks(binding, pks),
             fields=None if fields is None else tuple(fields),
             connection_alias=client.connection_alias,
         )
 
     @staticmethod
-    def get_shown_pks(model: type[Model], pks: Iterable[Any]) -> tuple[Any, ...]:
+    def get_shown_pks(binding: ModelBinding, pks: Iterable[Any]) -> tuple[Any, ...]:
         """The primary keys an event shows - a sensitive field's part of a key hidden, as everywhere
         else an observer, a log or an outbox reads.
 
         Args:
-            model: The model.
+            binding: The model.
             pks: The keys.
 
         Returns:
             The keys.
         """
-        meta = model._meta
-        names = meta.primary_key_attribute_names
-        fields_map = meta.fields_map
+        names = binding.primary_key_attribute_names
+        fields_map = binding.fields_map
         hidden_positions = [position for position, name in enumerate(names) if fields_map[name].sensitive]
         if not hidden_positions:
             return tuple(pks)
@@ -222,7 +235,7 @@ class ChangeEvents:
         # Deferred: the client module imports the instrumentation package.
         from hare.dialects.base.client.transaction_client import TransactionClient
 
-        events = [event for event in events if Observers.is_observed(RowsChanged, event.model)]
+        events = [event for event in events if Observers.is_observed(RowsChanged, event.model, binding=event.binding)]
         if not events:
             return
         if isinstance(client, TransactionClient) and not client._is_transaction_finished():
@@ -240,9 +253,6 @@ class ChangeEvents:
             events: The events.
         """
         # The writes an observer makes report their own events.
-        token = cls.reported_as_a_whole.set(False)
-        try:
+        with cls.reporting_separately():
             for event in events:
                 await Observers.deliver(event)
-        finally:
-            cls.reported_as_a_whole.reset(token)

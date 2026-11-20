@@ -3,7 +3,6 @@ holding a quote, a backslash or a line break was read back with the server's esc
 it changed after every migrate, and an AlterField changing only a description or a table's
 description changed nothing."""
 
-import os
 import textwrap
 
 import pytest
@@ -20,10 +19,7 @@ class Note(Model):
 """
 
 
-@pytest.fixture(autouse=True)
-def skip_without_clickhouse():
-    if not os.getenv("HARE_TEST_DB", "").startswith("clickhouse"):
-        pytest.skip("runs against the ClickHouse test server - make test_clickhouse")
+pytestmark = pytest.mark.usefixtures("skip_without_clickhouse")
 
 
 @pytest.mark.asyncio

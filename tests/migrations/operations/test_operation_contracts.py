@@ -103,10 +103,11 @@ def test_a_later_change_of_the_model_takes_the_place_of_an_options_or_table_chan
     earlier = operation_class("Item", {}) if operation_class is AlterModelOptions else operation_class("Item", "a")
     later = operation_class("item", {"x": 1}) if operation_class is AlterModelOptions else operation_class("item", "b")
     deleted = DeleteModel("Item")
-    assert earlier.reduce(later, APP_LABEL) == [later]
-    assert earlier.reduce(deleted, APP_LABEL) == [deleted]
+    assert earlier.get_rewrite(later, APP_LABEL).operations == (later,)
+    assert earlier.get_rewrite(deleted, APP_LABEL).operations == (deleted,)
     # Another model's operation moves across it.
-    assert earlier.reduce(DeleteModel("Other"), APP_LABEL) is True
+    assert earlier.get_rewrite(DeleteModel("Other"), APP_LABEL) is None
+    assert earlier.can_move_across(DeleteModel("Other"), APP_LABEL) is True
 
 
 @pytest.mark.database_independent
@@ -130,10 +131,11 @@ def test_an_operation_running_sql_against_any_table_may_touch_any_model(operatio
 @pytest.mark.database_independent
 def test_the_effect_of_an_operation():
     state = get_item_state()
-    assert PlainOperation().get_effect(APP_LABEL, state, SQLITE).loses_data is False
-    dropped = DeleteModel("Item").get_effect(APP_LABEL, state, SQLITE)
+    editor = SQLITE.schema_editor_class(FakeClient("sqlite"), collect_sql=True)
+    assert PlainOperation().get_effect(APP_LABEL, state, state, editor).loses_data is False
+    dropped = DeleteModel("Item").get_effect(APP_LABEL, state, State(), editor)
     assert (dropped.loses_data, dropped.reason) == (True, "drops the table of Item with its rows")
-    state_only = DeleteModel("Item", state_only=True).get_effect(APP_LABEL, state, SQLITE)
+    state_only = DeleteModel("Item", state_only=True).get_effect(APP_LABEL, state, State(), editor)
     assert state_only.loses_data is False
 
 
@@ -182,7 +184,11 @@ async def test_a_safe_not_null_alteration_going_back_makes_the_column_nullable_a
 
     async def alter_field(old_model, new_model, field_name):
         altered.append(
-            (old_model._meta.fields_map[field_name].null, new_model._meta.fields_map[field_name].null, field_name)
+            (
+                old_model.fields_map[field_name].null,
+                new_model.fields_map[field_name].null,
+                field_name,
+            )
         )
 
     # Going back, the state after the operation is left for the one before it.

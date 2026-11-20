@@ -39,8 +39,5 @@ JSON_SCHEMA_ONLY_CONSTRAINTS = ("readOnly", "format")
 #: name and hash don't follow the creator's own file.
 PYDANTIC_MODELS_MODULE = "hare.contrib.pydantic"
 
-#: The attribute a schema class keeps the checks of its fields in - read on every validated instance.
-FETCHED_FIELD_CHECKS_ATTRIBUTE = "_hare_fetched_field_checks"
-
 #: The relations holding many rows for one row - a related value goes through relations to one row only.
 TO_MANY_RELATION_TYPES = frozenset({RelationType.MANY_TO_MANY, RelationType.BACKWARD_FOREIGN_KEY})

@@ -7,6 +7,7 @@ from hare.classes.value_descriptions import ValueDescriptions
 from hare.dialects.base.search.text_search import TextSearch
 from hare.dialects.sqlite.indexes.full_text_index import FullTextIndex
 from hare.dialects.sqlite.search.constants import (
+    FULL_TEXT_INDEX_REQUIRED_FEATURE,
     SQLITE_FULL_TEXT_EXCLUDING_ALTERNATIVE_MESSAGE,
     SQLITE_FULL_TEXT_NOT_OPERATOR,
     SQLITE_FULL_TEXT_QUERY_OPERATORS,
@@ -22,7 +23,6 @@ from hare.exceptions import ConfigurationError, QueryError, UnSupportedError, Va
 from hare.fields import FloatField, TextField
 from hare.fields.constants import NULL_BYTE_MESSAGE
 from hare.query.expressions import ExpressionContext, ExpressionResult
-from hare.search.constants import FULL_TEXT_INDEX_REQUIRED_FEATURE
 from hare.search.enums import SearchOperator, SearchType
 from hare.search.query.search_query import SearchQuery
 from hare.search.search_arguments import SearchArguments
@@ -33,7 +33,7 @@ from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
     from hare.fields.field import Field
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.search import CombinedSearchQuery, SearchHeadline, SearchQueryCombinable, SearchRank
 
 
@@ -43,11 +43,11 @@ class SqliteTextSearch(TextSearch):
     to some fields of the index carries an FTS5 column filter."""
 
     @staticmethod
-    def get_index(model: type[Model], field_names: Iterable[str], searched_name: str) -> FullTextIndex:
+    def get_index(binding: ModelBinding, field_names: Iterable[str], searched_name: str) -> FullTextIndex:
         """The model's full-text index over the fields.
 
         Args:
-            model: The model.
+            binding: The model binding.
             field_names: The searched fields.
             searched_name: What searches them, for the message.
 
@@ -57,8 +57,9 @@ class SqliteTextSearch(TextSearch):
         Raises:
             UnSupportedError: No ``FullTextIndex`` of the model covers the fields.
         """
+        model = binding._model
         field_names = tuple(field_names)
-        index = FullTextIndex.get_covering(model, field_names)
+        index = FullTextIndex.get_covering(binding, field_names)
         if index is None:
             raise UnSupportedError(
                 f"{model.__name__}: {searched_name} on SQLite needs a FullTextIndex over {list(field_names)!r} in "
@@ -111,6 +112,7 @@ class SqliteTextSearch(TextSearch):
         return term
 
     def get_query_result(self, query: SearchQuery, expression_context: ExpressionContext) -> ExpressionResult:
+        self.check_query(query, expression_context)
         if query.invert:
             raise UnSupportedError(
                 "~SearchQuery can't run on SQLite on its own: FTS5 negates a query only as the right side of "
@@ -121,7 +123,6 @@ class SqliteTextSearch(TextSearch):
             query,
             "value",
             expression_context,
-            treat_str_as_field=False,
             literal_check=lambda text: self.raise_if_text_unsearchable(text, search_type),
         )
         return ExpressionResult(term=FullTextQuery(text_result.term, search_type), joins=text_result.joins)
@@ -198,10 +199,11 @@ class SqliteTextSearch(TextSearch):
         return field_names
 
     def get_rank_result(self, rank: SearchRank, expression_context: ExpressionContext) -> ExpressionResult:
+        self.check_rank(rank, expression_context)
         SearchFeatures.raise_if_unsupported(expression_context, "SearchRank", FULL_TEXT_INDEX_REQUIRED_FEATURE)
         field_names = self.get_ranked_field_names(rank)
-        model = expression_context.model
-        index = self.get_index(model, field_names, "SearchRank")
+        binding = expression_context.binding
+        index = self.get_index(binding, field_names, "SearchRank")
         field_weights: dict[str, float] = rank.weights if isinstance(rank.weights, dict) else {}
         unknown_weight_names = set(field_weights) - set(index.fields)
         if unknown_weight_names:
@@ -209,25 +211,29 @@ class SqliteTextSearch(TextSearch):
                 f"SearchRank weights name {sorted(unknown_weight_names)!r} - not fields of its FullTextIndex "
                 f"{list(index.fields)!r}"
             )
-        columns = model._meta.get_column_names(field_names)
-        index_columns = model._meta.get_column_names(index.fields)
+        columns = binding.get_column_names(field_names)
+        index_columns = binding.get_column_names(index.fields)
         column_filter = "" if set(columns) == set(index_columns) else self.get_column_filter(columns)
-        query_result = SearchArguments.get_result(rank, "query_argument", expression_context, treat_str_as_field=False)
+        query_result = SearchArguments.get_result(rank, "query_argument", expression_context)
         query = self.get_query_term(query_result.term, "SearchRank")
         weights = (
             tuple(float(field_weights.get(field_name, 1.0)) for field_name in index.fields) if field_weights else ()
         )
-        row_key = HareSqlField(index.get_row_key_column(model), table=expression_context.table)
+        row_key = HareSqlField(
+            index.get_row_key_column(binding),
+            table=expression_context.table,
+        )
         term = FullTextRank(
             row_key,
-            index.get_table_name(model),
+            index.get_table_name(binding),
             query.with_column_filter(column_filter),
             weights,
-            index_schema=model._meta.schema,
+            index_schema=binding.schema,
         )
         return ExpressionResult(term=term, joins=query_result.joins, output_field=FloatField())
 
     def get_headline_result(self, headline: SearchHeadline, expression_context: ExpressionContext) -> ExpressionResult:
+        self.check_headline(headline, expression_context)
         SearchFeatures.raise_if_unsupported(expression_context, "SearchHeadline", FULL_TEXT_INDEX_REQUIRED_FEATURE)
         if not isinstance(headline.expression, str):
             raise UnSupportedError(
@@ -250,24 +256,25 @@ class SqliteTextSearch(TextSearch):
                 "SearchHeadline on SQLite needs fragment_delimiter with max_words - FTS5's snippet() "
                 "marks the text left out with no text of its own"
             )
-        model = expression_context.model
+        binding = expression_context.binding
         field_name = headline.expression
-        index = self.get_index(model, (field_name,), "SearchHeadline")
-        query_result = SearchArguments.get_result(
-            headline, "query_argument", expression_context, treat_str_as_field=False
-        )
+        index = self.get_index(binding, (field_name,), "SearchHeadline")
+        query_result = SearchArguments.get_result(headline, "query_argument", expression_context)
         query = self.get_query_term(query_result.term, "SearchHeadline")
-        row_key = HareSqlField(index.get_row_key_column(model), table=expression_context.table)
+        row_key = HareSqlField(
+            index.get_row_key_column(binding),
+            table=expression_context.table,
+        )
         term = FullTextHeadline(
             row_key,
-            index.get_table_name(model),
+            index.get_table_name(binding),
             query.with_column_filter(""),
             index.fields.index(field_name),
             headline.start_sel,
             headline.stop_sel,
             headline.fragment_delimiter or "",
             headline.max_words,
-            index_schema=model._meta.schema,
+            index_schema=binding.schema,
         )
         return ExpressionResult(term=term, joins=query_result.joins, output_field=TextField())
 
@@ -290,19 +297,21 @@ class SqliteTextSearch(TextSearch):
             raise UnSupportedError(
                 "__search on SQLite searches a model's field through its FullTextIndex - not an annotation"
             )
-        model = searched_field.model
         field_name = searched_field.model_field_name
-        index = self.get_index(model, (field_name,), f"{field_name}__search")
+        model_binding = searched_field.get_binding().model_binding
+        index = self.get_index(model_binding, (field_name,), f"{field_name}__search")  # type: ignore[arg-type]
         query = (
             value
             if isinstance(value, (FullTextQuery, FullTextQueryCombination))
             else FullTextQuery(value, SearchType.PLAIN)
         )
-        column_filter = self.get_column_filter(model._meta.get_column_names([field_name]))
-        row_key = HareSqlField(index.get_row_key_column(model), table=term.table)
+        column_filter = self.get_column_filter(
+            model_binding.get_column_names([field_name])  # type: ignore[union-attr]
+        )
+        row_key = HareSqlField(index.get_row_key_column(model_binding), table=term.table)  # type: ignore[arg-type]
         return FullTextMatch(
             row_key,
-            index.get_table_name(model),
+            index.get_table_name(model_binding),  # type: ignore[arg-type]
             query.with_column_filter(column_filter),
-            index_schema=model._meta.schema,
+            index_schema=model_binding.schema,  # type: ignore[union-attr]
         )

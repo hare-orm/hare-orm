@@ -11,12 +11,14 @@ from tests.shared_models.testmodels import (
     Author,
     Book,
     CompositePkThing,
+    DocumentRevisionNote,
     Employee,
     Event,
     IntFields,
     JSONFields,
     SoftDeleteStandalone,
     Tournament,
+    VersionedDocument,
 )
 
 
@@ -79,6 +81,7 @@ async def test_after_cursor_reaches_end_with_no_gaps_or_duplicates(db, intfields
         if not page:
             break
         collected.extend(row.intnum for row in page)
+        assert collected == full[: len(collected)], "Cursor page repeated, skipped or exceeded the expected rows"
         cursor = (page[-1].intnum,)
 
     assert collected == full
@@ -158,6 +161,7 @@ async def test_after_cursor_with_related_field_ordering_paginates_full_set_no_ga
         if not page:
             break
         collected.extend(row.name for row in page)
+        assert collected == full[: len(collected)], "Cursor page repeated, skipped or exceeded the expected rows"
         cursor = (page[-1].tournament.name,)
 
     assert collected == full
@@ -277,6 +281,23 @@ async def test_after_cursor_with_composite_pk_ordering(db):
     assert [(row.thing_id, row.revision) for row in rows] == [(1, 2), (2, 1)]
 
 
+@pytest.mark.parametrize("ordering", ["document", "document__pk"])
+@pytest.mark.asyncio
+async def test_cursor_expands_each_component_of_a_related_primary_key(db, ordering):
+    for title in ("first", "second", "third"):
+        document = await VersionedDocument.objects.create(title=title)
+        await DocumentRevisionNote.objects.create(document=document, note=title)
+    query = DocumentRevisionNote.objects.order_by(ordering, "id").select_related("document")
+    rows = await query
+    expected = sorted(rows, key=lambda row: (row.document.id, row.document.version, row.id))
+    assert [row.id for row in rows] == [row.id for row in expected]
+    for index, row in enumerate(rows):
+        cursor = query.cursor_values(row)
+        assert cursor == (row.document.id, row.document.version, row.id)
+        assert [item.id for item in await query.after_cursor(*cursor)] == [item.id for item in expected[index + 1 :]]
+        assert [item.id for item in await query.before_cursor(*cursor)] == [item.id for item in expected[:index]]
+
+
 @pytest.mark.asyncio
 async def test_after_cursor_with_distinct(db, events_data):
     rows = await Event.objects.all().order_by("name").after_cursor("E1").distinct()
@@ -347,6 +368,7 @@ async def test_after_cursor_nullable_ordering_column_no_gaps(db, intfields_with_
         if not page:
             break
         collected.extend((row.intnum_null, row.id) for row in page)
+        assert collected == full[: len(collected)], "Cursor page repeated, skipped or exceeded the expected rows"
         cursor = (page[-1].intnum_null, page[-1].id)
 
     assert collected == full
@@ -410,18 +432,11 @@ NULL_PLACEMENT_ORDERINGS = [
 ]
 
 
-@pytest_asyncio.fixture
-async def intfields_scores_data(db):
-    """intnum 1..5 with intnum_null 1, NULL, 2, 3, NULL."""
-    for number, score in [(1, 1), (2, None), (3, 2), (4, 3), (5, None)]:
-        await IntFields.objects.create(intnum=number, intnum_null=score)
-
-
 @pytest.mark.parametrize("ordering_factory,expected", NULL_PLACEMENT_ORDERINGS)
 @pytest.mark.parametrize("page_size", [1, 2, 3])
 @pytest.mark.asyncio
 async def test_after_cursor_explicit_null_placement_no_gaps_or_duplicates(
-    intfields_scores_data, ordering_factory, expected, page_size
+    scores_data, ordering_factory, expected, page_size
 ):
     """Every page boundary - value rows, the first NULL row, the last NULL row - keeps the full
     walk identical to the unpaginated ordering, on every dialect."""
@@ -438,6 +453,7 @@ async def test_after_cursor_explicit_null_placement_no_gaps_or_duplicates(
         if not page:
             break
         collected.extend(row.intnum for row in page)
+        assert collected == full[: len(collected)], "Cursor page repeated, skipped or exceeded the expected rows"
         cursor = (page[-1].intnum_null, page[-1].intnum)
 
     assert collected == expected
@@ -445,9 +461,7 @@ async def test_after_cursor_explicit_null_placement_no_gaps_or_duplicates(
 
 @pytest.mark.parametrize("ordering_factory,expected", NULL_PLACEMENT_ORDERINGS)
 @pytest.mark.asyncio
-async def test_after_cursor_explicit_null_placement_null_boundary_value(
-    intfields_scores_data, ordering_factory, expected
-):
+async def test_after_cursor_explicit_null_placement_null_boundary_value(scores_data, ordering_factory, expected):
     """A cursor sitting on the FIRST NULL row: what follows is every remaining row of the ordering."""
     page = await IntFields.objects.all().order_by(ordering_factory(), "intnum").after_cursor(None, 2).limit(10)
     assert [row.intnum for row in page] == expected[expected.index(2) + 1 :]
@@ -458,7 +472,7 @@ async def test_after_cursor_explicit_null_placement_null_boundary_value(
 
 @pytest.mark.parametrize("ordering_factory,expected", NULL_PLACEMENT_ORDERINGS)
 @pytest.mark.asyncio
-async def test_after_cursor_explicit_null_placement_value_boundary(intfields_scores_data, ordering_factory, expected):
+async def test_after_cursor_explicit_null_placement_value_boundary(scores_data, ordering_factory, expected):
     """A cursor on a real value row (intnum 3, score 2): the NULL group counts as after it exactly
     when the ordering places NULLs last."""
     page = await IntFields.objects.all().order_by(ordering_factory(), "intnum").after_cursor(2, 3).limit(10)
@@ -467,9 +481,7 @@ async def test_after_cursor_explicit_null_placement_value_boundary(intfields_sco
 
 @pytest.mark.parametrize("ordering_factory,expected", NULL_PLACEMENT_ORDERINGS)
 @pytest.mark.asyncio
-async def test_iterator_explicit_null_placement_visits_every_row_once(
-    intfields_scores_data, ordering_factory, expected
-):
+async def test_iterator_explicit_null_placement_visits_every_row_once(scores_data, ordering_factory, expected):
     iterated = [row.intnum async for row in IntFields.objects.all().order_by(ordering_factory(), "intnum").iterator(2)]
     assert iterated == expected
 
@@ -493,6 +505,7 @@ async def test_after_cursor_explicit_null_placement_with_duplicate_values(db):
         if not page:
             break
         collected.extend(row.intnum for row in page)
+        assert collected == full[: len(collected)], "Cursor page repeated, skipped or exceeded the expected rows"
         cursor = (page[-1].intnum_null, page[-1].intnum)
     assert collected == full
 
@@ -517,6 +530,7 @@ async def test_after_cursor_explicit_null_placement_related_field_from_left_join
         if not page:
             break
         collected.append(page[0].name)
+        assert collected == full[: len(collected)], "Cursor page repeated, skipped or exceeded the expected rows"
         manager_name = "Boss" if page[0].name.startswith("Worker") else None
         cursor = (manager_name, page[0].name)
     assert collected == full

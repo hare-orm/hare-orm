@@ -18,6 +18,7 @@ from hare.fields.field import Field
 from hare.fields.generated_field import GeneratedField
 from hare.migrations.autodetection.operation_generator import OperationGenerator
 from hare.migrations.autodetection.rename_questions import RenameQuestions
+from hare.migrations.autodetection.state_signatures import StateSignatures
 from hare.migrations.operations import (
     AddConstraint,
     AddField,
@@ -46,13 +47,60 @@ from hare.migrations.state.state import State
 from hare.models import Model
 from hare.query.expressions import F, Q
 
+
+@pytest.mark.parametrize("relationship", ["foreign-key", "one-to-one"])
+@pytest.mark.parametrize("composite", [False, True], ids=["scalar-source", "composite-source"])
+@pytest.mark.parametrize("target_composite", [False, True], ids=["scalar-target", "composite-target"])
+@pytest.mark.parametrize(
+    "old_target,new_target,changed",
+    [("code", None, True), (None, "code", True), (None, "pk", False), ("pk", None, False)],
+)
+def test_implicit_relation_target_means_the_historical_primary_key(
+    relationship, composite, target_composite, old_target, new_target, changed
+):
+    primary_key = ("region", "id") if target_composite else "id"
+    old_target = primary_key if old_target == "pk" else old_target
+    new_target = primary_key if new_target == "pk" else new_target
+    relation_field = fields.ForeignKeyField if relationship == "foreign-key" else fields.OneToOneField
+    old_state = State()
+    parent_fields = [
+        ("id", fields.IntField(primary_key=not target_composite)),
+        ("code", fields.IntField(unique=True)),
+    ]
+    if target_composite:
+        parent_fields.append(("region", fields.IntField()))
+    CreateModel(
+        "Parent", parent_fields, {"primary_key_attribute": primary_key} if target_composite else {}
+    ).state_forward("models", old_state)
+    child_fields = [
+        ("id", fields.IntField(primary_key=not composite)),
+        ("parent", relation_field("models.Parent", to_field=old_target)),
+    ]
+    if composite:
+        child_fields.append(("region", fields.IntField()))
+    CreateModel("Child", child_fields, {"primary_key_attribute": ("region", "id")} if composite else {}).state_forward(
+        "models", old_state
+    )
+    new_state = old_state.clone()
+    AlterField("Child", "parent", relation_field("models.Parent", to_field=new_target)).state_forward(
+        "models", new_state
+    )
+    for __ in range(2):
+        operations = old_state.get_operations(new_state, "models").operations
+        assert [(type(operation), operation.model_name, operation.name) for operation in operations] == (
+            [(AlterField, "Child", "parent")] if changed else []
+        )
+    assert old_state.models[("models", "Child")].fields["parent"].to_field == old_target
+    assert new_state.models[("models", "Child")].fields["parent"].to_field == new_target
+
+
 pytestmark = pytest.mark.database_independent
 
 
 def build_state(app_label: str, *models: type[Model]) -> State:
     state = State()
     for model in models:
-        state.models[(app_label, model.__name__)] = ModelState.make_from_model(app_label, model)
+        state.models[(app_label, model.__name__)] = ModelState.make_from_declaration(app_label, model)
     return state
 
 
@@ -266,7 +314,7 @@ def test_indexed_field_survives_a_second_makemigrations_run_with_no_changes() ->
     makemigrations proposes nothing, no RemoveIndex dropping the index the model still declares."""
     Widget = make_model("Widget", "widget", id=fields.IntField(primary_key=True))
     widget_fields = list(build_state("models", Widget).models[("models", "Widget")].fields.items())
-    create_op = CreateModel(name="Widget", fields=widget_fields)
+    create_op = CreateModel(name="Widget", fields=widget_fields, options={"table": "widget"})
     tracked_state = State()
     create_op.state_forward("models", tracked_state)
 
@@ -322,6 +370,26 @@ def test_generate_rename_field_source_field_matrix(
     operations = OperationGenerator(old_state, new_state).generate()
     assert any(isinstance(op, RenameField) for op in operations) is expect_rename
     assert any(isinstance(op, AlterField) for op in operations) is expect_alter
+
+
+@pytest.mark.parametrize("relation", [fields.ForeignKeyField, fields.OneToOneField])
+def test_unbound_relation_reuses_the_scalar_column(relation) -> None:
+    author = make_model("Author", "author", id=fields.IntField(primary_key=True))
+    before = make_model("Book", "book", author_id=fields.IntField())
+    after = make_model("Book", "book", author=relation("models.Author", related_name="books"))
+    old_state = build_state("models", author, before)
+    new_state = build_state("models", author, after)
+
+    operations = OperationGenerator(old_state, new_state).generate()
+
+    assert [type(operation) for operation in operations] == [RenameField, AlterField]
+    rename = operations[0]
+    assert (rename.old_name, rename.new_name) == ("author_id", "author")
+    for operation in operations:
+        operation.state_forward("models", old_state)
+        model = old_state.apps.get_model("models.Book")
+        assert set(old_state.apps.get_binding(model).fields_db_projection.values()) == {"id", "author_id"}
+    assert old_state.apps.get_binding("models.Book").fields_map["author"].related_model.__name__ == "Author"
 
 
 def test_generate_two_fields_swapping_db_columns_raises() -> None:
@@ -718,7 +786,7 @@ def test_generate_pk_change_raises_instead_of_silent_noop() -> None:
     old_state = build_state("models", OldWidget)
     new_state = build_state("models", NewWidget)
 
-    with pytest.raises(Exception, match="primary key"):
+    with pytest.raises(ConfigurationError, match="primary key"):
         OperationGenerator(old_state, new_state).generate()
 
 
@@ -745,13 +813,7 @@ def test_generate_pk_rename_detected_instead_of_raising() -> None:
 
 
 def test_generate_composite_pk_component_rename_detected_instead_of_raising() -> None:
-    """Sibling of test_generate_pk_rename_detected_instead_of_raising for a COMPOSITE primary
-    key - _pk_rename_operation() used to bail unconditionally the moment either side's
-    pk_field_name was a tuple, never even checking whether field_operations already contained
-    the correct, unambiguous RenameField for the one component that changed (the exact same
-    heuristic already trusted for a single-column PK) - StateFieldDiff's own rename detection
-    has no special-casing for a PK field either way, so it already produced the right operation;
-    only the guard here was unconditionally throwing it away."""
+    """Recognize a field rename when that field is one component of the composite primary key."""
     OldWidget = make_model(
         "Widget",
         "widget",
@@ -780,6 +842,228 @@ def test_generate_composite_pk_component_rename_detected_instead_of_raising() ->
     assert rename_op.new_name == "c"
 
 
+def test_generate_multiple_composite_pk_component_renames() -> None:
+    old_model = make_model(
+        "Entry", "entry", a=fields.IntField(), b=fields.TextField(), pk=fields.CompositePrimaryKey("a", "b")
+    )
+    new_model = make_model(
+        "Entry",
+        "entry",
+        first=fields.IntField(source_field="a"),
+        second=fields.TextField(source_field="b"),
+        pk=fields.CompositePrimaryKey("first", "second"),
+    )
+    operations = OperationGenerator(
+        build_state("models", old_model),
+        build_state("models", new_model),
+        rename_questions=RenameQuestions({"models.Entry.a": "first", "models.Entry.b": "second"}),
+    ).generate()
+    assert len(operations) == 2
+    assert all(isinstance(operation, RenameField) for operation in operations)
+    assert {operation.old_name: operation.new_name for operation in operations} == {"a": "first", "b": "second"}
+
+
+@pytest.mark.parametrize("composite_target", [False, True])
+@pytest.mark.parametrize("column_names", [False, True])
+def test_generate_primary_key_relation_rename(composite_target, column_names) -> None:
+    target = (
+        make_model(
+            "Owner",
+            "owner",
+            region=fields.IntField(),
+            code=fields.TextField(),
+            pk=fields.CompositePrimaryKey("region", "code"),
+        )
+        if composite_target
+        else make_model("Owner", "owner", id=fields.IntField(primary_key=True))
+    )
+    old_key = (
+        ("owner_code", "position", "owner_region")
+        if composite_target and column_names
+        else ("owner_id", "position")
+        if column_names
+        else ("owner", "position")
+    )
+    new_key = tuple(name.replace("owner", "writer", 1) for name in old_key)
+    old_model = make_model(
+        "Entry",
+        "entry",
+        owner=fields.ForeignKeyField("models.Owner"),
+        position=fields.IntField(),
+        pk=fields.CompositePrimaryKey(*old_key),
+    )
+    new_model = make_model(
+        "Entry",
+        "entry",
+        writer=fields.ForeignKeyField("models.Owner"),
+        position=fields.IntField(),
+        pk=fields.CompositePrimaryKey(*new_key),
+    )
+    operations = OperationGenerator(
+        build_state("models", target, old_model),
+        build_state("models", target, new_model),
+        rename_questions=RenameQuestions({"models.Entry.owner": "writer"}),
+    ).generate()
+    assert len(operations) == 1
+    assert isinstance(operations[0], RenameField)
+    assert (operations[0].old_name, operations[0].new_name) == ("owner", "writer")
+
+
+@pytest.mark.parametrize("composite_target", [False, True])
+@pytest.mark.parametrize("column_names", [False, True])
+def test_primary_key_relation_columns_survive_state_snapshot(composite_target, column_names) -> None:
+    target = (
+        make_model(
+            "Owner",
+            "owner",
+            region=fields.IntField(),
+            code=fields.TextField(),
+            pk=fields.CompositePrimaryKey("region", "code"),
+        )
+        if composite_target
+        else make_model("Owner", "owner", id=fields.IntField(primary_key=True))
+    )
+    key = (
+        ("owner_region", "owner_code", "position")
+        if composite_target and column_names
+        else ("owner_id", "position")
+        if column_names
+        else ("owner", "position")
+    )
+    entry = make_model(
+        "Entry",
+        "entry",
+        owner=fields.ForeignKeyField("models.Owner"),
+        position=fields.IntField(),
+        pk=fields.CompositePrimaryKey(*key),
+    )
+    before = build_state("models", target, entry)
+    after = State.from_models(before.apps.get_models_iterable())
+    originals = [
+        {
+            key: (model.pk_field_name, StateSignatures.get_model_signature_key(model))
+            for key, model in state.models.items()
+        }
+        for state in (before, after)
+    ]
+
+    operations = OperationGenerator(before, after).generate()
+    replayed = before.clone()
+    for operation in operations:
+        operation.state_forward("models", replayed)
+
+    assert not OperationGenerator(replayed, after).generate()
+    for state, original in zip((before, after), originals, strict=True):
+        assert {
+            key: (model.pk_field_name, StateSignatures.get_model_signature_key(model))
+            for key, model in state.models.items()
+        } == original
+
+
+@pytest.mark.parametrize("rename_count", [1, 2])
+@pytest.mark.parametrize(
+    "key",
+    [
+        ("owner", "position"),
+        ("owner_region", "owner_code", "position"),
+        ("owner_code", "position", "owner_region"),
+        ("owner_region", "position", "owner_code"),
+    ],
+)
+def test_target_component_rename_preserves_referencing_primary_key_order(key, rename_count) -> None:
+    old_target = make_model(
+        "Owner",
+        "owner",
+        region=fields.IntField(source_field="region_column"),
+        code=fields.TextField(source_field="code_column"),
+        pk=fields.CompositePrimaryKey("region", "code"),
+    )
+    new_code = "token" if rename_count == 2 else "code"
+    new_target = make_model(
+        "Owner",
+        "owner",
+        area=fields.IntField(source_field="region_column"),
+        **{new_code: fields.TextField(source_field="code_column")},
+        pk=fields.CompositePrimaryKey("area", new_code),
+    )
+    replacements = {"owner_region": "owner_area"}
+    answers = {"models.Owner.region": "area"}
+    if rename_count == 2:
+        replacements["owner_code"] = "owner_token"
+        answers["models.Owner.code"] = "token"
+    new_key = tuple(replacements.get(name, name) for name in key)
+    old_entry = make_model(
+        "Entry",
+        "entry",
+        owner=fields.ForeignKeyField("models.Owner"),
+        position=fields.IntField(),
+        pk=fields.CompositePrimaryKey(*key),
+    )
+    new_entry = make_model(
+        "Entry",
+        "entry",
+        owner=fields.ForeignKeyField("models.Owner"),
+        position=fields.IntField(),
+        pk=fields.CompositePrimaryKey(*new_key),
+    )
+    before = build_state("models", old_target, old_entry)
+    after = build_state("models", new_target, new_entry)
+    operations = OperationGenerator(before, after, rename_questions=RenameQuestions(answers)).generate()
+    assert len(operations) == rename_count
+    assert all(isinstance(operation, RenameField) for operation in operations)
+    for operation in operations:
+        operation.state_forward("models", before)
+    assert before.apps.get_binding("models.Entry").primary_key_attribute == (
+        ("owner_area", f"owner_{new_code}", "position") if key[0] == "owner" else new_key
+    )
+
+
+@pytest.mark.parametrize("selected_apps", [None, ["old_app"], ["new_app"]])
+@pytest.mark.parametrize("old_columns", [False, True])
+@pytest.mark.parametrize("new_columns", [False, True])
+def test_model_move_compares_primary_key_columns_across_selected_apps(selected_apps, old_columns, new_columns) -> None:
+    target = make_model(
+        "Owner",
+        "owner",
+        {"app": "common"},
+        region=fields.IntField(),
+        code=fields.TextField(),
+        pk=fields.CompositePrimaryKey("region", "code"),
+    )
+    states = []
+    for app, columns in (("old_app", old_columns), ("new_app", new_columns)):
+        key = ("owner_region", "owner_code", "position") if columns else ("owner", "position")
+        entry = make_model(
+            "Entry",
+            "entry",
+            {"app": app},
+            owner=fields.ForeignKeyField("common.Owner", related_name=False),
+            position=fields.IntField(),
+            pk=fields.CompositePrimaryKey(*key),
+        )
+        states.append(State.from_models([target, entry]))
+    before, after = states
+    operations = OperationGenerator(
+        before,
+        after,
+        rename_questions=RenameQuestions({"old_app.Entry": "new_app.Entry"}),
+    ).generate(app_labels=selected_apps)
+    assert [type(operation) for operation in operations] == (
+        [CreateModel, DeleteModel]
+        if selected_apps is None
+        else [DeleteModel]
+        if selected_apps == ["old_app"]
+        else [CreateModel]
+    )
+    assert all(operation.state_only for operation in operations)
+    assert before.models[("old_app", "Entry")].pk_field_name == (
+        ("owner_region", "owner_code", "position") if old_columns else ("owner", "position")
+    )
+    assert after.models[("new_app", "Entry")].pk_field_name == (
+        ("owner_region", "owner_code", "position") if new_columns else ("owner", "position")
+    )
+
+
 def test_generate_composite_pk_membership_change_still_raises() -> None:
     """The guard above must still fire for a GENUINE composite-PK shape change (not a clean
     1:1 rename of one component) - gaining a member here has no single RenameField that could
@@ -805,8 +1089,51 @@ def test_generate_composite_pk_membership_change_still_raises() -> None:
     old_state = build_state("models", OldWidget)
     new_state = build_state("models", NewWidget)
 
-    with pytest.raises(Exception, match="primary key"):
+    with pytest.raises(ConfigurationError, match="primary key"):
         OperationGenerator(old_state, new_state).generate()
+
+
+@pytest.mark.parametrize("same_connection", [False, True])
+@pytest.mark.parametrize("composite", [False, True])
+@pytest.mark.parametrize("public_api", [False, True])
+def test_state_connection_aliases_determine_model_move_table_operations(
+    same_connection, composite, public_api
+) -> None:
+    states = []
+    for app, alias in (("old_app", "first"), ("new_app", "first" if same_connection else "second")):
+        model_fields = {"id": fields.IntField(primary_key=not composite, generated=False), "label": fields.TextField()}
+        if composite:
+            model_fields.update(tenant=fields.IntField(), pk=fields.CompositePrimaryKey("tenant", "id"))
+        entry = make_model("Entry", "entry", {"app": app}, **model_fields)
+        defaults = {"new_app": "previous", app: alias} if app == "old_app" else {app: alias}
+        states.append(State.from_models([entry], default_connections=defaults))
+    before, after = states
+    questions = RenameQuestions({"old_app.Entry": "new_app.Entry"})
+    operations = (
+        before.get_operations(after, "new_app", questions).operations
+        if public_api
+        else OperationGenerator(before, after, rename_questions=questions).generate(app_labels=["new_app"])
+    )
+    assert len(operations) == 1
+    assert isinstance(operations[0], CreateModel)
+    assert operations[0].state_only is same_connection
+    assert before.default_connections == {"new_app": "previous", "old_app": "first"}
+    assert after.default_connections == {"new_app": "first" if same_connection else "second"}
+
+
+def test_explicit_connection_aliases_override_state_defaults() -> None:
+    old_entry = make_model("Entry", "entry", {"app": "old_app"}, id=fields.IntField(primary_key=True))
+    new_entry = make_model("Entry", "entry", {"app": "new_app"}, id=fields.IntField(primary_key=True))
+    before = State.from_models([old_entry], default_connections={"old_app": "first"})
+    after = State.from_models([new_entry], default_connections={"new_app": "second"})
+    (operation,) = OperationGenerator(
+        before,
+        after,
+        connection_by_app={"old_app": "shared", "new_app": "shared"},
+        rename_questions=RenameQuestions({"old_app.Entry": "new_app.Entry"}),
+    ).generate(app_labels=["new_app"])
+    assert isinstance(operation, CreateModel)
+    assert operation.state_only
 
 
 def test_generate_alter_field_when_generated_sql_changes() -> None:
@@ -855,6 +1182,10 @@ def test_generate_recreate_generated_field_restores_indexes_constraints() -> Non
     OldWidget = make_model(
         "Widget",
         "widget",
+        {
+            "indexes": (GinIndex(fields=("search_vector",)),),
+            "constraints": (UniqueConstraint(fields=("title", "search_vector")),),
+        },
         id=fields.IntField(primary_key=True),
         title=fields.TextField(),
         body=fields.TextField(),
@@ -863,15 +1194,15 @@ def test_generate_recreate_generated_field_restores_indexes_constraints() -> Non
     NewWidget = make_model(
         "Widget",
         "widget",
+        {
+            "indexes": (GinIndex(fields=("search_vector",)),),
+            "constraints": (UniqueConstraint(fields=("title", "search_vector")),),
+        },
         id=fields.IntField(primary_key=True),
         title=fields.TextField(),
         body=fields.TextField(),
         search_vector=TSVectorField(source_fields=("title", "body"), config="english", db_index=True),
     )
-    OldWidget._meta.indexes = (GinIndex(fields=("search_vector",)),)
-    OldWidget._meta.constraints = (UniqueConstraint(fields=("title", "search_vector")),)
-    NewWidget._meta.indexes = (GinIndex(fields=("search_vector",)),)
-    NewWidget._meta.constraints = (UniqueConstraint(fields=("title", "search_vector")),)
 
     old_state = build_state("models", OldWidget)
     new_state = build_state("models", NewWidget)
@@ -896,7 +1227,7 @@ def test_generate_alter_field_for_an_unrelated_pk_attribute_change_does_not_drop
     unrelated attribute change on an auto-increment pk (description here, but equally nullability
     or an index) triggered a drop-and-recreate of the PRIMARY KEY column itself instead of a
     plain AlterField - which would break every FK referencing it. Mirrors
-    BaseSchemaEditor._alter_generated_field()'s own identical pk exclusion."""
+    BaseSchemaEditor.raise_if_generated_field_changes()'s own identical pk exclusion."""
     OldWidget = make_model("Widget", "widget", id=fields.IntField(primary_key=True), name=fields.TextField())
     NewWidget = make_model(
         "Widget", "widget", id=fields.IntField(primary_key=True, description="Primary key"), name=fields.TextField()
@@ -917,10 +1248,20 @@ def test_opclasses_only_index_change_is_detected() -> None:
     were all unchanged but whose opclasses were swapped (a real DDL change - a different operator
     class) matched the old signature and was silently treated as a no-op, so the autodetector
     never generated the RemoveIndex+AddIndex needed to actually apply it."""
-    OldWidget = make_model("Widget", "widget", id=fields.IntField(primary_key=True), data=fields.TextField())
-    NewWidget = make_model("Widget", "widget", id=fields.IntField(primary_key=True), data=fields.TextField())
-    OldWidget._meta.indexes = (GinIndex(fields=("data",), name="widget_data_idx", opclasses=("gin_trgm_ops",)),)
-    NewWidget._meta.indexes = (GinIndex(fields=("data",), name="widget_data_idx", opclasses=("gin__int_ops",)),)
+    OldWidget = make_model(
+        "Widget",
+        "widget",
+        {"indexes": (GinIndex(fields=("data",), name="widget_data_idx", opclasses=("gin_trgm_ops",)),)},
+        id=fields.IntField(primary_key=True),
+        data=fields.TextField(),
+    )
+    NewWidget = make_model(
+        "Widget",
+        "widget",
+        {"indexes": (GinIndex(fields=("data",), name="widget_data_idx", opclasses=("gin__int_ops",)),)},
+        id=fields.IntField(primary_key=True),
+        data=fields.TextField(),
+    )
 
     old_state = build_state("models", OldWidget)
     new_state = build_state("models", NewWidget)
@@ -1623,39 +1964,49 @@ def test_generate_create_model_mutual_fk_cycle_defers_one_field() -> None:
     assert set(tracked_state.models) == {("models", "Team"), ("models", "Player")}
 
 
-def test_generate_delete_model_mutual_fk_cycle_defers_one_field() -> None:
-    """Mirror of test_generate_create_model_mutual_fk_cycle_defers_one_field for deletion: two
-    EXISTING models with a genuine mutual FK cycle, both removed in the same autodetect round,
-    reproduce the identical cycle on the way out - DeleteModel.state_forward() would otherwise
-    always raise IncompatibleStateError (the still-referenced model, regardless of delete order)
-    for whichever of the two models is dropped second. One field must be removed via RemoveField
-    BEFORE either DeleteModel runs, breaking the cycle the same way CreateModel's own
-    exclude_fields=+AddField-after breaks it on the way in."""
+@pytest.mark.parametrize("relation_count", [1, 2])
+def test_generate_delete_model_mutual_fk_cycle_removes_parallel_relations(relation_count) -> None:
+    """Breaking a cyclic edge removes every parallel relation before deleting either model."""
     Team = make_model(
         "Team",
         "team",
         id=fields.IntField(primary_key=True),
         captain=fields.ForeignKeyField("models.Player", related_name="captained_teams", null=True),
+        **(
+            {"backup_captain": fields.ForeignKeyField("models.Player", related_name="backup_teams", null=True)}
+            if relation_count == 2
+            else {}
+        ),
     )
     Player = make_model(
         "Player",
         "player",
         id=fields.IntField(primary_key=True),
         team=fields.ForeignKeyField("models.Team", related_name="players", null=True),
+        **(
+            {"backup_team": fields.ForeignKeyField("models.Team", related_name="backup_players", null=True)}
+            if relation_count == 2
+            else {}
+        ),
     )
 
     old_state = build_state("models", Team, Player)
     new_state = build_state("models")
 
+    _, deferred = OperationGenerator._sort_by_dependencies(list(old_state.models), old_state)
+    assert len(deferred) == relation_count
     operations = OperationGenerator(old_state, new_state).generate()
     remove_field_ops = [op for op in operations if isinstance(op, RemoveField)]
     delete_ops = [op for op in operations if isinstance(op, DeleteModel)]
     assert {op.name for op in delete_ops} == {"Team", "Player"}
-    assert len(remove_field_ops) == 1
-    assert remove_field_ops[0].name in ("captain", "team")
+    assert len(remove_field_ops) == relation_count
+    assert {op.name for op in remove_field_ops} in (
+        {"captain", "backup_captain"} if relation_count == 2 else {"captain"},
+        {"team", "backup_team"} if relation_count == 2 else {"team"},
+    )
     # The RemoveField must come before BOTH DeleteModel operations - neither model may still
     # carry a live FK to the other when it's dropped.
-    assert operations.index(remove_field_ops[0]) < min(operations.index(op) for op in delete_ops)
+    assert max(operations.index(op) for op in remove_field_ops) < min(operations.index(op) for op in delete_ops)
 
     # Replaying state_forward() in generated order (what the real executor does) must not raise
     # IncompatibleStateError - this is exactly what used to fail before the fix, regardless of
@@ -1675,9 +2026,14 @@ def test_removing_a_named_expression_index_generates_remove_index_by_name() -> N
     fields"."""
     from hare.ddl.raw_sql_term import RawSQLTerm
 
-    OldWidget = make_model("Widget", "widget", id=fields.IntField(primary_key=True), name=fields.TextField())
+    OldWidget = make_model(
+        "Widget",
+        "widget",
+        {"indexes": (Index(RawSQLTerm("lower(name)"), name="widget_lower_name_idx"),)},
+        id=fields.IntField(primary_key=True),
+        name=fields.TextField(),
+    )
     NewWidget = make_model("Widget", "widget", id=fields.IntField(primary_key=True), name=fields.TextField())
-    OldWidget._meta.indexes = (Index(RawSQLTerm("lower(name)"), name="widget_lower_name_idx"),)
 
     operations = OperationGenerator(build_state("models", OldWidget), build_state("models", NewWidget)).generate()
 

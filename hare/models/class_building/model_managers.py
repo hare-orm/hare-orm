@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import inspect
-from typing import Any, cast
+from typing import Any
 
 from hare.models.enums import ModelOption
 from hare.query.managers.manager import Manager
@@ -14,7 +14,6 @@ class ModelManagers:
 
     @staticmethod
     def get_default_manager(
-        name: str,
         attributes: dict[str, Any],
         declares_objects: bool,
         meta_class: type,
@@ -25,7 +24,6 @@ class ModelManagers:
         else the ``objects`` of a base model, else a plain ``Manager``.
 
         Args:
-            name: The model's name.
             attributes: The attributes collected for the class - a base model's managers copied in.
             declares_objects: Whether the class body itself assigns ``objects``.
             meta_class: The model's ``Meta``, with its abstract ancestors' options merged in.
@@ -36,7 +34,7 @@ class ModelManagers:
         """
         objects = attributes.get("objects")
         if declares_objects:
-            return cast("Manager[Any]", objects)
+            return objects  # type: ignore[return-value]
         # Read without running the manager's descriptor - off a class it gives a queryset.
         if inspect.getattr_static(meta_class, ModelOption.MANAGER, None) is None and isinstance(objects, Manager):
             return objects

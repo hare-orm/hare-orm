@@ -22,7 +22,7 @@ POSTGRESQL_INDEX_MESSAGE = r"GistIndex\(fields=\['name'\]\) is an index of Postg
 
 
 @pytest_asyncio.fixture
-async def runner():
+async def runner(migration_context):
     client = AiosqliteClient(file_path=":memory:", connection_alias="dialect_indexes")
     await client.create_connection(with_db=True)
     try:

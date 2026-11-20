@@ -8,6 +8,7 @@ import uuid
 import pytest
 
 from hare.core.connections.connections import Connections
+from hare.core.hare_context import HareContext
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.exceptions import ConfigurationError, DecryptionError, FieldError, ValidationError
 from hare.fields import CharField, EncryptedJSONField, EncryptedTextField, GeneratedField, IntField, TextField
@@ -24,19 +25,12 @@ from tests.fields.models_encrypted import (
     SensitiveGeneratedRecord,
 )
 
-REQUIRES = ("encryption",)
-
-SECRET_KEY = "test-field-encryption-secret"
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[3]
 # Pinned: a generated schema's name (and every $ref built from it) must stay stable.
 ROOT_PUBLIC_RECORD_SCHEMA_NAME = "tests.fields.models_encrypted.EncryptedRecord:jhq63swidditdeg3"
 
 
-@pytest.fixture(autouse=True)
-def field_encryption_key():
-    FieldEncryption.configure(SECRET_KEY)
-    yield
-    FieldEncryption.reset()
+pytestmark = pytest.mark.usefixtures("field_encryption_key")
 
 
 async def fetch_raw_record_row() -> dict:
@@ -122,7 +116,7 @@ async def test_ciphertext_stored_in_database(db_encrypted_fields):
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_same_plaintext_encrypts_differently(db_encrypted_fields):
-    field = EncryptedRecord._meta.fields_map["secret"]
+    field = HareContext.require_current().apps.get_binding(EncryptedRecord).fields_map["secret"]
     assert field.to_db_value("same", EncryptedRecord) != field.to_db_value("same", EncryptedRecord)
 
 
@@ -175,7 +169,7 @@ async def test_assigned_value_is_not_decrypted(db_encrypted_fields):
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_json_field_takes_any_json_value(db_encrypted_fields):
-    field = EncryptedRecord._meta.fields_map["config"]
+    field = HareContext.require_current().apps.get_binding(EncryptedRecord).fields_map["config"]
     assert field.from_db_value(field.to_db_value(["a", "b"], EncryptedRecord)) == ["a", "b"]
     # A str is a value, as on JSONField - not JSON text.
     assert field.from_db_value(field.to_db_value("{broken", EncryptedRecord)) == "{broken"
@@ -217,8 +211,10 @@ async def test_json_has_key_lookup(db_encrypted_fields):
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_sensitive_fields(db_encrypted_fields):
-    assert EncryptedRecord._meta.sensitive_fields == frozenset({"secret", "config", "api_token", "owner", "owner_id"})
-    assert EncryptedOwner._meta.sensitive_fields == frozenset()
+    assert HareContext.require_current().apps.get_binding(EncryptedRecord).sensitive_fields == frozenset(
+        {"secret", "config", "api_token", "owner", "owner_id"}
+    )
+    assert HareContext.require_current().apps.get_binding(EncryptedOwner).sensitive_fields == frozenset()
 
 
 @pytest.mark.database_independent
@@ -233,20 +229,27 @@ def test_sensitive_defaults():
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_fields_tell_whether_they_are_sensitive(db_encrypted_fields):
-    fields_map = EncryptedRecord._meta.fields_map
+    fields_map = HareContext.require_current().apps.get_binding(EncryptedRecord).fields_map
     assert fields_map["secret"].sensitive is True
     assert fields_map["config"].sensitive is True
     assert fields_map["api_token"].sensitive is True
     assert fields_map["public_note"].sensitive is False
     assert fields_map["title"].sensitive is False
-    assert fields_map[next(iter(EncryptedRecord._meta.foreign_key_fields))].sensitive is True
+    assert (
+        fields_map[
+            next(iter(HareContext.require_current().apps.get_binding(EncryptedRecord).foreign_key_fields))
+        ].sensitive
+        is True
+    )
 
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_sensitive_is_not_part_of_migrations(db_encrypted_fields):
     for field_name in ("secret", "api_token", "owner"):
-        _path, _args, kwargs = EncryptedRecord._meta.fields_map[field_name].deconstruct()
+        _path, _args, kwargs = (
+            HareContext.require_current().apps.get_binding(EncryptedRecord).fields_map[field_name].deconstruct()
+        )
         assert "sensitive" not in kwargs
     assert StateSignatures.get_field_signature(CharField(max_length=10)) == StateSignatures.get_field_signature(
         CharField(max_length=10, sensitive=True)
@@ -559,7 +562,9 @@ async def test_distinct_that_still_works_with_encrypted_fields(db_encrypted_fiel
 async def test_generated_field_inherits_sensitive(db_encrypted_fields):
     from hare.contrib.pydantic import pydantic_model_creator
 
-    assert SensitiveGeneratedRecord._meta.sensitive_fields == frozenset({"api_token", "api_token_upper"})
+    assert HareContext.require_current().apps.get_binding(SensitiveGeneratedRecord).sensitive_fields == frozenset(
+        {"api_token", "api_token_upper"}
+    )
     assert GeneratedField(RawSQLTerm("1"), output_field=CharField(max_length=10, sensitive=True)).sensitive is True
     assert GeneratedField(RawSQLTerm("1"), output_field=IntField()).sensitive is False
     assert GeneratedField(RawSQLTerm("1"), output_field=IntField(), sensitive=True).sensitive is True
@@ -568,7 +573,12 @@ async def test_generated_field_inherits_sensitive(db_encrypted_fields):
     created = await SensitiveGeneratedRecord.objects.create(api_token="abc")
     await created.refresh_from_db()
     assert (created.api_token_upper, created.api_token_length) == ("ABC", 3)
-    _path, _args, kwargs = SensitiveGeneratedRecord._meta.fields_map["api_token_upper"].deconstruct()
+    _path, _args, kwargs = (
+        HareContext.require_current()
+        .apps.get_binding(SensitiveGeneratedRecord)
+        .fields_map["api_token_upper"]
+        .deconstruct()
+    )
     assert "sensitive" not in kwargs
 
 

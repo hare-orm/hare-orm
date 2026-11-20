@@ -6,9 +6,10 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable, Generator, Mapping
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 
-from litestar.dto import DTOField, Mark, _codegen_backend as codegen_backend
+from litestar.dto import DTOField, Mark
+from litestar.dto._backend import DTOBackend
 from litestar.dto.base_dto import AbstractDTO
 from litestar.dto.data_structures import DTOFieldDefinition
 from litestar.types.empty import Empty
@@ -20,17 +21,16 @@ from hare.contrib.frameworks.litestar.constants import (
     DTO_READ_ONLY_CONSTRAINT,
     TO_MANY_RELATION_TYPES,
 )
+from hare.contrib.frameworks.litestar.hare_dto_backend import HareDTOBackend
 from hare.contrib.frameworks.litestar.hare_dto_extra_fields import HareDTOExtraFields
-from hare.contrib.frameworks.litestar.hare_transfer_function_factory import HareTransferFunctionFactory
 from hare.exceptions import NoValuesFetched
 from hare.models import Model
 from hare.query.queryset import QuerySet, RelatedQuerySet
 from hare.query.queryset.single_rows.none_awaitable_type import NoneAwaitableType
 
 if TYPE_CHECKING:
-    from litestar.dto._backend import DTOBackend
-
     from hare.fields.field import Field
+    from hare.models.model_binding import ModelBinding
 
 
 ModelType = TypeVar("ModelType", bound=Model)
@@ -39,7 +39,10 @@ ModelType = TypeVar("ModelType", bound=Model)
 class HareDTO(AbstractDTO[ModelType], Generic[ModelType]):
     """A Litestar DTO of a hare model::
 
+        apps = Hare.bind_models(HARE_CONFIG)
+
         class BookDTO(HareDTO[Book]):
+            binding = apps.get_binding(Book)
             config = DTOConfig(exclude={"published_at"}, rename_strategy="camel")
 
         @get("/books", return_dto=BookDTO)
@@ -61,18 +64,24 @@ class HareDTO(AbstractDTO[ModelType], Generic[ModelType]):
     Besides the model's fields it answers with what a subclass declares - read-only, ``null`` where a row
     has no value for it, and named by a path through the relations for the related rows' (``"author.age"``):
     ``extra_fields`` (a query's annotation, an attribute set on the row after it was read, with its type),
-    ``computed`` (a property or method of the model, typed by its return annotation) and
+    ``computed`` (a synchronous property or method of the model, typed by its return annotation) and
     ``related_values`` (a value of a related row, flattened)::
 
         class BookDTO(HareDTO[Book]):
+            binding = apps.get_binding(Book)
             extra_fields = {"reviews_count": int}
             computed = ("title_length",)
             related_values = {"author_name": "author.name"}
+
+    Computed getters and methods receive only the row as ``self`` and must be callable without
+    additional arguments. Compute asynchronous values in the handler and expose them through ``extra_fields``.
     """
 
+    #: Structural source for schema construction; nested DTO fields use this same graph.
+    binding: ClassVar[ModelBinding | None] = None
     #: Values read from a row by name, with their types - a query's annotation, an attribute set on the row.
     extra_fields: ClassVar[Mapping[str, Any]] = {}
-    #: Properties and methods of the model, typed by their return annotations.
+    #: Synchronous properties and methods called with only self, typed by their return annotations.
     computed: ClassVar[tuple[str, ...]] = ()
     #: Values of related rows, flattened: a name to the path of the related field.
     related_values: ClassVar[Mapping[str, str]] = {}
@@ -80,20 +89,38 @@ class HareDTO(AbstractDTO[ModelType], Generic[ModelType]):
     declared_extra_fields: ClassVar[HareDTOExtraFields | None] = None
 
     @classmethod
+    def get_model_binding(cls, model_type: type[Model]) -> ModelBinding:
+        """Choose metadata once when Litestar prepares its DTO, using an explicit registry if supplied."""
+        from hare.core.hare_context import HareContext
+
+        if cls.binding is not None:
+            return cls.binding.graph.get_binding(model_type)
+        return HareContext.require_current().get_model_binding(model_type)
+
+    @classmethod
     def create_for_field_definition(
         cls, field_definition: FieldDefinition, handler_id: str, backend_class: type[DTOBackend] | None = None
     ) -> None:
         cls.config = dataclasses.replace(
             cls.config,
-            exclude={cls.get_litestar_path(cls.model_type, path) for path in cls.config.exclude},
-            include={cls.get_litestar_path(cls.model_type, path) for path in cls.config.include},
+            exclude={
+                cls.get_litestar_path(cls.get_model_binding(cls.model_type), path) for path in cls.config.exclude
+            },
+            include={
+                cls.get_litestar_path(cls.get_model_binding(cls.model_type), path) for path in cls.config.include
+            },
             rename_fields={
-                cls.get_litestar_path(cls.model_type, path): name for path, name in cls.config.rename_fields.items()
+                cls.get_litestar_path(cls.get_model_binding(cls.model_type), path): name
+                for path, name in cls.config.rename_fields.items()
             },
         )
         if cls.extra_fields or cls.computed or cls.related_values:
             cls.declared_extra_fields = HareDTOExtraFields(
-                cls.model_type, cls.extra_fields, cls.computed, cls.related_values, HareDTO.read_attribute
+                cls.get_model_binding(cls.model_type),
+                cls.extra_fields,
+                cls.computed,
+                cls.related_values,
+                HareDTO.read_attribute,
             )
             cls.attribute_accessor = cls.read_with_extra_fields  # type: ignore[method-assign]
         else:
@@ -101,10 +128,7 @@ class HareDTO(AbstractDTO[ModelType], Generic[ModelType]):
             # they are, with no look for an extra field.
             cls.declared_extra_fields = None
             cls.attribute_accessor = staticmethod(HareDTO.read_attribute)  # type: ignore[method-assign]
-        # Litestar's generated transfer code - a nested row's functions too - comes from the factory its module
-        # names: the calls of HareDTO.attribute_accessor() need hare's.
-        codegen_backend.TransferFunctionFactory = HareTransferFunctionFactory  # type: ignore[misc]
-        super().create_for_field_definition(field_definition, handler_id, backend_class)
+        super().create_for_field_definition(field_definition, handler_id, backend_class or HareDTOBackend)
 
     def data_to_encodable_type(self, data: Any) -> Any:
         """Encodes a handler's response - ``null`` for no row, as from a handler returning
@@ -121,14 +145,14 @@ class HareDTO(AbstractDTO[ModelType], Generic[ModelType]):
         return super().data_to_encodable_type(data)
 
     @staticmethod
-    def get_litestar_path(model_type: type[Model], path: str) -> str:
+    def get_litestar_path(binding: ModelBinding, path: str) -> str:
         """A field's path through the relations as Litestar names it: a relation holds its row or
         ``null``, so Litestar goes through the row's place in that choice - ``author.name`` is
         ``author.0.name`` - and a list of rows adds the row's place in the list - ``tags.id`` is
         ``tags.0.0.id``. The models are bound by the time a handler's DTO is built.
 
         Args:
-            model_type: The model the path starts at.
+            binding: The binding at the start of the field path.
             path: The path, fields joined with dots.
 
         Returns:
@@ -136,10 +160,10 @@ class HareDTO(AbstractDTO[ModelType], Generic[ModelType]):
         """
         parts = path.split(DTO_PATH_SEPARATOR)
         litestar_parts: list[str] = []
-        current_model: type[Model] | None = model_type
+        current_model: ModelBinding | None = binding
         for index, part in enumerate(parts):
             litestar_parts.append(part)
-            field = None if current_model is None else current_model._meta.fields_map.get(part)
+            field = None if current_model is None else current_model.fields_map.get(part)
             next_part = parts[index + 1] if index + 1 < len(parts) else None
             if field is None or field.relation_type is None or next_part in {None, DTO_CHOICE_PLACE}:
                 current_model = None
@@ -147,7 +171,7 @@ class HareDTO(AbstractDTO[ModelType], Generic[ModelType]):
             litestar_parts.append(DTO_CHOICE_PLACE)
             if field.relation_type in TO_MANY_RELATION_TYPES:
                 litestar_parts.append(DTO_CHOICE_PLACE)
-            current_model = field.related_model  # type: ignore[attr-defined]
+            current_model = field.get_related_binding()  # type: ignore[attr-defined]
         return DTO_PATH_SEPARATOR.join(litestar_parts)
 
     @staticmethod
@@ -177,7 +201,7 @@ class HareDTO(AbstractDTO[ModelType], Generic[ModelType]):
             relation; None for a field the query didn't select (``fields=...``), not its default;
             a declared extra field's value.
         """
-        extra_field = cast("HareDTOExtraFields", cls.declared_extra_fields).find(row, name)
+        extra_field = cls.declared_extra_fields.find(row, name)  # type: ignore[union-attr]
         if extra_field is not None:
             return extra_field.read(row)
         return HareDTO.read_attribute(row, name)
@@ -205,13 +229,14 @@ class HareDTO(AbstractDTO[ModelType], Generic[ModelType]):
             except NoValuesFetched:
                 return None
         # A relation not loaded, or one of an empty key - nothing on the other side.
-        if isinstance(value, QuerySet | NoneAwaitableType):
+        if isinstance(value, (QuerySet, NoneAwaitableType)):
             return None
         return value
 
     @classmethod
     def generate_field_definitions(cls, model_type: type[Model]) -> Generator[DTOFieldDefinition]:
-        for name, field in model_type._meta.fields_map.items():
+        binding = cls.get_model_binding(model_type)
+        for name, field in binding.fields_map.items():
             yield cls.get_field_definition(model_type, name, field)
         if cls.declared_extra_fields is not None:
             for name, extra_field in cls.declared_extra_fields.get_fields(model_type).items():
@@ -244,7 +269,7 @@ class HareDTO(AbstractDTO[ModelType], Generic[ModelType]):
             relation_type is not None
             or field.generated
             or field.constraints.get(DTO_READ_ONLY_CONSTRAINT) is True
-            or name == model_type._meta.soft_delete_field
+            or name == field.get_binding().model_binding.soft_delete_field  # type: ignore[union-attr]
         )
         annotation = field.get_annotation()
         if relation_type is not None:

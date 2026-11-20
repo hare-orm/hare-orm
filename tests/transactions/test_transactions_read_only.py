@@ -7,10 +7,10 @@ import time
 import pytest
 
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.dialects.base.client import TransactionClient
 from hare.exceptions import OperationalError, QueryError, TransactionManagementError
 from hare.instrumentation.declarations import QueryExecuted, TransactionEvent
-from hare.instrumentation.observers.observer_dispatch import ObserverDispatch
 from hare.instrumentation.observers.observers import Observers
 from hare.transactions.enums import TransactionEventType
 from hare.transactions.transactions import Transactions
@@ -19,17 +19,11 @@ from tests.shared_models.testmodels import Tournament
 READ_ONLY_REJECTION = re.compile(r"read-?only", re.IGNORECASE)
 
 
-@pytest.fixture(autouse=True)
-def _clear_instrumentation_hooks():
-    Observers.process_observers.clear()
-    ObserverDispatch.pending_errors.clear()
-    yield
-    Observers.process_observers.clear()
-    ObserverDispatch.pending_errors.clear()
+pytestmark = pytest.mark.usefixtures("cleared_process_observers")
 
 
 def _dialect() -> str:
-    return Tournament._meta.connection.dialect.name
+    return HareContext.require_current().apps.get_queryset(Tournament).get_connection().dialect.name
 
 
 def _slow_query() -> str:
@@ -43,7 +37,12 @@ def _slow_query() -> str:
 
 async def _assert_query_only_off() -> None:
     if _dialect() == "sqlite":
-        _, rows = await Tournament._meta.connection.execute("PRAGMA query_only")
+        _, rows = (
+            await HareContext.require_current()
+            .apps.get_queryset(Tournament)
+            .get_connection()
+            .execute("PRAGMA query_only")
+        )
         assert rows[0][0] == 0
 
 
@@ -181,7 +180,12 @@ async def test_statement_timeout_does_not_outlive_transaction(db_truncate):
     async with Transactions.atomic(statement_timeout=0.05):
         pass
     fast_enough_but_over_timeout = "SELECT 1" if _dialect() == "sqlite" else "SELECT pg_sleep(0.2)"
-    await Tournament._meta.connection.execute(fast_enough_but_over_timeout)
+    await (
+        HareContext.require_current()
+        .apps.get_queryset(Tournament)
+        .get_connection()
+        .execute(fast_enough_but_over_timeout)
+    )
     async with Transactions.atomic() as connection:
         await connection.execute(fast_enough_but_over_timeout)
 
@@ -200,7 +204,12 @@ async def test_postgres_timeout_settings_are_transaction_local_milliseconds(db_t
     assert statement_rows[0]["value"] in {expected, f"{statement_timeout:g}s"}
     assert lock_rows[0]["value"] == statement_rows[0]["value"]
     assert read_only_rows[0]["value"] == "off"
-    _, outside_rows = await Tournament._meta.connection.execute("SELECT current_setting('statement_timeout') AS value")
+    _, outside_rows = (
+        await HareContext.require_current()
+        .apps.get_queryset(Tournament)
+        .get_connection()
+        .execute("SELECT current_setting('statement_timeout') AS value")
+    )
     assert outside_rows[0]["value"] != statement_rows[0]["value"]
 
 

@@ -1,5 +1,4 @@
 import pytest
-import pytest_asyncio
 
 from hare.contrib import test as hare_test
 from hare.exceptions import ConfigurationError, FieldError, QueryError
@@ -388,13 +387,6 @@ async def test_group_by_without_aggregate_ignores_meta_ordering(db):
 # order_by() string is dialect-specific; F("field").asc()/.desc() with nulls_first/nulls_last
 # fixes the position on every dialect.
 # ============================================================================
-
-
-@pytest_asyncio.fixture
-async def scores_data(db):
-    """intnum 1..5 with intnum_null 1, NULL, 2, 3, NULL."""
-    for number, score in [(1, 1), (2, None), (3, 2), (4, 3), (5, None)]:
-        await IntFields.objects.create(intnum=number, intnum_null=score)
 
 
 @hare_test.requires_features(dialect="sqlite")

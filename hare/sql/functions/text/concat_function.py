@@ -6,13 +6,16 @@ from typing import Any
 
 from hare.sql import SqlContext, functions
 from hare.sql.terms.values.value_wrapper import ValueWrapper
-from hare.time import Timezone
+from hare.time.system_zone import SystemZone
+from hare.time.zone_settings import ZoneSettings
 
 
 class ConcatFunction(functions.Concat):
     """``CONCAT`` of arguments - a Python literal as its text: a bool as 'true'/'false', a float as
     ``repr()`` writes it, a Decimal with every digit it has and no exponent, a date/datetime/time as ISO text;
     the dialect types what is left."""
+
+    structure_attributes = ()
 
     @staticmethod
     def format_temporal_literal(value: date) -> str:
@@ -28,7 +31,9 @@ class ConcatFunction(functions.Concat):
         if isinstance(value, datetime):
             if value.tzinfo is not None:
                 value = (
-                    value.astimezone(UTC) if Timezone.get_use_timezone() else Timezone.get_system_local_naive(value)
+                    value.astimezone(UTC)
+                    if ZoneSettings.get_use_timezone()
+                    else SystemZone.get_system_local_naive(value)
                 )
             return value.isoformat(" ")
         return value.isoformat()
@@ -49,5 +54,5 @@ class ConcatFunction(functions.Concat):
                 arg = ValueWrapper(format(arg.value, "f"))
             else:
                 arg = ValueWrapper(repr(arg.value))
-        sql = arg.get_sql(sql_context.copy(with_alias=False)) if hasattr(arg, "get_sql") else str(arg)
+        sql = super().get_arg_sql(arg, sql_context)
         return sql_context.dialect.renderers.get_concatenated_argument_sql(sql, arg)

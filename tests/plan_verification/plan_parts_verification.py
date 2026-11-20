@@ -31,15 +31,15 @@ class PlanPartsVerification:
         if cls.original_compile is not None:
             return
         cls.original_compile = PlanDescriberCompiler.compile
-        PlanDescriberCompiler.compile = staticmethod(cls.get_checked_compile(cls.original_compile))  # type: ignore[method-assign]
+        PlanDescriberCompiler.compile = staticmethod(cls.get_checked_compile(cls.original_compile))  # type: ignore[method-assign, assignment]
         for plannable_class in cls.get_plannable_classes(Plannable):
             if "plan_parts" in plannable_class.__dict__:
-                plannable_class.get_plan_description = cls.get_checked_description(  # type: ignore[method-assign]
+                plannable_class.get_plan_description = cls.get_checked_description(  # type: ignore[method-assign, assignment]
                     plannable_class.__dict__["get_plan_description"]
                 )
 
     @classmethod
-    def get_plannable_classes(cls, base: type) -> list[type]:
+    def get_plannable_classes(cls, base: type[Plannable]) -> list[type[Plannable]]:
         """Every class made from ``base`` so far, at any depth.
 
         Args:
@@ -48,7 +48,7 @@ class PlanPartsVerification:
         Returns:
             The classes.
         """
-        found: list[type] = []
+        found: list[type[Plannable]] = []
         for subclass in base.__subclasses__():
             found.append(subclass)
             found += cls.get_plannable_classes(subclass)

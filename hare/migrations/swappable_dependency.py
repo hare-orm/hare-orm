@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from hare.migrations.constants import FIRST_MIGRATION
 
 
@@ -23,12 +25,18 @@ class SwappableDependency(tuple[str, str]):
         from hare.fields.relations.swappable_model_reference import SwappableModelReference
 
         app_label = SwappableModelReference(setting).get_label().split(".", 1)[0]
+        return cls.from_app_label(setting, app_label)
+
+    @classmethod
+    def from_app_label(cls, setting: str, app_label: str) -> SwappableDependency:
+        """Build a dependency from an already selected app, without reading configuration."""
         dependency = super().__new__(cls, (app_label, FIRST_MIGRATION))
         dependency.setting = setting
         return dependency
 
-    def __getnewargs__(self) -> tuple[str]:
-        return (self.setting,)
+    def __reduce__(self) -> tuple[Any, ...]:
+        """Keep the selected app when copying or serializing migration definitions."""
+        return type(self).from_app_label, (self.setting, self[0]), vars(self)
 
 
 #: ``migrations.swappable_dependency("USER_MODEL")`` - a dependency on the app a ``swappable``

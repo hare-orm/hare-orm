@@ -5,7 +5,19 @@
 промежуточными итогами; оконные функции и их рамки. Сами агрегаты описаны в разделе
 [Функции базы данных](functions.ru.md#aggregates).
 
+Ключ результата `aggregate()` может совпадать с именем поля, связи или прежней аннотации. Выражения
+и ранее заданные фильтры продолжают читать исходное значение:
+`annotate(total=Count("books")).aggregate(total=Sum("total"))` складывает прежние счётчики и возвращает
+результат под ключом `total`. Настоящая циклическая аннотация остаётся ошибкой. Имена результата,
+различающиеся только регистром, сохраняются и при агрегации через производную таблицу.
+
 ## <a id="implicit-group-by"></a>Неявный `GROUP BY`
+
+Запрос моделей с обычным `distinct()` и `only()` или `defer()` агрегируется по фактически выбранным
+строкам, включая скрытые колонки сортировки, сохраняющие их различия. `count()` сохраняет ту же
+идентичность строк. `aggregate()` читает выбранные поля и аннотации, но не добавляет пропущенные
+колонки модели или первичные ключи в эту DISTINCT-проекцию. Запрос `values()` также сохраняет
+фактическую SQL-проекцию, возвращая значения в запрошенном публичном порядке.
 
 Неявный `GROUP BY` у агрегата в `annotate()` следует таким правилам:
 
@@ -142,6 +154,10 @@ await Loan.objects.values("branch", "genre").annotate(total=Count("id")).group_b
   branch. Считается для каждой группы, как агрегат. Читает поля, по которым запрос группирует (у
   обычного поля группировки он всегда 0); поле вне группировки или запрос без группировки отклоняет сама
   база (PostgreSQL это делает).
+- Составной ключ или связь — одно логическое поле для `Grouping()`: его колонки группируются
+  вместе и дают один бит, в том числе для псевдонима составного ключа через `F("pk")`.
+  Вычисляемое поле использует одно и то же SQL-выражение с теми же параметрами в `GROUP BY`
+  и `Grouping()`, даже если аннотация группировки объявлена раньше своего аргумента.
 - `aggregate()` над такими группами даёт `QueryError` — строки итогов посчитали бы каждую строку
   повторно.
 - Они есть в PostgreSQL (`Features.supports_grouping_sets`); в SQLite и ClickHouse группировка и
@@ -185,13 +201,13 @@ class Window(CombinableExpression):
 | `RowNumber` | `()` | `ROW_NUMBER()` |
 | `Rank` | `()` | `RANK()` |
 | `DenseRank` | `()` | `DENSE_RANK()` |
-| `NTile` | `(buckets: int)` | `NTILE(buckets)`; `buckets` — целое от 1 до 2147483647, иначе `QueryError` |
+| `NTile` | <code>(buckets: int &#124; Expression)</code> | `NTILE(buckets)`; константа `buckets` — целое от 1 до 2147483647, иначе `QueryError`; выражения вычисляет база |
 | `Sum`/`Avg`/`Max`/`Min`/`Count` | <code>(field: str &#124; Expression, condition: Q &#124; None = None)</code> | `SUM`/`AVG`/`MAX`/`MIN`/`COUNT(field)` |
 | `StdDev`/`Variance` | <code>(field: str &#124; Expression, condition: Q &#124; None = None, sample: bool = False)</code> | `STDDEV_POP`/`STDDEV_SAMP`/`VAR_POP`/`VAR_SAMP(field)` |
 | `CumeDist`/`PercentRank` | `()` | `CUME_DIST()`/`PERCENT_RANK()` |
 | `FirstValue`/`LastValue` | <code>(field: str &#124; Expression, condition: Q &#124; None = None)</code> | `FIRST_VALUE`/`LAST_VALUE(field)` |
 | `NthValue` | <code>(field: str &#124; Expression, nth: int = 1)</code> | `NTH_VALUE(field, nth)` по всей группе окна, как `LastValue`; `nth` от 1 до 2147483647, иначе `QueryError` |
-| `Lag`/`Lead` | <code>(field: str &#124; Expression, offset: int = 1, default: Any = None)</code> | `LAG`/`LEAD(field, offset, default)`; `offset` — целое от 0 до 2147483647, иначе `QueryError` |
+| `Lag`/`Lead` | <code>(field: str &#124; Expression, offset: int &#124; Expression = 1, default: Any = None)</code> | `LAG`/`LEAD(field, offset, default)`; константа `offset` — целое от 0 до 2147483647, иначе `QueryError`; выражения вычисляет база |
 
 ```python
 await Book.objects.all().annotate(
@@ -200,8 +216,9 @@ await Book.objects.all().annotate(
 )
 ```
 
-Типы результатов: `Count` — всегда `int` (и `Sum`/`Max`/`Min` над вычисляемым значением `Count()` тоже, а
-`Avg` над ним — `float`); `Avg` от целых — то, что считает база: точный `Decimal` на PostgreSQL, чьё
+Типы результатов: `Count` — всегда `int` (и `Sum`/`Max`/`Min` над вычисляемым значением `Count()` тоже);
+`Avg` от целых, включая вычисляемое значение `Count()`, — то, что считает база: точный `Decimal` на
+PostgreSQL, чьё
 среднее `numeric` обрезал бы `float`, и `float` на SQLite и ClickHouse, в том числе внутри арифметики или
 `Concat`; `Avg` от `FloatField` — `float`, от `DecimalField` — то, что считает база: на PostgreSQL
 `Decimal`, не округлённый до `decimal_places` поля (среднее с собственным масштабом деления, `1.7125`, а не
@@ -224,9 +241,11 @@ await Book.objects.all().annotate(
 > **`LastValue` всегда видит всю группу окна**
 >
 > `LastValue(field)` записывает явную рамку `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`,
-> поэтому всегда возвращает значение поля в действительно последней строке группы. Без явной рамки рамка
-> SQL по умолчанию при заданном `order_by` (`RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`) делала
-> бы `LAST_VALUE` всегда равным значению *текущей* строки — известная ловушка SQL. `FirstValue` это не
+> поэтому видит группу до последней строки. ClickHouse пропускает NULL и возвращает последнее
+> непустое значение; PostgreSQL и SQLite сохраняют NULL. Без явной рамки рамка
+> SQL по умолчанию при заданном `order_by` (`RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`) давала
+> бы `LAST_VALUE` последней строки текущей рамки, включая строки с тем же значением сортировки.
+> `FirstValue` это не
 > затрагивает (нижняя граница рамки по умолчанию и так `UNBOUNDED PRECEDING`), поэтому у него остаётся
 > рамка SQL по умолчанию. Заданный `frame=` заменяет её.
 
@@ -256,7 +275,9 @@ await Loan.objects.annotate(
   умолчанию при `order_by`. Смещению, отличному от 0, нужно окно, упорядоченное ровно по одному числовому
   полю; другой `order_by` даёт `QueryError`.
 
-Рамка без строк даёт `NULL` (`RowRange(start=1, end=2)` на последней строке группы). Функция ранжирования
+Рамка без строк даёт результат функции для пустого набора: `Count` возвращает 0, остальные агрегаты
+следуют описанным выше правилам конкретной базы. Например, `RowRange(start=1, end=2)` пуста на последней
+строке группы. Функция ранжирования
 (`RowNumber`, `Rank`, `DenseRank`, `NTile`, `CumeDist`, `PercentRank`) и `Lag`/`Lead` всегда видят всю
 группу — рамка даёт `QueryError`; так же — смещение, которое не `int` и не `None`, и `start` после `end`.
 Рамки работают одинаково в PostgreSQL, SQLite и ClickHouse.

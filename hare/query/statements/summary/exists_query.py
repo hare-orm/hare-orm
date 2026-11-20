@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Generator
 from copy import copy
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -19,11 +18,14 @@ from hare.sql.terms.criteria.basic_criterion import BasicCriterion
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
+    from hare.dialects.base.client.database_client import DatabaseClient
     from hare.sql.builder.queries.query_builder import QueryBuilder
 
 
 class ExistsQuery(RowsSummaryQuery):
     """``queryset.exists()`` - whether the queryset has any row."""
+
+    rows_source_method_name = "_get_exists_source"
 
     #: A plain SELECT 1 ... LIMIT 1 - see AwaitableQuery.is_read_only. Inherited by ContainsQuery
     #: below, which only adds a WHERE criterion on top of the same read-only query.
@@ -47,6 +49,14 @@ class ExistsQuery(RowsSummaryQuery):
         *StatementPlanDescriptions.CURSOR_SLOTS,
     )
 
+    rows_plan_slots: ClassVar[DeclaredPlanSlots] = (
+        *RowsSummaryQuery.rows_plan_slots,
+        ("_has_empty_slice", PlanKeyForm.METHOD),
+    )
+
+    def _needs_dependency_values(self) -> bool:
+        return super()._needs_dependency_values() and self._limit != 0
+
     def _has_empty_slice(self) -> bool:
         """Whether the queryset is a slice of no rows - ``[:0]``, ``.limit(0)``."""
         return self._limit == 0
@@ -66,6 +76,7 @@ class ExistsQuery(RowsSummaryQuery):
         Returns:
             The description, None for a query that keeps no plan.
         """
+        self._make_selected_rows_summary()
         if self._rows_query is not None:
             return self._describe_over_rows(True)
         if not StatementPlanDescriptions.query_state_is_plannable(self):
@@ -76,18 +87,19 @@ class ExistsQuery(RowsSummaryQuery):
         self, value_wrapper_references: RecordedValueReferences | None, *, records_for_caller: bool
     ) -> bool:
         if self._bound_rows_query is not None:
-            return self._build_statement_over_rows(value_wrapper_references)
-        self._build_rows_selection(value_wrapper_references)
-        QueryCtes.apply_with_ctes(self, value_wrapper_references=value_wrapper_references)
-        self.query._limit = self.query._wrapper_class(1)
+            self._build_statement_over_rows(value_wrapper_references)
+        else:
+            self._build_rows_selection(value_wrapper_references)
+            QueryCtes.apply_with_ctes(self, value_wrapper_references=value_wrapper_references)
+            self.query._limit = self.query._wrapper_class(1)
+            if self._offset:
+                self.query._offset = self.query._wrapper_class(self._offset)
+                if value_wrapper_references is not None:
+                    ExpressionArguments.record_literal(value_wrapper_references, self, "_offset", self.query._offset)
+            self._finalize_select_list()
         if self._has_empty_slice():
             # A slice of no rows matches none - the statement reads one row whatever the slice.
             self.query = self.query.where(BasicCriterion.always_false())
-        if self._offset:
-            self.query._offset = self.query._wrapper_class(self._offset)
-            if value_wrapper_references is not None:
-                ExpressionArguments.record_literal(value_wrapper_references, self, "_offset", self.query._offset)
-        self._finalize_select_list()
         return True
 
     applies_offset_over_rows: ClassVar[bool] = True
@@ -109,7 +121,7 @@ class ExistsQuery(RowsSummaryQuery):
         if self._offset and (self._distinct or self._distinct_on):
             self._group_by_primary_key_for_distinct()
         self.query._selects = []
-        self.query._select_other(ValueWrapper(1, allow_parametrize=False))  # type:ignore[arg-type]
+        self.query._select_other(ValueWrapper(1, allow_parametrize=False))
 
     def _group_by_primary_key_for_distinct(self) -> None:
         """Groups a sliced ``.distinct()`` query by its primary key, so the offset skips distinct
@@ -126,26 +138,20 @@ class ExistsQuery(RowsSummaryQuery):
             )
         if self.query._groupbys:
             return
-        effective_table = self._effective_basetable()
-        self.query = self.query.groupby(
-            *(
-                effective_table[self.model._meta.fields_db_projection[attribute_name]]
-                for attribute_name in self.model._meta.primary_key_attribute_names
-            )
-        )
+        RowsSummaryQuery._group_by_primary_key(self)
 
-    def __await__(self) -> Generator[Any, None, bool]:
+    async def _execute_bound(self) -> bool:
         if self._is_none or self._limit == 0:
-            return self._execute_none().__await__()
-        query = self._get_execution_query()
-        query._make_query_to_run()
-        return query._execute_with_retry_context(query._execute()).__await__()
+            return False
+        return await self._execute_scalar_summary()
 
-    async def _execute_none(self) -> bool:
-        return False
+    async def _read_scalar_summary(self, connection: DatabaseClient, sql: str, parameters: list[Any]) -> bool:
+        """Runs the statement and tells whether it returned a row.
 
-    async def _execute(
-        self,
-    ) -> bool:
-        result, _ = await self._connection.execute(*self._get_parameterized_sql(), returns_rows=True)
+        Args:
+            connection: This execution's connection.
+            sql: The statement.
+            parameters: Its parameters.
+        """
+        result, _ = await connection._execute_built(sql, parameters, returns_rows=True, retry_read=True)
         return bool(result)

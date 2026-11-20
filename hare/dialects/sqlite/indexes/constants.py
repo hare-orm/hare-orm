@@ -40,6 +40,3 @@ SQLITE_FULL_TEXT_DELETE_COMMAND = "delete"
 
 #: How a ``FullTextIndex``'s tokenizer sets it apart from another index over the same fields.
 SQLITE_FULL_TEXT_TOKENIZER_DESCRIPTION = " tokenize={tokenizer}"
-
-#: The longest ``tokenizer`` a ``FullTextIndex`` takes - a sanity ceiling.
-SQLITE_FULL_TEXT_MAX_TOKENIZER_LENGTH = 200

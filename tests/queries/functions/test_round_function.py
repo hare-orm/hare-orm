@@ -12,6 +12,7 @@ from hare.query.expressions import Case, F, Value, When
 from hare.query.functions import Avg, Round, Sum
 from tests.shared_models.testmodels import Author, Book, FloatFields
 from tests.shared_models.testmodels_postgres import ExpressionTypeParity
+from tests.utils.expression_type_parity import annotated_values, assert_same_values
 
 
 @pytest_asyncio.fixture
@@ -20,28 +21,18 @@ async def rounding_rows(db):
         await ExpressionTypeParity.objects.create(num=num, big=1, dec=dec, flag=True, grp="a", ts=datetime.now(UTC))
 
 
-async def rounded_values(expression) -> list:
-    return await ExpressionTypeParity.objects.all().annotate(c=expression).order_by("num").values_list("c", flat=True)
-
-
-def assert_same_values(actual: list, expected: list) -> None:
-    assert actual == expected
-    assert [type(value) for value in actual] == [type(value) for value in expected]
-    assert [str(value) for value in actual] == [str(value) for value in expected]
-
-
 @pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_round_decimal_quotient_to_precision(rounding_rows):
-    assert_same_values(await rounded_values(Round(F("dec") / 3, 2)), [Decimal("0.13"), Decimal("0.37")])
-    assert_same_values(await rounded_values(Round(F("dec") / 3, 3)), [Decimal("0.133"), Decimal("0.367")])
+    assert_same_values(await annotated_values(Round(F("dec") / 3, 2)), [Decimal("0.13"), Decimal("0.37")])
+    assert_same_values(await annotated_values(Round(F("dec") / 3, 3)), [Decimal("0.133"), Decimal("0.367")])
 
 
 @pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_round_decimal_field_and_default_precision(rounding_rows):
-    assert_same_values(await rounded_values(Round("dec", 1)), [Decimal("0.4"), Decimal("1.1")])
-    assert_same_values(await rounded_values(Round("dec")), [Decimal("0"), Decimal("1")])
+    assert_same_values(await annotated_values(Round("dec", 1)), [Decimal("0.4"), Decimal("1.1")])
+    assert_same_values(await annotated_values(Round("dec")), [Decimal("0"), Decimal("1")])
 
 
 @pytest.mark.postgresql_models
@@ -49,7 +40,7 @@ async def test_round_decimal_field_and_default_precision(rounding_rows):
 async def test_round_to_the_highest_precision_reads_a_whole_part(rounding_rows):
     """A result of 1000 places was decoded through a field of 1000 digits in all - 1.10 has 1001."""
     assert_same_values(
-        await rounded_values(Round("dec", 1000)), [Decimal("0.40" + "0" * 998), Decimal("1.10" + "0" * 998)]
+        await annotated_values(Round("dec", 1000)), [Decimal("0.40" + "0" * 998), Decimal("1.10" + "0" * 998)]
     )
 
 
@@ -59,9 +50,9 @@ async def test_a_decimal_tie_is_rounded_away_from_zero_exactly(db):
     """SQLite rounded the double of a Decimal - 7.35 is 7.34999... there, rounded to 7.3."""
     for num, dec in ((1, Decimal("7.35")), (2, Decimal("-7.35")), (3, Decimal("2.675"))):
         await ExpressionTypeParity.objects.create(num=num, big=1, dec=dec, flag=True, grp="a", ts=datetime.now(UTC))
-    assert_same_values(await rounded_values(Round("dec", 1)), [Decimal("7.4"), Decimal("-7.4"), Decimal("2.7")])
+    assert_same_values(await annotated_values(Round("dec", 1)), [Decimal("7.4"), Decimal("-7.4"), Decimal("2.7")])
     assert_same_values(
-        await rounded_values(Round(F("dec") * 1, 2)), [Decimal("7.35"), Decimal("-7.35"), Decimal("2.68")]
+        await annotated_values(Round(F("dec") * 1, 2)), [Decimal("7.35"), Decimal("-7.35"), Decimal("2.68")]
     )
     queryset = ExpressionTypeParity.objects.annotate(c=Round("dec", 1))
     assert await queryset.filter(c=Decimal("7.4")).values_list("num", flat=True) == [1]
@@ -71,8 +62,8 @@ async def test_a_decimal_tie_is_rounded_away_from_zero_exactly(db):
 @pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_round_integer_stays_integer(rounding_rows):
-    assert_same_values(await rounded_values(Round("num")), [2, 7])
-    assert_same_values(await rounded_values(Round(F("num") * 2, 1)), [4, 14])
+    assert_same_values(await annotated_values(Round("num")), [2, 7])
+    assert_same_values(await annotated_values(Round(F("num") * 2, 1)), [4, 14])
 
 
 @pytest.mark.asyncio
@@ -160,7 +151,7 @@ async def test_round_over_aggregate_is_grouped_and_filtered_in_having(db):
 @pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_round_of_untyped_numbers_keeps_integer_or_float(rounding_rows):
-    assert_same_values(await rounded_values(Round(F("num") * 0.5, 1)), [1.0, 3.5])
-    assert_same_values(await rounded_values(Round(Value(2.5))), [3.0, 3.0])
-    assert_same_values(await rounded_values(Round(Value(3), 1)), [3, 3])
-    assert_same_values(await rounded_values(Round(Case(When(num=2, then=F("num")), default=0.5))), [2.0, 1.0])
+    assert_same_values(await annotated_values(Round(F("num") * 0.5, 1)), [1.0, 3.5])
+    assert_same_values(await annotated_values(Round(Value(2.5))), [3.0, 3.0])
+    assert_same_values(await annotated_values(Round(Value(3), 1)), [3, 3])
+    assert_same_values(await annotated_values(Round(Case(When(num=2, then=F("num")), default=0.5))), [2.0, 1.0])

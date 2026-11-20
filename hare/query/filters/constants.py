@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime
 
 from hare.query.enums import Lookup
-from hare.sql.enums import DatePart
+from hare.sql.enums import DatePart, TruncType
 
 #: Suffix -> DatePart for the lookups of the calendar parts of a date (`__year`, `__month`, ...) a
 #: `DateField` has a real value for - also the calendar half of what a `DatetimeField`
@@ -34,7 +34,12 @@ TIME_OF_DAY_DATE_PART_LOOKUPS: dict[str, DatePart] = {
 DATETIME_DATE_PART_LOOKUPS: dict[str, DatePart] = {**CALENDAR_DATE_PART_LOOKUPS, **TIME_OF_DAY_DATE_PART_LOOKUPS}
 
 #: The segments reading a datetime's date or time of day (``created__date``, ``created__time``).
-DATETIME_CAST_SEGMENTS = frozenset({"date", "time"})
+DATETIME_CAST_SEGMENTS = frozenset({TruncType.DATE, TruncType.TIME})
+
+#: Immutable path segments derived from the lookup declarations.
+CALENDAR_DATE_PART_SEGMENTS = frozenset(CALENDAR_DATE_PART_LOOKUPS)
+TIME_OF_DAY_DATE_PART_SEGMENTS = frozenset(TIME_OF_DAY_DATE_PART_LOOKUPS)
+DATETIME_DATE_PART_SEGMENTS = DATETIME_CAST_SEGMENTS | frozenset(DATETIME_DATE_PART_LOOKUPS)
 
 
 #: Lookups of a JSON path value whose filter value is a list of JSON values.
@@ -69,8 +74,8 @@ KEY_LIST_LOOKUPS = frozenset({Lookup.HAS_KEYS, Lookup.HAS_ANY_KEYS})
 #: the datetime's date / time of day.
 DATE_TRANSFORM_VALUE_TYPES: dict[str, type] = {
     **dict.fromkeys(DATETIME_DATE_PART_LOOKUPS, int),
-    "date": datetime.date,
-    "time": datetime.time,
+    TruncType.DATE: datetime.date,
+    TruncType.TIME: datetime.time,
 }
 
 #: ISO-8601 date / datetime text a JSON `__filter` date comparison accepts - a stored string not

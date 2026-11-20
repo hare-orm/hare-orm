@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 
 from hare.exceptions import ValidationError
@@ -18,13 +19,13 @@ if TYPE_CHECKING:
 from hare.fields.data.temporal.temporal_values import TemporalValues
 
 TDate = TypeVar("TDate", datetime.date, datetime.date | None)
-DateFieldQueryValueType = TypeVar("DateFieldQueryValueType", datetime.date, int, float, str)
 
 
 class DateField(Field[TDate]):
     """A calendar date - a ``DATE`` column. Takes a ``date``, or ISO text of a full date."""
 
     field_type = datetime.date
+    accepted_value_types = (str,)
     date_function_source = DateTruncSource.DATE
 
     keeps_native_db_values = True
@@ -50,13 +51,16 @@ class DateField(Field[TDate]):
             return DayLimit(None, None, checks_time_of_day=True)
         return None
 
+    def get_assign_normalized_types(self) -> frozenset[type]:
+        return self._get_unchanged_assign_types(DateField.to_python, self.field_type)
+
     def to_python(self, value: Any) -> datetime.date | None:
         if value is not None:
             value = self.get_date_value(value)
         return value
 
     def get_lookups(self) -> dict[str, FieldLookup]:
-        """The generic lookups and the date parts of the value (``__year``, ``__hour``, ...)."""
+        """The generic lookups and the calendar parts of the value (``__year``, ``__month``, ...)."""
         # Local import: the filters package imports the fields package.
         from hare.query.filters.constants import CALENDAR_DATE_PART_LOOKUPS
         from hare.query.filters.lookups.field_lookups import FieldLookups
@@ -87,12 +91,19 @@ class DateField(Field[TDate]):
             f"{self.model_field_name}: expected a date, a datetime or an ISO 8601 string, got {type(value).__name__}"
         )
 
-    def to_db_value(
-        self, value: DateFieldQueryValueType | None, instance: type[Model] | Model | None
-    ) -> DateFieldQueryValueType | None:
-        if value is not None:
-            # A plain attribute assignment or an update() never went through from_db_value() -
-            # every accepted input is converted (or rejected) here, whichever path wrote it.
-            value = self.get_date_value(value)  # type: ignore[assignment]
-        self.validate(value)
-        return value
+    def to_db_value(self, value: Any, instance: type[Model] | Model | None) -> datetime.date | None:
+        # Every accepted input is converted here, including a plain assignment or update().
+        result = self.get_date_value(value) if value is not None else None
+        self.validate(result)
+        return result
+
+    def get_unchanged_write_types(self, converter: Callable[..., Any] | None) -> tuple[type, ...] | None:
+        # This class's to_db_value() writes a date as it is.
+        field_class = type(self)
+        if (
+            converter is None
+            and field_class.to_db_value is DateField.to_db_value
+            and field_class.get_date_value is DateField.get_date_value
+        ):
+            return (datetime.date,)
+        return None

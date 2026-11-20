@@ -3,15 +3,18 @@ import httpx
 from hare.contrib.frameworks.fastapi import HareFastAPI
 from plugin_models import Note
 
-application = HareFastAPI(hare_config="plugin_settings.HARE_ORM")
+def create_application(context):
+    application = HareFastAPI(hare_config="plugin_settings.HARE_ORM", hare_context=context)
 
 
-@application.post("/notes/{note_id}", status_code=201)
-async def create_note(note_id: int) -> None:
-    await Note.objects.create(id=note_id, text="written by the application")
+    @application.post("/notes/{note_id}", status_code=201)
+    async def create_note(note_id: int) -> None:
+        await Note.objects.create(id=note_id, text="written by the application")
+    return application
 
 
-async def write_through_application(note_id):
+async def write_through_application(note_id, context):
+    application = create_application(context)
     async with application.router.lifespan_context(application):
         transport = httpx.ASGITransport(app=application)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:

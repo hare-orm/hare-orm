@@ -5,6 +5,8 @@ from typing import Any
 from hare.query.expressions import Function
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
+from hare.query.expressions.structure.enums import ArgumentRole
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.query.functions.comparison.function_arguments import FunctionArguments
 from hare.query.functions.json.json_object import JSONObject
 from hare.sql.functions.json.json_array import JsonArray as JsonArrayTerm
@@ -14,6 +16,8 @@ class JSONArray(JSONObject):
     """A JSON array of the given values, decoded as a ``list``: ``JSONArray("name", F("price") * 2,
     5)`` - a string is a field name. Each database writes a value into it as it writes that value into
     JSON."""
+
+    structure = ExpressionStructure(positional_role=ArgumentRole.FIELD)
 
     def __init__(self, *values: Any) -> None:
         """
@@ -30,5 +34,4 @@ class JSONArray(JSONObject):
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
         value_terms, joins = self.get_json_value_terms(expression_context)
-        self.field_object = self.OUTPUT_FIELD
         return ExpressionResult(term=JsonArrayTerm(*value_terms), joins=joins, output_field=self.OUTPUT_FIELD)

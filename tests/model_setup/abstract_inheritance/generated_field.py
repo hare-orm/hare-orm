@@ -1,9 +1,4 @@
-"""Companion models for tests/model_setup/abstract_inheritance/test_abstract_model_inheritance.py.
-
-GeneratedField declared on an abstract base, inherited by two concrete siblings - the DDL/
-expression must be generated correctly and independently for each concrete subclass's own table
-(not aliased/memoized against whichever sibling's schema gets created first, the same class of
-bug round M already fixed for Index.get_expressions())."""
+"""Inherited generated fields bind independently to each concrete model and its columns."""
 
 from hare import fields
 from hare.ddl.raw_sql_term import RawSQLTerm

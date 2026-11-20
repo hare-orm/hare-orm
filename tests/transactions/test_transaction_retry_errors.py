@@ -6,6 +6,7 @@ import sqlite3
 import pytest
 
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.dialects.postgresql.drivers.rust_pg.rust_pg_driver import RustPgDriver
 from hare.dialects.sqlite.drivers.aiosqlite.aiosqlite_driver import AiosqliteDriver
 from hare.exceptions import IntegrityError, OperationalError, TransactionRetryError
@@ -118,7 +119,7 @@ def test_sqlite_driver_does_not_retry_other_errors(error):
 @pytest.mark.asyncio
 async def test_sqlite_client_translates_a_busy_database(db, tmp_path):
     busy_error = get_sqlite_busy_error(tmp_path)
-    client = Tournament._meta.connection
+    client = HareContext.require_current().apps.get_queryset(Tournament).get_connection()
     if client.dialect.name != "sqlite":
         pytest.skip("translates through the SQLite client")
     translated = client._get_operational_error(busy_error, sql="BEGIN IMMEDIATE")
@@ -173,5 +174,10 @@ async def test_retrying_the_transaction_succeeds(db_truncate):
 @pytest.mark.asyncio
 async def test_plain_query_error_stays_operational_error(db_truncate):
     with pytest.raises(OperationalError) as error_info:
-        await Tournament._meta.connection.execute("SELECT * FROM missing_table_for_retry_test")
+        await (
+            HareContext.require_current()
+            .apps.get_queryset(Tournament)
+            .get_connection()
+            .execute("SELECT * FROM missing_table_for_retry_test")
+        )
     assert type(error_info.value) is OperationalError

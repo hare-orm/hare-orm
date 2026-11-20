@@ -12,12 +12,6 @@ HARE_PACKAGE_DIRECTORY = str(pathlib.Path(__file__).resolve().parent.parent)
 #: Environment variable pointing at a Hare ORM config object (module.VARIABLE).
 ENV_HARE_ORM_CONFIG = "HARE_ORM"
 
-#: pytest-xdist sets this to the worker's id (e.g. "gw0") in each worker process, and leaves it
-#: unset in a plain (non-`-n`) pytest run. Read to give each worker a database of its own: the file of a
-#: A file database's `db_url` and the kept test databases are named per worker under `-n`.
-ENV_PYTEST_XDIST_WORKER = "PYTEST_XDIST_WORKER"
-
-
 #: A ``swappable`` config setting name - an upper-case identifier such as ``USER_MODEL``.
 SWAPPABLE_SETTING_NAME_PATTERN = re.compile(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*")
 
@@ -44,4 +38,19 @@ CONNECTION_DATABASE_ON_ANOTHER_LOOP_MESSAGE = (
     "Hare connection {connection_alias!r} was opened on another event loop, and its database lives in that "
     "connection only - a connection of this loop would open an empty database of its own. Use the database "
     "from one event loop, or a database that outlives its connections"
+)
+
+RESOURCE_COMPLETION_FAILED = "Resource release failed while its caller was cancelled"
+INITIALIZATION_RELEASE_FAILED = "Application initialization and resource release failed"
+
+
+SWAPPABLE_SETTING_NOT_INITIALIZED_MESSAGE = (
+    "Swappable setting {setting!r} is only known after Hare.init() - initialize Hare "
+    "before importing migration files that use swappable_dependency()"
+)
+
+
+#: A scalar swappable reference cannot select several model labels.
+SWAPPABLE_SETTING_MULTIPLE_MODELS_MESSAGE = (
+    "Swappable setting {setting!r} names several models - only a GenericForeignKeyField takes it"
 )

@@ -1,5 +1,5 @@
-# The Rust toolchain of the native extension - the one CI and a local `make check` both use, so a
-# check passing on one passes on the other. A new version is an update of this file.
+# The Rust toolchain shared by CI and local `make check`. Platform-specific compilation still
+# needs checks on each supported platform. Update this file to change the toolchain version.
 [toolchain]
 channel = "1.99.0"
 components = ["clippy", "rustfmt"]

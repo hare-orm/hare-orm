@@ -71,11 +71,12 @@ async def test_register_live_model_single_call_replaces_manual_steps():
 
         Hare.register_live_models([LiveWidget], app_label="dynamic")
 
-        assert LiveWidget._meta.default_connection == "default"
+        assert HareContext.require_current().apps.get_binding(LiveWidget).default_connection == "default"
         assert ctx.apps["dynamic"]["LiveWidget"] is LiveWidget
 
-        await LiveWidget._meta.connection.execute_script(
-            f'CREATE TABLE "{LiveWidget._meta.db_table}" (id INTEGER PRIMARY KEY, name TEXT)'
+        await LiveWidget.get_connection().execute_script(
+            f'CREATE TABLE "{HareContext.require_current().apps.get_binding(LiveWidget).db_table}" (id INTEGER '
+            f"PRIMARY KEY, name TEXT)"
         )
         created = await LiveWidget.objects.create(name="from-register-live-model")
         fetched = await LiveWidget.objects.get(id=created.id)
@@ -203,6 +204,59 @@ async def test_register_live_model_reregistering_same_class_under_same_app_label
         assert ctx.apps["dynamic"]["LiveWidget"] is LiveWidget
 
 
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+async def test_registering_the_same_class_again_does_not_change_its_binding():
+    prefix = "before"
+
+    class RuntimeEntry(Model):
+        id = fields.IntField(primary_key=True, generated=False)
+        value = fields.TextField()
+
+    db_url = "sqlite+aiosqlite://:memory:"
+    async with HareContext() as context:
+        await context.init(
+            config={"connections": {"default": db_url}, "apps": {}},
+            table_name_generator=lambda model: f"{prefix}_{model.__name__.lower()}",
+        )
+        context.register_live_models([RuntimeEntry], "runtime", managed=False)
+        connection = context.get_connection("default")
+        await connection.execute_script(
+            'CREATE TABLE before_runtimeentry (id INTEGER PRIMARY KEY, "value" TEXT); '
+            "INSERT INTO before_runtimeentry VALUES (1, 'original');"
+        )
+        already_built = RuntimeEntry.objects.get(pk=1)
+        original_binding = context.apps.get_binding(RuntimeEntry)
+        prefix = "after"
+        context.register_live_models([RuntimeEntry], "runtime", managed=False)
+
+        assert context.apps.get_binding(RuntimeEntry) is original_binding
+        assert original_binding.default_connection == "default"
+        assert original_binding.managed is False
+        assert (await already_built).value == (await RuntimeEntry.objects.get(pk=1)).value == "original"
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+async def test_registering_a_batch_keeps_the_placement_of_an_already_registered_class():
+    class ExistingEntry(Model):
+        id = fields.IntField(primary_key=True)
+
+    class NewEntry(Model):
+        id = fields.IntField(primary_key=True)
+
+    db_url = "sqlite+aiosqlite://:memory:"
+    async with HareContext() as context:
+        await context.init(config={"connections": {"default": db_url, "other": db_url}, "apps": {}})
+        context.register_live_models([ExistingEntry], "runtime", managed=False)
+        context.register_live_models([ExistingEntry, NewEntry], "runtime", "other", managed=True)
+
+        existing_binding = context.apps.get_binding(ExistingEntry)
+        new_binding = context.apps.get_binding(NewEntry)
+        assert (existing_binding.default_connection, existing_binding.managed) == ("default", False)
+        assert (new_binding.default_connection, new_binding.managed) == ("other", True)
+
+
 @pytest.mark.sqlite_only
 @pytest.mark.asyncio
 async def test_executor_cache_does_not_leak_between_different_classes_sharing_a_table():
@@ -287,8 +341,8 @@ async def test_register_live_model_sets_managed_before_relations_are_initialised
 
         def recording_init_relations(apps: Apps) -> None:
             for model in (UnmanagedWidget, ManagedWidget):
-                if model._meta.app == "dynamic":
-                    managed_seen_by_init_relations.append((model.__name__, model._meta.managed))
+                if apps.get_registered_app_label(model) == "dynamic":
+                    managed_seen_by_init_relations.append((model.__name__, apps.get_binding(model).managed))
             original_init_relations(apps)
 
         monkeypatch.setattr(Apps, "init_relations", recording_init_relations)
@@ -298,15 +352,15 @@ async def test_register_live_model_sets_managed_before_relations_are_initialised
         assert ("UnmanagedWidget", False) in managed_seen_by_init_relations
         assert ("ManagedWidget", True) in managed_seen_by_init_relations
         assert ("UnmanagedWidget", True) not in managed_seen_by_init_relations
-        assert UnmanagedWidget._meta.managed is False
-        assert ManagedWidget._meta.managed is True
+        assert HareContext.require_current().apps.get_binding(UnmanagedWidget).managed is False
+        assert HareContext.require_current().apps.get_binding(ManagedWidget).managed is True
         assert ctx.apps["dynamic"]["UnmanagedWidget"] is UnmanagedWidget
 
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_registering_protect_relation_invalidates_transitive_protect_cache():
-    """Regression: MetaInfo.add_field() only evicted the direct target's backward-relation cache,
+    """Regression: ModelBinding.add_field() only evicted the direct target's backward-relation cache,
     so has_transitive_protect() on a model further up a CASCADE chain kept its cached False after
     a live model added a PROTECT relation below it - hard deletes then skipped the transitive
     PROTECT check."""
@@ -324,17 +378,17 @@ async def test_registering_protect_relation_invalidates_transitive_protect_cache
 
         Hare.register_live_models([ChainTop], app_label="chain")
         Hare.register_live_models([ChainMiddle], app_label="chain")
-        assert DeletionGraph.has_transitive_protect(ChainTop) is False
+        assert DeletionGraph.has_transitive_protect(HareContext.require_current().apps.get_binding(ChainTop)) is False
 
         class ChainGuard(Model):
             id = fields.IntField(primary_key=True)
             middle = fields.ForeignKeyField("chain.ChainMiddle", related_name="guards", on_delete=fields.PROTECT)
 
         Hare.register_live_models([ChainGuard], app_label="chain")
-        assert DeletionGraph.has_transitive_protect(ChainTop) is True
+        assert DeletionGraph.has_transitive_protect(HareContext.require_current().apps.get_binding(ChainTop)) is True
 
         Hare.unregister_live_models([ChainGuard])
-        assert DeletionGraph.has_transitive_protect(ChainTop) is False
+        assert DeletionGraph.has_transitive_protect(HareContext.require_current().apps.get_binding(ChainTop)) is False
 
 
 @pytest.mark.database_independent
@@ -362,8 +416,8 @@ async def test_register_live_model_managed_none_keeps_meta_managed():
         Hare.register_live_models([DeclaredUnmanaged], app_label="dynamic")
         Hare.register_live_models([DeclaredUnmanagedForcedManaged], app_label="dynamic", managed=True)
 
-        assert DeclaredUnmanaged._meta.managed is False
-        assert DeclaredUnmanagedForcedManaged._meta.managed is True
+        assert HareContext.require_current().apps.get_binding(DeclaredUnmanaged).managed is False
+        assert HareContext.require_current().apps.get_binding(DeclaredUnmanagedForcedManaged).managed is True
 
 
 @pytest.mark.database_independent
@@ -427,7 +481,9 @@ async def test_register_live_model_uses_its_own_contexts_table_name_generator():
                 id = fields.IntField(primary_key=True)
 
             Hare.register_live_models([LiveGeneratedName], app_label="dynamic")
-            assert LiveGeneratedName._meta.db_table == "pfx_livegeneratedname"
+            assert (
+                HareContext.require_current().apps.get_binding(LiveGeneratedName).db_table == "pfx_livegeneratedname"
+            )
     finally:
         await prefixed_context.close_connections()
         await unprefixed_context.close_connections()
@@ -446,7 +502,10 @@ async def test_register_live_model_uses_table_name_generator_of_a_directly_inite
             id = fields.IntField(primary_key=True)
 
         Hare.register_live_models([LiveDirectGeneratedName], app_label="dynamic")
-        assert LiveDirectGeneratedName._meta.db_table == "pfx_livedirectgeneratedname"
+        assert (
+            HareContext.require_current().apps.get_binding(LiveDirectGeneratedName).db_table
+            == "pfx_livedirectgeneratedname"
+        )
 
 
 @pytest.mark.parametrize("generated", [5, None, "", "  ", "a\x00b"])

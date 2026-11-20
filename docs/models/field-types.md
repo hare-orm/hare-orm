@@ -1,5 +1,33 @@
 # Field types
 
+The default JSON decoder reads integer literals exactly, including integers larger than 64 bits: a
+document is decoded by orjson, and one with a run of 19 or more digits — where such an integer may be -
+by hare's native decoder. `NaN`, `Infinity`, `-Infinity` and numbers overflowing a finite float are
+rejected by both. Duplicate object keys retain the last value. Malformed text raises `ValueError`
+inside the codec; `JSONField` reports its usual sensitive-safe `ValidationError`. Custom field decoders
+are unchanged. Input nesting is bounded at 1024 containers; JSONField's existing write-depth bound remains.
+
+A column of a `JSONField` with the default decoder and no declared `field_type` is read in hare's native
+module with that same decoder, without a Python call per value; a value the driver already decoded and
+`NULL` are kept, and text that isn't JSON gets the field's own `ValidationError`. A field with its own
+`decoder`, a declared `field_type` or an overridden `from_db_value()` is read by its `from_db_value()`
+(`Field.get_db_value_reader()` says which reader a field's column takes).
+
+A value written by `save()`, `bulk_create()`, `update()` or a filter passes through the field's
+writer (`Field.get_db_value_writer()`, or `Field.get_lookup_value_writer()` for filters). The writer
+uses the field or dialect conversion, including validation. Exact types declared by
+`get_unchanged_write_types()` may pass through the native serializer unchanged. Unchanged non-NULL
+values still run field validation once: the default uses the native routine behind `Field.validate()`,
+while custom validation retains its callback. Values requiring conversion use the ordinary writer.
+A failed conversion or validator propagates its error without a retry. Custom conversion and validation
+retain their normal callbacks.
+Decimal rounding uses `decimal`; UUID, duration and JSON conversions use the same helpers as direct
+field calls.
+
+Column conversions are prepared for repeated reads and writes. Lookup lists retain the field's
+batch conversion hook; custom registry value and converter-selection methods remain live.
+Preparing a converter does not remove validation or store values from an execution.
+
 The fields of `hare.fields` — the arguments every field takes, the fields holding plain values, enum
 fields, generated columns and composite primary keys — and where the fields of one database live.
 
@@ -18,7 +46,7 @@ class Field:
         primary_key: bool | None = None,
         null: bool = False,
         default: Any = None,
-        db_default: Any = NOT_PROVIDED,
+        db_default: Any = ...,
         unique: bool = False,
         db_index: bool | None = None,
         description: str | None = None,
@@ -28,13 +56,16 @@ class Field:
     ) -> None: ...
 ```
 
+The `...` default above means `db_default` was omitted; an explicit `db_default=None` declares
+`DEFAULT NULL`.
+
 | Argument | Meaning |
 |---|---|
 | `source_field` | Override the database column name (default: the field's Python attribute name). Two fields of one model mapping to the same column raise `ConfigurationError`. |
 | `generated` | A database-generated column (`SERIAL`, `AUTOINCREMENT`, ...) — see [`generated`](#generated) |
 | `primary_key` | The column is the table's primary key (indexed, and unique by the `PRIMARY KEY` constraint). `null=True` + `primary_key=True` raises `ConfigurationError`. |
 | `null` | Nullable column. |
-| `default` | A Python-side default: a value, a plain callable, or an **async** callable — resolved on `save()` — see [`default`](#default) |
+| `default` | A Python-side default: a value or synchronous callable assigned on construction, or an **async** callable awaited before writing — see [`default`](#default) |
 | `db_default` | A real database-level `DEFAULT`: a static value, or a `SqlDefault`/`Now`/`RandomHex`/`UuidV7` instance (`hare.fields.db_defaults`) — see [`db_default`](#db-default) |
 | `unique` | Unique constraint. |
 | `db_index` | Adds a database index for this column by itself. On by default for a `ForeignKeyField` — see [Relations](relations.md#index-on-the-key-column). |
@@ -81,11 +112,22 @@ column (e.g. a PostgreSQL `IDENTITY` column) — schema generation and migration
 
 ### <a id="default"></a>`default`
 
-A Python-side default: a value, a plain callable, or an **async** callable — resolved on `save()`. Not
-part of the database schema. The value (or a callable's result) is converted the same way an explicitly
+A Python-side default: a value, a plain callable, or an **async** callable. Callable objects and
+`functools.partial` are supported; an async `__call__` stays async after partial application.
+Values and synchronous
+callables are assigned when the instance is created; asynchronous defaults are awaited when preparing
+its write (`save()`, `create()` or bulk insertion). Defaults are not part of the database schema. The
+value (or a callable's result) is converted the same way an explicitly
 passed one is, so memory holds the type a later read returns: `default="red"` on a `CharEnumField` is the
 enum member, `default=1.5` on a `DecimalField` is `Decimal("1.50")`, a naive `datetime` becomes aware in
 the configured zone.
+
+A callable default on a `ForeignKeyField` or `OneToOneField` targeting a composite key is called
+once for the missing key columns. Its result supplies components by index in target-key order;
+a tuple is sufficient, and `None` clears a nullable relation. Explicit source-column values take
+precedence over the corresponding default components;
+when every column is supplied, the callable is not called. Assigning a column before saving also
+replaces that column's pending asynchronous default.
 
 A migration file writes the value as code: a literal, a list, tuple, dict, set or frozenset of them, a
 `Decimal`, a `UUID`, a date or time, an IP address or network (`ipaddress`), an enum member, a module-level
@@ -163,9 +205,9 @@ naive `DatetimeField` default under `use_timezone=False` carries the local syste
 
 A field with a `db_default` and no value of its own holds `DatabaseDefault` (`hare.fields`) on a new
 instance: the `INSERT` leaves its column out, so the database fills it. The marker is false;
-`isinstance(value, DatabaseDefault)` tells it from other false values. `bulk_create()` leaves out a
-column every object leaves to the database, and raises `QueryError` for a column only some of them leave
-to it.
+`isinstance(value, DatabaseDefault)` tells it from other false values. `bulk_create()` groups consecutive
+objects by the columns they leave to the database and omits those columns in each group's insert,
+preserving input order. Objects with explicit values can be mixed with objects using database defaults.
 
 ## <a id="data-fields"></a>Data fields (`hare.fields`)
 
@@ -187,10 +229,10 @@ to it.
 | `DecimalField` | `Decimal` | **`max_digits: int`, `decimal_places: int`** (both required, `max_digits ≥ 1`, `0 ≤ decimal_places ≤ max_digits`) | `DECIMAL(max_digits, decimal_places)` on PostgreSQL and ClickHouse, no column on SQLite ([below](#decimal-field-sqlite)); a text is parsed, a `bool` raises `ValidationError` |
 | `DatetimeField` | `datetime.datetime` | `auto_now: bool`, `auto_now_add: bool` (mutually exclusive) | `TIMESTAMP` (PostgreSQL: `TIMESTAMPTZ`) |
 | `DateField` | `datetime.date` | — | `DATE` |
-| `TimeField` | `datetime.time` | `auto_now`, `auto_now_add` (the local wall clock with the configured zone's standard offset — the same offset a naive time gets) | `TIME` (PostgreSQL: `TIMETZ`); a `timedelta` or the text `24:00` raises `ValidationError` |
+| `TimeField` | `datetime.time` | `auto_now`, `auto_now_add` (the local wall clock with the configured zone's standard offset — the same offset a naive time gets) | `TIME` (PostgreSQL: `TIMETZ`); a `timedelta` or end-of-day text (`24:00`, `T24:00`, compact forms) raises `ValidationError`; derived `__time` predicates also reject end-of-day text |
 | `TimeDeltaField` | `datetime.timedelta` | — | `BIGINT` (stored as microseconds); a number given instead of a `timedelta` raises `ValidationError` |
 | `FloatField` | `float` | — | `DOUBLE PRECISION` (SQLite: `REAL`) |
-| `JSONField[T]` | `dict` / `list` (or a Pydantic model class) | `encoder`, `decoder`, `field_type` (for OpenAPI docs) | `JSON` (PostgreSQL: `JSONB`); no btree index (`unique=True`/`db_index=True`/`Index(fields=...)`), but a non-btree `Meta.indexes` entry such as `GinIndex(fields=[...])` is accepted |
+| `JSONField[T]` | `dict` / `list` (or a Pydantic model class) | `encoder`, `decoder`, `field_type` (Python value validation and schemas) | `JSON` (PostgreSQL: `JSONB`); no btree index (`unique=True`/`db_index=True`/`Index(fields=...)`), but a non-btree `Meta.indexes` entry such as `GinIndex(fields=[...])` is accepted |
 | `JSONTextField` | `dict` / `list` / any JSON value | as `JSONField` | `JSONField`'s column, but a `String` of the JSON text on ClickHouse, whose `JSON` type drops a key's null and a list at the top: every value reads back as written (the outbox's `payload` and `headers`) |
 | `UUIDField` | `uuid.UUID` | `version` (a UUID of another version of RFC 9562 is refused wherever hare passes it to the database — in a write, a filter, the key of an existing row and a reference to it, `ValidationError` — a value the database computes itself, such as `F(...)` or `db_default`, isn't checked; `primary_key=True` without an explicit `default` auto-sets `default=uuid4`, `Uuid7.new` with `version=7`) | `CHAR(36)` (PostgreSQL: `UUID`); read back as a plain `uuid.UUID` on every driver |
 | `BinaryField` | `bytes` (`bytearray`, `memoryview` too; anything else raises `ValidationError`) | — | `BLOB` (PostgreSQL: `BYTEA`); filters by equality, `__in`, `__isnull` and the comparisons (byte order) — a text lookup (`__contains`, ...) raises `FieldError` — set by `update()`, takes `unique=True`/`db_index=True` (a B-tree index — on PostgreSQL a value over about 2.7 KB can't be indexed) |
@@ -219,8 +261,9 @@ A text field (`CharField`, `TextField`, `SlugField`, an `EncryptedTextField`, Po
 a number, a `UUID`, `bytes` or any other object raises `ValidationError` on every write path and as a
 filter value — its `str()` would be stored or compared. A text lookup (`__contains`, `__icontains`,
 `__startswith`, `__endswith`, `__iexact`, `__posix_regex`, `__search`, ...) takes a `str` alone on a field
-of any type: `number__contains=5` raises, `number__contains="5"` searches the number's text. A value read
-from a column is taken as the driver returns it.
+of any type: `number__contains=5` raises, `number__contains="5"` searches the number's text. Native text
+values may be used directly on reads. The `CharField`/`TextField` fallback reader keeps `None` and
+strings, and converts other driver values with `str()` before the field's Python conversion.
 
 ### <a id="numbers"></a>Numbers
 
@@ -247,16 +290,33 @@ from zero on every database: `Decimal("2.345")` on a `decimal_places=2` field is
 zero, ClickHouse cuts the extra places. A negative zero (`Decimal("-0.00")`) reads back as
 `Decimal("0.00")` — a decimal column holds no sign of zero.
 
+Construction (including `create()`) normalizes a decimal value immediately. Assigning an attribute
+later keeps the assigned Python value on the instance; `save()` and `bulk_update()` normalize the
+stored value without replacing that attribute. Use `refresh_from_db()` to read the stored result.
+
 ### <a id="decimal-field-sqlite"></a>`DecimalField` (SQLite)
 
 SQLite has no exact decimal type, so a `DecimalField` has no column there: a model declaring one raises
-`UnSupportedError` when it is bound to a SQLite connection, and so does a query run on SQLite with a
-`Decimal` value or a `Cast()` to a decimal in it — before any SQL. Keep money in whole minor units (an
-`IntField` or a `BigIntField` of cents) on SQLite, or use PostgreSQL or ClickHouse, which store exact
-decimals. [inspectdb](../migrations/inspectdb.md) reads a SQLite `DECIMAL` or `NUMERIC` column as a
-`FloatField`: SQLite gives such a column NUMERIC affinity, which keeps an integer or a 64-bit float.
+`UnSupportedError` when it is bound to a SQLite connection. Decimal-typed ORM expressions, including a
+`Cast()` to `DecimalField`, are also refused before SQL. This does not prohibit every Python `Decimal`
+argument: raw SQL parameters use a default adapter that converts `Decimal` to text. That conversion
+does not give SQLite exact decimal arithmetic.
+
+Keep money in whole minor units (an `IntField` or a `BigIntField` of cents) on SQLite, or use PostgreSQL
+or ClickHouse, which store exact decimals. [inspectdb](../migrations/inspectdb.md) reads a SQLite
+`DECIMAL` or `NUMERIC` column as a `FloatField`: SQLite gives such a column NUMERIC affinity, which
+keeps an integer or a 64-bit float.
 
 ### <a id="date-and-time-values"></a>Date and time values
+
+`Timezone.get_start_of_day(day, zone)` selects the first real moment of the day for zone
+names, `ZoneInfo` and pytz zone objects. `Timezone.make_aware(value, zone, is_dst=...)` rejects
+a nonexistent wall clock with `NonExistentTimeError` for every `is_dst` choice, and an
+already aware input with `QueryError`; `is_dst` disambiguates an existing repeated clock time.
+
+Awareness follows `utcoffset()`, not the presence of a `tzinfo` object. SQLite parameter and
+literal adaptation treats a datetime whose `utcoffset()` is `None` as a naive wall clock,
+adding no UTC suffix or system-zone conversion. Field timezone conversion happens beforehand.
 
 A `DatetimeField` accepts a `datetime`, a `date` (its first moment in the configured zone under
 `use_timezone=True` — midnight, or the end of a DST gap that starts at midnight, as on 2024-09-08 in
@@ -283,7 +343,7 @@ in hare's UTC session.
 ### <a id="extreme-dates"></a>Extreme dates (PostgreSQL)
 
 `datetime.min`/`datetime.max` and `date(1, 1, 1)`/`date(9999, 12, 31)` are stored as the days and
-moments they are on every database — on PostgreSQL too (asyncpg and rust_pg alike), not as
+moments they are on SQLite and PostgreSQL (asyncpg and rust_pg alike), not as
 `-infinity`/`infinity` — so `__year`/`__month`/`__day`, `Extract`/`Trunc` and `F("dt") ± timedelta(...)`
 work on them. A PostgreSQL `infinity`/`-infinity` written by other means is read as the same Python
 extremes: `date.max`/`date.min`, `datetime.max`/`datetime.min`. Under a time zone east of UTC
@@ -292,7 +352,13 @@ Under `use_timezone=False` a naive `datetime.min`/`datetime.max` is that moment 
 is, and reads back as the naive extreme — not a local wall clock, which east or west of UTC would fall
 past the range.
 
+ClickHouse has narrower date and datetime ranges; see [ClickHouse types](../dialects/clickhouse/types.md).
+
 ### <a id="json-values"></a>JSON values
+
+The default JSON encoder uses `orjson` (a required dependency) and the standard library for an integer
+outside orjson's 64-bit range; the default JSON decoder is `JsonCodec.loads`, hare's native decoder.
+Field validation runs before either encoder, including a custom `encoder` callback.
 
 `JSONField` raises `ValidationError` (not a bare `ValueError`/`TypeError`) for a value the encoder can't
 serialize, malformed JSON text read back from the column, or a value that doesn't match the declared
@@ -312,9 +378,10 @@ A value JSON can't hold raises `ValidationError` on every write path (`create()`
 `bulk_create()` including `use_copy=True`, `bulk_update()`): a `NaN`/`Infinity` float anywhere inside it. A
 null byte inside a JSON value is stored as the database stores it where it can hold one; PostgreSQL
 refuses it, and hare raises `ValidationError`. An int of any size is stored and read
-back exactly — one outside the 64-bit range orjson handles is encoded and decoded by the standard library
-instead. A `datetime`, `date`, naive `time` or `UUID` inside the value is written as the same ISO/UUID text
-on both paths, and with orjson not installed at all.
+back exactly — one outside the 64-bit range orjson handles is encoded by the standard library
+instead and decoded natively at full precision. A `datetime`, `date`, naive `time` or `UUID` inside the
+value is written as the same ISO/UUID text
+by both encoders.
 
 `exact`/`not` on a whole `JSONField` compare as the database does: PostgreSQL compares `jsonb` values (key
 order and `1` vs `1.0` don't matter), SQLite compares the stored text (they matter), a ClickHouse `JSON`
@@ -367,6 +434,13 @@ class Book(Model):
   Its JSON form and ordering rules apply too, including JSON value ordering and the refusal to order
   ClickHouse `DynamicField` and `VariantField` columns. Ordering an `F()` annotation of the column
   follows the same rules as ordering the column directly.
+- Migration narrowing checks use `output_field`'s scalar and nested-element limits too.
+  Removing enum members is checked against existing computed values even when the SQL
+  type and expression stay unchanged, including a simultaneous physical column rename.
+- An enum `output_field` retains its database membership constraint. Where the column uses
+  ordinary integer/text storage, hare adds the same `CHECK` as for a direct enum field;
+  native enum storage enforces membership itself. Invalid computed members are rejected on
+  both INSERT and UPDATE, including writes made outside hare.
 - `stored=True` computes the value on write; `stored=False` — a `VIRTUAL` column, computed on read —
   works on SQLite and PostgreSQL 18, and an older PostgreSQL server raises `UnSupportedError`
   (`Features.supports_virtual_generated_columns`).
@@ -379,7 +453,9 @@ reading it raises `NoValuesFetched`, as does reading it after a write that reads
 `bulk_create()` without `returning=True`, a database without `RETURNING`) until `refresh_from_db()`. A value
 assigned to a loaded instance is replaced by the computed one on `save()`; `bulk_update()` reads the new value
 back only with `returning=True`. It can't be the primary key and
-takes no `validators=` (`ConfigurationError` — put them on `output_field`); it is `sensitive` when its
+takes no `validators=` (`ConfigurationError`). Validate inputs on their fields; use a database constraint
+to restrict the computed result. Validators on `output_field` do not run when reading that result.
+The field is `sensitive` when its
 `output_field` is, unless it passes its own.
 
 ### <a id="format-fields"></a>Email, URL, slug and phone fields
@@ -430,9 +506,10 @@ again; the database holds the written form.
 
 So a filter value is found whatever form it is given in: `Author.objects.filter(email="Ann@EXAMPLE.com")`
 finds `Ann@example.com`, `filter(phone="(650) 253-0000")` finds `+16502530000` on a `region="US"` field.
-The local part of an address keeps its case — a mail server may tell `Ann` from `ann`; use
-`lowercase=True` when your addresses are case-insensitive, or `email__iexact=` to compare regardless of
-case.
+`EmailField` applies both its `max_length` (254 by default) and the validator's separate limit of
+320 characters. The domain is always lowercased. The local part keeps its case by default because a
+mail server may distinguish `Ann` from `ann`. Set `lowercase=True` to normalize both parts, or use
+`email__iexact=` for a case-insensitive comparison.
 
 - `schemes` — lowercase scheme names.
 - `SlugField` is indexed unless `db_index=False` is passed. A migration file writes `db_index=True` for
@@ -470,11 +547,16 @@ def CharEnumField(
 ```
 
 - `IntEnumField` is built on `SmallIntField` — enum values must fit `int16` (1..32767 if
-  `generated=True`, else the full `int16` range).
+  `generated=True`, else the full `int16` range). Generation is disabled by default, including for
+  primary keys; enable it explicitly with `generated=True`.
+  Storage uses each member's declared `.value`, for member, raw integer and compatible
+  foreign integer-enum inputs alike. Overriding a member's `__int__` does not change that code.
 - `CharEnumField` is built on `CharField` — `max_length=0` autodetects the longest enum value's string
   length. **If you add a longer enum value later, bump `max_length` yourself** — it isn't recomputed
   automatically. An enum with non-string values (e.g. `ONE = 1`) works too: the column stores
-  `str(member.value)` (`"1"`) and a read maps that text back to the member.
+  `str(member.value)` (`"1"`) and a read maps that text back to the member. Distinct members must
+  have distinct stored text; otherwise the declaration raises `ConfigurationError`. Enum aliases
+  naming the same member remain valid.
 - Both auto-generate a `"NAME: value"`-style `description` listing every member, unless you pass your
   own.
 - Both refuse a declaration that can't hold its enum (`ConfigurationError`): a class that is no enum, and
@@ -524,16 +606,23 @@ Each named field must exist and must **not** itself be `primary_key=True`, `gene
 the model to itself can't be a component either: its key would hold the relation itself. Nor can a
 container value — an `ArrayField`, `MapField`, `TupleField`, `NestedField` or `JSONField`, in a composite
 key or as the key itself: the ORM keeps the rows it reads and writes by their key (`ConfigurationError`);
-make such fields unique with a `UniqueConstraint` instead. `Model.pk` becomes a tuple; `clone()` on such
-a model resolves each component's own `default=`/ `db_default=` independently — only components with
-neither need an explicit value in `pk=(...)`.
+make such fields unique with a `UniqueConstraint` instead. `Model.pk` becomes a tuple. Without `pk`,
+`clone()` uses every component's `default=` or `db_default=` and raises `QueryError` if any has neither.
+When a component is a relation to a composite key, one call to its default supplies all its columns,
+including async defaults awaited when the clone is saved.
+An explicit `pk=(...)` must provide the complete key in component order; defaults do not fill missing parts.
 
 A component can be a foreign key, named by itself or by its key column —
 `CompositePrimaryKey("book_id", "number")` and `CompositePrimaryKey("book", "number")` are the same key.
 The relation's key column takes its place (a relation to a model with a composite key adds each of its
 key columns, `edition_book_id`, `edition_number`); `Model.pk` holds the related key's value(s), and `pk=`
-and `pk__in=` take them. The relation can't be `null=True`, and a `ManyToManyField` can't be a component
-(`ConfigurationError`):
+and `pk__in=` take them.
+
+Explicitly named columns keep their declared order, including columns of a composite relation:
+`CompositePrimaryKey("edition_number", "position", "edition_book_id")` keeps those three positions.
+Naming the relation itself instead adds all of its key columns in the target key's order.
+
+The relation can't be `null=True`, and a `ManyToManyField` can't be a component (`ConfigurationError`):
 
 ```python
 class Edition(Model):
@@ -573,7 +662,7 @@ row conflicting with it, so `bulk_create(on_conflict=[...])` naming its fields a
 
 ## <a id="postgresql-only-fields"></a>Fields of particular databases
 
-`HStoreField`, `TSVectorField`, `PostGISField`, `CitextField` and the range field family live in
+`HStoreField`, `TSVectorField`, `CitextField` and the range field family live in
 `hare.dialects.postgresql` — see [PostgreSQL fields](../dialects/postgresql/fields.md). Of `hare.fields`,
 `ArrayField` runs on PostgreSQL and ClickHouse, `MapField`, `TupleField` and `NestedField` on ClickHouse,
 and `IPAddressField` everywhere (`inet` on PostgreSQL, `IPv6` on ClickHouse, its text elsewhere) — see
@@ -582,9 +671,14 @@ as each database orders its column: PostgreSQL's `inet` puts an IPv4 address bef
 orders by the address's bytes; SQLite compares the text; ClickHouse orders its `IPv6` values its own way. The
 text lookups (`__startswith`) match an IPv4 address by its IPv4 text, ClickHouse's `::ffff:` form included. An
 IPv6 address naming a zone (`fe80::1%eth0`) raises `ValidationError` on PostgreSQL and ClickHouse, whose
-address columns hold no zone; SQLite keeps it in the text. `VectorField` lives in `hare.vectors` and works on
+address columns hold no zone; SQLite keeps it in the text. This includes scoped IPv4-mapped IPv6
+addresses (`::ffff:192.0.2.1%eth0`); only their unscoped forms normalize to IPv4.
+`VectorField` lives in `hare.vectors` and works on
 PostgreSQL and SQLite — see [Vector search](../dialects/search-and-geodata/vector-search.md).
 
 ## <a id="writing-your-own-field"></a>Writing your own field
 
 See [Custom fields](../extending/custom-fields.md).
+
+`ArrayField` sorts sets before converting their elements, including sets supplied through model
+constructors or defaults. Lists and tuples retain their order; nested arrays follow the same rule.

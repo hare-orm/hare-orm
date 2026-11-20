@@ -63,14 +63,3 @@ class DeletionAction(StrEnum):
     #: Deleted through ``QuerySet.delete()`` of its model, which deletes the other way (soft
     #: instead of hard, or hard instead of soft) with its own cascade.
     QUERYSET_DELETE = "queryset_delete"
-
-
-class DefaultAssignmentType(StrEnum):
-    """How the native constructor of a model's instances gives a field its default."""
-
-    #: The same immutable value on every instance.
-    CONSTANT = "constant"
-    #: The result of the field's callable default, normalized as an assigned value is.
-    CALL = "call"
-    #: Worked out by ``InstanceInitialization.assign_default()``.
-    FIELD = "field"

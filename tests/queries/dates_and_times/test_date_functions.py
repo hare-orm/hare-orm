@@ -1,8 +1,6 @@
 """Extract*/Trunc*/Now and the chained date-part, __date and __time lookups, in a non-UTC zone."""
 
 import datetime
-import os
-import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -33,20 +31,16 @@ from hare.query.functions import (
     TruncWeek,
 )
 from tests.queries.dates_and_times.date_function_models import Moment
+from tests.utils.database_under_test import DatabaseUnderTest
 
 MOSCOW = ZoneInfo("Europe/Moscow")
-
-
-def get_test_db_url() -> str:
-    raw_db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:").replace("\\{", "{").replace("\\}", "}")
-    return raw_db_url.format(uuid.uuid4().hex) if "{}" in raw_db_url else raw_db_url
 
 
 @pytest_asyncio.fixture(scope="module")
 async def date_functions_context() -> AsyncGenerator[Any]:
     async with hare_test_context(
         ["tests.queries.dates_and_times.date_function_models"],
-        db_url=get_test_db_url(),
+        db_url=DatabaseUnderTest.get_fresh_url(),
         timezone="Europe/Moscow",
         use_timezone=True,
     ) as ctx:
@@ -268,7 +262,9 @@ async def test_a_naive_moment_is_truncated_and_read_in_a_zone_from_the_local_wal
     in_tokyo = naive.astimezone().astimezone(tokyo)
     tokyo_midnight = in_tokyo.replace(hour=0, minute=0, second=0)
     async with hare_test_context(
-        ["tests.queries.dates_and_times.date_function_models"], db_url=get_test_db_url(), use_timezone=False
+        ["tests.queries.dates_and_times.date_function_models"],
+        db_url=DatabaseUnderTest.get_fresh_url(),
+        use_timezone=False,
     ):
         await Moment.objects.create(id=1, at=naive, day=naive.date(), clock=naive.time())
 
@@ -291,7 +287,9 @@ async def test_a_naive_moment_before_1970_is_truncated():
     OSError for a moment before 1970 on Windows."""
     naive = datetime.datetime(1900, 5, 6, 7, 8, 9)
     async with hare_test_context(
-        ["tests.queries.dates_and_times.date_function_models"], db_url=get_test_db_url(), use_timezone=False
+        ["tests.queries.dates_and_times.date_function_models"],
+        db_url=DatabaseUnderTest.get_fresh_url(),
+        use_timezone=False,
     ):
         await Moment.objects.create(id=1, at=naive, day=naive.date(), clock=naive.time())
 

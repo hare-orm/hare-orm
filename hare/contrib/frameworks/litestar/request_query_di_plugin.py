@@ -9,15 +9,18 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 from litestar import Request
 from litestar.di import Provide
-from litestar.params import ParameterKwarg, PathParameter, QueryParameter
+from litestar.params import ParameterKwarg, PathParameter, QueryParameter, SkipValidationMarker
 from litestar.plugins import DIPlugin
 
 from hare.contrib.frameworks.parameter_annotation import ParameterAnnotation
 from hare.contrib.request_query.constants import REQUEST_ARGUMENT_NAME
+from hare.contrib.request_query.enums import ParameterDefault
 from hare.contrib.request_query.request_query import RequestQuery
 
 if TYPE_CHECKING:
     from pydantic.fields import FieldInfo
+
+    from hare.core.apps import Apps
 
 
 class RequestQueryDIPlugin(DIPlugin):
@@ -36,20 +39,25 @@ class RequestQueryDIPlugin(DIPlugin):
     otherwise take a request query as a plain pydantic model.
     """
 
+    def __init__(self, *, apps: Apps | None = None) -> None:
+        self.apps = apps
+
     def has_typed_init(self, type_: Any) -> bool:
         return isinstance(type_, type) and issubclass(type_, RequestQuery)
 
     def get_typed_init(self, type_: Any) -> tuple[inspect.Signature, dict[str, Any]]:
-        type_.prepare_parameters()
+        schema = type_.prepare_parameters(apps=self.apps)
         annotations: dict[str, Any] = {}
         parameters = []
-        for name, field_info in type_.model_fields.items():
+        for name, field_info in schema.model_fields.items():
             annotation = self.get_parameter_annotation(field_info)
             annotations[name] = annotation
             default = (
                 inspect.Parameter.empty
-                if field_info.is_required()
-                else field_info.get_default(call_default_factory=True, validated_data={})
+                if field_info.is_required() or self.is_path_parameter(field_info)
+                else ParameterDefault.MISSING
+                if field_info.default_factory is not None
+                else field_info.get_default(call_default_factory=False)
             )
             parameters.append(
                 inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, annotation=annotation, default=default)
@@ -76,12 +84,20 @@ class RequestQueryDIPlugin(DIPlugin):
             dataclasses.replace(item, description=field_info.description)
             if isinstance(item, ParameterKwarg) and item.description is None
             else item
-            for item in field_info.metadata
+            for item in ParameterAnnotation.get_metadata(field_info.annotation, field_info.metadata)
         ]
         if not any(isinstance(item, ParameterKwarg) for item in metadata):
             parameter_type = PathParameter if ParameterAnnotation.is_in_path(field_info) else QueryParameter
-            metadata.append(parameter_type(description=field_info.description))
+            metadata.append(parameter_type(description=field_info.description, name=field_info.alias))
+        if field_info.default_factory is not None and not cls.is_path_parameter(field_info):
+            metadata.append(SkipValidationMarker())
         return Annotated[(annotation, *metadata)]
+
+    @staticmethod
+    def is_path_parameter(field_info: FieldInfo) -> bool:
+        return ParameterAnnotation.is_in_path(field_info) or any(
+            isinstance(item, PathParameter) for item in field_info.metadata
+        )
 
     @staticmethod
     def provide(request_query_class: type[RequestQuery[Any]]) -> Provide:

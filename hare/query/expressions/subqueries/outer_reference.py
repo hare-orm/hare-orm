@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 from copy import copy
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import (
@@ -10,13 +10,15 @@ from hare.exceptions import (
     QueryError,
 )
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
-from hare.fields.relations.fields.one_to_one_field_instance import OneToOneFieldInstance
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import AggregatedMultiValuedPaths
 from hare.query.expressions.arithmetic.combinable_expression import CombinableExpression
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
 from hare.query.expressions.f import F
-from hare.query.lookup_info.lookup_paths import LookupPaths
+from hare.query.expressions.structure.enums import ArgumentRole
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
+from hare.query.lookup_info.bound_lookup_path import BoundLookupPath
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 from hare.sql.terms.term import Term
@@ -31,7 +33,8 @@ from hare.sql.terms.subqueries.outer_aggregate_term import OuterAggregateTerm
 
 class OuterReference(CombinableExpression):
     """A reference to a field of the outer query from a child queryset in
-    ``Exists(...)``/``Subquery(...)``; outside one it raises ``QueryError``. The field may be
+    ``Exists(...)``/``Subquery(...)`` or an ``AsofJoin(on=...)`` condition. Without an outer
+    scope it raises ``QueryError``. The field may be
     reached through a relation (``OuterReference("author__name")``) - the join is added to the outer
     query.
 
@@ -39,6 +42,10 @@ class OuterReference(CombinableExpression):
         ``Ticket.objects.annotate(open=Exists(Report.objects.filter(ticket_id=OuterReference("id"),
         status="open")))``
     """
+
+    structure = ExpressionStructure(
+        positions=((0, ArgumentRole.OUTER_FIELD),), keywords=(("field", ArgumentRole.OUTER_FIELD),)
+    )
 
     def __init__(self, field: str) -> None:
         if not isinstance(field, str):
@@ -69,49 +76,40 @@ class OuterReference(CombinableExpression):
                 "OuterReference() can only be used inside a queryset wrapped in Exists(...), Subquery(...) or "
                 "AsofJoin(on=...)"
             )
-        outer_meta = outer_context.model._meta
+        outer_meta = outer_context.binding
         if (
             "__" in self.field
             and self.field not in outer_context.annotations
             and self.field.partition("__")[0] in outer_meta.fetch_fields
         ):
-            term, joins, nested_output_field = LookupPaths.get_nested_field(
-                outer_context.model,
-                outer_context.table,
-                self.field,
-                visibility=outer_context.visibility,
-                select_related_extra_conditions=outer_context.select_related_extra_conditions,
-                dialect=expression_context.dialect,
-                connection=expression_context.connection,
-            )
+            bound_path = BoundLookupPath.bind(outer_context, self.field)
+            term, joins = bound_path.term, bound_path.joins
             # Every join table of a relation path is aliased, so the term is always qualified.
             extra_joins = OuterScope.current_extra_joins.get()
             if extra_joins is not None:
                 extra_joins.extend(joins)
             # A to-many hop joined into the outer query repeats its rows like any other JOIN.
             if (tracker := AggregatedMultiValuedPaths.get_from(outer_context)) is not None:
-                tracker.record_lookup(outer_context.model, self.field, outer_context.select_related_path_prefix)
+                tracker.record_lookup(outer_context.binding, self.field, outer_context.select_related_path_prefix)
             self._record_outer_reference_terms(term.get_group_by_column_terms())
-            return ExpressionResult(term=term, output_field=nested_output_field)
+            return ExpressionResult(term=term, output_field=bound_path.field)
         # A term that always qualifies its column: the reference crosses a query boundary, and the
         # child query computes its own namespacing - an unqualified "id" would bind to the child's
         # table.
         field_name = (
             outer_meta.primary_key_attribute
-            if self.field == "pk" and isinstance(outer_meta.primary_key_attribute, str)
+            if self.field == PRIMARY_KEY_ALIAS and isinstance(outer_meta.primary_key_attribute, str)
             else self.field
         )
         field_object = outer_meta.fields_map.get(field_name)
-        if field_name not in outer_meta.fields_db_projection and isinstance(
-            field_object, (ForeignKeyFieldInstance, OneToOneFieldInstance)
-        ):
+        if field_name not in outer_meta.fields_db_projection and isinstance(field_object, ForeignKeyFieldInstance):
             # A forward relation's own name means its key column, as F("author") does.
             if len(field_object.source_fields) > 1:
                 raise FieldError(
                     f"OuterReference({self.field!r}): {outer_context.model.__name__}.{self.field} is a "
                     "composite relation - reference each of its key columns separately instead."
                 )
-            field_name = cast("str", field_object.source_field)
+            field_name = field_object.source_field  # type: ignore[assignment]
             field_object = outer_meta.fields_map.get(field_name)
         column = outer_meta.fields_db_projection.get(field_name)
         if column is not None:
@@ -155,8 +153,8 @@ class OuterReference(CombinableExpression):
                 extra_joins.extend(annotation_result.joins)
             self._record_outer_reference_terms(annotation_term.get_group_by_column_terms())
             return ExpressionResult(term=annotation_term, output_field=annotation_result.output_field)
-        if self.field == "pk" and outer_meta.has_composite_primary_key:
-            key_names = ", ".join(cast("tuple[str, ...]", outer_meta.primary_key_attribute))
+        if self.field == PRIMARY_KEY_ALIAS and outer_meta.has_composite_primary_key:
+            key_names = ", ".join(outer_meta.primary_key_attribute)
             raise FieldError(
                 f"OuterReference('pk'): the primary key of {outer_context.model.__name__} is composite "
                 f"({key_names}) - compare it with a relation to {outer_context.model.__name__} "

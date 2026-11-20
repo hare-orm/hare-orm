@@ -1,7 +1,9 @@
 import re
+from urllib.parse import quote
 
 import pytest
 
+from hare.contrib.test.databases.test_database_config import TestDatabaseConfig as DatabaseConfig
 from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
 from hare.exceptions import ConfigurationError, UnSupportedError
 
@@ -53,7 +55,7 @@ def test_sqlite_no_db():
 
 
 def test_sqlite_testing():
-    res = DbUrlConfigGenerator.expand(db_url="sqlite+aiosqlite:///some/test-{}.sqlite", testing=True)
+    res = DatabaseConfig.from_url(db_url="sqlite+aiosqlite:///some/test-{}.sqlite").config
     file_path = res["credentials"]["file_path"]
     assert "/some/test-" in file_path
     assert ".sqlite" in file_path
@@ -152,17 +154,13 @@ def test_sqlite_url_path_is_read_as_written(db_url, file_path):
             {"database": "test", "host": "127.0.0.1", "password": "kx%jj5/g", "port": 54321, "user": "postgres"},
             id="encoded_password",
         ),
-        # A literal '#' in a password (an entirely ordinary character, unlike '['/']') used to be
-        # passed straight through to urlparse, which treats it as introducing the URL fragment -
-        # silently truncating everything after it (host/port/database lost, username/password
-        # resolved to None) instead of raising anything that points at the real cause.
         pytest.param(
-            "postgres:sec#ret@127.0.0.1:54321/test",
+            "postgres:sec%23ret@127.0.0.1:54321/test",
             {"database": "test", "host": "127.0.0.1", "password": "sec#ret", "port": 54321, "user": "postgres"},
             id="hash_in_password",
         ),
         pytest.param(
-            "postgres:sec?ret@127.0.0.1:54321/test",
+            "postgres:sec%3Fret@127.0.0.1:54321/test",
             {"database": "test", "host": "127.0.0.1", "password": "sec?ret", "port": 54321, "user": "postgres"},
             id="question_mark_in_password",
         ),
@@ -191,7 +189,7 @@ def test_postgres_nonint_port():
 
 def test_postgres_testing():
     for scheme, engine in _postgres_scheme_engines.items():
-        res = DbUrlConfigGenerator.expand(db_url=(f"{scheme}://postgres@127.0.0.1:5432/" + r"test_\{\}"), testing=True)
+        res = DatabaseConfig.from_url(db_url=f"{scheme}://postgres@127.0.0.1:5432/" + "test_\\{\\}").config
         database = res["credentials"]["database"]
         assert "test_" in database
         assert "test_{}" != database
@@ -291,7 +289,7 @@ def test_documented_retry_query_params_are_cast():
 @pytest.mark.parametrize(
     ("url", "expected_credentials"),
     [
-        ("postgresql://user:pa/ss@localhost:5432/db", {"password": "pa/ss", "host": "localhost", "database": "db"}),
+        ("postgresql://user:pa%2Fss@localhost:5432/db", {"password": "pa/ss", "host": "localhost", "database": "db"}),
         (
             "postgresql://user:pass@localhost:5432/db?application_name=me@work",
             {"password": "pass", "host": "localhost", "database": "db", "application_name": "me@work"},
@@ -301,8 +299,11 @@ def test_documented_retry_query_params_are_cast():
             {"host": "/var/run/postgresql", "database": "db", "password": "pass"},
         ),
         ("postgresql://user:pass@localhost/my%20db", {"database": "my db", "host": "localhost"}),
-        ("postgresql://user:p@ss/w@localhost/db", {"password": "p@ss/w", "host": "localhost", "database": "db"}),
+        ("postgresql://user:p%40ss%2Fw@localhost/db", {"password": "p@ss/w", "host": "localhost", "database": "db"}),
         ("postgresql://user:pass@[::1]:5433/db", {"host": "::1", "port": 5433, "database": "db"}),
+        ("postgresql://user@LOCALHOST/db", {"host": "localhost"}),
+        ("postgresql://user@%2FVar%2FRun%2FPg/db", {"host": "/Var/Run/Pg"}),
+        ("postgresql://user@[fe80::1%25En0]/db", {"host": "fe80::1%En0"}),
     ],
 )
 def test_postgres_url_parsing_edge_cases(url, expected_credentials):
@@ -376,19 +377,27 @@ def test_an_entry_point_failing_to_import_is_skipped_and_named(monkeypatch, capl
     import importlib.metadata
     from types import SimpleNamespace
 
+    from hare.core.extensions.declarations import ExtensionContribution
+    from hare.core.extensions.extension_loader import ExtensionLoader
     from hare.dialects.dialect_registry import DialectRegistry
 
     loaded = []
+
+    def contribution():
+        loaded.append("working")
+        return ExtensionContribution()
 
     def load_broken():
         raise ImportError("No module named 'broken_lib'")
 
     entry_points = [
         SimpleNamespace(name="broken", value="broken_package.drivers", load=load_broken),
-        SimpleNamespace(name="working", value="working_package.drivers", load=lambda: loaded.append("working")),
+        SimpleNamespace(name="working", value="working_package.drivers", load=lambda: contribution),
     ]
     monkeypatch.setattr(importlib.metadata, "entry_points", lambda group: entry_points)
     monkeypatch.setattr(DialectRegistry, "loading_installed_drivers", False)
+    monkeypatch.setattr(DialectRegistry, "installed_drivers_loaded", False)
+    monkeypatch.setattr(DialectRegistry, "extensions", ExtensionLoader())
     monkeypatch.setattr(DialectRegistry, "installed_driver_errors", [])
     for _ in range(2):
         with pytest.raises(
@@ -424,7 +433,7 @@ def test_sqlite_fixed_path_unchanged_outside_xdist(monkeypatch):
     """No PYTEST_XDIST_WORKER (a plain, non-`-n` run) - a fixed testing db_url is used exactly as
     given, matching the pre-fix behavior."""
     monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
-    res = DbUrlConfigGenerator.expand("sqlite+aiosqlite:///some/fixed/path.sqlite", testing=True)
+    res = DatabaseConfig.from_url("sqlite+aiosqlite:///some/fixed/path.sqlite").config
     assert res["credentials"]["file_path"] == "/some/fixed/path.sqlite"
 
 
@@ -455,7 +464,7 @@ def test_sqlite_testing_path_of_an_xdist_worker(monkeypatch, worker_id, db_url, 
     see test_xdist_sqlite_locking.py). Under `-n`, the worker id is folded into the path so each
     worker gets its own file instead."""
     monkeypatch.setenv("PYTEST_XDIST_WORKER", worker_id)
-    res = DbUrlConfigGenerator.expand(db_url, testing=True)
+    res = DatabaseConfig.from_url(db_url).config
     assert res["credentials"]["file_path"] == file_path
 
 
@@ -463,7 +472,7 @@ def test_sqlite_templated_path_ignores_xdist_worker(monkeypatch):
     """The `{}` placeholder already gets a fresh random uuid on every call, which is unique
     regardless of worker - the xdist-worker suffix must not also apply here."""
     monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw2")
-    res = DbUrlConfigGenerator.expand("sqlite+aiosqlite:///some/test-{}.sqlite", testing=True)
+    res = DatabaseConfig.from_url("sqlite+aiosqlite:///some/test-{}.sqlite").config
     file_path = res["credentials"]["file_path"]
     assert "gw2" not in file_path
     assert "/some/test-" in file_path
@@ -482,20 +491,17 @@ def test_username_percent_encoded():
     assert res["credentials"]["user"] == "us@er"
 
 
-def test_userinfo_literal_at_sign_with_brackets():
-    """_quote_url_userinfo used to split on the FIRST '@', not the last - a literal '@' inside
-    the password (before the real userinfo/host boundary) combined with a bracket character
-    needing escaping would leave the bracket in the host portion and crash urlparse."""
-    res = DbUrlConfigGenerator.expand("postgresql+asyncpg://user:p@ss[1]@127.0.0.1:5432/test")
+def test_userinfo_encoded_at_sign_with_brackets():
+    res = DbUrlConfigGenerator.expand("postgresql+asyncpg://user:p%40ss%5B1%5D@127.0.0.1:5432/test")
     assert res["credentials"]["password"] == "p@ss[1]"
     assert res["credentials"]["host"] == "127.0.0.1"
 
 
 @pytest.mark.parametrize("password", ["p@s?s", "p@s#s", "p@s/s?r#d", "p@s?a=b", "p@s?a=b@c"])
-def test_a_password_holding_an_at_sign_and_a_query_mark_is_read_whole(password):
-    """The text after the password's own "@" was read as a host and a query - "s" the host, no database."""
+def test_encoded_password_delimiters_are_decoded_once(password):
     res = DbUrlConfigGenerator.expand(
-        f"postgresql+asyncpg://user:{password}@dbhost:5433/mydb?application_name=shop&server_settings=a@b"
+        f"postgresql+asyncpg://user:{quote(password, safe='')}@dbhost:5433/mydb"
+        "?application_name=shop&server_settings=a@b"
     )
     assert res["credentials"]["password"] == password
     assert res["credentials"]["host"] == "dbhost"
@@ -536,7 +542,6 @@ def test_generate_config_explicit(monkeypatch):
         db_url="sqlite+aiosqlite:///some/test.sqlite",
         app_modules={"models": ["one.models", "two.models"]},
         connection_label="models",
-        testing=True,
     )
     assert res == {
         "connections": {
@@ -582,3 +587,26 @@ def test_generate_config_many_apps():
             "peanuts": {"models": ["peanut.models"], "default_connection": "default"},
         },
     }
+
+
+@pytest.mark.parametrize(
+    "userinfo", ["user:p@ss", "user:sec#ret", "user:sec/ret", "user:sec?ret", "user:p[1]", "user:p:2", "user:p%ZZ"]
+)
+def test_reserved_userinfo_delimiters_require_encoding(userinfo):
+    with pytest.raises(ConfigurationError) as raised:
+        DbUrlConfigGenerator.expand(f"postgresql+asyncpg://{userinfo}@localhost/db")
+    assert userinfo not in str(raised.value)
+
+
+@pytest.mark.parametrize("component", ["p%2F", "user@name", "a:b", "x/y?z#[]", "a+b", "", "quote'&="])
+def test_userinfo_encoding_does_not_change_component_values(component):
+    encoded = quote(component, safe="")
+    credentials = DbUrlConfigGenerator.expand(f"postgresql+asyncpg://user:{encoded}@localhost/db")["credentials"]
+    assert credentials["password"] == component
+
+
+def test_blank_query_credentials_are_explicit():
+    credentials = DbUrlConfigGenerator.expand("postgresql+asyncpg:///db?user=&password=&application_name=")[
+        "credentials"
+    ]
+    assert credentials["user"] == credentials["password"] == credentials["application_name"] == ""

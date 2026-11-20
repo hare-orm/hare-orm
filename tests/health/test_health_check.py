@@ -9,6 +9,7 @@ import tempfile
 
 import pytest
 
+from hare.core.connections.connections import Connections
 from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError
 from hare.health import ConnectionCriteria, HealthCheck, HealthStatus
@@ -25,6 +26,25 @@ def make_config(directory: str) -> dict:
         },
         "apps": {"health": {"models": ["tests.health.health_models"], "default_connection": "reachable"}},
     }
+
+
+@pytest.mark.sqlite_only
+@pytest.mark.asyncio
+async def test_a_ping_reports_unhealthy_during_reconnect():
+    with tempfile.TemporaryDirectory() as directory:
+        async with HareContext() as context:
+            await context.init(config=make_config(directory))
+            health_check = HealthCheck(connections=["reachable"])
+            assert (await health_check.run()).status is HealthStatus.HEALTHY
+            async with asyncio.TaskGroup() as tasks:
+                async with context.connections.get_main("reachable").acquire_connection():
+                    tasks.create_task(Connections.reconnect())
+                    await wait_until(lambda: context.connections.close_task is not None)
+                    report = await health_check.run()
+            assert report.status is HealthStatus.UNHEALTHY
+            assert report.connections["reachable"].error_type == "ConfigurationError"
+            assert (await health_check.run()).status is HealthStatus.HEALTHY
+            await context.close_connections()
 
 
 @pytest.mark.sqlite_only
@@ -143,7 +163,7 @@ async def test_a_check_naming_a_connection_the_configuration_lacks_is_refused():
 
 
 @pytest.mark.asyncio
-async def test_the_database_under_test_is_healthy(db):
+async def test_the_database_under_test_is_healthy(db_simple):
     report = await HealthCheck(connections=["models"], degraded_when=[]).run()
     models = report.connections["models"]
     assert models.status is HealthStatus.HEALTHY, models.reasons
@@ -151,7 +171,7 @@ async def test_the_database_under_test_is_healthy(db):
 
 
 @pytest.mark.asyncio
-async def test_the_server_past_a_transaction_pooler_is_pinged_too(db):
+async def test_the_server_past_a_transaction_pooler_is_pinged_too(db_simple):
     # Through PgBouncer the server itself (direct_host) is pinged as well; straight to the server
     # there is no second ping.
     report = await HealthCheck(connections=["models"], degraded_when=[], check_direct=True).run()

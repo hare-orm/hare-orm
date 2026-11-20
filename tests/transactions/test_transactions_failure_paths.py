@@ -1,5 +1,6 @@
 import asyncio
 import time
+from contextlib import nullcontext, suppress
 
 import pytest
 
@@ -275,19 +276,80 @@ async def test_on_commit_callback_that_opens_transaction_leaves_no_open_transact
 
 @requires_features(supports_transactions=True)
 @pytest.mark.asyncio
-async def test_failing_rollback_callback_does_not_replace_the_block_exception(db_truncate):
-    def failing_callback():
+@pytest.mark.parametrize("nested", [False, True], ids=["transaction", "savepoint"])
+@pytest.mark.parametrize("failure", ["exception", "cancelled", "self-cancel", "exception-group"])
+async def test_failing_rollback_callback_does_not_replace_the_block_exception(db_truncate, nested, failure):
+    fired = []
+    original = Boom("original")
+
+    async def failing_callback():
+        fired.append("failed")
+        if failure == "cancelled":
+            raise asyncio.CancelledError("callback failed")
+        if failure == "self-cancel":
+            asyncio.current_task().cancel("callback failed")
+            await asyncio.sleep(0)
+        if failure == "exception-group":
+            raise BaseExceptionGroup("callback failed", [asyncio.CancelledError(), RuntimeError()])
         raise RuntimeError("callback failed")
 
-    with pytest.raises(Boom) as raised:
-        async with Transactions.atomic():
-            await Tournament.objects.create(name="rolled-back")
-            Transactions.on_rollback(failing_callback)
-            raise Boom("original")
+    async with Transactions.atomic() if nested else nullcontext():
+        if nested:
+            await Tournament.objects.create(name="outer")
+        with pytest.raises(Boom) as raised:
+            async with Transactions.atomic():
+                await Tournament.objects.create(name="rolled-back")
+                Transactions.on_rollback(failing_callback)
+                Transactions.on_rollback(lambda: fired.append("later"))
+                raise original
+        assert [row.name for row in await Tournament.objects.all()] == (["outer"] if nested else [])
 
-    assert str(raised.value) == "original"
+    assert raised.value is original
     assert any("callback failed" in note for note in raised.value.__notes__)
+    assert fired == ["failed", "later"]
+    assert [row.name for row in await Tournament.objects.all()] == (["outer"] if nested else [])
+
+
+@requires_features(supports_transactions=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nested", [False, True], ids=["transaction", "savepoint"])
+async def test_cancellation_during_automatic_rollback_reaches_the_caller(db_truncate, nested):
+    if nested and not Connections.get("models").features.supports_savepoints:
+        pytest.skip("Requires savepoints")
+    callback_started = asyncio.Event()
+    release_callback = asyncio.Event()
+    fired = []
+
+    async def pause_after_rollback():
+        callback_started.set()
+        await release_callback.wait()
+        fired.append("finished")
+
+    async def run_transaction():
+        async with Transactions.atomic() if nested else nullcontext():
+            if nested:
+                await Tournament.objects.create(name="outer transaction")
+            with suppress(Boom):
+                async with Transactions.atomic():
+                    await Tournament.objects.create(name="rolled-back")
+                    Transactions.on_rollback(pause_after_rollback)
+                    Transactions.on_rollback(lambda: fired.append("later"))
+                    raise Boom("rollback")
+
+    task = asyncio.create_task(run_transaction())
+    try:
+        await asyncio.wait_for(callback_started.wait(), timeout=5)
+        task.cancel("cancelled by the caller")
+    finally:
+        release_callback.set()
+    with pytest.raises(asyncio.CancelledError, match="cancelled by the caller"):
+        await task
+
+    assert fired == ["finished", "later"]
     assert await Tournament.objects.all().count() == 0
+    async with Transactions.atomic():
+        await Tournament.objects.create(name="next transaction")
+    assert [row.name for row in await Tournament.objects.all()] == ["next transaction"]
 
 
 @requires_features(supports_transactions=True)
@@ -368,7 +430,7 @@ async def test_transaction_finished_error_from_a_callback_is_not_swallowed(db_tr
     with pytest.raises(TransactionManagementError) as commit_error:
         async with Transactions.atomic():
             Transactions.on_commit(failing_callback)
-    assert isinstance(commit_error.value.__context__, pg.TransactionFinishedError)
+    assert isinstance(commit_error.value.__cause__, pg.TransactionFinishedError)
 
     with pytest.raises(Boom):
         async with Transactions.atomic():
@@ -498,25 +560,6 @@ async def test_caught_integrity_error_does_not_abort_a_sqlite_transaction(db_tru
 
     assert fired == ["committed"]
     assert await CharPkModel.objects.all().count() == 1
-
-
-@requires_features(supports_transactions=True)
-@pytest.mark.asyncio
-async def test_failing_rollback_callback_does_not_replace_the_nested_block_exception(db_truncate):
-    def failing_callback():
-        raise RuntimeError("callback failed")
-
-    async with Transactions.atomic():
-        await Tournament.objects.create(name="outer")
-        with pytest.raises(Boom) as raised:
-            async with Transactions.atomic():
-                await Tournament.objects.create(name="rolled-back")
-                Transactions.on_rollback(failing_callback)
-                raise Boom("original")
-
-    assert str(raised.value) == "original"
-    assert any("callback failed" in note for note in raised.value.__notes__)
-    assert [tournament.name for tournament in await Tournament.objects.all()] == ["outer"]
 
 
 @requires_features(supports_transactions=True)

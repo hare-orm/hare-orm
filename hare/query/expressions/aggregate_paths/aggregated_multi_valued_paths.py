@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.enums import Lookup
 from hare.query.expressions.aggregate_paths.constants import (
     MULTIPLE_VALUE_TYPES,
@@ -15,17 +16,16 @@ from hare.query.lookup_info.lookup_path import LookupPath
 if TYPE_CHECKING:
     from hare.fields.relations.fields.relational_field import RelationalField
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.aggregate_paths.aggregate_crossing import AggregateCrossing
 
 
-class AggregatedMultiValuedPaths(dict[str, bool]):
+class AggregatedMultiValuedPaths:
     """Tracks the to-many relation JOINs of a query, to detect aggregates that another JOIN fans out.
 
-    As a dict it maps each to-many path (``products``, ``products__reviews``) crossed by an
-    aggregate to whether every aggregate crossing it used distinct=True.
-
     Attributes:
+        paths: Every to-many path crossed by an aggregate, including its filter.
         aggregate_crossings: One entry per resolved aggregate expression.
         row_paths: Paths joined outside any aggregate - by ``.filter()``/``.exclude()``
             conditions, non-aggregate annotations, ``values()`` fields and the ordering. A separate
@@ -46,7 +46,7 @@ class AggregatedMultiValuedPaths(dict[str, bool]):
     """
 
     def __init__(self) -> None:
-        super().__init__()
+        self.paths: set[str] = set()
         self.aggregate_crossings: list[AggregateCrossing] = []
         self.row_paths: list[str] = []
         self.group_key_paths: set[str] = set()
@@ -72,22 +72,23 @@ class AggregatedMultiValuedPaths(dict[str, bool]):
         return paths if isinstance(paths, cls) else None
 
     @staticmethod
-    def get_multi_valued_paths(model: type[Model], lookup: str, prefix: str = "") -> list[str]:
+    def get_multi_valued_paths(binding: ModelBinding, lookup: str, prefix: str = "") -> list[str]:
         """Lists every to-many relation path a ``a__b__c`` lookup walks through.
 
         Args:
-            model: The model the lookup starts from.
+            binding: The model the lookup starts from.
             lookup: The double-underscore lookup, e.g. ``products__reviews__stars``.
             prefix: The relation path already walked to reach ``model``.
 
         Returns:
             The cumulative path of each to-many hop, e.g. ``["products", "products__reviews"]``.
         """
+        model = binding._model
         paths: list[str] = []
         current_model = model
         current_path = prefix
         for part in lookup.split("__"):
-            relation = current_model._meta.fields_map.get(part)
+            relation = binding.graph.get_binding(current_model).fields_map.get(part)
             related_model = getattr(relation, "related_model", None)
             if relation is None or related_model is None:
                 break
@@ -118,8 +119,7 @@ class AggregatedMultiValuedPaths(dict[str, bool]):
             for path in (*crossing.argument_paths, *crossing.filter_paths):
                 self.record_path(path)
         self.aggregate_crossings.append(crossing)
-        for path in {*crossing.argument_paths, *crossing.filter_paths}:
-            self[path] = self.get(path, True) and distinct
+        self.paths.update(crossing.argument_paths, crossing.filter_paths)
 
     @contextmanager
     def aggregate_filter_scope(self) -> Generator[None]:
@@ -148,15 +148,15 @@ class AggregatedMultiValuedPaths(dict[str, bool]):
         elif self.is_recording_row_joins:
             self.row_paths.append(path)
 
-    def record_lookup(self, model: type[Model], lookup: str, prefix: str = "") -> None:
+    def record_lookup(self, binding: ModelBinding, lookup: str, prefix: str = "") -> None:
         """Records the to-many hops of a lookup.
 
         Args:
-            model: The model the lookup starts from.
+            binding: The model the lookup starts from.
             lookup: The double-underscore lookup.
             prefix: The relation path already walked to reach ``model``.
         """
-        for path in self.get_multi_valued_paths(model, lookup, prefix):
+        for path in self.get_multi_valued_paths(binding, lookup, prefix):
             self.record_path(path)
 
     def get_mark(self) -> int:
@@ -200,18 +200,18 @@ class AggregatedMultiValuedPaths(dict[str, bool]):
         deepest_path = max(paths, key=len)
         return all(deepest_path == path or deepest_path.startswith(f"{path}__") for path in paths)
 
-    def record_group_key_lookup(self, model: type[Model], lookup: str) -> None:
+    def record_group_key_lookup(self, binding: ModelBinding, lookup: str) -> None:
         """Records the to-many hops of a GROUP BY key.
 
         Args:
-            model: The model the lookup starts from.
+            binding: The model the lookup starts from.
             lookup: The double-underscore lookup.
         """
-        multi_valued_paths = self.get_multi_valued_paths(model, lookup)
+        multi_valued_paths = self.get_multi_valued_paths(binding, lookup)
         self.group_key_paths.update(multi_valued_paths)
         if not multi_valued_paths:
             return
-        key = self.get_last_multi_valued_key(model, lookup)
+        key = self.get_last_multi_valued_key(binding, lookup)
         if key is None:
             return
         related_model, field_names = key
@@ -219,20 +219,22 @@ class AggregatedMultiValuedPaths(dict[str, bool]):
         key_field_names = self.group_key_field_names_by_path.setdefault(last_path, set())
         key_field_names.update(field_names)
         if self.field_names_identify_row(
-            related_model, key_field_names, self.non_null_field_names_by_path.get(last_path, ())
+            binding.graph.get_binding(related_model),
+            key_field_names,
+            self.non_null_field_names_by_path.get(last_path, ()),
         ):
             self.unique_group_key_paths.add(last_path)
 
-    def record_non_null_lookup(self, model: type[Model], lookup: str) -> None:
+    def record_non_null_lookup(self, binding: ModelBinding, lookup: str) -> None:
         """Records a field a filter keeps from being NULL on its to-many relation's JOIN - recorded
         before the GROUP BY keys, whose uniqueness it can complete.
 
         Args:
-            model: The model the lookup starts from.
+            binding: The model the lookup starts from.
             lookup: The double-underscore lookup of the field, without a lookup suffix.
         """
-        multi_valued_paths = self.get_multi_valued_paths(model, lookup)
-        key = self.get_last_multi_valued_key(model, lookup) if multi_valued_paths else None
+        multi_valued_paths = self.get_multi_valued_paths(binding, lookup)
+        key = self.get_last_multi_valued_key(binding, lookup) if multi_valued_paths else None
         if key is None:
             return
         _related_model, field_names = key
@@ -240,7 +242,7 @@ class AggregatedMultiValuedPaths(dict[str, bool]):
 
     def record_row_pinning_conditions(
         self,
-        model: type[Model],
+        binding: ModelBinding,
         conditions_by_generation: Mapping[int, Iterable[tuple[str, Any]]],
         claiming_generation_by_path: Mapping[str, int],
     ) -> None:
@@ -250,7 +252,7 @@ class AggregatedMultiValuedPaths(dict[str, bool]):
         repeats no row and inflates no aggregate.
 
         Args:
-            model: The queried model.
+            binding: The queried model.
             conditions_by_generation: Per ``.filter()`` call generation, the kwargs every kept row
                 satisfies.
             claiming_generation_by_path: Per to-many path, the generation whose filters read the
@@ -269,8 +271,8 @@ class AggregatedMultiValuedPaths(dict[str, bool]):
                     lookup = relation_lookup
                 elif not self.is_single_value(value):
                     continue
-                multi_valued_paths = self.get_multi_valued_paths(model, lookup)
-                last_multi_valued_key = self.get_last_multi_valued_key(model, lookup) if multi_valued_paths else None
+                multi_valued_paths = self.get_multi_valued_paths(binding, lookup)
+                last_multi_valued_key = self.get_last_multi_valued_key(binding, lookup) if multi_valued_paths else None
                 if last_multi_valued_key is None:
                     continue
                 related_model, field_names = last_multi_valued_key
@@ -280,12 +282,14 @@ class AggregatedMultiValuedPaths(dict[str, bool]):
                     if not generation or claiming_generation_by_path.get(path) == generation
                     else f"{path}{SEPARATE_FILTER_JOIN_PATH_SEPARATOR}{generation}"
                 )
-                relation = self.get_last_relation(model, path)
+                relation = self.get_last_relation(binding, path)
                 if is_isnull:
                     # A many-to-many JOIN can find link rows whose related row its ON clause
                     # rejects - one NULL row each.
                     if not isinstance(relation, ManyToManyFieldInstance) and all(
-                        self._is_read_non_nullable_field(related_model, field_name, set(field_names), set())
+                        self._is_read_non_nullable_field(
+                            binding.graph.get_binding(related_model), field_name, set(field_names), set()
+                        )
                         for field_name in field_names
                     ):
                         self.pinned_paths.add(tracked_path)
@@ -297,7 +301,9 @@ class AggregatedMultiValuedPaths(dict[str, bool]):
         for tracked_path, equal_field_names in equal_field_names_by_tracked_path.items():
             # An equality never matches NULL, so a nullable unique field identifies a row too.
             if self.field_names_identify_row(
-                related_model_by_tracked_path[tracked_path], equal_field_names, equal_field_names
+                binding.graph.get_binding(related_model_by_tracked_path[tracked_path]),
+                equal_field_names,
+                equal_field_names,
             ):
                 self.pinned_paths.add(tracked_path)
 
@@ -317,17 +323,17 @@ class AggregatedMultiValuedPaths(dict[str, bool]):
         return not hasattr(value, "_make_query")
 
     @staticmethod
-    def get_last_relation(model: type[Model], path: str) -> RelationalField[Model] | None:
+    def get_last_relation(binding: ModelBinding, path: str) -> RelationalField[Model] | None:
         """The relation a ``relation__relation`` path ends on.
 
         Args:
-            model: The model the path starts from.
+            binding: The model the path starts from.
             path: The relation path.
 
         Returns:
             The relation, or None when a part isn't a relation.
         """
-        lookup_path = LookupPath.parse(model, path, crosses_last=True)
+        lookup_path = LookupPath.parse(binding, path, crosses_last=True)
         if lookup_path.rest or not lookup_path.relations:
             return None
         return lookup_path.relations[-1]
@@ -343,39 +349,44 @@ class AggregatedMultiValuedPaths(dict[str, bool]):
         Returns:
             True when no two link rows join the same pair of rows.
         """
-        through_model = relation.through_model_class
-        if through_model is None:
+        through_binding = relation.get_through_binding()
+        if through_binding is None:
             return bool(relation.unique)
-        field_names_by_column = through_model._meta.fields_db_projection_reverse
+        field_names_by_column = through_binding.fields_db_projection_reverse
         key_field_names = [
             field_names_by_column.get(column, column) for column in (*relation.backward_keys, *relation.forward_keys)
         ]
-        return cls.field_names_identify_row(through_model, key_field_names)
+        return cls.field_names_identify_row(
+            through_binding,
+            key_field_names,
+        )
 
     @staticmethod
-    def get_last_multi_valued_key(model: type[Model], lookup: str) -> tuple[type[Model], tuple[str, ...]] | None:
+    def get_last_multi_valued_key(binding: ModelBinding, lookup: str) -> tuple[type[Model], tuple[str, ...]] | None:
         """The model a lookup's last to-many hop reaches, and the fields of it the lookup reads -
         ``tags`` and ``tags__pk`` read the primary key, ``tags__slug`` the ``slug`` field.
 
         Args:
-            model: The model the lookup starts from.
+            binding: The model the lookup starts from.
             lookup: The double-underscore lookup.
 
         Returns:
             The model and the field names, or None when the lookup doesn't end on a column of the
             model its last to-many hop reaches.
         """
+        model = binding._model
         current_model = model
         is_on_last_multi_valued_model = False
         parts = lookup.split("__")
         for index, part in enumerate(parts):
-            relation = current_model._meta.fields_map.get(part)
+            current_binding = binding.graph.get_binding(current_model)
+            relation = current_binding.fields_map.get(part)
             related_model = getattr(relation, "related_model", None)
             if relation is None or related_model is None:
                 if not is_on_last_multi_valued_model or index != len(parts) - 1:
                     return None
-                if part == "pk":
-                    return current_model, tuple(current_model._meta.primary_key_attribute_names)
+                if part == PRIMARY_KEY_ALIAS:
+                    return current_model, current_binding.primary_key_attribute_names
                 return (current_model, (part,)) if relation is not None else None
             if (
                 is_on_last_multi_valued_model
@@ -390,18 +401,18 @@ class AggregatedMultiValuedPaths(dict[str, bool]):
         if not is_on_last_multi_valued_model:
             return None
         # The lookup ends on the relation itself, which reads the related primary key.
-        return current_model, tuple(current_model._meta.primary_key_attribute_names)
+        return current_model, binding.graph.get_binding(current_model).primary_key_attribute_names
 
     @classmethod
     def field_names_identify_row(
-        cls, model: type[Model], field_names: Collection[str], non_null_field_names: Collection[str] = ()
+        cls, binding: ModelBinding, field_names: Collection[str], non_null_field_names: Collection[str] = ()
     ) -> bool:
         """Whether no two rows of a model can share the values of some fields - they include the
         primary key, a non-nullable unique field, or every field of an
         unconditional ``UniqueConstraint`` whose columns are all non-nullable.
 
         Args:
-            model: The model.
+            binding: The model.
             field_names: The field names.
             non_null_field_names: Nullable fields known to hold no NULL on the rows compared.
 
@@ -410,24 +421,23 @@ class AggregatedMultiValuedPaths(dict[str, bool]):
         """
         from hare.ddl.constraints.unique_constraint import UniqueConstraint
 
-        meta = model._meta
         read_field_names = set(field_names)
         known_non_null_field_names = set(non_null_field_names)
-        if meta.has_primary_key and (
-            "pk" in read_field_names or set(meta.primary_key_attribute_names) <= read_field_names
+        if binding.has_primary_key and (
+            PRIMARY_KEY_ALIAS in read_field_names or set(binding.primary_key_attribute_names) <= read_field_names
         ):
             return True
         unique_field_sets: list[tuple[str, ...]] = [
-            (field_name,) for field_name, field in meta.fields_map.items() if field.unique and not field.pk
+            (field_name,) for field_name, field in binding.fields_map.items() if field.unique and not field.pk
         ]
         unique_field_sets.extend(
             tuple(constraint.fields)
-            for constraint in meta.constraints
+            for constraint in binding.constraints
             if isinstance(constraint, UniqueConstraint) and not constraint.condition and constraint.fields
         )
         return any(
             all(
-                cls._is_read_non_nullable_field(model, field_name, read_field_names, known_non_null_field_names)
+                cls._is_read_non_nullable_field(binding, field_name, read_field_names, known_non_null_field_names)
                 for field_name in unique_field_set
             )
             for unique_field_set in unique_field_sets
@@ -435,13 +445,13 @@ class AggregatedMultiValuedPaths(dict[str, bool]):
 
     @staticmethod
     def _is_read_non_nullable_field(
-        model: type[Model], field_name: str, read_field_names: set[str], non_null_field_names: set[str]
+        binding: ModelBinding, field_name: str, read_field_names: set[str], non_null_field_names: set[str]
     ) -> bool:
         """Whether a field is read and can't hold NULL - a forward relation through its own name or
         all of its key columns.
 
         Args:
-            model: The model.
+            binding: The model.
             field_name: The field name.
             read_field_names: The field names read.
             non_null_field_names: Nullable fields known to hold no NULL.
@@ -449,7 +459,7 @@ class AggregatedMultiValuedPaths(dict[str, bool]):
         Returns:
             True for a read, non-nullable field.
         """
-        fields_map = model._meta.fields_map
+        fields_map = binding.fields_map
         field = fields_map.get(field_name)
         if field is None:
             return False

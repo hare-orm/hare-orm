@@ -8,10 +8,10 @@ from hare.ddl.constraints.check_constraint import CheckConstraint
 from hare.fields.data.choices.char_enum_field_instance import CharEnumFieldInstance
 from hare.fields.data.choices.constants import ENUM_MEMBERS_CHECK_SUFFIX
 from hare.fields.data.choices.int_enum_field_instance import IntEnumFieldInstance
+from hare.fields.generated_field import GeneratedField
 
 if TYPE_CHECKING:
-    from hare.core.connections.connection_handler import ConnectionHandler
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class EnumMemberChecks:
@@ -21,16 +21,14 @@ class EnumMemberChecks:
     migrations."""
 
     @staticmethod
-    def add_to_models(models: Iterable[type[Model]], connections: ConnectionHandler) -> None:
+    def add_to_models(models: Iterable[ModelBinding]) -> None:
         """Sets the enum checks of each model, bound to its connection - the ones set by an earlier
         binding are replaced.
 
         Args:
-            models: The models.
-            connections: The connections they are bound to - their settings, none opened.
+            models: Model bindings whose graph supplies the configured dialects.
         """
-        for model in models:
-            meta = model._meta
+        for meta in models:
             if meta.abstract or meta.swapped is not None:
                 continue
             declared_constraints = [
@@ -39,7 +37,7 @@ class EnumMemberChecks:
             enum_checks: list[CheckConstraint] = []
             if (
                 meta.default_connection is not None
-                and not connections.get_dialect(meta.default_connection).features.keeps_enum_columns
+                and not meta.graph.get_dialect(meta.default_connection).features.keeps_enum_columns
             ):
                 declared_names = {getattr(constraint, "name", None) for constraint in declared_constraints}
                 for field_name, field in meta.fields_map.items():
@@ -50,7 +48,7 @@ class EnumMemberChecks:
 
     @staticmethod
     def get_enum_check(field_name: str, field: Any) -> CheckConstraint | None:
-        """The check of an enum field's column.
+        """The check of a column with an enum value, including generated output types.
 
         Args:
             field_name: The field's name.
@@ -60,7 +58,10 @@ class EnumMemberChecks:
             The check, None for a field of no enum column of its own - a native enum type's holds the
             members itself.
         """
-        if not isinstance(field, (IntEnumFieldInstance, CharEnumFieldInstance)) or not field.has_db_field:
+        if not field.has_db_field:
+            return None
+        field = GeneratedField.get_effective_field(field)
+        if not isinstance(field, (IntEnumFieldInstance, CharEnumFieldInstance)):
             return None
         if isinstance(field, CharEnumFieldInstance) and field.has_native_enum_type:
             return None

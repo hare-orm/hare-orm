@@ -37,7 +37,7 @@ class StatisticPairAggregate(Aggregate):
         distinct: bool = False,
         _filter: Q | Exists | None = None,
     ) -> None:
-        super().__init__(y, F(x) if isinstance(x, str) else x, distinct=distinct, _filter=_filter)  # type: ignore[arg-type]
+        super().__init__(y, F(x) if isinstance(x, str) else x, distinct=distinct, _filter=_filter)
 
     def get_function_name(self) -> str:
         """The Postgres aggregate this call computes."""

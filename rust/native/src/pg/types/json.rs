@@ -1,35 +1,17 @@
 //! `json`/`jsonb`: the text the Python side decodes, and JSON text for a Python value bound as JSON.
 
-use pyo3::prelude::*;
+use std::borrow::Cow;
 use std::fmt::Write as _;
 
+use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDate, PyDateTime, PyDict, PyFloat, PyInt, PyList, PyString, PyTime, PyTuple};
 use tokio_postgres::types::Type;
 
+use crate::json_string::write_json_string;
 use crate::pg::error::{to_pyerr, DriverError};
 use crate::pg::value::BoxError;
 use crate::python::objects::{decimal_type, uuid_type};
-
-/// Appends `text` as a JSON string literal.
-pub(crate) fn write_json_string(text: &str, out: &mut String) {
-    out.push('"');
-    for character in text.chars() {
-        match character {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0C}' => out.push_str("\\f"),
-            control if (control as u32) < 0x20 => {
-                write!(out, "\\u{:04x}", control as u32).expect("writing into a String never fails");
-            }
-            other => out.push(other),
-        }
-    }
-    out.push('"');
-}
+use crate::python::value_traversal::PythonValueTraversal;
 
 /// Appends a finite float as a JSON number - the shortest text that reads back as the same float.
 pub(crate) fn write_json_float(value: f64, out: &mut String) -> Result<(), String> {
@@ -42,7 +24,23 @@ pub(crate) fn write_json_float(value: f64, out: &mut String) -> Result<(), Strin
 
 /// Serializes a Python value bound as a JSON parameter to JSON text: dict key order kept, ints of
 /// any size and floats exact, datetime/date/time as `isoformat()`, UUID/Decimal as strings.
-pub(crate) fn write_python_json(object: &Bound<'_, PyAny>, out: &mut String) -> PyResult<()> {
+pub(crate) fn write_python_json_with_context(
+    object: &Bound<'_, PyAny>,
+    out: &mut String,
+    context: &mut PythonValueTraversal,
+) -> PyResult<()> {
+    if object.is_instance_of::<PyList>() || object.is_instance_of::<PyTuple>() || object.is_instance_of::<PyDict>() {
+        context.visit(object, |context| write_python_json_value(object, out, context))
+    } else {
+        write_python_json_value(object, out, context)
+    }
+}
+
+fn write_python_json_value(
+    object: &Bound<'_, PyAny>,
+    out: &mut String,
+    context: &mut PythonValueTraversal,
+) -> PyResult<()> {
     let conversion_error = |message: String| to_pyerr(DriverError::Conversion(message));
     if object.is_none() {
         out.push_str("null");
@@ -56,19 +54,20 @@ pub(crate) fn write_python_json(object: &Bound<'_, PyAny>, out: &mut String) -> 
     } else if object.is_instance_of::<PyFloat>() {
         write_json_float(object.extract::<f64>()?, out).map_err(conversion_error)?;
     } else if object.is_instance_of::<PyString>() {
-        write_json_string(&object.extract::<String>()?, out);
+        write_json_string(object.cast::<PyString>()?.to_str()?, out);
     } else if object.is_instance_of::<PyDateTime>()
         || object.is_instance_of::<PyDate>()
         || object.is_instance_of::<PyTime>()
     {
-        write_json_string(&object.call_method0("isoformat")?.extract::<String>()?, out);
+        let text = object.call_method0("isoformat")?;
+        write_json_string(text.cast::<PyString>()?.to_str()?, out);
     } else if object.is_instance_of::<PyList>() || object.is_instance_of::<PyTuple>() {
         out.push('[');
         for (index, item) in object.try_iter()?.enumerate() {
             if index > 0 {
                 out.push(',');
             }
-            write_python_json(&item?, out)?;
+            write_python_json_with_context(&item?, out, context)?;
         }
         out.push(']');
     } else if object.is_instance_of::<PyDict>() {
@@ -78,17 +77,17 @@ pub(crate) fn write_python_json(object: &Bound<'_, PyAny>, out: &mut String) -> 
                 out.push(',');
             }
             let key_text = if key.is_instance_of::<PyString>() {
-                key.extract::<String>()?
+                Cow::Borrowed(key.cast::<PyString>()?.to_str()?)
             } else if key.is_none() {
-                "null".to_string()
+                Cow::Borrowed("null")
             } else if key.is_instance_of::<PyBool>() {
-                if key.extract::<bool>()? { "true" } else { "false" }.to_string()
+                Cow::Borrowed(if key.extract::<bool>()? { "true" } else { "false" })
             } else if key.is_instance_of::<PyInt>() {
-                key.call_method0("__index__")?.str()?.to_string()
+                Cow::Owned(key.call_method0("__index__")?.str()?.to_string())
             } else if key.is_instance_of::<PyFloat>() {
                 let mut text = String::new();
                 write_json_float(key.extract::<f64>()?, &mut text).map_err(conversion_error)?;
-                text
+                Cow::Owned(text)
             } else {
                 return Err(conversion_error(format!(
                     "JSON object keys must be str, int, float, bool or None, not {}",
@@ -97,7 +96,7 @@ pub(crate) fn write_python_json(object: &Bound<'_, PyAny>, out: &mut String) -> 
             };
             write_json_string(&key_text, out);
             out.push(':');
-            write_python_json(&item, out)?;
+            write_python_json_with_context(&item, out, context)?;
         }
         out.push('}');
     } else {

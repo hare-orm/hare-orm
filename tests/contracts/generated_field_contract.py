@@ -5,7 +5,10 @@ import dataclasses
 import json
 from typing import Any
 
+import pytest
+
 from hare.contrib.outbox import ChangeCapture
+from hare.core.hare_context import HareContext
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.fields.generated_field import GeneratedField
 from hare.models import Model
@@ -14,6 +17,7 @@ from hare.query.functions import Coalesce, Greatest, JSONObject, Least, Max, Min
 from hare.query.functions.window import Lag
 from tests.contracts.constants import GENERATED_VALUE_FIELD_NAME, SAMPLED_FIELD_NAME
 from tests.contracts.field_sample import FieldSample
+from tests.contracts.generated_field_expectations import GeneratedFieldExpectations
 
 
 class GeneratedFieldContract:
@@ -43,18 +47,23 @@ class GeneratedFieldContract:
     def canonical(value: Any) -> str:
         return json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False)
 
-    async def get_outcome(self, operation: str, field_name: str) -> tuple[tuple[str, Any], str | None]:
-        """Returns a comparable value or exception type, with diagnostic text outside the comparison."""
-        try:
-            return ("value", self.canonical(await self.execute(operation, field_name))), None
-        except Exception as error:
-            return ("error", type(error)), str(error)
+    async def get_outcome(self, operation: str, field_name: str, dialect: str) -> tuple[str, Any]:
+        """Require success or the declared refusal; unexpected exceptions propagate unchanged."""
+        expected_error = GeneratedFieldExpectations.get_error(self.sample, operation, dialect)
+        if expected_error is None:
+            return "value", self.canonical(await self.execute(operation, field_name))
+        exception_type, message = expected_error
+        with pytest.raises(exception_type, match=message):
+            await self.execute(operation, field_name)
+        return "error", exception_type
 
     async def execute(self, operation: str, field_name: str) -> Any:
-        field = self.model._meta.fields_map[field_name]
+        field = HareContext.require_current().apps.get_binding(self.model).fields_map[field_name]
         if operation == "json":
             return [
-                ChangeCapture.get_row_values(self.model, {field_name: getattr(row, field_name)})[field_name]
+                ChangeCapture.get_row_values(
+                    HareContext.require_current().apps.get_binding(self.model), {field_name: getattr(row, field_name)}
+                )[field_name]
                 for row in await self.model.objects.order_by("id")
             ]
         if operation == "json_object":
@@ -79,7 +88,9 @@ class GeneratedFieldContract:
                 .order_by("id")
                 .values_list("selected", flat=True)
             )
-            return [field.get_json_value(value) for value in values]
+            # A fractional branch promotes numeric inputs to FloatField. Serializing
+            # through the source field could quantize the result and conceal that contract.
+            return list(values)
         if operation == "lag_fractional":
             values = await (
                 self.model.objects.annotate(selected=Window(Lag(field_name, default=0.5), order_by=["id"]))

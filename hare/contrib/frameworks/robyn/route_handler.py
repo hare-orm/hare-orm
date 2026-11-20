@@ -5,13 +5,15 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Awaitable, Callable
+from functools import partial, wraps
 from http import HTTPStatus
-from typing import Any
+from typing import Any, get_type_hints
 from urllib.parse import urlencode, urlunsplit
 
 from pydantic import TypeAdapter
 from robyn import Headers, Request, Response
 
+from hare.contrib.application_lifecycle import ApplicationLifecycle
 from hare.contrib.frameworks.request_transaction import RequestTransaction
 from hare.contrib.frameworks.robyn.constants import (
     HARE_ROUTE_HANDLER_ATTRIBUTE,
@@ -22,6 +24,7 @@ from hare.contrib.frameworks.robyn.constants import (
 from hare.contrib.frameworks.robyn.hare_exception_handlers import HareExceptionHandlers
 from hare.contrib.request_query.exceptions import InvalidRequestQuery
 from hare.contrib.request_query.request_query import RequestQuery
+from hare.exceptions import ConfigurationError
 
 
 class RouteHandler:
@@ -47,14 +50,38 @@ class RouteHandler:
         self.response_adapter: TypeAdapter[Any] | None = (
             None if response_model is None else TypeAdapter(response_model)
         )
-        self.transaction_connection_names: tuple[str | None, ...] = ()
-        self.signature = inspect.signature(handler)
+        self.signature = self.get_handler_signature(handler)
         self.request_queries: dict[str, type[RequestQuery[Any]]] = {
             name: parameter.annotation
             for name, parameter in self.signature.parameters.items()
             if isinstance(parameter.annotation, type) and issubclass(parameter.annotation, RequestQuery)
         }
         self.request_argument = self.get_request_argument()
+
+    @staticmethod
+    def get_handler_signature(handler: Callable[..., Any]) -> inspect.Signature:
+        """Evaluate postponed annotations once, preserving the callable's exposed signature."""
+        signature = inspect.signature(handler)
+        target = inspect.unwrap(handler)
+        while isinstance(target, partial):
+            target = inspect.unwrap(target.func)
+        if inspect.isclass(target):
+            target = target.__init__
+        elif not inspect.isfunction(target) and not inspect.ismethod(target):
+            target = target.__call__
+        try:
+            if not getattr(target, "__annotations__", None):
+                return signature
+            hints = get_type_hints(target, include_extras=True)
+        except Exception as error:
+            raise ConfigurationError(f"Cannot read annotations of route handler {handler!r}: {error}") from error
+        return signature.replace(
+            parameters=[
+                parameter.replace(annotation=hints.get(name, parameter.annotation))
+                for name, parameter in signature.parameters.items()
+            ],
+            return_annotation=hints.get("return", signature.return_annotation),
+        )
 
     def get_request_argument(self) -> str | None:
         """The handler's own parameter taking the request.
@@ -77,6 +104,7 @@ class RouteHandler:
             The function.
         """
 
+        @wraps(self.handler)
         async def route_function(**arguments: Any) -> Any:
             return await self.call(arguments)
 
@@ -91,10 +119,6 @@ class RouteHandler:
         route_function.__signature__ = self.signature.replace(  # type: ignore[attr-defined]
             parameters=parameters, return_annotation=return_annotation
         )
-        route_function.__name__ = getattr(self.handler, "__name__", route_function.__name__)
-        route_function.__qualname__ = getattr(self.handler, "__qualname__", route_function.__qualname__)
-        route_function.__doc__ = self.handler.__doc__
-        route_function.__module__ = self.handler.__module__
         setattr(route_function, HARE_ROUTE_HANDLER_ATTRIBUTE, self)
         return route_function
 
@@ -128,11 +152,11 @@ class RouteHandler:
         try:
             for name, request_query_class in self.request_queries.items():
                 handler_arguments[name] = self.build_request_query(request_query_class, request)
-            if not self.transaction_connection_names or RequestTransaction.is_skipped(self.handler):
+            lifecycle = ApplicationLifecycle.active.get()
+            connections = () if lifecycle is None else lifecycle.transaction_connection_names
+            if not connections or RequestTransaction.is_skipped(self.handler):
                 return await self.run(handler_arguments)
-            return await RequestTransaction(self.transaction_connection_names).run(
-                lambda: self.run(handler_arguments), self.get_status_code
-            )
+            return await RequestTransaction(connections).run(lambda: self.run(handler_arguments), self.get_status_code)
         except InvalidRequestQuery as error:
             return HareExceptionHandlers.get_invalid_request_query_response(request, error)
 
@@ -186,11 +210,9 @@ class RouteHandler:
             InvalidRequestQuery: See ``RequestQuery.__init__()``.
         """
         pairs = [(name, value) for name, values in request.query_params.to_dict().items() for value in values]
-        request_query_class.prepare_parameters()
+        schema = request_query_class.prepare_parameters()
         path_values = {
-            name: value
-            for name, value in dict(request.path_params or {}).items()
-            if name in request_query_class.model_fields
+            name: value for name, value in dict(request.path_params or {}).items() if name in schema.model_fields
         }
         request_query = request_query_class.from_query_parameters(pairs, request=request, **path_values)
         url = request.url

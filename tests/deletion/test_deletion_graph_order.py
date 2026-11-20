@@ -7,6 +7,7 @@ import sys
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.models.deletion.cascade.deletion_graph import DeletionGraph
 from tests.shared_models.testmodels import Author
 
@@ -16,8 +17,11 @@ ORDER_SCRIPT = (
     "from hare.models.deletion.cascade.deletion_graph import DeletionGraph\n"
     "from tests.deletion.cascade_batch_models import BatchSoftParent\n"
     "async def main():\n"
-    "    async with hare_test_context(['tests.deletion.cascade_batch_models'], db_url='sqlite+aiosqlite://:memory:'):\n"
-    "        print([model.__name__ for model in DeletionGraph.get_cascade_models(BatchSoftParent)])\n"
+    "    async with hare_test_context(\n"
+    "        ['tests.deletion.cascade_batch_models'], db_url='sqlite+aiosqlite://:memory:'\n"
+    "    ) as context:\n"
+    "        binding = context.apps.get_binding(BatchSoftParent)\n"
+    "        print([model.__name__ for model in DeletionGraph.get_cascade_models(binding)])\n"
     "asyncio.run(main())\n"
 )
 
@@ -44,7 +48,12 @@ def get_cascade_orders(hash_seeds: list[str]) -> set[str]:
 
 
 def test_backward_relations_are_listed_by_name(db):
-    names = [backward_field.model_field_name for backward_field, _ in DeletionGraph.get_backward_relations(Author)]
+    names = [
+        backward_field.model_field_name
+        for backward_field, _ in DeletionGraph.get_backward_relations(
+            HareContext.require_current().apps.get_binding(Author)
+        )
+    ]
     assert names == sorted(names)
     assert len(names) > 1
 

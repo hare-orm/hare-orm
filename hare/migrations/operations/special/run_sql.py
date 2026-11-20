@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 
 class RunSQL(HareOperation):
-    """Runs raw SQL - a string, a list of strings or a list of ``(sql, params)`` pairs - with optional
+    """Runs raw SQL - a string, a sequence of strings or ``(sql, params)`` pairs - with optional
     reverse SQL.
 
     Args:
@@ -28,8 +28,6 @@ class RunSQL(HareOperation):
 
     reduces_to_sql = True
     noop = ""
-    backward_reads_state_left = False
-    backward_reads_state_reached = False
 
     def __init__(
         self,
@@ -49,9 +47,6 @@ class RunSQL(HareOperation):
 
     def describe(self) -> str:
         return "Run SQL"
-
-    def state_forward(self, app_label: str, state: State) -> None:
-        return None
 
     async def database_forward(
         self,
@@ -77,33 +72,29 @@ class RunSQL(HareOperation):
             raise NotImplementedError("RunSQL reverse_sql is not set")
         await self.run_sql(state_editor, self.reverse_sql)
 
-    async def run_sql(self, state_editor: BaseSchemaEditor, sqls: str | Sequence[Any] | None) -> None:
+    @staticmethod
+    async def run_sql(state_editor: BaseSchemaEditor, sqls: str | Sequence[Any] | None) -> None:
         """Runs the statements through the schema editor."""
-        if isinstance(sqls, (list, tuple)):
+        if isinstance(sqls, Sequence) and not isinstance(sqls, (str, bytes, bytearray)):
             for sql in sqls:
-                parameters: Any = None
-                takes_parameters = False
-                if isinstance(sql, (list, tuple)):
-                    elements = len(sql)
-                    if elements == 2:
-                        sql, parameters = sql
-                        takes_parameters = True
-                    else:
-                        raise ConfigurationError(f"Expected a 2-tuple but got {elements}")
+                if not isinstance(sql, Sequence) or isinstance(sql, (str, bytes, bytearray)):
+                    await state_editor.run_raw_sql(sql)  # type: ignore[arg-type]
+                    continue
+                elements = len(sql)
+                if elements != 2:
+                    raise ConfigurationError(f"Expected a 2-tuple but got {elements}")
+                sql, parameters = sql  # type: ignore[misc]
 
-                if takes_parameters:
-                    # A (sql, parameters) pair, an empty list too: %s placeholders on every database, as raw()
-                    # takes them - written in the connection's own style, and with the values in the text where
-                    # the SQL is only shown.
-                    raw_sql = RawSQL(sql, parameters)
-                    sql_context = state_editor.client.query_class.SQL_CONTEXT
-                    if state_editor.collect_sql:
-                        state_editor.collected_sql.append(raw_sql.get_sql(sql_context))
-                    else:
-                        parameterizer = RecordingParameterizer()
-                        rendered_sql = raw_sql.get_sql(sql_context.copy(parameterizer=parameterizer))
-                        await state_editor.run_parameterized_sql(rendered_sql, parameterizer.values)
+                # A (sql, parameters) pair, an empty list too: %s placeholders on every database, as raw()
+                # takes them - written in the connection's own style, and with the values in the text where
+                # the SQL is only shown.
+                raw_sql = RawSQL(sql, parameters)
+                sql_context = state_editor.client.query_class.SQL_CONTEXT
+                if state_editor.collect_sql:
+                    state_editor.collected_sql.append(raw_sql.get_sql(sql_context))
                 else:
-                    await state_editor.run_raw_sql(sql)
+                    parameterizer = RecordingParameterizer()
+                    rendered_sql = raw_sql.get_sql(sql_context.copy(parameterizer=parameterizer))
+                    await state_editor.run_parameterized_sql(rendered_sql, parameterizer.values, schema_change=True)
         elif isinstance(sqls, str) and sqls != RunSQL.noop:
             await state_editor.run_raw_sql(sqls)

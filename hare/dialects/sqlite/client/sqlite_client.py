@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import abc
 import asyncio
-import contextvars
-import errno
 import os
 import sqlite3
-from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
+from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
-from typing import Any, ClassVar, TypeVar, cast
+from typing import Any, ClassVar
 
+from hare.core.resource_completion import ResourceCompletion
+from hare.dialects.base.client.client_schema import ClientSchema
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.dialects.base.client.declarations import ShellCommand
 from hare.dialects.base.connection.connection_option import ConnectionOption
@@ -37,20 +37,24 @@ from hare.dialects.sqlite.client.declarations import SqliteDriverErrors
 from hare.dialects.sqlite.client.sqlite_migration_lock import SqliteMigrationLock
 from hare.dialects.sqlite.constants import (
     SQLITE_CONNECTION_OPTIONS,
+    SQLITE_DATABASE_FILE_EXISTS_MESSAGE,
     SQLITE_DEFAULT_FOREIGN_KEYS,
     SQLITE_DEFAULT_JOURNAL_MODE,
     SQLITE_DEFAULT_JOURNAL_SIZE_LIMIT,
     SQLITE_DIALECT,
     SQLITE_FILE_FORMAT_PRAGMAS,
     SQLITE_IN_MEMORY_FILENAME,
+    SQLITE_PRAGMA_ENABLED_VALUES,
     SQLITE_REGEXP_OPTION,
     SQLITE_SPATIAL_EXTENSION_OPTION,
+    SQLITE_STORAGE_UNOBSERVED_MESSAGE,
     SQLITE_TRANSACTION_ABORTED_MESSAGE,
     SQLITE_VECTOR_EXTENSION_OPTION,
 )
-from hare.dialects.sqlite.enums import SpatialiteMetadata
+from hare.dialects.sqlite.enums import SpatialiteMetadata, SqliteStorageState
 from hare.dialects.sqlite.exceptions import SqliteTriggerRecursionLimitError
 from hare.dialects.sqlite.functions.sqlite_function_errors import SqliteFunctionErrors
+from hare.dialects.sqlite.parameters.sqlite_parameter_adapters import SqliteParameterAdapters
 from hare.dialects.sqlite.query.declarations import SqliteQuery
 from hare.dialects.sqlite.spatial.sqlite_spatial_extension import SqliteSpatialExtension
 from hare.dialects.sqlite.vectors.sqlite_vector_extension import SqliteVectorExtension
@@ -67,17 +71,14 @@ from hare.exceptions import (
 )
 from hare.instrumentation.pools.pool_registry import PoolRegistry
 
-T = TypeVar("T")
-
-
-CoroutineFunction = Callable[..., Coroutine[None, None, T]]
-
 
 class SqliteClient(DatabaseClient):
     """What every SQLite driver shares: the connection's settings and PRAGMAs, its one connection
     taken like a pool's, the database file, scripts split into statements and the translation of a
     driver's errors into hare's. A driver (``hare.dialects.sqlite.drivers``) opens the connection,
     runs the statements and names its exception classes (``driver_errors``)."""
+
+    parameter_adapters: SqliteParameterAdapters
 
     native_python_types = frozenset({bytes, str, int, float})
     query_class = SqliteQuery
@@ -90,12 +91,6 @@ class SqliteClient(DatabaseClient):
 
     #: The exception classes of the driver.
     driver_errors: ClassVar[SqliteDriverErrors]
-
-    #: The connections whose foreign keys a migration switched off in the current task - a delete in
-    #: its ``RunPython`` cascades in Python there.
-    foreign_keys_switched_off: ClassVar[contextvars.ContextVar[frozenset[str]]] = contextvars.ContextVar(
-        "hare_sqlite_foreign_keys_switched_off", default=frozenset()
-    )
 
     @staticmethod
     def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -112,7 +107,9 @@ class SqliteClient(DatabaseClient):
         """
         return dict(zip(row.keys(), row, strict=True))
 
-    async def execute_dicts(self, query: str, values: list[Any] | None = None) -> list[dict[str, Any]]:
+    async def execute_dicts(
+        self, query: str, values: list[Any] | None = None, *, retry_read: bool = False
+    ) -> list[dict[str, Any]]:
         """Reads dictionaries from positional rows, preserving case-distinct output names.
 
         The cursor supplies the names once for the batch. Reading plain tuples avoids building
@@ -121,26 +118,69 @@ class SqliteClient(DatabaseClient):
         Args:
             query: The SQL statement.
             values: Its bound parameters.
+            retry_read: Permit retry of an explicitly safe read, as in ``execute()``; False by default.
 
         Returns:
             The rows keyed by their exact output names.
         """
-        result = await self.execute(query, values, returns_rows=True, rows_by_position=True)
+        result = await self.execute(query, values, returns_rows=True, rows_by_position=True, retry_read=retry_read)
         columns = result.column_names
         return [dict(zip(columns, row, strict=True)) for row in result.rows]
 
-    def enforces_foreign_keys(self) -> bool:
-        return super().enforces_foreign_keys() and (
-            self.connection_alias not in SqliteClient.foreign_keys_switched_off.get()
-        )
+    @property
+    def parameter_binding_key(self) -> object:
+        """The adapter snapshot used by statement preparation and execution."""
+        return self.parameter_adapters
 
-    def __init__(self, file_path: str | None = None, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        if not isinstance(file_path, str) or not file_path:
+    def register_parameter_adapter(self, value_type: type, adapter: Callable[[Any], Any]) -> None:
+        """Replace this client's conversion for an exact Python type.
+
+        Configure adapters before executing queries. Transactions retain the snapshot they
+        started with; replacing a parent client's snapshot affects subsequent executions and
+        prevents reuse of plans prepared with its previous conversions.
+        """
+        self.parameter_adapters = self.parameter_adapters.with_adapter(value_type, adapter)
+
+    def enforces_foreign_keys(self) -> bool:
+        """Read the physical client's state, shared with its transactions and child tasks."""
+        client = self.get_physical_client()
+        return client.features.supports_foreign_keys and client.foreign_keys_enabled
+
+    def get_physical_client(self) -> SqliteClient:
+        """Follow the same replacement chain as this non-transactional client's statements.
+
+        Transaction clients override this to retain the physical client they pinned before
+        a context replaced its connections. An alias alone does not identify that client.
+        """
+        client = self
+        while (successor := client.get_successor()) is not None:
+            client = successor  # type: ignore[assignment]
+        return client
+
+    def reset_foreign_key_state(self) -> None:
+        """Restore the configured state when a physical connection is opened or closed."""
+        self.foreign_keys_enabled = str(self.pragmas["foreign_keys"]).lower() in SQLITE_PRAGMA_ENABLED_VALUES
+
+    async def read_foreign_key_state(self) -> bool:
+        """Observe the executing connection and publish its actual foreign-key setting."""
+        result = await self.execute("PRAGMA foreign_keys")
+        enabled = bool(result.rows[0][0])
+        self.get_physical_client().foreign_keys_enabled = enabled
+        return enabled
+
+    def __init__(
+        self, file_path: str | bytes | os.PathLike[str] | os.PathLike[bytes] | None = None, **kwargs: Any
+    ) -> None:
+        super().__init__(file_path=file_path, **kwargs)
+        file_path = None if file_path is None else os.fsdecode(file_path)
+        if not file_path:
             raise ConfigurationError(
                 f"SQLite connection needs a non-empty file_path (a file name or ':memory:'), got {file_path!r}"
             )
+        self.parameter_adapters = SqliteParameterAdapters()
         self.filename = file_path
+        self._storage_state = SqliteStorageState.UNOPENED
+        self._storage_filename: str | None = None
         #: The message of the last error one of hare's functions raised on the connection.
         self.function_errors = SqliteFunctionErrors()
         #: Whether the dialect's placeholders name their parameters' numbers (``?1``) - the values of
@@ -151,7 +191,7 @@ class SqliteClient(DatabaseClient):
         self.attached_databases: dict[str, str] = self._get_attached_databases(
             kwargs.get(SQLITE_ATTACHED_DATABASES_OPTION_NAME)
         )
-        self.install_regexp_functions: bool = SQLITE_REGEXP_OPTION.parse(kwargs.get(SQLITE_REGEXP_OPTION.name, False))
+        SQLITE_REGEXP_OPTION.parse(kwargs.get(SQLITE_REGEXP_OPTION.name, False))
         #: Whether each connection loads the sqlite-vec extension - VectorField's distances.
         self.load_sqlite_vec: bool = SQLITE_VECTOR_EXTENSION_OPTION.parse(
             kwargs.get(SQLITE_VECTOR_EXTENSION_OPTION.name, False)
@@ -207,6 +247,7 @@ class SqliteClient(DatabaseClient):
             **pragmas,
         }
         SQLITE_CONNECTION_OPTIONS.raise_for_unknown(settings, "sqlite")
+        self.reset_foreign_key_state()
 
         #: The driver's open connection, None before the first statement and after close().
         self._connection: Any = None
@@ -219,7 +260,7 @@ class SqliteClient(DatabaseClient):
         """The databases each connection attaches.
 
         Args:
-            raw_value: The setting - ``{name: file}``, or the text ``name:file,name:file`` of a database URL;
+            raw_value: A mapping of names to files, or the text ``name:file,name:file`` of a database URL;
                 None for none.
 
         Returns:
@@ -243,10 +284,6 @@ class SqliteClient(DatabaseClient):
                     f"{SQLITE_ATTACHED_DATABASES_OPTION_NAME}: a database name is given twice in {raw_value!r}"
                 )
             raw_value = {name: file for name, __, file in pairs}
-        if not isinstance(raw_value, dict):
-            raise ConfigurationError(
-                f"{SQLITE_ATTACHED_DATABASES_OPTION_NAME} takes a dict of database names to files, got {raw_value!r}"
-            )
         for name, file in raw_value.items():
             if not isinstance(name, str) or not name or "\x00" in name:
                 raise ConfigurationError(
@@ -283,7 +320,7 @@ class SqliteClient(DatabaseClient):
         text = option.parse(raw_value)
         if not text:
             raise ConfigurationError(f"{option.name} must be a non-empty string")
-        return cast("str", text)
+        return text
 
     @abc.abstractmethod
     async def swap_busy_timeout(self, connection: Any, milliseconds: int) -> int:
@@ -317,10 +354,27 @@ class SqliteClient(DatabaseClient):
         return self.filename == SQLITE_IN_MEMORY_FILENAME
 
     def hold_migration_lock(self) -> AbstractAsyncContextManager[None]:
-        # An in-memory database lives in this process only - no other one migrates it.
-        if self.filename == SQLITE_IN_MEMORY_FILENAME:
+        """Hold the lock of the actual storage, retaining this transaction's physical client."""
+        client = self.get_physical_client()
+        if client.filename == SQLITE_IN_MEMORY_FILENAME:
             return nullcontext()
-        return SqliteMigrationLock.hold(self.filename)
+        return client._hold_storage_migration_lock()
+
+    @asynccontextmanager
+    async def _hold_storage_migration_lock(self) -> AsyncGenerator[None]:
+        """Observe native storage before choosing its lock; fileless databases need no OS lock.
+
+        Cold clients open through their usual driver setup. URI interpretation and symlink
+        normalization come from SQLite itself, sharing the storage boundary used for deletion.
+        """
+        if self._connection is None:
+            async with self.acquire_connection():
+                pass
+        filename = self._storage_filename
+        if self._storage_state is not SqliteStorageState.OBSERVED or filename is None:
+            raise OperationalError(SQLITE_STORAGE_UNOBSERVED_MESSAGE)
+        async with SqliteMigrationLock.hold(filename) if filename else nullcontext():
+            yield
 
     def get_pool_bounds(self) -> tuple[int, int]:
         # The client's one connection.
@@ -355,15 +409,17 @@ class SqliteClient(DatabaseClient):
     async def _close_unlocked(self) -> None:
         PoolRegistry.remove(self)
         if self._connection:
-            await self._connection.close()
-            self.log.debug(
-                "Closed connection %s with params: filename=%s %s",
-                self._connection,
-                self.filename,
-                " ".join(f"{pragma}={value}" for pragma, value in self.pragmas.items()),
-            )
-
-            self._connection = None
+            try:
+                await ResourceCompletion.wait(self._connection.close())
+                self.log.debug(
+                    "Closed connection %s with params: filename=%s %s",
+                    self._connection,
+                    self.filename,
+                    " ".join(f"{pragma}={value}" for pragma, value in self.pragmas.items()),
+                )
+            finally:
+                self._connection = None
+                self.reset_foreign_key_state()
 
     async def db_create(self) -> None:
         """Checks that the database file doesn't exist yet - SQLite itself creates it on the first
@@ -373,7 +429,9 @@ class SqliteClient(DatabaseClient):
             OperationalError: If the database file already exists.
         """
         if self.filename != SQLITE_IN_MEMORY_FILENAME and os.path.exists(self.filename):
-            raise OperationalError(f"database file {self.filename!r} already exists")
+            raise OperationalError(SQLITE_DATABASE_FILE_EXISTS_MESSAGE.format(filename=self.filename))
+        if self._connection is None:
+            self._storage_state, self._storage_filename = SqliteStorageState.NOT_CREATED, None
 
     async def generate_schema(self, safe: bool) -> None:
         """Creates every model of this connection in the database, in one transaction - outside one,
@@ -382,24 +440,46 @@ class SqliteClient(DatabaseClient):
         Args:
             safe: Whether each object is created only when it doesn't exist yet.
         """
-        # Connected first, so the DDL is written for the features of the library's own version.
-        async with self.acquire_connection():
-            pass
-        schema = self.get_schema_sql(safe)
+        schema = await ClientSchema.build_connected_sql(self, safe)
         self.log.debug("Creating schema: %s", schema)
         if schema:
             async with self._in_transaction() as connection:
                 await connection.execute_script(schema)
 
+    async def _get_unopened_storage_filename(self) -> str:
+        """Get an explicitly requested deletion target without changing connection setup.
+
+        A driver may use an anchored ordinary filename or observe its native URI handling.
+        An empty result denotes connection-only storage, with no filesystem entry to delete.
+        """
+        raise NotImplementedError()
+
     async def db_delete(self) -> None:
+        """Close this client's storage and delete its observed main file, when one exists.
+
+        Closing retains its observed target across CWD changes and repeated closes. A successful
+        create check that never opened storage has nothing to remove. Explicit deletion on a
+        never-opened client asks the driver for its target; a failed, unobserved opening cannot
+        safely infer one. Replacement clients and attached databases keep their own storage.
+        """
         await self.close()
+        state = self._storage_state
+        if state is SqliteStorageState.NOT_CREATED:
+            return
+        if state is SqliteStorageState.OPENING:
+            raise OperationalError(SQLITE_STORAGE_UNOBSERVED_MESSAGE)
+        if state is SqliteStorageState.UNOPENED:
+            self._storage_state, self._storage_filename = SqliteStorageState.OPENING, None
+            filename = await self._get_unopened_storage_filename()
+            self._storage_state, self._storage_filename = SqliteStorageState.OBSERVED, filename
+        else:
+            filename = self._storage_filename  # type: ignore[assignment]
+        if not filename:
+            return
         try:
-            os.remove(self.filename)
+            os.remove(filename)
         except FileNotFoundError:
             pass
-        except OSError as error:
-            if error.errno != errno.EINVAL:  # fix: "sqlite+aiosqlite://:memory:" in Windows
-                raise error
 
     @staticmethod
     def _is_read_only_transaction_write(client: Any, error: BaseException) -> bool:

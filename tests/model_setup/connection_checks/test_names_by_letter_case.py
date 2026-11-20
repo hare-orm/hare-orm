@@ -2,34 +2,31 @@
 tables, columns or indexes are refused when the models are bound: the second table was the first one, the
 second column a duplicate, the second unique index never created - its duplicates accepted."""
 
-import os
-
 import pytest
 
 from hare.contrib.test import hare_test_context
 from hare.exceptions import ConfigurationError, IntegrityError
 from tests.model_setup.connection_checks.models_letter_case_unicode import LowerName, UpperName
+from tests.utils.database_under_test import DatabaseUnderTest
 
 PACKAGE = "tests.model_setup.connection_checks"
 DECLARATIONS = [
-    ("models_letter_case_tables", "tables 'Case_w1' and 'case_w1'"),
+    ("models_letter_case_tables", "CaseTableA.*CaseTableB.*both resolve to table 'case_w1'"),
     ("models_letter_case_columns", "columns 'Name' and 'name'"),
-    ("models_letter_case_indexes", "constraints or indexes 'Uq_N6' and 'uq_n6'"),
+    ("models_letter_case_indexes", "more than one object named 'uq_n6'"),
 ]
 
 
-def get_db_url() -> str:
-    return os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-
-
 def in_context(module: str, **options):
-    return hare_test_context(modules=[f"{PACKAGE}.{module}"], db_url=get_db_url(), app_label="models", **options)
+    return hare_test_context(
+        modules=[f"{PACKAGE}.{module}"], db_url=DatabaseUnderTest.get_url(), app_label="models", **options
+    )
 
 
 @pytest.mark.parametrize(("module", "message"), DECLARATIONS)
 @pytest.mark.asyncio
 async def test_names_differing_only_in_letter_case_are_refused_where_the_database_ignores_it(module, message):
-    if not get_db_url().startswith("sqlite"):
+    if not DatabaseUnderTest.get_url().startswith("sqlite"):
         pytest.skip("SQLite takes such names for one")
     with pytest.raises(ConfigurationError, match=message):
         async with in_context(module, _generate_schemas=False):
@@ -39,7 +36,7 @@ async def test_names_differing_only_in_letter_case_are_refused_where_the_databas
 @pytest.mark.parametrize(("module", "message"), DECLARATIONS)
 @pytest.mark.asyncio
 async def test_names_differing_only_in_letter_case_are_two_where_the_database_tells_them_apart(module, message):
-    if get_db_url().split(":", 1)[0].split("+", 1)[0] != "postgresql":
+    if DatabaseUnderTest.get_url().split(":", 1)[0].split("+", 1)[0] != "postgresql":
         pytest.skip("PostgreSQL tells quoted names of another case apart")
     async with in_context(module):
         pass

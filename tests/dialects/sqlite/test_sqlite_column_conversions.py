@@ -48,7 +48,7 @@ async def test_a_text_the_new_field_does_not_read_is_refused_before_the_table_ch
     result = await project.cli("migrate")
 
     assert result.exit_code not in (0, None)
-    assert f'holds "{text}"' in result.output
+    assert f"holds {text!r}" in result.output
     assert await project.query("SELECT id, value FROM note ORDER BY id") == [
         {"id": 1, "value": text},
         {"id": 2, "value": None},

@@ -44,20 +44,20 @@ class PlanOrigins:
         return id(owner)
 
     @staticmethod
-    def get_value_origin(owner: Any, attribute: str, index: int | None = None) -> ValueOrigin:
+    def get_value_origin(owner: Any, attribute: str | None, index: int | None = None) -> ValueOrigin:
         """The origin of a value held by ``owner`` under ``attribute`` - the value's own origin for a
         key of a derived condition.
 
         Args:
             owner: The object holding the value.
-            attribute: The attribute or key the value is held under.
+            attribute: The attribute or key the value is held under, or None for a callable source.
             index: The value's position in a sequence held under ``attribute``.
 
         Returns:
             The origin.
         """
         derived_origins: dict[str, ValueOrigin] | None = getattr(owner, "_value_origins", None)
-        if derived_origins is not None:
+        if derived_origins is not None and attribute is not None:
             derived_origin = derived_origins.get(attribute)
             if derived_origin is not None:
                 return derived_origin

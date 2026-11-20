@@ -8,12 +8,18 @@ import pytest
 from hare.dialects.dialect_registry import DialectRegistry
 from tests.contracts.constants import ALWAYS_AVAILABLE_URL_SCHEMES
 from tests.contracts.hare_registry import HareRegistry
+from tests.utils.package_requirements import PackageRequirements
 
 pytestmark = pytest.mark.database_independent
 
 
 @pytest.mark.parametrize(
-    "module_name", [name for name in HareRegistry.get_module_names() if HareRegistry.is_installed(name)]
+    "module_name",
+    [
+        pytest.param(name, marks=pytest.mark.requires(*PackageRequirements.get(name)))
+        for name in HareRegistry.get_module_names()
+        if HareRegistry.is_installed(name)
+    ],
 )
 def test_a_module_the_environment_can_import_imports(module_name):
     importlib.import_module(module_name)

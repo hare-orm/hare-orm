@@ -14,17 +14,9 @@ from hare.migrations.autodetection.rename_questions import RenameQuestions
 from hare.migrations.operations import AddField, CreateModel, DeleteModel, RemoveField, RenameField, RenameModel
 from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
+from tests.utils.project_sources import ProjectSources
 
 pytestmark = pytest.mark.database_independent
-
-
-def _prepare_migration_package(tmp_path: Path, app_label: str) -> str:
-    package_dir = tmp_path / app_label
-    migrations_dir = package_dir / "migrations"
-    migrations_dir.mkdir(parents=True, exist_ok=True)
-    (package_dir / "__init__.py").write_text("", encoding="ascii")
-    (migrations_dir / "__init__.py").write_text("", encoding="ascii")
-    return f"{app_label}.migrations"
 
 
 def _write_migration(
@@ -33,8 +25,8 @@ def _write_migration(
     name: str,
     dependencies: list[tuple[str, str]] | None = None,
 ) -> str:
-    module_path = _prepare_migration_package(tmp_path, app_label)
-    migrations_dir = tmp_path / app_label / "migrations"
+    migrations_dir = ProjectSources(tmp_path).prepare_migrations(tmp_path / app_label)
+    module_path = f"{app_label}.migrations"
     content = [
         "from hare import migrations",
         "",
@@ -55,8 +47,8 @@ def _write_migration_with_ops(
     operations_source: list[str],
     dependencies: list[tuple[str, str]] | None = None,
 ) -> str:
-    module_path = _prepare_migration_package(tmp_path, app_label)
-    migrations_dir = tmp_path / app_label / "migrations"
+    migrations_dir = ProjectSources(tmp_path).prepare_migrations(tmp_path / app_label)
+    module_path = f"{app_label}.migrations"
     content = [
         "from hare import migrations",
         "from hare.migrations import operations as ops",
@@ -86,7 +78,8 @@ def _make_model(name: str, app_label: str, managed: bool | None = None, **model_
 
 @pytest.mark.asyncio
 async def test_autodetector_initial_migration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    module_path = _prepare_migration_package(tmp_path, "autoapp_init")
+    ProjectSources(tmp_path).prepare_migrations(tmp_path / "autoapp_init")
+    module_path = "autoapp_init.migrations"
     monkeypatch.syspath_prepend(str(tmp_path))
 
     apps = StateApps()
@@ -494,6 +487,7 @@ async def test_autodetector_no_changes(tmp_path: Path, monkeypatch: pytest.Monke
             "            fields=[",
             "                ('id', fields.IntField(generated=True, primary_key=True, unique=True, db_index=True)),",
             "            ],",
+            "            options={'table': 'widget'},",
             "        ),",
         ],
     )
@@ -524,7 +518,8 @@ async def test_autodetector_skips_unmanaged_model(tmp_path: Path, monkeypatch: p
     CreateModel, no migration file at all - the same defense-in-depth guarantee a runtime-
     registered "live" model (Hare.register_live_model()) relies on to never have hare-orm try to
     migrate a table it doesn't own."""
-    module_path = _prepare_migration_package(tmp_path, "unmanagedapp")
+    ProjectSources(tmp_path).prepare_migrations(tmp_path / "unmanagedapp")
+    module_path = "unmanagedapp.migrations"
     monkeypatch.syspath_prepend(str(tmp_path))
 
     apps = StateApps()
@@ -553,7 +548,8 @@ async def test_autodetector_managed_model_unaffected_by_sibling_unmanaged_model(
     """A managed=True (or unset, defaulting True) model must still be picked up normally even
     when another model in the same app is managed=False - managed=False must exclude only that
     one model, not turn the whole app invisible to makemigrations."""
-    module_path = _prepare_migration_package(tmp_path, "mixedmanagedapp")
+    ProjectSources(tmp_path).prepare_migrations(tmp_path / "mixedmanagedapp")
+    module_path = "mixedmanagedapp.migrations"
     monkeypatch.syspath_prepend(str(tmp_path))
 
     apps = StateApps()
@@ -592,9 +588,9 @@ async def test_autodetector_rerun_fk_to_unmanaged_model_no_related_name(
     registered the SAME live model class into every State it built for the FK target, so the
     default backward relation (e.g. "widgets") the first run's init_relations() added onto that
     live class was still there on the second run, colliding with the identical relation
-    init_relations() was about to add again. StateApps._clone_unmanaged_model() now clones a
-    fresh state-only class per State instead of reusing the live one, so this must not crash and
-    must keep detecting the same changes on every run."""
+    init_relations() was about to add again. The captured migration environment now renders
+    unmanaged declarations as state-only classes, so this must keep both that environment
+    and the live registry unchanged while detecting the same changes on every run."""
     module_path = _write_migration_with_ops(
         tmp_path,
         "fkbackwardapp",
@@ -606,6 +602,7 @@ async def test_autodetector_rerun_fk_to_unmanaged_model_no_related_name(
             "                ('id', fields.IntField(primary_key=True)),",
             "                ('external', fields.ForeignKeyField('fkbackwardapp.ExternalThing', db_index=True)),",
             "            ],",
+            "            options={'table': 'widget'},",
             "        ),",
         ],
     )
@@ -648,6 +645,8 @@ async def test_autodetector_rerun_fk_to_unmanaged_model_no_related_name(
             }
         }
 
+        live_external = ctx.apps.get_model("fkbackwardapp.ExternalThing")
+        live_fields = dict(ctx.apps.get_binding(live_external).fields_map)
         for _ in range(2):
             apps = StateApps()
             apps.register_model("fkbackwardapp", Widget)
@@ -656,5 +655,8 @@ async def test_autodetector_rerun_fk_to_unmanaged_model_no_related_name(
                 apps_config,
                 now=lambda: dt.datetime(2024, 1, 1, 12, 0),
             )
+            assert autodetector.environment.connections is apps.environment.connections
+            assert autodetector.environment.source_bindings[Widget] is apps.get_binding(Widget)
             changes = await autodetector.changes()
             assert changes == []
+            assert ctx.apps.get_binding(live_external).fields_map == live_fields

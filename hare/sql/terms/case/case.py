@@ -6,18 +6,18 @@ from typing import TYPE_CHECKING, Any
 from hare.sql.builder_methods import BuilderMethods
 from hare.sql.exceptions import CaseException
 from hare.sql.sql_context import SqlContext
-from hare.sql.terms.node import TNode
+from hare.sql.terms.node import Node
 from hare.sql.terms.term import Term
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
     from typing import Self
 
-    from hare.sql.builder.tables.table import Table
-
 
 class Case(Term):
     """``CASE WHEN ... THEN ... ELSE ... END`` - built by ``when()`` and ``else_()``."""
+
+    structure_attributes = ("_cases", "_else")
 
     def __init__(self, alias: str | None = None) -> None:
         super().__init__(alias=alias)
@@ -45,15 +45,14 @@ class Case(Term):
         new_term._cases = list(self._cases)
         return new_term
 
-    def nodes_(self) -> Iterator[TNode]:
-        yield self  # type:ignore[misc]
+    def get_children(self) -> Iterator[Node]:
 
         for criterion, term in self._cases:
-            yield from criterion.nodes_()
-            yield from term.nodes_()
+            yield criterion
+            yield term
 
         if self._else is not None:
-            yield from self._else.nodes_()
+            yield self._else
 
     @property
     def is_aggregate(self) -> bool | None:  # type:ignore[override]
@@ -75,29 +74,6 @@ class Case(Term):
     @BuilderMethods.builder
     def when(self, criterion: Any, term: Any) -> Self:
         self._cases.append((criterion, self.wrap_constant(term)))
-        return self
-
-    @BuilderMethods.builder
-    def replace_table(self, current_table: Table | None, new_table: Table | None) -> Self:
-        """Replaces all occurrences of the specified table with the new table.
-
-        Useful when reusing fields across queries.
-
-        Args:
-            current_table: The table to be replaced.
-            new_table: The table to replace with.
-
-        Returns:
-            A copy of the term with the tables replaced.
-        """
-        self._cases = [
-            (
-                criterion.replace_table(current_table, new_table),
-                term.replace_table(current_table, new_table),
-            )
-            for criterion, term in self._cases
-        ]
-        self._else = self._else.replace_table(current_table, new_table) if self._else else None
         return self
 
     @BuilderMethods.builder

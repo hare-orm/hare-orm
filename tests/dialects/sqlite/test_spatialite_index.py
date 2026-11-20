@@ -28,6 +28,7 @@ from hare.migrations.operations import (
     RemoveIndex,
     RenameField,
     RenameModel,
+    SeparateDatabaseAndState,
 )
 from tests.dialects.sqlite.models_spatialite_index import IndexedCity, IndexedOwner, IndexedRegion, IndexedShop
 from tests.dialects.sqlite.test_full_text_migrations import MigrationRunner
@@ -67,7 +68,7 @@ async def open_client(metadata: SpatialiteMetadata = SpatialiteMetadata.WGS84) -
 
 
 @pytest_asyncio.fixture
-async def runner():
+async def runner(migration_context):
     client = await open_client()
     try:
         yield MigrationRunner(client)
@@ -474,22 +475,36 @@ def build_store(indexes: list[SpatialiteIndex]) -> type:
     return build_model(
         "Store",
         "drift_store",
-        {"name": fields.CharField(max_length=50), "location": PointField()},
+        {
+            "name": fields.CharField(max_length=50),
+            "location": PointField(),
+            "secondary_location": PointField(source_field="secondary_point"),
+        },
         {"indexes": indexes},
     )
 
 
 @pytest.mark.asyncio
 async def test_a_migrated_index_has_no_drift_and_a_missing_one_has(round_trip):
-    store = build_store([SpatialiteIndex(fields=("location",))])
+    primary_index = SpatialiteIndex(fields=("location",))
+    secondary_index = SpatialiteIndex(fields=("secondary_location",))
+    store = build_store([primary_index, secondary_index])
     operations = await round_trip.migrate_to(store)
     assert [type(operation).__name__ for operation in operations] == ["CreateExtension", "CreateModel"]
     assert (await detect_drift(round_trip.connection, build_live_state(store), [APP_LABEL])).operations == []
-    unindexed = build_store([])
-    drift = await detect_drift(round_trip.connection, build_live_state(unindexed), [APP_LABEL])
-    assert [type(operation).__name__ for operation in drift.operations] == ["RemoveIndex"]
-    assert [type(operation).__name__ for operation in await round_trip.migrate_to(unindexed)] == ["RemoveIndex"]
-    assert (await detect_drift(round_trip.connection, build_live_state(unindexed), [APP_LABEL])).operations == []
+    expected = build_live_state(build_store([secondary_index]))
+    drift = await detect_drift(round_trip.connection, expected, [APP_LABEL])
+    assert [type(operation) for operation in drift.operations] == [SeparateDatabaseAndState, RemoveIndex]
+    round_trip.tracked_state = expected
+    await round_trip.apply(drift.operations)
+    assert (await detect_drift(round_trip.connection, expected, [APP_LABEL])).operations == []
+
+    expected = build_live_state(store)
+    drift = await detect_drift(round_trip.connection, expected, [APP_LABEL])
+    assert [type(operation) for operation in drift.operations] == [SeparateDatabaseAndState, AddIndex]
+    round_trip.tracked_state = expected
+    await round_trip.apply(drift.operations)
+    assert (await detect_drift(round_trip.connection, expected, [APP_LABEL])).operations == []
 
 
 @pytest.mark.asyncio

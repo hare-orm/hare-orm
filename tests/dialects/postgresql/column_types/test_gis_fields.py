@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from hare.dialects.postgresql.enums import PostgresqlDialectName
+from hare.dialects.postgresql.postgresql_introspector import PostgresqlIntrospector
 from hare.exceptions import UnSupportedError, ValidationError
 from hare.gis import GeometryCollection, LineString, MultiPoint, Point, Polygon
 from hare.gis.aggregates import Collect, Extent, MakeLine, UnionAggregate
@@ -34,7 +34,6 @@ from hare.gis.functions import (
     Transform,
     Union,
 )
-from hare.inspectdb.generation.column_type_mapper import ColumnTypeMapper
 from hare.inspectdb.introspection.column_info import ColumnInfo
 from hare.query.expressions import Case, F, Value, When
 from tests.dialects.postgresql.column_types.models_gis import GisCity, GisPlace, GisProjectedSite
@@ -144,9 +143,8 @@ async def test_a_geometry_in_an_expression_is_written_as_a_geometry(db_gis):
     driver binds - though update(location=Value(...)) wrote one."""
     await create_places()
     branch = Case(When(id=1, then=Point(7, 8)), default=F("location"))
-    assert await GisPlace.objects.filter(id=1).annotate(x=Value(Point(3, 4))).values_list("x", flat=True) == [
-        Point(3, 4, srid=4326)
-    ]
+    for point in (Point(3, 4), Point(3, 4, srid=4326)):
+        assert await GisPlace.objects.filter(id=1).annotate(x=Value(point)).values_list("x", flat=True) == [point]
     assert await GisPlace.objects.filter(id=1).annotate(x=branch).values_list("x", flat=True) == [
         Point(7, 8, srid=4326)
     ]
@@ -346,7 +344,7 @@ def test_inspectdb_maps_postgis_columns():
             udt_name=udt_name,
             full_type=full_type,
         )
-        return ColumnTypeMapper.map_column_type(PostgresqlDialectName.POSTGRESQL, column)
+        return PostgresqlIntrospector.map_column_type(column)
 
     assert map_type("geometry(Point,4326)") == ("hare.gis.fields.PointField", {}, False)
     assert map_type("geometry(PolygonZ,3857)") == (
@@ -361,8 +359,8 @@ def test_inspectdb_maps_postgis_columns():
     )
     assert map_type("geometry(Geometry,4326)") == ("hare.gis.fields.GeometryField", {}, False)
     assert map_type("geography(Point,4326)") == (
-        "hare.dialects.postgresql.fields.postgis_field.PostGISField",
-        {},
+        "hare.gis.fields.PointField",
+        {"geography": True},
         False,
     )
     assert map_type("geometry(PointM,4326)")[2] is True

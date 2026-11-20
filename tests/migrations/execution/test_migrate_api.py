@@ -1,11 +1,13 @@
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
-from hare import Hare
 from hare.core.config import AppConfig, ConnectionConfig, HareConfig
-from hare.core.connections.connections import Connections
-from hare.migrations.api import migrate
+from hare.migrations.api import MigrationSession, migrate
+from hare.migrations.loading.graph.migration_key import MigrationKey
+from hare.migrations.operations import CreateModel
+from tests.utils.project_sources import ProjectSources
 
 pytestmark = pytest.mark.sqlite_only
 
@@ -21,19 +23,12 @@ async def test_migrate_accepts_dataclass_config() -> None:
         },
         apps={"models": AppConfig(models=["tests.unmigrated.models"], default_connection="default")},
     )
-    try:
-        await migrate(config=config)
-    finally:
-        await Hare.close_connections()
+    await migrate(config=config)
 
 
 def _write_create_model_migration(tmp_path: Path, app_label: str, model_name: str, table_name: str) -> str:
-    package_dir = tmp_path / app_label
-    migrations_dir = package_dir / "migrations"
-    migrations_dir.mkdir(parents=True)
-    (package_dir / "__init__.py").write_text("", encoding="ascii")
-    (package_dir / "models.py").write_text("", encoding="ascii")
-    (migrations_dir / "__init__.py").write_text("", encoding="ascii")
+    sources = ProjectSources(tmp_path)
+    migrations_dir = sources.prepare_migrations(sources.write_package(app_label))
     (migrations_dir / "0001_initial.py").write_text(
         "\n".join(
             [
@@ -88,29 +83,23 @@ async def test_migrate_with_scoped_target_does_not_touch_unrelated_connections(
             "appb": {"models": ["appb.models"], "default_connection": "conn_b", "migrations": appb_module},
         },
     }
-    try:
-        await migrate(config=config, target="appa.0001_initial")
+    async with MigrationSession(config) as session:
+        await session.migrate(target="appa.0001_initial")
 
-        conn_a = Connections.get("conn_a")
+        conn_a = session.context.get_connection("conn_a")
         _, rows_a = await conn_a.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='widget_a'")
         assert len(rows_a) == 1
 
-        conn_b = Connections.get("conn_b")
+        conn_b = session.context.get_connection("conn_b")
         _, rows_b = await conn_b.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='widget_b'")
         assert len(rows_b) == 0, "appb must not be migrated as a side effect of targeting appa"
-    finally:
-        await Hare.close_connections()
 
 
 def _write_migration_with_dependencies(
     tmp_path: Path, app_label: str, model_name: str, table_name: str, dependencies: list[tuple[str, str]]
 ) -> str:
-    package_dir = tmp_path / app_label
-    migrations_dir = package_dir / "migrations"
-    migrations_dir.mkdir(parents=True)
-    (package_dir / "__init__.py").write_text("", encoding="ascii")
-    (package_dir / "models.py").write_text("", encoding="ascii")
-    (migrations_dir / "__init__.py").write_text("", encoding="ascii")
+    sources = ProjectSources(tmp_path)
+    migrations_dir = sources.prepare_migrations(sources.write_package(app_label))
     (migrations_dir / "0001_initial.py").write_text(
         "\n".join(
             [
@@ -168,21 +157,19 @@ async def test_migrate_resolves_a_cross_connection_dependency(tmp_path: Path, mo
             "appb": {"models": ["appb.models"], "default_connection": "conn_b", "migrations": appb_module},
         },
     }
-    try:
-        await migrate(config=config)
+    async with MigrationSession(config) as session:
+        await session.migrate()
 
-        conn_a = Connections.get("conn_a")
+        conn_a = session.context.get_connection("conn_a")
         _, rows_a = await conn_a.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='widget_a'")
         _, rows_a_wrong = await conn_a.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='widget_b'")
-        conn_b = Connections.get("conn_b")
+        conn_b = session.context.get_connection("conn_b")
         _, rows_b = await conn_b.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='widget_b'")
         _, rows_b_wrong = await conn_b.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='widget_a'")
         assert len(rows_a) == 1, "appa must be migrated on its own connection (conn_a)"
         assert len(rows_a_wrong) == 0, "appb must never land on conn_a"
         assert len(rows_b) == 1, "appb must be migrated on its own connection (conn_b)"
         assert len(rows_b_wrong) == 0, "appa must never land on conn_b"
-    finally:
-        await Hare.close_connections()
 
 
 @pytest.mark.asyncio
@@ -214,16 +201,14 @@ async def test_migrate_scoped_target_still_finds_latest_when_another_app_depends
             "appb": {"models": ["appb.models"], "default_connection": "default", "migrations": appb_module},
         },
     }
-    try:
-        await migrate(config=config, target="appa")
+    async with MigrationSession(config) as session:
+        await session.migrate(target="appa")
 
-        conn = Connections.get("default")
+        conn = session.context.get_connection("default")
         _, rows_a = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='widget_a'")
         _, rows_b = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='widget_b'")
         assert len(rows_a) == 1, "appa must still be migrated when explicitly targeted"
         assert len(rows_b) == 0, "appb must not be migrated as a side effect of targeting appa"
-    finally:
-        await Hare.close_connections()
 
 
 @pytest.mark.asyncio
@@ -263,12 +248,12 @@ async def test_migrate_creates_a_relation_without_a_constraint_to_another_connec
             },
         },
     }
-    try:
-        await migrate(config=config)
-        _, columns = await Connections.get("conn_b").execute("SELECT name FROM pragma_table_info('widget_b')")
+    async with MigrationSession(config) as session:
+        await session.migrate()
+        _, columns = await session.context.get_connection("conn_b").execute(
+            "SELECT name FROM pragma_table_info('widget_b')"
+        )
         assert sorted(column[0] for column in columns) == ["id", "widget_id"]
-    finally:
-        await Hare.close_connections()
 
 
 @pytest.mark.asyncio
@@ -309,16 +294,56 @@ async def test_a_migration_waits_for_the_migration_of_another_connection_it_depe
     }
     events: list[tuple[str, str]] = []
 
-    def record(event: str, app_label: str, name: str) -> None:
-        if event.endswith("_start"):
-            events.append((event, app_label))
+    async def record(event: str, app_label: str, name: str) -> None:
+        events.append((event, app_label))
 
-    try:
-        await migrate(config=config, progress=record)
-        assert events == [("apply_start", "provider"), ("apply_start", "dependent")]
+    async with MigrationSession(config) as session:
+        await session.migrate(progress=record)
+        assert events == [
+            ("apply_start", "provider"),
+            ("apply_done", "provider"),
+            ("apply_start", "dependent"),
+            ("apply_done", "dependent"),
+        ]
 
         events.clear()
-        await migrate(config=config, target="provider.zero", progress=record)
-        assert events == [("rollback_start", "dependent"), ("rollback_start", "provider")]
-    finally:
-        await Hare.close_connections()
+        await session.migrate(target="provider.zero", progress=record)
+        assert events == [
+            ("rollback_start", "dependent"),
+            ("rollback_done", "dependent"),
+            ("rollback_start", "provider"),
+            ("rollback_done", "provider"),
+        ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dry_run", [False, True])
+async def test_fake_migrate_does_not_replay_applied_state_callbacks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dry_run: bool
+) -> None:
+    app_label = "fake_state_app"
+    migrations_module = _write_create_model_migration(tmp_path, app_label, "Book", "book")
+    migrations_dir = tmp_path / app_label / "migrations"
+    (migrations_dir / "0002_empty.py").write_text(
+        "from hare import migrations\n"
+        "class Migration(migrations.Migration):\n"
+        f"    dependencies = [({app_label!r}, '0001_initial')]\n"
+        "    operations = []\n",
+        encoding="ascii",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    config = {
+        "connections": {"default": {"engine": "sqlite+aiosqlite", "credentials": {"file_path": ":memory:"}}},
+        "apps": {app_label: {"models": [], "default_connection": "default", "migrations": migrations_module}},
+    }
+    async with MigrationSession(config) as session:
+        await session.migrate(target=f"{app_label}.0001_initial")
+        state_callback = Mock(side_effect=AssertionError("fake migrations must not replay state callbacks"))
+        monkeypatch.setattr(CreateModel, "state_forward", state_callback)
+        await session.migrate(target=f"{app_label}.0002_empty", fake=True, dry_run=dry_run)
+        state_callback.assert_not_called()
+        executor = next(iter(session.create_executors().values()))
+        expected = {MigrationKey(app_label, "0001_initial")}
+        if not dry_run:
+            expected.add(MigrationKey(app_label, "0002_empty"))
+        assert set(await executor.recorder.applied_migrations()) == expected

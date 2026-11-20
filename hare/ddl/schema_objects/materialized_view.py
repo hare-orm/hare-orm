@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 from hare.ddl.schema_objects.view import View
 from hare.exceptions import ConfigurationError
@@ -16,9 +16,11 @@ class MaterializedView(View):
     Args:
         name: The view's name.
         query: The ``SELECT`` - as ``View.query``.
-        with_data: Fill the view when it is created; False leaves it unreadable until refreshed.
-        unique_columns: Columns of the view a unique index is built over - a concurrent refresh
-            needs one.
+        with_data: Fill the view when it is created. Without this, the view may be empty
+            or unreadable until refreshed, depending on the dialect. The schema objects
+            guide describes each supported database's behavior.
+        unique_columns: Columns of the view's unique index where the dialect supports
+            it. A concurrent refresh may require this index.
 
     Raises:
         ConfigurationError: See ``View``; ``unique_columns`` isn't a sequence of distinct non-empty
@@ -30,7 +32,7 @@ class MaterializedView(View):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if isinstance(cast("object", self.unique_columns), str) or not all(
+        if isinstance(self.unique_columns, str) or not all(  # type: ignore[unreachable]
             isinstance(column, str) and column for column in self.unique_columns
         ):
             raise ConfigurationError(
@@ -42,6 +44,11 @@ class MaterializedView(View):
                 f"MaterializedView {self.name!r}: unique_columns names a column twice: {self.unique_columns!r}"
             )
         object.__setattr__(self, "unique_columns", tuple(self.unique_columns))
+
+    @property
+    def has_internal_storage(self) -> bool:
+        """Whether dropping the view also drops its stored rows."""
+        return True
 
     def get_options(self) -> dict[str, Any]:
         options = super().get_options()

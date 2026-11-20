@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.classes.deferred_import import DeferredImport
 from hare.query.expressions.constants import NO_CAST_SQL_TYPES
 from hare.query.expressions.expression_result import ExpressionResult
 from hare.query.expressions.value_references.literal_value_reference import LiteralValueReference
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
     from hare.query.expressions.expression import Expression
     from hare.query.expressions.expression_context import ExpressionContext
     from hare.query.expressions.f import F
+    from hare.query.expressions.raw_sql import RawSQL
     from hare.query.expressions.value import Value
     from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
 
@@ -27,36 +29,12 @@ class ExpressionArguments:
     parameter recorded under the origin of the argument (``PlanOrigins``) while the query records
     its plan."""
 
-    #: ``Expression`` and ``Value`` - the expressions import this module, so they are taken on the
-    #: first argument rather than imported here; None until then.
-    expression_classes: ClassVar[tuple[type[Expression], type[Value]] | None] = None
-    #: ``F``, taken on the first field name the same way; None until then.
-    field_reference_class: ClassVar[type[F] | None] = None
-
-    @staticmethod
-    def get_expression_classes() -> tuple[type[Expression], type[Value]]:
-        """``Expression`` and ``Value``, kept on the class once taken.
-
-        Returns:
-            The classes.
-        """
-        from hare.query.expressions.expression import Expression
-        from hare.query.expressions.value import Value
-
-        ExpressionArguments.expression_classes = (Expression, Value)
-        return Expression, Value
-
-    @staticmethod
-    def get_field_reference_class() -> type[F]:
-        """``F``, kept on the class once taken.
-
-        Returns:
-            The class.
-        """
-        from hare.query.expressions.f import F
-
-        ExpressionArguments.field_reference_class = F
-        return F
+    #: Classes imported on their first read; their modules import this one.
+    expression_class: ClassVar[DeferredImport[type[Expression]]] = DeferredImport(
+        "hare.query.expressions.expression", "Expression"
+    )
+    value_class: ClassVar[DeferredImport[type[Value]]] = DeferredImport("hare.query.expressions.value", "Value")
+    field_reference_class: ClassVar[DeferredImport[type[F]]] = DeferredImport("hare.query.expressions.f", "F")
 
     @staticmethod
     def get_result(
@@ -92,13 +70,13 @@ class ExpressionArguments:
             term ``wrap_constant()`` makes of it, neither recorded: a None is part of the structure, a
             list keeps no plan.
         """
-        expression_classes = ExpressionArguments.expression_classes or ExpressionArguments.get_expression_classes()
-        expression_class, value_class = expression_classes
+        expression_class = ExpressionArguments.expression_class
+        value_class = ExpressionArguments.value_class
         if isinstance(value, expression_class):
             if encoder is not None and isinstance(value, value_class):
                 return value.get_encoded_result(expression_context, encoder)
             return value.get_result(expression_context)
-        if isinstance(value, Term) and not isinstance(value, ValueWrapper):
+        if isinstance(value, Term):
             # A SQL term built by hand binds its values as its description lists them.
             TermPlanDescriptions.record(value, expression_context.value_wrapper_references)
             return ExpressionResult(term=value)
@@ -139,26 +117,19 @@ class ExpressionArguments:
             The result.
         """
         if isinstance(field, str):
-            field_reference_class = (
-                ExpressionArguments.field_reference_class or ExpressionArguments.get_field_reference_class()
-            )
-            return field_reference_class(field).get_result(expression_context)
+            return ExpressionArguments.field_reference_class(field).get_result(expression_context)
         return ExpressionArguments.get_result(owner, attribute, field, expression_context, index=index)
 
     @staticmethod
-    def record_parameters(
-        value_wrapper_references: RecordedValueReferences, owner: Any, attribute: str, parameters: list[ValueWrapper]
-    ) -> None:
-        """Records the parameters an object made when it was made, as a ``PARAMETERS`` part lists them.
+    def record_raw_sql_parameters(value_wrapper_references: RecordedValueReferences, raw_sql: RawSQL) -> None:
+        """Record the wrapped parameters of a raw SQL expression in their original order.
 
         Args:
             value_wrapper_references: The references the query records.
-            owner: The object.
-            attribute: The attribute holding the parameters.
-            parameters: The parameters.
+            raw_sql: The expression holding the parameters.
         """
-        for index, parameter in enumerate(parameters):
-            ExpressionArguments.record_literal(value_wrapper_references, owner, attribute, parameter, index=index)
+        for index, parameter in enumerate(raw_sql.parameters):
+            ExpressionArguments.record_literal(value_wrapper_references, raw_sql, "parameters", parameter, index=index)
 
     @staticmethod
     def record_literal(

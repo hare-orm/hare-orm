@@ -1,6 +1,4 @@
-"""Model._meta.get_lookup_info()/get_lookups()/get_ordering_info() and their QuerySet forms - what
-a filter key or an ordering name refers to, described without building a query, and the check
-.filter()/.exclude()/.order_by() run through them."""
+"""Describe filters and ordering through model bindings and querysets without executing a database query."""
 
 import dataclasses
 import datetime
@@ -9,6 +7,7 @@ import uuid
 import pytest
 
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.exceptions import FieldError, QueryError, UnSupportedError
 from hare.fields import CharField
@@ -69,7 +68,7 @@ def relation_names(lookup_info) -> list[str]:
 
 @pytest.mark.asyncio
 async def test_plain_field_lookups(db):
-    exact = Event._meta.get_lookup_info("name")
+    exact = HareContext.require_current().apps.get_binding(Event).get_lookup_info("name")
     assert exact.key == "name"
     assert exact.model is Event
     assert (relation_names(exact), field_names(exact), exact.transforms) == ([], "name", ())
@@ -77,59 +76,64 @@ async def test_plain_field_lookups(db):
     assert not exact.crosses_to_many
     assert exact.requires_extension is None
 
-    contains = Event._meta.get_lookup_info("name__icontains")
+    contains = HareContext.require_current().apps.get_binding(Event).get_lookup_info("name__icontains")
     assert (contains.lookup, contains.value_shape, contains.value_type) == (
         Lookup.ICONTAINS,
         LookupValueShape.VALUE,
         str,
     )
-    members = Event._meta.get_lookup_info("event_id__in")
+    members = HareContext.require_current().apps.get_binding(Event).get_lookup_info("event_id__in")
     assert (members.lookup, members.value_shape, members.value_type) == (Lookup.IN, LookupValueShape.LIST, int)
-    between = Event._meta.get_lookup_info("event_id__range")
+    between = HareContext.require_current().apps.get_binding(Event).get_lookup_info("event_id__range")
     assert (between.value_shape, between.value_type) == (LookupValueShape.RANGE, int)
-    is_null = Event._meta.get_lookup_info("reporter_id__isnull")
+    is_null = HareContext.require_current().apps.get_binding(Event).get_lookup_info("reporter_id__isnull")
     assert (is_null.lookup, is_null.value_shape, is_null.value_type) == (Lookup.ISNULL, LookupValueShape.VALUE, bool)
-    primary_key = Event._meta.get_lookup_info("pk__in")
+    primary_key = HareContext.require_current().apps.get_binding(Event).get_lookup_info("pk__in")
     assert (field_names(primary_key), primary_key.value_type) == ("event_id", int)
 
 
 @pytest.mark.asyncio
 async def test_descriptions_are_immutable_and_cached(db):
-    lookup_info = Event._meta.get_lookup_info("tournament__name__icontains")
-    assert Event._meta.get_lookup_info("tournament__name__icontains") is lookup_info
+    lookup_info = HareContext.require_current().apps.get_binding(Event).get_lookup_info("tournament__name__icontains")
+    assert (
+        HareContext.require_current().apps.get_binding(Event).get_lookup_info("tournament__name__icontains")
+        is lookup_info
+    )
     with pytest.raises(dataclasses.FrozenInstanceError):
         lookup_info.lookup = Lookup.EXACT  # type: ignore[misc]
 
 
 @pytest.mark.asyncio
 async def test_forward_relation_lookups(db):
-    relation = Event._meta.get_lookup_info("tournament")
+    relation = HareContext.require_current().apps.get_binding(Event).get_lookup_info("tournament")
     assert (relation_names(relation), field_names(relation)) == (["tournament"], "id")
     assert (relation.lookup, relation.value_shape, relation.value_type) == (Lookup.EXACT, LookupValueShape.VALUE, int)
-    members = Event._meta.get_lookup_info("tournament__in")
+    members = HareContext.require_current().apps.get_binding(Event).get_lookup_info("tournament__in")
     assert (members.lookup, members.value_shape, members.value_type) == (Lookup.IN, LookupValueShape.LIST, int)
-    is_null = Event._meta.get_lookup_info("reporter__isnull")
+    is_null = HareContext.require_current().apps.get_binding(Event).get_lookup_info("reporter__isnull")
     assert (relation_names(is_null), is_null.value_type) == (["reporter"], bool)
-    key_column = Event._meta.get_lookup_info("tournament_id__gte")
+    key_column = HareContext.require_current().apps.get_binding(Event).get_lookup_info("tournament_id__gte")
     assert (relation_names(key_column), field_names(key_column), key_column.lookup) == (
         [],
         "tournament_id",
         Lookup.GTE,
     )
-    through = Event._meta.get_lookup_info("tournament__name__startswith")
+    through = HareContext.require_current().apps.get_binding(Event).get_lookup_info("tournament__name__startswith")
     assert (relation_names(through), field_names(through), through.lookup) == (
         ["tournament"],
         "name",
         Lookup.STARTSWITH,
     )
     for key in ("tournament__pk", "tournament__id", "tournament__pk__in", "tournament__id__in"):
-        lookup_info = Event._meta.get_lookup_info(key)
+        lookup_info = HareContext.require_current().apps.get_binding(Event).get_lookup_info(key)
         assert (relation_names(lookup_info), field_names(lookup_info), lookup_info.value_type) == (
             ["tournament"],
             "id",
             int,
         )
-    assert not Event._meta.get_lookup_info("tournament__name").crosses_to_many
+    assert (
+        not HareContext.require_current().apps.get_binding(Event).get_lookup_info("tournament__name").crosses_to_many
+    )
 
 
 @pytest.mark.asyncio
@@ -146,50 +150,69 @@ async def test_forward_relation_filters_take_a_key_or_an_object(db):
         ("tournament__pk", tournament.pk),
         ("tournament__id__in", [tournament.pk]),
     ):
-        Event._meta.get_lookup_info(key)
+        HareContext.require_current().apps.get_binding(Event).get_lookup_info(key)
         assert await Event.objects.filter(**{key: value}).values_list("pk", flat=True) == [event.pk]
 
 
 @pytest.mark.asyncio
 async def test_composite_primary_key_lookups(db):
-    exact = VersionedDocument._meta.get_lookup_info("pk")
+    exact = HareContext.require_current().apps.get_binding(VersionedDocument).get_lookup_info("pk")
     assert field_names(exact) == ("id", "version")
     assert (exact.lookup, exact.value_shape, exact.value_type) == (
         Lookup.EXACT,
         LookupValueShape.VALUE,
         (uuid.UUID, int),
     )
-    members = VersionedDocument._meta.get_lookup_info("pk__in")
+    members = HareContext.require_current().apps.get_binding(VersionedDocument).get_lookup_info("pk__in")
     assert (members.lookup, members.value_shape, members.value_type) == (
         Lookup.IN,
         LookupValueShape.LIST,
         (uuid.UUID, int),
     )
-    others = VersionedDocument._meta.get_lookup_info("pk__not_in")
+    others = HareContext.require_current().apps.get_binding(VersionedDocument).get_lookup_info("pk__not_in")
     assert (others.lookup, others.value_shape) == (Lookup.NOT_IN, LookupValueShape.LIST)
-    assert VersionedDocument._meta.get_lookup_info("pk__not").value_shape == LookupValueShape.VALUE
+    assert (
+        HareContext.require_current().apps.get_binding(VersionedDocument).get_lookup_info("pk__not").value_shape
+        == LookupValueShape.VALUE
+    )
     with pytest.raises(FieldError, match="VersionedDocument.pk is a composite primary key - it takes pk=, pk__in="):
-        VersionedDocument._meta.get_lookup_info("pk__gt")
-    assert sorted(VersionedDocument._meta.get_lookups("pk", SQLITE)) == ["", "in", "not", "not_in"]
+        HareContext.require_current().apps.get_binding(VersionedDocument).get_lookup_info("pk__gt")
+    assert sorted(HareContext.require_current().apps.get_binding(VersionedDocument).get_lookups("pk", SQLITE)) == [
+        "",
+        "in",
+        "not",
+        "not_in",
+    ]
 
 
 @pytest.mark.asyncio
 async def test_forward_relation_to_a_composite_key(db):
-    relation = DocumentRevisionNote._meta.get_lookup_info("document")
+    relation = HareContext.require_current().apps.get_binding(DocumentRevisionNote).get_lookup_info("document")
     assert (relation_names(relation), field_names(relation)) == (["document"], ("id", "version"))
     assert relation.value_type == (uuid.UUID, int)
-    members = DocumentRevisionNote._meta.get_lookup_info("document__in")
+    members = HareContext.require_current().apps.get_binding(DocumentRevisionNote).get_lookup_info("document__in")
     assert (members.value_shape, members.value_type) == (LookupValueShape.LIST, (uuid.UUID, int))
     for key in ("document__pk", "document__pk__in"):
-        assert field_names(DocumentRevisionNote._meta.get_lookup_info(key)) == ("id", "version")
-    assert DocumentRevisionNote._meta.get_lookup_info("document__isnull").value_type is bool
-    key_columns = [DocumentRevisionNote._meta.get_lookup_info(key) for key in ("document_id", "document_version__gt")]
+        assert field_names(
+            HareContext.require_current().apps.get_binding(DocumentRevisionNote).get_lookup_info(key)
+        ) == ("id", "version")
+    assert (
+        HareContext.require_current()
+        .apps.get_binding(DocumentRevisionNote)
+        .get_lookup_info("document__isnull")
+        .value_type
+        is bool
+    )
+    key_columns = [
+        HareContext.require_current().apps.get_binding(DocumentRevisionNote).get_lookup_info(key)
+        for key in ("document_id", "document_version__gt")
+    ]
     assert [(field_names(lookup_info), lookup_info.value_type) for lookup_info in key_columns] == [
         ("document_id", uuid.UUID),
         ("document_version", int),
     ]
     with pytest.raises(QueryError, match="DocumentRevisionNote.document has a composite key"):
-        DocumentRevisionNote._meta.get_lookup_info("document__gt")
+        HareContext.require_current().apps.get_binding(DocumentRevisionNote).get_lookup_info("document__gt")
 
     document = await VersionedDocument.objects.create(title="D")
     other = await VersionedDocument.objects.create(title="O")
@@ -208,26 +231,36 @@ async def test_forward_relation_to_a_composite_key(db):
 
 @pytest.mark.asyncio
 async def test_reverse_and_many_to_many_relations(db):
-    reverse = VersionedDocument._meta.get_lookup_info("revision_notes__isnull")
+    reverse = (
+        HareContext.require_current().apps.get_binding(VersionedDocument).get_lookup_info("revision_notes__isnull")
+    )
     assert (relation_names(reverse), reverse.lookup, reverse.value_type) == (["revision_notes"], Lookup.ISNULL, bool)
     assert reverse.crosses_to_many
-    through_reverse = VersionedDocument._meta.get_lookup_info("revision_notes__note__icontains")
+    through_reverse = (
+        HareContext.require_current()
+        .apps.get_binding(VersionedDocument)
+        .get_lookup_info("revision_notes__note__icontains")
+    )
     assert (field_names(through_reverse), through_reverse.crosses_to_many) == ("note", True)
 
-    reverse_one_to_one = Event._meta.get_lookup_info("address")
+    reverse_one_to_one = HareContext.require_current().apps.get_binding(Event).get_lookup_info("address")
     assert relation_names(reverse_one_to_one) == ["address"]
     assert not reverse_one_to_one.crosses_to_many
 
-    many_to_many = Event._meta.get_lookup_info("participants__in")
+    many_to_many = HareContext.require_current().apps.get_binding(Event).get_lookup_info("participants__in")
     assert (relation_names(many_to_many), field_names(many_to_many)) == (["participants"], "id")
     assert (many_to_many.value_shape, many_to_many.value_type, many_to_many.crosses_to_many) == (
         LookupValueShape.LIST,
         int,
         True,
     )
-    reverse_many_to_many = Team._meta.get_lookup_info("events__name")
+    reverse_many_to_many = HareContext.require_current().apps.get_binding(Team).get_lookup_info("events__name")
     assert (relation_names(reverse_many_to_many), reverse_many_to_many.crosses_to_many) == (["events"], True)
-    chain = Tournament._meta.get_lookup_info("events__participants__name__icontains")
+    chain = (
+        HareContext.require_current()
+        .apps.get_binding(Tournament)
+        .get_lookup_info("events__participants__name__icontains")
+    )
     assert (relation_names(chain), field_names(chain), chain.crosses_to_many) == (
         ["events", "participants"],
         "name",
@@ -237,16 +270,21 @@ async def test_reverse_and_many_to_many_relations(db):
 
 @pytest.mark.asyncio
 async def test_many_to_many_to_a_composite_key(db):
-    relation = VersionedArticle._meta.get_lookup_info("tags")
+    relation = HareContext.require_current().apps.get_binding(VersionedArticle).get_lookup_info("tags")
     assert (relation_names(relation), field_names(relation), relation.value_type) == (
         ["tags"],
         ("id", "version"),
         (uuid.UUID, int),
     )
-    members = VersionedArticle._meta.get_lookup_info("tags__in")
+    members = HareContext.require_current().apps.get_binding(VersionedArticle).get_lookup_info("tags__in")
     assert (members.value_shape, members.crosses_to_many) == (LookupValueShape.LIST, True)
-    assert field_names(VersionedArticle._meta.get_lookup_info("tags__pk__in")) == ("id", "version")
-    assert field_names(VersionedTag._meta.get_lookup_info("articles__title")) == "title"
+    assert field_names(
+        HareContext.require_current().apps.get_binding(VersionedArticle).get_lookup_info("tags__pk__in")
+    ) == ("id", "version")
+    assert (
+        field_names(HareContext.require_current().apps.get_binding(VersionedTag).get_lookup_info("articles__title"))
+        == "title"
+    )
 
     tag = await VersionedTag.objects.create(name="T")
     article = await VersionedArticle.objects.create(title="A")
@@ -259,67 +297,83 @@ async def test_many_to_many_to_a_composite_key(db):
 
 @pytest.mark.asyncio
 async def test_date_parts(db):
-    year = Event._meta.get_lookup_info("modified__year__gte")
+    year = HareContext.require_current().apps.get_binding(Event).get_lookup_info("modified__year__gte")
     assert (field_names(year), year.transforms, year.lookup, year.value_type) == (
         "modified",
         ("year",),
         Lookup.GTE,
         int,
     )
-    week_days = Event._meta.get_lookup_info("modified__week_day__in")
+    week_days = HareContext.require_current().apps.get_binding(Event).get_lookup_info("modified__week_day__in")
     assert (week_days.value_shape, week_days.value_type) == (LookupValueShape.LIST, int)
-    date = Event._meta.get_lookup_info("modified__date")
+    date = HareContext.require_current().apps.get_binding(Event).get_lookup_info("modified__date")
     assert (date.transforms, date.lookup, date.value_type) == (("date",), Lookup.EXACT, datetime.date)
-    assert Event._meta.get_lookup_info("modified__time__lt").value_type is datetime.time
+    assert (
+        HareContext.require_current().apps.get_binding(Event).get_lookup_info("modified__time__lt").value_type
+        is datetime.time
+    )
     with pytest.raises(FieldError, match="Event.name has no lookup 'year'"):
-        Event._meta.get_lookup_info("name__year")
+        HareContext.require_current().apps.get_binding(Event).get_lookup_info("name__year")
 
 
 @pytest.mark.asyncio
 async def test_json_values_and_paths(db):
-    contains = JSONFields._meta.get_lookup_info("data__contains")
+    contains = HareContext.require_current().apps.get_binding(JSONFields).get_lookup_info("data__contains")
     assert (contains.transforms, contains.lookup, contains.value_type) == ((), Lookup.CONTAINS, object)
-    keys = JSONFields._meta.get_lookup_info("data__has_keys")
+    keys = HareContext.require_current().apps.get_binding(JSONFields).get_lookup_info("data__has_keys")
     assert (keys.value_shape, keys.value_type) == (LookupValueShape.LIST, str)
-    path = JSONFields._meta.get_lookup_info("data__owner__name__icontains")
+    path = HareContext.require_current().apps.get_binding(JSONFields).get_lookup_info("data__owner__name__icontains")
     assert (field_names(path), path.transforms, path.lookup, path.value_type) == (
         "data",
         ("owner", "name"),
         Lookup.ICONTAINS,
         str,
     )
-    path_value = JSONFields._meta.get_lookup_info("data__owner__rank")
+    path_value = HareContext.require_current().apps.get_binding(JSONFields).get_lookup_info("data__owner__rank")
     assert (path_value.transforms, path_value.lookup, path_value.value_type) == (
         ("owner", "rank"),
         Lookup.EXACT,
         object,
     )
-    assert JSONFields._meta.get_lookup_info("data__owner__rank__in").value_shape == LookupValueShape.LIST
+    assert (
+        HareContext.require_current().apps.get_binding(JSONFields).get_lookup_info("data__owner__rank__in").value_shape
+        == LookupValueShape.LIST
+    )
     with pytest.raises(FieldError, match="JSONFields.data has no lookup 'startswith'"):
-        JSONFields._meta.get_lookup_info("data__startswith")
+        HareContext.require_current().apps.get_binding(JSONFields).get_lookup_info("data__startswith")
 
 
 @pytest.mark.asyncio
 async def test_generated_field_is_described_by_its_output_field(db):
-    total = VersionedDocumentWithComputedColumns._meta.get_lookup_info("total__gte")
+    total = (
+        HareContext.require_current()
+        .apps.get_binding(VersionedDocumentWithComputedColumns)
+        .get_lookup_info("total__gte")
+    )
     assert isinstance(total.field, GeneratedField)
     assert (total.lookup, total.value_type) == (Lookup.GTE, int)
 
 
 @pytest.mark.asyncio
 async def test_custom_lookups_declare_their_value(db):
-    any_of = Tournament._meta.get_lookup_info("name__lookup_info_any_of")
+    any_of = HareContext.require_current().apps.get_binding(Tournament).get_lookup_info("name__lookup_info_any_of")
     assert (any_of.lookup, any_of.value_shape, any_of.value_type) == (
         "lookup_info_any_of",
         LookupValueShape.LIST,
         str,
     )
-    postgresql_only = Tournament._meta.get_lookup_info("name__lookup_info_postgresql_only")
+    postgresql_only = (
+        HareContext.require_current().apps.get_binding(Tournament).get_lookup_info("name__lookup_info_postgresql_only")
+    )
     assert (postgresql_only.value_shape, postgresql_only.value_type) == (LookupValueShape.VALUE, str)
     assert not postgresql_only.is_supported(SQLITE)
     assert postgresql_only.is_supported(POSTGRESQL)
-    assert "lookup_info_postgresql_only" not in Tournament._meta.get_lookups("name", SQLITE)
-    assert "lookup_info_postgresql_only" in Tournament._meta.get_lookups("name", POSTGRESQL)
+    assert "lookup_info_postgresql_only" not in HareContext.require_current().apps.get_binding(Tournament).get_lookups(
+        "name", SQLITE
+    )
+    assert "lookup_info_postgresql_only" in HareContext.require_current().apps.get_binding(Tournament).get_lookups(
+        "name", POSTGRESQL
+    )
 
     await Tournament.objects.create(name="A")
     await Tournament.objects.create(name="B")
@@ -353,18 +407,20 @@ async def test_a_dialect_only_lookup_runs_on_its_dialect(db):
 
 @pytest.mark.asyncio
 async def test_dialect_support(db):
-    search = Event._meta.get_lookup_info("name__search")
+    search = HareContext.require_current().apps.get_binding(Event).get_lookup_info("name__search")
     assert (search.is_supported(SQLITE), search.is_supported(POSTGRESQL)) == (False, True)
-    trigram = Event._meta.get_lookup_info("name__trigram_similar")
+    trigram = HareContext.require_current().apps.get_binding(Event).get_lookup_info("name__trigram_similar")
     assert trigram.requires_extension == "pg_trgm"
     assert (trigram.is_supported(SQLITE), trigram.is_supported(POSTGRESQL)) == (False, True)
-    regex = Event._meta.get_lookup_info("name__posix_regex")
+    regex = HareContext.require_current().apps.get_binding(Event).get_lookup_info("name__posix_regex")
     assert (regex.is_supported(SQLITE), regex.is_supported(POSTGRESQL)) == (True, True)
     assert SQLITE.filter_operators.supports_lookup(regex)
 
-    postgresql_only = set(Event._meta.get_lookups("name", POSTGRESQL)) - set(Event._meta.get_lookups("name", SQLITE))
+    postgresql_only = set(HareContext.require_current().apps.get_binding(Event).get_lookups("name", POSTGRESQL)) - set(
+        HareContext.require_current().apps.get_binding(Event).get_lookups("name", SQLITE)
+    )
     assert postgresql_only == {"search", "trigram_similar", "trigram_word_similar", "trigram_strict_word_similar"}
-    date_lookups = Event._meta.get_lookups("modified", SQLITE)
+    date_lookups = HareContext.require_current().apps.get_binding(Event).get_lookups("modified", SQLITE)
     assert {"", "year", "year__gte", "date__in", "isnull"} <= set(date_lookups)
     assert date_lookups["year__gte"].value_type is int
 
@@ -372,33 +428,37 @@ async def test_dialect_support(db):
 @pytest.mark.asyncio
 async def test_lookups_of_relations(db):
     assert {"", "in", "not", "not_in", "isnull", "not_isnull", "gte"} <= set(
-        Event._meta.get_lookups("tournament", SQLITE)
+        HareContext.require_current().apps.get_binding(Event).get_lookups("tournament", SQLITE)
     )
-    assert sorted(Event._meta.get_lookups("participants", SQLITE)) == sorted(
+    assert sorted(HareContext.require_current().apps.get_binding(Event).get_lookups("participants", SQLITE)) == sorted(
         ["", "not", "in", "not_in", "isnull", "not_isnull"]
     )
-    assert sorted(DocumentRevisionNote._meta.get_lookups("document__pk", SQLITE)) == ["", "in", "not", "not_in"]
-    assert "icontains" in Event._meta.get_lookups("tournament__name", SQLITE)
+    assert sorted(
+        HareContext.require_current().apps.get_binding(DocumentRevisionNote).get_lookups("document__pk", SQLITE)
+    ) == ["", "in", "not", "not_in"]
+    assert "icontains" in HareContext.require_current().apps.get_binding(Event).get_lookups("tournament__name", SQLITE)
     # A forward relation has its key column's lookups - only those the dialect runs, as the column's own.
     for dialect in (SQLITE, POSTGRESQL):
-        assert set(Event._meta.get_lookups("tournament", dialect)) == set(
-            Event._meta.get_lookups("tournament_id", dialect)
+        assert set(HareContext.require_current().apps.get_binding(Event).get_lookups("tournament", dialect)) == set(
+            HareContext.require_current().apps.get_binding(Event).get_lookups("tournament_id", dialect)
         )
-    assert not {"search", "trigram_similar"} & set(Event._meta.get_lookups("tournament", SQLITE))
+    assert not {"search", "trigram_similar"} & set(
+        HareContext.require_current().apps.get_binding(Event).get_lookups("tournament", SQLITE)
+    )
     with pytest.raises(FieldError, match="Event has no field path 'tournament__nme'"):
-        Event._meta.get_lookups("tournament__nme", SQLITE)
+        HareContext.require_current().apps.get_binding(Event).get_lookups("tournament__nme", SQLITE)
 
 
 @pytest.mark.asyncio
 async def test_unknown_paths_and_lookups(db):
     with pytest.raises(FieldError, match="Unknown filter param 'nme': Event has no field 'nme'"):
-        Event._meta.get_lookup_info("nme")
+        HareContext.require_current().apps.get_binding(Event).get_lookup_info("nme")
     with pytest.raises(FieldError, match="Unknown filter param 'name__foo': Event.name has no lookup 'foo'"):
-        Event._meta.get_lookup_info("name__foo")
+        HareContext.require_current().apps.get_binding(Event).get_lookup_info("name__foo")
     with pytest.raises(FieldError, match="Unknown filter param 'tournament__nme': Tournament has no field 'nme'"):
-        Event._meta.get_lookup_info("tournament__nme")
+        HareContext.require_current().apps.get_binding(Event).get_lookup_info("tournament__nme")
     with pytest.raises(FieldError, match="Tournament.name has no lookup 'icontains__gte'"):
-        Event._meta.get_lookup_info("tournament__name__icontains__gte")
+        HareContext.require_current().apps.get_binding(Event).get_lookup_info("tournament__name__icontains__gte")
 
 
 @pytest.mark.asyncio
@@ -421,26 +481,37 @@ async def test_filter_exclude_and_order_by_check_every_key_when_called(db):
 
 @pytest.mark.asyncio
 async def test_ordering_info(db):
-    descending = Event._meta.get_ordering_info("-name")
+    descending = HareContext.require_current().apps.get_binding(Event).get_ordering_info("-name")
     assert (descending.paths, descending.descending, descending.crosses_to_many) == (("name",), True, False)
-    relation = Event._meta.get_ordering_info("tournament")
+    relation = HareContext.require_current().apps.get_binding(Event).get_ordering_info("tournament")
     assert (relation.relations, relation.paths) == ((), ("tournament_id",))
-    through = Event._meta.get_ordering_info("tournament__name")
+    through = HareContext.require_current().apps.get_binding(Event).get_ordering_info("tournament__name")
     assert ([relation.model_field_name for relation in through.relations], through.paths) == (
         ["tournament"],
         ("tournament__name",),
     )
-    assert VersionedDocument._meta.get_ordering_info("-pk").paths == ("id", "version")
-    assert DocumentRevisionNote._meta.get_ordering_info("document").paths == ("document_id", "document_version")
-    related_key = DocumentRevisionNote._meta.get_ordering_info("document__pk")
+    assert HareContext.require_current().apps.get_binding(VersionedDocument).get_ordering_info("-pk").paths == (
+        "id",
+        "version",
+    )
+    assert HareContext.require_current().apps.get_binding(DocumentRevisionNote).get_ordering_info(
+        "document"
+    ).paths == ("document_id", "document_version")
+    related_key = (
+        HareContext.require_current().apps.get_binding(DocumentRevisionNote).get_ordering_info("document__pk")
+    )
     assert related_key.paths == ("document__pk",)
     assert [field.model_field_name for field in related_key.fields] == ["id", "version"]
-    assert Event._meta.get_ordering_info("participants").paths == ("participants",)
-    to_many = Event._meta.get_ordering_info("participants__name")
+    assert HareContext.require_current().apps.get_binding(Event).get_ordering_info("participants").paths == (
+        "participants",
+    )
+    to_many = HareContext.require_current().apps.get_binding(Event).get_ordering_info("participants__name")
     assert to_many.crosses_to_many
-    assert JSONFields._meta.get_ordering_info("data__owner__rank").transforms == ("owner", "rank")
+    assert HareContext.require_current().apps.get_binding(JSONFields).get_ordering_info(
+        "data__owner__rank"
+    ).transforms == ("owner", "rank")
     with pytest.raises(FieldError, match="Unknown field nme for ordering: Event has no field 'nme'"):
-        Event._meta.get_ordering_info("nme")
+        HareContext.require_current().apps.get_binding(Event).get_ordering_info("nme")
 
     first = await VersionedDocument.objects.create(title="A")
     second = await VersionedDocument.objects.create(title="B")
@@ -461,7 +532,9 @@ async def test_queryset_describes_its_annotations(db):
         int,
     )
     assert count.field is not None
-    assert queryset.get_lookup_info("name__icontains") is Tournament._meta.get_lookup_info("name__icontains")
+    assert queryset.get_lookup_info("name__icontains") is HareContext.require_current().apps.get_binding(
+        Tournament
+    ).get_lookup_info("name__icontains")
     assert {"", "gte", "in", "isnull"} <= set(queryset.get_lookups("event_count", SQLITE))
     ordering = queryset.get_ordering_info("-event_count")
     assert (ordering.paths, ordering.descending) == (("event_count",), True)

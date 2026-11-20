@@ -4,10 +4,10 @@ import dataclasses
 from typing import Any
 
 from hare.classes.class_path import ClassPath
-from hare.classes.comparable_values import ComparableValues
+from hare.declarations.declaration_values import DeclarationValues
 
 
-class DeclaredAttributeValues(ComparableValues):
+class DeclaredAttributeValues(DeclarationValues):
     """Comparable values in which a declaration written as a dataclass (a constraint, a trigger, a view)
     is compared by every argument it is built with, not by its ``deconstruct()`` - so an argument
     ``deconstruct()`` leaves out shows up as a difference once the declaration is read back from a

@@ -10,7 +10,7 @@ from hare.sql.sql_context import SqlContext
 from hare.sql.terms import functions as term_functions
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 from hare.sql.types.sql_types import SqlTypes
-from hare.time import Timezone
+from hare.time.system_zone import SystemZone
 
 if TYPE_CHECKING:
     from hare.dialects.base.renderers.term_renderers import TermRenderers
@@ -41,7 +41,7 @@ class PostgresqlTemporalRenderers:
     def get_local_zone_sql(sql_context: SqlContext) -> str:
         """The machine's local zone as a literal - PostgreSQL holds a naive timestamp as an instant
         in it."""
-        return ValueWrapper(Timezone.get_local_zone_name(), allow_parametrize=False).get_sql(sql_context)
+        return ValueWrapper(SystemZone.get_local_zone_name(), allow_parametrize=False).get_sql(sql_context)
 
     @staticmethod
     def get_extract_source_sql(function: functions.Extract, sql_context: SqlContext) -> str:
@@ -51,7 +51,7 @@ class PostgresqlTemporalRenderers:
         field_sql = function.field.get_sql(sql_context)
         zone_name = function.zone_name
         if zone_name is None and function.use_local_zone_when_naive:
-            zone_name = Timezone.get_local_zone_name()
+            zone_name = SystemZone.get_local_zone_name()
         if zone_name is None:
             return f"FROM {field_sql}"
         # The cast reads a `timestamp` column as the UTC wall clock it holds - a no-op for TIMESTAMPTZ.
@@ -112,7 +112,7 @@ class PostgresqlTemporalRenderers:
         field_sql = function.field.get_sql(sql_context)
         zone_name = function.zone_name
         if zone_name is None and function.use_local_zone_when_naive:
-            zone_name = Timezone.get_local_zone_name()
+            zone_name = SystemZone.get_local_zone_name()
         if zone_name is not None:
             field_sql = (
                 f"(CAST({field_sql} AS TIMESTAMPTZ) AT TIME ZONE {ValueWrapper(zone_name).get_sql(sql_context)})"

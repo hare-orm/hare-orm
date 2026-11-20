@@ -62,12 +62,13 @@ mostly hare-orm's own code. Its design was inspired by the Rust PostgreSQL backe
 [yara-orm](https://github.com/vsdudakov/yara-orm), an open-source ORM under the MIT License, and
 these parts of it are adapted from yara-orm's code:
 
-- in `rust/native/src/pg/client.rs` — the TLS connection setup (the certificate checks and the
-  connector built from them) and the unification of parameter types across the rows of
-  `execute_many`;
+- in `rust/native/src/pg/tls/` — the TLS connection setup, including certificate checks and
+  connector construction;
+- in `rust/native/src/pg/parameter_values.rs` — the unification of parameter types across the
+  rows of `execute_many`;
 - in `rust/native/src/pg/value/` (`mod.rs`, `from_python.rs`, `into_python.rs`) — the base of the
   `Value` type: its variants and their conversion to and from Python objects;
-- in `rust/native/src/pg/error.rs` — the driver's error type.
+- in `rust/native/src/pg/error/` — the driver's error type.
 
 Those parts remain subject to its license:
 

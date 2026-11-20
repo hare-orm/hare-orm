@@ -21,6 +21,7 @@ from hare.contrib.outbox import (
 from hare.contrib.outbox.deliveries.constants import EVENT_ID_HEADER, REDIS_STREAM_EVENT_FIELD
 from tests.contrib.outbox.models import DemoOutboxEvent
 from tests.contrib.outbox.wakeup_signals import signal_until_arrived
+from tests.utils.waiting import wait_until
 
 REDIS_URL = os.environ.get("HARE_TEST_REDIS_URL")
 KAFKA_BOOTSTRAP = os.environ.get("HARE_TEST_KAFKA_BOOTSTRAP")
@@ -37,6 +38,22 @@ def get_unique_name(prefix: str) -> str:
 
 async def assert_wakes_the_relay(wakeup) -> None:
     """A relay polling once a minute delivers an event within seconds - woken by ``wakeup``."""
+    topics = frozenset({"first\nsecond", "таблица.изменена", 'quote"\\topic', "plain"})
+    received = []
+    callback = received.append
+    await wakeup.subscribe(callback, DemoOutboxEvent.get_connection())
+    try:
+
+        async def arrived() -> bool:
+            if not received:
+                await wakeup.signal(topics)
+            return bool(received)
+
+        await wait_until(arrived)
+        assert all(signal == topics for signal in received)
+    finally:
+        await wakeup.unsubscribe(callback)
+
     delivered = asyncio.Event()
 
     async def deliver(_event: DemoOutboxEvent) -> None:

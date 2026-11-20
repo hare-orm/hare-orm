@@ -54,30 +54,42 @@ any other from the base parts.
 
 ## <a id="registering"></a>Registering
 
-The package's driver module registers the driver — and with it the dialect — when it is imported:
+A driver module defines an extension factory; importing it does not modify the registry:
 
 ```python
 # hare_colstore/driver.py
-from hare.dialects.dialect_registry import DialectRegistry
-
-COLSTORE_DRIVER = ColstoreDriver()
-DialectRegistry.register_driver(COLSTORE_DRIVER)
+extension = ColstoreDriver.get_contribution
 ```
 
-and names that module in the `hare.dialects` entry point group, so hare imports it the first time it
-looks up a driver that none of its own has, or lists every driver:
+The inherited factory returns an `ExtensionContribution(drivers=(ColstoreDriver(),))`.
+A package with several components can define its own factory returning a contribution containing
+dialects, drivers, field lookups, transforms and QuerySet methods.
 
 ```toml
-# pyproject.toml of hare-colstore
 [project.entry-points."hare.dialects"]
-colstore = "hare_colstore.driver"
+colstore = "hare_colstore.driver:extension"
 ```
 
-Once the package is installed, a `"colstore+colstore-client://..."` connection URL or a connection config
-with `"engine": "colstore+colstore-client"` uses it. A second driver or dialect under a taken name or
-database URL scheme raises `ConfigurationError`. Registering a dialect calls its `install()` once — the
-place to register what it adds to hare's own classes (a `QuerySet` method, a path transform on a core
-field).
+Hare discovers installed factories when an unknown driver is requested or all drivers are listed.
+A requested built-in driver loads only its module. Each new dialect supplies its related declarations
+from `get_contribution()`. Names, URL schemes and method compatibility are checked before one
+`RegistrySnapshot` is published and dependent caches are invalidated once. A failed contribution
+leaves the previous snapshot and its caches intact; it does not prevent other packages from loading.
+Built-in names and schemes are reserved.
+
+Each execution captures a registration snapshot. Nested statements and iterator pages use that
+same snapshot, including cursor cleanup. Yielding a row restores the consumer's context. A new
+independent execution sees the latest publication. Type mappings, lookup operators and SQL
+renderers follow this boundary too: build their defaults locally, then use their registration
+methods for subsequent changes. Registration also updates dialect variants in one publication.
+Cached results are scoped to the captured snapshot, with a shared size bound across generations.
+
+Successful factories run once. Failed factories are remembered until
+`DialectRegistry.refresh_installed_drivers()` explicitly retries them and discovers new packages.
+Factories must return declarations without calling registration methods. Hare cannot undo arbitrary
+external side effects of Python imports. Direct `register_dialect()`, `register_driver()`,
+`Field.register_lookup()`, `Field.register_transform()` and `QuerySetExtensions.register()` remain
+available outside factories, each publishing a single contribution.
 
 ## <a id="checklist"></a>Checklist
 
@@ -87,7 +99,7 @@ field).
 - [ ] Query class with `SQL_CONTEXT = dialect.sql_context`.
 - [ ] Client: statements, error translation, `features` from the dialect's plus the driver's;
   transactions where the database has them.
-- [ ] Driver: name, schemes, credentials, client classes; registered on import.
+- [ ] Driver: name, schemes, credentials, client classes; provided by the extension factory.
 - [ ] `hare.dialects` entry point.
 - [ ] Schema editor templates and class methods, table options, introspector — as the database needs.
 - [ ] hare's suite green under `HARE_TEST_DB`, including `tests/dialects/test_dialect_contract.py`.

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections import Counter
+from collections.abc import Callable, Iterable, Mapping
+from copy import copy
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -135,8 +137,6 @@ class QueryOptions:
     DEFAULT: ClassVar[QueryOptions]
     #: The part of a plan key the settings of ``DEFAULT`` make.
     DEFAULT_PLAN_KEY_PART: ClassVar[tuple[Any, ...]]
-    #: Copies every setting of one object onto another - see get_copy_function().
-    copy_function: ClassVar[Callable[[QueryOptions, QueryOptions], None] | None] = None
 
     __slots__ = tuple(DEFAULTS)
 
@@ -182,22 +182,6 @@ class QueryOptions:
             setattr(options, name, value)
         return options
 
-    @classmethod
-    def get_copy_function(cls) -> Callable[[QueryOptions, QueryOptions], None]:
-        """``def copy(source, target): target.a = source.a; ...`` for every setting - one
-        attribute assignment per slot, generated once, instead of a getattr()/setattr() loop.
-
-        Returns:
-            The function.
-        """
-        copy_function = cls.copy_function
-        if copy_function is None:
-            body = "\n".join(f"    target.{name} = source.{name}" for name in cls.__slots__)
-            namespace: dict[str, Any] = {}
-            exec(f"def copy(source, target):\n{body}", namespace)  # nosec B102 - class-derived source, no external input
-            copy_function = cls.copy_function = namespace["copy"]
-        return copy_function
-
     def without(self, *names: str) -> QueryOptions:
         """The options with the named settings unset.
 
@@ -239,18 +223,22 @@ class QueryOptions:
             if value is current or (not value and not current):
                 continue
             if options is self:
-                options = QueryOptions.__new__(QueryOptions)
-                QueryOptions.get_copy_function()(self, options)
+                options = copy(self)
             setattr(options, name, value)
         return options
 
-    def is_default(self) -> bool:
-        """Whether every setting holds its unset value.
+    def is_default(self, names: Iterable[str] | None = None) -> bool:
+        """Whether the selected settings hold their unset values.
+
+        Args:
+            names: The settings to check; None checks every declared setting.
 
         Returns:
             True when none is set.
         """
-        return self is QueryOptions.DEFAULT or not any(getattr(self, name) for name in QueryOptions.__slots__)
+        return self is QueryOptions.DEFAULT or not any(
+            getattr(self, name) for name in (QueryOptions.__slots__ if names is None else names)
+        )
 
     def get_plan_key_part(self) -> tuple[Any, ...]:
         """The part of a plan key these settings make - the value of each setting written into the
@@ -299,7 +287,7 @@ class QueryOptions:
         classified = [*cls.SQL_SETTINGS, *cls.DESCRIBED_SETTINGS, *cls.RESULT_SETTINGS]
         if sorted(classified) != sorted(cls.DEFAULTS):
             unclassified = sorted(set(cls.DEFAULTS) - set(classified))
-            repeated = sorted({name for name in classified if classified.count(name) > 1})
+            repeated = sorted(name for name, count in Counter(classified).items() if count > 1)
             raise TypeError(
                 f"Every QueryOptions setting is in exactly one of SQL_SETTINGS, DESCRIBED_SETTINGS and "
                 f"RESULT_SETTINGS - unclassified: {unclassified}, classified twice: {repeated}"

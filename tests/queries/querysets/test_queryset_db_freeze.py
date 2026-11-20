@@ -9,18 +9,18 @@ from __future__ import annotations
 
 import sys
 import types
+from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
 import pytest_asyncio
 
 from hare import fields
-from hare.core.hare_context import HareContext
-from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
 from hare.models import Model
 from hare.models.tenancy.tenancy import Tenancy
 from hare.query.functions import Length
 from hare.transactions.transactions import Transactions
+from tests.utils.multi_database_context import MultiDatabaseTestContext
 
 pytestmark = pytest.mark.sqlite_only
 
@@ -47,7 +47,8 @@ class ReadWriteSplitRouter:
         return "write_primary"
 
 
-async def _make_context(tmp_path, connection_aliases: list[str], router: type, app_label: str):
+@asynccontextmanager
+async def _open_context(tmp_path, connection_aliases: tuple[str, ...], router: type, app_label: str):
     class ShardWidget(Model):
         id = fields.IntField(primary_key=True)
         name = fields.CharField(max_length=50)
@@ -59,56 +60,34 @@ async def _make_context(tmp_path, connection_aliases: list[str], router: type, a
 
     module = types.ModuleType(MODULE_NAME)
     setattr(module, "ShardWidget", ShardWidget)  # noqa: B010
-    sys.modules[MODULE_NAME] = module
-
-    connections = {
-        name: DbUrlConfigGenerator.expand(
-            f"sqlite+aiosqlite:///{tmp_path / f'{name}.sqlite'}?synchronous=OFF", testing=True
-        )
-        for name in connection_aliases
-    }
-    context = HareContext()
-    await context.__aenter__()
-    await context.init(
-        config={
-            "connections": connections,
-            "apps": {app_label: {"models": [MODULE_NAME], "default_connection": connection_aliases[0]}},
-        },
-        routers=[router],
-        _create_db=True,
-    )
-    await context.generate_schemas()
-    first_connection = context.connections.get(connection_aliases[0])
-    for name in connection_aliases[1:]:
-        await context.connections.get(name).execute_script(first_connection.get_schema_sql(safe=True))
-    return context, ShardWidget
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setitem(sys.modules, MODULE_NAME, module)
+        async with MultiDatabaseTestContext.open_fixed_sqlite_routes(
+            tmp_path, connection_aliases, app_label=app_label, module_name=MODULE_NAME, router=router
+        ) as context:
+            yield context, ShardWidget
 
 
 @pytest_asyncio.fixture
 async def sharded(tmp_path):
-    context, shard_widget = await _make_context(tmp_path, ["shard_a", "shard_b"], TenantShardRouter, "freeze_shards")
-    try:
+    async with _open_context(tmp_path, ("shard_a", "shard_b"), TenantShardRouter, "freeze_shards") as (
+        context,
+        shard_widget,
+    ):
         with Tenancy.scope("A"):
             await shard_widget.objects.create(name="w-a")
             await shard_widget.objects.create(name="w-a-2")
         with Tenancy.scope("B"):
             await shard_widget.objects.create(name="w-b")
         yield context, shard_widget
-    finally:
-        await context.__aexit__(None, None, None)
-        sys.modules.pop(MODULE_NAME, None)
 
 
 @pytest_asyncio.fixture
 async def read_write_split(tmp_path):
-    context, shard_widget = await _make_context(
-        tmp_path, ["write_primary", "read_replica"], ReadWriteSplitRouter, "freeze_split"
-    )
-    try:
-        yield context, shard_widget
-    finally:
-        await context.__aexit__(None, None, None)
-        sys.modules.pop(MODULE_NAME, None)
+    async with _open_context(
+        tmp_path, ("write_primary", "read_replica"), ReadWriteSplitRouter, "freeze_split"
+    ) as fixture:
+        yield fixture
 
 
 def _build(shard_widget: Any, build_type: str) -> Any:

@@ -66,7 +66,8 @@ Substr = DeclaredSubclass.make(
     TextFunction,
     "Substr",
     __package__,
-    """``Substr(text, position, length=None)`` - from a 1-based position, to the end without a length.""",
+    """``Substr(text, position)`` or ``Substr(text, position, length)`` - from a 1-based position,
+    to the end when the length is omitted.""",
     function_name="SUBSTR",
     argument_types=(CastType.INTEGER, CastType.INTEGER),
     arity=(2, 3),
@@ -137,7 +138,7 @@ Ord = DeclaredSubclass.make(
     TextFunction,
     "Ord",
     __package__,
-    """The Unicode code point of the first character, 0 of an empty text.""",
+    """The first character's code point, following the database's rules; empty text is NULL on SQLite.""",
     function_name="ASCII",
     returns_integer=True,
 )

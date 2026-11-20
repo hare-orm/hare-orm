@@ -2,13 +2,14 @@
 by itself (``book``): the relation's key column(s) take its place in the key, a relation to a model
 with a composite key adding each of its columns."""
 
-import os
+from types import ModuleType
 
 import pytest
 import pytest_asyncio
 
 from hare import fields
-from hare.contrib.test import RollbackIsolation, hare_test_context
+from hare.contrib.test import RollbackIsolation
+from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError
 from hare.fields.composite_primary_key import CompositePrimaryKey
 from hare.models import Model
@@ -20,18 +21,35 @@ from tests.composite_primary_keys.composite_key_relation_models import (
     RelationKeyNote,
     RelationKeyShelfSlot,
 )
+from tests.utils.database_under_test import DatabaseUnderTest
 
 MODULES = ["tests.composite_primary_keys.composite_key_relation_models"]
 
 
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+async def test_a_primary_key_shadow_column_must_exist_after_binding():
+    class Owner(Model):
+        id = fields.IntField(primary_key=True, generated=False)
+
+    class Entry(Model):
+        owner = fields.ForeignKeyField("live.Owner")
+        number = fields.IntField()
+        pk = CompositePrimaryKey("owner_missing", "number")
+
+    module = ModuleType("runtime_primary_key_columns")
+    module.__models__ = [Owner, Entry]
+    async with HareContext() as context:
+        with pytest.raises(ConfigurationError, match="primary key names unknown field 'owner_missing'"):
+            await context.init(
+                {"connections": {"default": "sqlite+aiosqlite://:memory:"}, "apps": {"live": {"models": [module]}}},
+                connect=False,
+            )
+
+
 @pytest_asyncio.fixture(scope="module")
 async def relation_key_db_module():
-    async with hare_test_context(
-        MODULES,
-        db_url=os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:"),
-        app_label="models",
-        connection_label="models",
-    ) as context:
+    async with DatabaseUnderTest.open_model_context(MODULES) as context:
         yield context
 
 
@@ -55,9 +73,19 @@ async def create_books():
 
 
 def test_the_relation_columns_are_the_key(relation_key_db):
-    assert RelationKeyEdition._meta.primary_key_attribute == ("book_id", "number")
-    assert RelationKeyShelfSlot._meta.primary_key_attribute == ("slot", "book_id")
-    assert RelationKeyNote._meta.primary_key_attribute == ("edition_book_id", "edition_number", "position")
+    assert HareContext.require_current().apps.get_binding(RelationKeyEdition).primary_key_attribute == (
+        "book_id",
+        "number",
+    )
+    assert HareContext.require_current().apps.get_binding(RelationKeyShelfSlot).primary_key_attribute == (
+        "slot",
+        "book_id",
+    )
+    assert HareContext.require_current().apps.get_binding(RelationKeyNote).primary_key_attribute == (
+        "edition_book_id",
+        "edition_number",
+        "position",
+    )
 
 
 @pytest.mark.asyncio
@@ -123,7 +151,11 @@ async def test_a_component_relation_to_a_composite_key_and_by_its_own_name(relat
 @pytest.mark.asyncio
 async def test_a_relation_to_the_key_from_a_model_set_up_before_its_target(relation_key_db):
     # RelationKeyChapter is set up before RelationKeyEdition, whose key holds its relation's column.
-    assert set(RelationKeyChapter._meta.fields_db_projection) == {"id", "edition_book_id", "edition_number"}
+    assert set(HareContext.require_current().apps.get_binding(RelationKeyChapter).fields_db_projection) == {
+        "id",
+        "edition_book_id",
+        "edition_number",
+    }
     await create_books()
     edition = await RelationKeyEdition.objects.get(pk=(1, 2))
     await RelationKeyChapter.objects.create(id=1, edition=edition)

@@ -13,6 +13,7 @@ from hare.contrib.request_query import (
     RequestQuery,
     SearchConfig,
 )
+from hare.contrib.request_query.declaration.request_query_registry import RequestQueryRegistry
 from hare.core.registries import Registries
 from hare.dialects.postgresql.request_query import PostgresqlRequestQuery
 from hare.dialects.sqlite.request_query import SqliteRequestQuery
@@ -88,12 +89,18 @@ async def test_a_built_class_nothing_holds_is_gone(db_request_query):
     book_query = RequestQuery.for_model(Book, name="ForgottenBookQuery", filters=(FilterField("title"),))
     book_query.describe_parameters()
     reference = weakref.ref(book_query)
+    schema_reference = weakref.ref(book_query.prepare_parameters())
+    bucket = book_query.get_cache_bucket()
+    bucket_reference = weakref.ref(bucket)
+    bucket_id = id(bucket)
+    del bucket
     del book_query
     gc.collect()
     assert reference() is None
+    assert schema_reference() is None
+    assert bucket_reference() is None
     assert all(item.__name__ != "ForgottenBookQuery" for item in RequestQuery.get_concrete_subclasses())
-    assert all(item.__name__ != "ForgottenBookQuery" for item in RequestQuery.prepared_classes)
-    assert all(item.__name__ != "ForgottenBookQuery" for item in RequestQuery.declarations.owners)
+    assert bucket_id not in RequestQueryRegistry.declarations.buckets
 
 
 def reversed_lookup(field: CharField | None) -> FieldLookup:
@@ -107,7 +114,7 @@ def reversed_lookup(field: CharField | None) -> FieldLookup:
 async def test_a_lookup_registered_after_init_is_used_on_the_next_query(library):
     name_query = RequestQuery.for_model(Author, filters=(FilterField("name"),))
     name_query.get_declaration()
-    assert RequestQuery.declarations.get_owner_bucket(name_query)
+    assert RequestQueryRegistry.declarations.get_bucket(name_query)
 
     class ReversedNameQuery(RequestQuery[Author]):
         class Meta:
@@ -116,15 +123,16 @@ async def test_a_lookup_registered_after_init_is_used_on_the_next_query(library)
 
     with pytest.raises(ConfigurationError, match="rq_reversed"):
         ReversedNameQuery.get_declaration()
+    previous_snapshot = Registries.snapshot
     CharField.register_lookup("rq_reversed", reversed_lookup)
     try:
-        assert not RequestQuery.declarations.get_owner_bucket(name_query)
+        assert not RequestQueryRegistry.declarations.get_bucket(name_query)
         rows = await ReversedNameQuery.from_query_string("name__rq_reversed=annA").fetch()
         assert [row.name for row in rows] == ["Anna"]
         (description,) = [item for item in ReversedNameQuery.describe_parameters() if item.name == "name__rq_reversed"]
         assert (description.lookup, description.path) == ("rq_reversed", "name")
     finally:
-        del CharField.registered_lookups["rq_reversed"]
+        Registries.snapshot = previous_snapshot
         Registries.changed()
     with pytest.raises(ConfigurationError, match="rq_reversed"):
         ReversedNameQuery.get_declaration()

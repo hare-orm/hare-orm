@@ -36,14 +36,14 @@ class TimestampedModel(Model):
 )
 def test_an_automatic_field_deconstructs_with_only_its_flag(field_name, flag, other_flag):
     """An automatic field is written to a migration with its own flag and without the other."""
-    _path, _args, kwargs = TimestampedModel._meta.fields_map[field_name].deconstruct()
+    _path, _args, kwargs = TimestampedModel._declaration.fields_map[field_name].deconstruct()
 
     assert kwargs[flag] is True
     assert other_flag not in kwargs
 
 
 def test_regular_field_deconstructs_without_either_flag():
-    _path, _args, kwargs = TimestampedModel._meta.fields_map["name"].deconstruct()
+    _path, _args, kwargs = TimestampedModel._declaration.fields_map["name"].deconstruct()
 
     assert "auto_now" not in kwargs
     assert "auto_now_add" not in kwargs
@@ -52,7 +52,7 @@ def test_regular_field_deconstructs_without_either_flag():
 def test_field_rebuilt_from_its_deconstruction_keeps_the_flags():
     """A field rebuilt from what a migration writes of it is valid and keeps both flags."""
     for name, auto_now, auto_now_add in (("modified_at", True, False), ("created_at", False, True)):
-        path, args, kwargs = TimestampedModel._meta.fields_map[name].deconstruct()
+        path, args, kwargs = TimestampedModel._declaration.fields_map[name].deconstruct()
         module_name, class_name = path.rsplit(".", 1)
         rebuilt = getattr(importlib.import_module(module_name), class_name)(*args, **kwargs)
 

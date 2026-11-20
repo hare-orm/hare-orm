@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Self
 
+from hare.contrib.test.databases.resource_cleanup import ResourceCleanup
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
 from hare.dialects.dialect_registry import DialectRegistry
@@ -36,14 +37,21 @@ class ServerSession:
         Returns:
             The session.
         """
-        settings = DbUrlConfigGenerator.expand(db_url, testing=False)
+        settings = DbUrlConfigGenerator.expand(db_url)
         credentials = dict(DatabaseUnderTest.get_direct_credentials(settings["credentials"]))
         credentials.update(POSTGRESQL_SINGLE_CONNECTION_POOL_SETTINGS, database=database)
         if application_name is not None:
             credentials["application_name"] = application_name
         client_class = DialectRegistry.get_driver(settings["engine"]).get_client_class(credentials)
         client = client_class(connection_alias=SERVER_SESSION_CONNECTION_ALIAS, **credentials)
-        await client.create_connection(with_db=True)
+        try:
+            await client.create_connection(with_db=True)
+        except BaseException as error:
+            cleanup = ResourceCleanup()
+            cleanup.push(client.close)
+            await cleanup.close()
+            cleanup.raise_errors(error)
+            raise
         return cls(client)
 
     async def fetch(self, query: str, *values: Any) -> list[dict[str, Any]]:

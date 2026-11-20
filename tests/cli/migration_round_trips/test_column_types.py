@@ -9,7 +9,9 @@ import textwrap
 
 import pytest
 
+from hare.fields.encrypted.blind_index_field import BlindIndexField
 from hare.fields.encrypted.field_encryption import FieldEncryption
+from hare.migrations import operations as ops
 from tests.utils.database_under_test import DatabaseUnderTest
 
 
@@ -36,8 +38,12 @@ async def test_changed_generated_field_is_recreated_after_the_field_it_now_uses(
         total = fields.GeneratedField(expression=RawSQLTerm("price * qty - discount"), output_field=fields.IntField())
     """)
     await project.cli_ok("makemigrations")
-    migration_source = project.read_latest_migration()
-    assert migration_source.index('name="discount"') < migration_source.index('name="total",')
+    added_fields = [
+        operation.name
+        for operation in project.get_latest_migration().operations
+        if isinstance(operation, ops.AddField)
+    ]
+    assert added_fields.index("discount") < added_fields.index("total")
     await project.cli_ok("migrate")
     await project.assert_in_sync()
     assert await project.query("SELECT id, discount, total FROM item") == [{"id": 1, "discount": 2, "total": 10}]
@@ -92,7 +98,7 @@ async def test_a_label_added_to_a_native_enum_reaches_the_database(project_facto
     # The class gets a member in the middle - the migrations written before keep the members they had.
     project.write_models(template.format(members='A = "a"\n        B = "b"\n        C = "c"'))
     await project.cli_ok("makemigrations")
-    assert "AlterEnumType" in project.read_latest_migration()
+    assert any(isinstance(operation, ops.AlterEnumType) for operation in project.get_latest_migration().operations)
     await project.cli_ok("migrate")
     await project.assert_in_sync()
     rows = await project.query("SELECT enum_range(NULL::mood_type)::text AS labels")
@@ -146,9 +152,12 @@ async def test_same_named_native_enum_types_of_two_schemas_are_two_types(project
 
     project.write_models(template.format(shade_members='DARK = "dark"\n        LIGHT = "light"'))
     await project.cli_ok("makemigrations")
-    assert (
-        'ops.CreateEnumType(name="tone", labels=("dark", "light"), schema="paint")' in project.read_latest_migration()
-    )
+    enum_types = {
+        (operation.name, operation.labels, operation.schema)
+        for operation in project.get_latest_migration().operations
+        if isinstance(operation, ops.CreateEnumType)
+    }
+    assert enum_types == {("tone", ("happy", "sad"), None), ("tone", ("dark", "light"), "paint")}
     await project.cli_ok("migrate")
     await project.assert_in_sync()
     assert await get_type_labels() == {"public": "{happy,sad}", "paint": "{dark,light}"}
@@ -159,7 +168,7 @@ async def test_same_named_native_enum_types_of_two_schemas_are_two_types(project
     project.write_models(template.format(shade_members='DARK = "dark"\n        MATTE = "matte"'))
     await project.query("UPDATE thing SET shade = NULL")
     await project.cli_ok("makemigrations")
-    assert "AlterEnumType" in project.read_latest_migration()
+    assert any(isinstance(operation, ops.AlterEnumType) for operation in project.get_latest_migration().operations)
     await project.cli_ok("migrate")
     await project.assert_in_sync()
     assert await get_type_labels() == {"public": "{happy,sad}", "paint": "{dark,matte}"}
@@ -192,7 +201,10 @@ async def test_a_native_enum_column_moves_to_a_type_of_another_schema(project_fa
     """
     project.write_models(template.format(type_schema=', type_schema="first_space"'))
     await project.cli_ok("makemigrations")
-    assert 'ops.CreateSchema(schema_name="first_space")' in project.read_latest_migration()
+    assert any(
+        isinstance(operation, ops.CreateSchema) and operation.schema_name == "first_space"
+        for operation in project.get_latest_migration().operations
+    )
     await project.cli_ok("migrate")
     await project.assert_in_sync()
     await project.query(
@@ -263,7 +275,10 @@ async def test_a_blind_index_added_to_an_encrypted_field_round_trips(project_fac
             "    email = fields.EncryptedTextField(blind_index=True, null=True)\n"
         )
         await project.cli_ok("makemigrations")
-        assert "fields.BlindIndexField(" in project.read_latest_migration()
+        assert any(
+            isinstance(operation, ops.AddField) and isinstance(operation.field, BlindIndexField)
+            for operation in project.get_latest_migration().operations
+        )
         await project.cli_ok("migrate")
         await project.assert_in_sync()
         await project.cli_ok("migrate", "app", "0001")

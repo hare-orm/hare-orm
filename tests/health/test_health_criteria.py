@@ -23,6 +23,7 @@ from hare.health.declarations import PoolChange
 from hare.instrumentation.declarations import PoolStatus
 from hare.instrumentation.enums import PoolRole
 from hare.instrumentation.pools.pool_metrics import PoolMetrics
+from hare.instrumentation.pools.sample_window import SampleWindow
 
 
 def make_pool(
@@ -36,15 +37,26 @@ def make_pool(
     timeouts=0,
     connect_failures=0,
     waits=(),
+    missed=0,
 ):
     status = PoolStatus(
         "models", role, schema, max_size, max_size - in_use, in_use, waiting, 1, max_size, 0, 0, 0.0, 1, 0
     )
-    return PoolChange(status, taken, timeouts, connect_failures, tuple(waits))
+    return PoolChange(
+        status, taken, timeouts, connect_failures, SampleWindow(0, len(waits) + missed, tuple(waits), missed)
+    )
 
 
 def make_check(*, ping=PingResult(True, 1.5, None), server_ping=None, pools=()):
     return ConnectionCheck("models", ping, server_ping, tuple(pools))
+
+
+def test_wait_criterion_distinguishes_incomplete_and_empty_samples():
+    criterion = AcquireWaitTime(max_seconds=0.5)
+    assert criterion.check(make_check(pools=[make_pool(waits=())])) is None
+    assert criterion.check(make_check(pools=[make_pool(waits=[0.1], missed=4)])) == (
+        "4 of 5 wait measurements of the main pool were overwritten; the wait threshold cannot be verified"
+    )
 
 
 @pytest.mark.parametrize(

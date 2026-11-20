@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.ddl.conditions.constraint_condition import ConstraintCondition
 from hare.ddl.constraints.check_constraint import CheckConstraint
@@ -11,13 +11,15 @@ from hare.ddl.enums import ExclusionConstraintUsing
 from hare.ddl.expressions.declared_expressions import DeclaredExpressions
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.dialects.base.schema.constraints.constraint_statements import ConstraintStatements
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
+from hare.dialects.base.schema.plans.schema_statement import SchemaStatement
 from hare.dialects.postgresql.schema.constants import BTREE_GIST_EXTENSION
 from hare.dialects.postgresql.types.postgresql_types import PostgresqlTypes
 from hare.fields.field import Field
-from hare.models import Model
 
 if TYPE_CHECKING:
     from hare.dialects.postgresql.schema.postgresql_schema_editor import PostgresqlSchemaEditor
+    from hare.models.model_binding import ModelBinding
 
 
 class PostgresqlConstraintStatements(ConstraintStatements):
@@ -27,7 +29,7 @@ class PostgresqlConstraintStatements(ConstraintStatements):
 
     editor: PostgresqlSchemaEditor
 
-    def exclusion_constraint_sql(self, model: type[Model], constraint: ExclusionConstraint) -> str:
+    def exclusion_constraint_sql(self, binding: ModelBinding, constraint: ExclusionConstraint) -> str:
         expression_sqls = []
         for expression, operator in constraint.expressions:
             # A field name is its quoted column; an expression of hare is put in parentheses, as EXCLUDE
@@ -35,19 +37,17 @@ class PostgresqlConstraintStatements(ConstraintStatements):
             if isinstance(expression, RawSQLTerm):
                 expression_sql = expression.get_sql()
             elif isinstance(expression, str):
-                expression_sql = self.editor.quote(
-                    self.editor.constraint_names.get_fields_to_columns(model, [expression])[0]
-                )
+                expression_sql = self.editor.quote(binding.get_column_names([expression])[0])
             else:
-                expression_sql = f"({DeclaredExpressions.get_sql(expression, model, self.editor.client.dialect)})"
+                expression_sql = f"({DeclaredExpressions.get_sql(expression, binding, self.editor.client.dialect)})"
             expression_sqls.append(f"{expression_sql} WITH {operator}")
         clauses_sql = ""
         if constraint.include:
             clauses_sql += self.editor.index_statements.get_index_include_sql(
-                [self.editor.quote(column) for column in model._meta.get_column_names(constraint.include)]
+                [self.editor.quote(column) for column in binding.get_column_names(constraint.include)]
             )
         if constraint.condition:
-            clauses_sql += f" WHERE ({ConstraintCondition.get_sql(constraint.condition, model, self.editor.client)})"
+            clauses_sql += f" WHERE ({ConstraintCondition.get_sql(constraint.condition, binding, self.editor.client)})"
         if constraint.deferrable:
             clauses_sql += " DEFERRABLE INITIALLY " + ("DEFERRED" if constraint.initially_deferred else "IMMEDIATE")
         return self.editor.EXCLUSION_CONSTRAINT_CREATE_TEMPLATE.format(
@@ -57,38 +57,46 @@ class PostgresqlConstraintStatements(ConstraintStatements):
             where=clauses_sql,
         )
 
-    async def add_check_constraint_not_valid(self, model: type[Model], constraint: CheckConstraint) -> None:
+    def get_unvalidated_check_add_plan(self, binding: ModelBinding, constraint: CheckConstraint) -> SchemaChangePlan:
         constraint_sql = self.editor.CHECK_CONSTRAINT_CREATE_TEMPLATE.format(
             name=self.editor.quote(constraint.name),
-            check=ConstraintCondition.get_sql(constraint.check, model, self.editor.client),
+            check=ConstraintCondition.get_sql(constraint.check, binding, self.editor.client),
         )
-        await self.editor.run_sql(
-            self.editor.ADD_CONSTRAINT_TEMPLATE.format(
-                table=self.editor.qualify_table_name(model._meta.db_table, model._meta.schema),
-                constraint=f"{constraint_sql} NOT VALID",
+        return SchemaChangePlan(
+            (
+                SchemaStatement(
+                    self.editor.ADD_CONSTRAINT_TEMPLATE.format(
+                        table=self.editor.qualify_table_name(binding.db_table, binding.schema),
+                        constraint=f"{constraint_sql} NOT VALID",
+                    )
+                ),
             )
         )
 
-    async def add_unique_constraint_using_index(
-        self, model: type[Model], constraint: UniqueConstraint, index_name: str
-    ) -> None:
+    def get_unique_constraint_using_index_plan(
+        self, binding: ModelBinding, constraint: UniqueConstraint, index_name: str
+    ) -> SchemaChangePlan:
         # The index is renamed to the constraint's name and kept.
         deferrable_sql = ""
         if constraint.deferrable:
             deferrable_sql = " DEFERRABLE INITIALLY " + ("DEFERRED" if constraint.initially_deferred else "IMMEDIATE")
-        await self.editor.run_sql(
+        statement = SchemaStatement(
             self.editor.ADD_CONSTRAINT_TEMPLATE.format(
-                table=self.editor.qualify_table_name(model._meta.db_table, model._meta.schema),
+                table=self.editor.qualify_table_name(binding.db_table, binding.schema),
                 constraint=(
-                    f"CONSTRAINT {self.editor.quote(cast('str', constraint.name))} UNIQUE USING INDEX "
+                    f"CONSTRAINT {self.editor.quote(constraint.name)} UNIQUE USING INDEX "  # type: ignore[arg-type]
                     f"{self.editor.quote(index_name)}{deferrable_sql}"
                 ),
             )
         )
 
-    async def validate_constraint(self, model: type[Model], name: str) -> None:
-        table = self.editor.qualify_table_name(model._meta.db_table, model._meta.schema)
-        await self.editor.run_sql(f"ALTER TABLE {table} VALIDATE CONSTRAINT {self.editor.quote(name)}")
+        return SchemaChangePlan((statement,))
+
+    def get_constraint_validation_plan(self, binding: ModelBinding, name: str) -> SchemaChangePlan:
+        table = self.editor.qualify_table_name(binding.db_table, binding.schema)
+        return SchemaChangePlan(
+            (SchemaStatement(f"ALTER TABLE {table} VALIDATE CONSTRAINT {self.editor.quote(name)}"),)
+        )
 
     @classmethod
     def get_nulls_distinct_sql(cls, nulls_distinct: bool) -> str:

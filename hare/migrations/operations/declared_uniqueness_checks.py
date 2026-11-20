@@ -7,7 +7,7 @@ from hare.exceptions import UnSupportedError
 
 if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class DeclaredUniquenessChecks:
@@ -16,17 +16,18 @@ class DeclaredUniquenessChecks:
     is refused when it is bound."""
 
     @staticmethod
-    def raise_if_unsupported(editor: BaseSchemaEditor, model: type[Model], declarations: Iterable[str]) -> None:
+    def raise_if_unsupported(editor: BaseSchemaEditor, binding: ModelBinding, declarations: Iterable[str]) -> None:
         """Refuses the uniquenesses a migration declares for a model, on a database keeping none.
 
         Args:
             editor: The schema editor the migration runs with.
-            model: The model.
+            binding: The model.
             declarations: What declares a uniqueness - ``code (unique=True)``, ``UniqueConstraint(code)``.
 
         Raises:
             UnSupportedError: A uniqueness is declared and the database keeps none.
         """
+        model = binding._model
         declarations = list(declarations)
         if not declarations or editor.client.features.supports_unique_constraints:
             return
@@ -50,27 +51,24 @@ class DeclaredUniquenessChecks:
         return f"{type(schema_object).__name__}({name or ', '.join(str(field) for field in fields)})"
 
     @staticmethod
-    def get_unique_field_declarations(model: type[Model], field_names: Iterable[str]) -> list[str]:
+    def get_unique_field_declarations(binding: ModelBinding, field_names: Iterable[str]) -> list[str]:
         """The fields of ``field_names`` declaring ``unique=True`` on a column of the model's table - a
         primary key is unique by itself, and a many-to-many relation's ``unique`` is the pair of its
         automatic through table, kept where the database keeps uniqueness.
 
         Args:
-            model: The model.
+            binding: The model.
             field_names: The fields looked at.
 
         Returns:
             ``<name> (unique=True)`` of each.
         """
-        meta = model._meta
+        relation_names = binding.forward_key_relation_names
         return [
             f"{field_name} (unique=True)"
             for field_name in field_names
-            if (field := meta.fields_map.get(field_name)) is not None
+            if (field := binding.fields_map.get(field_name)) is not None
             and getattr(field, "unique", False)
             and not getattr(field, "pk", False)
-            and (
-                field_name in meta.fields_db_projection
-                or field_name in meta.foreign_key_fields | meta.one_to_one_fields
-            )
+            and (field_name in binding.fields_db_projection or field_name in relation_names)
         ]

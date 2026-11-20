@@ -7,10 +7,10 @@ import pytest
 
 from hare import fields
 from hare.contrib.test import hare_test_context
+from hare.declarations.declaration_value_serializer import DeclarationValueSerializer
+from hare.declarations.import_manager import ImportManager
 from hare.exceptions import ValidationError
 from hare.fields.uuid7 import Uuid7
-from hare.migrations.writer.import_manager import ImportManager
-from hare.migrations.writer.migration_writer import MigrationWriter
 from hare.models import Model
 
 pytestmark = pytest.mark.sqlite_only
@@ -28,7 +28,7 @@ async def test_a_primary_key_of_version_7_defaults_to_one():
     async with hare_test_context([__name__], db_url=DB_URL):
         row = await VersionedKey.objects.create()
     assert row.id.version == 7
-    assert VersionedKey._meta.fields_map["id"].default == Uuid7.new
+    assert VersionedKey._declaration.fields_map["id"].default == Uuid7.new
 
 
 @pytest.mark.parametrize(
@@ -63,7 +63,7 @@ async def test_save_and_bulk_update_refuse_it_too():
 
 
 def test_both_ways_a_dialect_writes_a_uuid_check_it():
-    field = VersionedKey._meta.fields_map["id"]
+    field = VersionedKey._declaration.fields_map["id"]
     with pytest.raises(ValidationError, match="expected a version 7 UUID"):
         field.to_db_value(str(uuid.uuid4()), VersionedKey)
     with pytest.raises(ValidationError, match="expected a version 7 UUID"):
@@ -72,27 +72,27 @@ def test_both_ways_a_dialect_writes_a_uuid_check_it():
 
 
 def test_a_null_passes_a_nullable_field():
-    VersionedKey._meta.fields_map["random_key"].validate(None)
+    VersionedKey._declaration.fields_map["random_key"].validate(None)
 
 
 def test_a_migration_writes_the_version():
-    path, _, kwargs = VersionedKey._meta.fields_map["random_key"].deconstruct()
+    path, _, kwargs = VersionedKey._declaration.fields_map["random_key"].deconstruct()
     assert kwargs["version"] == 4
     imports = ImportManager()
-    written = MigrationWriter.render_value(VersionedKey._meta.fields_map["id"], imports)
+    written = DeclarationValueSerializer.render_value(VersionedKey._declaration.fields_map["id"], imports)
     assert "version=7" in written
     assert "default=" in written
 
 
 def test_a_null_of_a_field_not_null_is_refused_as_a_null():
     with pytest.raises(ValidationError, match="must not be None"):
-        VersionedKey._meta.fields_map["id"].validate(None)
+        VersionedKey._declaration.fields_map["id"].validate(None)
 
 
 def test_a_uuid_of_another_variant_is_refused_though_its_version_digit_matches():
     """The version and the variant bits are compared on the UUID's integer - a UUID of another variant than RFC
     9562's has no version, whatever its version digit holds."""
-    field = VersionedKey._meta.fields_map["id"]
+    field = VersionedKey._declaration.fields_map["id"]
     other_variant = uuid.UUID(int=Uuid7.new().int & ~(0b11 << 62))
     assert other_variant.version is None
     with pytest.raises(ValidationError, match="expected a version 7 UUID"):

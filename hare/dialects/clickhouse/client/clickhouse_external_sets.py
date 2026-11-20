@@ -11,6 +11,7 @@ from hare.dialects.clickhouse.client.constants import (
     CLICKHOUSE_TAB_SEPARATED_SPECIAL_CHARACTERS,
 )
 from hare.dialects.clickhouse.client.declarations import ClickhouseExternalSet, ClickhouseValueSet
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 
 
 class ClickhouseExternalSets:
@@ -75,7 +76,7 @@ class ClickhouseExternalSets:
         Returns:
             The data.
         """
-        texts = [column_type == "String" for column_type in value_set.column_types]
+        texts = [column_type == ClickhouseTypeName.STRING for column_type in value_set.column_types]
         if len(texts) == 1:
             if not texts[0]:
                 return "\n".join(map(str, value_set.rows)).encode()

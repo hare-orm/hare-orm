@@ -6,10 +6,10 @@ from hare.query.plans.description.plan_context import PlanContext
 from hare.query.plans.description.plan_description import PlanDescription
 from hare.query.plans.description.plan_parts import PlanParts
 from hare.query.plans.plan_origins import PlanOrigins
-from hare.query.query_connection import QueryConnection
 from hare.query.statements.select.combined.combined_branches import CombinedBranches
 
 if TYPE_CHECKING:
+    from hare.query.queryset.query_specification import QuerySpecification
     from hare.query.statements.select.combined_query import CombinedQuery
 
 
@@ -18,8 +18,8 @@ class CombinedPlanDescriptions:
 
     @staticmethod
     def get_branches_plan_description(query: CombinedQuery) -> PlanDescription | None:
-        """Describes the branches of a set operation: each branch's structure as it is built in, with
-        the connection it is pinned to, and its values.
+        """Describes each branch's structure and its values. Pinned branches need compilation
+        to check the actual client of the combined statement.
 
         Args:
             query: The set operation.
@@ -30,16 +30,16 @@ class CombinedPlanDescriptions:
         branch_structures: list[tuple[Any, ...]] = []
         values: list[Any] = []
         origins: list[Any] | None = [] if PlanOrigins.records else None
-        model_column_names = CombinedBranches.get_model_column_names(CombinedBranches.get_models(query))
         for branch in query._branches:
-            branch_description = CombinedBranches.get_prepared_branch(branch, model_column_names).get_plan_description(
+            declaration: QuerySpecification[Any] = branch
+            if declaration._connection is not None:
+                return None
+            branch_description = CombinedBranches.get_prepared_branch(query, branch).get_plan_description(
                 PlanContext.EMPTY
             )
             if branch_description is None:
                 return None
-            branch_structures.append(
-                (QueryConnection.get_pinned_connection_name(branch), branch_description.structure)
-            )
+            branch_structures.append(branch_description.structure)
             values.extend(branch_description.values)
             if origins is not None:
                 origins = PlanParts.get_origins(branch_description, origins)

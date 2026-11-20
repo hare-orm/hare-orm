@@ -1,9 +1,4 @@
-"""Characterization tests for the Add*/Remove*/Rename*/Create*/Delete* Operation family.
-
-Locks in the exact SQL each operation's database_backward() currently produces (the forward
-direction is already covered by test_operations_database.py) before the operations.py mixin
-refactor, so that refactor is verified against these exact strings rather than against intent.
-"""
+"""Migration rollback SQL and preservation of declared schema objects in state transitions."""
 
 from __future__ import annotations
 
@@ -158,10 +153,8 @@ async def test_delete_model_backward_recreates_table() -> None:
     ]
 
 
-@pytest.mark.asyncio
-async def test_rename_constraint_state_forward_preserves_check_expression() -> None:
-    """RenameConstraint.state_forward's CheckConstraint branch must carry over `check`, not
-    just `name` - a risk if it gets merged carelessly with the UniqueConstraint branch."""
+def test_rename_constraint_state_forward_preserves_check_expression() -> None:
+    """Renaming a check constraint preserves its predicate and changes only its name."""
     state = State()
     CreateModel(name="Widget", fields=[("id", fields.IntField(primary_key=True))]).state_forward("models", state)
     AddConstraint(

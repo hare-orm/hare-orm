@@ -7,6 +7,8 @@ from hare.sql.terms.criteria.criterion import Criterion
 class TrueCriterion(Criterion):
     """``TRUE`` - the condition of a JOIN keeping every pair of rows, such as a ``LATERAL`` subquery's."""
 
+    structure_attributes = ()
+
     is_aggregate = None
 
     def get_sql(self, sql_context: SqlContext) -> str:

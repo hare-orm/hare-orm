@@ -19,21 +19,25 @@ SHAPES = [
         "count after a keyset boundary",
         lambda value: Tournament.objects.all().order_by("name").after_cursor(value).count(),
         ("a", "c"),
+        (4, 2),
     ),
     (
         "count before a keyset boundary",
         lambda value: Tournament.objects.all().order_by("name").before_cursor(value).count(),
         ("e", "c"),
+        (4, 2),
     ),
     (
         "exists past an offset",
         lambda value: Tournament.objects.filter(name__gte="b").offset(value).exists(),
         (1, 10),
+        (True, False),
     ),
     (
         "exists after a keyset boundary",
         lambda value: Tournament.objects.all().order_by("name").after_cursor(value).exists(),
         ("a", "e"),
+        (True, False),
     ),
     (
         "filter on a union's rows",
@@ -45,15 +49,16 @@ SHAPES = [
             .values_list("name", flat=True)
         ),
         ("a", "b"),
+        (["a", "e"], ["b", "e"]),
     ),
 ]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("name", "build", "values"), SHAPES, ids=[shape[0] for shape in SHAPES])
-async def test_a_later_query_of_the_structure_runs_on_its_plan(db, name, build, values):
+@pytest.mark.parametrize(("name", "build", "values", "expected"), SHAPES, ids=[shape[0] for shape in SHAPES])
+async def test_a_later_query_of_the_structure_runs_on_its_plan(db, name, build, values, expected):
     await create_tournaments()
-    await StatementPlanChecks.assert_a_later_query_runs_on_its_plan(build, values)
+    await StatementPlanChecks.assert_a_later_query_runs_on_its_plan(build, values, expected_results=expected)
 
 
 @pytest.mark.asyncio
@@ -63,15 +68,24 @@ async def test_json_cursor_boundaries_rebind_on_a_kept_plan(db, cursor_method, r
     for row_id, value in enumerate((9, 9, 10, 11), 1):
         await JSONFields.objects.create(id=row_id, data=value)
 
-    def build(boundary):
+    expected_ids = ([2, 3, 4], []) if cursor_method == "after_cursor" else ([], [1, 2, 3])
+    expected = expected_ids
+    if result_type == "count":
+        expected = tuple(map(len, expected_ids))
+    elif result_type == "exists":
+        expected = tuple(map(bool, expected_ids))
+
+    async def build(boundary):
         queryset = getattr(JSONFields.objects.order_by("data", "id"), cursor_method)(*boundary)
         if result_type == "values":
-            return queryset.values_list("id", flat=True)
+            return await queryset.values_list("id", flat=True)
         if result_type == "models":
-            return queryset
-        return getattr(queryset, result_type)()
+            return [row.pk for row in await queryset]
+        return await getattr(queryset, result_type)()
 
-    await StatementPlanChecks.assert_a_later_query_runs_on_its_plan(build, ((9, 1), (11, 4)))
+    await StatementPlanChecks.assert_a_later_query_runs_on_its_plan(
+        build, ((9, 1), (11, 4)), expected_results=expected
+    )
 
 
 @pytest.mark.asyncio

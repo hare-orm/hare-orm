@@ -8,6 +8,7 @@ from hare.contrib.pydantic.creation.generic_foreign_key_tag_reader import Generi
 from hare.contrib.pydantic.models.pydantic_model import PydanticModel
 from hare.exceptions import NoValuesFetched
 from hare.fields.constants import GENERIC_FOREIGN_KEY_TYPE_FIELD
+from hare.models import Model
 from hare.query.queryset import QuerySet
 from hare.query.queryset.single_rows.none_awaitable_type import NoneAwaitable
 
@@ -57,7 +58,7 @@ class GenericForeignKeySchemas:
         Returns:
             The annotation.
         """
-        fields_map = generic_field.model._meta.fields_map
+        fields_map = generic_field._binding.fields_map
         branch_models = {}
         for branch_name in generic_field.branch_names:
             key_fields = fields_map[branch_name].to_field_instances  # type: ignore[attr-defined]
@@ -106,14 +107,14 @@ class GenericForeignKeySchemas:
         def validate(cls: type[PydanticModel], value: Any) -> Any:
             if value is NoneAwaitable:
                 return None
-            if isinstance(value, QuerySet) or (hasattr(value, "__await__") and not hasattr(value, "_meta")):
+            if isinstance(value, QuerySet) or (hasattr(value, "__await__") and not isinstance(value, Model)):
                 raise NoValuesFetched(
                     f"Field {generic_field.model_field_name!r} has not been fetched - prefetch its branches "
                     f"({', '.join(generic_field.branch_names)}) or use "
                     f"select_related({generic_field.model_field_name!r}) "
                     "before serializing."
                 )
-            if as_keys and hasattr(value, "_meta"):
+            if as_keys and isinstance(value, Model):
                 return generic_field.get_key_values(value)
             return value
 

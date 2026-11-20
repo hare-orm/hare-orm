@@ -11,7 +11,7 @@ from hare.contrib.request_query.options.constants import DEFAULT_DELETED_PARAMET
 from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset import QuerySet
 from hare.contrib.request_query.options.parameter_field import ParameterField
 from hare.contrib.request_query.options.request_option import RequestOption
@@ -70,17 +70,18 @@ class DeletedConfig(RequestOption):
             return queryset.only_deleted()
         return queryset
 
-    def check_model(self, owner: str, model: type[Model]) -> None:
+    def check_model(self, owner: str, binding: ModelBinding) -> None:
         """Checks that the model has deleted rows at all.
 
         Args:
             owner: The request query class, for the error.
-            model: The model.
+            binding: The model binding.
 
         Raises:
             ConfigurationError: The model has no ``Meta.soft_delete_field``.
         """
-        if model._meta.soft_delete_field is None:
+        model = binding._model
+        if binding.soft_delete_field is None:
             raise ConfigurationError(
                 f"{owner}.Meta.deleted: {model.__name__} has no Meta.soft_delete_field - "
                 "it has no deleted rows to show"

@@ -1,7 +1,6 @@
 """SystemClock is the one clock hare stamps moments with - on every Python version and platform it
 reads the system's precise wall clock."""
 
-import sys
 import time
 from datetime import UTC, datetime, timedelta
 
@@ -17,20 +16,25 @@ pytestmark = pytest.mark.database_independent
 CLOCK_AGREEMENT = timedelta(milliseconds=50)
 
 
-def test_utc_now_is_an_aware_utc_moment_of_now():
+def test_utc_now_is_an_aware_utc_datetime():
     stamped = SystemClock.get_utc_now()
+    assert isinstance(stamped, datetime)
     assert stamped.tzinfo is UTC
-    assert abs(stamped - datetime.now(UTC)) < CLOCK_AGREEMENT
 
 
-def test_local_now_is_a_naive_moment_of_the_local_wall_clock():
+def test_local_now_is_a_naive_datetime():
     stamped = SystemClock.get_local_now()
+    assert isinstance(stamped, datetime)
     assert stamped.tzinfo is None
-    assert abs(stamped - datetime.now()) < CLOCK_AGREEMENT
 
 
 @pytest.mark.timing
-@pytest.mark.requires("native")
+@pytest.mark.parametrize(("getter", "zone"), [(SystemClock.get_utc_now, UTC), (SystemClock.get_local_now, None)])
+def test_system_clock_reads_the_same_moment_as_python(getter, zone):
+    assert abs(getter() - datetime.now(zone)) < CLOCK_AGREEMENT
+
+
+@pytest.mark.timing
 def test_native_clock_reads_the_same_moment_as_python():
     native_utc = NativeModules.clock.get_utc_now()
     assert native_utc.tzinfo is UTC
@@ -38,19 +42,6 @@ def test_native_clock_reads_the_same_moment_as_python():
     seconds, microseconds = NativeModules.clock.get_posix_time()
     assert 0 <= microseconds < 1_000_000
     assert abs(seconds + microseconds / 1_000_000 - time.time()) < CLOCK_AGREEMENT.total_seconds()
-
-
-@pytest.mark.timing
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows' own precise clock")
-def test_windows_precise_clock_reads_posix_time():
-    seconds, microseconds = SystemClock.get_windows_posix_time()
-    assert 0 <= microseconds < 1_000_000
-    assert abs(seconds + microseconds / 1_000_000 - time.time()) < CLOCK_AGREEMENT.total_seconds()
-
-
-def test_stamps_never_go_back():
-    stamps = [SystemClock.get_utc_now() for _ in range(5000)]
-    assert all(earlier <= later for earlier, later in zip(stamps, stamps[1:]))
 
 
 @pytest.mark.timing

@@ -1,7 +1,6 @@
-"""A queryset made by simple calls alone runs on the plan kept under the key of its calls - its
-filters aren't even built - and gives the rows of its own values; any other call leaves it to the
-usual build."""
+"""Repeated query shapes reuse prepared SQL while binding current values and row scopes."""
 
+import asyncio
 from unittest.mock import patch
 
 import pytest
@@ -12,42 +11,84 @@ from hare.exceptions import DoesNotExist, QueryError
 from hare.models.tenancy.tenancy import Tenancy
 from hare.query.enums import Connector
 from hare.query.expressions import F, Q
+from hare.query.plans.statement.statement_plan import StatementPlan
 from hare.query.plans.statement.statement_plans import StatementPlans
-from hare.query.queryset.pending_calls.pending_filter_calls import PendingFilterCalls
-from hare.query.statements.awaitable_query import AwaitableQuery
-from tests.shared_models.testmodels import IntFields, SoftDeleteStandalone, TenantScopedFactory, Tournament
+from tests.shared_models.testmodels import IntFields, JSONFields, SoftDeleteStandalone, TenantScopedFactory, Tournament
 
-# Counts the builds a run on a plan saves - plan verification compares after the body.
+# Counts new SQL templates - plan verification compares after the body.
 pytestmark = pytest.mark.plan_verification_after_test
 
 
-def spy_on_builds():
-    """Counts the queries built - a query running on the plan of its calls builds none."""
-    return patch.object(AwaitableQuery, "_make_query", autospec=True, side_effect=AwaitableQuery._make_query)
+@pytest.mark.asyncio
+async def test_model_plan_hit_binds_fresh_values_without_creating_a_statement(db):
+    from hare.query.statements.select.model_rows_query import ModelRowsQuery
 
-
-def spy_on_filter_builds():
-    """Counts the kept filter calls built into conditions."""
-    return patch.object(
-        PendingFilterCalls,
-        "build_pending_filter_calls",
-        autospec=True,
-        side_effect=PendingFilterCalls.build_pending_filter_calls,
-    )
+    await IntFields.objects.create(intnum=1)
+    await IntFields.objects.create(intnum=2)
+    assert [row.intnum for row in await IntFields.objects.filter(intnum__gte=1).order_by("intnum")] == [1, 2]
+    with patch.object(ModelRowsQuery, "__init__", side_effect=AssertionError("unexpected statement allocation")):
+        assert [row.intnum for row in await IntFields.objects.filter(intnum__gte=2).order_by("intnum")] == [2]
 
 
 @pytest.mark.asyncio
-async def test_a_later_chain_of_the_same_calls_builds_nothing(db):
+async def test_concurrent_plan_reads_leave_the_declaration_unbound(db):
+    from hare.query.statements.select.model_rows_query import ModelRowsQuery
+
+    await IntFields.objects.create(intnum=1)
+    queryset = IntFields.objects.filter(intnum=1)
+    assert [row.intnum for row in await queryset] == [1]
+
+    async def read():
+        return await queryset
+
+    with patch.object(ModelRowsQuery, "__init__", side_effect=AssertionError("unexpected statement allocation")):
+        first, second = await asyncio.gather(read(), read())
+    assert [row.intnum for row in first] == [1]
+    assert [row.intnum for row in second] == [1]
+    assert first[0] is not second[0]
+    assert queryset._connection is None
+
+
+def spy_on_plan_preparations():
+    """Count new SQL templates at the shared plan preparation boundary."""
+    return patch.object(StatementPlan, "prepare", wraps=StatementPlan.prepare)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_named", [False, True])
+async def test_tuple_row_shapes_share_sql_and_keep_their_decoded_results(db, first_named):
+    documents = {1: {"items": [1, None, True]}, 2: {"items": [2, {"title": "book"}]}}
+    for identifier, document in documents.items():
+        await JSONFields.objects.create(id=identifier, data=document)
+
+    def read(minimum, named):
+        return JSONFields.objects.filter(id__gte=minimum).order_by("id").values_list("id", "data", named=named)
+
+    assert list(await read(1, first_named)) == list(documents.items())
+    with spy_on_plan_preparations() as preparations:
+        for minimum, named in ((2, not first_named), (1, first_named), (1, not first_named)):
+            rows = await read(minimum, named)
+            assert list(rows) == [
+                (identifier, value) for identifier, value in documents.items() if identifier >= minimum
+            ]
+            if named:
+                assert [(row.id, row.data) for row in rows] == list(rows)
+            else:
+                assert all(type(row) is tuple for row in rows)
+    assert preparations.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_later_chain_of_the_same_calls_reuses_prepared_sql(db):
     for number in range(1, 6):
         await IntFields.objects.create(intnum=number, intnum_null=number * 10)
     assert (await IntFields.objects.filter(intnum__gte=2).order_by("intnum").first()).intnum == 2
     assert await IntFields.objects.filter(intnum__gte=3).count() == 3
-    with spy_on_builds() as builds, spy_on_filter_builds() as filter_builds:
+    with spy_on_plan_preparations() as preparations:
         assert (await IntFields.objects.filter(intnum__gte=4).order_by("intnum").first()).intnum == 4
         assert await IntFields.objects.filter(intnum__gte=5).count() == 1
         assert await IntFields.objects.filter(intnum__gte=6).order_by("intnum").first() is None
-    assert builds.call_count == 0
-    assert filter_builds.call_count == 0
+    assert preparations.call_count == 0
 
 
 @pytest.mark.asyncio
@@ -57,10 +98,10 @@ async def test_values_and_updates_run_on_the_plan_of_their_calls(db):
     assert sorted(await IntFields.objects.filter(intnum__gte=2).values_list("intnum", flat=True)) == [2, 3]
     assert await IntFields.objects.filter(intnum=1).update(intnum_null=7) == 1
     hits = StatementPlans.hits
-    with spy_on_builds() as builds:
+    with spy_on_plan_preparations() as preparations:
         assert list(await IntFields.objects.filter(intnum__gte=3).values_list("intnum", flat=True)) == [3]
         assert await IntFields.objects.filter(intnum=2).update(intnum_null=8) == 1
-    assert builds.call_count == 0
+    assert preparations.call_count == 0
     assert StatementPlans.hits - hits == 2
     assert {row.intnum: row.intnum_null for row in await IntFields.objects.all()} == {1: 7, 2: 8, 3: None}
 
@@ -99,9 +140,9 @@ async def test_an_instance_filter_value_runs_on_its_plan(db):
     first = await Tournament.objects.create(name="first")
     second = await Tournament.objects.create(name="second")
     assert (await Tournament.objects.filter(pk=first.pk).first()).name == "first"
-    with spy_on_builds() as builds:
+    with spy_on_plan_preparations() as preparations:
         assert (await Tournament.objects.filter(pk=second.pk).first()).name == "second"
-    assert builds.call_count == 0
+    assert preparations.call_count == 0
 
 
 @requires_features(supports_select_for_update=True, supports_transactions=True)
@@ -128,11 +169,11 @@ async def test_a_get_with_a_row_lock_runs_on_the_plan_of_its_call(db_truncate):
     Caches.forget_all_caches()
     async with Transactions.atomic():
         assert (await Tournament.objects.select_for_update().get(pk=tournament.pk)).name == "locked"
-        with spy_on_builds() as builds:
+        with spy_on_plan_preparations() as preparations:
             assert (await Tournament.objects.select_for_update().get(pk=tournament.pk)).name == "locked"
             assert (await Tournament.objects.get(pk=tournament.pk)).name == "locked"
     # The plain get() of the same key took a plan of its own - one build, not the locking one.
-    assert builds.call_count == 1
+    assert preparations.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -147,24 +188,24 @@ async def test_a_get_seeing_deleted_rows_runs_on_a_plan_of_its_own(db):
             await SoftDeleteStandalone.objects.get(pk=removed.pk)
         with pytest.raises(DoesNotExist):
             await SoftDeleteStandalone.objects.only_deleted().get(pk=kept.pk)
-    with spy_on_builds() as builds:
+    with spy_on_plan_preparations() as preparations:
         assert (await SoftDeleteStandalone.objects.include_deleted().get(pk=kept.pk)).name == "kept"
         assert (await SoftDeleteStandalone.objects.get(pk=kept.pk)).name == "kept"
-    assert builds.call_count == 0
+    assert preparations.call_count == 0
 
 
 @pytest.mark.asyncio
 async def test_a_plan_found_by_a_query_of_other_calls_is_kept_under_these_calls_too(db):
     """A query whose statement plan another queryset recorded runs on that plan when built - and
-    keeps it under its own calls, so the next one builds nothing."""
+    keeps it under its own calls, so the next one reuses prepared SQL."""
     row = await IntFields.objects.create(intnum=4)
     Caches.forget_all_caches()
     assert (await IntFields.objects.get(Q(pk=row.pk))).intnum == 4
     StatementPlans.call_signature_plans.clear()
     assert (await IntFields.objects.get(pk=row.pk)).intnum == 4
-    with spy_on_builds() as builds:
+    with spy_on_plan_preparations() as preparations:
         assert (await IntFields.objects.get(pk=row.pk)).intnum == 4
-    assert builds.call_count == 0
+    assert preparations.call_count == 0
 
 
 @pytest.mark.asyncio
@@ -174,15 +215,15 @@ async def test_get_values_a_plan_binds_otherwise_take_the_filter_calls(db):
     row = await IntFields.objects.create(intnum=6, intnum_null=None)
     for kwargs in ({"intnum_null": None, "intnum": 6}, {"intnum__in": [6, 7]}, {"intnum_null__isnull": True}):
         assert (await IntFields.objects.get(**kwargs)).pk == row.pk
-        with spy_on_builds() as builds:
+        with spy_on_plan_preparations() as preparations:
             assert (await IntFields.objects.get(**kwargs)).pk == row.pk
-        assert builds.call_count == 0, kwargs
+        assert preparations.call_count == 0, kwargs
 
 
 @pytest.mark.asyncio
 async def test_q_conditions_of_plain_filters_run_on_the_plan_of_their_calls(db):
     """Q conditions of plain filters are part of the calls - their tree in the key, their values
-    bound - so the same trees with other values build nothing and give their own rows."""
+    bound - so the same trees with other values reuse prepared SQL and give their own rows."""
     for number in range(1, 7):
         await IntFields.objects.create(intnum=number, intnum_null=number * 10 if number % 2 else None)
 
@@ -201,10 +242,9 @@ async def test_q_conditions_of_plain_filters_run_on_the_plan_of_their_calls(db):
         ]
 
     assert await read(get_querysets(1, 2, [1, 2])) == [[1, 2], [1], [1, 2], [1], [1], 2]
-    with spy_on_builds() as builds, spy_on_filter_builds() as filter_builds:
+    with spy_on_plan_preparations() as preparations:
         assert await read(get_querysets(3, 6, [5, 6])) == [[3, 6], [3], [1, 2, 5, 6], [3], [3], 2]
-    assert builds.call_count == 0
-    assert filter_builds.call_count == 0
+    assert preparations.call_count == 0
 
 
 @pytest.mark.asyncio
@@ -223,8 +263,7 @@ async def test_q_conditions_of_another_tree_take_a_plan_of_their_own(db):
 
 @pytest.mark.asyncio
 async def test_q_conditions_of_expressions_run_on_the_plan_of_their_calls(db):
-    """A Q condition holding an expression or a query is kept unbuilt too - described by its own
-    description."""
+    """Expression and nested-query filters reuse their prepared SQL."""
     for number in range(1, 4):
         await IntFields.objects.create(intnum=number, intnum_null=number)
     assert await IntFields.objects.filter(Q(intnum=F("intnum_null")) | Q(intnum=9)).count() == 3
@@ -232,15 +271,15 @@ async def test_q_conditions_of_expressions_run_on_the_plan_of_their_calls(db):
     assert (
         await IntFields.objects.filter(Q(intnum__in=IntFields.objects.filter(intnum=2).values("intnum"))).count() == 1
     )
-    with spy_on_filter_builds() as filter_builds:
+    with spy_on_plan_preparations() as preparations:
         assert await IntFields.objects.filter(Q(intnum=F("intnum_null")) | Q(intnum=9)).count() == 3
-    assert filter_builds.call_count == 0
+    assert preparations.call_count == 0
 
 
 @pytest.mark.asyncio
 async def test_annotations_run_on_the_plan_of_their_calls(db):
     """annotate()/alias() expressions are part of the calls - described by their own descriptions,
-    their literals bound - so a later chain of the same calls builds nothing."""
+    their literals bound - so a later chain of the same calls reuses prepared SQL."""
     for number in range(1, 6):
         await IntFields.objects.create(intnum=number, intnum_null=number * 10)
 
@@ -255,12 +294,11 @@ async def test_annotations_run_on_the_plan_of_their_calls(db):
         )
 
     assert list(await read(4, 2)) == [(4, 8), (5, 10)]
-    with spy_on_builds() as builds, spy_on_filter_builds() as filter_builds:
+    with spy_on_plan_preparations() as preparations:
         # The annotation's value is bound before the filter's, in the order of the calls the other
         # way round.
         assert list(await read(3, 3)) == [(3, 9), (4, 12), (5, 15)]
-    assert builds.call_count == 0
-    assert filter_builds.call_count == 0
+    assert preparations.call_count == 0
 
 
 @pytest.mark.asyncio
@@ -281,7 +319,7 @@ async def test_exists_and_subquery_filters_run_on_the_plan_of_their_calls(db):
         )
 
     assert list(await read(1, 5)) == [1, 3, 5]
-    with spy_on_builds() as builds:
+    with spy_on_plan_preparations() as preparations:
         assert list(await read(2, 4)) == [3]
         assert list(await read(1, 1)) == [1]
-    assert builds.call_count == 0
+    assert preparations.call_count == 0

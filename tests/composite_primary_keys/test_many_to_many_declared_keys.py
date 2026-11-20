@@ -10,6 +10,7 @@ import pytest
 from hare import Hare, fields
 from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.core.config import HareConfig
+from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError
 from hare.migrations.state.state import State
 from hare.models import Model
@@ -35,17 +36,15 @@ class DeclaredKeyOwner(Model):
 @pytest.mark.asyncio
 async def test_a_composite_key_prefix_is_written_and_expanded_as_declared():
     async with hare_test_context(modules=[__name__], app_label="models", _generate_schemas=False):
-        field = DeclaredKeyOwner._meta.fields_map["targets"]
+        field = HareContext.require_current().apps.get_binding(DeclaredKeyOwner).fields_map["targets"]
         assert field.backward_keys == ("owner_a", "owner_b")
         assert field.forward_keys == ("target_a", "target_b")
 
         _path, _args, kwargs = field.deconstruct()
         assert (kwargs["backward_key"], kwargs["forward_key"]) == ("owner", "target")
 
-        rendered_owner = State.from_models([DeclaredKeyTarget, DeclaredKeyOwner]).apps.get_model(
-            "models.DeclaredKeyOwner"
-        )
-        rendered_field = rendered_owner._meta.fields_map["targets"]
+        state = State.from_models([DeclaredKeyTarget, DeclaredKeyOwner])
+        rendered_field = state.apps.get_binding("models.DeclaredKeyOwner").fields_map["targets"]
         assert rendered_field.backward_keys == ("owner_a", "owner_b")
         assert rendered_field.forward_keys == ("target_a", "target_b")
 
@@ -84,7 +83,6 @@ async def test_two_sides_of_one_column_name_are_refused(clashing_keys_module):
             pass
 
 
-@pytest.mark.requires("native")
 def test_two_sides_whose_names_differ_in_case_are_kept_where_the_database_tells_them_apart(clashing_keys_module):
     """The sides were compared ignoring case on every database - "key" and "KEY", two columns of PostgreSQL,
     were refused as one."""
@@ -92,5 +90,5 @@ def test_two_sides_whose_names_differ_in_case_are_kept_where_the_database_tells_
         HareConfig.from_db_url("postgresql://user:password@127.0.0.1:1/database", {"clash": [clashing_keys_module]})
     )
 
-    field = apps.get_model("clash.ClashOwner")._meta.fields_map["targets"]
+    field = apps.get_binding("clash.ClashOwner").fields_map["targets"]
     assert (field.forward_keys, field.backward_keys) == (("key",), ("KEY",))

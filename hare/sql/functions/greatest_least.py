@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from hare.sql.sql_context import SqlContext
 from hare.sql.terms.functions.function import Function
 
 
 class GreatestLeast(Function):
     """``GREATEST``/``LEAST`` - the database's own, or the dialect's function comparing numbers as numbers."""
+
+    structure_attributes = ("compares_numbers",)
+    has_repeatable_value = True
 
     def __init__(self, name: str, *args: Any, compares_numbers: bool = False, alias: str | None = None) -> None:
         """
@@ -19,6 +21,3 @@ class GreatestLeast(Function):
         """
         super().__init__(name, *args, alias=alias)
         self.compares_numbers = compares_numbers
-
-    def get_function_sql(self, sql_context: SqlContext) -> str:
-        return f"{self.name}({', '.join(self.get_arg_sql(arg, sql_context) for arg in self.args)})"

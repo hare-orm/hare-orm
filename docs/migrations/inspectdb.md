@@ -9,13 +9,55 @@ code ([below](#generating-model-source-programmatically)).
 hare inspectdb --connection default --schema public books authors > library/models.py
 ```
 
+Catalog IO and declaration reconstruction are separate. Each dialect reader captures immutable
+`CatalogSnapshot` records, including the original SQL and metadata that the mapper cannot represent.
+Its declaration mapper then builds independent `TableInfo` objects without database access. Mapping
+the same snapshot again is unaffected by edits to declarations reconstructed from it.
+
+For raw table metadata, use
+`await DatabaseCatalog.read_tables(connection, ["books"], schema="public")`, importing
+`DatabaseCatalog` from `hare.inspectdb.introspection.database_catalog`. Snapshot `records` are
+dialect-specific; nested mappings and sequences are read-only. `copy_records()` provides mutable
+copies. The supplied connection and transaction determine consistency across catalog queries;
+an immutable snapshot alone does not establish transaction isolation. Catalog delimiters are read
+using `sqlparse` tokens, so strings, quoted identifiers and comments remain opaque.
+
+Mapping limitations are exposed as `TableInfo.diagnostics`: immutable `CatalogDiagnostic` records
+with a `CatalogDiagnosticCode`, object name, original definition and affected columns when available.
+`table.get_diagnostics(code)` selects a category without parsing human-readable messages. Generated
+source renders these records as TODO comments; changing that presentation does not change catalog data.
+Foreign keys sharing any source column are retained as diagnostics rather than collapsed into one
+arbitrary relation. Such a table is not inferred as an automatic many-to-many through table.
+Unknown ClickHouse element types remain ambiguous through nullable and container wrappers. PostgreSQL
+exclusion `INCLUDE` columns preserve quoted commas and escaped quotes; unsupported syntax remains
+a diagnostic.
+Function grants preserve each overload's signature and privileges. A name-only `Grant` is suggested
+only when the function inventory proves there is one overload; otherwise a TODO retains the exact
+grant for an explicit migration, even when only one overload has non-owner privileges.
+Drift maps shadow identities in known schema references and engine arguments, preserving literal
+defaults, comments and string contents. Qualified identifiers are normalized on both compared sides.
+
+Schema comparison uses captured physical column, key and index properties independently of model
+reconstruction. For example, SQLite index collations and sort direction, foreign-key actions, and
+the distinction between an integer rowid alias and a separately indexed primary key remain visible.
+PostgreSQL comparison retains trigger enable modes and function execution settings; ClickHouse
+comparison retains full column types, codecs and skipping-index definitions. Reconstructed values
+are kept separately for migration suggestions. Schema objects are captured before comparison too,
+including every requested PostgreSQL function overload. A function body in a language other than
+SQL or PL/pgSQL is treated as literal source, without SQL identifier remapping.
+SQLite foreign-key timing is read from catalog clauses and matched to pragma records by columns,
+targets and actions. `DEFERRABLE INITIALLY DEFERRED` is retained even though the pragma omits it;
+unrecognized clause shapes retain their original SQL for comparison.
+Trigger event clauses normalize keywords and spacing outside quoted column names; whitespace and
+escaped quotes inside those names are preserved.
+
 ## <a id="reconstruction-rules"></a>What is reconstructed
 
-`inspectdb` raises rather than silently mis-generating a model when it hits a name collision it can't
-represent: two tables that differ only by case would otherwise produce two identical Python class names
-(one silently shadowing the other), and an FK column whose stripped attribute name (`author_id` →
-`author`) collides with an unrelated plain column would otherwise drop one of the two fields. Both fail
-loudly instead. It also reconstructs a composite foreign key as a single `ForeignKeyField` (not one field
+`inspectdb` raises when two tables would produce the same Python class name, including names differing
+only by case. Conflicting field names are allocated distinct Python attributes while `source_field`
+preserves the physical column name. For example, a foreign key `author_id` and an unrelated `author`
+column both survive reconstruction. It also reconstructs a composite foreign key as a single
+`ForeignKeyField` (not one field
 per column) and an index built on a SQL expression rather than a plain column list — both round-trip back
 into real model source, not a `# TODO` comment. A composite foreign key is a relation when it references
 the target's whole primary key under the column names a composite relation has,
@@ -39,19 +81,36 @@ database, comes back as `NO_ACTION` with a `# TODO` likewise.
 A PostgreSQL `ON DELETE NO ACTION DEFERRABLE INITIALLY IMMEDIATE` — the constraint `on_delete=PROTECT`
 creates — comes back as `PROTECT`. What no relation declares — an `ON UPDATE` action, another deferral
 (`DEFERRABLE INITIALLY DEFERRED`) — is named in a `# TODO`: a migration of the model creates the
-constraint without it, and `drift` reports it (SQLite reports the `ON UPDATE` action alone, not the
-deferral).
+constraint without it, and `drift` reports it. SQLite comparison also retains deferral clauses from
+the catalog definition.
 
 Other reconstruction rules:
 
 - An FK column that is also the table's primary key comes back as `OneToOneField(..., primary_key=True)`;
   an FK column without the `_id` suffix (`owner_code`) gets `source_field="owner_code"`.
+- A composite primary key with nullable components becomes nullable fields with
+  `Meta.primary_key = None` and a TODO naming the omitted key. This preserves readable column values,
+  but recreating the model does not recreate the database's primary key. Review that limitation before
+  generating migrations; `CompositePrimaryKey` requires every component to hold a value.
+- When the referenced table is included, a single-column FK outside the primary key gets a TODO if its type
+  differs from the reconstructed target field. For example, SQLite rowid metadata cannot distinguish
+  an original `BigIntField` from `IntField`, while a referencing column may still say `BIGINT`.
+  The explicit relation and its constraints remain, but its recreated column inherits the target field's
+  type and value range.
+  Such a junction is not collapsed into an automatic many-to-many field.
 - When a table has two or more relations to the same target (including a self-referencing pair), each
   gets `related_name="<table>_<field>_set"` so their backward relations don't collide.
+  The same explicit form is used when the default reverse name is not a usable field attribute,
+  for example for a table containing spaces, starting with a digit or containing `__`, or when
+  appending `s` produces a Python keyword. Explicit names use the field-name normalization rules;
+  valid Unicode defaults remain unchanged. This applies to scalar and composite foreign keys
+  and one-to-one relations in both generated source and `ModelFactory`.
+  A table named `model` may produce a class named `Model`; its declared scalar or composite key
+  is treated like any other model's. Generated source aliases the imported base when necessary.
 - A partial index keeps its `WHERE` clause as `PartialIndex(condition=RawSQLTerm(...))`, the predicate as
-  the database reports it, on both PostgreSQL and SQLite. An expression index (`lower(note)`) is rebuilt
-  as `Index(RawSQLTerm(...))` on both dialects — a key without the parentheses SQLite keeps around it
-  (`(lower(note))`) — and a composite foreign key is rebuilt on SQLite too.
+  the database reports it, on both PostgreSQL and SQLite. PostgreSQL reconstructs an expression
+  index with `RawSQLTerm` keys. SQLite retains the complete expression key SQL with `CatalogIndexKey`,
+  including its parentheses, collation and sort direction. SQLite also reconstructs composite foreign keys.
 - An index or constraint keeps its database name (`Index(..., name="book_published_idx")`) unless it is
   the one hare generates for the declaration or the one PostgreSQL gives an unnamed index or `UNIQUE`
   constraint (`<table>_<columns>_idx`/`_key`); a plain single-column index under a name of its own
@@ -69,8 +128,7 @@ Other reconstruction rules:
   order (`"-a"`, `F("a").desc(nulls_last=True)`, an expression key as
   `OrderedIndexKey(RawSQLTerm("lower(c)"), Order.DESC_NULLS_FIRST)`), a collated key as an expression
   (`RawSQLTerm('d COLLATE "C"')`) and `NULLS NOT DISTINCT` (`UniqueConstraint(nulls_distinct=False)`).
-  What no hare index can declare — the sort order of a collated key on SQLite — is left out and listed in
-  a `# TODO`.
+  SQLite gets key order and collation from its index catalog, including descending collated keys.
 - A foreign key to a table of another schema than the inspected one stays a plain column with a `# TODO`
   naming its target — a relation can only point at a model of the same run.
 - A partition of a partitioned PostgreSQL table is not listed (the partitioned table stands for it),
@@ -94,13 +152,21 @@ Other reconstruction rules:
   `generated=False`, so `create()` sends the key.
 - A generated column becomes a `GeneratedField` of its expression — except a stored PostgreSQL `tsvector`
   whose expression is the one a `TSVectorField` writes, which comes back as that `TSVectorField` with its
-  `source_fields`, `config` and `weights`, so `__search` keeps its configuration.
+  `source_fields`, `config` and `weights`, so `__search` keeps its configuration. Mixed configurations
+  or weighted and unweighted sources use `expression` with explicit `SearchVector` components;
+  querying that form requires an explicitly configured `SearchQuery`.
 - A `UNIQUE`/indexed column whose field type can't be indexed (`JSONField`) loses the index with a
   `# TODO`, instead of producing a model that can't be imported.
-- A single-column `UNIQUE` foreign key comes back as `OneToOneField`.
+- Representable single-column uniqueness of a foreign key becomes `OneToOneField`; named or
+  deferrable unique constraints remain in `Meta.constraints`. A composite-primary-key component
+  becomes a plain field because relation fields cannot be components of that key.
 - A foreign key's own index (a plain index over exactly its key columns) isn't written out —
   `ForeignKeyField` [has it by default](../models/relations.md#index-on-the-key-column); a foreign key
   without one, and without another index starting with its columns, gets `db_index=False`.
+- PostgreSQL `numeric`/`decimal` literal defaults retain their exact `Decimal` value. Casts that
+  can change the value before column assignment and other SQL expressions remain `SqlDefault`;
+  reconstructing a default does not silently replace those casts with a Python float. Custom
+  introspector default parsers retain their results.
 - An array column's default (`'{1,2}'::integer[]`) comes back as the list (`db_default=[1, 2]`), its
   elements read by the array's element type.
 - A PostgreSQL array column comes back with the dimensions it was declared with: `integer[][]` as
@@ -121,8 +187,12 @@ Other reconstruction rules:
   same run — comes back as a `ManyToManyField` on the model of its first column's table:
   `through=` naming the table, `forward_key`/`backward_key` its columns, the field named after the
   table without the owner's table name (`booking_people` → `people`), `related_name="<table>_set"`.
-  The table gets a `# NOTE` naming the field instead of a class. A through table of another shape, or
-  one whose other side isn't in the run, is skipped with a `# NOTE` saying how to declare it.
+  This requires matching column types, schemas, foreign-key actions and the complete automatic
+  index set, including names and key order. The field preserves `on_delete`, `unique`, `db_index`
+  and the table comment. The table then gets a `# NOTE` naming the field instead of a class.
+  A junction with additional constraints, special indexes or other unrepresented properties,
+  or whose target is absent from the run, remains an explicit model with the ordinary mapping
+  diagnostics. Foreign-key constraint names are not retained by the current catalog model.
 - A column of a PostgreSQL `ENUM` type — an array of one too — comes back as
   [`NativeEnumField`](../dialects/postgresql/fields.md) of an enum the module declares of the type's
   labels, in their order (`Mood = StrEnum('Mood', {'SAD': 'sad', 'OK': 'ok'})`, a label that isn't a name
@@ -183,11 +253,13 @@ Other reconstruction rules:
   `toIPv6('::1')`, a cast to a `Dynamic` or `Variant` type — comes back as its value (`db_default=1.5`),
   and an enum's default as its field holds it: a `CharEnumField`'s by its label, an `IntEnumField`'s by
   its number, whichever side of the member the server keeps.
-- A column or table whose Python name would shadow one of the generated module's imports or a model
-  attribute (a column `fields` or `pk`, a table `model`) is renamed — a field gets `_field` appended
-  (`fields_field` with `source_field="fields"`), a class a trailing underscore (`Model_` with
-  `Meta.table = "model"`) — and relations point at the renamed class. A column named after a keyword gets
-  `_field` appended too (`from_field`), and a run of underscores in a column's name becomes one: a field
+- All model declarations are prepared before rendering. Their class and field names are reserved,
+  and conflicting imports receive aliases (`fields2`, `Model2`). A table `model` can therefore remain
+  `class Model(Model2)`, and relations keep the allocated class name. Each model is built once;
+  discovering another import does not rebuild earlier declarations.
+- A column conflicting with a model attribute, such as `pk`, receives a distinct field name with
+  `source_field` retaining its database name. A keyword gets `_field` appended (`from_field`), and
+  a run of underscores in a column's name becomes one: a field
   name holds no `__` and ends in no `_` (see [Field types](../models/field-types.md)).
 
 ## <a id="generating-model-source-programmatically"></a>Generating model source programmatically
@@ -207,7 +279,13 @@ class SchemaInspector:
 
     @staticmethod
     def render_module(
-        table_infos: list[TableInfo], dialect: str, views: list[tuple[str, bool, tuple[str, ...]]] | None = None
+        table_infos: list[TableInfo],
+        dialect: str,
+        views: list[tuple[str, bool, tuple[str, ...]]] | None = None,
+        connection_dialect: Dialect | None = None,
+        unattached_objects: list[DatabaseSequence | DatabaseFunction] | None = None,
+        unattached_object_grants: list[SchemaPart] | None = None,
+        schema_object_notes: list[str] | None = None,
     ) -> str: ...
 ```
 
@@ -220,6 +298,10 @@ an introspector, `SchemaNotFoundError`/`TableNotFoundError` for a missing schema
 already read with `DatabaseCatalog` (see [Reading a table:
 `DatabaseCatalog`](../models/runtime-models.md#reading-a-table)); `views` — each view's name, whether it is
 materialized and its triggers — are the views it names in the `# NOTE` at the end.
+`connection_dialect` supplies the connection's dialect capabilities. `unattached_objects` lists
+sequences and functions outside table declarations; `unattached_object_grants` carries their
+catalog `SchemaPart` records, including unrepresentable grants. `schema_object_notes` adds notes
+for other schema objects.
 
 Each table is first turned into the same model state a declared model has
 (`hare.inspectdb.InspectedModelBuilder(table_info, ModelGenerationOptions(dialect, app_label)).build()`
@@ -227,4 +309,30 @@ returns an `InspectedModel` with `state` — a migrations `ModelState` of real f
 objects — plus the `# TODO` notes and the `Meta` layout). The source is that state written the way a
 migration file writes it — every field, index and constraint as its `deconstruct()` call — and
 `ModelFactory` builds a class from the very same state, so the generated source and a class built at
-runtime never disagree.
+runtime use the same declarations. The standalone builder checks a possible many-to-many through-table
+shape using only that table; module-level inference additionally needs metadata of all related tables.
+
+Relation finalization maps physical foreign-key target columns to the target's allocated storage
+attributes, including renamed fields and relation key shadows. Reverse accessors share the target's
+field namespace and receive suffixes when needed. CLI inspection reads referenced table layouts even
+when those tables are not requested for output; it still emits only the requested models.
+
+For a standalone factory or source builder, supply the same context explicitly:
+
+```python
+from hare.inspectdb import ModelFactory
+from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
+
+tables = await DatabaseCatalog.inspect_tables(connection, ["authors", "books"])
+book_class = ModelFactory.from_table_info(
+    tables[1], connection.dialect.name, app_label="library", target_tables=tuple(tables)
+)
+```
+
+The returned class is unregistered. `target_models` can instead provide existing, linked classes by
+full model reference, alongside `foreign_key_target_overrides` when their names differ. Source builders
+accept these options in `ModelGenerationOptions`; `SchemaInspector.render_module()` accepts extra
+layouts in `target_table_infos` without rendering those tables. A standalone non-primary-key reference
+without its target layout raises `ConfigurationError` rather than guessing an attribute from a raw
+column name. `InspectedModelBuilder.build()` itself constructs the intermediate declaration; publishing
+classes or source through the factory/source APIs performs relation finalization.

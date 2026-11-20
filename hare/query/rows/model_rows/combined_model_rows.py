@@ -3,25 +3,35 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import itertools
+from collections import defaultdict
 from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING, Any, cast
+from copy import copy
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.dialects.base.constants import CHUNK_SIZE
 from hare.dialects.base.results.statement_result import StatementResult
 from hare.exceptions import QueryError
+from hare.query.constants import COMBINED_QUERY_APP_COLUMN, COMBINED_QUERY_MODEL_COLUMN
+from hare.query.execution.query_execution import QueryExecution
 from hare.query.expressions import Value
+from hare.query.hare_column_names import HareColumnNames
 from hare.query.relation_loading.prefetching.prefetcher import Prefetcher
 from hare.query.rows.model_rows.model_rows import ModelRows
-from hare.query.rows.native.hydrate_accelerator import HydrateAccelerator
-from hare.query.statements.select.combined.combined_branches import CombinedBranches
+from hare.query.statements.constants import VALUES_SET_OPERATION_COLUMN_PREFIX
+from hare.query.statements.projections.derived_projection import DerivedProjection
 from hare.query.statements.select.select_query import SelectQuery
 from hare.sql import Order
 
 if TYPE_CHECKING:
+    from hare.core.hare_context import HareContext
     from hare.fields.field import Field
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
+    from hare.query.statements.projections.declarations import SelectedOutputColumn
     from hare.query.statements.select.combined_query import CombinedQuery
+    from hare.sql.builder.queries.query_builder import QueryBuilder
 
 
 class CombinedModelRows:
@@ -29,18 +39,20 @@ class CombinedModelRows:
     plus two naming the row's model, which picks the model each row is an instance of; an
     annotation decodes through the field of the first branch that knows one, like Django."""
 
-    def __init__(self, model: type[Model], models: set[type[Model]], prefetched_relations: tuple[Any, ...]) -> None:
+    def __init__(self, binding: ModelBinding, models: set[type[Model]], prefetched_relations: tuple[Any, ...]) -> None:
         """
         Args:
-            model: The model of the first queryset.
+            binding: The prepared binding of the first queryset's model.
             models: The models the rows can be instances of.
             prefetched_relations: The relations prefetched on the instances once they are read.
         """
-        self.model = model
+        self._binding = binding
         self.models = models
         self.prefetched_relations = prefetched_relations
+        bindings = tuple(binding.graph.get_binding(model) for model in models)
         #: The names of the two columns naming each row's model - its app and its class.
-        self.app_column, self.model_column = CombinedBranches.get_model_column_names(models)
+        self.app_column = HareColumnNames.get_free_name(COMBINED_QUERY_APP_COLUMN, bindings)
+        self.model_column = HareColumnNames.get_free_name(COMBINED_QUERY_MODEL_COLUMN, bindings)
         #: The combined columns in the first branch's order, the model columns among them.
         self.column_names: list[str] = []
         #: The combined columns but the two naming the model.
@@ -58,18 +70,14 @@ class CombinedModelRows:
 
     def get_output_aliases(self) -> list[str]:
         """The aliases of the combined columns, in output order."""
-        return self.column_names
-
-    def get_branch_aliases(self, branch: SelectQuery[Any] | CombinedQuery) -> list[str]:
-        """The aliases of a built branch's columns, in output order."""
-        return [select.alias or select.name for select in branch.query._selects]
+        return [f"{VALUES_SET_OPERATION_COLUMN_PREFIX}{i}" for i in range(len(self.column_names))]
 
     def get_default_orderings(self) -> list[tuple[str, Order]]:
         """The ordering of unordered rows ``first()``/``last()`` and ``iterator()`` take - the
         primary key, like Django."""
         return [
             (primary_key_attribute_name, Order.ASC)
-            for primary_key_attribute_name in self.model._meta.primary_key_attribute_names
+            for primary_key_attribute_name in self._binding.primary_key_attribute_names
         ]
 
     def check_ordering_name(self, field_name: str) -> None:
@@ -82,31 +90,62 @@ class CombinedModelRows:
         Raises:
             QueryError: The rows don't select it.
         """
-        column_name = self.model._meta.fields_db_projection.get(field_name, field_name)
-        if column_name not in self.column_names:
+        if field_name not in self.column_names:
             raise QueryError("Order by field must be in the select list for union queries")
-        return column_name
+        return self.get_output_aliases()[self.column_names.index(field_name)]
 
-    def take_branch(self, branch: SelectQuery[Any] | CombinedQuery, branch_index: int) -> None:
-        """Checks a built branch selects the columns the first one does, and takes each annotation's
-        output field from the first branch that knows it.
+    def get_branch_projection(
+        self, branch: SelectQuery[Any] | CombinedQuery, public_columns: list[tuple[str, int]]
+    ) -> tuple[QueryBuilder, list[str]]:
+        """Map logical model outputs to branch cells after its DISTINCT, ordering and slice.
+
+        Physical source columns may share names with another field or annotation. Internal
+        projection aliases keep those cells distinct; SQL-only cells remain in the inner
+        row identity and are trimmed before the set operation pairs its visible columns.
+        """
+        public_slots = dict(public_columns)
+        # Preserve ALL source cells through DISTINCT/order/slice, then trim SQL-only cells.
+        source = copy(branch.query)
+        with_clauses, source._with = source._with, []
+        projection = DerivedProjection(source, column_prefix=VALUES_SET_OPERATION_COLUMN_PREFIX)
+        inner = projection.query
+        aliases = [projection.columns[public_slots[name]].name for name in self.column_names]
+        if len(aliases) == len(projection.columns):
+            # Keep unknown literals in the set operation's type-inference scope.
+            inner._with = with_clauses
+            return inner, aliases
+        query = branch._connection.query_class.from_(inner).select(
+            *(inner.field(alias).as_(alias) for alias in aliases)
+        )
+        query._with = with_clauses
+        return query, aliases
+
+    def take_branch(self, branch: SelectQuery[Any] | CombinedQuery) -> list[tuple[str, int]]:
+        """Accept a branch's columns and take each annotation's output field from the first branch
+        that knows it. Return the public columns with their positions in the branch.
 
         Raises:
             QueryError: The branch selects other columns.
         """
         model_columns = (self.app_column, self.model_column)
-        column_names = self.get_branch_aliases(branch)
+        if isinstance(branch, SelectQuery):
+            public_columns = [
+                (name, position)
+                for position, column in enumerate(branch._get_output_columns())
+                if (name := column[0]) is not None
+            ]
+        else:
+            public_columns = [(name, position) for position, name in enumerate(branch._rows.get_output_names())]
+        column_names = [name for name, _ in public_columns]
         selects = [name for name in column_names if name not in model_columns]
         is_first_branch = not self.column_names
         if is_first_branch:
             self.column_names = column_names
             self.selects = selects
-            self.custom_field_output_fields = {}
-            self.undecoded_custom_fields = set()
-        elif selects != self.selects:
+        elif set(selects) != set(self.selects):
             raise QueryError("Union queries must have the same select fields")
         if not isinstance(branch, SelectQuery):
-            nested_rows = cast("CombinedModelRows", branch._rows)
+            nested_rows: CombinedModelRows = branch._rows  # type: ignore[assignment]
             if is_first_branch:
                 self.custom_fields = nested_rows.custom_fields
             self.undecoded_custom_fields |= nested_rows.undecoded_custom_fields & self.custom_fields
@@ -115,7 +154,7 @@ class CombinedModelRows:
             for key in self.custom_fields - self.undecoded_custom_fields:
                 if (output_field := nested_rows.custom_field_output_fields.get(key)) is not None:
                     self.custom_field_output_fields.setdefault(key, output_field)
-            return
+            return public_columns
         if is_first_branch:
             self.custom_fields = frozenset(branch._annotations.keys() - branch._alias_keys - set(model_columns))
         for key in self.custom_fields - self.undecoded_custom_fields:
@@ -127,111 +166,80 @@ class CombinedModelRows:
                     self.custom_field_output_fields.pop(key, None)
                 continue
             self.custom_field_output_fields.setdefault(key, output_field)
+        return public_columns
 
     def get_result_reading(self) -> tuple[Any, ...]:
-        """What reading the rows of the statement just built needs - kept with its plan."""
-        return (
-            self.custom_fields,
-            tuple(self.custom_field_output_fields.items()),
-            frozenset(self.undecoded_custom_fields),
-            tuple(self.selects),
-            tuple(self.column_names),
-        )
+        """The annotation names and immutable field mapping used to read a completed statement.
 
-    def restore(self, result_reading: tuple[Any, ...]) -> None:
-        """Takes what reading the rows needs from the plan the query runs on."""
-        custom_fields, custom_field_output_fields, undecoded_custom_fields, selects, column_names = result_reading
-        self.custom_fields = custom_fields
-        self.custom_field_output_fields = dict(custom_field_output_fields)
-        self.undecoded_custom_fields = set(undecoded_custom_fields)
-        self.selects = list(selects)
-        self.column_names = list(column_names)
-
-    def get_output_columns(self) -> list[tuple[str, str, str, Field[Any] | None]]:
-        """The combined columns of the built query, to read from it as a derived table - per
-        column its field or annotation name (twice), its column name and the field its value
-        decodes through."""
-        meta = self.model._meta
-        field_names_by_column = {
-            column_name: field_name for field_name, column_name in meta.fields_db_projection.items()
-        }
-        output_columns: list[tuple[str, str, str, Field[Any] | None]] = []
-        for column_name in self.selects:
-            field_name = field_names_by_column.get(column_name, column_name)
-            value_field = meta.fields_map.get(field_name) or self.custom_field_output_fields.get(column_name)
-            output_columns.append((field_name, field_name, column_name, value_field))
-        return output_columns
-
-    def _get_model_rows(self, connection: DatabaseClient) -> ModelRows:
-        """How the rows are read into instances on ``connection``."""
-        return ModelRows(
-            self.model,
-            connection,
-            annotations=list(self.custom_fields),
-            annotation_fields=self.custom_field_output_fields,
-        )
-
-    def read_rows(self, model_rows: ModelRows, connection: DatabaseClient, result: StatementResult) -> list[Model]:
-        """The instance of each row - in one ``rust.native.rows`` call where the rows are read by
-        position.
-
-        Args:
-            model_rows: How the rows are read into instances.
-            connection: The connection the rows were read on.
-            result: The rows, at least one, with their column names.
-
-        Returns:
-            The instances.
+        Mutable branch accumulators are not retained by the plan or reconstructed on a hit.
+        A later build gets a new CombinedModelRows from the query's build preparation.
         """
-        column_names = result.column_names
-        rows = result.rows
-        if HydrateAccelerator.module is not None and connection.features.supports_positional_rows:
-            return HydrateAccelerator.run_or_fall_back(
-                lambda: model_rows.read_combined_with_accelerator(
-                    rows, column_names, self.models, self.app_column, self.model_column
-                ),
-                lambda: list(
-                    model_rows.read_combined(rows, column_names, self.models, self.app_column, self.model_column)
-                ),
-            )
-        return list(model_rows.read_combined(rows, column_names, self.models, self.app_column, self.model_column))
+        return self.custom_fields, MappingProxyType(dict(self.custom_field_output_fields)), tuple(self.column_names)
 
-    async def read(self, query: CombinedQuery, sql: str, parameters: list[Any]) -> list[Any]:
+    def get_output_columns(self) -> list[SelectedOutputColumn]:
+        """Every combined cell in SQL order; model discriminators have no public identity."""
+        meta = self._binding
+        return [
+            (name, name, alias, meta.fields_map.get(name) or self.custom_field_output_fields.get(name))
+            if name in self.selects
+            else (None, None, alias, None)
+            for name, alias in zip(self.column_names, self.get_output_aliases(), strict=True)
+        ]
+
+    def _get_model_rows(self, connection: DatabaseClient, result_reading: tuple[Any, ...]) -> ModelRows:
+        """How the rows are read into instances with the dialect of ``connection``."""
+        custom_fields, custom_field_output_fields, output_names = result_reading
+        return ModelRows(
+            self._binding,
+            connection.dialect.types,
+            annotations=tuple(custom_fields),
+            combined_output_names=output_names,
+            annotation_fields=custom_field_output_fields,
+        )
+
+    async def read(
+        self, query: CombinedQuery, sql: str, parameters: list[Any], result_reading: tuple[Any, ...]
+    ) -> list[Any]:
         """Runs the statement, makes each row an instance of the model its model columns name,
         then prefetches the relations asked for - batched over the instances, grouped by their
         model, on the connection the rows were read from."""
         connection = query._connection
-        by_position = connection.features.supports_positional_rows
-        result = await connection.execute(sql, parameters, returns_rows=True, rows_by_position=by_position)
+        result = await QueryExecution.fetch_rows(connection, sql, parameters, retry_read=query.is_read_only)
         if not result.rows:
             return []
-        model_rows = self._get_model_rows(connection)
+        model_rows = self._get_model_rows(connection, result_reading)
         instances: list[Model] = []
-        if HydrateAccelerator.module is not None and by_position:
-            instances = self.read_rows(model_rows, connection, result)
-        else:
-            reader = model_rows.read_combined(
-                result.rows,
-                result.column_names,
-                self.models,
-                self.app_column,
-                self.model_column,
-            )
-            while chunk := list(itertools.islice(reader, CHUNK_SIZE)):
-                instances.extend(chunk)
-                await asyncio.sleep(0)
+        reader = model_rows.read_combined(
+            connection,
+            result.rows,
+            result.column_names,
+            self.models,
+            self.app_column,
+            self.model_column,
+            context=query._context,
+        )
+        while chunk := list(itertools.islice(reader, CHUNK_SIZE)):
+            instances.extend(chunk)
+            await asyncio.sleep(0)
         if instances and self.prefetched_relations:
-            instances_by_model: dict[type[Model], list[Model]] = {}
+            instances_by_model: defaultdict[type[Model], list[Model]] = defaultdict(list)
             for instance in instances:
-                instances_by_model.setdefault(type(instance), []).append(instance)
-            for model, model_instances in instances_by_model.items():
-                await Prefetcher(model, connection).load(
+                instances_by_model[type(instance)].append(instance)
+            for model_instances in instances_by_model.values():
+                await Prefetcher(model_instances[0]._binding, connection, query._context).load(
                     model_instances, *self.prefetched_relations, db_explicitly_chosen=True
                 )
-        return cast("list[Any]", instances)
+        return instances
 
     async def stream_batches(
-        self, query: CombinedQuery, connection: DatabaseClient, sql: str, parameters: list[Any], chunk_size: int
+        self,
+        connection: DatabaseClient,
+        sql: str,
+        parameters: list[Any],
+        chunk_size: int,
+        result_reading: tuple[Any, ...],
+        *,
+        context: HareContext | None = None,
     ) -> AsyncIterator[list[Any]]:
         """Streams the instances off a server-side cursor, a batch of rows at a time.
 
@@ -243,8 +251,23 @@ class CombinedModelRows:
                 "stream() does not support prefetch_related() - resolving a prefetch needs every "
                 "parent instance up front; use iterator() or plain iteration instead"
             )
-        model_rows = self._get_model_rows(connection)
-        async with contextlib.aclosing(connection.stream_batches(sql, parameters, chunk_size=chunk_size)) as batches:
+        model_rows = self._get_model_rows(connection, result_reading)
+        reader = None
+        async with contextlib.aclosing(
+            connection._stream_built_batches(sql, parameters, chunk_size=chunk_size)
+        ) as batches:
             async for batch in batches:
-                # A batch of the driver's rows, read by name too.
-                yield self.read_rows(model_rows, connection, StatementResult(len(batch), batch))
+                if not batch:
+                    yield []
+                    continue
+                if reader is None:
+                    column_names = StatementResult.get_row_column_names(batch)
+                    reader = model_rows.get_combined_reader(
+                        connection,
+                        column_names,
+                        self.models,
+                        self.app_column,
+                        self.model_column,
+                        context=context,
+                    )
+                yield list(reader(batch))

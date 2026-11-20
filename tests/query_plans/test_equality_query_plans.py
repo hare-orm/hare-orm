@@ -17,6 +17,7 @@ from hare.query.plans.statement.statement_plans import StatementPlans
 from tests.shared_models import testmodels, testmodels_postgres
 from tests.shared_models.testmodels import Author, Book, Event, IntFields, Tournament
 from tests.shared_models.testmodels_postgres import DecimalFields
+from tests.utils.statement_plan_checks import StatementPlanChecks
 
 
 async def run_counting_plan_hits(build: Callable[[], Awaitable[Any]]) -> tuple[Any, int]:
@@ -279,16 +280,14 @@ async def test_every_field_type_is_read(db):
     ids=["Model.get", "get with a condition", "filter"],
 )
 async def test_row_reader_is_reused_across_queries_of_a_shape(db, build):
-    """Queries of one shape read their rows with one compiled hydrate function, not one compiled
-    per query."""
-    from hare.query.plans.statement.statement_plans import StatementPlans
-
+    """Queries of one shape reuse the model's decode plan and read their current values."""
     await IntFields.objects.create(intnum=100)
     await IntFields.objects.create(intnum=101)
     await build(100)
-    reader_count = len(StatementPlans.hydrate_functions)
-    await build(101)
-    assert len(StatementPlans.hydrate_functions) == reader_count
+    with StatementPlanChecks.assert_decode_plans_reused(IntFields):
+        result = await build(101)
+        objs = result if isinstance(result, list) else [result]
+        assert [obj.intnum for obj in objs] == [101]
 
 
 @pytest.mark.asyncio

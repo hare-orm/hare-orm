@@ -4,6 +4,7 @@ from decimal import Decimal
 import pytest
 
 from hare.contrib import test
+from hare.core.hare_context import HareContext
 from hare.dialects.postgresql.constants import POSTGRESQL_DIALECT
 from hare.dialects.postgresql.fields.ranges import (
     BigIntRangeField,
@@ -17,7 +18,7 @@ from hare.dialects.postgresql.lookups.postgresql_value_encoders import Postgresq
 from hare.exceptions import ValidationError
 from hare.query.expressions import F
 from hare.sql.functions import Cast
-from hare.time import Timezone
+from hare.time.system_zone import SystemZone
 from tests.dialects.postgresql.column_types.models_ranges import (
     DateRangeThing,
     DateTimeRangeThing,
@@ -399,7 +400,7 @@ async def test_created_range_in_memory_matches_the_stored_one(db_ranges):
 async def test_infinite_bounds_read_the_same_on_both_drivers_and_write_back_as_their_extremes(db_ranges):
     """asyncpg read a tstzrange infinity bound naive - both drivers now read it UTC-aware, as the
     Python extreme, and write that extreme back as the moment or the day it is."""
-    client = DateTimeRangeThing._meta.connection
+    client = HareContext.require_current().apps.get_queryset(DateTimeRangeThing).get_connection()
     await client.execute_script(
         "INSERT INTO datetimerangething (id, span) VALUES (1, '[-infinity,infinity)'), "
         "(2, '[-infinity,\"2026-01-01 00:00+00\")');"
@@ -451,7 +452,7 @@ def test_datetime_range_bounds_follow_datetime_field_conversion():
     with override_timezone(use_timezone=False):
         read = field.from_db_value(Range(utc_lower, utc_upper))
         assert read.lower.tzinfo is None
-        assert read.lower == Timezone.get_system_local_naive(utc_lower)
+        assert read.lower == SystemZone.get_system_local_naive(utc_lower)
         assigned = field.to_python(Range(datetime.datetime(2024, 6, 1, 9, 0), None))
         assert assigned.lower == datetime.datetime(2024, 6, 1, 9, 0)
 

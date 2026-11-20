@@ -7,7 +7,7 @@ import pytest
 from hare import fields
 from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.migrations.drift import detect_drift_for_alias
-from hare.migrations.operations import AddField
+from hare.migrations.operations import AddField, SeparateDatabaseAndState
 from hare.models import Model
 from tests.utils.attached_databases import get_url_with_attached_databases
 
@@ -55,7 +55,9 @@ async def test_a_column_missing_from_a_table_of_an_attached_database_is_drift():
 
         result = await detect_drift_for_alias(ctx.apps, APPS_CONFIG, "models")
 
-        assert [(type(operation), operation.name) for operation in result.operations] == [(AddField, "body")]
+        prepare, operation = result.operations
+        assert isinstance(prepare, SeparateDatabaseAndState)
+        assert isinstance(operation, AddField) and operation.name == "body"
 
 
 @pytest.mark.sqlite_only

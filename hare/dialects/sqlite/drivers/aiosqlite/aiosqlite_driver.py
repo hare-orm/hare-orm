@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from hare.dialects.dialect_registry import DialectRegistry
 from hare.dialects.sqlite.connection.sqlite_driver import SqliteDriver
 from hare.dialects.sqlite.constants import SQLITE_AIOSQLITE_DRIVER_NAME, SQLITE_REGEXP_OPTION
 
@@ -38,4 +37,4 @@ class AiosqliteDriver(SqliteDriver):
         return AiosqliteClient, AiosqliteClientWithRegexpSupport, AiosqliteTransactionClient
 
 
-DialectRegistry.register_driver(AiosqliteDriver())
+extension = AiosqliteDriver.get_contribution

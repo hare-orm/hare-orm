@@ -4,11 +4,11 @@ import pytest
 import pytest_asyncio
 
 from hare.contrib.test import requires_features
-from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.core.connections.connections import Connections
 from hare.exceptions import IntegrityError, OperationalError, TransactionManagementError
 from hare.transactions.transactions import Transactions
 from tests.shared_models.testmodels import CompositePkThing, IntFields
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 @pytest_asyncio.fixture
@@ -19,11 +19,7 @@ async def file_db(tmp_path):
     databases (file SQLite, Postgres), where a second connection genuinely shares state with
     the first - exactly what these tests need to verify."""
     db_path = tmp_path / "autonomous_test.sqlite"
-    async with hare_test_context(
-        ["tests.shared_models.testmodels"],
-        db_url=f"sqlite+aiosqlite:///{db_path}?synchronous=OFF",
-        connection_label="models",
-    ) as ctx:
+    async with DatabaseUnderTest.open_file_model_context(db_path) as ctx:
         yield ctx
 
 

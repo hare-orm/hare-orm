@@ -1,5 +1,4 @@
-//! `rust.native.clock` - the system's precise wall clock, for Pythons whose `datetime.now()` reads a
-//! coarser one (Windows before Python 3.13).
+//! `rust.native.clock` - UTC timestamps and POSIX time from the system's precise wall clock.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

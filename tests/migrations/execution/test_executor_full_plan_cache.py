@@ -1,9 +1,14 @@
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
 from hare.core.hare_context import HareContext
+from hare.migrations.execution.constants import ZERO_MIGRATION
 from hare.migrations.execution.executor import MigrationExecutor
+from hare.migrations.execution.executor.migration_target import MigrationTarget
+from hare.migrations.loading.graph.migration_key import MigrationKey
+from tests.utils.project_sources import ProjectSources
 
 pytestmark = pytest.mark.sqlite_only
 
@@ -13,11 +18,7 @@ def _write_migration(migrations_dir: Path, name: str, body_lines: list[str]) -> 
 
 
 def _write_app(tmp_path: Path, app_label: str) -> Path:
-    package_dir = tmp_path / app_label
-    migrations_dir = package_dir / "migrations"
-    migrations_dir.mkdir(parents=True)
-    (package_dir / "__init__.py").write_text("", encoding="ascii")
-    (migrations_dir / "__init__.py").write_text("", encoding="ascii")
+    migrations_dir = ProjectSources(tmp_path).prepare_migrations(tmp_path / app_label)
     return migrations_dir
 
 
@@ -31,7 +32,7 @@ async def test_collect_sql_on_a_reused_executor_sees_migrations_added_to_disk_af
     picked up by self.loader.graph, but _project_state() reads the STALE _full_plan_cache -
     confirmed live: RemoveField('subtitle') in 0003 crashed because the state projection never
     replayed 0002's AddField('subtitle') first, even though 0001->0002->0003's dependency chain
-    is entirely valid and self.loader.graph.nodes already contained all three."""
+    is entirely valid and the loader's graph already contained all three."""
     migrations_dir = _write_app(tmp_path, "fullplancacheapp")
     monkeypatch.syspath_prepend(str(tmp_path))
 
@@ -129,3 +130,45 @@ async def test_collect_sql_on_a_reused_executor_sees_migrations_added_to_disk_af
         assert any("subtitle" in statement for statement in removing_sql)
 
         await connection.close()
+
+
+@pytest.mark.asyncio
+async def test_sql_collection_preserves_history_and_recorder_for_later_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_label = "preview_history_app"
+    migrations_dir = _write_app(tmp_path, app_label)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    _write_migration(
+        migrations_dir,
+        "0001_initial",
+        [
+            "from hare import migrations",
+            "class Migration(migrations.Migration):",
+            "    dependencies = []",
+            "    operations = []",
+        ],
+    )
+    async with HareContext() as context:
+        context.connections._init_config(
+            {"default": {"engine": "sqlite+aiosqlite", "credentials": {"file_path": ":memory:"}}}
+        )
+        executor = MigrationExecutor(
+            context.connections.get("default"),
+            {app_label: {"models": [], "default_connection": "default", "migrations": f"{app_label}.migrations"}},
+        )
+        await executor.migrate()
+        recorder = executor.recorder
+        expected = {MigrationKey(app_label, "0001_initial")}
+        assert set(await recorder.applied_migrations()) == expected
+        await executor.build_graph()
+        assert executor.loader.applied_migrations == expected
+        with monkeypatch.context() as preview_patch:
+            journal_reader = AsyncMock(side_effect=AssertionError("SQL collection must not read migration history"))
+            preview_patch.setattr(recorder, "applied_migrations", journal_reader)
+            assert await executor.collect_sql(app_label, "0001_initial") == []
+            journal_reader.assert_not_called()
+        assert executor.loader.applied_migrations == expected
+        assert executor.loader.recorder is executor.runner.recorder is executor.recorder is recorder
+        await executor.migrate([MigrationTarget(app_label, ZERO_MIGRATION)])
+        assert await recorder.applied_migrations() == []

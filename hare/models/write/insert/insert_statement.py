@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from hare.fields.generated_field import GeneratedField
@@ -8,7 +8,7 @@ from hare.sql.terms.parameters.parameter import Parameter
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.models.write.insert.insert_conflict import InsertConflict
     from hare.sql.builder.queries.query_builder import QueryBuilder
 
@@ -18,14 +18,14 @@ class InsertStatement:
     ``ON CONFLICT`` and ``RETURNING``. ``save()`` and ``bulk_create()`` build every INSERT here.
 
     Args:
-        model: The model.
+        binding: The model's structural binding.
         connection: The connection.
     """
 
-    __slots__ = ("model", "connection")
+    __slots__ = ("_binding", "connection")
 
-    def __init__(self, model: type[Model], connection: DatabaseClient) -> None:
-        self.model = model
+    def __init__(self, binding: ModelBinding, connection: DatabaseClient) -> None:
+        self._binding = binding
         self.connection = connection
 
     def get_field_names(self, *, with_primary_key: bool, omitted_field_names: Collection[str] = ()) -> list[str]:
@@ -39,7 +39,7 @@ class InsertStatement:
         Returns:
             The field names, in model field order.
         """
-        meta = self.model._meta
+        meta = self._binding
         field_names = []
         for field_name in meta.fields_db_projection:
             field_object = meta.fields_map[field_name]
@@ -54,9 +54,9 @@ class InsertStatement:
                 field_names.append(field_name)
         return field_names
 
-    def get_columns(self, field_names: Sequence[str]) -> list[str]:
+    def get_columns(self, field_names: Iterable[str]) -> list[str]:
         """The columns of fields."""
-        fields_db_projection = self.model._meta.fields_db_projection
+        fields_db_projection = self._binding.fields_db_projection
         return [fields_db_projection[field_name] for field_name in field_names]
 
     def get_returning_columns(
@@ -78,7 +78,7 @@ class InsertStatement:
         Returns:
             The columns, without repeats.
         """
-        meta = self.model._meta
+        meta = self._binding
         primary_key_columns = self.get_columns(meta.primary_key_attribute_names)
         columns = list(primary_key_columns) if returns_primary_key else []
         columns.extend(
@@ -86,7 +86,7 @@ class InsertStatement:
             for column in meta.generated_db_fields
             if not (primary_key_given and not returns_primary_key and column in primary_key_columns)
         )
-        columns.extend(self.get_columns(list(omitted_field_names)))
+        columns.extend(self.get_columns(omitted_field_names))
         if returns_version and meta.optimistic_lock_field:
             columns.append(meta.fields_db_projection[meta.optimistic_lock_field])
         return list(dict.fromkeys(columns))
@@ -104,7 +104,7 @@ class InsertStatement:
         types = self.connection.dialect.types
         if not types.has_inserted_by_select:
             return False
-        meta = self.model._meta
+        meta = self._binding
         written_columns = set(columns)
         return any(
             types.is_inserted_by_select(meta.fields_map[field_name])
@@ -138,7 +138,7 @@ class InsertStatement:
         Returns:
             The query.
         """
-        into_table = self.connection.query_class.into(self.model._meta.basetable)
+        into_table = self.connection.query_class.into(self._binding.basetable)
         if rows_source_sql is not None:
             query = into_table.columns(*columns).insert_rows_from(rows_source_sql)
         elif columns:
@@ -149,7 +149,7 @@ class InsertStatement:
             # .columns().insert() of no column renders an empty string, not an INSERT.
             query = into_table.default_values()
         if conflict is not None:
-            query = conflict.apply(self.model, self.connection.dialect.types, query)
+            query = conflict.apply(self._binding, self.connection.dialect.types, query)
         if returning and self.connection.features.supports_returning:
             query = query.returning(*returning)
         return query

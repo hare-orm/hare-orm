@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.exceptions import IncompleteInstanceError
 from hare.fields.enums import RelationLoadStrategy
@@ -9,9 +9,7 @@ from hare.fields.relations.declarations import RelationProperty
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.fields.relations.fields.relational_field import RelationalField
 from hare.fields.relations.relation_values import RelationValues
-from hare.query.lookup_info.lookup_paths import LookupPaths
 from hare.query.queryset import QuerySet, QuerySetSingle
-from hare.query.queryset.relations.linked_many_to_many_relation import LinkedManyToManyRelation
 from hare.query.queryset.relations.many_to_many_relation import ManyToManyRelation
 from hare.query.queryset.relations.related_queryset.related_query_set import RelatedQuerySet
 from hare.query.queryset.relations.related_queryset.relation_rows import RelationRows
@@ -25,7 +23,7 @@ if TYPE_CHECKING:
 
 
 class RelationAccessors:
-    """The attributes of an instance's relations: the properties MetaInfo installs for each relation,
+    """The attributes of an instance's relations: the properties ModelBinding installs for each relation,
     and the related queryset they read. A property's functions are closures over the relation's
     names - read on every attribute access, they take no keyword arguments to merge."""
 
@@ -44,8 +42,7 @@ class RelationAccessors:
         Returns:
             The property.
         """
-        usage = f"Assigning '{_key.removeprefix('_')}'"
-        empty_values = (None,) * len(to_fields)
+        field_name = _key.removeprefix("_")
 
         def get_related_obj(obj: Model) -> Awaitable[Model | None]:
             try:
@@ -56,11 +53,18 @@ class RelationAccessors:
                 if not set_values:
                     return NoneAwaitable
                 if len(set_values) != len(values):
+                    shown_parts = []
+                    for source_name, target_name, key_value in zip(relation_fields, to_fields, values, strict=True):
+                        target_field = obj._binding.graph.get_binding(related_model).fields_map[target_name]
+                        source_field = obj._binding.fields_map[source_name]
+                        message_field = target_field if target_field.sensitive else source_field
+                        shown_parts.append(f"{source_name!r}: {message_field.get_value_for_message(key_value)}")
+                    shown_values = ", ".join(shown_parts)
                     # Some key columns of a composite relation set and some not: neither a reference
                     # nor "no relation".
                     raise IncompleteInstanceError(
                         f"{_key!r} on {type(obj).__name__} has only some of its composite key "
-                        f"columns set ({dict(zip(relation_fields, values, strict=True))!r}) - set all "
+                        f"columns set ({{{shown_values}}}) - set all "
                         "of them, or none."
                     )
                 return RelationAccessors.get_related_queryset(
@@ -68,8 +72,8 @@ class RelationAccessors:
                 ).first()
 
         def set_related_obj(obj: Model, value: Model | None) -> None:
-            to_field_values = (
-                RelationValues.get_relation_key_values(value, to_fields, usage) if value else empty_values
+            to_field_values = RelationValues.get_checked_relation_key_values(
+                obj._binding, field_name, value, context=obj._context
             )
             for relation_field, to_field_value in zip(relation_fields, to_field_values, strict=True):
                 setattr(obj, relation_field, to_field_value)
@@ -97,33 +101,12 @@ class RelationAccessors:
             The property.
         """
 
-        def get_relation(obj: Model, bind: bool = True) -> ReverseRelation[Model]:
-            relation_rows: RelationRows | None = getattr(obj, _key, None)
-            relation: ReverseRelation[Model] | None
-            if relation_rows is None:
-                relation_rows = RelationRows()
-                setattr(obj, _key, relation_rows)
-                relation = None
-            else:
-                relation = relation_rows.held_relation  # type: ignore[assignment]
-                if relation is None and (relation_reference := relation_rows.relation_reference) is not None:
-                    relation = relation_reference()  # type: ignore[assignment]
-            if relation is None:
-                # The relation class itself for a manager of plain querysets - get_class_for() answers
-                # the same, one call later.
-                relation_class: type[ReverseRelation[Model]] = (
-                    ReverseRelation
-                    if related_model._meta.manager.queryset_class is QuerySet
-                    else ReverseRelation.get_class_for(related_model)
-                )
-                relation = relation_class(related_model, relation_fields, obj, from_fields, relation_rows)
-                relation_rows.keep_relation(relation)
-            # Fetched rows not bound yet are bound on the first use of a query setting - often never.
-            if bind and (relation._is_bound or not relation_rows._fetched):
-                relation._bind()
-            return relation
+        def create(obj: Model, rows: RelationRows) -> ReverseRelation[Model]:
+            related_binding = obj._binding.graph.get_binding(related_model)
+            relation_class: type[ReverseRelation[Model]] = ReverseRelation.get_class_for(related_binding)
+            return relation_class(related_model, relation_fields, obj, from_fields, rows)
 
-        return RelationProperty(get_relation)
+        return RelationAccessors._make_to_many_property(_key, create)
 
     @staticmethod
     def make_reverse_one_to_one_property(
@@ -146,12 +129,14 @@ class RelationAccessors:
         def get_related_obj(obj: Model) -> QuerySetSingle[Model | None]:
             # Not cached: the fields the relation is read by can still change (an unsaved obj, a
             # clone given a new pk). A value select_related()/prefetch_related() set is returned as is.
-            if hasattr(obj, _key):
+            try:
                 return getattr(obj, _key)
+            except AttributeError:
+                pass
             values = RelationValues.get_relation_key_values(obj, from_fields, usage)
             if None in values:
                 # A NULL target value (a nullable to_field=, or an unsaved pk) is referenced by no row.
-                return cast("QuerySetSingle[Model | None]", NoneAwaitable)
+                return NoneAwaitable  # type: ignore[return-value]
             return RelationAccessors.get_related_queryset(
                 related_model, dict(zip(relation_fields, values, strict=True)), obj
             ).first()
@@ -171,51 +156,33 @@ class RelationAccessors:
             The property.
         """
 
-        def get_relation(obj: Model, bind: bool = True) -> ManyToManyRelation[Model]:
-            relation_rows: RelationRows | None = getattr(obj, _key, None)
-            relation: ManyToManyRelation[Model] | None
-            if relation_rows is None:
-                relation_rows = RelationRows()
-                setattr(obj, _key, relation_rows)
-                relation = None
-            else:
-                relation = relation_rows.held_relation  # type: ignore[assignment]
-                if relation is None and (relation_reference := relation_rows.relation_reference) is not None:
-                    relation = relation_reference()  # type: ignore[assignment]
+        def create(obj: Model, rows: RelationRows) -> ManyToManyRelation[Model]:
+            relation_class: type[ManyToManyRelation[Model]] = ManyToManyRelation.get_class_for(
+                field_object.get_related_binding()
+            )
+            return relation_class(obj, field_object, rows)
+
+        return RelationAccessors._make_to_many_property(_key, create)
+
+    @staticmethod
+    def _make_to_many_property(
+        key: str, create: Callable[[Model, RelationRows], RelatedQuerySet[Any]]
+    ) -> RelationProperty:
+        def get_relation(obj: Model, bind: bool = True) -> RelatedQuerySet[Any]:
+            rows: RelationRows | None = getattr(obj, key, None)
+            if rows is None:
+                rows = RelationRows()
+                setattr(obj, key, rows)
+            relation = rows.get_relation()
             if relation is None:
-                # The relation class itself for a manager of plain querysets - get_class_for() answers
-                # the same, one call later.
-                relation_class: type[ManyToManyRelation[Model]] = (
-                    cast("type[ManyToManyRelation[Model]]", LinkedManyToManyRelation)
-                    if RelationAccessors.reads_linked_rows(field_object)
-                    else ManyToManyRelation
-                )
-                many_to_many_class: type[ManyToManyRelation[Model]] = (
-                    relation_class
-                    if field_object.related_model._meta.manager.queryset_class is QuerySet
-                    else relation_class.get_class_for(field_object.related_model)
-                )
-                relation = many_to_many_class(obj, field_object, relation_rows)
-                relation_rows.keep_relation(relation)
-            # Fetched rows not bound yet are bound on the first use of a query setting - often never.
-            if bind and (relation._is_bound or not relation_rows._fetched):
+                relation = create(obj, rows)
+                rows.keep_relation(relation)
+            # Prefetched rows can be read without binding the related queryset.
+            if bind and (relation._is_bound or not rows._fetched):
                 relation._bind()
             return relation
 
         return RelationProperty(get_relation)
-
-    @staticmethod
-    def reads_linked_rows(field_object: ManyToManyFieldInstance[Model]) -> bool:
-        """Whether a many-to-many relation's rows are read by the keys its links hold - a relation to a
-        model on another connection, read from the model declaring it.
-
-        Args:
-            field_object: The many-to-many field.
-
-        Returns:
-            True for a field declared to a model on another connection.
-        """
-        return not field_object._generated and LookupPaths.crosses_connections(field_object)
 
     @staticmethod
     def get_relation(obj: Model, field_name: str) -> RelatedQuerySet[Any]:
@@ -229,7 +196,7 @@ class RelationAccessors:
         Returns:
             The relation.
         """
-        return cast("RelatedQuerySet[Any]", getattr(type(obj), field_name).fget(obj, bind=False))
+        return obj._binding.relation_accessors[field_name].fget(obj, bind=False)
 
     @staticmethod
     def get_related_queryset(model: type[TModel], filters: dict[str, Any], obj: Model) -> QuerySet[TModel]:
@@ -244,7 +211,8 @@ class RelationAccessors:
         Returns:
             The queryset.
         """
-        queryset = cast("QuerySet[TModel]", model._meta.manager.get_queryset())
+        binding = obj._binding.graph.get_binding(model)
+        queryset: QuerySet[TModel] = binding.manager.create_queryset(binding=binding, context=obj._context)
         queryset._append_filters(False, (), filters)
         queryset._set_instance_connection(obj)
         return queryset
@@ -262,10 +230,10 @@ class RelationAccessors:
             The matching relation names.
         """
         relation_names_needing_refresh = set()
-        for relation_name in obj._meta.foreign_key_fields | obj._meta.one_to_one_fields:
-            relation_field = cast("RelationalField[Any]", obj._meta.fields_map[relation_name])
+        for relation_name in obj._binding.forward_key_relation_names:
+            relation_field: RelationalField[Any] = obj._binding.fields_map[relation_name]  # type: ignore[assignment]
             if getattr(relation_field, "lazy", None) != RelationLoadStrategy.JOINED:
                 continue
-            if set(relation_field.source_fields) & refresh_fields:
+            if not refresh_fields.isdisjoint(relation_field.source_fields):
                 relation_names_needing_refresh.add(relation_name)
         return frozenset(relation_names_needing_refresh)

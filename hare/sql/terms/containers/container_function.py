@@ -14,6 +14,9 @@ class ContainerFunction(Function):
         alias: The alias.
     """
 
+    structure_attributes: ClassVar[tuple[str, ...]] = ()
+    has_repeatable_value = True
+
     requires_dialect_renderer: ClassVar[bool] = True
     #: The function's name in hare - a renderer is found by the term's class, not by this name.
     function_name: ClassVar[str]

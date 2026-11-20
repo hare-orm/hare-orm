@@ -13,6 +13,7 @@ from hare.core.connections.connections import Connections
 from hare.exceptions import QueryError, TransactionRetryError
 from hare.query.functions import Sum
 from hare.transactions.atomic.atomic import Atomic
+from hare.transactions.enums import TransactionOutcome
 from hare.transactions.transactions import Transactions
 from tests.shared_models.testmodels import IntFields
 
@@ -94,6 +95,55 @@ async def test_a_commit_failing_to_serialize_runs_again(db_truncate, monkeypatch
             await run_once(runs, 6)
     assert runs[0] == 2
     assert await IntFields.objects.count() == 1
+
+
+@requires_features(supports_transactions=True)
+@pytest.mark.parametrize("failure_source", ["commit_callback", "after_manual_commit"])
+@pytest.mark.asyncio
+async def test_a_retry_error_after_commit_never_repeats_the_write(db_truncate, failure_source):
+    runs = []
+
+    def fail_after_commit():
+        raise TransactionRetryError("failure after commit")
+
+    with pytest.raises(TransactionRetryError, match="failure after commit"):
+        async for attempt in Transactions.atomic(retries=2):
+            async with attempt as connection:
+                runs.append(1)
+                await IntFields.objects.create(intnum=7)
+                if failure_source == "commit_callback":
+                    Transactions.on_commit(fail_after_commit)
+                else:
+                    await connection.commit()
+                    fail_after_commit()
+    assert runs == [1]
+    assert await IntFields.objects.values_list("intnum", flat=True) == [7]
+
+
+@requires_features(supports_transactions=True)
+@pytest.mark.parametrize("failure_source", ["body", "exit"])
+@pytest.mark.asyncio
+async def test_an_unknown_outcome_does_not_authorize_a_retry(db_truncate, monkeypatch, failure_source):
+    original_exit = Atomic.__aexit__
+    retry_error = TransactionRetryError("outcome is unknown")
+
+    async def uncertain_exit(self, exception_type, exception, traceback):
+        # Release real test resources but withhold proof of rollback from the retry controller.
+        await original_exit(self, TransactionRetryError, retry_error, None)
+        self._context.client.transaction_state.finish(TransactionOutcome.UNKNOWN)
+        if failure_source == "exit":
+            raise retry_error
+
+    monkeypatch.setattr(Atomic, "__aexit__", uncertain_exit)
+    runs = []
+    with pytest.raises(TransactionRetryError, match="outcome is unknown"):
+        async for attempt in Transactions.atomic(retries=2):
+            async with attempt:
+                runs.append(1)
+                await IntFields.objects.create(intnum=8)
+                if failure_source == "body":
+                    raise retry_error
+    assert runs == [1]
 
 
 @requires_features(supports_transactions=True)

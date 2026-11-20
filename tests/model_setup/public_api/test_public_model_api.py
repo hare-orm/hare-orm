@@ -1,6 +1,4 @@
-"""The public ways to ask a model which connection its queries use, what type a field is and how
-the model's table and fields are laid out - ``Model.get_connection()``/``QuerySet.get_connection()``,
-``Field.relation_type``/``encrypted``/``enum_type`` and the documented ``Model._meta`` attributes."""
+"""Public connection, field and model metadata APIs, including registry bindings and read/write routing."""
 
 from __future__ import annotations
 
@@ -14,7 +12,9 @@ import pytest_asyncio
 from hare import fields
 from hare.cli.plugins import CLIContext
 from hare.contrib.test import requires_features
+from hare.core.apps.model_binding_graph import ModelBindingGraph
 from hare.core.constants import DEFAULT_CONNECTION_NAME
+from hare.core.hare_context import HareContext
 from hare.exceptions import UnSupportedError
 from hare.fields import RelationType
 from hare.inspectdb import SchemaInspector
@@ -63,7 +63,7 @@ async def read_write_split():
 
 def test_get_connection_is_the_default_connection_without_a_router(db):
     connection = Tournament.get_connection()
-    assert connection.connection_alias == Tournament._meta.default_connection
+    assert connection.connection_alias == HareContext.require_current().apps.get_binding(Tournament).default_connection
     assert Tournament.get_connection(for_write=True) is connection
     assert Tournament.objects.all().get_connection() is connection
     assert Tournament.objects.filter(name="x").get_connection(for_write=True) is connection
@@ -99,7 +99,7 @@ async def test_get_connection_inside_a_transaction_runs_in_the_transaction(db):
         pass
 
     with pytest.raises(Rollback):
-        async with Transactions.atomic(Tournament._meta.default_connection):
+        async with Transactions.atomic(HareContext.require_current().apps.get_binding(Tournament).default_connection):
             await Tournament.objects.using(Tournament.get_connection(for_write=True)).create(name="Rolled back")
             await (
                 Tournament.objects.all()
@@ -134,17 +134,26 @@ async def test_select_for_update_without_database_support_raises_when_run(db):
 
 
 def test_relation_type_names_every_relation_type(db):
-    fields_map = Event._meta.fields_map
+    fields_map = HareContext.require_current().apps.get_binding(Event).fields_map
     assert fields_map["tournament"].relation_type is RelationType.FOREIGN_KEY
     assert fields_map["participants"].relation_type is RelationType.MANY_TO_MANY
     assert fields_map["address"].relation_type is RelationType.BACKWARD_ONE_TO_ONE
-    assert Tournament._meta.fields_map["events"].relation_type is RelationType.BACKWARD_FOREIGN_KEY
-    assert Address._meta.fields_map["event"].relation_type is RelationType.ONE_TO_ONE
-    assert VersionedDocument._meta.fields_map["revision_notes"].relation_type is RelationType.BACKWARD_FOREIGN_KEY
+    assert (
+        HareContext.require_current().apps.get_binding(Tournament).fields_map["events"].relation_type
+        is RelationType.BACKWARD_FOREIGN_KEY
+    )
+    assert (
+        HareContext.require_current().apps.get_binding(Address).fields_map["event"].relation_type
+        is RelationType.ONE_TO_ONE
+    )
+    assert (
+        HareContext.require_current().apps.get_binding(VersionedDocument).fields_map["revision_notes"].relation_type
+        is RelationType.BACKWARD_FOREIGN_KEY
+    )
 
 
 def test_relation_type_is_none_for_plain_values(db):
-    fields_map = Event._meta.fields_map
+    fields_map = HareContext.require_current().apps.get_binding(Event).fields_map
     assert fields_map["name"].relation_type is None
     assert fields_map["event_id"].relation_type is None
     # The key column of a forward relation holds a plain value.
@@ -153,7 +162,7 @@ def test_relation_type_is_none_for_plain_values(db):
 
 def test_relation_type_matches_the_relation_sets_of_meta(db):
     for model in (Event, Tournament, Address, VersionedDocument):
-        meta = model._meta
+        meta = HareContext.require_current().apps.get_binding(model)
         expected_by_type = {
             RelationType.FOREIGN_KEY: meta.foreign_key_fields,
             RelationType.ONE_TO_ONE: meta.one_to_one_fields,
@@ -170,7 +179,7 @@ def test_relation_type_matches_the_relation_sets_of_meta(db):
 
 @pytest.mark.database_independent
 def test_encrypted_marks_only_encrypted_fields():
-    fields_map = EncryptedRecord._meta.fields_map
+    fields_map = EncryptedRecord._declaration.fields_map
     assert fields_map["secret"].encrypted is True
     assert fields_map["config"].encrypted is True
     assert fields_map["public_note"].encrypted is True
@@ -182,7 +191,7 @@ def test_encrypted_marks_only_encrypted_fields():
 
 @pytest.mark.database_independent
 def test_enum_type_is_the_enum_of_an_enum_field():
-    fields_map = EnumFields._meta.fields_map
+    fields_map = EnumFields._declaration.fields_map
     assert fields_map["service"].enum_type is Service
     assert fields_map["currency"].enum_type is Currency
     assert fields_map["id"].enum_type is None
@@ -190,15 +199,28 @@ def test_enum_type_is_the_enum_of_an_enum_field():
 
 
 def test_meta_primary_key_names(db):
-    assert Event._meta.primary_key_attribute_names == ("event_id",)
-    assert VersionedDocument._meta.primary_key_attribute_names == ("id", "version")
-    assert Visit._meta.primary_key_attribute_names == ()
-    assert VersionedDocument._meta.pk is None
-    assert [field.model_field_name for field in VersionedDocument._meta.pk_fields] == ["id", "version"]
+    assert HareContext.require_current().apps.get_binding(Event).primary_key_attribute_names == ("event_id",)
+    assert HareContext.require_current().apps.get_binding(Event).pk_fields == (
+        HareContext.require_current().apps.get_binding(Event).pk,
+    )
+    assert HareContext.require_current().apps.get_binding(Address).pk_fields == (
+        HareContext.require_current().apps.get_binding(Address).pk,
+    )
+    assert HareContext.require_current().apps.get_binding(Address).primary_key_attribute_names == ("event_id",)
+    assert ModelBindingGraph().include(Visit).pk_fields == ()
+    assert HareContext.require_current().apps.get_binding(VersionedDocument).primary_key_attribute_names == (
+        "id",
+        "version",
+    )
+    assert ModelBindingGraph().include(Visit).primary_key_attribute_names == ()
+    assert HareContext.require_current().apps.get_binding(VersionedDocument).pk is None
+    assert [
+        field.model_field_name for field in HareContext.require_current().apps.get_binding(VersionedDocument).pk_fields
+    ] == ["id", "version"]
 
 
 def test_meta_names_and_columns(db):
-    meta = Event._meta
+    meta = HareContext.require_current().apps.get_binding(Event)
     assert meta.full_name == "models.Event"
     assert meta.db_table == "event"
     assert set(meta.fields_map) == meta.fields
@@ -211,7 +233,7 @@ def test_meta_names_and_columns(db):
 def test_model_description_groups_fields_by_type(db):
     from hare.contrib.pydantic.descriptions import ModelDescription
 
-    description = ModelDescription.from_model(Event)
+    description = ModelDescription.from_binding(HareContext.require_current().apps.get_binding(Event))
     assert [field.model_field_name for field in description.pk_fields] == ["event_id"]
     assert {field.model_field_name for field in description.data_fields} == {
         "name",
@@ -242,6 +264,8 @@ def test_default_connection_name_is_the_single_url_connection():
 @pytest.mark.asyncio
 async def test_schema_inspector_generates_a_module_for_a_table(db):
     connection = Tournament.get_connection()
-    source = await SchemaInspector.inspect(connection, [Tournament._meta.db_table])
+    source = await SchemaInspector.inspect(
+        connection, [HareContext.require_current().apps.get_binding(Tournament).db_table]
+    )
     assert "class Tournament(Model):" in source
     assert "from hare import fields" in source or "fields." in source

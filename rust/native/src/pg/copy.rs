@@ -5,18 +5,16 @@
 
 use std::pin::pin;
 
-use crate::pg::timed_manager::Object;
 use tokio_postgres::binary_copy::BinaryCopyInWriter;
 use tokio_postgres::types::Type;
 
-use tokio_postgres::types::ToSql;
-
 use crate::pg::error::DriverError;
+use crate::pg::timed_manager::Object;
 use crate::pg::value::{BinaryParameter, Value};
 
 /// The COPY BINARY type of a column of SQL type `base_type_name` - every text type is `TEXT`, whose
 /// binary format is plain UTF-8.
-fn resolve_copy_type(base_type_name: &str) -> Result<Type, DriverError> {
+fn get_copy_type(base_type_name: &str) -> Result<Type, DriverError> {
     Ok(match base_type_name {
         "SMALLINT" => Type::INT2,
         "INT" | "INTEGER" => Type::INT4,
@@ -52,6 +50,26 @@ fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+/// Validate the binary frame shape before starting COPY or calling the writer,
+/// which panics on mismatched row widths and narrows the field count to i16.
+fn check_copy_shape(columns: usize, types: usize, records: &[Vec<Value>]) -> Result<(), DriverError> {
+    if columns != types {
+        return Err(DriverError::Query(format!("COPY names {columns} columns but declares {types} types")));
+    }
+    if i16::try_from(columns).is_err() {
+        return Err(DriverError::Query("COPY column count exceeds the binary protocol limit".to_string()));
+    }
+    for (index, record) in records.iter().enumerate() {
+        if record.len() != columns {
+            return Err(DriverError::Query(format!(
+                "COPY row {index} has {} values; expected {columns}",
+                record.len()
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn copy_in_records(
     client: &Object,
     table: &str,
@@ -61,8 +79,9 @@ pub(crate) async fn copy_in_records(
     records: Vec<Vec<Value>>,
     tags_comment: &str,
 ) -> Result<u64, DriverError> {
+    check_copy_shape(columns.len(), column_types.len(), &records)?;
     let types: Vec<Type> =
-        column_types.iter().map(|column_type| resolve_copy_type(column_type)).collect::<Result<_, _>>()?;
+        column_types.iter().map(|column_type| get_copy_type(column_type)).collect::<Result<_, _>>()?;
     let quoted_columns = columns.iter().map(|column| quote_ident(column)).collect::<Vec<_>>().join(", ");
     // The query tags end the statement as a comment, as they end every other one.
     let target = match schema {
@@ -73,11 +92,25 @@ pub(crate) async fn copy_in_records(
 
     let sink = client.copy_in(&sql).await?;
     let mut writer = pin!(BinaryCopyInWriter::new(sink, &types));
+    // A function pointer keeps the input/output borrow tied across the Send future's lifetime check.
+    let binary_parameter: fn(&Value) -> BinaryParameter<'_> = |value| BinaryParameter(value);
     for row in &records {
-        let parameters: Vec<BinaryParameter> = row.iter().map(BinaryParameter).collect();
-        let parameter_refs: Vec<&(dyn ToSql + Sync)> =
-            parameters.iter().map(|parameter| parameter as &(dyn ToSql + Sync)).collect();
-        writer.as_mut().write(&parameter_refs).await?;
+        writer.as_mut().write_raw(row.iter().map(binary_parameter)).await?;
     }
     Ok(writer.finish().await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copy_rejects_inconsistent_metadata_and_rows_before_writing() {
+        assert!(check_copy_shape(2, 1, &[]).is_err());
+        assert!(check_copy_shape(32_768, 32_768, &[]).is_err());
+        assert!(check_copy_shape(2, 2, &[vec![Value::Int(1)]]).is_err());
+        assert!(check_copy_shape(1, 1, &[vec![Value::Null], vec![Value::Int(2), Value::Int(3)]]).is_err());
+        check_copy_shape(2, 2, &[vec![Value::Int(1), Value::Null], vec![Value::Int(2), Value::Int(3)]]).unwrap();
+        check_copy_shape(2, 2, &[]).unwrap();
+    }
 }

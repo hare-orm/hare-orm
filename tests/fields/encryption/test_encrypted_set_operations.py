@@ -12,8 +12,6 @@ from hare.fields.encrypted.field_encryption import FieldEncryption
 from hare.models import Model
 from hare.query.expressions import F, Value
 
-REQUIRES = ("encryption",)
-
 
 class SecretLog(Model):
     secret = fields.EncryptedTextField()

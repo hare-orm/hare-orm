@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.exceptions import ValidationError
 from hare.fields.enums import HeldValueStep
@@ -10,6 +11,7 @@ if TYPE_CHECKING:
     from hare.ddl.schema_objects.enum_type import EnumType
     from hare.dialects.base.dialect import Dialect
     from hare.dialects.base.types.type_registry import TypeRegistry
+    from hare.fields.data.containers.container_value_converters import ContainerValueConverters
     from hare.fields.narrowing.narrowing_limit import NarrowingLimit
     from hare.models import Model
 
@@ -31,9 +33,17 @@ class ContainerField(Field[Any]):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         if self.sensitive:
-            # A held value's own error message must hide it the same way.
-            for child_field in self.get_child_fields():
+            # Descendants may have been constructed before this sensitive parent.
+            pending = list(self.get_child_fields())
+            visited = {id(self)}
+            while pending:
+                child_field = pending.pop()
+                if id(child_field) in visited:
+                    continue
+                visited.add(id(child_field))
                 child_field.sensitive = True
+                if isinstance(child_field, ContainerField):
+                    pending.extend(child_field.get_child_fields())
 
     def get_child_fields(self) -> tuple[Field[Any], ...]:
         """The fields of the values the container holds.
@@ -57,12 +67,12 @@ class ContainerField(Field[Any]):
     @property
     def requires_enum_type(self) -> EnumType | None:  # type: ignore[override]
         return next(
-            (child.requires_enum_type for child in self.get_child_fields() if child.requires_enum_type is not None),
+            (enum_type for child in self.get_child_fields() if (enum_type := child.requires_enum_type) is not None),
             None,
         )
 
     def encode_value(
-        self, value: Any, instance: type[Model] | Model | None, types: TypeRegistry | None, path: str
+        self, value: Any, instance: type[Model] | Model | None, types: ContainerValueConverters | None, path: str
     ) -> Any:
         """The value bound for a container that isn't None.
 
@@ -78,9 +88,9 @@ class ContainerField(Field[Any]):
         Raises:
             ValidationError: The value isn't of the container's shape, or a held field refuses its value.
         """
-        raise NotImplementedError
+        return self._prepare_encoder(types)(value, instance, path)
 
-    def decode_value(self, value: Any, types: TypeRegistry | None) -> Any:
+    def decode_value(self, value: Any, types: ContainerValueConverters | None) -> Any:
         """The Python value of a container read from the database that isn't None.
 
         Args:
@@ -90,6 +100,14 @@ class ContainerField(Field[Any]):
         Returns:
             The Python value.
         """
+        return self._prepare_decoder(types)(value)
+
+    def _prepare_encoder(self, types: ContainerValueConverters | None) -> Callable[..., Any]:
+        """Prepare the concrete shape's non-NULL writer using its held fields."""
+        raise NotImplementedError
+
+    def _prepare_decoder(self, types: ContainerValueConverters | None) -> Callable[[Any], Any]:
+        """Prepare the concrete shape's non-NULL reader using its held fields."""
         raise NotImplementedError
 
     def normalize_value(self, value: Any, path: str) -> Any:
@@ -124,9 +142,9 @@ class ContainerField(Field[Any]):
             The way to each narrowed held value and its limit; empty when the old field is a
             container of another shape.
         """
-        if type(old_field) is not type(self):
+        if not isinstance(old_field, ContainerField):
             return []
-        old_steps = cast("ContainerField", old_field).get_held_steps()
+        old_steps = old_field.get_held_steps()
         new_steps = self.get_held_steps()
         if [step for step, _field in old_steps] != [step for step, _field in new_steps]:
             return []
@@ -148,13 +166,20 @@ class ContainerField(Field[Any]):
         """
         return self.model_field_name or type(self).__name__
 
-    def get_db_value(self, value: Any, instance: type[Model] | Model | None, types: TypeRegistry | None) -> Any:
+    def get_db_value(
+        self,
+        value: Any,
+        instance: type[Model] | Model | None,
+        types: ContainerValueConverters | None,
+        path: str | None = None,
+    ) -> Any:
         """The value bound for a column of the container.
 
         Args:
             value: The Python value.
             instance: The model (class) it is written or compared for.
             types: The dialect's types each held value is written through; None for the fields' own.
+            path: The path of the value within the container, used in conversion errors.
 
         Returns:
             The value to bind - None for None.
@@ -163,130 +188,138 @@ class ContainerField(Field[Any]):
             ValidationError: The value is None and the field holds no NULL - a database storing a
                 container without NULL would write an empty or a zero one in its place.
         """
+        return self._write_container(value, instance, path, self.get_value_encoder(types))
+
+    def get_python_value(self, value: Any, types: ContainerValueConverters | None) -> Any:
+        """Read one container through the same prepared traversal used for a column."""
+        return self._read_container(value, self.get_value_decoder(types))
+
+    def get_value_encoder(self, types: ContainerValueConverters | None) -> Callable[..., Any]:
+        """Prepare non-NULL writes; custom containers retain their encode_value hook."""
+        if getattr(self.encode_value, "__func__", None) is not ContainerField.encode_value:
+            return lambda value, instance, path: self.encode_value(value, instance, types, path)
+        return self._prepare_encoder(types)
+
+    def get_value_decoder(self, types: ContainerValueConverters | None) -> Callable[[Any], Any]:
+        """Prepare non-NULL reads; custom containers retain their decode_value hook."""
+        if getattr(self.decode_value, "__func__", None) is not ContainerField.decode_value:
+            return lambda value: self.decode_value(value, types)
+        return self._prepare_decoder(types)
+
+    def get_value_writer(self, types: ContainerValueConverters | None) -> Callable[..., Any]:
+        """Prepare a path-aware container writer without retaining values or instances."""
+        if getattr(self.get_db_value, "__func__", None) is not ContainerField.get_db_value:
+            return lambda value, instance, path=None: self.get_db_value(value, instance, types, path)
+        encode = self.get_value_encoder(types)
+        return lambda value, instance, path=None: self._write_container(value, instance, path, encode)
+
+    def get_value_reader(self, types: ContainerValueConverters | None) -> Callable[[Any], Any]:
+        """Prepare a container reader while retaining a custom get_python_value hook."""
+        if getattr(self.get_python_value, "__func__", None) is not ContainerField.get_python_value:
+            return lambda value: self.get_python_value(value, types)
+        decode = self.get_value_decoder(types)
+        return lambda value: self._read_container(value, decode)
+
+    def _write_container(self, value: Any, instance: Any, path: str | None, encode: Callable[..., Any]) -> Any:
+        """Validate the outer value before its sole container traversal."""
+        path = self.get_path() if path is None else path
         if value is None and not self.null:
-            raise ValidationError(f"{self.get_path()}: a value is required, got None")
+            raise ValidationError(f"{path}: a value is required, got None")
         self.validate(value)
-        if value is None:
-            return None
-        return self.encode_value(value, instance, types, self.get_path())
+        return None if value is None else encode(value, instance, path)
 
-    def get_python_value(self, value: Any, types: TypeRegistry | None) -> Any:
-        """The Python value of a column of the container.
-
-        Args:
-            value: The value the driver returned.
-            types: The dialect's types each held value is read through; None for the fields' own.
-
-        Returns:
-            The Python value - None for None.
-        """
-        if value is None:
-            return None
-        return self.decode_value(value, types)
+    @staticmethod
+    def _read_container(value: Any, decode: Callable[[Any], Any]) -> Any:
+        return None if value is None else decode(value)
 
     def get_dialect_db_value(self, value: Any, instance: type[Model] | Model | None, types: TypeRegistry) -> Any:
-        """The value a dialect binds for a column of the container - through its types, unless a
-        subclass writes its values its own way (``to_db_value()``).
-
-        Args:
-            value: The Python value.
-            instance: The model (class) it is written or compared for.
-            types: The dialect's types.
-
-        Returns:
-            The value to bind.
-        """
-        if type(self).to_db_value is not ContainerField.to_db_value:
-            return self.to_db_value(value, instance)
+        """Write a root container through its dialect; nested values retain indexed paths."""
         return self.get_db_value(value, instance, types)
 
     def get_dialect_python_value(self, value: Any, types: TypeRegistry) -> Any:
-        """The Python value of a column of the container a dialect reads - through its types, unless a
-        subclass reads its values its own way (``from_db_value()``).
-
-        Args:
-            value: The value the driver returned.
-            types: The dialect's types.
-
-        Returns:
-            The Python value.
-        """
-        if type(self).from_db_value is not ContainerField.from_db_value:
-            return self.from_db_value(value)
+        """Read a root container through its dialect."""
         return self.get_python_value(value, types)
 
-    def reads_values_by_types(self) -> bool:
-        """Whether the container's values are read as ``get_python_value()`` reads them - no subclass
-        reading them its own way.
+    def get_dialect_db_writer(self, types: TypeRegistry) -> Callable[[Any, Any], Any]:
+        """Prepare the root writer without bypassing a dialect-entry override."""
+        if getattr(self.get_dialect_db_value, "__func__", None) is not ContainerField.get_dialect_db_value:
+            return lambda value, instance: self.get_dialect_db_value(value, instance, types)
+        return self.get_value_writer(types)
 
-        Returns:
-            True when they are.
-        """
-        field_class = type(self)
-        return all(
-            getattr(field_class, name) is getattr(ContainerField, name)
-            for name in ("from_db_value", "to_python", "get_python_value")
-        )
+    def get_dialect_python_reader(self, types: TypeRegistry) -> Callable[[Any], Any]:
+        """Prepare the root reader without bypassing a dialect-entry override."""
+        if getattr(self.get_dialect_python_value, "__func__", None) is not ContainerField.get_dialect_python_value:
+            return lambda value: self.get_dialect_python_value(value, types)
+        return self.get_value_reader(types)
 
     def encode_child(
         self,
         child_field: Field[Any],
         value: Any,
         instance: type[Model] | Model | None,
-        types: TypeRegistry | None,
+        types: ContainerValueConverters | None,
         path: str,
     ) -> Any:
-        """The value bound for one held value.
+        """Write one held value with the same NULL and error policy as a prepared child."""
+        return self._prepare_child_encoder(child_field, types)(value, instance, path)
 
-        Args:
-            child_field: The field of the held value.
-            value: The held value.
-            instance: The model (class) it is written or compared for.
-            types: The dialect's types; None for the fields' own.
-            path: The path to the held value.
+    def get_child_encoder(self, child: Field[Any], types: ContainerValueConverters | None) -> Callable[..., Any]:
+        """Prepare a child once, retaining custom child hooks at every nesting depth."""
+        if getattr(self.encode_child, "__func__", None) is not ContainerField.encode_child:
+            return lambda value, instance, path: self.encode_child(child, value, instance, types, path)
+        return self._prepare_child_encoder(child, types)
 
-        Returns:
-            The value to bind.
+    def _prepare_child_encoder(self, child: Field[Any], types: ContainerValueConverters | None) -> Callable[..., Any]:
 
-        Raises:
-            ValidationError: The field refuses the value - a None where the field holds no NULL
-                and the dialect's containers don't hold one for every field.
-        """
-        if value is None:
-            if not child_field.null and (types is None or not types.container_values_always_nullable):
-                raise ValidationError(f"{path}: a value is required, got None")
-            return None
-        if isinstance(child_field, ContainerField):
-            return child_field.encode_value(value, instance, types, path)
-        validation_error = None
-        try:
-            if types is None:
-                return child_field.to_db_value(value, instance)
-            return types.get_db_value(child_field, value, instance)
-        except ValidationError as error:
-            # The held field is bound to no model: its own message names no field - the path does.
-            message = str(error).removeprefix(f"{child_field.model_field_name}: ").removeprefix(": ")
-            validation_error = self.get_validation_error(error, value, f"{path}: {message}")
-        raise validation_error
+        nested = isinstance(child, ContainerField)
+        write: Callable[..., Any] = (
+            child.get_value_writer(types)  # type: ignore[attr-defined]
+            if nested
+            else child.to_db_value
+            if types is None
+            else types.get_db_writer(child)
+        )
+        nullable = child.null or (types is not None and types.container_values_always_nullable)
 
-    def decode_child(self, child_field: Field[Any], value: Any, types: TypeRegistry | None) -> Any:
-        """The Python value of one held value read from the database.
+        def write_child(value: Any, instance: Any, path: str) -> Any:
+            if value is None:
+                if not nullable:
+                    raise ValidationError(f"{path}: a value is required, got None")
+                return None
+            if nested:
+                return write(value, instance, path)
+            validation_error = None
+            try:
+                return write(value, instance)
+            except ValidationError as error:
+                message = str(error).removeprefix(f"{child.model_field_name}: ").removeprefix(": ")
+                validation_error = self.get_validation_error(error, value, f"{path}: {message}")
+            raise validation_error
 
-        Args:
-            child_field: The field of the held value.
-            value: The value the driver returned.
-            types: The dialect's types; None for the fields' own.
+        return write_child
 
-        Returns:
-            The Python value.
-        """
-        if value is None:
-            return None
-        if isinstance(child_field, ContainerField):
-            return child_field.decode_value(value, types)
-        if types is None:
-            return child_field.from_db_value(value)
-        return types.get_python_value(child_field, value)
+    def decode_child(self, child_field: Field[Any], value: Any, types: ContainerValueConverters | None) -> Any:
+        """Read one held value through the prepared child conversion."""
+        return self._prepare_child_decoder(child_field, types)(value)
+
+    def get_child_decoder(self, child: Field[Any], types: ContainerValueConverters | None) -> Callable[[Any], Any]:
+        """Prepare reads with the same custom-hook policy as writes."""
+        if getattr(self.decode_child, "__func__", None) is not ContainerField.decode_child:
+            return lambda value: self.decode_child(child, value, types)
+        return self._prepare_child_decoder(child, types)
+
+    def _prepare_child_decoder(
+        self, child: Field[Any], types: ContainerValueConverters | None
+    ) -> Callable[[Any], Any]:
+
+        read = (
+            child.get_value_reader(types)
+            if isinstance(child, ContainerField)
+            else child.from_db_value
+            if types is None
+            else types.get_python_reader(child)
+        )
+        return lambda value: None if value is None else read(value)
 
     def normalize_child(self, child_field: Field[Any], value: Any, path: str) -> Any:
         """A held value as its field holds it.
@@ -313,18 +346,6 @@ class ContainerField(Field[Any]):
             message = str(error).removeprefix(f"{child_field.model_field_name}: ").removeprefix(": ")
             validation_error = self.get_validation_error(error, value, f"{path}: {message}")
         raise validation_error
-
-    @staticmethod
-    def get_child_python_type(child_field: Field[Any]) -> Any:
-        """The Python type of a held value - ``| None`` when its field holds NULL.
-
-        Args:
-            child_field: The field of the held value.
-
-        Returns:
-            The type.
-        """
-        return child_field.get_annotation()
 
     def to_db_value(self, value: Any, instance: type[Model] | Model | None) -> Any:
         return self.get_db_value(value, instance, None)

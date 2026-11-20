@@ -6,15 +6,9 @@ so both the build and the plan hit return the same rows."""
 import pytest
 
 from hare.query.expressions import Q, Subquery
-from hare.query.plans.statement.statement_plans import StatementPlans
 from hare.query.relation_loading.select import Select
 from tests.shared_models.testmodels import DoubleFK, Employee, Event, SoftDeleteStandalone, Tournament
-
-
-async def count_plan_hits(statement) -> tuple[object, int]:
-    hits = StatementPlans.hits
-    result = await statement
-    return result, StatementPlans.hits - hits
+from tests.utils.statement_plan_checks import StatementPlanChecks
 
 
 async def create_tournaments() -> tuple[list[Tournament], list[Event]]:
@@ -40,7 +34,7 @@ async def test_values_list_subquery_runs_on_the_plan_and_binds_its_values(db):
         ).order_by("name")
 
     assert names(await query("a")) == ["a-event"]
-    rows, hits = await count_plan_hits(query("b"))
+    rows, hits = await StatementPlanChecks.count_plan_hits(query("b"))
     assert names(rows) == ["b-event"]
     assert hits == 1
     assert await query("nobody") == []

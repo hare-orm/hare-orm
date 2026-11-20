@@ -9,14 +9,12 @@ by testing context isolation relative to the current state.
 """
 
 import asyncio
-import contextlib
 import json
 
 import pytest
 
 import tests.shared_models.testmodels as testmodels_module
 from hare.contrib.test.isolated_contexts import hare_test_context
-from hare.core.caching.caches import Caches
 from hare.core.config import AppConfig, DBUrlConfig, HareConfig
 from hare.core.connections.connection_handler import ConnectionHandler
 from hare.core.hare_context import HareContext
@@ -25,6 +23,7 @@ from hare.instrumentation.declarations import QueryExecuted, TransactionEvent
 from hare.instrumentation.observers.observer_set import ObserverSet
 from hare.instrumentation.observers.observers import Observers
 from hare.time import Timezone
+from hare.time.zone_settings import ZoneSettings
 from hare.transactions.enums import TransactionEventType
 
 pytestmark = pytest.mark.sqlite_only
@@ -263,8 +262,7 @@ class TestAsyncContextManager:
 
     @pytest.mark.asyncio
     async def test_reinit_of_the_global_context_with_global_fallback(self):
-        """A re-init of the global context keeping _enable_global_fallback=True succeeds and
-        closes the connections it replaces."""
+        """A second configuration is rejected without replacing a global application's resources."""
         from tests.shared_models.testmodels import Tournament
 
         async with HareContext() as ctx:
@@ -273,15 +271,17 @@ class TestAsyncContextManager:
                 _enable_global_fallback=True,
             )
             previous_connections = ctx.connections
-            await ctx.init(
-                HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": ["tests.shared_models.testmodels"]}),
-                _enable_global_fallback=True,
-            )
+            with pytest.raises(ConfigurationError, match="one application configuration"):
+                await ctx.init(
+                    HareConfig.from_db_url(
+                        "sqlite+aiosqlite://:memory:", {"models": ["tests.shared_models.testmodels"]}
+                    ),
+                    _enable_global_fallback=True,
+                )
             await ctx.generate_schemas()
 
             assert HareContext.global_context is ctx
-            assert ctx.connections is not previous_connections
-            assert previous_connections._get_storage() == {}
+            assert ctx.connections is previous_connections
             assert await Tournament.objects.all().count() == 0
 
     @pytest.mark.database_independent
@@ -328,11 +328,20 @@ class TestCloseConnectionsExceptionSafety:
             assert ctx.inited is False
             assert ctx._connections is None
 
-            # A fresh init() afterward must work cleanly, not stay permanently wedged.
-            await ctx.init(
-                HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": ["tests.shared_models.testmodels"]})
-            )
-            assert ctx.inited is True
+            # Old queries retain this context's identity; it cannot acquire a new registry.
+            with pytest.raises(ConfigurationError, match="one application configuration"):
+                await ctx.init(
+                    HareConfig.from_db_url(
+                        "sqlite+aiosqlite://:memory:", {"models": ["tests.shared_models.testmodels"]}
+                    )
+                )
+            async with HareContext() as replacement:
+                await replacement.init(
+                    HareConfig.from_db_url(
+                        "sqlite+aiosqlite://:memory:", {"models": ["tests.shared_models.testmodels"]}
+                    )
+                )
+                assert replacement.inited is True
 
 
 @pytest.mark.database_independent
@@ -561,7 +570,7 @@ class TestInit:
             await ctx.generate_schemas()
             tournament = await Tournament.objects.create(name="Original")
 
-            with pytest.raises(ConfigurationError, match="Module 'tests.does_not_exist' not found"):
+            with pytest.raises(ConfigurationError, match="one application configuration"):
                 await ctx.init(
                     HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": ["tests.does_not_exist"]})
                 )
@@ -584,7 +593,7 @@ class TestInit:
             await ctx.generate_schemas()
             tournament = await Tournament.objects.create(name="Original")
 
-            with pytest.raises(ConfigurationError, match='"apps" section'):
+            with pytest.raises(ConfigurationError, match="one application configuration"):
                 await Hare.init({"connections": {}})
 
             assert ctx.inited is True
@@ -641,8 +650,8 @@ class TestHareTestContext:
 
     @pytest.mark.asyncio
     async def test_nested_context_with_different_dialect_does_not_corrupt_outer_models(self):
-        """MetaInfo.basequery/basequery_all_fields/basetable are plain cached attributes set once
-        by Apps.build_initial_querysets() - unlike MetaInfo.db (a property, always re-resolved
+        """ModelBinding.basequery/basequery_all_fields/basetable are plain cached attributes set once
+        by Apps.build_initial_querysets() - unlike ModelBinding.db (a property, always re-resolved
         fresh), they don't automatically follow which HareContext is "current". A nested
         hare_test_context() re-registering the SAME already-imported module (exactly what a
         dialect-specific fixture like Transactions.autonomous()'s file_db does, reusing
@@ -653,7 +662,7 @@ class TestHareTestContext:
         from tests.shared_models.testmodels import IntFields
 
         async with hare_test_context(["tests.shared_models.testmodels"], connection_label="models") as outer_ctx:
-            outer_dialect = IntFields._meta.basequery.query_class
+            outer_dialect = HareContext.require_current().apps.get_binding(IntFields).basequery.query_class
 
             async with hare_test_context(
                 ["tests.shared_models.testmodels"], db_url="sqlite+aiosqlite://:memory:", connection_label="models"
@@ -661,14 +670,14 @@ class TestHareTestContext:
                 assert HareContext.get_current() is inner_ctx
                 # the inner context re-registered the same module - same class object, mutated
                 assert (
-                    IntFields._meta.basequery.query_class
-                    is inner_ctx.get_model("models.IntFields")._meta.basequery.query_class
+                    HareContext.require_current().apps.get_binding(IntFields).basequery.query_class
+                    is inner_ctx.apps.get_binding("models.IntFields").basequery.query_class
                 )
 
             # back to the outer context - its own dialect must be reclaimed, not left as the
             # inner context's
             assert HareContext.get_current() is outer_ctx
-            assert IntFields._meta.basequery.query_class is outer_dialect
+            assert HareContext.require_current().apps.get_binding(IntFields).basequery.query_class is outer_dialect
             # and the outer context's models still actually work end to end, not just look right
             await IntFields.objects.create(intnum=1)
             assert await IntFields.objects.filter(intnum=1).exists()
@@ -681,7 +690,7 @@ class TestHareTestContext:
         from tests.shared_models.testmodels import IntFields
 
         async with hare_test_context(["tests.shared_models.testmodels"], connection_label="models") as outer_ctx:
-            outer_connection = IntFields._meta.default_connection
+            outer_connection = HareContext.require_current().apps.get_binding(IntFields).default_connection
             inner_ctx = HareContext()
             try:
                 with inner_ctx:
@@ -693,9 +702,9 @@ class TestHareTestContext:
                             },
                         }
                     )
-                    assert IntFields._meta.default_connection == "inner"
+                    assert HareContext.require_current().apps.get_binding(IntFields).default_connection == "inner"
                 assert HareContext.get_current() is outer_ctx
-                assert IntFields._meta.default_connection == outer_connection
+                assert HareContext.require_current().apps.get_binding(IntFields).default_connection == outer_connection
                 await IntFields.objects.create(intnum=2)
                 assert await IntFields.objects.filter(intnum=2).exists()
             finally:
@@ -708,7 +717,7 @@ class TestHareTestContext:
         from tests.shared_models.testmodels import IntFields
 
         async with hare_test_context(["tests.shared_models.testmodels"], connection_label="models") as outer_ctx:
-            outer_connection = IntFields._meta.default_connection
+            outer_connection = HareContext.require_current().apps.get_binding(IntFields).default_connection
             async with HareContext() as inner_ctx:
                 await inner_ctx.init(
                     {
@@ -719,60 +728,48 @@ class TestHareTestContext:
                     }
                 )
                 await inner_ctx.drop_databases()
-                assert IntFields._meta.default_connection is None
+                assert inner_ctx.apps is None
             assert HareContext.get_current() is outer_ctx
-            assert IntFields._meta.default_connection == outer_connection
+            assert HareContext.require_current().apps.get_binding(IntFields).default_connection == outer_connection
             await IntFields.objects.create(intnum=3)
             assert await IntFields.objects.filter(intnum=3).exists()
 
     @pytest.mark.asyncio
-    async def test_sql_rendered_with_another_contexts_query_builder_is_not_reused_afterwards(self):
-        """The outer context's models used (e.g. from a sibling task) while a nested context has
-        bound them to another dialect's query builder render that builder's SQL - a known
-        limitation for that window. Once they are bound back, none of that SQL may still be served
-        from the outer context's own caches: it used to stay cached under the outer dialect/
-        connection key forever."""
-        from hare.dialects.postgresql.query import PostgresqlQuery
+    async def test_retained_queries_and_instances_keep_their_origin_in_another_context(self):
         from tests.shared_models.testmodels import IntFields
 
-        async with hare_test_context(["tests.shared_models.testmodels"], connection_label="models"):
+        async with hare_test_context(["tests.shared_models.testmodels"], connection_label="models") as outer:
             created = await IntFields.objects.create(intnum=1)
-            meta = IntFields._meta
-            own_basequery, own_basequery_all_fields = meta.basequery, meta.basequery_all_fields
-            Caches.forget_model_caches([IntFields])
-            foreign_basequery = PostgresqlQuery.from_(meta.basetable)
-            meta.basequery = foreign_basequery
-            meta.basequery_all_fields = foreign_basequery.select(*meta.db_fields)
-            try:
-                for query_factory in (
-                    lambda: IntFields.objects.get(intnum=1),
-                    lambda: IntFields.objects.get(pk=created.pk),
-                    lambda: IntFields.objects.filter(intnum=1).count(),
-                    lambda: IntFields.objects.filter(intnum__gte=1).values_list("intnum", flat=True),
-                    lambda: created.save(update_fields=["intnum"]),
-                ):
-                    with contextlib.suppress(Exception):
-                        await query_factory()
-            finally:
-                meta.basequery, meta.basequery_all_fields = own_basequery, own_basequery_all_fields
-
-            assert (await IntFields.objects.get(intnum=1)).pk == created.pk
-            assert (await IntFields.objects.get(pk=created.pk)).intnum == 1
-            assert await IntFields.objects.filter(intnum=1).count() == 1
-            assert await IntFields.objects.filter(intnum__gte=1).values_list("intnum", flat=True) == [1]
-            created.intnum = 2
-            await created.save(update_fields=["intnum"])
+            retained = outer.apps.get_queryset(IntFields).filter(intnum__gte=1)
+            outer_binding = outer.apps.get_binding(IntFields)
+            before = retained.sql()
+            async with HareContext() as inner:
+                await inner.init(
+                    {
+                        "connections": {"inner": "sqlite+aiosqlite://:memory:"},
+                        "apps": {"models": {"models": [testmodels_module], "default_connection": "inner"}},
+                    },
+                    connect=False,
+                    table_name_generator=lambda model: "inner_" + model.__name__.lower(),
+                )
+                assert inner.apps.get_binding(IntFields) is not outer_binding
+                assert retained.sql() == before
+                assert (await retained.get(pk=created.pk)).intnum == 1
+                assert await retained.count() == 1
+                assert await retained.values_list("intnum", flat=True) == [1]
+                created.intnum = 2
+                await created.save(update_fields=["intnum"])
+                assert (await retained.get(pk=created.pk)).intnum == 2
+                assert HareContext.require_current() is inner
+            assert HareContext.require_current() is outer
+            assert outer.apps.get_binding(IntFields) is outer_binding
+            assert await retained.values_list("intnum", flat=True) == [2]
             await created.delete()
-            assert not await IntFields.objects.exists()
+            assert not await retained.exists()
 
     @pytest.mark.asyncio
-    async def test_reregistering_same_module_under_different_app_label_raises_clear_error(self):
-        """Model._meta.app is a plain attribute on the model CLASS, not scoped to any one
-        HareContext - re-importing the same already-imported module (Python's own module
-        cache) in a later, unrelated context still returns the SAME classes, still carrying
-        whatever app label they were first registered under. A sequential context registering
-        it again under a DIFFERENT app label must fail loudly and specifically, not silently
-        leave the new app's registry empty with only a generic "has no models" warning."""
+    async def test_sequential_contexts_can_bind_the_same_module_under_different_app_labels(self):
+        """Each registry chooses its app label without changing the shared declarations."""
         import sys
         import types
 
@@ -792,12 +789,10 @@ class TestHareTestContext:
             async with hare_test_context([module_name], app_label="appA") as ctx1:
                 assert ctx1.get_model("appA.RelabelConflictModel") is RelabelConflictModel
 
-            with pytest.raises(
-                ConfigurationError,
-                match=f"Module '{module_name}' has no models for app label 'appB'",
-            ):
-                async with hare_test_context([module_name], app_label="appB"):
-                    pass
+            async with hare_test_context([module_name], app_label="appB") as ctx2:
+                assert ctx2.get_model("appB.RelabelConflictModel") is RelabelConflictModel
+                assert ctx2.apps.get_binding(RelabelConflictModel).app == "appB"
+                assert RelabelConflictModel._declaration.app is None
         finally:
             sys.modules.pop(module_name, None)
 
@@ -883,7 +878,7 @@ class TestInitIntegration:
 
 
 class TestFailedReinit:
-    """A re-init that fails leaves the context and its models on the previous configuration."""
+    """Failed setup in another context preserves the existing application and its graph."""
 
     class RouterWithArgument:
         def __init__(self, alias):
@@ -915,7 +910,7 @@ class TestFailedReinit:
 
     async def _assert_previous_configuration(self, ctx, Author):
         assert ctx.connections.db_config.keys() == {"default"}
-        assert Author._meta.default_connection == "default"
+        assert HareContext.require_current().apps.get_binding(Author).default_connection == "default"
         assert ctx.routers == [TestFailedReinit.PreviousRouter]
         assert [author.name for author in await Author.objects.all()] == ["before"]
 
@@ -924,8 +919,9 @@ class TestFailedReinit:
         """A router path that can't be imported fails before anything is replaced."""
         async with HareContext() as ctx:
             Author = await self._init_with_row(ctx)
-            with pytest.raises(ConfigurationError, match="Can't import router"):
-                await ctx.init(config=self._reinit_config(), routers=["no.such.Router"])
+            async with HareContext() as failed:
+                with pytest.raises(ConfigurationError, match="Can't import router"):
+                    await failed.init(config=self._reinit_config(), routers=["no.such.Router"])
             await self._assert_previous_configuration(ctx, Author)
 
     @pytest.mark.asyncio
@@ -934,8 +930,9 @@ class TestFailedReinit:
         the models are bound back to the previous configuration."""
         async with HareContext() as ctx:
             Author = await self._init_with_row(ctx)
-            with pytest.raises(ConfigurationError, match="Can't instantiate router"):
-                await ctx.init(config=self._reinit_config(), routers=[TestFailedReinit.RouterWithArgument])
+            async with HareContext() as failed:
+                with pytest.raises(ConfigurationError, match="Can't instantiate router"):
+                    await failed.init(config=self._reinit_config(), routers=[TestFailedReinit.RouterWithArgument])
             await self._assert_previous_configuration(ctx, Author)
 
     @pytest.mark.asyncio
@@ -943,11 +940,12 @@ class TestFailedReinit:
         """A models module that can't be imported keeps the previous configuration."""
         async with HareContext() as ctx:
             Author = await self._init_with_row(ctx)
-            with pytest.raises(ConfigurationError):
-                await ctx.init(
-                    config=self._reinit_config("tests.no_such_models_module"),
-                    routers=[TestFailedReinit.PreviousRouter],
-                )
+            async with HareContext() as failed:
+                with pytest.raises(ConfigurationError):
+                    await failed.init(
+                        config=self._reinit_config("tests.no_such_models_module"),
+                        routers=[TestFailedReinit.PreviousRouter],
+                    )
             await self._assert_previous_configuration(ctx, Author)
 
     @pytest.mark.asyncio
@@ -958,12 +956,13 @@ class TestFailedReinit:
         HareContext.set_global(other)
         async with HareContext() as ctx:
             Author = await self._init_with_row(ctx)
-            with pytest.raises(ConfigurationError, match="Global context fallback is already enabled"):
-                await ctx.init(
-                    config=self._reinit_config(),
-                    routers=[TestFailedReinit.PreviousRouter],
-                    _enable_global_fallback=True,
-                )
+            async with HareContext() as failed:
+                with pytest.raises(ConfigurationError, match="Global context fallback is already enabled"):
+                    await failed.init(
+                        config=self._reinit_config(),
+                        routers=[TestFailedReinit.PreviousRouter],
+                        _enable_global_fallback=True,
+                    )
             await self._assert_previous_configuration(ctx, Author)
         assert HareContext.global_context is other
 
@@ -999,10 +998,10 @@ class TestNestedContextRebinding:
                 )
                 await inner.generate_schemas()
                 await Author.objects.create(name="inner")
-                assert Author._meta.db_table == "inner_author"
+                assert HareContext.require_current().apps.get_binding(Author).db_table == "inner_author"
 
-            assert Author._meta.default_connection == "default"
-            assert Author._meta.db_table == "author"
+            assert HareContext.require_current().apps.get_binding(Author).default_connection == "default"
+            assert HareContext.require_current().apps.get_binding(Author).db_table == "author"
             await Author.objects.create(name="outer again")
             assert sorted(author.name for author in await Author.objects.all()) == ["outer", "outer again"]
 
@@ -1135,7 +1134,7 @@ class TestTimezoneAndRouters:
                 timezone="America/New_York",
             )
             assert Timezone.name() == "America/New_York"
-            assert Timezone.get_use_timezone() is True
+            assert ZoneSettings.get_use_timezone() is True
 
             async with HareContext() as inner:
                 await inner.init(
@@ -1146,10 +1145,10 @@ class TestTimezoneAndRouters:
                     timezone="Europe/Moscow",
                 )
                 assert Timezone.name() == "Europe/Moscow"
-                assert Timezone.get_use_timezone() is False
+                assert ZoneSettings.get_use_timezone() is False
 
             assert Timezone.name() == "America/New_York"
-            assert Timezone.get_use_timezone() is True
+            assert ZoneSettings.get_use_timezone() is True
 
     @pytest.mark.asyncio
     async def test_naive_datetime_is_interpreted_consistently_across_create_and_filter(self):
@@ -1214,16 +1213,18 @@ class TestTimezoneAndRouters:
 
     @pytest.mark.database_independent
     @pytest.mark.asyncio
-    async def test_init_routers_with_type(self):
-        """_init_routers accepts router type directly."""
+    @pytest.mark.parametrize("use_factory", [False, True])
+    async def test_init_routers_with_callable(self, use_factory):
+        """Router classes and factories use the same construction path."""
 
+        router = (lambda: TestTimezoneAndRouters.TestRouter()) if use_factory else TestTimezoneAndRouters.TestRouter
         async with HareContext() as ctx:
             await ctx.init(
                 HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": ["tests.shared_models.testmodels"]}),
-                routers=[TestTimezoneAndRouters.TestRouter],
+                routers=[router],
             )
 
-            assert ctx.routers == [TestTimezoneAndRouters.TestRouter]
+            assert ctx.routers == [router]
 
     @pytest.mark.database_independent
     @pytest.mark.asyncio
@@ -1258,8 +1259,8 @@ class TestTimezoneAndRouters:
         ("router", "message"),
         [
             pytest.param("not_a_valid_router_path", "Can't import router", id="invalid_router_type"),
-            # Neither a string nor a type.
-            pytest.param(123, "Router must be either str or type", id="invalid_router_item"),
+            # Cannot construct a router.
+            pytest.param(123, "Can't instantiate router", id="invalid_router_item"),
         ],
     )
     @pytest.mark.database_independent
@@ -1443,3 +1444,46 @@ def test_an_import_failing_inside_a_models_module_is_named_with_its_cause(tmp_pa
         Hare.bind_models(
             HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": ["models_importing_a_missing_package"]})
         )
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+@pytest.mark.parametrize("release_error_type", [None, RuntimeError, asyncio.CancelledError])
+async def test_failed_connection_initialization_retains_release_errors_and_discards_state(
+    monkeypatch, release_error_type
+):
+    initialization_error = ValueError("initialization failed")
+    release_error = release_error_type("release failed") if release_error_type is not None else None
+    closed = []
+
+    class OpenedClient:
+        discarded = False
+
+        async def close(self):
+            closed.append(self)
+            if release_error is not None:
+                raise release_error
+
+    def reject_connection(alias):
+        raise initialization_error
+
+    handler = ConnectionHandler()
+    client = OpenedClient()
+    handler.root_clients["opened"] = client
+    handler._db_config = {"broken": {}}
+    monkeypatch.setattr(handler, "get", reject_connection)
+    with pytest.raises(BaseExceptionGroup if release_error is not None else ValueError) as raised:
+        await handler._init_connections(create_db=False)
+    if release_error is None:
+        assert raised.value is initialization_error
+    else:
+        assert len(raised.value.exceptions) == 2
+        assert raised.value.exceptions[0] is initialization_error
+        if isinstance(release_error, asyncio.CancelledError):
+            assert isinstance(raised.value.exceptions[1], asyncio.CancelledError)
+        else:
+            assert raised.value.exceptions[1] is release_error
+    assert closed == [client]
+    assert client.discarded
+    assert not handler.root_clients
+    assert handler._db_config is None

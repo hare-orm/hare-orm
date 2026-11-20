@@ -52,7 +52,11 @@ class WriteScenario:
         Returns:
             The row.
         """
-        queryset = model.objects.all_tenants() if model._meta.tenant_field else model.objects.all()
+        queryset = (
+            model.objects.all_tenants()
+            if HareContext.require_current().apps.get_binding(model).tenant_field
+            else model.objects.all()
+        )
         if include_deleted:
             queryset = queryset.include_deleted()
         row = await queryset.get(pk=pk)
@@ -80,7 +84,11 @@ class WriteScenario:
         Returns:
             The rows, by key.
         """
-        queryset = model.objects.all_tenants() if model._meta.tenant_field else model.objects.all()
+        queryset = (
+            model.objects.all_tenants()
+            if HareContext.require_current().apps.get_binding(model).tenant_field
+            else model.objects.all()
+        )
         rows = list(await queryset.order_by("pk"))
         if self.after_fetch is not None:
             for row in rows:
@@ -96,8 +104,12 @@ class WriteScenario:
         snapshot: dict[str, dict[Any, dict[str, Any]]] = {}
         for role in (WriteRole.SUBJECT, WriteRole.NOTE, WriteRole.LINK):
             model = self.models.get_model(role)
-            queryset = model.objects.all_tenants() if model._meta.tenant_field else model.objects.all()
-            if model._meta.soft_delete_field:
+            queryset = (
+                model.objects.all_tenants()
+                if self.context.apps.get_binding(model).tenant_field
+                else model.objects.all()
+            )
+            if self.context.apps.get_binding(model).soft_delete_field:
                 queryset = queryset.include_deleted()
             snapshot[role.value] = {row["id"]: row for row in await queryset.order_by("pk").values()}
         return snapshot

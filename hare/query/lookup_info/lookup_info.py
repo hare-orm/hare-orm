@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.fields.relations.fields.generic_foreign_key_field_instance import GenericForeignKeyFieldInstance
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -46,7 +47,7 @@ class LookupInfo:
     """
 
     key: str
-    model: type[Model]
+    binding: ModelBinding
     relations: tuple[Field[Any], ...]
     field: Field[Any] | tuple[Field[Any], ...] | None
     transforms: tuple[str, ...]
@@ -86,3 +87,8 @@ class LookupInfo:
         if self.generic_field is not None:
             return True
         return dialect.filter_operators.supports_lookup(self)
+
+    @property
+    def model(self) -> type[Model]:
+        """The Python class represented by this structural binding."""
+        return self.binding._model

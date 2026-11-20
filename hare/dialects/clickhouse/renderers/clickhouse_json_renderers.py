@@ -1,18 +1,14 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, cast
 
 from hare.dialects.base.renderers.json_renderers import JsonRenderers
 from hare.dialects.clickhouse.lookups.constants import CLICKHOUSE_JSON_TYPED_VALUE_SQL, CLICKHOUSE_JSON_VALUE_TEXT_SQL
 from hare.dialects.clickhouse.renderers.clickhouse_json_texts import ClickhouseJsonTexts
+from hare.query.filters.lookups.json.json_filter_parser import JsonFilterParser
 from hare.sql import functions
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms import criteria
-
-if TYPE_CHECKING:
-    from hare.sql.functions.json.json_value import JsonValue
-    from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 
 class ClickhouseJsonRenderers(JsonRenderers):
@@ -24,10 +20,10 @@ class ClickhouseJsonRenderers(JsonRenderers):
         """The object's JSON text - each key a JSON string, each value its JSON text, in order."""
         parts_sql = []
         for position, (key, value) in enumerate(zip(function.args[::2], function.args[1::2], strict=True)):
-            key_text = ("," if position else "{") + json.dumps(cast("ValueWrapper", key).value) + ":"
+            key_text = ("," if position else "{") + json.dumps(key.value) + ":"  # type: ignore[attr-defined, operator]
             parts_sql += [
                 sql_context.dialect.literals.get_string_literal_sql(key_text),
-                ClickhouseJsonTexts.get_json_text_sql(cast("JsonValue", value), sql_context),
+                ClickhouseJsonTexts.get_json_text_sql(value, sql_context),  # type: ignore[arg-type]
             ]
         if not parts_sql:
             return "'{}'"
@@ -36,9 +32,7 @@ class ClickhouseJsonRenderers(JsonRenderers):
     @staticmethod
     def render_json_array(function: functions.JsonArray, sql_context: SqlContext) -> str:
         """The array's JSON text - each value its JSON text, in order."""
-        values_sql = [
-            ClickhouseJsonTexts.get_json_text_sql(cast("JsonValue", value), sql_context) for value in function.args
-        ]
+        values_sql = [ClickhouseJsonTexts.get_json_text_sql(value, sql_context) for value in function.args]  # type: ignore[arg-type]
         if not values_sql:
             return "'[]'"
         separated_sql = ", ',', ".join(values_sql)
@@ -73,20 +67,21 @@ class ClickhouseJsonRenderers(JsonRenderers):
         # The JSON text - of a JSON column, or of a String one holding it.
         column_sql = f"toString({column_sql})"
         literals = sql_context.dialect.literals
-        if any(isinstance(part, int) for part in criterion.path):
+        if any(JsonFilterParser.is_index_segment(part) for part in criterion.path):
             # A digit is an index of an array and a key of an object, the meaning of hare's path - each
             # step taken on the value the steps before it reached.
             value_sql = column_sql
             for part in criterion.path:
-                if isinstance(part, int):
-                    index_sql = str(part + 1 if part >= 0 else part)
+                if JsonFilterParser.is_index_segment(part):
+                    index = int(part)
+                    index_sql = str(index + 1 if index >= 0 else index)
                     key_sql = literals.get_string_literal_sql(str(part))
                     value_sql = (
                         f"if(JSONType({value_sql}) = 'Array', JSONExtractRaw({value_sql}, {index_sql}), "
                         f"JSONExtractRaw({value_sql}, {key_sql}))"
                     )
                 else:
-                    value_sql = f"JSONExtractRaw({value_sql}, {literals.get_string_literal_sql(part)})"
+                    value_sql = f"JSONExtractRaw({value_sql}, {literals.get_string_literal_sql(part)})"  # type: ignore[arg-type]
             raw_sql = f"nullIf({value_sql}, '')"
             if not criterion.as_text:
                 return raw_sql

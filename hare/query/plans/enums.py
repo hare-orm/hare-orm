@@ -19,6 +19,8 @@ class PlanPartType(StrEnum):
     #: An argument: an expression by its own description, a ``None`` as ``NULL``, a SQL term by its
     #: text and values, any other literal by its type, bound - a list or tuple keeps no plan.
     ARGUMENT = "argument"
+    #: An argument whose values also affect SQL shape; bound normally and included in the key.
+    SHAPE_ARGUMENT = "shape_argument"
     #: A sequence of arguments.
     ARGUMENTS = "arguments"
     #: A method giving an argument, described as an ``ARGUMENT``.
@@ -77,15 +79,12 @@ class PlanKeyForm(StrEnum):
     PRESENCE = "presence"
     #: A method or function giving what is written into the SQL text - the key holds what it returns.
     METHOD = "method"
-    #: The connection - the key holds its dialect and alias; built into another query, the alias it
-    #: is pinned to alone (the dialect is that query's).
+    #: The connection's alias, feature, parameter-binding and SQL-context keys. A standalone query
+    #: also records its dialect; a nested query uses the enclosing query's dialect.
     CONNECTION = "connection"
     #: A part described by a method or function (``PlanDescription``) - the key holds its structure,
     #: its values are bound; None keeps no plan.
     DESCRIBED = "described"
-    #: The conditions in a sequence, each by its own description, as the most frequent query's
-    #: filters are.
-    CONDITIONS = "conditions"
     #: A value bound as a parameter when set - the key holds whether it is set (not None).
     BOUND = "bound"
     #: A value bound as a parameter when true - the key holds whether it is.

@@ -8,14 +8,8 @@ import pytest
 from hare.contrib.test import requires_features
 from hare.query.expressions import RawSQL, Subquery
 from hare.query.functions import Count
-from hare.query.plans.statement.statement_plans import StatementPlans
 from tests.shared_models.testmodels import Event, Tournament
-
-
-async def count_plan_hits(statement) -> tuple[object, int]:
-    hits = StatementPlans.hits
-    result = await statement
-    return result, StatementPlans.hits - hits
+from tests.utils.statement_plan_checks import StatementPlanChecks
 
 
 async def create_tournaments() -> list[Tournament]:
@@ -39,7 +33,7 @@ def cte_filtered_events(tournament_name: str):
 async def test_cte_values_are_bound_per_query(db):
     await create_tournaments()
     assert [event.name for event in await cte_filtered_events("a")] == ["a-event"]
-    rows, hits = await count_plan_hits(cte_filtered_events("b"))
+    rows, hits = await StatementPlanChecks.count_plan_hits(cte_filtered_events("b"))
     assert [event.name for event in rows] == ["b-event"]
     assert hits == 1
     assert await cte_filtered_events("nobody") == []
@@ -59,7 +53,7 @@ async def test_aggregate_with_a_cte_runs_on_its_plan(db):
 
     assert await event_count("a") == {"total": 3}
     for tournament_name, expected in (("b", 2), ("c", 1), ("d", 0)):
-        result, hits = await count_plan_hits(event_count(tournament_name))
+        result, hits = await StatementPlanChecks.count_plan_hits(event_count(tournament_name))
         assert (result, hits) == ({"total": expected}, 1)
 
 
@@ -134,7 +128,7 @@ async def test_raw_sql_filter_value_binds_its_parameters(db):
 
     await query("a")
     for tournament in (*tournaments, tournaments[0]):
-        rows, hits = await count_plan_hits(query(tournament.name))
+        rows, hits = await StatementPlanChecks.count_plan_hits(query(tournament.name))
         assert [row.id for row in rows] == [tournament.id]
         assert hits == 1
     rows = await Tournament.objects.filter(id__in=RawSQL('SELECT "id" FROM "tournament" WHERE "name" <> %s', ["a"]))

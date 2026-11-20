@@ -19,31 +19,47 @@ class StubCommands:
 
     @staticmethod
     async def stubs(cli_context: CLIContext, output: str, relation_depth: int, check: bool) -> int | None:
-        """Writes the stubs, or with ``check`` reports the ones the models have outdated.
+        """Generate stubs in one binding scope without opening database connections.
+
+        The writer consumes the active registry rather than rebinding it. Leaving the scope
+        restores an already running caller's model bindings, including on output errors.
+
+        Args:
+            cli_context: The command's configuration and import context.
+            output: The directory for the generated model modules.
+            relation_depth: The maximum number of relations crossed by generated filter keys.
+            check: Compare the expected stubs with existing files without writing them. Files for
+                modules absent from the current configuration are not checked or removed.
 
         Returns:
-            1 when ``check`` finds an outdated stub, None otherwise.
+            1 when ``check`` finds a missing or outdated stub, None otherwise.
 
         Raises:
             CLIUsageError: ``relation_depth`` is out of its range, or ``output`` holds a NUL
                 character, which no path holds.
-            CLIError: A stub can't be written there - the output is a file, or not writable.
+            CLIError: A generated stub can't be read or written at its output path.
         """
         if not 0 <= relation_depth <= MAX_RELATION_DEPTH:
             raise CLIUsageError(f"--relation-depth must be 0 to {MAX_RELATION_DEPTH}, got {relation_depth}")
         if "\0" in output:
             raise CLIUsageError(f"--output must be a path, got {output!r}")
-        writer = StubWriter(BoundModels(CommandContext.load_config(cli_context)), Path(output), relation_depth)
-        try:
-            if check:
-                outdated = writer.get_outdated()
-                for path in outdated:
-                    print(f"Outdated stub: {path.as_posix()}")
-                return 1 if outdated else None
-            written_paths = writer.write()
-        # A ValueError is a path a stub's name can't go into - "//" is the root of no server on Windows.
-        except (OSError, ValueError) as error:
-            raise CLIError(f"Can't write the stubs into {output!r}: {error}") from error
+        config = CommandContext.load_config(cli_context)
+        async with CommandContext.hare_cli_context(config, connect=False) as context:
+            writer = StubWriter(
+                BoundModels(context.require_apps()),
+                Path(output),
+                relation_depth,
+            )
+            try:
+                if check:
+                    outdated = writer.get_outdated()
+                    for path in outdated:
+                        print(f"Outdated stub: {path.as_posix()}")
+                    return 1 if outdated else None
+                written_paths = writer.write()
+            # A ValueError is a path a stub's name can't go into - "//" is the root of no server on Windows.
+            except (OSError, ValueError) as error:
+                raise CLIError(f"Can't write the stubs into {output!r}: {error}") from error
         for path in written_paths:
             print(f"Wrote {path.as_posix()}")
         return None

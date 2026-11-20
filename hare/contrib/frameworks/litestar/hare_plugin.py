@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Iterable, Mapping
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from litestar.typing import FieldDefinition
 
     from hare.core.config import HareConfig
+    from hare.core.hare_context import HareContext
 
 
 class HarePlugin(InitPluginProtocol, RequestQueryDIPlugin, SerializationPlugin):
@@ -58,12 +59,13 @@ class HarePlugin(InitPluginProtocol, RequestQueryDIPlugin, SerializationPlugin):
 
     Args:
         config: The Hare configuration, as for ``Hare.init(config=...)``.
-        atomic_requests: True for a transaction per request on the default connection, the
+        hare_context: An initialized context to borrow without closing it, None to create one.
+        atomic_requests: True for a transaction per request on the automatically selected connection, the
             connection aliases for one on each of them, False for none.
         health_routes: The health check routes to add to the app, None for none.
 
     Raises:
-        ConfigurationError: ``atomic_requests`` is neither a bool nor a sequence of names.
+        ConfigurationError: ``atomic_requests`` is neither a bool nor an iterable of names.
     """
 
     #: The DTO of each model a handler returned or took, built once per model - weakly, and
@@ -75,11 +77,13 @@ class HarePlugin(InitPluginProtocol, RequestQueryDIPlugin, SerializationPlugin):
         self,
         config: Mapping[str, Any] | HareConfig | str,
         *,
-        atomic_requests: bool | Sequence[str] = False,
+        hare_context: HareContext | None = None,
+        atomic_requests: bool | Iterable[str] = False,
         health_routes: HealthRoutes | None = None,
     ) -> None:
-        self.lifecycle = HareLifecycle(config, atomic_requests=atomic_requests)
+        self.lifecycle = HareLifecycle(config, atomic_requests=atomic_requests, context=hare_context)
         self.health_routes = health_routes
+        self.apps = self.lifecycle.bind_models()
 
     def supports_type(self, field_definition: FieldDefinition) -> bool:
         return field_definition.is_subclass_of(Model)
@@ -88,10 +92,15 @@ class HarePlugin(InitPluginProtocol, RequestQueryDIPlugin, SerializationPlugin):
         model_type = self.get_model_type(field_definition)
         if model_type is None:
             raise ConfigurationError(f"{field_definition.annotation!r} holds no hare model")
-        dto = HarePlugin.model_dtos.get(model_type)
+        binding = self.lifecycle.get_model_apps().get_binding(model_type)
+        dto = HarePlugin.model_dtos.get(binding)
         if dto is None:
-            dto = HareDTO[model_type]  # type: ignore[valid-type]
-            HarePlugin.model_dtos[model_type] = dto
+            dto = type(
+                f"{model_type.__name__}DTO",
+                (HareDTO[model_type],),  # type: ignore[valid-type]
+                {"__module__": model_type.__module__, "binding": binding},
+            )
+            HarePlugin.model_dtos[binding] = dto
         return dto
 
     @classmethod
@@ -116,11 +125,10 @@ class HarePlugin(InitPluginProtocol, RequestQueryDIPlugin, SerializationPlugin):
     def on_app_init(self, app_config: AppConfig) -> AppConfig:
         # Litestar builds the handlers' signatures - the parameters of each request query - right
         # after the plugins, long before the lifespan opens the connections.
-        self.lifecycle.bind_models()
         app_config.lifespan.insert(0, self.lifespan)
         for exception_type, handler in HareExceptionHandlers.get_handlers().items():
             app_config.exception_handlers.setdefault(exception_type, handler)
-        middleware: list[Any] = [RequestStateResetMiddleware()]
+        middleware: list[Any] = [RequestStateResetMiddleware(self.lifecycle)]
         if self.lifecycle.transaction_connection_names:
             middleware.append(TransactionMiddleware(self.lifecycle.transaction_connection_names))
             app_config.after_exception.append(self.fail_request_transaction)
@@ -158,8 +166,10 @@ class HarePlugin(InitPluginProtocol, RequestQueryDIPlugin, SerializationPlugin):
 
     @staticmethod
     async def fail_request_transaction(error: Exception, scope: Scope) -> None:
-        """Rolls back the transaction of a request whose handler raised, even when an exception
-        handler answers it (``404`` for ``DoesNotExist``) - Litestar's ``after_exception`` hook.
+        """Mark a handled exception for rollback when the response starts.
+
+        Litestar's ``after_exception`` hook also marks exceptions answered by a handler,
+        such as ``404`` for ``DoesNotExist``; the transaction remains open until response start.
 
         Args:
             error: The exception.

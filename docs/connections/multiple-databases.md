@@ -1,5 +1,10 @@
 # Several databases
 
+Read-after-write history and primary-read scopes belong to the active application, even when
+applications use identical connection aliases. Write history uses monotonic time and immutable
+task snapshots: a child sees its parent’s previous writes, while its new writes remain local.
+Timezone overrides are also scoped to the application in which they were entered.
+
 An application with several connections picks one per query: by `using=` at the call, or by a router that
 decides for every query of a model, reads and writes apart.
 
@@ -17,6 +22,13 @@ query starts from one, so this covers `create`, `get`, `get_or_create`, `update_
 **On an instance**: the `using=` argument of `save`, `delete`, `hard_delete`, `delete_preview`, `restore`
 and `refresh_from_db`; of the relation writes (`add`, `remove`, `set`, `clear`, `create`, ...), a
 many-to-many relation's included; and of `prefetch_related_objects()`.
+
+The selected client must not belong to another `HareContext`: query and instance operations
+raise `ConfigurationError` before SQL in that case, including for equal aliases. Aliases are
+looked up in the query's or instance's original context. Transactions, independent clients and
+tenant clients from that context remain valid. For another application's database, start from
+its registry, for example `other_context.apps.get_queryset(Book)`. Standalone clients with no
+connection handler have no application ownership to conflict with.
 
 **Elsewhere**: `Transactions.atomic(using)`, `on_commit(..., using=)`, `on_rollback(..., using=)`,
 `execute_sql(..., using=)`. A client of an autonomous transaction is passed the same way:
@@ -36,6 +48,11 @@ goes there by default: `save()`, `delete()`, `restore()`, `refresh_from_db()`,
 `prefetch_related_objects()`, awaiting a forward relation (`await book.author`), and the relations of the
 instance (`author.books.all()`/`.filter()`/`.count()`/`.values()`, M2M `add()`/`remove()`/`clear()`):
 
+After `save(using=...)`, new queries obtained from the instance's relations follow that connection
+even when its primary key is unchanged. A queryset explicitly pinned with `.using()` keeps its choice.
+The source model's router is consulted when the relation query executes, including for a queryset
+created earlier; changing its routing does not require rebuilding the instance or relation.
+
 ```python
 book = await Book.objects.all().using("replica").get(title="Notes")
 author = await book.author          # read from "replica", not from "default"
@@ -49,6 +66,11 @@ opinion for the queried model. A related model whose default connection differs 
 own connection choice. The queryset of a `Prefetch("books", Book.objects.filter(...))` reads on the parent's
 connection as the plain `prefetch_related("books")` does, unless it chose one with `.using()` itself.
 
+Cascade deletion, its preview, restoration and many-to-many mutation checks use the same source-versus-target
+connection rule. Models sharing their declared default and current route retain the exact selected
+client, including its transaction and tenant namespace. A different declared default keeps the target's
+selection, even when both routers choose one alias or an independent source client uses that alias.
+
 ## <a id="routers"></a>Routers
 
 Write a **plain class** — no base class to inherit, hare dispatches to it duck-typed — with either or
@@ -57,7 +79,7 @@ both methods, each returning a **connection alias string** (or `None`):
 ```python
 class ReportingRouter:
     def db_for_read(self, model: type[Model]) -> str | None:
-        if model._meta.app == "reporting":
+        if Hare.get_context().apps.get_binding(model).app == "reporting":
             return "reporting_replica"
         return None
 
@@ -78,7 +100,10 @@ there would create a duplicate.
 Register via `Hare.init(routers=[...])` — a list of dotted-path strings
 (`"library.routers.ReportingRouter"`) or classes directly, each instantiated without arguments. Each
 `HareContext` holds its routers in a `ConnectionRouter` of its own (`context.router`), which asks them in
-turn — so the routers of different contexts never mix.
+turn — so the routers of different contexts never mix. A write through an explicit client also
+records read-after-write affinity for the application that supplied that client, even under another
+active context. It does not pin the other application's reads to its primary. Reconnecting pools
+retains the application's write history.
 
 A router chooses where queries go, not where tables are: `makemigrations`, `migrate` and `drift` work on
 the `default_connection` of each app and never ask a router. So a router routes between connections holding
@@ -105,8 +130,9 @@ model's `default_connection` where `db_for_write` returns `None`. Asking
 which connection a model is written through (`Model.get_connection(for_write=True)`) writes nothing and
 changes no read.
 
-The config's `read_your_writes_seconds` ends that this long after the task's last write, when the replica
-has caught up:
+The config's `read_your_writes_seconds` ends that this long after the task's last write to the
+connection in the current application. Expiration does not establish that the replica has caught up;
+choose the window for the application's consistency requirements:
 
 ```python
 await Hare.init(
@@ -125,6 +151,7 @@ async with Routing.using_primary():
     loan = await Loan.objects.get(pk=loan_id)
 ```
 
-`Routing.forget_writes()` lets the current task read from the replicas again — for a task that serves
-several requests one after another. A queryset's `.using()` and a transaction choose their connection
-themselves and aren't affected. Without routers nothing of this runs.
+`Routing.forget_writes()` forgets the current application's writes in this task, allowing replica reads
+again — for a task that serves several requests one after another. Other applications and already
+started child tasks retain their write histories. A queryset's `.using()` and a transaction choose their
+connection themselves and aren't affected. Without routers nothing of this runs.

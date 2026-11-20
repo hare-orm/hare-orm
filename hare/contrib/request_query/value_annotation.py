@@ -180,9 +180,7 @@ class ValueAnnotation:
         """
         if any(isinstance(item, TextParameter) for item in metadata):
             return get_origin(annotation) is list
-        stripped = annotation
-        while get_origin(stripped) is Annotated:
-            stripped = get_args(stripped)[0]
+        stripped = cls.strip(annotation)
         members = (
             [member for member in get_args(stripped) if member is not NoneType]
             if get_origin(stripped) in {Union, UnionType}

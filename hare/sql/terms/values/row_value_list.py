@@ -8,6 +8,8 @@ class RowValueList(Tuple):
     """The rows a row value is compared with by ``IN`` - ``((1, 2), (3, 4))``; a dialect that takes no
     list of row values there writes its own form."""
 
+    structure_attributes = ()
+
     def get_sql(self, sql_context: SqlContext) -> str:
         renderer = sql_context.dialect.renderers.get(type(self))
         if renderer is not None:

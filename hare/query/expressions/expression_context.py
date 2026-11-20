@@ -1,19 +1,23 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field as dataclass_field
 from typing import TYPE_CHECKING, Any
 
+from hare.exceptions import UnSupportedError
 from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
 from hare.query.scopes.row_visibility import RowVisibility
 from hare.sql import Table
 
 if TYPE_CHECKING:
+    from hare.core.hare_context import HareContext
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.dialect import Dialect
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import AggregatedMultiValuedPaths
     from hare.query.expressions.conditions.q import Q
+    from hare.query.expressions.expression_result import ExpressionResult
 
 
 @dataclass(frozen=True)
@@ -21,7 +25,7 @@ class ExpressionContext:
     """What an expression resolves against: the query's model, table and annotations, the dialect and the
     state the expressions of one build share."""
 
-    model: type[Model]
+    binding: ModelBinding
     table: Table
     annotations: dict[str, Any]
     # Set by a query recording its plan: every filter kwarg, literal and cursor value resolved
@@ -57,7 +61,30 @@ class ExpressionContext:
     # The annotations being resolved up the chain, shared by it - an annotation referencing itself
     # through another raises QueryError instead of recursing forever.
     annotation_names_in_progress: set[str] = dataclass_field(default_factory=set)
+    #: Bind a grouped annotation through the statement's existing expression bindings.
+    grouping_annotation_result: Callable[[str, ExpressionContext], ExpressionResult] | None = None
     #: The dialect the expressions compile for.
     dialect: Dialect = dataclass_field(kw_only=True)
     #: The connection the query runs on; None when compiling DDL or SQL for no particular database.
     connection: DatabaseClient | None = dataclass_field(kw_only=True)
+    #: A neutral probe inspects term structure before an execution dialect is chosen.
+    checks_dialect_admission: bool = dataclass_field(default=True, kw_only=True)
+    #: The source application; None for an explicitly offline query or schema expression.
+    application_context: HareContext | None = dataclass_field(default=None, kw_only=True)
+    #: Defaults of a computed search vector; explicit configurations on expressions take precedence.
+    text_search_config: str | None = None
+    requires_search_config: bool = False
+
+    def require_connection_feature(self, name: str, feature: str) -> None:
+        """Reject an expression on a bound connection lacking a required feature."""
+        connection = self.connection
+        if connection is not None and not getattr(connection.features, feature):
+            raise UnSupportedError(
+                f"{name} can't run on the {connection.connection_alias!r} connection: it needs features.{feature}, "
+                "which the connection doesn't have"
+            )
+
+    @property
+    def model(self) -> type[Model]:
+        """The Python class used by field hooks and diagnostics."""
+        return self.binding._model

@@ -4,7 +4,6 @@ from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
 from hare.exceptions import UnSupportedError
-from hare.fields.data.containers.container_field import ContainerField
 from hare.fields.enums import NarrowedValueSource
 from hare.fields.field import Field
 from hare.fields.narrowing.constants import FLOAT32_MANTISSA_BITS
@@ -26,6 +25,17 @@ class ColumnNarrowingCheck(SchemaEditorPart):
 
     __slots__ = ()
 
+    @staticmethod
+    def has_narrowing_limits(old_field: Field[Any], new_field: Field[Any]) -> bool:
+        """Whether the declaration narrows stored values, even with an unchanged SQL type.
+
+        Container limits belong to their held fields; an enum membership change can leave
+        both a scalar column and every enclosing container's SQL type unchanged.
+        """
+        return new_field.get_narrowing_limit(old_field) is not None or bool(
+            new_field.get_held_narrowing_limits(old_field)
+        )
+
     async def check_alter_field_narrowing_data_loss(
         self, qualified_table: str, old_field: Field[Any], new_field: Field[Any], quoted_column: str
     ) -> None:
@@ -43,11 +53,10 @@ class ColumnNarrowingCheck(SchemaEditorPart):
         """
         limit = new_field.get_narrowing_limit(old_field)
         overflow_predicates = [] if limit is None else [limit.get_overflow_predicate_sql(self, quoted_column)]
-        if isinstance(new_field, ContainerField):
-            overflow_predicates.extend(
-                self.get_held_value_overflow_predicate_sql(held_path, held_limit, quoted_column)
-                for held_path, held_limit in new_field.get_held_narrowing_limits(old_field)
-            )
+        overflow_predicates.extend(
+            self.get_held_value_overflow_predicate_sql(held_path, held_limit, quoted_column)
+            for held_path, held_limit in new_field.get_held_narrowing_limits(old_field)
+        )
         if not overflow_predicates:
             return
         overflow_predicate = " OR ".join(f"({predicate})" for predicate in overflow_predicates)

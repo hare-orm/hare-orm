@@ -87,6 +87,11 @@ POSTGIS_GEOGRAPHY_FUNCTIONS = frozenset(
     }
 )
 
+#: Native geography results, independently of functions accepting geography arguments.
+POSTGIS_GEOGRAPHY_RESULT_FUNCTIONS = frozenset(
+    {SpatialFunctionType.CENTROID, SpatialFunctionType.BUFFER, SpatialFunctionType.INTERSECTION}
+)
+
 #: The PostGIS aggregate of each spatial aggregate.
 POSTGIS_AGGREGATES = {
     SpatialFunctionType.COLLECT: "ST_Collect",

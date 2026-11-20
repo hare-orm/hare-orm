@@ -15,8 +15,7 @@ from hare.fields.field import Field
 from hare.query.enums import Lookup, LookupValueShape
 
 if TYPE_CHECKING:
-    from hare.dialects.base.types.type_registry import TypeRegistry
-    from hare.models import Model
+    from hare.fields.data.containers.container_value_converters import ContainerValueConverters
     from hare.query.filters.lookups.field_lookup import FieldLookup
     from hare.sql.terms.term import Term
 
@@ -94,6 +93,17 @@ class TupleField(ContainerField):
     def get_child_fields(self) -> tuple[Field[Any], ...]:
         return self.fields_in_order
 
+    def get_snapshot_comparison_value(self, value: Any) -> Any:
+        """Compare each element through its declared field, including named tuples."""
+        if value is None:
+            return None
+        return tuple(
+            field.get_snapshot_comparison_value(element)
+            for field, element in zip(
+                self.fields_in_order, self.get_ordered_values(value, self.get_path()), strict=True
+            )
+        )
+
     def get_held_steps(self) -> tuple[tuple[tuple[HeldValueStep, int | None], Field[Any]], ...]:
         return tuple(
             ((HeldValueStep.TUPLE_ELEMENT, position), field) for position, field in enumerate(self.fields_in_order)
@@ -116,7 +126,9 @@ class TupleField(ContainerField):
         names = self.element_names
         if isinstance(value, Mapping) and names is not None:
             if set(value) != set(names):
-                raise ValidationError(f"{path}: expected the elements {list(names)}, got {sorted(value)!r}")
+                raise ValidationError(
+                    f"{path}: expected the elements {list(names)}, got {self.get_value_for_message(list(value))}"
+                )
             return [value[name] for name in names]
         if not isinstance(value, (tuple, list)):
             raise ValidationError(f"{path}: expected a tuple, got {self.get_value_for_message(value)}")
@@ -136,26 +148,28 @@ class TupleField(ContainerField):
         """
         return f"{path}.{self.element_names[position] if self.element_names is not None else position}"
 
-    def encode_value(
-        self, value: Any, instance: type[Model] | Model | None, types: TypeRegistry | None, path: str
-    ) -> Any:
-        return TupleValue(
-            self.encode_child(field, element, instance, types, self.get_element_path(path, position))
-            for position, (field, element) in enumerate(
-                zip(self.fields_in_order, self.get_ordered_values(value, path), strict=True)
-            )
-        )
+    def _prepare_encoder(self, types: ContainerValueConverters | None) -> Callable[..., Any]:
+        encoders = tuple(self.get_child_encoder(field, types) for field in self.fields_in_order)
 
-    def decode_value(self, value: Any, types: TypeRegistry | None) -> Any:
+        def encode_value(value: Any, instance: Any, path: str) -> Any:
+            elements = self.get_ordered_values(value, path)
+            return TupleValue(
+                encode(element, instance, self.get_element_path(path, position))
+                for position, (encode, element) in enumerate(zip(encoders, elements, strict=True))
+            )
+
+        return encode_value
+
+    def _prepare_decoder(self, types: ContainerValueConverters | None) -> Callable[[Any], Any]:
+        decoders = tuple(self.get_child_decoder(field, types) for field in self.fields_in_order)
         names = self.element_names
-        elements = [value[name] for name in names] if isinstance(value, Mapping) and names is not None else value
-        decoded = [
-            self.decode_child(field, element, types)
-            for field, element in zip(self.fields_in_order, elements, strict=True)
-        ]
-        if names is not None:
-            return dict(zip(names, decoded, strict=True))
-        return tuple(decoded)
+
+        def decode_value(value: Any) -> Any:
+            elements = [value[name] for name in names] if isinstance(value, Mapping) and names is not None else value
+            decoded = [decode(element) for decode, element in zip(decoders, elements, strict=True)]
+            return dict(zip(names, decoded, strict=True)) if names is not None else tuple(decoded)
+
+        return decode_value
 
     def normalize_value(self, value: Any, path: str) -> Any:
         names = self.element_names
@@ -197,7 +211,7 @@ class TupleField(ContainerField):
         return None
 
     def get_python_type(self) -> Any:
-        element_types = [self.get_child_python_type(field) for field in self.fields_in_order]
+        element_types = [field.get_annotation() for field in self.fields_in_order]
         if self.element_names is not None:
             # A dict of exactly the named elements, each of its type.
             return TypedDict(  # type: ignore[operator]

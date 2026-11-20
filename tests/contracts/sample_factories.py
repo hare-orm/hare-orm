@@ -4,6 +4,7 @@ import types
 from typing import Any
 
 from hare.contrib.factories import LazyFunction, ManyToMany, ModelFactory, Sequence, SubFactory
+from hare.core.hare_context import HareContext
 from hare.models import Model
 from tests.contracts.constants import SAMPLED_FIELD_NAME
 from tests.contracts.field_sample import FieldSample
@@ -46,7 +47,7 @@ class SampleFactories:
         declarations: dict[str, Any] = {"id": Sequence(lambda number: number + 1)}
         if target_model is not None:
             target_factory = SampleFactories.make_target_factory(target_model)
-            if SAMPLED_FIELD_NAME in row_model._meta.many_to_many_fields:
+            if SAMPLED_FIELD_NAME in HareContext.require_current().apps.get_binding(row_model).many_to_many_fields:
                 declarations[SAMPLED_FIELD_NAME] = ManyToMany(target_factory, size=1)
             else:
                 declarations[SAMPLED_FIELD_NAME] = SubFactory(target_factory)

@@ -48,8 +48,8 @@ def test_every_expression_of_a_dialect_package_is_registered_by_its_dialect(pack
     expression_classes = get_expression_classes(package)
     registered_classes = [
         expression_class
-        for expression_class, dialect_classes in DialectExpressions.registered.items()
-        if dialect_class in dialect_classes
+        for expression_class in {*expression_classes, *DialectExpressions.registered}
+        if dialect_class in (DialectExpressions.get_dialect_classes(expression_class) or ())
     ]
     unregistered = [
         expression_class.__qualname__

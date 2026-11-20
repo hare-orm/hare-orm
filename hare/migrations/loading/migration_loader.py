@@ -4,25 +4,32 @@ import hashlib
 import pkgutil
 import sys
 from importlib import import_module, invalidate_caches, reload
+from importlib.util import find_spec, module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import ModuleType
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.core.caching.cache import Cache
+from hare.core.constants import DEFAULT_CONNECTION_NAME
 from hare.fields.field import Field
 from hare.migrations.constants import FIRST_MIGRATION, LATEST_MIGRATION
 from hare.migrations.exceptions import MigrationLoadError
 from hare.migrations.loading.graph.migration_graph import MigrationGraph
 from hare.migrations.loading.graph.migration_key import MigrationKey
+from hare.migrations.loading.migration_definitions import MigrationDefinitions
 from hare.migrations.loading.recorder.migration_recorder import MigrationRecorder
 from hare.migrations.migration import Migration
+from hare.migrations.state.state import State
+
+if TYPE_CHECKING:
+    from hare.migrations.state.migration_environment import MigrationEnvironment
 
 
 class MigrationLoader:
     """Reads the migrations on disk and the journal of the applied ones, and builds their graph."""
 
-    #: SHA-256 of each migration module's source as last executed in this process, keyed by
-    #: dotted module path.
-    MIGRATION_SOURCE_DIGESTS: dict[str, bytes] = {}
+    #: SHA-256 of the executed source, with lifetime tied to its imported module.
+    source_digests: ClassVar[Cache[bytes]] = Cache()
 
     def __init__(
         self,
@@ -30,6 +37,7 @@ class MigrationLoader:
         recorder: MigrationRecorder,
         *,
         ignore_no_migrations: bool = False,
+        definitions: MigrationDefinitions | None = None,
     ) -> None:
         """Keeps what the graph is loaded from - ``build_graph()`` loads it.
 
@@ -38,9 +46,12 @@ class MigrationLoader:
             recorder: Reads the applied migrations.
             ignore_no_migrations: Drop a "__first__" dependency on an app that has no migration
                 yet instead of failing - makemigrations is about to write that app's first one.
+            definitions: A session's captured definitions. When present, graph refreshes
+                copy these declarations and read the journal without reloading files.
         """
         self.apps_config = apps_config
         self.ignore_no_migrations = ignore_no_migrations
+        self.definitions = definitions
         self.recorder = recorder
         self.disk_migrations: dict[MigrationKey, Migration] = {}
         #: The squashed migrations on disk - each one's ``replaces`` names the migrations it replaces.
@@ -52,6 +63,23 @@ class MigrationLoader:
         self.migrated_apps: set[str] = set()
         self.graph = MigrationGraph()
 
+    def get_default_connections(self) -> dict[str, str]:
+        """Capture every configured application's default connection."""
+        return {
+            label: config.get("default_connection", DEFAULT_CONNECTION_NAME)
+            for label, config in self.apps_config.items()
+        }
+
+    def create_initial_state(
+        self, environment: MigrationEnvironment, *, ignores_missing_swappable_relations: bool = False
+    ) -> State:
+        """Start a fresh migration state using the configured connection of each app."""
+        return State(
+            default_connections=self.get_default_connections(),
+            environment=environment,
+            ignores_missing_swappable_relations=ignores_missing_swappable_relations,
+        )
+
     def migrations_module(self, app_label: str) -> str | None:
         return self.apps_config.get(app_label, {}).get("migrations")
 
@@ -61,6 +89,11 @@ class MigrationLoader:
         Raises:
             MigrationLoadError: A migration file can't be read, or declares no ``Migration``.
         """
+        if self.definitions is not None:
+            self.disk_migrations = self.definitions.copy_migrations()
+            self.migrated_apps = set(self.definitions.migrated_apps)
+            self.unmigrated_apps = set(self.definitions.unmigrated_apps)
+            return
         self.disk_migrations = {}
         self.unmigrated_apps = set()
         self.migrated_apps = set()
@@ -76,16 +109,15 @@ class MigrationLoader:
             was_loaded = module_name in sys.modules
             try:
                 module = import_module(module_name)
-            except ModuleNotFoundError as error:
-                raise MigrationLoadError(
-                    f"Cannot import migrations module {module_name} for app {app_label}: {error}"
-                ) from error
-            else:
                 if not hasattr(module, "__path__"):
                     self.unmigrated_apps.add(app_label)
                     continue
                 if was_loaded:
-                    reload(module)
+                    module = reload(module)
+            except Exception as error:
+                raise MigrationLoadError(
+                    f"Cannot load migrations module {module_name} for app {app_label}: {type(error).__name__}: {error}"
+                ) from error
 
             self.migrated_apps.add(app_label)
             migration_names = [
@@ -122,24 +154,42 @@ class MigrationLoader:
             The imported module.
         """
         module = sys.modules.get(migration_path)
+        previous_module = module
         if module is None:
-            module = import_module(migration_path)
-            source = cls._read_module_source(module)
-            if source is not None:
-                cls.MIGRATION_SOURCE_DIGESTS[migration_path] = hashlib.sha256(source).digest()
-            return module
+            spec = find_spec(migration_path)
+            if spec is None:
+                return import_module(migration_path)
+            module = module_from_spec(spec)
         source = cls._read_module_source(module)
         if source is None:
-            return module
+            return import_module(migration_path) if previous_module is None else module
         source_digest = hashlib.sha256(source).digest()
-        if cls.MIGRATION_SOURCE_DIGESTS.get(migration_path) == source_digest:
+        if cls.source_digests.get_value(module) == source_digest:
             return module
         # Compiled from the source directly - a cached .pyc is only validated by whole-second
         # mtime and size, so a same-size edit within the same second would otherwise be ignored.
-        code = compile(source, cast("str", module.__file__), "exec")
-        exec(code, module.__dict__)  # nosec B102
-        cls.MIGRATION_SOURCE_DIGESTS[migration_path] = source_digest
-        return module
+        code = compile(source, module.__file__, "exec")  # type: ignore[arg-type]
+        spec = module.__spec__ or spec_from_file_location(migration_path, module.__file__)
+        # _read_module_source accepts only .py files, for which importlib supplies a source loader.
+        assert spec is not None  # nosec B101
+        replacement = module_from_spec(spec)
+        # Decorators and recursive imports read the executing module through sys.modules.
+        # Publish it during execution as importlib does, restoring the last version on failure.
+        sys.modules[migration_path] = replacement
+        try:
+            exec(code, replacement.__dict__)  # nosec B102
+        except BaseException:
+            if previous_module is None:
+                sys.modules.pop(migration_path, None)
+            else:
+                sys.modules[migration_path] = previous_module
+            raise
+        cls.source_digests.set_value(replacement, source_digest)
+        parent_name, _, child_name = migration_path.rpartition(".")
+        parent = sys.modules.get(parent_name)
+        if parent is not None:
+            setattr(parent, child_name, replacement)
+        return replacement
 
     @staticmethod
     def _read_module_source(module: ModuleType) -> bytes | None:
@@ -153,16 +203,22 @@ class MigrationLoader:
         except OSError:
             return None
 
-    async def build_graph(self, *, replaces_migrations: bool = True) -> None:
-        """Builds the graph of the migrations on disk.
+    async def build_graph(
+        self, *, replaces_migrations: bool = True, applied_migrations: set[MigrationKey] | None = None
+    ) -> None:
+        """Build definitions against the authoritative applied history before selecting replacements.
 
         Args:
             replaces_migrations: Put each squashed migration in place of the ones it replaces, as
                 the applied ones say - when False, every migration on disk is a node of its own.
+            applied_migrations: A captured history merged from each application's owning journal.
+                None reads this loader's recorder. The supplied set is copied before normalization.
         """
         self.load_disk()
         self.graph = MigrationGraph()
-        self.applied_migrations = set(await self.recorder.applied_migrations())
+        self.applied_migrations = set(
+            await self.recorder.applied_migrations() if applied_migrations is None else applied_migrations
+        )
 
         for key, migration in self.disk_migrations.items():
             self.graph.add_node(key, migration)
@@ -174,9 +230,28 @@ class MigrationLoader:
             self._add_external_dependencies(key, migration)
 
         self.replacements = {key: migration for key, migration in self.disk_migrations.items() if migration.replaces}
+        # Normalize historical squash labels on this loader's independent declarations.
+        coverage = {
+            key: frozenset(MigrationKey(app_label=app, name=name) for app, name in migration.replaces)
+            for key, migration in self.replacements.items()
+        }
+        for key, migration in self.replacements.items():
+            migration.replacement_aliases = tuple(
+                dict.fromkeys(
+                    [
+                        *migration.replacement_aliases,
+                        *(
+                            (other.app_label, other.name)
+                            for other in sorted(self.replacements)
+                            if coverage[other] < coverage[key]
+                        ),
+                    ]
+                )
+            )
         if replaces_migrations:
-            for key, migration in self.replacements.items():
-                self._apply_replacement(key, migration)
+            for key in sorted(self.replacements, key=lambda item: (-len(coverage[item]), item)):
+                if key in self.graph.node_map:
+                    self._apply_replacement(key, self.replacements[key])
 
         self.graph.validate_consistency()
 
@@ -198,7 +273,8 @@ class MigrationLoader:
         if all(applied_flags):
             self.applied_migrations.add(key)
         if all(applied_flags) or not any(applied_flags):
-            self.graph.remove_replaced_nodes(key, replaced_keys)
+            alias_keys = [MigrationKey(app_label=app, name=name) for app, name in migration.replacement_aliases]
+            self.graph.remove_replaced_nodes(key, [*replaced_keys, *alias_keys])
             return
         missing_keys = [
             replaced_key
@@ -214,7 +290,7 @@ class MigrationLoader:
         self.graph.remove_replacement_node(key, replaced_keys)
 
     def _check_key(self, key: MigrationKey, current_app: str) -> MigrationKey | None:
-        if (key.name != FIRST_MIGRATION and key.name != LATEST_MIGRATION) or key in self.graph.nodes:
+        if (key.name != FIRST_MIGRATION and key.name != LATEST_MIGRATION) or key in self.graph.node_map:
             return key
         if key.app_label == current_app:
             return None

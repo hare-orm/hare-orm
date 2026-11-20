@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.classes.constants import CONTAINER_MAX_DEPTH
+from hare.classes.deferred_import import DeferredImport
 from hare.exceptions import QueryError
 from hare.query.expressions.constants import (
     ISNULL_LOOKUP_SUFFIXES,
@@ -11,18 +13,30 @@ from hare.query.expressions.constants import (
     LONG_IN_LIST_STRUCTURE,
     PLAIN_VALUE_TYPES,
     RANGE_LOOKUP_SUFFIX,
-    VALUE_PARAMETER_MAX_DEPTH,
 )
 from hare.query.plans.description.plan_context import PlanContext
 from hare.query.plans.description.plan_description import PlanDescription
 from hare.query.plans.description.plannable import Plannable
-from hare.query.query_connection import QueryConnection
+
+if TYPE_CHECKING:
+    from hare.query.queryset.combination.queryset_combination import QuerySetCombination
+    from hare.query.queryset.query_specification import QuerySpecification
+    from hare.query.queryset.queryset import QuerySet
 
 
 class FilterPlanDescriptions:
     """How a filter describes its value for a plan: a plain value or a list by its type or length (its
     values bound), a value written into the SQL text by itself (part of the key), and a query
     compared with by the query's own description."""
+
+    #: ``QuerySet`` - imported at its first read, as its module imports this one.
+    query_set_class: ClassVar[DeferredImport[type[QuerySet[Any, Any]]]] = DeferredImport(
+        "hare.query.queryset", "QuerySet"
+    )
+    #: ``QuerySetCombination`` - imported at its first read, as its module imports this one.
+    query_set_combination: ClassVar[DeferredImport[type[QuerySetCombination]]] = DeferredImport(
+        "hare.query.queryset.combination.queryset_combination", "QuerySetCombination"
+    )
 
     @staticmethod
     def describe_value_filter(
@@ -68,7 +82,7 @@ class FilterPlanDescriptions:
                 # A bound left None opens the range on its side - a plain comparison of the other
                 # bound.
                 values.append(value)
-                bounds = cast("list[Any] | tuple[Any, ...]", value)
+                bounds: list[Any] | tuple[Any, ...] = value  # type: ignore[assignment]
                 return RANGE_LOOKUP_SUFFIX, (bounds[0] is None, bounds[1] is None)
             # A list of another length renders another number of parameters.
             values.append(value)
@@ -100,11 +114,11 @@ class FilterPlanDescriptions:
             The shape, hashable.
 
         Raises:
-            QueryError: The value nests deeper than ``VALUE_PARAMETER_MAX_DEPTH`` - or holds itself.
+            QueryError: The value nests deeper than ``CONTAINER_MAX_DEPTH`` - or holds itself.
         """
-        if isinstance(value, (dict, list, tuple, set)) and depth > VALUE_PARAMETER_MAX_DEPTH:
+        if isinstance(value, (dict, list, tuple, set)) and depth > CONTAINER_MAX_DEPTH:
             raise QueryError(
-                f"A filter value nesting deeper than {VALUE_PARAMETER_MAX_DEPTH} levels, or holding itself, can't "
+                f"A filter value nesting deeper than {CONTAINER_MAX_DEPTH} levels, or holding itself, can't "
                 "be compared"
             )
         if isinstance(value, dict):
@@ -178,14 +192,23 @@ class FilterPlanDescriptions:
         from hare.query.queryset import QuerySet
         from hare.query.statements import AwaitableQuery
 
+        if isinstance(value, (QuerySet, AwaitableQuery)):
+            if context.binding is not None:
+                from hare.query.queryset.pending_calls.calls_before_setup import CallsBeforeSetup
+
+                value = CallsBeforeSetup.bind(value, context.application_context, context.binding.graph)
+            elif value._binding is None:
+                return None
         if isinstance(value, QuerySet):
             # The values it selects, else its primary key - or the rows it combines, whose
             # primary key is selected from them built into the filter.
             value = value._get_filter_value_compiler()
         if isinstance(value, AwaitableQuery):
-            filter_value_query = value._get_filter_value_query()
+            filter_value_query: QuerySpecification[Any] = value._get_filter_value_query()
+            if filter_value_query._connection is not None:
+                return None
             return PlanDescription.combine(
-                ("query", QueryConnection.get_pinned_connection_name(filter_value_query)),
+                ("query",),
                 (filter_value_query.get_plan_description(context),),
             )
         return value.get_plan_description(context)
@@ -218,12 +241,8 @@ class FilterPlanDescriptions:
         Returns:
             True for a queryset combining querysets of model instances.
         """
-        # Deferred import: hare.query.queryset imports this module at import time.
-        from hare.query.queryset import QuerySet
-        from hare.query.queryset.combination.queryset_combination import QuerySetCombination
-
         return (
-            isinstance(value, QuerySet)
+            isinstance(value, FilterPlanDescriptions.query_set_class)
             and value._combination is not None
-            and not QuerySetCombination.selects_values(value)
+            and not FilterPlanDescriptions.query_set_combination.selects_values(value)
         )

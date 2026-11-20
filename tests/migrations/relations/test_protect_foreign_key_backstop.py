@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.exceptions import IntegrityError
 from hare.fields import CharField
 from hare.fields.constants import CASCADE, SET_NULL
@@ -26,6 +27,7 @@ from tests.shared_models.testmodels import (
     O2O_null,
 )
 from tests.utils.operations import apply_operations
+from tests.utils.project_sources import ProjectSources
 
 CURRENT_PROTECT_RULE = ("NO ACTION", "IMMEDIATE")
 
@@ -63,7 +65,9 @@ async def get_foreign_key_rule(connection, table: str, column: str) -> tuple[str
 
 
 def build_state(*models) -> State:
-    return State(models={("models", model.__name__): ModelState.make_from_model("models", model) for model in models})
+    return State(
+        models={("models", model.__name__): ModelState.make_from_declaration("models", model) for model in models}
+    )
 
 
 @requires_features(supports_foreign_keys=True)
@@ -73,36 +77,36 @@ async def test_alter_m2m_on_delete_rebuilds_the_through_table_constraints(db_iso
     columns and never touched its FK constraints, so the database kept the old ON DELETE action."""
     connection = db_isolated.get_connection()
     editor = _get_schema_editor(connection)
-    protect_field = M2MOnDeleteProtectParent._meta.fields_map["peers"]
+    protect_field = HareContext.require_current().apps.get_binding(M2MOnDeleteProtectParent).fields_map["peers"]
     through_table = protect_field.through
     backward_key = protect_field.backward_keys[0]
     forward_key = protect_field.forward_keys[0]
 
     cascade_field = copy(protect_field)
     cascade_field.on_delete = CASCADE
-    await editor.many_to_many_through_tables.alter_many_to_many_field(
-        M2MOnDeleteProtectParent, protect_field, cascade_field
-    )
+    await editor.many_to_many_through_tables.get_many_to_many_change_plan(
+        HareContext.require_current().apps.get_binding(M2MOnDeleteProtectParent), protect_field, cascade_field
+    ).execute(editor)
     assert (await get_foreign_key_rule(connection, through_table, backward_key))[0] == "CASCADE"
     assert (await get_foreign_key_rule(connection, through_table, forward_key))[0] == "CASCADE"
 
     parent = await M2MOnDeleteProtectParent.objects.create(name="parent")
     peer = await M2MOnDeleteProtectPeer.objects.create(name="peer")
     await parent.peers.add(peer)
-    parent_table = M2MOnDeleteProtectParent._meta.db_table
+    parent_table = HareContext.require_current().apps.get_binding(M2MOnDeleteProtectParent).db_table
     await connection.execute(f'DELETE FROM "{parent_table}" WHERE "id" = {parent.pk}')
     assert await connection.execute_dicts(f'SELECT * FROM "{through_table}"') == []
 
     set_null_field = copy(protect_field)
     set_null_field.on_delete = SET_NULL
-    await editor.many_to_many_through_tables.alter_many_to_many_field(
-        M2MOnDeleteProtectParent, cascade_field, set_null_field
-    )
+    await editor.many_to_many_through_tables.get_many_to_many_change_plan(
+        HareContext.require_current().apps.get_binding(M2MOnDeleteProtectParent), cascade_field, set_null_field
+    ).execute(editor)
     assert (await get_foreign_key_rule(connection, through_table, backward_key))[0] == "SET NULL"
 
-    await editor.many_to_many_through_tables.alter_many_to_many_field(
-        M2MOnDeleteProtectParent, set_null_field, protect_field
-    )
+    await editor.many_to_many_through_tables.get_many_to_many_change_plan(
+        HareContext.require_current().apps.get_binding(M2MOnDeleteProtectParent), set_null_field, protect_field
+    ).execute(editor)
     assert await get_foreign_key_rule(connection, through_table, backward_key) == CURRENT_PROTECT_RULE
     assert await get_foreign_key_rule(connection, through_table, forward_key) == CURRENT_PROTECT_RULE
 
@@ -132,11 +136,7 @@ async def test_table_rebuild_keeps_the_unique_constraint_of_a_one_to_one_field(d
 def write_protect_migrations(tmp_path: Path, app_label: str, schema_operations: list[str]) -> str:
     """Writes an app whose 0001 creates a parent table and a child with a PROTECT FK to it, and whose
     atomic 0002 inserts a row into each, then runs ``schema_operations``."""
-    package_dir = tmp_path / app_label
-    migrations_dir = package_dir / "migrations"
-    migrations_dir.mkdir(parents=True)
-    (package_dir / "__init__.py").write_text("", encoding="ascii")
-    (migrations_dir / "__init__.py").write_text("", encoding="ascii")
+    migrations_dir = ProjectSources(tmp_path).prepare_migrations(tmp_path / app_label)
     (migrations_dir / "0001_initial.py").write_text(
         "\n".join(
             [

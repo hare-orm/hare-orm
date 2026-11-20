@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Collection
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Callable, Collection, Mapping
+from dataclasses import replace
+from typing import TYPE_CHECKING
 
 from hare.exceptions import ConfigurationError
 from hare.fields.relations.swappable_model_reference import SwappableModelReference
 from hare.migrations.autodetection.operation_sorter import OperationSorter
 from hare.migrations.autodetection.split_migration import SplitMigration
-from hare.migrations.operations import AddField, AlterField, CreateModel
+from hare.migrations.operations.dependencies.constants import DATABASE_DEPENDENCY_SUBJECTS
+from hare.migrations.operations.dependencies.prepared_operation_graph import PreparedOperationGraph
 from hare.migrations.operations.dependencies.relation_dependencies import RelationDependencies
 from hare.migrations.operations.enums import DependencySubject, DependencyType
 
@@ -38,11 +40,13 @@ class MigrationSplitter:
         state: State,
         apps_with_migrations: Collection[str],
         get_leaf_migrations: Callable[[str], list[tuple[str, str]]],
+        *,
+        connection_by_app: Mapping[str, str | None] | None = None,
     ) -> None:
         self.state = state
         self.apps_with_migrations = set(apps_with_migrations)
         self.get_leaf_migrations = get_leaf_migrations
-        self.sorter = OperationSorter(state)
+        self.sorter = OperationSorter(state, connection_by_app)
 
     def split(self, operations_by_app: dict[str, list[HareOperation]]) -> list[SplitMigration]:
         """The new migrations.
@@ -61,7 +65,9 @@ class MigrationSplitter:
             (app_label, operation) for app_label, operations in operations_by_app.items() for operation in operations
         ]
         ordered = self.sorter.sort(entries)
-        providers = self.sorter.get_providers(ordered)
+        providers = PreparedOperationGraph.get_providers(
+            ordered, self.sorter.connection_by_app, state=self.sorter.state
+        )
         migrations: list[SplitMigration] = []
         current_by_app: dict[str, int] = {}
         migration_by_position: dict[int, int] = {}
@@ -70,14 +76,19 @@ class MigrationSplitter:
             existing_dependencies: set[tuple[str, str]] = set()
             swappable_app_labels = self.get_swappable_app_labels(app_label, operation)
             for requirement in self.sorter.get_required(app_label, operation):
-                provider_positions = [
-                    provider_position
-                    for key in self.sorter.get_provider_keys(requirement)
-                    for provider_position in providers.get(key, ())
-                    if provider_position != position
-                ]
+                provider_positions = PreparedOperationGraph.get_provider_positions(requirement, providers, position)
                 if provider_positions:
                     needed_migrations.add(migration_by_position[min(provider_positions)])
+                    continue
+                if requirement.subject in DATABASE_DEPENDENCY_SUBJECTS:
+                    resource = replace(requirement, dependency_type=DependencyType.CREATED)
+                    provider_app = self.state.native_providers.get(resource)
+                    if (
+                        provider_app is not None
+                        and provider_app != app_label
+                        and provider_app in self.apps_with_migrations
+                    ):
+                        existing_dependencies.update(self.get_leaf_migrations(provider_app))
                     continue
                 if (
                     requirement.subject not in self.APP_SUBJECTS
@@ -98,7 +109,7 @@ class MigrationSplitter:
                     migration.split_dependencies.add(current)
                 migrations.append(migration)
                 current = current_by_app[app_label] = len(migrations) - 1
-            migrations[current].operations.append(cast("HareOperation", operation))
+            migrations[current].operations.append(operation)  # type: ignore[arg-type]
             migrations[current].split_dependencies.update(
                 needed for needed in needed_migrations if migrations[needed].app_label != app_label
             )
@@ -127,8 +138,7 @@ class MigrationSplitter:
             stack.extend(migrations[position].split_dependencies)
         return False
 
-    @staticmethod
-    def get_swappable_app_labels(app_label: str, operation: Operation) -> set[str]:
+    def get_swappable_app_labels(self, app_label: str, operation: Operation) -> set[str]:
         """The apps the ``swappable()`` relations of an operation point into now - a migration depends on
         their setting, not on a migration of theirs.
 
@@ -136,16 +146,12 @@ class MigrationSplitter:
             app_label: The operation's app.
             operation: The operation.
         """
-        fields: list[Any] = []
-        if isinstance(operation, CreateModel):
-            fields = [field for _field_name, field in operation.fields]
-        elif isinstance(operation, (AddField, AlterField)):
-            fields = [operation.field]
+        app_label, fields = RelationDependencies.get_declared_operation_fields(app_label, operation)
         app_labels: set[str] = set()
         for field in fields:
             model_name = getattr(field, "model_name", None)
             if isinstance(model_name, SwappableModelReference):
-                target_key = RelationDependencies.get_target_key(model_name, app_label)
+                target_key = RelationDependencies.get_target_key(model_name, app_label, self.state)
                 if target_key is not None:
                     app_labels.add(target_key[0])
         return app_labels

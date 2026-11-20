@@ -5,14 +5,8 @@ import pytest
 from hare.contrib.request_query import OffsetPagination, OrderingConfig, RequestQuery
 from hare.exceptions import FieldError, QueryError
 from hare.query.expressions import Q
-from tests.contrib.request_query.models import Book, BookStatus, LineReturn, Visit
-from tests.contrib.request_query.queries import CatalogBookQuery, PublishedBookQuery
-
-
-class LineReturnQuery(RequestQuery[LineReturn]):
-    class Meta:
-        queryset = LineReturn.objects.all()
-        pagination = None
+from tests.contrib.request_query.models import Book, BookStatus, LineReturn, Refund, Visit
+from tests.contrib.request_query.queries import CatalogBookQuery, LineReturnQuery, PublishedBookQuery, RefundQuery
 
 
 class JoinedBookQuery(RequestQuery[Book]):
@@ -98,6 +92,22 @@ async def test_most_frequent_first_and_a_limit(library):
 @pytest.mark.asyncio
 async def test_a_relation_to_a_composite_key_counts_by_the_key(library):
     assert (await LineReturnQuery().count_by("line"))["line"] == {(2, 1): 1, (3, 2): 1}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parameters", [{"line": "2,1"}, {"line__in": ["2,1"]}, {"line__pk__in": ["2,1"]}])
+async def test_a_composite_relation_skips_each_spelling_of_its_own_filter(library, parameters):
+    query = LineReturnQuery(**parameters)
+    assert [row.reason for row in await query.fetch()] == ["damaged"]
+    assert await query.count_by("line") == {"line": {(2, 1): 1, (3, 2): 1}}
+
+
+@pytest.mark.asyncio
+async def test_a_nested_composite_relation_skips_its_key_filter_but_keeps_other_fields(library):
+    await Refund.objects.create(id=2, line_return=await LineReturn.objects.get(id=2), amount=200)
+    query = RefundQuery(line_return__line__pk__in=["2,1"], line_return__line__book__author__name="Boris")
+
+    assert await query.count_by("line_return__line") == {"line_return__line": {(3, 2): 1}}
 
 
 @pytest.mark.asyncio

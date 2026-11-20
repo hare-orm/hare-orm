@@ -194,8 +194,8 @@ def test_long_through_table_names_do_not_collide():
         apps.register_model("models", model)
     apps.init_relations()
 
-    through1 = TableB1._meta.fields_map["rel"].through
-    through2 = TableB2._meta.fields_map["rel"].through
+    through1 = apps.get_binding(TableB1).fields_map["rel"].through
+    through2 = apps.get_binding(TableB2).fields_map["rel"].through
     assert through1 != through2
     assert len(through1.encode()) <= 63
     assert len(through2.encode()) <= 63

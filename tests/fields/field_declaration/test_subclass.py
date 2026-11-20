@@ -4,6 +4,7 @@ import pytest
 
 from hare.contrib.test import requires_features
 from hare.core.connections.connections import Connections
+from hare.core.hare_context import HareContext
 from hare.exceptions import ValidationError
 from tests.fields.field_declaration.subclass_models import (
     Contact,
@@ -130,7 +131,7 @@ async def test_date_field_subclass_to_python_value_override_runs_on_native_drive
     if DatabaseUnderTest.get_dialect().name != "postgresql":
         pytest.skip("datetime.date is only DB_NATIVE on Postgres - this bug can't manifest on sqlite")
 
-    field = DateMarkerModel._meta.fields_map["event_date"]
+    field = HareContext.require_current().apps.get_binding(DateMarkerModel).fields_map["event_date"]
     created = await DateMarkerModel.objects.create(event_date=datetime.date(2020, 1, 1))
     field.hydration_log.clear()  # Model.__init__() already logged one call during construction.
 

@@ -1,6 +1,7 @@
 import pytest
 
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.ddl.constraints import UniqueConstraint
 from hare.ddl.indexes import Index
 from hare.exceptions import ConfigurationError, IntegrityError
@@ -43,7 +44,7 @@ async def test_unique_together_with_foreign_keys(db):
 
 def test_valid_unique_constraints_and_indexes_pass_indexability_check(db):
     """Sanity anchor - an already-valid UniqueConstraint doesn't get flagged."""
-    ModelDefinitionChecks.validate_index_fields(UniqueTogetherFields._meta)
+    ModelDefinitionChecks.validate_index_fields(HareContext.require_current().apps.get_binding(UniqueTogetherFields))
 
 
 @pytest.mark.parametrize(
@@ -63,7 +64,7 @@ def test_valid_unique_constraints_and_indexes_pass_indexability_check(db):
     ],
 )
 def test_a_unique_constraint_of_a_field_it_cannot_index_raises(db, model_class, field_names, message):
-    meta = model_class._meta
+    meta = HareContext.require_current().apps.get_binding(model_class)
     original = meta.constraints
     meta.constraints = (UniqueConstraint(fields=field_names),)
     try:
@@ -74,7 +75,7 @@ def test_a_unique_constraint_of_a_field_it_cannot_index_raises(db, model_class, 
 
 
 def test_tuple_form_indexes_on_non_indexable_field_raises(db):
-    meta = JSONFields._meta
+    meta = HareContext.require_current().apps.get_binding(JSONFields)
     original = meta.indexes
     meta.indexes = (("data",),)
     try:
@@ -85,7 +86,7 @@ def test_tuple_form_indexes_on_non_indexable_field_raises(db):
 
 
 def test_index_object_form_indexes_on_non_indexable_field_raises(db):
-    meta = JSONFields._meta
+    meta = HareContext.require_current().apps.get_binding(JSONFields)
     original = meta.indexes
     meta.indexes = (Index(fields=("data",)),)
     try:
@@ -137,7 +138,9 @@ async def test_unique_together_and_index_over_foreign_key_use_its_source_field_c
     await connection.execute_script("DROP TABLE IF EXISTS ut_source_membership")
     await connection.execute_script("DROP TABLE IF EXISTS ut_source_owner")
     try:
-        assert membership_class._meta.get_column_names(["owner", "role", "owner_id"]) == [
+        assert HareContext.require_current().apps.get_binding(membership_class).get_column_names(
+            ["owner", "role", "owner_id"]
+        ) == [
             "owner_ref",
             "role",
             "owner_ref",
@@ -145,13 +148,15 @@ async def test_unique_together_and_index_over_foreign_key_use_its_source_field_c
         if ddl_path == "generate_schemas":
             schema_generator = connection.dialect.schema_editor_class(connection)
             for model in (owner_class, membership_class):
-                table_sql = schema_generator.table_creation.get_model_sql_data(model).get_table_creation_sql()
+                table_sql = schema_generator.table_creation.get_model_sql_data(
+                    HareContext.require_current().apps.get_binding(model)
+                ).get_table_creation_sql()
                 assert "owner_id" not in table_sql
                 await connection.execute_script(table_sql)
         else:
             editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
-            await editor.create_model(owner_class)
-            await editor.create_model(membership_class)
+            await editor.create_model(HareContext.require_current().apps.get_binding(owner_class))
+            await editor.create_model(HareContext.require_current().apps.get_binding(membership_class))
 
         table_info = await DatabaseCatalog.inspect_table(connection, "ut_source_membership")
         assert sorted((tuple(index.columns), index.is_unique) for index in table_info.indexes) == [

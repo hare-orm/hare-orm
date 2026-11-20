@@ -1,3 +1,4 @@
+from inspect import signature
 from unittest.mock import ANY, AsyncMock, patch
 
 import pytest
@@ -14,6 +15,10 @@ async def test_asyncpg_connection_params():
     import asyncpg
 
     from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
+
+    pool_sizes = {"min_size": 1}
+    if "init_size" in signature(asyncpg.create_pool).parameters:
+        pool_sizes = {"min_size": 0, "init_size": 1}
 
     with (
         patch(
@@ -52,17 +57,16 @@ async def test_asyncpg_connection_params():
                 timeout=30,
                 user="root",
                 max_size=16,
-                min_size=1,
                 connection_class=asyncpg.connection.Connection,
                 loop=None,
                 server_settings={"TimeZone": "UTC"},
                 reset=AsyncpgClient._skip_default_reset,
                 init=ANY,
                 connect=ANY,
+                **pool_sizes,
             )
 
 
-@pytest.mark.requires("native")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ssl_credential", ["ssl", "sslmode"])
 async def test_rust_pg_rejects_asyncpg_style_ssl_credential(ssl_credential):

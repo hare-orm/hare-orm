@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
-from hare.dialects.postgresql.lookups.trigram.trigram_operator_term import TrigramOperatorTerm
 from hare.fields.data.numeric.float_field import FloatField
 from hare.query.expressions import Expression, ExpressionContext, ExpressionResult, F, Value
 from hare.query.expressions.dialect_expressions import DialectExpressions
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 from hare.sql.terms.functions.function import Function
+from hare.sql.terms.infix_operator import InfixOperator
 
 
 class TrigramFunction(Expression):
@@ -19,7 +19,7 @@ class TrigramFunction(Expression):
         string: The string compared with it.
     """
 
-    #: Shared, long-lived instance - the statement plans hold output fields weakly.
+    #: Shared output descriptor reused by expression results.
     OUTPUT_FIELD: ClassVar[FloatField[Any]] = FloatField()
 
     #: The pg_trgm function, or the distance operator.
@@ -47,14 +47,16 @@ class TrigramFunction(Expression):
         return f"{type(self).__name__}({self.expression!r}, {self.string!r})"
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
-        DialectExpressions.raise_if_dialect_lacks(self, expression_context.dialect)
+        DialectExpressions.raise_if_dialect_lacks(
+            self, expression_context.dialect, checks_admission=expression_context.checks_dialect_admission
+        )
         expression_result = self.expression.get_result(expression_context)
         string_term = self.string_value.get_result(expression_context).term
         left, right = (
             (string_term, expression_result.term) if self.string_first else (expression_result.term, string_term)
         )
         term = (
-            TrigramOperatorTerm(self.function_name, left, right)
+            InfixOperator(left, f" {self.function_name} ", right)
             if self.is_operator
             else Function(self.function_name, left, right)
         )

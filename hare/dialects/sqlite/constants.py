@@ -13,6 +13,11 @@ from hare.vectors.enums import VectorDistanceType
 
 #: The file name SQLite opens as a private in-memory database instead of a file.
 SQLITE_IN_MEMORY_FILENAME = ":memory:"
+SQLITE_STORAGE_UNOBSERVED_MESSAGE = "SQLite native storage identity was not observed; refusing an unanchored deletion"
+SQLITE_DATABASE_FILE_EXISTS_MESSAGE = "database file {filename!r} already exists"
+SQLITE_PRAGMA_RESTORE_FAILED = "SQLite operation and pragma restoration both failed"
+#: Boolean PRAGMA spellings accepted by SQLite and the connection settings.
+SQLITE_PRAGMA_ENABLED_VALUES = frozenset({"1", "on", "true", "yes"})
 
 #: Default PRAGMA values applied on connect unless overridden via connection credentials.
 SQLITE_DEFAULT_JOURNAL_MODE = "WAL"
@@ -27,35 +32,61 @@ SQLITE_FILE_FORMAT_PRAGMAS = ("page_size", "auto_vacuum")
 #: each value is checked before it is sent (a PRAGMA can't take a bind parameter).
 SQLITE_CONNECTION_OPTIONS = ConnectionOptions(
     ConnectionOption(
-        "journal_mode", ConnectionOptionType.CHOICE, choices=("DELETE", "TRUNCATE", "PERSIST", "MEMORY", "WAL", "OFF")
+        "journal_mode",
+        ConnectionOptionType.CHOICE,
+        choices=("DELETE", "TRUNCATE", "PERSIST", "MEMORY", "WAL", "OFF"),
+        sql_value=True,
     ),
     ConnectionOption(
-        "synchronous", ConnectionOptionType.CHOICE, choices=("OFF", "NORMAL", "FULL", "EXTRA", "0", "1", "2", "3")
+        "synchronous",
+        ConnectionOptionType.CHOICE,
+        choices=("OFF", "NORMAL", "FULL", "EXTRA", "0", "1", "2", "3"),
+        sql_value=True,
     ),
-    ConnectionOption("temp_store", ConnectionOptionType.CHOICE, choices=("DEFAULT", "FILE", "MEMORY", "0", "1", "2")),
-    ConnectionOption("locking_mode", ConnectionOptionType.CHOICE, choices=("NORMAL", "EXCLUSIVE")),
     ConnectionOption(
-        "auto_vacuum", ConnectionOptionType.CHOICE, choices=("NONE", "FULL", "INCREMENTAL", "0", "1", "2")
+        "temp_store", ConnectionOptionType.CHOICE, choices=("DEFAULT", "FILE", "MEMORY", "0", "1", "2"), sql_value=True
     ),
-    ConnectionOption("secure_delete", ConnectionOptionType.CHOICE, choices=("ON", "OFF", "FAST", "0", "1")),
-    ConnectionOption("foreign_keys", ConnectionOptionType.BOOLEAN),
-    ConnectionOption("case_sensitive_like", ConnectionOptionType.BOOLEAN),
-    ConnectionOption("recursive_triggers", ConnectionOptionType.BOOLEAN),
-    ConnectionOption("automatic_index", ConnectionOptionType.BOOLEAN),
-    ConnectionOption("cell_size_check", ConnectionOptionType.BOOLEAN),
-    ConnectionOption("defer_foreign_keys", ConnectionOptionType.BOOLEAN),
-    ConnectionOption("ignore_check_constraints", ConnectionOptionType.BOOLEAN),
-    ConnectionOption("trusted_schema", ConnectionOptionType.BOOLEAN),
-    ConnectionOption("reverse_unordered_selects", ConnectionOptionType.BOOLEAN),
-    ConnectionOption("journal_size_limit", ConnectionOptionType.WHOLE_NUMBER, minimum=-1, maximum=2**40),
-    ConnectionOption("cache_size", ConnectionOptionType.WHOLE_NUMBER, minimum=-(2**31), maximum=2**31 - 1),
-    ConnectionOption("busy_timeout", ConnectionOptionType.WHOLE_NUMBER, minimum=0, maximum=86_400_000),
-    ConnectionOption("mmap_size", ConnectionOptionType.WHOLE_NUMBER, minimum=0, maximum=2**40),
-    ConnectionOption("page_size", ConnectionOptionType.WHOLE_NUMBER, minimum=512, maximum=65536, power_of_two=True),
-    ConnectionOption("wal_autocheckpoint", ConnectionOptionType.WHOLE_NUMBER, minimum=0, maximum=2**31 - 1),
-    ConnectionOption("threads", ConnectionOptionType.WHOLE_NUMBER, minimum=0, maximum=64),
-    ConnectionOption("max_page_count", ConnectionOptionType.WHOLE_NUMBER, minimum=1, maximum=2**32 - 2),
-    ConnectionOption("cache_spill", ConnectionOptionType.WHOLE_NUMBER, minimum=0, maximum=2**31 - 1),
+    ConnectionOption("locking_mode", ConnectionOptionType.CHOICE, choices=("NORMAL", "EXCLUSIVE"), sql_value=True),
+    ConnectionOption(
+        "auto_vacuum",
+        ConnectionOptionType.CHOICE,
+        choices=("NONE", "FULL", "INCREMENTAL", "0", "1", "2"),
+        sql_value=True,
+    ),
+    ConnectionOption(
+        "secure_delete",
+        ConnectionOptionType.CHOICE,
+        choices=("ON", "OFF", "TRUE", "FALSE", "YES", "NO", "FAST", "0", "1"),
+        sql_value=True,
+    ),
+    ConnectionOption("foreign_keys", ConnectionOptionType.BOOLEAN, sql_value=True),
+    ConnectionOption("case_sensitive_like", ConnectionOptionType.BOOLEAN, sql_value=True),
+    ConnectionOption("recursive_triggers", ConnectionOptionType.BOOLEAN, sql_value=True),
+    ConnectionOption("automatic_index", ConnectionOptionType.BOOLEAN, sql_value=True),
+    ConnectionOption("cell_size_check", ConnectionOptionType.BOOLEAN, sql_value=True),
+    ConnectionOption("defer_foreign_keys", ConnectionOptionType.BOOLEAN, sql_value=True),
+    ConnectionOption("ignore_check_constraints", ConnectionOptionType.BOOLEAN, sql_value=True),
+    ConnectionOption("trusted_schema", ConnectionOptionType.BOOLEAN, sql_value=True),
+    ConnectionOption("reverse_unordered_selects", ConnectionOptionType.BOOLEAN, sql_value=True),
+    ConnectionOption(
+        "journal_size_limit", ConnectionOptionType.WHOLE_NUMBER, minimum=-1, maximum=2**40, sql_value=True
+    ),
+    ConnectionOption(
+        "cache_size", ConnectionOptionType.WHOLE_NUMBER, minimum=-(2**31), maximum=2**31 - 1, sql_value=True
+    ),
+    ConnectionOption("busy_timeout", ConnectionOptionType.WHOLE_NUMBER, minimum=0, maximum=86400000, sql_value=True),
+    ConnectionOption("mmap_size", ConnectionOptionType.WHOLE_NUMBER, minimum=0, maximum=2**40, sql_value=True),
+    ConnectionOption(
+        "page_size", ConnectionOptionType.WHOLE_NUMBER, minimum=512, maximum=65536, power_of_two=True, sql_value=True
+    ),
+    ConnectionOption(
+        "wal_autocheckpoint", ConnectionOptionType.WHOLE_NUMBER, minimum=0, maximum=2**31 - 1, sql_value=True
+    ),
+    ConnectionOption("threads", ConnectionOptionType.WHOLE_NUMBER, minimum=0, maximum=64, sql_value=True),
+    ConnectionOption(
+        "max_page_count", ConnectionOptionType.WHOLE_NUMBER, minimum=1, maximum=2**32 - 2, sql_value=True
+    ),
+    ConnectionOption("cache_spill", ConnectionOptionType.WHOLE_NUMBER, minimum=0, maximum=2**31 - 1, sql_value=True),
 )
 
 #: The connection setting that installs hare's REGEXP functions - not a PRAGMA.
@@ -224,9 +255,6 @@ SQLITE_TYPE_MAP: list[tuple[str, str, dict[str, Any]]] = [
     ("text", "hare.fields.data.text.TextField", {}),
 ]
 
-#: SQLite's one namespace of a plain (non-ATTACHed) database.
-SQLITE_MAIN_SCHEMA = "main"
-
 SQLITE_TABLE_EXISTS_SQL = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?"
 #: Whether a table exists in one database of the connection - ``main`` or an attached one, quoted.
 SQLITE_DATABASE_TABLE_EXISTS_SQL = "SELECT 1 FROM {database}.sqlite_master WHERE type = 'table' AND name = ?"
@@ -235,28 +263,7 @@ SQLITE_DATABASE_TABLE_EXISTS_SQL = "SELECT 1 FROM {database}.sqlite_master WHERE
 #: quotes, backticks, square brackets (a doubled quote character inside stands for one) - or bare.
 SQLITE_IDENTIFIER_PATTERN = r'"(?:[^"]|"")+"|`(?:[^`]|``)+`|\[[^\]]+\]|\w+'
 
-#: A table-level ``CONSTRAINT "name" UNIQUE (...)`` clause of SQLite's literal CREATE TABLE text -
-#: its backing index is an unnamed ``sqlite_autoindex_*``, so the name is read from here.
-SQLITE_TABLE_UNIQUE_CONSTRAINT_RE = LazyPattern(
-    rf"\bCONSTRAINT\s+(?P<name>{SQLITE_IDENTIFIER_PATTERN})\s+UNIQUE\s*\((?P<columns>[^)]*)\)", re.IGNORECASE
-)
 
-#: SQLite's column type affinity rules, checked in order against the declared type's upper-cased
-#: text: the first rule one of whose substrings the type contains names its affinity. A type no
-#: rule matches has NUMERIC affinity, an empty one BLOB.
-SQLITE_TYPE_AFFINITY_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
-    (("INT",), "INTEGER"),
-    (("CHAR", "CLOB", "TEXT"), "TEXT"),
-    (("BLOB",), "BLOB"),
-    (("REAL", "FLOA", "DOUB"), "REAL"),  # codespell:ignore
-)
-
-SQLITE_DEFAULT_TYPE_AFFINITY = "NUMERIC"
-
-SQLITE_EMPTY_TYPE_AFFINITY = "BLOB"
-
-#: ``WITHOUT ROWID`` in a CREATE TABLE text - a table without the row id an INTEGER key column is.
-SQLITE_WITHOUT_ROWID_PATTERN = LazyPattern(r"\bWITHOUT\s+ROWID\b", re.IGNORECASE)
 #: The declared type of the key column that is the row id - only this exact type name.
 SQLITE_ROW_ID_TYPE = "INTEGER"
 #: The type an IntField column is declared - a column of another key declared INTEGER is the same
@@ -271,29 +278,14 @@ SQLITE_COLUMN_TYPE_SYNONYMS = {
     "FLOAT": "REAL",
 }
 
-#: The table options after the column list of a CREATE TABLE text as ``sqlite_master`` keeps it -
-#: ``WITHOUT ROWID`` and ``STRICT``, comma-separated.
-SQLITE_TABLE_OPTIONS_PATTERN = LazyPattern(
-    r"\)\s*(?P<options>(?:WITHOUT\s+ROWID|STRICT)(?:\s*,\s*(?:WITHOUT\s+ROWID|STRICT))*)\s*;?\s*$",
-    re.IGNORECASE,
-)
-
-
 #: A declared SQLite type string can carry its own size, e.g. "VARCHAR(255)" - SQLite has no
 #: separate metadata for this (its columns are dynamically typed), so the declared type string itself
 #: is the only place to read it from.
-SQLITE_SIZE_RE = LazyPattern(r"\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\)")
+SQLITE_SIZE_RE = LazyPattern(r"\(\s*(\d+)\s*(?:,\s*\d+\s*)?\)")
 
-SQLITE_INDEX_ON_RE = LazyPattern(rf"\bON\s+(?:{SQLITE_IDENTIFIER_PATTERN}|[\w.]+)\s*\(", re.IGNORECASE)
+SQLITE_INDEX_WHERE_RE = LazyPattern(r"WHERE\b\s*(?P<condition>.+?)\s*;?\s*$", re.IGNORECASE | re.DOTALL)
 
-SQLITE_INDEX_WHERE_RE = LazyPattern(r"^\s*WHERE\s+(?P<condition>.+?)\s*;?\s*$", re.IGNORECASE | re.DOTALL)
-
-#: An index term suffix Index(*expressions) can't carry - it wraps every term in parens.
-SQLITE_INDEX_TERM_MODIFIER_RE = LazyPattern(r"\s(?:ASC|DESC)\s*$|\bCOLLATE\b", re.IGNORECASE)
-
-SQLITE_INDEX_TERM_ORDER_RE = LazyPattern(r"\s(?P<direction>ASC|DESC)\s*$", re.IGNORECASE)
-
-SQLITE_INDEX_TERM_COLLATE_RE = LazyPattern(r"\bCOLLATE\b", re.IGNORECASE)
+SQLITE_DEFAULT_COLLATION = "binary"
 
 SQLITE_TRIGGERDEF_RE = LazyPattern(
     rf"""CREATE\s+TRIGGER\s+(?:IF\ NOT\ EXISTS\s+)?(?P<name>{SQLITE_IDENTIFIER_PATTERN})\s+
@@ -303,11 +295,6 @@ SQLITE_TRIGGERDEF_RE = LazyPattern(
         (?:WHEN\s+(?P<when>.+?)\s+)?
         BEGIN\s*(?P<body>.*?)\s*END\s*;?\s*$""",
     re.IGNORECASE | re.DOTALL | re.VERBOSE,
-)
-
-SQLITE_CHECK_CONSTRAINT_HEADER_RE = LazyPattern(
-    rf"(?:CONSTRAINT\s+(?P<name>{SQLITE_IDENTIFIER_PATTERN})\s+)?CHECK\s*\(",
-    re.IGNORECASE,
 )
 
 
@@ -432,6 +419,7 @@ SQLITE_DATABASE_LIST_SQL = "PRAGMA database_list"
 #: A table-reading PRAGMA (``table_xinfo``, ``index_list``, ``index_info``, ``foreign_key_list``) of a
 #: database of the connection, for a quoted table or index - a PRAGMA takes no parameters.
 SQLITE_DATABASE_PRAGMA_TEMPLATE = "PRAGMA {database}.{pragma}({name})"
+SQLITE_TABLE_LIST_SQL = "PRAGMA {database}.table_list"
 
 #: The declared column types hare writes for more than one field on SQLite - inspectdb maps them to the
 #: plain field and says which other field the column may hold, by the type, lowercased.

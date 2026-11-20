@@ -16,7 +16,7 @@ from hare.query.lookup_info.lookup_info import LookupInfo
 from hare.query.relation_loading.prefetching.prefetch import Prefetch
 
 if TYPE_CHECKING:
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class GenericForeignKeyPaths:
@@ -26,27 +26,28 @@ class GenericForeignKeyPaths:
 
     @staticmethod
     def get_generic_path(
-        model: type[Model], path: str
+        binding: ModelBinding, path: str
     ) -> tuple[str, GenericForeignKeyFieldInstance[Any], list[str]] | None:
         """Finds the generic foreign key a path names.
 
         Args:
-            model: The model the path is resolved on.
+            binding: The model the path is resolved on.
             path: The path - a filter key, a relation or field name.
 
         Returns:
             The relations before the field (``""`` for the model's own), the field and the parts
             after it; None when the path names none.
         """
-        declared_names = GenericForeignKeyFieldInstance.declared_names
-        if not declared_names:
+        model = binding._model
+        if "__" not in path:
+            generic_field = binding.generic_foreign_key_fields.get(path)
+            if generic_field is not None and generic_field.branch_names:
+                return "", generic_field, []
             return None
         segments = path.split("__")
-        if not declared_names.intersection(segments):
-            return None
         current_model = model
         for index, segment in enumerate(segments):
-            meta = current_model._meta
+            meta = binding.graph.get_binding(current_model)
             generic_field = meta.generic_foreign_key_fields.get(segment)
             if generic_field is not None and generic_field.branch_names:
                 return "__".join(segments[:index]), generic_field, segments[index + 1 :]
@@ -58,12 +59,12 @@ class GenericForeignKeyPaths:
 
     @staticmethod
     def get_filter_parts(
-        model: type[Model], key: str
+        binding: ModelBinding, key: str
     ) -> tuple[str, GenericForeignKeyFieldInstance[Any], bool, Lookup] | None:
         """Reads a filter key naming a generic foreign key.
 
         Args:
-            model: The model the key is resolved on.
+            binding: The model the key is resolved on.
             key: The filter key.
 
         Returns:
@@ -73,7 +74,7 @@ class GenericForeignKeyPaths:
         Raises:
             FieldError: A lookup the field doesn't take.
         """
-        generic_path = GenericForeignKeyPaths.get_generic_path(model, key)
+        generic_path = GenericForeignKeyPaths.get_generic_path(binding, key)
         if generic_path is None:
             return None
         relation_path, generic_field, rest = generic_path
@@ -88,11 +89,11 @@ class GenericForeignKeyPaths:
         return relation_path, generic_field, compares_type, Lookup(lookup_name)
 
     @staticmethod
-    def get_lookup_info(model: type[Model], key: str) -> LookupInfo | None:
+    def get_lookup_info(binding: ModelBinding, key: str) -> LookupInfo | None:
         """Describes a filter key naming a generic foreign key.
 
         Args:
-            model: The model the key is resolved on.
+            binding: The model the key is resolved on.
             key: The filter key.
 
         Returns:
@@ -103,14 +104,15 @@ class GenericForeignKeyPaths:
         Raises:
             FieldError: A lookup the field doesn't take.
         """
-        filter_parts = GenericForeignKeyPaths.get_filter_parts(model, key)
+        model = binding._model
+        filter_parts = GenericForeignKeyPaths.get_filter_parts(binding, key)
         if filter_parts is None:
             return None
         relation_path, generic_field, compares_type, lookup = filter_parts
         relations: list[Any] = []
         current_model = model
         for segment in relation_path.split("__") if relation_path else ():
-            relation = current_model._meta.fields_map[segment]
+            relation = binding.graph.get_binding(current_model).fields_map[segment]
             relations.append(relation)
             current_model = relation.related_model  # type: ignore[attr-defined]
         if lookup in GENERIC_FOREIGN_KEY_NULL_LOOKUPS:
@@ -119,7 +121,7 @@ class GenericForeignKeyPaths:
             value_type = str if compares_type else dict
         return LookupInfo(
             key=key,
-            model=model,
+            binding=binding,
             relations=tuple(relations),
             field=None,
             transforms=(),
@@ -136,12 +138,12 @@ class GenericForeignKeyPaths:
         )
 
     @staticmethod
-    def expand_relation_paths(model: type[Model], paths: tuple[Any, ...], method_name: str) -> tuple[Any, ...]:
+    def expand_relation_paths(binding: ModelBinding, paths: tuple[Any, ...], method_name: str) -> tuple[Any, ...]:
         """Relation paths with each one ending at a generic foreign key given as the paths of its
         branches - ``select_related("target")`` is ``select_related("post", "photo")``.
 
         Args:
-            model: The queryset's model.
+            binding: The queryset's model.
             paths: The paths - anything but a string is kept as it is.
             method_name: The method given them, for an error.
 
@@ -152,13 +154,11 @@ class GenericForeignKeyPaths:
             FieldError: A path goes on past a generic foreign key, or a ``Prefetch`` with a queryset
                 names one - a queryset reads one model, the branches several.
         """
-        if not GenericForeignKeyFieldInstance.declared_names:
-            return paths
         expanded_paths: list[Any] = []
         changed = False
         for path in paths:
             if isinstance(path, Prefetch) and (
-                prefetch_path := GenericForeignKeyPaths.get_generic_path(model, path.relation)
+                prefetch_path := GenericForeignKeyPaths.get_generic_path(binding, path.relation)
             ):
                 relation = path.relation
                 generic_field = prefetch_path[1]
@@ -167,7 +167,7 @@ class GenericForeignKeyPaths:
                     "one model, its branches differ; prefetch each branch by its name instead "
                     f"({', '.join(repr(name) for name in generic_field.branch_names)})"
                 )
-            generic_path = GenericForeignKeyPaths.get_generic_path(model, path) if isinstance(path, str) else None
+            generic_path = GenericForeignKeyPaths.get_generic_path(binding, path) if isinstance(path, str) else None
             if generic_path is None:
                 expanded_paths.append(path)
                 continue

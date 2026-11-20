@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Self, cast
+from typing import TYPE_CHECKING, Any, Self
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.ddl.expressions.declared_expressions import DeclaredExpressions
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.ddl.schema_objects.materialized_view import MaterializedView
+from hare.dialects.clickhouse.clickhouse_engine import ClickhouseEngine
 from hare.dialects.clickhouse.schema.constants import (
     CLICKHOUSE_REFRESH_EVERY_KEYWORD,
     CLICKHOUSE_REFRESH_SCHEDULE_PATTERN,
@@ -61,21 +62,24 @@ class ClickhouseMaterializedView(MaterializedView):
     """
 
     to: str | None = None
-    engine: str = "MergeTree"
+    engine: str | ClickhouseEngine = ClickhouseEngine("MergeTree")
     order_by: tuple[str | Expression | RawSQLTerm, ...] = ()
     partition_by: str | Expression | RawSQLTerm | None = None
     refresh: str | None = None
     append: bool = False
     depends_on: tuple[str, ...] = ()
 
+    @property
+    def has_internal_storage(self) -> bool:
+        return self.to is None
+
     def __post_init__(self) -> None:
         super().__post_init__()
         owner = f"ClickhouseMaterializedView {self.name!r}"
         if self.to is not None and (not isinstance(self.to, str) or not self.to.strip()):
             raise ConfigurationError(f"{owner}: to must be a table name, got {self.to!r}")
-        if not isinstance(self.engine, str) or not self.engine.strip():
-            raise ConfigurationError(f"{owner}: engine must be a non-empty string, got {self.engine!r}")
-        if isinstance(cast("object", self.order_by), str) or not all(
+        object.__setattr__(self, "engine", self.get_engine())
+        if isinstance(self.order_by, str) or not all(  # type: ignore[unreachable]
             DeclaredExpressions.is_declared_expression(key) for key in self.order_by
         ):
             raise ConfigurationError(
@@ -95,13 +99,15 @@ class ClickhouseMaterializedView(MaterializedView):
                 f'{owner}: refresh takes a schedule - "EVERY 1 HOUR", "AFTER 30 MINUTE", with OFFSET and '
                 f"RANDOMIZE FOR - got {self.refresh!r}"
             )
-        if isinstance(cast("object", self.depends_on), str) or not all(
+        if isinstance(self.depends_on, str) or not all(  # type: ignore[unreachable]
             isinstance(view_name, str) and view_name for view_name in self.depends_on
         ):
             raise ConfigurationError(f"{owner}: depends_on must be a sequence of view names, got {self.depends_on!r}")
         object.__setattr__(self, "order_by", tuple(self.order_by))
         object.__setattr__(self, "depends_on", tuple(self.depends_on))
-        if self.to is not None and (self.engine != "MergeTree" or self.order_by or self.partition_by is not None):
+        if self.to is not None and (
+            self.get_engine() != ClickhouseEngine("MergeTree") or self.order_by or self.partition_by is not None
+        ):
             raise ConfigurationError(
                 f"{owner}: a view writing to {self.to!r} has no storage of its own - engine, order_by and "
                 "partition_by are those of that table"
@@ -130,7 +136,13 @@ class ClickhouseMaterializedView(MaterializedView):
         """
         if isinstance(view, cls):
             return view
-        return cls(name=view.name, query=view.query, with_data=view.with_data, unique_columns=view.unique_columns)
+        return cls(
+            name=view.name,
+            query=view.query,
+            with_data=view.with_data,
+            unique_columns=view.unique_columns,
+            read_columns=view.read_columns,
+        )
 
     def get_sort_keys(self) -> tuple[str | Expression | RawSQLTerm, ...]:
         """What the view's own storage is sorted by.
@@ -144,7 +156,7 @@ class ClickhouseMaterializedView(MaterializedView):
         options = super().get_options()
         if self.to is not None:
             options["to"] = self.to
-        if self.engine != "MergeTree":
+        if self.get_engine() != ClickhouseEngine("MergeTree"):
             options["engine"] = self.engine
         if self.order_by:
             options["order_by"] = self.order_by
@@ -157,3 +169,7 @@ class ClickhouseMaterializedView(MaterializedView):
         if self.depends_on:
             options["depends_on"] = self.depends_on
         return options
+
+    def get_engine(self) -> ClickhouseEngine:
+        """Return the storage declaration, accepting a bare name for an argument-free engine."""
+        return ClickhouseEngine(self.engine) if isinstance(self.engine, str) else self.engine

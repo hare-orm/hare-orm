@@ -7,7 +7,7 @@ from hare.query.expressions.expression_result import ExpressionResult
 from hare.query.expressions.subqueries.declarations import KeyRowsQuery
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
-from hare.sql import Table
+from hare.sql import Query, Table
 
 if TYPE_CHECKING:
     from hare.query.expressions.expression_context import ExpressionContext
@@ -39,8 +39,6 @@ class CteRows(KeyRowsQuery):
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
         cte = Table(self.name)
         connection = expression_context.connection
-        query_class = (
-            connection.query_class if connection is not None else expression_context.model._meta.connection.query_class
-        )
+        query_class = connection.query_class if connection is not None else Query
         rows = query_class.from_(cte).select(*(cte[column] for column in self.columns))
         return ExpressionResult(term=rows, joins=[])

@@ -31,7 +31,8 @@ class DocsPage:
         #: The page's path under ``docs/``, with ``/`` separators - ``models/relations.md``.
         self.name = path.relative_to(docs_directory).as_posix()
         self.is_russian = self.name.endswith(RUSSIAN_PAGE_SUFFIX)
-        self.lines = path.read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8").splitlines()
+        self.line_count = len(lines)
         self.headings: list[PageHeading] = []
         self.code_blocks: list[PageCodeBlock] = []
         self.prose: list[PageProse] = []
@@ -41,7 +42,8 @@ class DocsPage:
         self.unnamed_fence_lines: list[int] = []
         #: Each heading's line -> whether text other than code follows it before the next heading.
         self.heading_has_text: dict[int, bool] = {}
-        self._split()
+        self.linked_page_names: list[tuple[int, str]] = []
+        self._split(lines)
 
     @property
     def sibling_name(self) -> str:
@@ -55,40 +57,7 @@ class DocsPage:
         """The name of the English page of the pair."""
         return self.sibling_name if self.is_russian else self.name
 
-    def get_linked_page_names(self) -> list[tuple[int, str]]:
-        """The pages of the site this page links, by the line of the link - external links and
-        links within the page left out.
-
-        Returns:
-            (line, page name under ``docs/``) of each link.
-        """
-        linked: list[tuple[int, str]] = []
-        directory = posixpath.dirname(self.name)
-        for line_number, text in self._get_lines_outside_code():
-            for match in MARKDOWN_LINK.finditer(text):
-                target = match["target"].split("#", 1)[0]
-                if not target.endswith(".md") or "://" in target:
-                    continue
-                linked.append((line_number, posixpath.normpath(posixpath.join(directory, target))))
-        return linked
-
-    def _get_lines_outside_code(self) -> list[tuple[int, str]]:
-        """The lines not inside a fenced code block - prose, headings and tables.
-
-        Returns:
-            (line number, text) of each such line.
-        """
-        outside: list[tuple[int, str]] = []
-        in_code = False
-        for line_number, text in enumerate(self.lines, start=1):
-            if CODE_FENCE.match(text):
-                in_code = not in_code
-                continue
-            if not in_code:
-                outside.append((line_number, text))
-        return outside
-
-    def _split(self) -> None:
+    def _split(self, lines: list[str]) -> None:
         """Splits the lines into headings, code blocks, table rows and prose."""
         in_code = False
         fence_line = 0
@@ -97,7 +66,8 @@ class DocsPage:
         code_lines: list[str] = []
         current_heading_line: int | None = None
         previous_line_in_table = False
-        for line_number, text in enumerate(self.lines, start=1):
+        directory = posixpath.dirname(self.name)
+        for line_number, text in enumerate(lines, start=1):
             line_in_table = previous_line_in_table
             previous_line_in_table = False
             fence = CODE_FENCE.match(text)
@@ -122,6 +92,10 @@ class DocsPage:
             if in_code:
                 code_lines.append(text)
                 continue
+            for match in MARKDOWN_LINK.finditer(text):
+                target = match["target"].split("#", 1)[0]
+                if target.endswith(".md") and "://" not in target:
+                    self.linked_page_names.append((line_number, posixpath.normpath(posixpath.join(directory, target))))
             heading = MARKDOWN_HEADING.match(text)
             if heading:
                 title = heading["title"]

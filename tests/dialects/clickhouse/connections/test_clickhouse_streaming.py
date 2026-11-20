@@ -6,6 +6,7 @@ import asyncio
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.exceptions import OperationalError
 from tests.dialects.clickhouse.models import Account, Team
 from tests.utils.waiting import wait_until
@@ -46,7 +47,7 @@ async def test_rows_are_streamed_outside_a_transaction(clickhouse_db):
 
 @pytest.mark.asyncio
 async def test_a_reader_stopping_early_leaves_nothing_running(clickhouse_db):
-    connection = Account._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Account).get_connection()
     await create_accounts(20000)
     for _ in range(3):
         read = 0
@@ -68,7 +69,7 @@ async def test_a_reader_stopping_early_leaves_nothing_running(clickhouse_db):
 
 @pytest.mark.asyncio
 async def test_a_failing_stream_raises_hares_error(clickhouse_db):
-    connection = Account._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Account).get_connection()
     with pytest.raises(OperationalError):
         async for _row in connection.stream(
             "SELECT throwIf(number = 5000, 'stop') FROM numbers(10000)", chunk_size=100

@@ -17,7 +17,7 @@ class RawSQLTerm:
 
     sql: str
 
-    def get_sql(self, context: Any = None, dialect: str | None = None) -> str:
+    def get_sql(self, context: Any = None) -> str:
         """The SQL, as it is."""
         return self.sql
 

@@ -1,16 +1,21 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
+from hare.core.connections.connections import Connections
+from hare.exceptions import UnSupportedError
 from hare.models.deletion.cascade.deletion_graph import DeletionGraph
+from hare.models.deletion.cascade.deletion_scope import DeletionScope
+from hare.models.deletion.constants import TENANT_VISIT_REQUIRES_SAVEPOINT
 from hare.models.tenancy.tenancy import Tenancy
 from hare.models.tenancy.tenant_schemas import TenantSchemas
+from hare.query.scopes.row_scope_binding import RowScopeBinding
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class TenantSchemaVisits:
@@ -18,12 +23,12 @@ class TenantSchemaVisits:
     it runs in - each visited in turn inside its transaction, which then runs in that schema."""
 
     @staticmethod
-    def visits_schemas(model: type[Model], connection: DatabaseClient | None, *, leaves_constrained: bool) -> bool:
+    def visits_schemas(binding: ModelBinding, connection: DatabaseClient | None, *, leaves_constrained: bool) -> bool:
         """Whether a delete or a restore of ``model`` rows on ``connection`` visits the other tenant
         schemas.
 
         Args:
-            model: The model of the root rows.
+            binding: The model of the root rows.
             connection: The connection it runs on.
             leaves_constrained: Whether it is a hard delete leaving the relations the database
                 enforces to it - visiting only for the work the database's own cascade doesn't do.
@@ -37,9 +42,9 @@ class TenantSchemaVisits:
             and connection.is_transaction_client
             and connection.tenant_schema_template is not None
             and (
-                DeletionGraph.has_tenant_schema_work(model)
+                DeletionGraph.has_tenant_schema_work(binding)
                 if leaves_constrained
-                else DeletionGraph.reaches_tenant_schema_models(model)
+                else DeletionGraph.reaches_tenant_schema_models(binding)
             )
         )
 
@@ -61,36 +66,40 @@ class TenantSchemaVisits:
 
     @staticmethod
     @asynccontextmanager
-    async def visit(connection: DatabaseClient, schema_name: str, tenant: str) -> AsyncIterator[None]:
-        """Runs the block in another tenant's schema, inside the transaction - with that tenant's
-        scope active. An error leaves the schema to the rollback that follows it.
+    async def visit(
+        connection: DatabaseClient,
+        schema_name: str,
+        tenant: str,
+    ) -> AsyncGenerator[DeletionScope]:
+        """Visits a schema through a dedicated savepoint client and task-local binding.
 
-        Args:
-            connection: The transaction.
-            schema_name: The tenant's schema.
-            tenant: The tenant.
-
-        Yields:
-            Nothing.
+        The enclosing wrappers retain their schema throughout. On success the search path
+        is restored before releasing the savepoint; on failure rollback restores it. The
+        yielded scope supplies the client to every lookup and write of this visit.
         """
-        wrappers = []
-        client = connection
-        while client.is_transaction_client:
-            wrappers.append((client, client.tenant_schema))
-            client = client._parent
-        # Local import: the introspector's modules import the models.
         from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
 
-        table_names = frozenset(await DatabaseCatalog.get_table_names(connection, schema=schema_name))
-        previous_schemas = await connection.enter_tenant_schema(schema_name)
-        for wrapper, _tenant_schema in wrappers:
-            wrapper.tenant_schema = schema_name
-        tables_token = DeletionGraph.visited_schema_tables.set(table_names)
-        try:
-            with Tenancy.scope(tenant):
-                yield
-        finally:
-            DeletionGraph.visited_schema_tables.reset(tables_token)
-            for wrapper, tenant_schema in wrappers:
-                wrapper.tenant_schema = tenant_schema
-        await connection.leave_tenant_schema(previous_schemas)
+        if not connection.features.supports_savepoints:
+            raise UnSupportedError(TENANT_VISIT_REQUIRES_SAVEPOINT)
+        async with connection._in_transaction() as schema_connection:
+            tables = frozenset(await DatabaseCatalog.get_table_names(schema_connection, schema=schema_name))
+            previous_schemas = await schema_connection.enter_tenant_schema(schema_name)
+            schema_connection.tenant_schema = schema_name
+            scope = DeletionScope(schema_connection, schema_name, tenant, tables)
+            connections = schema_connection.connection_handler
+            if connections is None:
+                connections = Connections.current()
+                schema_connection.connection_handler = connections
+            connection_token = connections.set(schema_connection.connection_alias, schema_connection)
+            scope_token = DeletionScope.current.set(scope)
+            try:
+                with Tenancy.scope(tenant):
+                    binding_token = RowScopeBinding.current.set(RowScopeBinding())
+                    try:
+                        yield scope
+                    finally:
+                        RowScopeBinding.current.reset(binding_token)
+            finally:
+                DeletionScope.current.reset(scope_token)
+                connection_token.reset()
+            await schema_connection.leave_tenant_schema(previous_schemas)

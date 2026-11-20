@@ -5,7 +5,6 @@ too many parameters raises."""
 
 import datetime
 import decimal
-import os
 import re
 import sqlite3
 import uuid
@@ -19,6 +18,7 @@ import pytest_asyncio
 
 from hare.contrib.test import requires_features, truncate_all_models
 from hare.contrib.test.isolated_contexts import hare_test_context
+from hare.core.hare_context import HareContext
 from hare.dialects.postgresql.lookups.in_list import ArrayParameter
 from hare.dialects.sqlite.lookups.in_list import SqliteLargeInList
 from hare.dialects.sqlite.parameters.constants import SQLITE_IN_JSON_ARRAY_THRESHOLD
@@ -35,6 +35,7 @@ from hare.instrumentation.observers.observers import Observers
 from hare.models.tenancy.tenancy import Tenancy
 from hare.query.expressions import Q, RawSQL
 from hare.query.functions import Count, Length
+from tests.utils.database_under_test import DatabaseUnderTest
 from tests.writes.bulk_large_list_models import (
     LargeListArticle,
     LargeListChild,
@@ -60,15 +61,10 @@ from tests.writes.bulk_large_list_models import (
 SMALL_BIND_PARAMETER_LIMIT = 150
 
 
-def get_test_db_url() -> str:
-    raw_db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:").replace("\\{", "{").replace("\\}", "}")
-    return raw_db_url.format(uuid.uuid4().hex) if "{}" in raw_db_url else raw_db_url
-
-
 @pytest_asyncio.fixture(scope="module")
 async def large_list_context() -> AsyncGenerator[Any]:
     async with hare_test_context(
-        ["tests.writes.bulk_large_list_models"], db_url=get_test_db_url(), connection_label="models"
+        ["tests.writes.bulk_large_list_models"], db_url=DatabaseUnderTest.get_fresh_url(), connection_label="models"
     ) as ctx:
         yield ctx
 
@@ -82,7 +78,7 @@ async def large_list_db(large_list_context: Any) -> AsyncGenerator[Any]:
 @pytest.fixture
 def small_bind_parameter_limit(large_list_db: Any) -> Generator[int]:
     # The connection's own features - a connected client keeps those of its server's version.
-    connection = LargeListItem._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(LargeListItem).get_connection()
     with mock.patch.object(
         connection, "features", connection.features.replace(max_bind_parameters=SMALL_BIND_PARAMETER_LIMIT)
     ):
@@ -106,7 +102,7 @@ async def captured_queries() -> AsyncGenerator[list[tuple[str, list[Any]]]]:
 
 
 def is_postgres() -> bool:
-    return LargeListItem._meta.connection.dialect.name == "postgresql"
+    return HareContext.require_current().apps.get_queryset(LargeListItem).get_connection().dialect.name == "postgresql"
 
 
 def count_bound_parameters(params: list[Any]) -> int:
@@ -159,10 +155,10 @@ async def test_composite_pk_in_short_list_is_a_plain_row_list(large_list_db):
 def test_sqlite_row_container_keeps_values_json_cannot_carry_exactly():
     long_row_count = SQLITE_IN_JSON_ARRAY_THRESHOLD
 
-    assert SqliteLargeInList.get_row_container([(index, float("nan")) for index in range(long_row_count)]) is None
-    assert SqliteLargeInList.get_row_container([(index, 2**70) for index in range(long_row_count)]) is None
-    assert SqliteLargeInList.get_row_container([(1, 2), (3, 4)]) is None
-    container = SqliteLargeInList.get_row_container([(index, str(index)) for index in range(long_row_count)])
+    assert SqliteLargeInList().get_row_container([(index, float("nan")) for index in range(long_row_count)]) is None
+    assert SqliteLargeInList().get_row_container([(index, 2**70) for index in range(long_row_count)]) is None
+    assert SqliteLargeInList().get_row_container([(1, 2), (3, 4)]) is None
+    container = SqliteLargeInList().get_row_container([(index, str(index)) for index in range(long_row_count)])
     assert container is not None
     assert container.decode_hex_columns == (False, False)
 
@@ -425,7 +421,7 @@ async def test_bulk_create_upsert_returning_leaves_room_for_the_tenant_scope(
     # Four columns per row: 37 rows fill a 148-parameter ceiling exactly, leaving no room for the
     # tenant scope's own parameter unless the batch size accounts for it.
     bind_parameter_limit = 148
-    connection = LargeListTenantItem._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(LargeListTenantItem).get_connection()
     limited_features = connection.features.replace(max_bind_parameters=bind_parameter_limit)
     # The VALUES form, whose rows count against the ceiling - not an array per column.
     values_form = mock.patch.object(
@@ -573,7 +569,7 @@ async def test_bulk_update_of_a_relation_and_its_key_field_together(large_list_d
 
 @pytest.mark.asyncio
 async def test_too_many_parameters_is_an_operational_error_not_a_connection_error(large_list_db):
-    connection = LargeListItem._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(LargeListItem).get_connection()
     # PostgreSQL takes at most 65535 (32767 through asyncpg); SQLite's limit is how its library was
     # built - 32766 by default, 250000 in Debian's and Ubuntu's.
     if is_postgres():
@@ -592,7 +588,7 @@ async def test_too_many_parameters_is_an_operational_error_not_a_connection_erro
 def test_postgres_rows_source_binds_an_array_per_column_but_not_for_an_array_column(large_list_db):
     if not is_postgres():
         pytest.skip("the column-array rows source is Postgres's")
-    dialect = LargeListItem._meta.connection.dialect
+    dialect = HareContext.require_current().apps.get_queryset(LargeListItem).get_connection().dialect
     assert (
         dialect.parameters.get_column_arrays_rows_source_sql(["INT", "VARCHAR(100)"], 1)
         == "SELECT * FROM unnest($1::INT[],$2::VARCHAR(100)[])"

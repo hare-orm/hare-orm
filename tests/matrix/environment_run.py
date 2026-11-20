@@ -8,18 +8,16 @@ Usage:
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
 
 from tests.matrix.constants import (
     MATRIX_DATABASE_DRIVER_EXTRAS,
-    REPOSITORY_DIRECTORY,
     SUITE_ENVIRONMENT_OPTION,
-    SUITE_ENVIRONMENTS,
-    WITHOUT_NATIVE_PLUGIN,
 )
-from tests.matrix.matrix_run import MatrixRun
+from tests.matrix.matrix_catalog import MatrixCatalog
 from tests.matrix.matrix_virtualenv import MatrixVirtualenv
+from tests.matrix.paths import REPOSITORY_DIRECTORY
+from tests.matrix.process_groups import ProcessGroups
 
 
 class EnvironmentRun:
@@ -59,26 +57,28 @@ class EnvironmentRun:
         Raises:
             SystemExit: No environment has the name, or its virtualenv doesn't exist.
         """
-        environments = {environment.name: environment for environment in SUITE_ENVIRONMENTS}
+        environments = {
+            environment.name: environment for environment in MatrixCatalog.get_environments(python_version)
+        }
         if environment_name not in environments:
             raise SystemExit(f"No environment {environment_name} - known: {', '.join(environments)}")
         environment = environments[environment_name]
         database = EnvironmentRun.get_database(os.environ.get("HARE_TEST_DB", "sqlite+aiosqlite://:memory:"))
-        virtualenv = MatrixVirtualenv.get(MatrixRun(python_version, environment_name, environment, database, {}))
-        if not virtualenv.get_python_executable().exists():
+        virtualenv = MatrixVirtualenv.get(python_version, environment, database)
+        python = virtualenv.get_python_executable()
+        if not python.exists():
             raise SystemExit(
                 f"{virtualenv.name} doesn't exist - make matrix_venvs MATRIX_OPTIONS=\"--python {python_version} "
                 f'--environment {environment_name}"'
             )
         command = [
-            str(virtualenv.get_python_executable()),
+            str(python),
             "-m",
             "pytest",
-            *([] if environment.native else ["-p", WITHOUT_NATIVE_PLUGIN]),
             f"{SUITE_ENVIRONMENT_OPTION}={environment_name}",
             *pytest_arguments,
         ]
-        return subprocess.run(command, cwd=REPOSITORY_DIRECTORY, check=False).returncode
+        return ProcessGroups().run(command, cwd=REPOSITORY_DIRECTORY, environment=dict(os.environ), output=sys.stdout)
 
 
 if __name__ == "__main__":

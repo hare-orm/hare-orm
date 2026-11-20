@@ -55,6 +55,9 @@ coordinates, and its own SRID is dropped — the collection's applies. Every cla
 wrong shape, a non-finite number, an unclosed ring, a member of another type raise `ValidationError`,
 as do geometry collections nested more than 100 deep. Measured (M) coordinates aren't supported.
 
+A polygon hole must be a nonempty closed ring; an empty interior ring raises `ValidationError`.
+`Polygon()` itself remains the empty polygon.
+
 Each geometry has:
 
 - `wkt` — its well-known text without the SRID (`POINT Z (1 2 3)`), `ewkt` — with it
@@ -114,6 +117,8 @@ A geometry without an SRID gets the field's, so `Point(1, 2)` assigned to a `Poi
 type, have its dimensions and its SRID; otherwise `ValidationError` is raised before the query runs. A
 geometry in another SRID is not transformed on write — transform it first, or store it in a column of its
 own SRID. Values are read back as `Geometry` objects carrying their SRID.
+A standalone `Value(Point(...))` annotation has no field supplying a coordinate system: it preserves
+the geometry's SRID, including an unspecified one.
 
 ### <a id="geography"></a>Choosing geometry or geography
 
@@ -197,6 +202,7 @@ from Python in any form a field takes, transformed to the first one's SRID:
 | `Area(geometry)` | float — square meters on a geography, the SRID's units on a geometry |
 | `Length(geometry)`, `Perimeter(geometry)` | float — a line's length, a polygon's rings' length |
 | `Distance(geometry, other)` | float — the shortest distance |
+| `DWithin(geometry, other, distance)` | bool — within the radius; the radius may be an expression |
 | `Centroid`, `PointOnSurface` | a point — the center of mass, a point surely on the geometry |
 | `Envelope`, `Boundary`, `ConvexHull` | the bounding box, the boundary, the convex hull |
 | `Buffer(geometry, distance)` | the area within `distance` (negative shrinks a polygon) |
@@ -209,6 +215,23 @@ from Python in any form a field takes, transformed to the first one's SRID:
 | `AsGeoJSON(geometry)` | dict — the GeoJSON geometry |
 | `NumPoints(geometry)`, `NumGeometries(geometry)` | int |
 | `GeometryTypeName(geometry)` | str — `POINT`, `POLYGON`, ... |
+
+Nested operations retain each geometry argument's type and SRID, including geometry literals and
+annotations. `Transform` exposes the target SRID to its enclosing expression. A generated geometry
+column uses its `output_field` metadata; a generated geography therefore keeps geographic distance
+units when passed to another spatial function.
+
+Geometry-producing functions describe their result independently of the source column: a buffer of
+a point is an area, and a centroid is a point. Reading the result or filtering its annotation uses
+that result's shape, dimensions and geometry/geography type. Native dimension rules still apply:
+PostGIS `Centroid` returns x/y, while `PointOnSurface` can retain a line's z coordinate. A function
+that can return either x/y or x/y/z does not force a literal in `Case` or `Coalesce` into x/y.
+The original column's declared shape and dimensions remain enforced on writes.
+
+An explicit `Value(Point(1, 2))` retains its unknown reference system (`srid=None`) on PostgreSQL and
+SQLite, including through functions that preserve SRID and filters on the result. It does not acquire
+the default field SRID. Assigning the same point to a declared `PointField()` still assigns that
+field's SRID, as described above.
 
 ```python
 from hare.gis.functions import Area, Distance, Transform
@@ -230,6 +253,12 @@ from hare.query.expressions import Q
 nearest = City.objects.annotate(km=Distance("center", moscow) / 1000).order_by("km", "id")
 next_page = await nearest.filter(Q(km__gt=last.km) | Q(km=last.km, id__gt=last.id)).limit(20)
 ```
+
+`DWithin` uses the same dialect spatial predicate as `__dwithin`. PostgreSQL renders
+`ST_DWithin`, retaining spatial-index support. A geography radius is in metres; a geometry
+radius is in SRID units. Convert kilometres by multiplying by 1000 explicitly.
+`PointField(geography=True, srid=4326)` and `PointField()` declare different physical types;
+coordinates in existing columns are never swapped automatically.
 
 ## <a id="aggregates"></a>Aggregates
 
@@ -264,7 +293,7 @@ DB_URL = "sqlite+aiosqlite://db.sqlite3?load_spatialite=true"
 | Setting | Meaning |
 |---|---|
 | `load_spatialite` | `true` loads SpatiaLite into every connection — `Features.supports_spatial` |
-| `spatialite_path` | The library: a name the system's loader finds (`mod_spatialite`, the default — Debian/Ubuntu's `libsqlite3-mod-spatialite`, Homebrew's `libspatialite`) or a path. On Windows a path with a directory also loads the libraries SpatiaLite needs (GEOS, PROJ, ...) from that directory |
+| `spatialite_path` | The library: a name the system's loader finds (`mod_spatialite`, the default — Debian/Ubuntu's `libsqlite3-mod-spatialite`, Homebrew's `libspatialite`) or a path. Its dependencies (GEOS, PROJ, ...) must be discoverable by the system's library loader |
 | `spatialite_proj_database` | The path of PROJ's `proj.db`, which a transformation between SRIDs reads — needed when PROJ doesn't find its own (the Windows build carries it next to the library) |
 | `spatialite_metadata` | The spatial metadata hare creates in a database without any: `wgs84` (the default), `full` or `none` — see [`spatialite_metadata`](#spatialite-metadata) |
 
@@ -370,8 +399,8 @@ describes a GeoJSON geometry. It takes what a write takes: a geometry of another
 or another SRID is refused (the GeoJSON it serializes to holds no SRID), and one without an SRID takes
 the field's. `inspectdb` reads a PostGIS column with a type and an SRID as the matching
 field (`geometry(PolygonZ,3857)` -> `PolygonField(srid=3857, dimensions=3)`); a `geography(Point,4326)`
-column stays the [`PostGISField`](../postgresql/fields.md#postgisfield) of a `(latitude, longitude)`
-tuple, and a column without a type and an SRID, or with measured coordinates, is an ambiguous
+column becomes `PointField(geography=True)` with `Point(longitude, latitude)` values, and a column without a
+type and an SRID, or with measured coordinates, is an ambiguous
 `TextField`. The tables and views of an extension — PostGIS's `spatial_ref_sys`, `geometry_columns`,
 `geography_columns` — are no model's: `inspectdb` and the drift check leave them out, as they leave out
 SpatiaLite's spatial metadata.

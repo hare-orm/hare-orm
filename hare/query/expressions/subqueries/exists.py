@@ -3,15 +3,17 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.fields.data.boolean_field import BooleanField
-from hare.query.expressions.constants import UNBINDABLE_VALUE_ORIGIN
 from hare.query.expressions.expression import Expression
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
+from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
 from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 from hare.sql.terms.criteria.not_criterion import Not
 from hare.sql.terms.term import Term
+from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
     from hare.query.expressions.conditions.q import Q
@@ -32,6 +34,8 @@ class Exists(Expression):
                 has_open_ticket=Exists(Ticket.objects.filter(report_id=OuterReference("id"), status="open"))
             ).filter(has_open_ticket=True)
     """
+
+    structure = ExpressionStructure(query_scope=True)
 
     # The result is decoded as a bool - a database may return 0/1.
     populate_field_object = True
@@ -125,9 +129,18 @@ class Exists(Expression):
         return exists_query
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
-        if self.wraps_values_query:
-            return self._get_values_query_result(expression_context)
-        inner = self._get_wrapped_query(self.get_built_query(self.queryset), expression_context)
+        from copy import copy
+
+        from hare.query.queryset.pending_calls.calls_before_setup import CallsBeforeSetup
+
+        bound = copy(self)
+        bound.source_queryset = CallsBeforeSetup.bind(
+            self.source_queryset, expression_context.application_context, expression_context.binding.graph
+        )
+        bound._queryset = None
+        if bound.wraps_values_query:
+            return bound._get_values_query_result(expression_context)
+        inner = self._get_wrapped_query(bound.get_built_query(bound.queryset), expression_context)
         with OuterScope.entered(expression_context) as scope:
             if expression_context.value_wrapper_references is not None:
                 # The outer query is recording its plan: the inner query's value references go into
@@ -152,25 +165,28 @@ class Exists(Expression):
         inner = self._get_wrapped_query(self.queryset, expression_context)
         value_wrapper_references = expression_context.value_wrapper_references
         with OuterScope.entered(expression_context) as scope:
+            inner._make_embedded_subquery(value_wrapper_references)
+        limit = None
+        if inner._limit is not None and not inner.dialect.features.keeps_exists_limit:
+            limit = ValueWrapper(inner._limit)
             if value_wrapper_references is not None and inner.plannable:
-                inner._make_subquery(value_wrapper_references=value_wrapper_references)
-            else:
-                inner._make_subquery()
-                if value_wrapper_references is not None:
-                    value_wrapper_references.append((UNBINDABLE_VALUE_ORIGIN, None))
-        return self._get_exists_result(inner.query, scope)
+                ExpressionArguments.record_literal(value_wrapper_references, inner, "_limit", limit)
+        return self._get_exists_result(inner.query, scope, limit=limit)
 
-    def _get_exists_result(self, inner_query: Any, scope: OuterScope) -> ExpressionResult:
+    def _get_exists_result(
+        self, inner_query: Any, scope: OuterScope, *, limit: ValueWrapper | None = None
+    ) -> ExpressionResult:
         """Wraps a built inner query into this condition's EXISTS criterion.
 
         Args:
             inner_query: The built inner query.
             scope: What building it collected about the outer query.
+            limit: The explicit limit for a backend that needs it in the existence predicate.
 
         Returns:
             The EXISTS (or NOT EXISTS) criterion with its joins and boolean output field.
         """
-        term: Term = ExistsTerm(inner_query)
+        term: Term = ExistsTerm(inner_query, limit_guard=limit)
         term.is_aggregate = bool(scope.aggregate_references)
         term.outer_reference_terms = tuple(scope.reference_terms)
         if self.negated:

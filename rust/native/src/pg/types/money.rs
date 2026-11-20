@@ -3,7 +3,7 @@
 use crate::pg::value::{BoxError, Value};
 
 /// `MONEY`: an 8-byte count of the smallest currency fraction - read as a Decimal with 2
-/// fractional digits, like asyncpg's money codec (the real scale is the server's `lc_monetary`).
+/// fractional digits (the real scale is the server's `lc_monetary`).
 pub(crate) fn decode_money(raw: &[u8]) -> Result<Value, BoxError> {
     let bytes: [u8; 8] = raw.try_into().map_err(|_| format!("invalid money payload length {}", raw.len()))?;
     let cents = i128::from(i64::from_be_bytes(bytes));

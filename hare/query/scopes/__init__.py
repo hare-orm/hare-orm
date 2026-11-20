@@ -9,10 +9,12 @@ from hare.classes.lazy_exports import LazyExports
 from hare.query.scopes.constants import EXPORTED_MODULES
 
 if TYPE_CHECKING:
+    from hare.query.scopes.row_scope_provider import RowScopeProvider
     from hare.query.scopes.row_scopes import RowScopes
     from hare.query.scopes.row_visibility import RowVisibility
 
 __all__ = [
+    "RowScopeProvider",
     "RowVisibility",
     "RowScopes",
 ]

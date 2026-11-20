@@ -9,6 +9,8 @@ from hare.sql.terms.star import Star
 class Count(DistinctOptionFunction):
     """``COUNT(term)``, ``COUNT(*)`` for ``"*"``."""
 
+    structure_attributes = ()
+
     def __init__(self, parameter: Any, alias: str | None = None) -> None:
         is_star = isinstance(parameter, str) and parameter == "*"
         super().__init__("COUNT", Star() if is_star else parameter, alias=alias)

@@ -17,6 +17,7 @@ from hare.exceptions import FieldError
 from hare.query.expressions import ArithmeticOperator, CombinedExpression, F, OuterReference, Subquery, Value
 from hare.query.functions import Avg, Count, Max, Min, Sum
 from hare.time import Timezone
+from hare.time.zone_settings import ZoneSettings
 from tests.shared_models import testmodels, testmodels_postgres
 from tests.utils.timezone_context import override_timezone
 
@@ -54,7 +55,7 @@ async def zone(db, request):
 
 def moment(*args, **kwargs) -> datetime.datetime:
     """A datetime of the active timezone mode - aware UTC under use_timezone, naive otherwise."""
-    if Timezone.get_use_timezone():
+    if ZoneSettings.get_use_timezone():
         return datetime.datetime(*args, tzinfo=datetime.UTC, **kwargs)
     return datetime.datetime(*args, **kwargs)
 
@@ -109,7 +110,7 @@ async def test_datetime_literal_as_the_left_operand_of_a_shift(zone):
 async def test_datetime_shift_result_is_an_aware_datetime_in_the_configured_zone(zone):
     await make_record()
     result = await evaluate(F("started_at") + timedelta(hours=1))
-    if Timezone.get_use_timezone():
+    if ZoneSettings.get_use_timezone():
         assert result.utcoffset() is not None
         assert result.tzinfo == Timezone.default()
     else:

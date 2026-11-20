@@ -4,6 +4,7 @@ start together."""
 import asyncio
 import time
 import uuid
+from contextlib import aclosing
 
 import pytest
 
@@ -12,7 +13,19 @@ from hare.dialects.clickhouse.keeper.clickhouse_database_keeper_nodes import Cli
 from hare.dialects.clickhouse.keeper.clickhouse_migration_lock import ClickhouseMigrationLock
 from hare.exceptions import ConfigurationError, DBConnectionError, OperationalError
 from tests.dialects.clickhouse.constants import CLICKHOUSE_KEEPER_HOSTS
+from tests.dialects.clickhouse.models import Skill
+from tests.utils.migration_lock_assertions import MigrationLockAssertions
 from tests.utils.waiting import WAIT_DEADLINE_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_exclusive_creation_cannot_acquire_an_existing_database(clickhouse_db):
+    client = Connections.current().create_independent("models", {})
+    await client.db_create()
+    with pytest.raises(client.driver_errors.server, match="already exists"):
+        await client.db_create_exclusive()
+
+    assert await Connections.get("models").execute_dicts("SELECT 71 AS value") == [{"value": 71}]
 
 
 @pytest.mark.asyncio
@@ -60,26 +73,7 @@ async def test_migrate_runs_one_after_another_in_keeper_without_transactions(cli
     try:
         await clients[0].execute_dicts("SELECT 1 AS one")
         assert not clients[0].features.supports_select_for_update
-        order: list[str] = []
-        first_holds, first_released = asyncio.Event(), asyncio.Event()
-
-        async def migrate(index: int) -> None:
-            async with clients[index].hold_migration_lock():
-                order.append(f"start {index}")
-                if index == 0:
-                    first_holds.set()
-                    await first_released.wait()
-                order.append(f"end {index}")
-
-        first = asyncio.create_task(migrate(0))
-        await first_holds.wait()
-        second = asyncio.create_task(migrate(1))
-        # The second run gets every chance to start while the first holds the Keeper node.
-        for _ in range(100):
-            await asyncio.sleep(0)
-        first_released.set()
-        await asyncio.wait_for(asyncio.gather(first, second), WAIT_DEADLINE_SECONDS)
-        assert order == ["start 0", "end 0", "start 1", "end 1"]
+        await MigrationLockAssertions.assert_serialized(clients, asyncio.Event())
     finally:
         for client in clients:
             await client.close()
@@ -159,12 +153,21 @@ async def test_a_close_while_the_connection_sets_itself_up_opens_it_anew(clickho
 async def test_a_client_closed_and_dropped_opens_no_connection_again(clickhouse_db):
     """A client kept after close_connections() opened a connection again that nothing closed."""
     client = Connections.current().create_independent("models", {})
-    await client.execute_dicts("SELECT 1 AS n")
-    client.discarded = True
-    await client.close()
-    with pytest.raises(DBConnectionError, match="was closed and dropped"):
-        await client.execute_dicts("SELECT 1 AS n")
-    assert client._connection is None
+    try:
+        for key in (1, 2):
+            await Skill.objects.create(id=key, name=f"skill {key}")
+        query = Skill.objects.using(client).order_by("id").values_list("id", flat=True)
+        async with aclosing(query.stream(chunk_size=1)) as stream:
+            assert await anext(stream) == 1
+        assert await query == [1, 2]
+        client.discarded = True
+        await client.close()
+        with pytest.raises(DBConnectionError, match="was closed and dropped"):
+            await client.execute_dicts("SELECT 1 AS n")
+        assert client._connection is None
+        assert await Skill.objects.order_by("id").values_list("id", flat=True) == [1, 2]
+    finally:
+        await client.close()
 
 
 @pytest.mark.requires("clickhouse-connect")

@@ -44,11 +44,6 @@ PARTIAL_INSTANCE_WITHOUT_KEY_MESSAGE = (
     "{model_name} was loaded by .only()/.defer() without its primary key - name it in .only() to {action} the object"
 )
 
-#: The refusal of a query on a model without a default connection, by the model's name.
-MISSING_DEFAULT_CONNECTION_MESSAGE = (
-    "{model_name} has no default connection - set the apps.<app>.default_connection key of Hare.init()"
-)
-
 
 #: Meta attributes merged across unrelated abstract bases by concatenation - each is a collection of
 #: separately declared entries. Along one ancestor chain a redeclared key still replaces.
@@ -73,3 +68,32 @@ EMPTY_PENDING_DEFAULTS: MappingProxyType[str, Any] = MappingProxyType({})
 #: The start of the alias an expression of ``Meta.ordering`` is ordered by - never selected, followed
 #: by its place among the expressions.
 META_ORDERING_ALIAS_PREFIX = "hare meta ordering "
+
+#: Every attempted restoration is completed before setter errors are reported.
+INSTANCE_RESTORE_FAILURES_MESSAGE = "Instance restoration failures"
+
+#: Persistence bookkeeping is restored without invoking model field setters.
+INSTANCE_STATE_ATTRIBUTE_NAMES = frozenset(
+    (
+        "_binding",
+        "_context",
+        "_saved_in_db",
+        "_custom_generated_pk",
+        "_connection_alias",
+        "_dirty_snapshot",
+        "_partial",
+        "_await_when_save",
+        "_allow_soft_delete_write",
+    )
+)
+
+#: The persistence state a write's snapshot of an instance holds, in the order undo restores it backwards.
+PERSISTENCE_STATE_ATTRIBUTE_NAMES = ["_saved_in_db", "_custom_generated_pk", "_connection_alias", "_dirty_snapshot"]
+
+WRITE_RESTORE_FAILURES_MESSAGE = "Write failed and instance restoration also failed"
+
+REFRESH_RESTORE_FAILURES_MESSAGE = "Refresh failed and instance restoration also failed"
+
+UNBOUND_MODEL_MESSAGE = (
+    "{model_name} is not bound yet: call Hare.bind_models() or Hare.init() before describing its filters or orderings"
+)

@@ -11,11 +11,14 @@ import pytest
 import pytest_asyncio
 
 from hare import fields
+from hare.core.hare_context import HareContext
 from hare.dialects.clickhouse.fields import DynamicField, VariantField
+from hare.dialects.clickhouse.types.clickhouse_type_names import ClickhouseTypeNames
 from hare.exceptions import ConfigurationError, UnSupportedError, ValidationError
-from hare.query.expressions import Window
+from hare.query.expressions import F, Q, Window
 from hare.query.functions.window import Lag, Lead, NthValue
 from tests.dialects.clickhouse.dynamic_types.models import Sample
+from tests.utils.model_bindings import ModelBindings
 from tests.utils.operations import apply_operations
 
 MOMENT = datetime.datetime(2024, 5, 6, 7, 8, 9, 123456, tzinfo=datetime.UTC)
@@ -57,7 +60,8 @@ async def ids(**filters):
 def test_column_types():
     from hare.dialects.clickhouse.constants import CLICKHOUSE_DIALECT
 
-    fields_map = Sample._meta.fields_map
+    apps = ModelBindings.prepare(Sample)
+    fields_map = apps.get_binding(Sample).fields_map
     assert fields_map["anything"].get_column_type(CLICKHOUSE_DIALECT) == "Dynamic"
     assert fields_map["limited"].get_column_type(CLICKHOUSE_DIALECT) == "Dynamic(max_types=2)"
     assert fields_map["reading"].get_column_type(CLICKHOUSE_DIALECT) == "Variant(Array(Float64), Int32, String)"
@@ -103,8 +107,33 @@ async def test_dynamic_filters_match_values_of_their_own_type(samples):
     assert await ids(anything=Decimal("12.34")) == [6]
     assert await ids(anything__gt=Decimal("12.3")) == [6]
     assert await ids(anything__in=[2**70, -7]) == [15, 16]
-    assert len(await ids(anything__not=5)) == len(DYNAMIC_VALUES) - 2
-    assert 3 not in await ids(anything__not_in=[5])
+
+
+@pytest.mark.asyncio
+async def test_negative_typed_lookups_match_python_membership_including_null(clickhouse_dynamic_types_db):
+    values = (5, "5", None, 7)
+    await Sample.objects.bulk_create(
+        [Sample(id=index, anything=value, limited=value, reading=value) for index, value in enumerate(values, 1)]
+    )
+    for field_name in ("anything", "reading"):
+        for choices in ([], [5], [None], [5, None], ["5"], [5, "5", None]):
+            expected = [index for index, value in enumerate(values, 1) if value not in choices]
+            condition = Q(**{f"{field_name}__in": choices})
+            for query in (
+                Sample.objects.filter(**{f"{field_name}__not_in": choices}),
+                Sample.objects.exclude(condition),
+                Sample.objects.filter(~condition),
+            ):
+                assert await query.order_by("id").values_list("id", flat=True) == expected, (field_name, choices)
+        for value in (5, "5", None):
+            expected = [index for index, stored in enumerate(values, 1) if stored != value]
+            assert (
+                await Sample.objects.filter(**{f"{field_name}__not": value})
+                .order_by("id")
+                .values_list("id", flat=True)
+                == expected
+            )
+    assert await Sample.objects.filter(anything__not=F("limited")).count() == 0
 
 
 @pytest.mark.asyncio
@@ -163,6 +192,24 @@ async def test_variant_values(clickhouse_dynamic_types_db):
 
 
 @pytest.mark.database_independent
+@pytest.mark.parametrize(
+    ("server_type", "python_types"),
+    [
+        ("Array(Int32)", (list,)),
+        ("Array(Nullable(String))", (list,)),
+        ("Tuple(name String, count UInt8)", (tuple,)),
+        ("Map(String, Array(Int64))", (dict,)),
+        ("LowCardinality(Nullable(String))", (str,)),
+        ("Nullable(DateTime64(6, 'UTC'))", (datetime.datetime,)),
+        ("FixedString(8)", (str, bytes)),
+        ("UnknownType(String)", ()),
+    ],
+)
+def test_read_python_types_use_parsed_names_and_unwrap_scalar_wrappers(server_type, python_types):
+    assert ClickhouseTypeNames.get_read_python_types(server_type) == python_types
+
+
+@pytest.mark.database_independent
 def test_variant_declarations_are_checked():
     from hare.dialects.clickhouse.constants import CLICKHOUSE_DIALECT
 
@@ -211,18 +258,16 @@ async def test_arrays_of_dynamic_values(clickhouse_dynamic_types_db):
 async def test_inspectdb_reads_the_types_and_drift_finds_a_changed_one(clickhouse_dynamic_types_db):
     from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
     from hare.migrations.drift import detect_drift
-    from hare.migrations.state.model_state import ModelState
     from hare.migrations.state.state import State
     from tests.utils.model_source_generator import ModelSourceGenerator
 
-    connection = Sample._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Sample).get_connection()
     table = await DatabaseCatalog.inspect_table(connection, "sample")
     source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name)
     compile(source, "<generated>", "exec")
     for expected in ("anything = DynamicField(", "limited = DynamicField(max_types=2", "reading = VariantField("):
         assert expected in source, (expected, source)
-    state = State()
-    state.models[("models", "Sample")] = ModelState.make_from_model("models", Sample)
+    state = State.from_models([Sample], app_label="models")
 
     async def get_altered_fields():
         drift = await detect_drift(connection, state, ["models"])
@@ -249,13 +294,13 @@ async def test_a_variant_of_fields_read_in_their_own_ways(clickhouse_dynamic_typ
     from hare.migrations.operations import CreateModel, DeleteModel
     from hare.migrations.state.state import State
 
-    connection = Sample._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Sample).get_connection()
     # A FixedString is read as its padded bytes by one driver and as text by the other; an address
     # field takes an address object, though it converts a text too.
     field = VariantField([FixedStringField(6), fields.IPv4AddressField(), fields.BooleanField()], null=True)
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -296,8 +341,11 @@ async def test_a_variant_value_keeps_its_type_on_every_write(clickhouse_dynamic_
     the String."""
 
     async def get_variant_types() -> list[str]:
-        rows = await Sample._meta.connection.execute_dicts(
-            "SELECT variantType(reading) AS variant_type FROM sample ORDER BY id"
+        rows = (
+            await HareContext.require_current()
+            .apps.get_queryset(Sample)
+            .get_connection()
+            .execute_dicts("SELECT variantType(reading) AS variant_type FROM sample ORDER BY id")
         )
         return [row["variant_type"] for row in rows]
 

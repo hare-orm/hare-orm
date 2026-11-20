@@ -2,7 +2,6 @@
 that database with its rows, and back when the migration is unapplied; a model whose views name its
 table by its database is refused before any statement."""
 
-import os
 import textwrap
 import uuid
 
@@ -10,11 +9,7 @@ import pytest
 
 from tests.utils.cli_project_factory import project_factory  # noqa: F401
 
-
-@pytest.fixture(autouse=True)
-def skip_without_clickhouse():
-    if not os.getenv("HARE_TEST_DB", "").startswith("clickhouse"):
-        pytest.skip("runs against the ClickHouse test server - make test_clickhouse")
+pytestmark = pytest.mark.usefixtures("skip_without_clickhouse")
 
 
 MODEL_TEMPLATE = """

@@ -43,15 +43,16 @@ class IPAddressField(Field[Any]):
             value: An address or its text.
 
         Returns:
-            The address - an IPv4 address mapped into IPv6 as the IPv4 one.
+            The address - an unscoped IPv4-mapped IPv6 address as the IPv4 one.
+            A scoped address stays IPv6 so its storage policy can preserve or refuse the zone.
 
         Raises:
             ValueError: The value is no address of the field's family.
         """
-        address = value if isinstance(value, ipaddress.IPv4Address | ipaddress.IPv6Address) else None
+        address = value if isinstance(value, (ipaddress.IPv4Address, ipaddress.IPv6Address)) else None
         if address is None:
             address = ipaddress.ip_address(value.decode() if isinstance(value, bytes) else str(value))
-        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        if isinstance(address, ipaddress.IPv6Address) and address.scope_id is None and address.ipv4_mapped is not None:
             return address.ipv4_mapped
         return address
 
@@ -81,8 +82,8 @@ class IPAddressField(Field[Any]):
     def to_python(self, value: Any) -> Any:
         return None if value is None else self.get_address(value)
 
-    def from_db_value(self, value: Any) -> Any:
-        return self.to_python(value)
+    def get_assign_normalized_types(self) -> frozenset[type]:
+        return self._get_unchanged_assign_types(IPAddressField.to_python, ipaddress.IPv4Address)
 
     def to_db_value(self, value: Any, instance: type[Model] | Model | None) -> Any:
         if value is None:
@@ -109,7 +110,8 @@ class IPAddressField(Field[Any]):
         # An address naming a zone is written with it after a "%" - no other address text holds one.
         if text is not None and "%" in text:
             raise ValidationError(
-                f"{self.model_field_name}: {text} names a zone of the address, which an address column of the "
+                f"{self.model_field_name}: {self.get_value_for_message(text)} names a zone of the address, "
+                "which an address column of the "
                 "database holds no place for"
             )
         return text

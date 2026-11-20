@@ -11,8 +11,8 @@ from hare.query.plans.plan_origins import PlanOrigins
 class PlanDescription:
     """What a part of a query gives the query's plan: the structure, which is part of the plan's key,
     the values the plan binds, and - only while a query records its plan (``PlanOrigins.records``) -
-    the origin of each value. Never changed once made; not frozen, as a frozen dataclass is slower to
-    make.
+    the origin of each value. Preparation may complete its structure before publication; published
+    descriptions are read without mutation.
 
     Args:
         structure: The structure.

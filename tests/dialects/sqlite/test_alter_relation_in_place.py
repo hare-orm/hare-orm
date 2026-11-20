@@ -9,9 +9,9 @@ from hare import fields
 from hare.ddl.indexes.index import Index
 from hare.dialects.sqlite.drivers.aiosqlite.client import AiosqliteClient
 from hare.migrations.autodetection.operation_generator import OperationGenerator
-from hare.migrations.migration import Migration
 from hare.migrations.operations import CreateModel
 from hare.migrations.state.state import State
+from tests.utils.operations import apply_operations
 
 pytestmark = pytest.mark.sqlite_only
 
@@ -46,8 +46,9 @@ async def migrate(old: State, new: State) -> tuple[list[str], list[str]]:
     try:
         editor = client.dialect.schema_editor_class(client, atomic=True, collect_sql=False)
         empty = State()
-        initial = Migration(name="0001", app_label="models", operations=OperationGenerator(empty, old).generate())
-        state = await initial.apply(empty.clone(), schema_editor=editor)
+        state = await apply_operations(
+            "models", empty, *OperationGenerator(empty, old).generate(), schema_editor=editor
+        )
         await client.execute_script(
             f"INSERT INTO relation_parent (id) VALUES (1); INSERT INTO {TABLE} (id, parent_id, tag) VALUES (1, 1, 'x')"
         )
@@ -59,8 +60,7 @@ async def migrate(old: State, new: State) -> tuple[list[str], list[str]]:
             await run_sql(sql)
 
         editor.run_sql = record_and_run
-        change = Migration(name="0002", app_label="models", operations=OperationGenerator(old, new).generate())
-        await change.apply(state, schema_editor=editor)
+        await apply_operations("models", state, *OperationGenerator(old, new).generate(), schema_editor=editor)
         rows = await client.execute_dicts(f"SELECT name FROM pragma_index_list('{TABLE}') ORDER BY name")
         assert await client.execute_dicts(f"SELECT id, parent_id, tag FROM {TABLE}") == [
             {"id": 1, "parent_id": 1, "tag": "x"}

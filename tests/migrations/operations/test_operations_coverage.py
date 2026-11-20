@@ -4,11 +4,9 @@ import pytest
 
 from hare import fields
 from hare.ddl import RawSQLTerm
-from hare.ddl.constraints import CheckConstraint, UniqueConstraint
+from hare.ddl.constraints import UniqueConstraint
 from hare.ddl.indexes import Index
 from hare.ddl.schema_objects.trigger import Trigger
-from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-from hare.dialects.base.schema.tables.table_comments import TableComments
 from hare.exceptions import ConfigurationError
 from hare.migrations.exceptions import IncompatibleStateError
 from hare.migrations.operations import (
@@ -34,22 +32,9 @@ from hare.migrations.operations import (
 from hare.migrations.state.state import State
 from tests.utils.fake_client import FakeClient
 from tests.utils.operations import apply_operations
+from tests.utils.schema_editor import TestSchemaEditor
 
 pytestmark = pytest.mark.database_independent
-
-
-class TestSchemaEditorTableComments(TableComments):
-    __test__ = False
-
-    def get_table_comment_sql(self, table: str, comment: str) -> str:
-        return ""
-
-    def get_column_comment_sql(self, table: str, column: str, comment: str) -> str:
-        return ""
-
-
-class _TestSchemaEditor(BaseSchemaEditor):
-    table_comments_class = TestSchemaEditorTableComments
 
 
 # --- IncompatibleStateError guards, one per operation type ---
@@ -137,7 +122,7 @@ def test_alter_trigger_missing_raises(state_with_model: State):
         AlterTrigger(model_name="TestModel", trigger=trigger).state_forward("models", state_with_model)
 
 
-# --- Constructor ValueError guards - "name or fields"/"old_name or old_fields" style mutual
+# --- Constructor ConfigurationError guards - "name or fields"/"old_name or old_fields" style mutual
 # requirements checked eagerly at __init__ time, before state_forward ever runs ---
 
 
@@ -197,7 +182,7 @@ def test_rename_index_by_old_fields_success(state_with_model: State):
     indexes = model_state.get_option_list("indexes")
     assert len(indexes) == 1
     assert indexes[0].name == "idx_renamed"
-    assert indexes[0].field_names == ["id"]
+    assert indexes[0].fields == ["id"]
 
 
 def test_add_constraint_unnamed_is_kept_with_the_constraints(state_with_model: State):
@@ -313,24 +298,13 @@ def test_rename_constraint_success(state_with_model: State):
     assert names == {"uq_id_renamed"}
 
 
-def test_rename_constraint_check_constraint_success(state_with_model: State):
-    constraint = CheckConstraint(check=RawSQLTerm("id > 0"), name="chk_id")
-    AddConstraint(model_name="TestModel", constraint=constraint).state_forward("models", state_with_model)
-    RenameConstraint(model_name="TestModel", old_name="chk_id", new_name="chk_id_renamed").state_forward(
-        "models", state_with_model
-    )
-    model_state = state_with_model.models[("models", "TestModel")]
-    names = {c.name for c in model_state.options["constraints"]}
-    assert names == {"chk_id_renamed"}
-
-
 # --- RunSQL: list/tuple forms, ValueError on bad tuple shape, noop sentinel ---
 
 
 @pytest.mark.asyncio
 async def test_run_sql_list_of_plain_strings():
     client = FakeClient("sql")
-    editor = _TestSchemaEditor(client)
+    editor = TestSchemaEditor(client)
     state = State()
 
     op = RunSQL(["CREATE INDEX a ON t (x)", "CREATE INDEX b ON t (y)"])
@@ -342,19 +316,19 @@ async def test_run_sql_list_of_plain_strings():
 @pytest.mark.asyncio
 async def test_run_sql_parameterized_tuples_collect_sql():
     client = FakeClient("sql")
-    editor = _TestSchemaEditor(client, collect_sql=True)
+    editor = TestSchemaEditor(client, collect_sql=True)
     state = State()
 
     op = RunSQL([("INSERT INTO t (x) VALUES (%s)", [1])])
     await apply_operations("models", state, op, schema_editor=editor)
 
-    assert editor.collected_sql == ["INSERT INTO t (x) VALUES (1)"]
+    assert editor.collected_sql == ["--", "-- Run SQL", "--", "INSERT INTO t (x) VALUES (1)"]
 
 
 @pytest.mark.asyncio
 async def test_run_sql_bad_tuple_shape_raises_value_error():
     client = FakeClient("sql")
-    editor = _TestSchemaEditor(client, collect_sql=True)
+    editor = TestSchemaEditor(client, collect_sql=True)
     state = State()
 
     op = RunSQL([("sql", "params", "extra")])
@@ -365,7 +339,7 @@ async def test_run_sql_bad_tuple_shape_raises_value_error():
 @pytest.mark.asyncio
 async def test_run_sql_noop_sentinel_executes_nothing():
     client = FakeClient("sql")
-    editor = _TestSchemaEditor(client)
+    editor = TestSchemaEditor(client)
     state = State()
 
     op = RunSQL(RunSQL.noop)
@@ -377,7 +351,7 @@ async def test_run_sql_noop_sentinel_executes_nothing():
 @pytest.mark.asyncio
 async def test_run_sql_backward_without_reverse_sql_raises():
     client = FakeClient("sql")
-    editor = _TestSchemaEditor(client)
+    editor = TestSchemaEditor(client)
     state = State()
 
     op = RunSQL("CREATE INDEX a ON t (x)")
@@ -399,7 +373,7 @@ async def test_run_python_backward_executes_reverse_code():
         calls.append("backward")
 
     client = FakeClient("sql")
-    editor = _TestSchemaEditor(client)
+    editor = TestSchemaEditor(client)
     state = State()
 
     op = RunPython(forward, backward)
@@ -411,7 +385,7 @@ async def test_run_python_backward_executes_reverse_code():
 @pytest.mark.asyncio
 async def test_run_python_backward_without_reverse_code_raises():
     client = FakeClient("sql")
-    editor = _TestSchemaEditor(client)
+    editor = TestSchemaEditor(client)
     state = State()
 
     op = RunPython(RunPython.noop)

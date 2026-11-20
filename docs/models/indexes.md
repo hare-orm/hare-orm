@@ -60,6 +60,11 @@ columns — name the relation's column, `Coalesce(F("owner_id"), 0)`.
 
 ## <a id="expression-keys"></a>Expression keys
 
+An `Index` keeps its declared expressions. Binding it to a model for SQL or a generated name
+does not change that declaration. `index.get_key_names(model)` describes its physical keys;
+`index.get_generated_name(model)` computes its default name. Model-specific bindings are explicit,
+so one declaration can be used with different models and column mappings.
+
 A key may be an expression, with a direction and a NULL placement as above:
 `Index(Lower("title").desc(nulls_last=True), name="book_title_lower_desc")`. A collated key is an
 expression too: `Index(Collate("title", "C"), name="book_title_c")`. Each database writes an expression

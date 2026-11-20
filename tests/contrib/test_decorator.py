@@ -2,74 +2,32 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from hare.contrib.test import init_memory_database, requires_features
+from hare.contrib.test import init_memory_database
 from hare.core.config import HareConfig
 
+pytestmark = [pytest.mark.database_independent, pytest.mark.asyncio]
 
-@pytest.mark.asyncio
-@requires_features(dialect="sqlite")
+
+@pytest.mark.parametrize(
+    ("models", "expected_modules"),
+    [(None, ["__main__"]), (["app.models"], ["app.models"]), ("app.models", ["app.models"])],
+    ids=["bare-decorator", "module-list", "module-string"],
+)
 @patch("hare.Hare.init")
 @patch("hare.Hare.generate_schemas")
 async def test_init_memory_database_decorator(
     mocked_generate: AsyncMock,
     mocked_init: AsyncMock,
-    db,
+    models: str | list[str] | None,
+    expected_modules: list[str],
 ) -> None:
-    """Test init_memory_database as decorator without parentheses."""
-
-    @init_memory_database
     async def run():
         return "result"
 
-    result = await run()
+    decorated = init_memory_database(run) if models is None else init_memory_database(models)(run)
+    result = await decorated()
     assert result == "result"
     mocked_init.assert_awaited_once_with(
-        HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": ["__main__"]})
-    )
-    mocked_generate.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-@requires_features(dialect="sqlite")
-@patch("hare.Hare.init")
-@patch("hare.Hare.generate_schemas")
-async def test_init_memory_database_decorator_with_models_list(
-    mocked_generate: AsyncMock,
-    mocked_init: AsyncMock,
-    db,
-) -> None:
-    """Test init_memory_database as decorator with models list."""
-
-    @init_memory_database(["app.models"])
-    async def run():
-        return "result"
-
-    result = await run()
-    assert result == "result"
-    mocked_init.assert_awaited_once_with(
-        HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": ["app.models"]})
-    )
-    mocked_generate.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-@requires_features(dialect="sqlite")
-@patch("hare.Hare.init")
-@patch("hare.Hare.generate_schemas")
-async def test_init_memory_database_decorator_with_models_string(
-    mocked_generate: AsyncMock,
-    mocked_init: AsyncMock,
-    db,
-) -> None:
-    """Test init_memory_database as decorator with models string."""
-
-    @init_memory_database("app.models")
-    async def run():
-        return "result"
-
-    result = await run()
-    assert result == "result"
-    mocked_init.assert_awaited_once_with(
-        HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": ["app.models"]})
+        HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": expected_modules})
     )
     mocked_generate.assert_awaited_once()

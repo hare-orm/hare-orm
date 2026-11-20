@@ -24,15 +24,7 @@ from tests.dialects.clickhouse.models import (
     StatusArray,
     Team,
 )
-
-
-async def get_values(expression, **filters):
-    return (
-        await Player.objects.filter(**filters)
-        .order_by("id")
-        .annotate(value=expression)
-        .values_list("value", flat=True)
-    )
+from tests.dialects.clickhouse.queries.player_values import PlayerValues
 
 
 async def create_players():
@@ -49,20 +41,20 @@ async def create_players():
 async def test_decimals_of_different_scales_in_one_result(clickhouse_db):
     await create_players()
 
-    coalesced = await get_values(Coalesce(NullIf("score", 0), Value(decimal.Decimal("0.125"))))
+    coalesced = await PlayerValues.get(Coalesce(NullIf("score", 0), Value(decimal.Decimal("0.125"))))
     assert [str(value) for value in coalesced] == ["1.250", "0.125", "7.000"]
     case = Case(When(active=True, then=F("score")), default=Value(decimal.Decimal("0.5")))
-    assert [str(value) for value in await get_values(case)] == ["1.25", "0.50", "7.00"]
+    assert [str(value) for value in await PlayerValues.get(case)] == ["1.25", "0.50", "7.00"]
     case = Case(When(id=1, then=Value(decimal.Decimal("1.5"))), default=Value(decimal.Decimal("0.25")))
-    assert [str(value) for value in await get_values(case)] == ["1.50", "0.25", "0.25"]
+    assert [str(value) for value in await PlayerValues.get(case)] == ["1.50", "0.25", "0.25"]
 
 
 @pytest.mark.asyncio
 async def test_null_if_compares_decimals_as_numbers(clickhouse_db):
     await create_players()
 
-    assert await get_values(NullIf("score", 0)) == [decimal.Decimal("1.25"), None, decimal.Decimal("7")]
-    assert await get_values(NullIf("score", Value(decimal.Decimal("7.000")))) == [
+    assert await PlayerValues.get(NullIf("score", 0)) == [decimal.Decimal("1.25"), None, decimal.Decimal("7")]
+    assert await PlayerValues.get(NullIf("score", Value(decimal.Decimal("7.000")))) == [
         decimal.Decimal("1.25"),
         decimal.Decimal("0"),
         None,
@@ -73,11 +65,11 @@ async def test_null_if_compares_decimals_as_numbers(clickhouse_db):
 async def test_lag_and_lead_read_the_whole_partition(clickhouse_db):
     await create_players()
 
-    assert await get_values(Window(Lag("id"), order_by=["id"])) == [None, 1, 2]
-    assert await get_values(Window(Lead("id"), order_by=["id"])) == [2, 3, None]
-    assert await get_values(Window(Lead("id", 2, -1), order_by=["id"])) == [3, -1, -1]
-    assert await get_values(Window(Lag("rating"), partition_by=["active"], order_by=["id"])) == [None, None, 2.5]
-    assert await get_values(Window(Lead("score"), order_by=["id"])) == [
+    assert await PlayerValues.get(Window(Lag("id"), order_by=["id"])) == [None, 1, 2]
+    assert await PlayerValues.get(Window(Lead("id"), order_by=["id"])) == [2, 3, None]
+    assert await PlayerValues.get(Window(Lead("id", 2, -1), order_by=["id"])) == [3, -1, -1]
+    assert await PlayerValues.get(Window(Lag("rating"), partition_by=["active"], order_by=["id"])) == [None, None, 2.5]
+    assert await PlayerValues.get(Window(Lead("score"), order_by=["id"])) == [
         decimal.Decimal("0"),
         decimal.Decimal("7"),
         None,
@@ -88,8 +80,8 @@ async def test_lag_and_lead_read_the_whole_partition(clickhouse_db):
 async def test_cume_dist(clickhouse_db):
     await create_players()
 
-    assert await get_values(Window(CumeDist(), order_by=["active"])) == [1.0, pytest.approx(1 / 3), 1.0]
-    assert await get_values(Window(CumeDist(), order_by=["id"])) == [
+    assert await PlayerValues.get(Window(CumeDist(), order_by=["active"])) == [1.0, pytest.approx(1 / 3), 1.0]
+    assert await PlayerValues.get(Window(CumeDist(), order_by=["id"])) == [
         pytest.approx(1 / 3),
         pytest.approx(2 / 3),
         1.0,
@@ -102,8 +94,8 @@ async def test_a_count_of_a_nullable_column_in_a_window(clickhouse_db):
     find (NOT_FOUND_COLUMN_IN_BLOCK) - the column is counted through identity()."""
     await create_players()
 
-    assert await get_values(Window(Count("rating"), partition_by=["active"])) == [2, 0, 2]
-    assert await get_values(Window(Count("rating"))) == [2, 2, 2]
+    assert await PlayerValues.get(Window(Count("rating"), partition_by=["active"])) == [2, 0, 2]
+    assert await PlayerValues.get(Window(Count("rating"))) == [2, 2, 2]
 
 
 @pytest.mark.asyncio
@@ -154,8 +146,8 @@ async def test_a_row_number_a_rank_and_a_tile_mix_with_a_signed_integer(clickhou
 
     for function in (RowNumber(), Rank(), DenseRank(), NTile(3)):
         window = Window(function, order_by=["id"])
-        assert await get_values(Case(When(id__lte=2, then=window), default=Value(0))) == [1, 2, 0]
-        assert await get_values(Coalesce(window, Value(-1))) == [1, 2, 3]
+        assert await PlayerValues.get(Case(When(id__lte=2, then=window), default=Value(0))) == [1, 2, 0]
+        assert await PlayerValues.get(Coalesce(window, Value(-1))) == [1, 2, 3]
 
 
 @pytest.mark.asyncio

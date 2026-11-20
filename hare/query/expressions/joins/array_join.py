@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import QueryError, UnSupportedError
 from hare.fields.data.containers.array_field import ArrayField
-from hare.query.expressions.conditions.q import Q
 from hare.query.expressions.conditions.query_modifier import QueryModifier
 from hare.query.expressions.expression import Expression
 from hare.query.expressions.expression_context import ExpressionContext
@@ -12,6 +11,9 @@ from hare.query.expressions.expression_result import ExpressionResult
 from hare.query.expressions.f import F
 from hare.query.expressions.joins.array_join_element import ArrayJoinElement
 from hare.query.expressions.joins.named_join import NamedJoin
+from hare.query.expressions.structure.enums import ArgumentRole
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
+from hare.query.filters.lookups.field_transforms import FieldTransforms
 from hare.sql.builder.tables.array_join_source import ArrayJoinSource
 from hare.sql.terms.criteria.true_criterion import TrueCriterion
 from hare.sql.terms.field import Field as SqlField
@@ -19,7 +21,6 @@ from hare.sql.terms.field import Field as SqlField
 if TYPE_CHECKING:
     from hare.fields.field import Field
     from hare.query.expressions.expression_result import TableCriterionTuple
-    from hare.sql.builder.tables.table import Table
 
 
 class ArrayJoin(NamedJoin):
@@ -42,6 +43,8 @@ class ArrayJoin(NamedJoin):
     Raises:
         QueryError: ``array`` is no field name, ``F()`` or expression.
     """
+
+    structure = ExpressionStructure(positions=((0, ArgumentRole.FIELD),), keywords=(("array", ArgumentRole.FIELD),))
 
     repeats_rows = True
 
@@ -87,7 +90,7 @@ class ArrayJoin(NamedJoin):
             )
         joined = ArrayJoinSource(self.name, array_result.term, left=self.left)
         # Joined like a table, with no condition.
-        return [*array_result.joins, (cast("Table", joined), TrueCriterion())], array_field.base_field
+        return [*array_result.joins, (joined, TrueCriterion())], array_field.base_field  # type: ignore[list-item]
 
     def get_path_result(self, path: str, expression_context: ExpressionContext) -> ExpressionResult:
         """What ``<name>__<path>`` reads - the element, with a path inside it.
@@ -95,16 +98,19 @@ class ArrayJoin(NamedJoin):
         Raises:
             QueryError: The path reads nothing inside the element.
         """
+        result, _ = self._get_element_path_result(path, expression_context, allows_lookup=False)
+        return result
+
+    def _get_element_path_result(
+        self, path: str, expression_context: ExpressionContext, *, allows_lookup: bool
+    ) -> tuple[ExpressionResult, list[str]]:
+        """Read an element path and return any segments left for a lookup."""
         joins, element_field = self.get_joins(expression_context)
-        term: Any = SqlField(cast("str", self.name))
-        output_field = element_field
-        for segment in path.split("__") if path else ():
-            transform = output_field.get_path_transform(segment)
-            if transform is None:
-                raise QueryError(f"ArrayJoin {self.name!r}: {segment!r} reads nothing inside its element")
-            get_term, output_field = transform
-            term = get_term(term)
-        return ExpressionResult(term=term, joins=joins, output_field=output_field)
+        transforms, output_field, remaining = FieldTransforms.get_path(element_field, path.split("__") if path else [])
+        if remaining and not allows_lookup:
+            raise QueryError(f"ArrayJoin {self.name!r}: {remaining[0]!r} reads nothing inside its element")
+        term = FieldTransforms.apply(transforms, SqlField(self.name))  # type: ignore[arg-type]
+        return ExpressionResult(term=term, joins=joins, output_field=output_field), remaining
 
     def get_path_filter(
         self,
@@ -116,29 +122,20 @@ class ArrayJoin(NamedJoin):
     ) -> QueryModifier:
         """The JOIN, then the filter on the element - or on a path inside it, the segments after the
         path its lookup."""
-        _, element_field = self.get_joins(expression_context)
-        segments = path.split("__") if path else []
-        path_length = 0
-        field: Any = element_field
-        while path_length < len(segments):
-            transform = field.get_path_transform(segments[path_length])
-            if transform is None:
-                break
-            field = transform[1]
-            path_length += 1
-        result = self.get_path_result("__".join(segments[:path_length]), expression_context)
-        lookup = "__".join(segments[path_length:])
-        condition = Q(**{f"{self.name}__{lookup}" if lookup else str(self.name): value})
-        condition._filter_call_generation = filter_call_generation
+        result, remaining = self._get_element_path_result(path, expression_context, allows_lookup=True)
+        lookup = "__".join(remaining)
+        filter_key = f"{self.name}__{lookup}" if lookup else str(self.name)
+        condition = self._get_filter_condition(filter_key, value, filter_call_generation)
         modifier = condition.get_result(
             ExpressionContext(
-                model=expression_context.model,
+                binding=expression_context.binding,
                 dialect=expression_context.dialect,
                 connection=expression_context.connection,
                 table=expression_context.table,
                 annotations={**expression_context.annotations, str(self.name): ArrayJoinElement(result)},
                 visibility=expression_context.visibility,
                 value_wrapper_references=expression_context.value_wrapper_references,
+                application_context=expression_context.application_context,
             )
         )
         return QueryModifier(joins=result.joins) & modifier

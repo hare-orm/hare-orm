@@ -1,21 +1,15 @@
-import os
-
 import pytest
 import pytest_asyncio
 
 from hare.contrib.test import RollbackIsolation
-from hare.contrib.test.isolated_contexts import hare_test_context
+from hare.core.hare_context import HareContext
 from tests.fields.relations.models_async_pk_default import AsyncPkChild, AsyncPkTarget
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 @pytest_asyncio.fixture(scope="module")
 async def db_async_pk_default_module():
-    async with hare_test_context(
-        modules=["tests.fields.relations.models_async_pk_default"],
-        db_url=os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:"),
-        app_label="models",
-        connection_label="models",
-    ) as ctx:
+    async with DatabaseUnderTest.open_model_context(["tests.fields.relations.models_async_pk_default"]) as ctx:
         yield ctx
 
 
@@ -27,8 +21,10 @@ async def db_async_pk_default(db_async_pk_default_module):
 
 @pytest.mark.asyncio
 async def test_fk_shadow_field_does_not_inherit_target_async_default_flag(db_async_pk_default):
-    assert AsyncPkTarget._meta.fields_map["id"]._default_is_coroutine
-    assert not AsyncPkChild._meta.fields_map["target_id"]._default_is_coroutine
+    assert HareContext.require_current().apps.get_binding(AsyncPkTarget).fields_map["id"]._default_is_coroutine
+    assert (
+        not HareContext.require_current().apps.get_binding(AsyncPkChild).fields_map["target_id"]._default_is_coroutine
+    )
 
 
 @pytest.mark.asyncio

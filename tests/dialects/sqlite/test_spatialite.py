@@ -50,6 +50,7 @@ from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
 from hare.query.expressions import F
 from tests.dialects.sqlite.models_spatialite import SpatialCity, SpatialPlace, SpatialSite
 from tests.spatialite.spatialite_settings import SpatialiteTestSettings
+from tests.utils.model_bindings import ModelBindings
 
 MODULES = ["tests.dialects.sqlite.models_spatialite"]
 SQUARE = [(0, 0), (4, 0), (4, 4), (0, 4), (0, 0)]
@@ -115,8 +116,11 @@ async def get_ids(**kwargs) -> list[int]:
 
 @pytest.mark.database_independent
 def test_the_column_types():
+    apps = ModelBindings.prepare(SpatialPlace)
     dialect = DialectRegistry.get_dialect("sqlite")
-    columns = {name: field.get_column_type(dialect) for name, field in SpatialPlace._meta.fields_map.items()}
+    columns = {
+        name: field.get_column_type(dialect) for name, field in apps.get_binding(SpatialPlace).fields_map.items()
+    }
     assert (columns["location"], columns["area"], columns["shape"], columns["height_point"]) == (
         "POINT",
         "POLYGON",

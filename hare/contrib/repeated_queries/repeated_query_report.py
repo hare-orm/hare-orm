@@ -26,6 +26,6 @@ class RepeatedQueryReport:
     call_site: str
 
 
-#: A custom report handler - a metric, a structured log event, an exception in a strict test
-#: environment - instead of the default warning.
+#: A custom report handler for a metric or structured log event instead of the default warning.
+#: Handler errors are logged; tests assert on a query collection to enforce their limits.
 ReportAction = Callable[[RepeatedQueryReport], None]

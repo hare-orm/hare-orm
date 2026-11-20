@@ -16,6 +16,7 @@ class PostgresqlDatabase:
         """
         self.name = name
         self.port = port
+        self.created = False
 
     async def connect(self, database: str = "postgres") -> Any:
         """A connection to one of the server's databases.
@@ -37,9 +38,11 @@ class PostgresqlDatabase:
         """
         connection = await self.connect()
         try:
+            version = str(await connection.fetchval("SHOW server_version"))
             await connection.execute(f'DROP DATABASE IF EXISTS "{self.name}"')
             await connection.execute(f'CREATE DATABASE "{self.name}"')
-            return str(await connection.fetchval("SHOW server_version"))
+            self.created = True
+            return version
         finally:
             await connection.close()
 
@@ -69,13 +72,10 @@ class PostgresqlDatabase:
             await connection.close()
 
     async def drop(self) -> None:
-        """Drops the database - a failure here costs nothing but a leftover database, which the next
-        run's create() drops."""
+        """Drops the database, passing cleanup failures to the run's result collector."""
+        connection = await self.connect()
         try:
-            connection = await self.connect()
-            try:
-                await connection.execute(f'DROP DATABASE IF EXISTS "{self.name}"')
-            finally:
-                await connection.close()
-        except Exception as error:  # noqa: BLE001 - never lose a finished run over the clean-up
-            print(f"(the database {self.name} stays: {error})")
+            await connection.execute(f'DROP DATABASE IF EXISTS "{self.name}"')
+            self.created = False
+        finally:
+            await connection.close()

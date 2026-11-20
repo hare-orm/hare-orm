@@ -2,12 +2,10 @@
 deletes by the composite key, row locks and foreign keys to and from a partitioned table."""
 
 import datetime
-import os
 
 import pytest
 import pytest_asyncio
 
-from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.exceptions import IntegrityError
 from hare.transactions.transactions import Transactions
 from tests.dialects.postgresql.conftest import skip_if_not_postgres
@@ -19,6 +17,7 @@ from tests.dialects.postgresql.schema.models_partitioned import (
     ReportNote,
     UnreadReport,
 )
+from tests.utils.database_under_test import DatabaseUnderTest
 
 PARTITION_ROW_COUNTS_SQL = (
     "SELECT child.relname AS name, "
@@ -32,11 +31,8 @@ PARTITION_ROW_COUNTS_SQL = (
 @pytest_asyncio.fixture
 async def db_partitioned():
     skip_if_not_postgres()
-    async with hare_test_context(
-        modules=["tests.dialects.postgresql.schema.models_partitioned"],
-        db_url=os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:"),
-        app_label="models",
-        connection_label="models",
+    async with DatabaseUnderTest.open_model_context(
+        ["tests.dialects.postgresql.schema.models_partitioned"]
     ) as context:
         yield context
 

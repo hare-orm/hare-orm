@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import FieldError
 from hare.fields.relations.fields.backward_foreign_key_relation import BackwardForeignKeyRelation
-from hare.fields.relations.fields.declarations import BackwardOneToOneRelation
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
-from hare.fields.relations.fields.one_to_one_field_instance import OneToOneFieldInstance
 from hare.fields.relations.fields.relational_field import RelationalField
 from hare.models.class_building.constants import LOOKUP_SEPARATOR
 from hare.query.lookup_info.lookup_path import LookupPath
@@ -19,6 +17,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.statements.select.model_rows_query import ModelRowsQuery
 
 
@@ -53,24 +52,25 @@ class OnlyDeferFields:
         Returns:
             The expanded field expressions, in model field order.
         """
-        fetch_fields = query.model._meta.fetch_fields
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
+        fetch_fields = model_binding.fetch_fields
         deferred_fields = set(query._deferred_fields)
         expressions = [
             field_name
-            for field_name in query.model._meta.fields_map
+            for field_name in model_binding.fields_map
             if field_name not in fetch_fields and field_name not in deferred_fields
         ]
         expressions.extend(sorted(OnlyDeferFields.prefetch_map_required_local_fields(query) - set(expressions)))
 
         for relation_path in sorted(query._select_related):
-            lookup_path = LookupPath.parse(query.model, relation_path, crosses_last=True)
+            lookup_path = LookupPath.parse(model_binding, relation_path, crosses_last=True)
             for position, related_field in enumerate(lookup_path.relations):
                 prefix = "__".join(lookup_path.relation_names[: position + 1])
-                related_model = related_field.related_model
+                related_binding = related_field.get_related_binding()
                 expressions.extend(
                     f"{prefix}__{field_name}"
-                    for field_name in related_model._meta.fields_map
-                    if field_name not in related_model._meta.fetch_fields
+                    for field_name in related_binding.fields_map
+                    if field_name not in related_binding.fetch_fields
                 )
 
         return tuple(expressions)
@@ -98,13 +98,14 @@ class OnlyDeferFields:
         # select direct model fields which would have the key "": {"": ["a", "b"]}
         data_fields = fetch_to_fields.pop("", None)
         if data_fields:
-            table = query.model._meta.basetable
+            table = query._binding.basetable  # type: ignore[union-attr]
 
             # Annotation names in .only() select no model column - the bucket size counts real
             # columns only. An .alias() named like a field means the field.
             def is_real_field(field: str) -> bool:
+                model_binding: ModelBinding = query._binding  # type: ignore[assignment]
                 return field not in query._annotations or (
-                    field in query._alias_keys and field in query.model._meta.fields_db_projection
+                    field in query._alias_keys and field in model_binding.fields_db_projection
                 )
 
             real_field_count = sum(1 for field in data_fields if is_real_field(field))
@@ -120,7 +121,7 @@ class OnlyDeferFields:
             try:
                 query.query = query.query.select(
                     *[
-                        table[query.model._meta.fields_db_projection[field]].as_(field)
+                        table[query._binding.fields_db_projection[field]].as_(field)  # type: ignore[union-attr]
                         for field in data_fields
                         if is_real_field(field)
                     ]
@@ -135,7 +136,7 @@ class OnlyDeferFields:
                 (
                     query.model,
                     0,
-                    query.model._meta.basetable,
+                    query._binding.basetable,  # type: ignore[union-attr]
                     query.model,
                     (None,),
                 )
@@ -144,11 +145,12 @@ class OnlyDeferFields:
         # Select fields of related models, e.g. {"a": ["b", "c"]}
         added_paths = set()
         for fetch_fields_lookup, data_fields in fetch_to_fields.items():
-            fetch_fields = LookupPaths.expand_expression(query.model, fetch_fields_lookup)
+            lookup_path, last_field = LookupPaths.get_expression_path(query._binding, fetch_fields_lookup)  # type: ignore[arg-type]
+            fetch_fields = (*lookup_path.relations, last_field)
             extra_conditions = query._select_related_extra_conditions
             model: type[Model] = query.model
             referring_model = model
-            table = query.model._meta.basetable
+            table = query._binding.basetable  # type: ignore[union-attr]
             path: tuple[str | None, ...] = (None,)
             for position, fetch_field in enumerate(fetch_fields):
                 if not isinstance(fetch_field, RelationalField):
@@ -157,17 +159,18 @@ class OnlyDeferFields:
                         f'Unknown field "{fetch_fields_lookup}__..." for model {query.model.__name__!r} - '
                         f"{fetch_field.model_field_name} is no relation"
                     )
-                field = cast("RelationalField[Model]", fetch_field)
-                path = path + (field.model_field_name,)
+                field: RelationalField[Model] = fetch_field
+                relation_name = field.model_field_name
+                path = path + (relation_name,)
                 is_last_field = position == len(fetch_fields) - 1
                 # Each relation's extra_condition goes into its JOIN here too - an intermediate one's as
                 # well: this JOIN is built before select_related's, and the first JOIN is the one kept.
                 table = QueryJoins.join_table_by_field(
                     query,
                     table,
-                    field.model_field_name,
+                    relation_name,
                     field,
-                    extra_conditions.get(LOOKUP_SEPARATOR.join(cast("tuple[str, ...]", path[1:]))),
+                    extra_conditions.get(LOOKUP_SEPARATOR.join(path[1:])),  # type: ignore[arg-type]
                 )
                 referring_model = model
                 model = field.related_model
@@ -175,20 +178,24 @@ class OnlyDeferFields:
                 if path in added_paths:
                     continue
 
-                # Every hop selects its related model's primary key: only the key tells a joined row
-                # from a LEFT JOIN miss.
+                # Every hop retains an identity key: nullable selected cells alone cannot tell
+                # a keyless related row from a LEFT JOIN miss.
                 hop_field_names = list(
                     dict.fromkeys(
-                        (*OnlyDeferFields.get_pk_select_field_names(model), *(data_fields if is_last_field else ()))
+                        (
+                            *OnlyDeferFields.get_related_identity_field_names(field),
+                            *(data_fields if is_last_field else ()),
+                        )
                     )
                 )
                 query._select_related_positions.append((model, len(hop_field_names), table, referring_model, path))
                 added_paths.add(path)
                 try:
+                    table_name = table.get_table_name() if hop_field_names else ""
                     query.query = query.query.select(
                         *[
-                            table[model._meta.fields_db_projection[hop_field_name]].as_(
-                                LookupPaths.safe_select_label(table.get_table_name(), hop_field_name)
+                            table[query._binding.graph.get_binding(model).fields_db_projection[hop_field_name]].as_(  # type: ignore[union-attr]
+                                LookupPaths.safe_select_label(table_name, hop_field_name, query._annotations)
                             )
                             for hop_field_name in hop_field_names
                         ]
@@ -207,28 +214,39 @@ class OnlyDeferFields:
         Args:
             query: The model rows query.
         """
-        relation_names = query._prefetch_map.keys() | query._prefetch_queries.keys()
-        required = OnlyDeferFields.get_prefetch_key_field_names(query.model, relation_names)
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
+        return OnlyDeferFields.get_prefetch_required_fields(
+            model_binding, query._fields_for_select, query._prefetch_map, query._prefetch_queries
+        )
+
+    @staticmethod
+    def get_prefetch_required_fields(
+        binding: ModelBinding,
+        fields_for_select: Iterable[str],
+        prefetch_map: dict[str, set[Any]],
+        prefetch_queries: dict[str, Any],
+    ) -> set[str]:
+        """Select the key columns needed by a request, including paths already loaded by only()."""
+        relation_names = prefetch_map.keys() | prefetch_queries.keys()
+        required = OnlyDeferFields.get_prefetch_key_field_names(binding, relation_names)
         loaded_paths = set()
-        for expression in query._fields_for_select:
+        for expression in fields_for_select:
             relation_path = expression.rpartition("__")[0]
             while relation_path:
                 loaded_paths.add(relation_path)
                 relation_path = relation_path.rpartition("__")[0]
-        for relation_name, nested_lookups in query._prefetch_map.items():
+        for relation_name, nested_lookups in prefetch_map.items():
             required.update(
-                OnlyDeferFields.get_nested_prefetch_field_paths(
-                    query.model, relation_name, nested_lookups, loaded_paths
-                )
+                OnlyDeferFields.get_nested_prefetch_field_paths(binding, relation_name, nested_lookups, loaded_paths)
             )
         return required
 
     @staticmethod
-    def get_prefetch_key_field_names(model: type[Model], relation_names: Iterable[str]) -> set[str]:
+    def get_prefetch_key_field_names(binding: ModelBinding, relation_names: Iterable[str]) -> set[str]:
         """A model's fields its relations' prefetches match rows by.
 
         Args:
-            model: The model.
+            binding: The model.
             relation_names: Its prefetched relations.
 
         Returns:
@@ -236,24 +254,24 @@ class OnlyDeferFields:
         """
         required: set[str] = set()
         for relation_name in relation_names:
-            field = model._meta.fields_map.get(relation_name)
-            if isinstance(field, (ForeignKeyFieldInstance, OneToOneFieldInstance)):
+            field = binding.fields_map.get(relation_name)
+            if isinstance(field, ForeignKeyFieldInstance):
                 required.update(field.source_fields)
-            elif isinstance(field, (BackwardForeignKeyRelation, BackwardOneToOneRelation)):
+            elif isinstance(field, BackwardForeignKeyRelation):
                 required.update(to_field.model_field_name for to_field in field.to_field_instances)
             elif isinstance(field, ManyToManyFieldInstance):
-                required.update(model._meta.primary_key_attribute_names)
+                required.update(binding.primary_key_attribute_names)
         return required
 
     @staticmethod
     def get_nested_prefetch_field_paths(
-        model: type[Model], relation_path: str, nested_lookups: Iterable[Any], loaded_paths: set[str]
+        binding: ModelBinding, relation_path: str, nested_lookups: Iterable[Any], loaded_paths: set[str]
     ) -> set[str]:
         """The fields a nested prefetch needs on the instances of a relation ``.only()`` loads, by path from
         the queried model (``author__publisher_id``) - nothing for a relation the prefetch loads itself.
 
         Args:
-            model: The model the relation path starts at.
+            binding: The model the relation path starts at.
             relation_path: The relation the nested lookups go on from.
             nested_lookups: The lookups after it - names, or ``Prefetch`` objects.
             loaded_paths: The relation paths ``.only()`` loads fields of.
@@ -263,7 +281,7 @@ class OnlyDeferFields:
         """
         if relation_path not in loaded_paths:
             return set()
-        related_field = model._meta.fields_map.get(relation_path.rpartition("__")[2])
+        related_field = binding.fields_map.get(relation_path.rpartition("__")[2])
         related_model = getattr(related_field, "related_model", None)
         if related_model is None:
             return set()
@@ -273,14 +291,18 @@ class OnlyDeferFields:
             if isinstance(name, str):
                 relation_name, __, rest = name.partition("__")
                 lookups_by_relation.setdefault(relation_name, []).extend([rest] if rest else [])
+        related_binding = binding.graph.get_binding(related_model)
         paths = {
             f"{relation_path}__{field_name}"
-            for field_name in OnlyDeferFields.get_prefetch_key_field_names(related_model, lookups_by_relation)
+            for field_name in OnlyDeferFields.get_prefetch_key_field_names(related_binding, lookups_by_relation)
         }
         for relation_name, rest_lookups in lookups_by_relation.items():
             paths.update(
                 OnlyDeferFields.get_nested_prefetch_field_paths(
-                    related_model, f"{relation_path}__{relation_name}", rest_lookups, loaded_paths
+                    related_binding,
+                    f"{relation_path}__{relation_name}",
+                    rest_lookups,
+                    loaded_paths,
                 )
             )
         return paths
@@ -296,24 +318,29 @@ class OnlyDeferFields:
             query: The model rows query.
         """
         required: set[str] = set()
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
         for relation_path in query._explicitly_select_related:
-            field = query.model._meta.fields_map.get(relation_path.partition("__")[0])
-            if isinstance(field, (ForeignKeyFieldInstance, OneToOneFieldInstance)):
+            field = model_binding.fields_map.get(relation_path.partition("__")[0])
+            if isinstance(field, ForeignKeyFieldInstance):
                 required.update(field.source_fields)
         return required
 
     @staticmethod
-    def get_pk_select_field_names(model: type[Model]) -> tuple[str, ...]:
-        """The selectable field name(s) backing ``model``'s primary key, in pk order.
+    def get_related_identity_field_names(field: RelationalField[Model]) -> tuple[str, ...]:
+        """The joined model's identity fields, including a keyless model's join columns.
 
-        Args:
-            model: The model whose primary key is selected.
-
-        Returns:
-            Keys of ``model._meta.fields_db_projection``.
+        Primary keys keep their existing implicit selection. Without a primary key, the
+        actual target/connector columns distinguish a matched row from a LEFT JOIN miss;
+        these columns cannot all be SQL NULL in a successful equality join.
         """
-        meta = model._meta
-        return tuple(
-            name if name in meta.fields_db_projection else cast("str", meta.fields_map[name].source_field)
-            for name in meta.primary_key_attribute_names
-        )
+        meta = field.get_related_binding()
+        if meta.has_primary_key:
+            return tuple(
+                name if name in meta.fields_db_projection else meta.fields_map[name].source_field  # type: ignore[misc]
+                for name in meta.primary_key_attribute_names
+            )
+        if isinstance(field, BackwardForeignKeyRelation):
+            return field.relation_fields
+        if isinstance(field, ForeignKeyFieldInstance):
+            return tuple(target.model_field_name for target in field.to_field_instances)
+        return ()

@@ -24,6 +24,12 @@ class SqliteSearchRenderers:
         renderers.register(FullTextQuery, cls.render_full_text_query)
 
     @staticmethod
+    def get_index_table_names_sql(sql_context: SqlContext, table: str, schema: str | None) -> tuple[str, str]:
+        """Quote the bare FTS name for MATCH and the qualified name for FROM."""
+        bare = sql_context.quote(table)
+        return bare, f"{sql_context.quote(schema)}.{bare}" if schema else bare
+
+    @staticmethod
     def render_full_text_query(query: FullTextQuery, sql_context: SqlContext) -> str:
         """``hare_full_text_query(text,'plain','{"title"}')`` - the text as an FTS5 query."""
         text_sql = Function.get_arg_sql(query.args[0], sql_context)

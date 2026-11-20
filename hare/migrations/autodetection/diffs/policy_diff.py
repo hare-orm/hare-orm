@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.ddl.conditions.tenant_condition import TenantCondition
 from hare.ddl.raw_sql_term import RawSQLTerm
@@ -34,7 +34,7 @@ class PolicyDiff(DeclaredSchemaObjectDiff):
         Returns:
             ``(table, column)`` of each column, by the names of the state before the migration.
         """
-        policy = cast("Policy", schema_object)
+        policy: Policy = schema_object
         field_names: set[str] = set()
         for condition in (policy.using, policy.with_check):
             if isinstance(condition, TenantCondition):

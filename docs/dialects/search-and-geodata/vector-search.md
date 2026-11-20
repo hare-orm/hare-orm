@@ -115,16 +115,8 @@ class Book(Model):
         indexes = (HnswIndex(fields=("embedding",), m=16, ef_construction=64, opclasses=("vector_cosine_ops",)),)
 ```
 
-> [!WARNING]
-> **WITH before WHERE**
->
-> If you also combine one of these with `condition=` (a partial index), the *storage parameters*
-> (`WITH (lists=...)` / `WITH (m=..., ef_construction=...)`) must come **before** the *condition*
-> (`WHERE (...)`) in the generated `CREATE INDEX` statement — that's a hard PostgreSQL syntax
-> requirement, not a style choice. `IvfflatIndex`/`HnswIndex` already get this ordering right on their
-> own; this note exists to explain *why*, not because you need to do anything about it: if you're
-> extending either class yourself, remember `PartialIndex.__init__` only ever *appends* its `WHERE`
-> clause, so anything adding its own storage parameters must *prepend* them instead.
+Storage parameters and a partial-index `condition=` can be combined. The ORM renders storage
+parameters before the condition in the generated SQL.
 
 ## <a id="sqlite"></a>sqlite-vec (SQLite)
 

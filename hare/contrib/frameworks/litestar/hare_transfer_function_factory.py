@@ -2,46 +2,95 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from litestar.dto._codegen_backend import TransferFunctionFactory
+from litestar.dto._types import CollectionType, MappingType
 
 if TYPE_CHECKING:
-    from litestar.dto._types import TransferDTOFieldDefinition
+    from litestar.dto._types import TransferDTOFieldDefinition, TransferType
+    from litestar.typing import FieldDefinition
 
 
 class HareTransferFunctionFactory(TransferFunctionFactory):
-    """Litestar's generator of a DTO's transfer code, a row read through an attribute accessor kept in a
-    local first, and every field of a row read through the accessor.
+    """Keep accessor calls in local values and recursive factories within this DTO.
 
-    Litestar keeps a nested row in a local named after the expression reading it only when the expression is
-    an attribute or an item - one of ``HareDTO.attribute_accessor()``'s calls became part of a name of the
-    generated code, which then didn't compile (a row two to-one relations deep).
+    Generated identifiers must never contain an attribute-access expression. Reading
+    via the accessor also includes computed and flattened fields absent from the row's
+    attributes. Litestar's recursive collection branches name their factory directly;
+    these two hooks propagate this local factory instead, leaving the library intact.
     """
 
     @contextmanager
     def _access_attribute(self, source_name: str, field_name: str, expect_optional: bool) -> Generator[str]:
-        # Litestar reads an optional field only where hasattr() finds it - a related value (``writer_name``)
-        # is no attribute of the row; the accessor answers None for a value a row lacks itself.
-        with super()._access_attribute(source_name, field_name, expect_optional=False) as value_expression:
-            yield value_expression
+        with super()._access_attribute(source_name, field_name, expect_optional=False) as expression:
+            value_name = self._create_local_name("attribute_value")
+            self._add_stmt(f"{value_name} = {expression}")
+            yield value_name
 
-    def _create_transfer_instance_data(
+    def _create_transfer_data_body_nested(
         self,
-        tmp_return_type_name: str,
-        source_instance_name: str,
-        destination_type_name: str,
+        field_definition: FieldDefinition,
         field_definitions: tuple[TransferDTOFieldDefinition, ...],
-        destination_type_is_dict: bool,
+        destination_type: type[Any],
+        source_data_name: str,
+        assignment_target: str,
     ) -> None:
-        if "(" in source_instance_name:
-            row_name = self._create_local_name("source_row")
-            self._add_stmt(f"{row_name} = {source_instance_name}")
-            source_instance_name = row_name
-        super()._create_transfer_instance_data(
-            tmp_return_type_name=tmp_return_type_name,
-            source_instance_name=source_instance_name,
-            destination_type_name=destination_type_name,
+        transfer = type(self).create_transfer_data(
+            is_data_field=self.is_data_field,
+            destination_type=destination_type,
+            field_definition=field_definition.inner_types[0],
             field_definitions=field_definitions,
-            destination_type_is_dict=destination_type_is_dict,
+            attribute_accessor=self.attribute_accessor,
         )
+        self.write_collection(
+            transfer,
+            field_definition,
+            source_data_name,
+            assignment_target,
+            is_mapping=field_definition.is_mapping,
+        )
+
+    def _create_transfer_type_data_body(
+        self,
+        transfer_type: TransferType,
+        nested_as_dict: bool,
+        source_value_name: str,
+        assignment_target: str,
+    ) -> None:
+        if isinstance(transfer_type, (CollectionType, MappingType)) and transfer_type.has_nested:
+            transfer = type(self).create_transfer_type_data(
+                is_data_field=self.is_data_field,
+                transfer_type=transfer_type.value_type
+                if isinstance(transfer_type, MappingType)
+                else transfer_type.inner_type,
+                attribute_accessor=self.attribute_accessor,
+            )
+            self.write_collection(
+                transfer,
+                transfer_type.field_definition,
+                source_value_name,
+                assignment_target,
+                is_mapping=isinstance(transfer_type, MappingType),
+            )
+            return
+        super()._create_transfer_type_data_body(transfer_type, nested_as_dict, source_value_name, assignment_target)
+
+    def write_collection(
+        self,
+        transfer: Any,
+        definition: FieldDefinition,
+        source: str,
+        target: str,
+        *,
+        is_mapping: bool,
+    ) -> None:
+        """Emit Litestar's collection construction with the local nested transfer function."""
+        origin = self._add_to_fn_globals("origin", definition.instantiable_origin)
+        function = self._add_to_fn_globals("transfer_data", transfer)
+        values = (
+            f"(key, {function}(item)) for key, item in {source}.items()"
+            if is_mapping
+            else f"{function}(item) for item in {source}"
+        )
+        self._add_stmt(f"{target} = {origin}({values})")

@@ -83,6 +83,30 @@ def test_root_and_leaf_nodes_filtered_by_app_label():
     assert graph.leaf_nodes() == sorted([_key("app_a", "0002_second"), _key("app_b", "0001_initial")])
 
 
+@pytest.mark.parametrize("foreign_apps", [("bridge",), ("bridge", "middle")])
+@pytest.mark.parametrize("redundant_direct_edge", [False, True])
+def test_app_history_follows_dependency_paths_through_other_apps(foreign_apps, redundant_direct_edge):
+    graph = MigrationGraph()
+    first, second, third = (_key("library", name) for name in ("0001_first", "0002_second", "0003_third"))
+    bridges = [_key(app, "0001_initial") for app in foreign_apps]
+    chain = [first, *bridges, second, third]
+    for key in chain:
+        graph.add_node(key, migration=object())
+    for parent, child in zip(chain, chain[1:]):
+        graph.add_dependency(child, child=child, parent=parent)
+    if redundant_direct_edge:
+        graph.add_dependency(second, child=second, parent=first)
+    assert graph.root_nodes("library") == [first]
+    assert graph.leaf_nodes("library") == [third]
+    assert graph.get_single_leaf("library") == third
+    assert graph.same_app_children(first) == [second]
+    assert graph.same_app_children(second) == [third]
+    # Reversing to the first library migration keeps its foreign-app dependents.
+    assert graph.backwards_plan_for_all(graph.same_app_children(first)) == [third, second]
+    for bridge in bridges:
+        assert graph.root_nodes(bridge.app_label) == graph.leaf_nodes(bridge.app_label) == [bridge]
+
+
 def test_leaf_and_root_nodes_ignore_a_cross_app_dependency_when_scoped():
     """app_a's own single migration is depended upon by app_b (e.g. an FK to app_a's model,
     generating `dependencies=[("app_a", "0001_initial")]` on app_b's side) - app_a's migration

@@ -3,7 +3,6 @@ converts the stored texts in a mutation after it - a text that didn't parse fail
 the table unreadable, became NULL in a Nullable column, and an impossible date was read as another one.
 Such a text is refused before the column changes."""
 
-import os
 import textwrap
 
 import pytest
@@ -17,10 +16,7 @@ class Note(Model):
 """
 
 
-@pytest.fixture(autouse=True)
-def skip_without_clickhouse():
-    if not os.getenv("HARE_TEST_DB", "").startswith("clickhouse"):
-        pytest.skip("runs against the ClickHouse test server - make test_clickhouse")
+pytestmark = pytest.mark.usefixtures("skip_without_clickhouse")
 
 
 async def get_value_column_type(project) -> str:
@@ -68,7 +64,7 @@ async def test_a_text_the_new_type_does_not_hold_is_refused_before_the_column_ch
     result = await project.cli("migrate")
 
     assert result.exit_code not in (0, None)
-    assert f'holds "{text}"' in result.output
+    assert f"holds {text!r}" in result.output
     assert await get_value_column_type(project) == "Nullable(String)"
     assert await project.query("SELECT id, value FROM note ORDER BY id") == [
         {"id": 1, "value": text},

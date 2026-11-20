@@ -2,10 +2,10 @@
 
 use pyo3::exceptions::PyOverflowError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDateTime, PyDelta, PyDeltaAccess, PyList};
+use pyo3::types::{PyDateTime, PyList};
 
-const MICROSECONDS_PER_SECOND: i128 = 1_000_000;
-const SECONDS_PER_DAY: i128 = 86_400;
+use crate::rows::value_writing::count_microseconds;
+
 const MICROSECOND_DIGITS: u32 = 6;
 
 /// Each moment of `values` as the ticks since `epoch` of a column keeping `moment_scale` fractional
@@ -31,24 +31,9 @@ pub fn get_moment_ticks<'py>(
             ticks.append(value)?;
             continue;
         }
-        let microseconds = get_microseconds(&value.sub(epoch)?)?;
+        let microseconds = count_microseconds(&value.sub(epoch)?)?;
         let tick = microseconds.checked_mul(multiplier).ok_or_else(overflow)?.div_euclid(divisor);
         ticks.append(tick)?;
     }
     Ok(ticks)
-}
-
-/// The microseconds a timedelta spans - its days, seconds and microseconds, read as attributes from
-/// anything but a plain timedelta.
-fn get_microseconds(delta: &Bound<'_, PyAny>) -> PyResult<i128> {
-    let (days, seconds, microseconds): (i128, i128, i128) = if let Ok(delta) = delta.cast_exact::<PyDelta>() {
-        (delta.get_days().into(), delta.get_seconds().into(), delta.get_microseconds().into())
-    } else {
-        (
-            delta.getattr("days")?.extract()?,
-            delta.getattr("seconds")?.extract()?,
-            delta.getattr("microseconds")?.extract()?,
-        )
-    };
-    Ok((days * SECONDS_PER_DAY + seconds) * MICROSECONDS_PER_SECOND + microseconds)
 }

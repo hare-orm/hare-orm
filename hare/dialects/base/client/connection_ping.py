@@ -33,5 +33,5 @@ class ConnectionPing:
         try:
             await asyncio.wait_for(client.execute(PING_SQL), timeout)
         except (DatabaseError, TimeoutError) as error:
-            return PingResult(False, None, type(error).__name__)
+            return PingResult.failed(error)
         return PingResult(True, (time.perf_counter() - start_time) * 1000, None)

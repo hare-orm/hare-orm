@@ -8,16 +8,20 @@ import textwrap
 
 import pytest
 
+from hare.ddl.constraints import UniqueConstraint
+from hare.fields.relations.fields.one_to_one_field_instance import OneToOneFieldInstance
+from hare.migrations import Migration
+from hare.migrations.operations import AddField, CreateModel, RenameField
 from tests.utils.cli_project import CliProject
 from tests.utils.cli_project_factory import project_factory  # noqa: F401 - the fixture
 
 
-async def squash_and_apply_from_zero(project: CliProject, *squashed_range: str) -> str:
+async def squash_and_apply_from_zero(project: CliProject, *squashed_range: str) -> Migration:
     """Squashes the app's migrations (all of them without a range), applies the result to the
     empty database, checks it and rolls it back.
 
     Returns:
-        The squashed migration's source.
+        The squashed migration's operations and metadata.
     """
     await project.cli_ok("squashmigrations", "app", *(squashed_range or (project.migration_files()[-1],)))
     squashed_name = next(name for name in project.migration_files() if "squashed" in name)
@@ -26,7 +30,7 @@ async def squash_and_apply_from_zero(project: CliProject, *squashed_range: str) 
     await project.cli_ok("migrate", "app", "zero")
     await project.cli_ok("migrate")
     await project.assert_in_sync()
-    return (project.root / "cli_rt_app" / "migrations" / f"{squashed_name}.py").read_text(encoding="utf-8")
+    return project.get_migration(squashed_name)
 
 
 @pytest.mark.asyncio
@@ -50,9 +54,14 @@ async def test_fields_added_with_an_index_of_their_own_fold_into_the_created_mod
             + textwrap.indent(textwrap.dedent(added_fields), "    ")
         )
         await project.cli_ok("makemigrations")
-    squashed_source = await squash_and_apply_from_zero(project)
-    assert squashed_source.count("ops.") == 1
-    assert "ops.CreateModel" in squashed_source
+    migration = await squash_and_apply_from_zero(project)
+    [operation] = migration.operations
+    assert isinstance(operation, CreateModel)
+    assert operation.name == "Node"
+    columns = dict(operation.fields)
+    assert set(columns) == {"id", "code", "parent", "rank"}
+    assert columns["code"].index and columns["rank"].index
+    assert columns["parent"].model_name == "app.Node"
 
 
 @pytest.mark.asyncio
@@ -66,10 +75,12 @@ async def test_a_field_added_and_then_given_an_index_keeps_it_squashed_without_i
         project.write_models("class Node(Model):\n    id = fields.IntField(primary_key=True)\n" + field)
         await project.cli_ok("makemigrations")
     names = project.migration_files()
-    squashed_source = await squash_and_apply_from_zero(project, names[1], names[2])
-    assert "ops.AddField" in squashed_source
-    assert "db_index=True" in squashed_source
-    assert "ops.AddIndex" not in squashed_source
+    migration = await squash_and_apply_from_zero(project, names[1], names[2])
+    [operation] = migration.operations
+    assert isinstance(operation, AddField)
+    assert (operation.model_name, operation.name) == ("Node", "code")
+    assert operation.field.index
+    assert migration.replaces == [("app", names[1]), ("app", names[2])]
 
 
 @pytest.mark.asyncio
@@ -103,10 +114,11 @@ async def test_a_renamed_model_is_created_under_its_new_name_and_table(project_f
             operations = [ops.RenameModel(old_name="Node", new_name="Branch")]
         """,
     )
-    squashed_source = await squash_and_apply_from_zero(project)
-    assert 'name="Branch"' in squashed_source
-    assert '"app.Branch"' in squashed_source
-    assert "Node" not in squashed_source.split("operations = [")[1]
+    migration = await squash_and_apply_from_zero(project)
+    [operation] = migration.operations
+    assert isinstance(operation, CreateModel)
+    assert operation.name == "Branch"
+    assert dict(operation.fields)["parent"].model_name == "app.Branch"
     await project.cli_ok("migrate")
     await project.query("INSERT INTO branch (id) VALUES (1)")
     await project.query("INSERT INTO branch (id, parent_id) VALUES (2, 1)")
@@ -126,10 +138,14 @@ async def test_a_one_to_one_relation_to_a_composite_key_added_later_is_unique_on
     for step in ("", relation):
         project.write_models(textwrap.dedent(template).format(relation=step))
         await project.cli_ok("makemigrations")
-    squashed_source = await squash_and_apply_from_zero(project)
-    assert squashed_source.count("ops.") == 1
-    # The relation's uniqueness is its own - never written as a constraint.
-    assert squashed_source.count("UniqueConstraint(") == 0
+    migration = await squash_and_apply_from_zero(project)
+    [operation] = migration.operations
+    assert isinstance(operation, CreateModel)
+    assert operation.name == "Pair"
+    relation = dict(operation.fields)["twin"]
+    assert isinstance(relation, OneToOneFieldInstance)
+    assert relation.unique and relation.model_name == "app.Pair"
+    assert not any(isinstance(constraint, UniqueConstraint) for constraint in operation.options.get("constraints", ()))
 
 
 @pytest.mark.asyncio
@@ -148,8 +164,12 @@ async def test_a_rename_of_a_field_a_created_models_raw_sql_reads_stays_apart_sq
     await project.cli_ok("makemigrations")
     project.write_models(textwrap.dedent(template).format(name="amount"))
     await project.cli_ok("makemigrations", "--rename", "app.Item.price=amount")
-    squashed_source = await squash_and_apply_from_zero(project)
-    assert "ops.RenameField(" in squashed_source
+    migration = await squash_and_apply_from_zero(project)
+    assert any(
+        isinstance(operation, RenameField)
+        and (operation.model_name, operation.old_name, operation.new_name) == ("Item", "price", "amount")
+        for operation in migration.operations
+    )
     await project.cli_ok("migrate")
     await project.query("INSERT INTO item (id, amount) VALUES (1, 7)")
     await project.query("INSERT INTO item (id, amount, base_id) VALUES (2, 8, 7)")
@@ -163,9 +183,12 @@ async def test_a_field_created_with_an_index_and_left_without_it_is_created_with
     for field_options in ("null=True, db_index=True", "null=True"):
         project.write_models(f"{node}    code = fields.IntField({field_options})\n")
         await project.cli_ok("makemigrations")
-    squashed_source = await squash_and_apply_from_zero(project)
-    assert squashed_source.count("ops.") == 1
-    assert "Index(" not in squashed_source
+    migration = await squash_and_apply_from_zero(project)
+    [operation] = migration.operations
+    assert isinstance(operation, CreateModel)
+    assert operation.name == "Node"
+    assert not dict(operation.fields)["code"].index
+    assert not operation.options.get("indexes")
 
 
 @pytest.mark.asyncio

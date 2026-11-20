@@ -6,12 +6,14 @@ from hare.dialects.base.renderers.term_renderers import TermRenderers
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
+    from hare.sql.terms.term import Term
 
 
 class CheckedTermRenderers(TermRenderers):
     """Term renderers checked to be complete: the dialect registers its renderers when they are
     built (``add_dialect_renderers()``), and each term whose SQL differs between dialects is checked to
-    have one - a dialect that forgot a term fails as it is built, not at the first query using the
+    have one. A function with standard call syntax may register only its dialect name. A dialect
+    that forgot a term fails as it is built, not at the first query using the
     term. hare's own dialects build theirs on it; a dialect rendering only some of the terms starts
     from a plain ``TermRenderers``.
     """
@@ -30,29 +32,35 @@ class CheckedTermRenderers(TermRenderers):
         from hare.sql import functions
         from hare.sql.terms import criteria, functions as term_functions
 
+        term_classes: tuple[type[Term], ...] = (
+            functions.DatetimeAsText,
+            functions.Extract,
+            functions.MathFunction,
+            functions.CastTo,
+            functions.TextFunction,
+            functions.DateTrunc,
+            functions.DatetimeCast,
+            functions.TemporalShift,
+            functions.TemporalDifference,
+            functions.JsonObject,
+            functions.JsonArray,
+            functions.JsonValue,
+            functions.JsonComparand,
+            functions.DateAsTimestamp,
+            functions.JsonSortKey,
+            term_functions.Interval,
+            term_functions.FloatMod,
+            criteria.JSONAttributeCriterion,
+        )
         missing_term_classes = [
             term_class.__name__
-            for term_class in (
-                functions.DatetimeAsText,
-                functions.Extract,
-                functions.MathFunction,
-                functions.CastTo,
-                functions.TextFunction,
-                functions.DateTrunc,
-                functions.DatetimeCast,
-                functions.TemporalShift,
-                functions.TemporalDifference,
-                functions.JsonObject,
-                functions.JsonArray,
-                functions.JsonValue,
-                functions.JsonComparand,
-                functions.DateAsTimestamp,
-                functions.JsonSortKey,
-                term_functions.Interval,
-                term_functions.FloatMod,
-                criteria.JSONAttributeCriterion,
-            )
+            for term_class in term_classes
             if term_class not in self.renderers
+            and not (
+                issubclass(term_class, term_functions.Function)
+                and not term_class.requires_dialect_renderer
+                and term_class in self.name_renderers
+            )
         ]
         if missing_term_classes:
             raise TypeError(f"{type(self).__name__} renders none of {', '.join(missing_term_classes)}")

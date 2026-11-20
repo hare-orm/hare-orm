@@ -17,8 +17,8 @@ from hare.fields.data.numeric import IntField
 from hare.fields.relations.fields.relational_field import RelationalField
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
 from hare.migrations.autodetection.operation_generator import OperationGenerator
-from hare.migrations.drift import detect_drift
-from hare.migrations.operations import AddField, AlterField, CreateModel
+from hare.migrations.migration import Migration
+from hare.migrations.operations import AddField, AlterField, CreateModel, SeparateDatabaseAndState
 from hare.migrations.state.state import State
 from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
@@ -94,11 +94,6 @@ async def get_index_columns(round_trip: ReversibleRoundTrip, table: str) -> list
     return sorted(tuple(column for _position, column in sorted(columns)) for columns in columns_by_index_name.values())
 
 
-async def get_drift_operation_types(round_trip: ReversibleRoundTrip, *models: type[Model]) -> list[type]:
-    result = await detect_drift(round_trip.connection, build_live_state(*models), [APP_LABEL])
-    return [type(operation) for operation in result.operations]
-
-
 @pytest.fixture
 def round_trip(db_isolated_no_schema) -> ReversibleRoundTrip:
     return ReversibleRoundTrip(db_isolated_no_schema.get_connection())
@@ -122,13 +117,13 @@ async def test_foreign_key_from_a_migration_without_db_index_gets_its_index_and_
     assert await get_index_columns(round_trip, "fkm_child") == []
 
     models = build_models(build_parent_and_child)
-    assert await get_drift_operation_types(round_trip, *models) == [AlterField]
+    assert await round_trip.get_drift_operation_types(*models) == [SeparateDatabaseAndState, AlterField]
     operations = await round_trip.migrate_to(*models)
 
     assert [type(operation) for operation in operations] == [AlterField]
     assert await get_index_columns(round_trip, "fkm_child") == [("parent_id",)]
     assert round_trip.get_pending_operations(*models) == []
-    assert await get_drift_operation_types(round_trip, *models) == []
+    assert await round_trip.get_drift_operation_types(*models) == []
 
     await round_trip.roll_back()
 
@@ -142,7 +137,7 @@ async def test_foreign_key_with_db_index_false_generates_no_changes(round_trip: 
     models = build_models(lambda: build_parent_and_child({"db_index": False}))
 
     assert round_trip.get_pending_operations(*models) == []
-    assert await get_drift_operation_types(round_trip, *models) == []
+    assert await round_trip.get_drift_operation_types(*models) == []
 
 
 @pytest.mark.asyncio
@@ -165,12 +160,12 @@ async def test_new_model_creates_the_foreign_key_index_and_drift_reports_it_miss
     await round_trip.migrate_to(*models)
 
     assert await get_index_columns(round_trip, "fkm_new_child") == [("loose_id",), ("parent_id",)]
-    assert await get_drift_operation_types(round_trip, *models) == []
+    assert await round_trip.get_drift_operation_types(*models) == []
 
     index_names = await round_trip.get_plain_index_names("fkm_new_child")
     await round_trip.query(f'DROP INDEX "{index_names[0]}"')
 
-    assert await get_drift_operation_types(round_trip, *models) == [AlterField]
+    assert await round_trip.get_drift_operation_types(*models) == [SeparateDatabaseAndState, AlterField]
 
 
 @pytest.mark.asyncio
@@ -191,7 +186,7 @@ async def test_composite_foreign_key_gets_one_index_over_its_key_columns(round_t
     assert [type(operation) for operation in operations] == [AlterField]
     assert await get_index_columns(round_trip, "fkm_pair_child") == [("pair_left", "pair_right")]
     assert round_trip.get_pending_operations(*models) == []
-    assert await get_drift_operation_types(round_trip, *models) == []
+    assert await round_trip.get_drift_operation_types(*models) == []
 
     await round_trip.roll_back()
 
@@ -209,12 +204,23 @@ async def test_drift_reports_a_missing_composite_foreign_key_index(round_trip: R
 
     models = build_models(build_version)
     await round_trip.migrate_to(*models)
-    assert await get_drift_operation_types(round_trip, *models) == []
+    assert await round_trip.get_drift_operation_types(*models) == []
 
     index_names = await round_trip.get_plain_index_names("fkm_drift_pair_child")
+    columns_before = await get_index_columns(round_trip, "fkm_drift_pair_child")
     await round_trip.query(f'DROP INDEX "{index_names[0]}"')
 
-    assert await get_drift_operation_types(round_trip, *models) == [AlterField]
+    expected = build_live_state(*models)
+    drift = await round_trip.get_drift(expected)
+    assert [type(operation) for operation in drift.operations] == [SeparateDatabaseAndState, AlterField]
+    assert drift.mismatched_objects == []
+    repair = Migration("repair", APP_LABEL, operations=drift.operations)
+    await repair.apply(expected, schema_editor=round_trip.editor)
+    assert await get_index_columns(round_trip, "fkm_drift_pair_child") == columns_before
+    assert await round_trip.get_drift_operation_types(*models) == []
+
+    await repair.unapply(expected, schema_editor=round_trip.editor)
+    assert await get_index_columns(round_trip, "fkm_drift_pair_child") == []
 
 
 @pytest.mark.asyncio
@@ -237,16 +243,25 @@ async def test_automatic_through_table_from_a_migration_without_db_index_gets_it
     legacy_models = build_models(build_version, legacy=True)
     await round_trip.migrate_to(*legacy_models)
     assert await get_index_columns(round_trip, "fkm_tags") == []
-    assert await get_drift_operation_types(round_trip, *legacy_models) == []
+    assert await round_trip.get_drift_operation_types(*legacy_models) == []
 
     models = build_models(build_version)
-    assert await get_drift_operation_types(round_trip, *models) == [AlterField]
+    expected = build_live_state(*models)
+    drift = await round_trip.get_drift(expected)
+    assert [type(operation) for operation in drift.operations] == [SeparateDatabaseAndState, AlterField]
+    assert drift.mismatched_objects == []
+    repair = Migration("repair", APP_LABEL, operations=drift.operations)
+    await repair.apply(expected, schema_editor=round_trip.editor)
+    assert await get_index_columns(round_trip, "fkm_tags") == expected_index_columns
+    await repair.unapply(expected, schema_editor=round_trip.editor)
+    assert await get_index_columns(round_trip, "fkm_tags") == []
+
     operations = await round_trip.migrate_to(*models)
 
     assert [type(operation) for operation in operations] == [AlterField]
     assert await get_index_columns(round_trip, "fkm_tags") == expected_index_columns
     assert round_trip.get_pending_operations(*models) == []
-    assert await get_drift_operation_types(round_trip, *models) == []
+    assert await round_trip.get_drift_operation_types(*models) == []
 
     await round_trip.roll_back()
 
@@ -277,7 +292,7 @@ async def test_unique_together_leading_with_the_foreign_key_replaces_its_index(
 
     assert await get_index_columns(round_trip, "fkm_cover_child") == []
     assert round_trip.get_pending_operations(*covered_models) == []
-    assert await get_drift_operation_types(round_trip, *covered_models) == []
+    assert await round_trip.get_drift_operation_types(*covered_models) == []
 
     await round_trip.roll_back()
 
@@ -285,7 +300,7 @@ async def test_unique_together_leading_with_the_foreign_key_replaces_its_index(
 
 
 @pytest.mark.asyncio
-async def test_unnamed_partial_index_on_the_foreign_key_column_takes_the_place_of_its_index(
+async def test_unnamed_partial_index_coexists_with_the_foreign_key_index(
     round_trip: ReversibleRoundTrip,
 ) -> None:
     def build_version() -> tuple[type[Model], ...]:
@@ -301,7 +316,7 @@ async def test_unnamed_partial_index_on_the_foreign_key_column_takes_the_place_o
     models = build_models(build_version)
     await round_trip.migrate_to(*models)
 
-    assert len(await round_trip.get_plain_index_names("fkm_partial_child")) == 1
+    assert len(await round_trip.get_plain_index_names("fkm_partial_child")) == 2
     assert round_trip.get_pending_operations(*models) == []
 
 
@@ -327,7 +342,7 @@ async def test_through_model_indexes_the_relation_its_unique_constraint_does_not
     await round_trip.migrate_to(*models)
 
     assert await get_index_columns(round_trip, "fkm_membership") == [("group_id",)]
-    assert await get_drift_operation_types(round_trip, *models) == []
+    assert await round_trip.get_drift_operation_types(*models) == []
 
 
 @pytest.mark.asyncio

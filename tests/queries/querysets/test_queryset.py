@@ -14,6 +14,7 @@ import pytest_asyncio
 from hare import Connections
 from hare.contrib import test
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.dialects.postgresql.query import PostgresqlQuery
 from hare.exceptions import (
     DoesNotExist,
@@ -67,6 +68,7 @@ from tests.shared_models.testmodels import (
 )
 from tests.shared_models.testmodels_postgres import TemporalRecord
 from tests.utils.model_rows_queries import get_model_rows_query
+from tests.utils.waiting import wait_until
 
 # TODO: Test the many exceptions in QuerySet
 # TODO: .filter(intnum_null=None) does not work as expected
@@ -1557,6 +1559,21 @@ async def test_select_for_update_inside_transaction_still_works(db_truncate):
         assert locked.pk == row.pk
 
 
+async def wait_until_a_transaction_waits_for_a_row_lock() -> None:
+    """Waits until a transaction of the test database is blocked on a lock another one holds - as the server
+    reports it, so the proof doesn't rest on a delay."""
+    connection = Connections.get("models")
+
+    async def a_backend_waits() -> bool:
+        _, rows = await connection.execute(
+            "SELECT count(*) AS waiting FROM pg_stat_activity "
+            "WHERE datname = current_database() AND wait_event_type = 'Lock'"
+        )
+        return rows[0]["waiting"] > 0
+
+    await wait_until(a_backend_waits)
+
+
 @requires_features(supports_select_for_update=True)
 @pytest.mark.asyncio
 async def test_select_for_update_blocks_concurrent_transaction(db_truncate):
@@ -1594,9 +1611,8 @@ async def test_select_for_update_blocks_concurrent_transaction(db_truncate):
     await holder_locked.wait()
     waiter_task = asyncio.create_task(waiter())
 
-    # Give the waiter every chance to actually reach the database and hit the row lock - it
-    # must still be blocked (not done) here, proving a real lock is held, not a no-op.
-    await asyncio.sleep(0.3)
+    # The waiter reached the database and is blocked on the row lock - a real lock is held, not a no-op.
+    await wait_until_a_transaction_waits_for_a_row_lock()
     assert not waiter_task.done()
     assert "waiter_acquired_lock" not in events
 
@@ -1648,9 +1664,9 @@ async def test_select_for_update_locks_prefetched_rows(db_truncate):
     waiter_task = asyncio.create_task(waiter())
 
     try:
-        # The waiter must still be blocked here, proving the prefetched Book row was really
-        # locked - not just the Author row select_for_update() was directly called on.
-        await asyncio.sleep(0.3)
+        # The waiter is blocked on the lock, proving the prefetched Book row was really locked - not just
+        # the Author row select_for_update() was directly called on.
+        await wait_until_a_transaction_waits_for_a_row_lock()
         assert not waiter_task.done()
         assert "waiter_acquired_lock" not in events
     finally:
@@ -1984,9 +2000,9 @@ async def test_combined_rows_raise_on_unmatched_model_column(db):
 
     with pytest.raises(QueryError, match="none of the models"):
         list(
-            ModelRows(Tournament, db_client).read_combined(
-                rows, list(rows[0].keys()), {Tournament}, "hare_app", "hare_model"
-            )
+            ModelRows(
+                HareContext.require_current().apps.get_binding(Tournament), db_client.dialect.types
+            ).read_combined(db_client, rows, list(rows[0].keys()), {Tournament}, "hare_app", "hare_model")
         )
 
 
@@ -2006,9 +2022,11 @@ async def test_combined_rows_annotations_survive_hydration(db):
     )
 
     instances = list(
-        ModelRows(Tournament, db_client, annotations=["extra_col"]).read_combined(
-            rows, list(rows[0].keys()), {Tournament}, "hare_app", "hare_model"
-        )
+        ModelRows(
+            HareContext.require_current().apps.get_binding(Tournament),
+            db_client.dialect.types,
+            annotations=["extra_col"],
+        ).read_combined(db_client, rows, list(rows[0].keys()), {Tournament}, "hare_app", "hare_model")
     )
     assert len(instances) == 1
     assert instances[0].extra_col == 42
@@ -2464,7 +2482,7 @@ async def test_mixed_set_operations_apply_in_chain_order(db):
 
 @pytest.mark.asyncio
 async def test_update_limit_order_by_with_join(db):
-    event_db = Event._meta.connection
+    event_db = HareContext.require_current().apps.get_queryset(Event).get_connection()
     event_db.features = event_db.features.replace(supports_update_limit_order_by=True)
     try:
         t1 = await Tournament.objects.create(name="T1")
@@ -2486,7 +2504,7 @@ async def test_update_limit_order_by_with_join(db):
 
 @pytest.mark.asyncio
 async def test_delete_limit_order_by_with_join(db):
-    event_db = Event._meta.connection
+    event_db = HareContext.require_current().apps.get_queryset(Event).get_connection()
     event_db.features = event_db.features.replace(supports_update_limit_order_by=True)
     try:
         t1 = await Tournament.objects.create(name="T1")
@@ -2511,6 +2529,7 @@ def test_capabilities_resolves_from_bound_connection_not_model_default(db):
     from hare.dialects.postgresql.constants import POSTGRESQL_DIALECT
 
     class FakeDB:
+        connection_handler = None
         dialect = POSTGRESQL_DIALECT
         features = Features()
         query_class = PostgresqlQuery
@@ -2518,7 +2537,7 @@ def test_capabilities_resolves_from_bound_connection_not_model_default(db):
     qs = Event.objects.all()
     qs._apply_connection(FakeDB())
     assert qs.features is FakeDB.features
-    assert qs.features is not Event._meta.connection.features
+    assert qs.features is not HareContext.require_current().apps.get_queryset(Event).get_connection().features
 
 
 def test_capabilities_cache_invalidated_by_apply_db(db):
@@ -2534,6 +2553,7 @@ def test_capabilities_cache_invalidated_by_apply_db(db):
     from hare.dialects.postgresql.constants import POSTGRESQL_DIALECT
 
     class FakeDB:
+        connection_handler = None
         dialect = POSTGRESQL_DIALECT
         features = Features()
         query_class = PostgresqlQuery
@@ -2665,12 +2685,7 @@ async def test_values_preserves_select_for_update(db):
 @requires_features(supports_select_for_update=True)
 @pytest.mark.asyncio
 async def test_values_select_for_update_with_joined_field_defaults_to_locking_the_base_table(db):
-    """A "related__field"-style .values()/.values_list() field goes through the same
-    _join_table()/_join_table_with_forwarded_fields() path select_related() does, always
-    building a LEFT OUTER JOIN - Postgres rejects a bare FOR UPDATE (no OF) against ANY query
-    containing an outer join at all, the identical crash select_related() +
-    select_for_update() already had fixed (cache_shape.py). FieldSelectQuery's own
-    _apply_limit_offset_group_by_and_lock() needed the same `of=` default."""
+    """Selecting a related field uses an outer JOIN; FOR UPDATE defaults to the base table."""
     qs = Book.objects.filter(name="x").select_for_update()
     values_qs = qs.values("id", "author__name")
     assert "FOR UPDATE OF" in values_qs.sql()

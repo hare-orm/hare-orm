@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import dataclasses
+import datetime as dt
+import functools
+import ipaddress
 import json
-import math
+import types
+import typing
+import uuid
+import zoneinfo
+from decimal import Decimal
 from enum import Enum
-from types import FunctionType
 from typing import Any
 
 from hare.classes.class_path import ClassPath
+from hare.classes.constants import FUNCTION_DECLARATION_PATH_ATTRIBUTE, UNSUPPORTED_COMPARABLE_VALUE
+from hare.exceptions import ConfigurationError
 
 
 class ComparableValues:
@@ -16,32 +25,48 @@ class ComparableValues:
 
     @classmethod
     def get(cls, value: Any) -> object:
-        """``value`` as two equal declarations give it: a plain value as it is; a collection, value by
-        value; any other object as ``get_object_value()`` gives it.
+        """A typed structural value, independent of mapping and set iteration order.
+
+        Lists and tuples are equivalent declaration sequences. Scalar types and
+        mapping keys stay distinct; display strings never establish equality.
 
         Args:
             value: The value.
 
         Returns:
-            The comparable value - plain values, lists and dicts of them.
+            The comparable structure, containing JSON-serializable values.
         """
-        if isinstance(value, float) and math.isnan(value):
-            # NaN is unequal to itself - two declarations of it are still equal.
-            return ["float", "nan"]
-        if isinstance(value, (int, float, str, bool, type(None))):
-            return value
+        if isinstance(value, Enum):
+            return ["enum_member", cls.get(type(value)), cls.get(value.value)]
+        if value is None:
+            return ["none"]
+        if isinstance(value, bool):
+            return ["bool", value]
+        if isinstance(value, int):
+            return ["int", value]
+        if isinstance(value, float):
+            return ["float", value.hex()]
+        if isinstance(value, str):
+            return ["str", value]
+        if isinstance(value, bytes):
+            return ["bytes", value.hex()]
         if isinstance(value, dict):
-            return {str(key): cls.get(item) for key, item in value.items()}
+            entries = [[cls.get(key), cls.get(item)] for key, item in value.items()]
+            return ["mapping", sorted(entries, key=lambda entry: json.dumps(entry[0], sort_keys=True))]
         if isinstance(value, (list, tuple)):
-            return [cls.get(item) for item in value]
+            return ["sequence", [cls.get(item) for item in value]]
         if isinstance(value, (set, frozenset)):
-            return sorted((cls.get(item) for item in value), key=repr)
+            return [
+                "set",
+                sorted((cls.get(item) for item in value), key=lambda item: json.dumps(item, sort_keys=True)),
+            ]
         return cls.get_object_value(value)
 
     @classmethod
     def get_object_value(cls, value: Any) -> object:
         """An object as two equal declarations give it: a class by its path; an object a migration file
-        writes as a call (``deconstruct()``) by that call; any other object by its text.
+        writes as a call (``deconstruct()``) by that call. Standard-library values
+        retain their type and constructor data; unsupported objects fail explicitly.
 
         Args:
             value: The object.
@@ -59,15 +84,68 @@ class ComparableValues:
                 [[member_name, cls.get(member_value)] for member_name, member_value in members],
             ]
         if isinstance(value, type):
-            return ClassPath.get(value)
+            return ["type", getattr(value, "migration_import_path", None) or ClassPath.get(value)]
+        if import_path := getattr(value, "migration_import_path", None):
+            return ["reference", import_path]
         deconstruct = getattr(value, "deconstruct", None)
         if callable(deconstruct):
             path, args, kwargs = deconstruct()
-            return [path, cls.get(args), cls.get(kwargs)]
-        if isinstance(value, FunctionType):
-            # By its name - a migration file declares the function anew.
-            return ["function", value.__name__]
-        return str(value)
+            return ["declaration", path, cls.get(args), cls.get(kwargs)]
+        if dataclasses.is_dataclass(value):
+            return [
+                "dataclass",
+                ClassPath.get(type(value)),
+                cls.get({field.name: getattr(value, field.name) for field in dataclasses.fields(value) if field.init}),
+            ]
+        if isinstance(value, Decimal):
+            return ["decimal", str(value)]
+        if isinstance(value, uuid.UUID):
+            return ["uuid", value.hex]
+        if isinstance(value, dt.timedelta):
+            return ["timedelta", value.days, value.seconds, value.microseconds]
+        if isinstance(value, (dt.datetime, dt.time)):
+            zone = value.tzinfo
+            zone_value = ["zone", zone.key] if isinstance(zone, zoneinfo.ZoneInfo) else cls.get(value.utcoffset())
+            return [
+                "datetime" if isinstance(value, dt.datetime) else "time",
+                value.isoformat(),
+                value.fold,
+                zone_value,
+            ]
+        if isinstance(value, dt.date):
+            return ["date", value.isoformat()]
+        if isinstance(value, zoneinfo.ZoneInfo):
+            return ["zone", value.key]
+        if isinstance(value, dt.timezone):
+            return ["timezone", cls.get(value.utcoffset(None)), value.tzname(None)]
+        if isinstance(value, (ipaddress.IPv4Interface, ipaddress.IPv6Interface)):
+            return ["ip_interface", value.version, value.with_prefixlen]
+        if isinstance(value, (ipaddress.IPv4Address, ipaddress.IPv6Address)):
+            return ["ip_address", value.version, value.packed.hex()]
+        if isinstance(value, (ipaddress.IPv4Network, ipaddress.IPv6Network)):
+            return ["ip_network", value.version, value.with_prefixlen]
+        if isinstance(value, functools.partial):
+            return ["partial", cls.get(value.func), cls.get(value.args), cls.get(value.keywords)]
+        if isinstance(value, types.FunctionType):
+            return ["function", getattr(value, FUNCTION_DECLARATION_PATH_ATTRIBUTE, None) or ClassPath.get(value)]
+        if isinstance(value, (types.BuiltinFunctionType, types.MethodType)):
+            bound_to = getattr(value, "__self__", None)
+            if isinstance(bound_to, type):
+                return ["class_method", cls.get(bound_to), value.__name__]
+            if bound_to is None or isinstance(bound_to, types.ModuleType):
+                return ["function", ClassPath.get(value)]
+        origin = typing.get_origin(value)
+        if origin is not None:
+            arguments = cls.get(typing.get_args(value))
+            if origin in (typing.Union, types.UnionType):
+                return ["union", arguments]
+            return ["generic", cls.get(origin), getattr(value, "_name", None), arguments]
+        if value is Ellipsis:
+            return ["ellipsis"]
+        typing_name = getattr(value, "_name", None)
+        if typing_name and getattr(typing, typing_name, None) is value:
+            return ["typing", typing_name]
+        raise ConfigurationError(UNSUPPORTED_COMPARABLE_VALUE.format(type=ClassPath.get(type(value))))
 
     @staticmethod
     def get_enum_content(enum_type: type[Enum]) -> tuple[tuple[str, ...], str, tuple[tuple[str, Any], ...]]:

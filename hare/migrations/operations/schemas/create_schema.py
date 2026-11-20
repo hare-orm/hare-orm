@@ -14,20 +14,18 @@ if TYPE_CHECKING:
 class CreateSchema(HareOperation):
     """Creates a database schema - before the tables in it."""
 
-    backward_reads_state_left = False
-    backward_reads_state_reached = False
-
     def __init__(self, schema_name: str) -> None:
         self.schema_name = schema_name
 
-    def get_provided_dependencies(self, app_label: str) -> list[OperationDependency]:
+    def get_provided_dependencies(self, app_label: str, state: State) -> list[OperationDependency]:
         return [OperationDependency.of_schema(self.schema_name, DependencyType.CREATED)]
 
     def describe(self) -> str:
         return f"Create schema {self.schema_name}"
 
     def state_forward(self, app_label: str, state: State) -> None:
-        state.schemas.add(self.schema_name)
+        state.schemas.add((state.default_connections.get(app_label), self.schema_name))
+        state.record_native_operation(app_label, self)
 
     async def database_forward(
         self,

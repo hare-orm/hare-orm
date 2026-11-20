@@ -1,7 +1,6 @@
 """HStoreField: its value, lookups and key/keys/values transforms."""
 
 import os
-import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -10,11 +9,13 @@ import pytest_asyncio
 
 from hare.contrib.test.databases.model_truncation import truncate_all_models
 from hare.contrib.test.isolated_contexts import hare_test_context
+from hare.core.hare_context import HareContext
 from hare.dialects.postgresql.fields.hstore.h_store_text import HStoreText
 from hare.exceptions import ValidationError
 from hare.query.expressions import F, Q
 from tests.dialects.postgresql.column_types.models_hstore import GeneratedAttributes, Item, Shelf, UniqueAttributes
 from tests.dialects.postgresql.conftest import skip_if_not_postgres
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 @pytest.mark.database_independent
@@ -31,8 +32,7 @@ def test_text_form_round_trips():
 @pytest_asyncio.fixture(scope="module")
 async def hstore_context() -> AsyncGenerator[Any]:
     skip_if_not_postgres()
-    db_url = os.environ["HARE_TEST_DB"].replace("\\{", "{").replace("\\}", "}")
-    db_url = db_url.format(uuid.uuid4().hex) if "{}" in db_url else db_url
+    db_url = DatabaseUnderTest.get_fresh_url(os.environ["HARE_TEST_DB"])
     async with hare_test_context(
         ["tests.dialects.postgresql.column_types.models_hstore"], db_url=db_url, app_label="models"
     ) as ctx:
@@ -132,8 +132,14 @@ async def test_key_keys_and_values_transforms(items):
 @pytest.mark.asyncio
 async def test_an_empty_hstore_in_an_array_is_read_back(items):
     """asyncpg's text array parser crashed the process on an empty hstore in an array."""
-    rows = await Item._meta.connection.execute_dicts(
-        f"SELECT array_agg(attributes ORDER BY id) AS values FROM {Item._meta.db_table} WHERE id IN (2, 3)"
+    rows = (
+        await HareContext.require_current()
+        .apps.get_queryset(Item)
+        .get_connection()
+        .execute_dicts(
+            f"SELECT array_agg(attributes ORDER BY id) AS values FROM "
+            f"{HareContext.require_current().apps.get_binding(Item).db_table} WHERE id IN (2, 3)"
+        )
     )
     assert rows[0]["values"] == [HStoreText.encode({"color": "blue", 'we"ird\\': "x=>y, z"}), ""]
     assert await matching(attributes={}) == [3]

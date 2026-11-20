@@ -8,7 +8,7 @@ from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
     from hare.sql import SqlContext
-    from hare.sql.terms.node import TNode
+    from hare.sql.terms.node import Node
 
 
 class JsonArrayRowValues(Term):
@@ -26,9 +26,8 @@ class JsonArrayRowValues(Term):
         self.rows_json = ValueWrapper(rows_json)
         self.decode_hex_columns = decode_hex_columns
 
-    def nodes_(self) -> Iterator[TNode]:
-        yield self  # type:ignore[misc]
-        yield from self.rows_json.nodes_()
+    def get_children(self) -> Iterator[Node]:
+        yield self.rows_json
 
     def get_sql(self, sql_context: SqlContext) -> str:
         selected_values = []

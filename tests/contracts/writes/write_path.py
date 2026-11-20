@@ -4,8 +4,6 @@ import dataclasses
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
-import pytest
-
 from hare.instrumentation.enums import RowOperation
 from tests.contracts.writes.enums import WriteRole
 from tests.contracts.writes.expected_change import ExpectedChange
@@ -53,11 +51,3 @@ class WritePath:
             if not roles or change.role in roles
             for pk in change.pks
         ]
-
-    def get_parameter(self) -> Any:
-        """The path as a test's parameter.
-
-        Returns:
-            The parameter, named after the path.
-        """
-        return pytest.param(self, id=self.name)

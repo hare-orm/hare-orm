@@ -8,6 +8,7 @@ from __future__ import annotations
 from hare.contrib.outbox.capture import ChangeCapture, ChangeExtension
 from hare.contrib.outbox.deliveries import (
     CallableDelivery,
+    DeliveryResult,
     KafkaDelivery,
     OutboxDelivery,
     RabbitMQDelivery,
@@ -21,11 +22,13 @@ from hare.contrib.outbox.outbox_event import OutboxEvent
 from hare.contrib.outbox.outbox_json_encoding import OutboxJsonEncoding
 from hare.contrib.outbox.outbox_message import OutboxMessage
 from hare.contrib.outbox.relay import (
+    ClaimedBatch,
     OutboxBacklog,
     OutboxDeadLettered,
     OutboxDelivered,
     OutboxDeliveryFailed,
     OutboxRelay,
+    OutboxStore,
 )
 from hare.contrib.outbox.wakeups import (
     InProcessWakeup,
@@ -44,7 +47,9 @@ __all__ = [
     "ChangeCapture",
     "ChangeExtension",
     "ChangePayload",
+    "ClaimedBatch",
     "DeliveryError",
+    "DeliveryResult",
     "InProcessWakeup",
     "KafkaDelivery",
     "KafkaWakeup",
@@ -58,6 +63,7 @@ __all__ = [
     "OutboxJsonEncoding",
     "OutboxMessage",
     "OutboxRelay",
+    "OutboxStore",
     "OutboxWakeup",
     "RabbitMQDelivery",
     "RabbitMQWakeup",

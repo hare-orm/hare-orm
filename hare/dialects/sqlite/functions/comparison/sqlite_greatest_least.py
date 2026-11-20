@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from functools import partial
 from typing import Any
 
 import aiosqlite
@@ -47,11 +46,6 @@ class SqliteGreatestLeast:
     @classmethod
     async def install(cls, connection: aiosqlite.Connection) -> None:
         """Registers both functions on ``connection``."""
-        native_functions = SqliteNativeFunctions.module
-        greatest: Any = partial(cls.pick, True)
-        least: Any = partial(cls.pick, False)
-        if native_functions is not None:
-            functions = native_functions.GreatestLeast(cls.pick)
-            greatest, least = functions.greatest, functions.least
-        await connection.create_function(SQLITE_GREATEST_FUNCTION_NAME, -1, greatest, deterministic=True)
-        await connection.create_function(SQLITE_LEAST_FUNCTION_NAME, -1, least, deterministic=True)
+        functions = SqliteNativeFunctions.module.GreatestLeast(cls.pick)
+        await connection.create_function(SQLITE_GREATEST_FUNCTION_NAME, -1, functions.greatest, deterministic=True)
+        await connection.create_function(SQLITE_LEAST_FUNCTION_NAME, -1, functions.least, deterministic=True)

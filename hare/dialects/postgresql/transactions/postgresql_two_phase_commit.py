@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from hare.dialects.base.transactions.two_phase_commit import TwoPhaseCommit
 from hare.dialects.postgresql.transactions.constants import (
+    POSTGRESQL_PREPARED_TRANSACTION_CONFLICT_SQLSTATE,
     POSTGRESQL_PREPARED_TRANSACTIONS_DISABLED_MESSAGE,
     POSTGRESQL_PREPARED_TRANSACTIONS_LIMIT_REACHED_MESSAGE,
 )
@@ -59,13 +60,14 @@ class PostgresqlTwoPhaseCommit(TwoPhaseCommit):
         return f"UPDATE {table} SET resolved_at = now() WHERE xid = $1"  # nosec B608
 
     def get_pending_decisions_sql(self, table: str, with_age_limit: bool) -> str:
-        sql = (
-            f"SELECT xid, participant_aliases FROM {table} "  # nosec B608
-            "WHERE resolved_at IS NULL"
-        )
+        sql = "SELECT xid, participant_aliases"
         if with_age_limit:
-            sql += " AND created_at < now() - make_interval(secs => $1)"
-        return sql
+            sql += ", created_at < now() - make_interval(secs => $1) AS is_stale"
+        return f"{sql} FROM {table} WHERE resolved_at IS NULL"  # nosec B608
+
+    def is_prepare_conflict(self, error: BaseException) -> bool:
+        sqlstate = getattr(error, "sqlstate", None) or getattr(error.__cause__, "sqlstate", None)
+        return sqlstate == POSTGRESQL_PREPARED_TRANSACTION_CONFLICT_SQLSTATE
 
     def get_prepare_failure(self, error: OperationalError, connection_alias: str) -> ConfigurationError | None:
         message = str(error).lower()

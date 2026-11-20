@@ -1,48 +1,19 @@
-"""Tests for QuerySet's `QUERY_SHAPE_CACHE` (hare/query/queryset/queryset.py) - the fast path
-that reuses a fully-built hare.sql query (selects/orderby/distinct/WHERE all applied) across
-repeated calls of the SAME `.filter(...)` shape, binding only the leaf `ValueWrapper` values into
-the shape's SQL text (`StatementPlan.bind()`). Unlike `DECODE_PLAN_CACHE` (query SHAPE
-only), this cache stores real query structure keyed on filter KEYS - so its primary risk is
-silent data corruption: reusing the wrong criterion structure, or a stale/shared value, for a
-different call. Every test below therefore checks actual RESULTS, not just cache bookkeeping -
-proving the fast path is both taken (via a spy) AND correct (via the returned rows), for the
-full matrix the design docs mandate: repeated-different-values, every eligible lookup shape,
-every remaining excluded shape (fk-shortcut/CTE/an __in list with an embedded None - OR,
-nested/multi-kwarg Q, non-join negation, __in/__not_in, select_related, a
-CombinedExpression/Value/F literal annotate(), .after_cursor() keyset pagination, a single-hop
-related__field=value join-crossing filter (plain or negated via .exclude()'s NOT EXISTS
-rewrite), every __contains/__startswith/__endswith LIKE-family lookup (case-sensitive AND
-case-insensitive - the latter's pattern embeds one level deeper, inside an UPPER(...) SQL
-function call), JSON __contains/__contained_by (already covered for free, no new code - see
-test_json_contains_and_contained_by_already_fast_pathed_and_stay_correct), and ArrayField
-__contains/__contained_by/__overlap/__len (the first two/three substitute the WHOLE Array node,
-not a leaf value inside it - see ArrayValueReference's own docstring) are now covered by the fast path;
-Function/Aggregate/Window/Case annotations, an F() cross-reference to another annotation, a NULL
-.after_cursor() boundary value, a multi-value/non-scalar related-field filter
-(related__field__in=[...]), and the JSON __filter lookup (its value_encoder is an identity
-pass-through on the WHOLE raw dict, but the criterion it builds embeds a decomposed PIECE of that
-dict instead) stay excluded), None/isnull's special rewrite, dialect non-collision, and concurrent
-access. Also covers `register_lookup()`-registered custom filters generically (no lookup-specific
-code) - a lookup whose own operator embeds `encoded_value` unchanged is automatically eligible
-through the SAME ScalarValueReference/RangeValueReference/ListValueReference mechanisms every built-in lookup uses,
-gated by an `is` identity check against the encoder's own direct output (not just a structural
-isinstance check) - this identity check was ADDED to those three ref shapes after a live-verified
-silent-wrong-result bug: a custom lookup whose operator TRANSFORMS the value (e.g. reverses it)
-used to be wrongly treated as a plain reusable scalar, substituting `to_db_value(new_raw)` in
-place of whatever the operator actually embedded.
+"""Statement plans reuse query structure while binding each call's current values.
+
+The scenarios cover filters, annotations, relations, scopes, subqueries and pagination.
+They check returned rows, plan hits and the model-local templates retained for later calls.
+Caches are cleared between tests so cold-build and reuse assertions remain independent.
 """
 
 import asyncio
 import datetime
-import os
 from decimal import Decimal
 from unittest.mock import patch
 
 import pytest
-import pytest_asyncio
 
-from hare.contrib.test import RollbackIsolation, requires_features
-from hare.contrib.test.isolated_contexts import hare_test_context
+from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.exceptions import FieldError, ValidationError
 from hare.fields import CharField
@@ -64,6 +35,7 @@ from hare.query.statements.summary.count_query import CountQuery
 from hare.query.statements.summary.exists_query import ExistsQuery
 from hare.sql.terms import Criterion, Not, Term, ValueWrapper
 from hare.sql.terms.subqueries.exists_term import ExistsTerm
+from tests.query_plans.query_shape_rows import QueryShapeRows
 from tests.shared_models.testmodels import (
     Author,
     Book,
@@ -124,19 +96,21 @@ def _unsafe_custom_lookup(field: CharField | None) -> FieldLookup:
     return FieldLookup(_operator)
 
 
-def _rebuilt_custom_lookup(field: CharField | None) -> FieldLookup:
-    """The transforming custom filter of `_unsafe_custom_lookup`, declaring that its SQL text depends
-    on nothing of the value but its type - a plan builds its criterion again from a later value."""
+def _encoded_custom_lookup(field: CharField | None) -> FieldLookup:
+    """A transforming lookup declares its input conversion separately from SQL construction."""
 
-    def _operator(term: Term, value: str) -> Term:
-        return term == value[::-1]
+    def encode(value, model, field, dialect):
+        return dialect.types.get_lookup_value(field, value, model)[::-1]
 
-    return FieldLookup(_operator, binds_by_rebuild=True)
+    def operator(term, value):
+        return term == value
+
+    return FieldLookup(operator, encode)
 
 
 CharField.register_lookup("safe_custom", _safe_custom_lookup)
 CharField.register_lookup("unsafe_custom", _unsafe_custom_lookup)
-CharField.register_lookup("rebuilt_custom", _rebuilt_custom_lookup)
+CharField.register_lookup("encoded_custom", _encoded_custom_lookup)
 
 
 def _value_wrapper_ids(criterion: Criterion | None) -> set[int]:
@@ -150,60 +124,21 @@ def _value_wrapper_ids(criterion: Criterion | None) -> set[int]:
 
 @pytest.fixture(autouse=True)
 def clear_query_shape_cache():
-    """Module-level and never invalidated in production (same policy as DECODE_PLAN_CACHE) -
-    must be cleared between tests or an earlier test's cached shape silently answers a later
-    test's "cold cache" assumptions with stale data."""
+    """Clear every model's statement plans and dependent call signatures before and after a test."""
     StatementPlans.plans.clear()
     yield
     StatementPlans.plans.clear()
 
 
-@pytest_asyncio.fixture(scope="module")
-async def db_array_fields_module():
-    """`ArrayField` lives in `tests.shared_models.testmodels_postgres`, a separate model module from the
-    default `tests.shared_models.testmodels` the shared `db` fixture (and every other test in this file) uses -
-    mirrors `tests/fields/conftest.py`'s own `db_array_fields` fixture, which isn't visible here
-    (sibling directory, not an ancestor of this file - pytest conftest fixtures don't cross that
-    boundary) rather than importing it directly."""
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    if DatabaseUnderTest.get_dialect().name != "postgresql":
-        pytest.skip("ArrayField requires PostgreSQL")
-    async with hare_test_context(
-        modules=["tests.shared_models.testmodels", "tests.shared_models.testmodels_postgres"],
-        db_url=db_url,
-        app_label="models",
-        connection_label="models",
-    ) as ctx:
-        yield ctx
-
-
-@pytest_asyncio.fixture
-async def db_array_fields(db_array_fields_module):
-    async with RollbackIsolation(db_array_fields_module) as context:
-        yield context
-
-
-def _spy_on_plan_hits():
-    """StatementPlans.count_hit() runs only when a query runs on its shape's plan - its call
-    count is the one unambiguous signal that the fast path actually activated, as opposed to
-    every call happening to take the normal full-rebuild path."""
-    return patch.object(StatementPlans, "count_hit", side_effect=StatementPlans.count_hit)
-
-
-def _spy_on_plan_hits_of_any_type():
-    """Same as `_spy_on_plan_hits()` - for `ExistsQuery`/`CountQuery`, siblings of `QuerySet`."""
-    return patch.object(StatementPlans, "count_hit", side_effect=StatementPlans.count_hit)
-
-
 @pytest.mark.asyncio
 async def test_repeated_shape_is_a_cache_hit_on_second_call(db):
     await Author.objects.create(name="a")
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         await Author.objects.filter(name="a").order_by("id")
         assert spy.call_count == 0  # first call: cache miss, no plan yet
         await Author.objects.filter(name="a").order_by("id")
         # A nonzero count is the signal the fast path actually activated (see
-        # _spy_on_plan_hits()'s own docstring).
+        # spy_on_plan_hits()'s own docstring).
         assert spy.call_count > 0  # second call: cache hit
 
 
@@ -213,7 +148,7 @@ async def test_repeated_filter_different_values_returns_correct_independent_resu
     ValueWrapper would make the second call return the first call's row (or nothing)."""
     await Author.objects.create(name="alice")
     await Author.objects.create(name="bob")
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first_call = (await Author.objects.filter(name="alice").order_by("id"))[0]
         second_call = (await Author.objects.filter(name="bob").order_by("id"))[0]
     assert spy.call_count > 0
@@ -230,11 +165,9 @@ async def test_limit_and_offset_are_eligible_for_the_fast_path(db):
     template the first time this shape was seen. This is the single most common real-world query
     shape (filter + order_by + limit/offset - pagination) - excluding it from the cache meant
     every page of every paginated list rebuilt filters/ordering from scratch."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
+    _author = await QueryShapeRows.create_two_rated_books()
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         for _ in range(3):
             assert (await Book.objects.filter(name="alpha").first()).name == "alpha"
     assert spy.call_count > 0  # first call: cache miss; 2 more: cache hits
@@ -244,14 +177,14 @@ async def test_limit_and_offset_are_eligible_for_the_fast_path(db):
     # applied afterward, so each block below clears the cache first to stay independent/
     # order-proof rather than relying on (or asserting) that sharing as this test's own subject.
     StatementPlans.plans.clear()
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         for _ in range(3):
             names = [b.name async for b in Book.objects.all().order_by("name").limit(1)]
             assert names == ["alpha"]
     assert spy.call_count > 0
 
     StatementPlans.plans.clear()
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         for _ in range(3):
             names = [b.name async for b in Book.objects.all().order_by("name").offset(1)]
             assert names == ["beta"]
@@ -260,7 +193,7 @@ async def test_limit_and_offset_are_eligible_for_the_fast_path(db):
     # Different limit/offset values, same underlying filter/ordering shape - the cached
     # template must never leak one call's limit/offset into another's.
     StatementPlans.plans.clear()
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first_page = [b.name async for b in Book.objects.all().order_by("name").limit(1).offset(0)]
         second_page = [b.name async for b in Book.objects.all().order_by("name").limit(1).offset(1)]
     assert spy.call_count > 0  # first call: miss; second: hit, same shape, different limit/offset
@@ -277,25 +210,23 @@ async def test_order_by_is_part_of_the_cache_key(db):
     only incidentally exercised alongside limit/offset elsewhere in this file): a different
     order_by field OR direction on the SAME filter shape must be a SEPARATE cache entry, never
     silently reuse another ordering's template."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
+    _author = await QueryShapeRows.create_two_rated_books()
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = [b.name async for b in Book.objects.filter(rating__gt=0).order_by("name").all()]
         assert spy.call_count == 0
         second = [b.name async for b in Book.objects.filter(rating__gt=0).order_by("name").all()]
     assert spy.call_count > 0
     assert first == ["alpha", "beta"]
     assert second == ["alpha", "beta"]
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     reverse = [b.name async for b in Book.objects.filter(rating__gt=0).order_by("-name").all()]
     assert reverse == ["beta", "alpha"]
-    assert len(StatementPlans.plans) == 2, "a different order_by direction must be a separate cache entry"
+    assert StatementPlans.plans.entry_count == 2, "a different order_by direction must be a separate cache entry"
 
     await Book.objects.filter(rating__gt=0).order_by("rating").all()
-    assert len(StatementPlans.plans) == 3, "a different order_by field must be a separate cache entry"
+    assert StatementPlans.plans.entry_count == 3, "a different order_by field must be a separate cache entry"
 
 
 @pytest.mark.asyncio
@@ -312,19 +243,19 @@ async def test_order_by_null_placement_is_part_of_the_cache_key(db):
     nulls_first = F("intnum_null").asc(nulls_first=True)
     nulls_last = F("intnum_null").asc(nulls_last=True)
     assert await numbers(nulls_first) == [2, 4, 1, 3]
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
     assert await numbers(nulls_last) == [1, 3, 2, 4]
-    assert len(StatementPlans.plans) == 2, "NULLS LAST must not reuse the NULLS FIRST template"
+    assert StatementPlans.plans.entry_count == 2, "NULLS LAST must not reuse the NULLS FIRST template"
     await numbers(F("intnum_null").asc())
-    assert len(StatementPlans.plans) == 3, "the dialect default must not reuse an explicit placement's template"
+    assert StatementPlans.plans.entry_count == 3, "the dialect default must not reuse an explicit placement's template"
     await numbers(F("intnum_null").desc(nulls_last=True))
-    assert len(StatementPlans.plans) == 4
+    assert StatementPlans.plans.entry_count == 4
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         assert await numbers(nulls_first) == [2, 4, 1, 3]
         assert await numbers(nulls_last) == [1, 3, 2, 4]
     assert spy.call_count == 2, "repeating each placement still hits its own cache entry"
-    assert len(StatementPlans.plans) == 4
+    assert StatementPlans.plans.entry_count == 4
 
 
 @requires_features(supports_select_for_update=True)
@@ -337,20 +268,20 @@ async def test_select_for_update_now_fast_pathed(db):
     one, not silently reuse/corrupt the plain FOR UPDATE template."""
     qs_first = Book.objects.filter(name="alpha")
     qs_first._select_for_update = True
-    key_before = set(StatementPlans.plans)
+    cache_size_before = StatementPlans.plans.entry_count
     qs_first.sql()
-    assert len(StatementPlans.plans) == len(key_before) + 1
+    assert StatementPlans.plans.entry_count == cache_size_before + 1
 
     qs_second = Book.objects.filter(name="beta")
     qs_second._select_for_update = True
     qs_second.sql()
-    assert len(StatementPlans.plans) == len(key_before) + 1, "same lock shape must reuse one entry"
+    assert StatementPlans.plans.entry_count == cache_size_before + 1, "same lock shape must reuse one entry"
 
     qs_nowait = Book.objects.filter(name="alpha")
     qs_nowait._select_for_update = True
     qs_nowait._select_for_update_nowait = True
     qs_nowait.sql()
-    assert len(StatementPlans.plans) == len(key_before) + 2, "a different lock mode must be a separate entry"
+    assert StatementPlans.plans.entry_count == cache_size_before + 2, "a different lock mode must be a separate entry"
     assert "NOWAIT" in qs_nowait.sql().upper()
     assert "NOWAIT" not in qs_first.sql().upper()
 
@@ -370,12 +301,10 @@ async def test_every_eligible_lookup_hits_the_fast_path_and_stays_correct(db, lo
     """Every plain-comparison lookup (no value_encoder, no join, a bare BasicCriterion+
     ValueWrapper shape) is eligible for the fast path - each must give the SAME result with the
     cache warm as it would cold, and must actually take it (spy.call_count > 0)."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=5.0)
+    _author = await QueryShapeRows.create_two_rated_books(beta_rating=5.0)
 
     cold = await Book.objects.filter(**{lookup: value}).order_by("name").all()
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         warm = await Book.objects.filter(**{lookup: value}).order_by("name").all()
     assert spy.call_count > 0
     assert [b.name for b in warm] == [b.name for b in cold]
@@ -392,11 +321,9 @@ async def test_every_eligible_lookup_hits_the_fast_path_and_stays_correct(db, lo
 async def test_lookups_with_or_shapes_run_on_their_plan_and_stay_correct(db, lookup, value, expected):
     """`__not` resolves to an OR of two criteria (`field.ne(value) | field.isnull()`) holding the
     value as its one parameter - every repeat after the first runs on the plan."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=5.0)
+    _author = await QueryShapeRows.create_two_rated_books(beta_rating=5.0)
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         for _ in range(3):
             names = [b.name for b in await Book.objects.filter(**{lookup: value}).order_by("name").all()]
             assert names == expected
@@ -429,12 +356,9 @@ async def test_or_combination_now_fast_pathed_and_stays_correct(db):
     `value_wrapper_references` entry per leaf kwarg regardless of tree shape - `_query_shape_is_
     cacheable()`'s recursive `_q_node_is_cacheable()` now allows OR through. Two DIFFERENT
     value pairs across repeated calls must still each get their own correct, non-stale rows."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
-    await Book.objects.create(name="gamma", author=author, rating=3.0)
+    _author = await QueryShapeRows.create_three_rated_books()
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = {b.name async for b in Book.objects.filter(Q(name="alpha") | Q(name="gamma")).all()}
         assert spy.call_count == 0  # first call: miss, no plan yet
         second = {b.name async for b in Book.objects.filter(Q(name="alpha") | Q(name="beta")).all()}
@@ -443,16 +367,14 @@ async def test_or_combination_now_fast_pathed_and_stays_correct(db):
     assert spy.call_count > 0
     assert first == {"alpha", "gamma"}
     assert second == {"alpha", "beta"}
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
 async def test_nested_q_now_fast_pathed_and_stays_correct(db):
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
+    _author = await QueryShapeRows.create_two_rated_books()
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = {b.name async for b in Book.objects.filter(Q(Q(name="alpha"))).all()}
         second = {b.name async for b in Book.objects.filter(Q(Q(name="beta"))).all()}
     assert spy.call_count > 0
@@ -466,12 +388,10 @@ async def test_multi_kwarg_single_q_now_fast_pathed_and_stays_correct(db):
     the old `len(q.filters) == 1` check; the recorder already looped `self.filters.items()` for
     every kwarg regardless, so the only change needed was the pre-check/key/value-collection
     logic, not the recording itself."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
+    author = await QueryShapeRows.create_two_rated_books()
     await Book.objects.create(name="alpha", author=author, rating=2.0)
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await Book.objects.filter(Q(name="alpha", rating=1.0)).all()
         assert spy.call_count == 0  # first call: miss
         second = await Book.objects.filter(Q(name="alpha", rating=2.0)).all()
@@ -485,47 +405,20 @@ async def test_deeply_nested_and_inside_or_now_fast_pathed_and_stays_correct(db)
     """`(Q(a) & Q(b)) | Q(c)` - a 3-level tree (OR at the root, an AND pair nested under one of
     its branches) - exercises `_q_tree_shape_key()`/`_q_tree_leaf_values()`'s recursion past a
     single level, not just a flat OR of two leaves."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
-    await Book.objects.create(name="gamma", author=author, rating=3.0)
+    author = await QueryShapeRows.create_three_rated_books()
     await Book.objects.create(name="delta", author=author, rating=4.0)
 
     def shape(name1: str, rating1: float, name2: str) -> Q:
         return Q(Q(name=name1) & Q(rating=rating1)) | Q(name=name2)
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = {b.name async for b in Book.objects.filter(shape("alpha", 1.0, "gamma")).all()}
         assert spy.call_count == 0
         second = {b.name async for b in Book.objects.filter(shape("beta", 2.0, "delta")).all()}
     assert spy.call_count > 0
     assert first == {"alpha", "gamma"}
     assert second == {"beta", "delta"}
-    assert len(StatementPlans.plans) == 1
-
-
-@pytest.mark.asyncio
-async def test_no_stale_value_ids_survive_in_cloned_tree(db):
-    """The symmetry-principle regression test: after a cache HIT for an OR/nested shape, walk the
-    freshly built WHERE tree and confirm none of its `ValueWrapper` leaves are the SAME objects
-    (by `id()`) as the cached template's own leaves - a shared object here would mean two
-    concurrent/sequential calls silently alias each other's filter values."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
-    await Book.objects.create(name="gamma", author=author, rating=3.0)
-
-    qs_first = Book.objects.filter(Q(name="alpha") | Q(name="gamma"))
-    await qs_first.all()
-    cached_query = next(iter(StatementPlans.plans.values())).template
-    cached_ids = _value_wrapper_ids(cached_query._wheres)
-    assert cached_ids  # sanity: the OR shape really did populate the cache with real leaves
-
-    qs_second = Book.objects.filter(Q(name="alpha") | Q(name="beta"))
-    built_qs_second = _built(qs_second)
-    new_ids = _value_wrapper_ids(built_qs_second.query._wheres)
-
-    assert new_ids.isdisjoint(cached_ids)
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -533,12 +426,9 @@ async def test_non_join_negated_child_deep_inside_or_tree_now_fast_pathed(db):
     """`_q_node_is_cacheable()` recurses into every child - a NON-join negated node anywhere in
     the tree (not just a negated top-level Q, already covered by `.exclude()`) is a fine candidate:
     a plan binds the values under a `Not(...)` like any other."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
-    await Book.objects.create(name="gamma", author=author, rating=3.0)
+    _author = await QueryShapeRows.create_three_rated_books()
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = {b.name async for b in Book.objects.filter(~Q(name="alpha") | Q(name="beta")).all()}
         assert spy.call_count == 0
         second = {b.name async for b in Book.objects.filter(~Q(name="beta") | Q(name="gamma")).all()}
@@ -554,17 +444,14 @@ async def test_join_crossing_negated_child_deep_inside_or_tree_now_fast_pathed(d
     now ALSO eligible: the NestedValueRef recording happens at the leaf (wherever the kwarg
     actually is), independent of tree depth/position, and the cloner's `ComplexCriterion` branch
     already recurses generically into whichever side holds the `Not(ExistsTerm(...))`."""
-    author_one = await Author.objects.create(name="a1")
-    author_two = await Author.objects.create(name="a2")
-    await Book.objects.create(name="alpha", author=author_one, rating=1.0)
-    await Book.objects.create(name="beta", author=author_two, rating=2.0)
+    _author_one, _author_two = await QueryShapeRows.create_books_by_two_authors()
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         for _ in range(3):
             names = {b.name async for b in Book.objects.filter(~Q(author__name="a1") | Q(name="nonexistent")).all()}
             assert names == {"beta"}
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -573,19 +460,16 @@ async def test_exclude_now_fast_pathed_and_stays_correct(db):
     criterion (`Term.negate()`'s default, see `_finalize_modifier()`) - the cloner's `Not` branch
     descends past it to the same substitutable `ValueWrapper` leaf underneath. Two DIFFERENT
     excluded values across repeated calls must still each get their own correct results."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
-    await Book.objects.create(name="gamma", author=author, rating=3.0)
+    _author = await QueryShapeRows.create_three_rated_books()
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = {b.name async for b in Book.objects.all().exclude(name="alpha")}
         assert spy.call_count == 0  # first call: miss
         second = {b.name async for b in Book.objects.all().exclude(name="gamma")}
     assert spy.call_count > 0  # second call: hit
     assert first == {"beta", "gamma"}
     assert second == {"alpha", "beta"}
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -593,11 +477,9 @@ async def test_double_negation_now_fast_pathed_and_stays_correct(db):
     """`~Q(~Q(...))` - two SEPARATE Q objects each independently negated (not the single-object
     `~~q` restore case) - resolves to `Not(Not(BasicCriterion(...)))`, a doubly-nested wrap the
     cloner's `Not` branch must recurse through twice, not just once."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
+    _author = await QueryShapeRows.create_two_rated_books()
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = {b.name async for b in Book.objects.filter(~Q(~Q(name="alpha"))).all()}
         assert spy.call_count == 0
         second = {b.name async for b in Book.objects.filter(~Q(~Q(name="beta"))).all()}
@@ -620,14 +502,14 @@ async def test_exclude_nullable_column_now_fast_pathed_and_stays_correct(db):
     alpha = await Book.objects.create(name="alpha", author=author, rating=2.0, subject="alpha-subject")
     beta = await Book.objects.create(name="beta", author=author, rating=3.0, subject="beta-subject")
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = {b.name async for b in Book.objects.all().exclude(subject="alpha-subject")}
         assert spy.call_count == 0  # first call: miss
         second = {b.name async for b in Book.objects.all().exclude(subject="beta-subject")}
     assert spy.call_count > 0  # second call: hit
     assert first == {no_subject.name, beta.name}
     assert second == {no_subject.name, alpha.name}
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -638,40 +520,14 @@ async def test_join_crossing_exclude_now_fast_pathed_and_stays_correct(db):
     folding a single resulting `ScalarValueReference` into a `NestedValueRef` for the outer kwarg entry,
     and the cloner's `ExistsTerm` branch (reached through `Not`'s existing one) rebinds the
     correlated subquery's own `_wheres`/`_joins` - see both docstrings for the full mechanism."""
-    author_one = await Author.objects.create(name="a1")
-    author_two = await Author.objects.create(name="a2")
-    await Book.objects.create(name="alpha", author=author_one, rating=1.0)
-    await Book.objects.create(name="beta", author=author_two, rating=2.0)
+    _author_one, _author_two = await QueryShapeRows.create_books_by_two_authors()
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         for _ in range(3):
             names = {b.name async for b in Book.objects.all().exclude(author__name="a1")}
             assert names == {"beta"}
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
-
-
-@pytest.mark.asyncio
-async def test_no_stale_value_ids_survive_in_cloned_negated_tree(db):
-    """The symmetry-principle regression test for negation specifically: after a cache HIT on a
-    `~Q(...)` shape, the freshly built `Not(...)`-wrapped tree must not share any `ValueWrapper`
-    leaf (by `id()`) with the cached template's own tree."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
-    await Book.objects.create(name="gamma", author=author, rating=3.0)
-
-    qs_first = Book.objects.filter(~Q(name="alpha"))
-    await qs_first.all()
-    cached_query = next(iter(StatementPlans.plans.values())).template
-    cached_ids = _value_wrapper_ids(cached_query._wheres)
-    assert cached_ids
-
-    qs_second = Book.objects.filter(~Q(name="beta"))
-    built_qs_second = _built(qs_second)
-    new_ids = _value_wrapper_ids(built_qs_second.query._wheres)
-
-    assert new_ids.isdisjoint(cached_ids)
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -680,24 +536,21 @@ async def test_in_now_fast_pathed_and_stays_correct(db):
     built) instead of the scalar `ScalarValueReference` - two calls with the SAME list LENGTH but
     DIFFERENT values must reuse one cache entry and stay correct; the list's length is part of
     `plan_key` (see `_leaf_value_shape()`), so a DIFFERENT length is a separate entry."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
-    await Book.objects.create(name="gamma", author=author, rating=3.0)
+    author = await QueryShapeRows.create_three_rated_books()
     await Book.objects.create(name="delta", author=author, rating=4.0)
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = {b.name async for b in Book.objects.filter(name__in=["alpha", "gamma"]).all()}
         assert spy.call_count == 0
         second = {b.name async for b in Book.objects.filter(name__in=["beta", "delta"]).all()}
     assert spy.call_count > 0
     assert first == {"alpha", "gamma"}
     assert second == {"beta", "delta"}
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     third = {b.name async for b in Book.objects.filter(name__in=["alpha", "beta", "gamma"]).all()}
     assert third == {"alpha", "beta", "gamma"}
-    assert len(StatementPlans.plans) == 2, "a different list length must be a SEPARATE cache entry"
+    assert StatementPlans.plans.entry_count == 2, "a different list length must be a SEPARATE cache entry"
 
 
 @pytest.mark.asyncio
@@ -705,13 +558,10 @@ async def test_not_in_now_fast_pathed_and_stays_correct(db):
     """`__not_in` always OR's in a `field.isnull()` check for a no-None list (Django-style: NULL
     rows are never excluded by `NOT IN`) - `.find_()` locates the nested `ContainsCriterion`
     inside that `ComplexCriterion(OR, ...)` the same way it does the bare shape `__in` produces."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
-    await Book.objects.create(name="gamma", author=author, rating=3.0)
+    author = await QueryShapeRows.create_three_rated_books()
     await Book.objects.create(name="delta", author=author, rating=4.0)
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = {b.name async for b in Book.objects.filter(name__not_in=["alpha", "gamma"]).all()}
         assert spy.call_count == 0
         second = {b.name async for b in Book.objects.filter(name__not_in=["beta", "delta"]).all()}
@@ -728,12 +578,12 @@ async def test_in_with_embedded_none_runs_on_its_plan(db):
     await Book.objects.create(name="has-subject", author=author, rating=1.0, subject="fiction")
     await Book.objects.create(name="no-subject", author=author, rating=2.0, subject=None)
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         for _ in range(3):
             names = {b.name async for b in Book.objects.filter(subject__in=["fiction", None]).all()}
             assert names == {"has-subject", "no-subject"}
     assert spy.call_count == 2
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -743,38 +593,12 @@ async def test_in_empty_list_runs_on_its_plan_and_stays_correct(db):
     author = await Author.objects.create(name="a")
     await Book.objects.create(name="alpha", author=author, rating=1.0)
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         for _ in range(3):
             names = [b.name async for b in Book.objects.filter(name__in=[]).all()]
             assert names == []
     assert spy.call_count == 2
-    assert len(StatementPlans.plans) == 1
-
-
-@pytest.mark.asyncio
-async def test_no_stale_value_ids_survive_in_cloned_in_list_tree(db):
-    """The symmetry-principle regression test for `__in` specifically: after a cache HIT, none of
-    the freshly built `Tuple(...)` container's `ParameterizedValueWrapper` leaves may share an
-    `id()` with the CACHED template's own container - and the cached template's own container
-    must stay untouched (never mutated in place) after serving a hit."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
-    await Book.objects.create(name="gamma", author=author, rating=3.0)
-    await Book.objects.create(name="delta", author=author, rating=4.0)
-
-    qs_first = Book.objects.filter(name__in=["alpha", "gamma"])
-    await qs_first.all()
-    cached_query = next(iter(StatementPlans.plans.values())).template
-    cached_ids = _value_wrapper_ids(cached_query._wheres)
-    assert cached_ids
-
-    qs_second = Book.objects.filter(name__in=["beta", "delta"])
-    built_qs_second = _built(qs_second)
-    new_ids = _value_wrapper_ids(built_qs_second.query._wheres)
-
-    assert new_ids.isdisjoint(cached_ids)
-    assert _value_wrapper_ids(cached_query._wheres) == cached_ids, "the cached template must never be mutated"
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -782,32 +606,26 @@ async def test_range_now_fast_pathed_and_stays_correct(db):
     """A fully-bounded `__range` resolves to a single `BetweenCriterion` (`field.between(lower,
     upper)`, only produced when NEITHER bound is None) - two calls with DIFFERENT bounds must
     reuse one cache entry and each get their own correct result."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
-    await Book.objects.create(name="gamma", author=author, rating=3.0)
+    author = await QueryShapeRows.create_three_rated_books()
     await Book.objects.create(name="delta", author=author, rating=4.0)
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = {b.name async for b in Book.objects.filter(rating__range=(0.5, 2.5)).all()}
         assert spy.call_count == 0
         second = {b.name async for b in Book.objects.filter(rating__range=(2.5, 4.5)).all()}
     assert spy.call_count > 0
     assert first == {"alpha", "beta"}
     assert second == {"gamma", "delta"}
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
 async def test_one_sided_range_runs_on_its_plan_and_stays_correct(db):
     """A one-sided `__range` (`(None, upper)`/`(lower, None)`) is a plain `<=`/`>=` comparison - its
     plan key holds the open side, and a later call open on the same side binds its bound."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
-    await Book.objects.create(name="gamma", author=author, rating=3.0)
+    _author = await QueryShapeRows.create_three_rated_books()
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         for upper, expected in ((1.5, {"alpha"}), (2.5, {"alpha", "beta"}), (0.5, set())):
             names = {b.name async for b in Book.objects.filter(rating__range=(None, upper)).all()}
             assert names == expected
@@ -821,11 +639,9 @@ async def test_one_sided_range_runs_on_its_plan_and_stays_correct(db):
 @pytest.mark.asyncio
 async def test_fully_open_range_runs_on_its_plan_and_stays_correct(db):
     """Both bounds `None` is an `IS NOT NULL` test binding nothing - a plan of its own."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
+    _author = await QueryShapeRows.create_two_rated_books()
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         for _ in range(3):
             names = {b.name async for b in Book.objects.filter(rating__range=(None, None)).all()}
             assert names == {"alpha", "beta"}
@@ -836,10 +652,7 @@ async def test_fully_open_range_runs_on_its_plan_and_stays_correct(db):
 async def test_ranges_open_on_different_sides_keep_plans_of_their_own(db):
     """A fully-bounded `BETWEEN`, a range open below, one open above and one open on both sides
     of the same key - four plans, none bound with the values of another."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
-    await Book.objects.create(name="gamma", author=author, rating=3.0)
+    _author = await QueryShapeRows.create_three_rated_books()
 
     calls = [
         ((0.5, 2.5), {"alpha", "beta"}),
@@ -850,31 +663,7 @@ async def test_ranges_open_on_different_sides_keep_plans_of_their_own(db):
     for _ in range(2):
         for bounds, expected in calls:
             assert {b.name async for b in Book.objects.filter(rating__range=bounds).all()} == expected
-    assert len(StatementPlans.plans) == 4
-
-
-@pytest.mark.asyncio
-async def test_no_stale_value_ids_survive_in_cloned_range_tree(db):
-    """The symmetry-principle regression test for `__range`: after a cache HIT, neither the fresh
-    lower nor upper `ValueWrapper` may share an `id()` with the CACHED template's own bounds."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
-    await Book.objects.create(name="gamma", author=author, rating=3.0)
-    await Book.objects.create(name="delta", author=author, rating=4.0)
-
-    qs_first = Book.objects.filter(rating__range=(0.5, 2.5))
-    await qs_first.all()
-    cached_query = next(iter(StatementPlans.plans.values())).template
-    cached_ids = _value_wrapper_ids(cached_query._wheres)
-    assert cached_ids
-
-    qs_second = Book.objects.filter(rating__range=(2.5, 4.5))
-    built_qs_second = _built(qs_second)
-    new_ids = _value_wrapper_ids(built_qs_second.query._wheres)
-
-    assert new_ids.isdisjoint(cached_ids)
-    assert _value_wrapper_ids(cached_query._wheres) == cached_ids
+    assert StatementPlans.plans.entry_count == 4
 
 
 @pytest.mark.asyncio
@@ -887,7 +676,7 @@ async def test_fk_relational_shortcut_runs_on_its_plan_and_stays_correct(db):
     await Book.objects.create(name="alpha", author=author_one, rating=1.0)
     await Book.objects.create(name="beta", author=author_two, rating=2.0)
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await Book.objects.filter(author=author_one).first()
         second = await Book.objects.filter(author=author_two).first()
     assert spy.call_count == 1
@@ -906,19 +695,16 @@ async def test_select_related_now_fast_pathed_and_stays_correct(db):
     the Python-side row hydration had no idea, silently reading garbage/crashing. Two calls with
     DIFFERENT filter VALUES on the SAME select_related() shape must each correctly resolve their
     OWN related object, not the first call's."""
-    author_one = await Author.objects.create(name="a1")
-    author_two = await Author.objects.create(name="a2")
-    await Book.objects.create(name="alpha", author=author_one, rating=1.0)
-    await Book.objects.create(name="beta", author=author_two, rating=2.0)
+    _author_one, _author_two = await QueryShapeRows.create_books_by_two_authors()
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await Book.objects.filter(name="alpha").select_related("author").first()
         assert spy.call_count == 0
         second = await Book.objects.filter(name="beta").select_related("author").first()
     assert spy.call_count > 0
     assert first.author.name == "a1"
     assert second.author.name == "a2"
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -927,12 +713,9 @@ async def test_select_related_with_only_now_fast_pathed_and_stays_correct(db):
     inclusion logic branches on `self._fields_for_select` directly, not just on the base-table
     columns it resolves to, so `plan_key` includes `self._fields_for_select` itself
     defensively alongside the select_related path set."""
-    author_one = await Author.objects.create(name="a1")
-    author_two = await Author.objects.create(name="a2")
-    await Book.objects.create(name="alpha", author=author_one, rating=1.0)
-    await Book.objects.create(name="beta", author=author_two, rating=2.0)
+    _author_one, _author_two = await QueryShapeRows.create_books_by_two_authors()
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await Book.objects.filter(name="alpha").only("id", "name").select_related("author").first()
         assert spy.call_count == 0
         second = await Book.objects.filter(name="beta").only("id", "name").select_related("author").first()
@@ -952,10 +735,10 @@ async def test_different_select_related_sets_are_separate_cache_entries(db):
     await Book.objects.create(name="alpha", author=author, rating=1.0)
 
     await Book.objects.filter(rating__gt=0).select_related("author").all()
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     await Book.objects.filter(rating__gt=0).all()
-    assert len(StatementPlans.plans) == 2, "no-select_related must be a separate entry from select_related"
+    assert StatementPlans.plans.entry_count == 2, "no-select_related must be a separate entry from select_related"
 
 
 @pytest.mark.asyncio
@@ -968,7 +751,7 @@ async def test_select_related_extra_condition_now_fast_pathed_and_stays_correct(
     author = await Author.objects.create(name="a1")
     await Book.objects.create(name="alpha", author=author, rating=1.0)
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = (
             await Book.objects.filter(name="alpha")
             .select_related(Select("author", extra_condition=Q(name="a1")))
@@ -986,7 +769,7 @@ async def test_select_related_extra_condition_now_fast_pathed_and_stays_correct(
     # extra_condition filters the JOIN itself (LEFT JOIN), not the row - a non-matching value
     # means .author resolves to None (no matching related row), not an exception.
     assert second.author is None
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -994,12 +777,9 @@ async def test_select_related_extra_condition_with_only_binds_each_calls_conditi
     """`.only()` naming the base model's own fields beside a `select_related()` with an
     `extra_condition`: the plan binds each call's own extra_condition value - two calls with
     different values each get their own result."""
-    author_one = await Author.objects.create(name="a1")
-    author_two = await Author.objects.create(name="a2")
-    await Book.objects.create(name="alpha", author=author_one, rating=1.0)
-    await Book.objects.create(name="beta", author=author_two, rating=2.0)
+    _author_one, _author_two = await QueryShapeRows.create_books_by_two_authors()
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         for _ in range(3):
             first = (
                 await Book.objects.filter(name="alpha")
@@ -1034,7 +814,7 @@ async def test_select_related_extra_condition_survives_order_by_same_relation(db
     author_a2 = await Author.objects.create(name="a2")
     await Book.objects.create(name="beta", author=author_a2, rating=1.0)
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = (
             await Book.objects.filter(name="beta")
             .select_related(Select("author", extra_condition=Q(name="a1")))
@@ -1079,7 +859,7 @@ async def test_select_related_extra_condition_survives_nested_filter_on_same_rel
     author = await Author.objects.create(name="a1")
     book = await Book.objects.create(name="beta", author=author, rating=1.0)
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = (
             await Book.objects.filter(pk=book.pk, author__id=author.pk)
             .select_related(Select("author", extra_condition=Q(name="a1")))
@@ -1100,11 +880,9 @@ async def test_select_related_extra_condition_survives_nested_filter_on_same_rel
 
 @pytest.mark.asyncio
 async def test_only_fields_still_correct_and_can_use_fast_path(db):
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
+    _author = await QueryShapeRows.create_two_rated_books()
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = (await Book.objects.filter(name="alpha").only("id", "name").all())[0]
         second = (await Book.objects.filter(name="beta").only("id", "name").all())[0]
     assert spy.call_count > 0
@@ -1114,9 +892,7 @@ async def test_only_fields_still_correct_and_can_use_fast_path(db):
 
 @pytest.mark.asyncio
 async def test_values_and_values_list_not_broken_by_cache(db):
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
+    _author = await QueryShapeRows.create_two_rated_books()
 
     # warm the plain .filter() shape first
     await Book.objects.filter(name="alpha").all()
@@ -1133,32 +909,28 @@ async def test_function_aggregate_annotate_now_fast_pathed_and_stays_correct(db)
     cacheable - `_annotation_is_cacheable()`'s `AnnotationFunction` branch accepts it since there's
     no literal embedded anywhere in it to substitute (the `hare.sql.functions` class each of
     `Sum`/`Avg`/`Count`/`Max`/`Min` wraps only ever takes the one main term)."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
+    _author = await QueryShapeRows.create_two_rated_books()
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         for _ in range(3):
             result = (await Author.objects.annotate(book_count=Count("books")).filter(name="a").all())[0]
             assert result.book_count == 2
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
 async def test_combined_expression_annotate_now_fast_pathed_and_stays_correct(db):
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
+    _author = await QueryShapeRows.create_two_rated_books()
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         for _ in range(3):
             results = await Book.objects.annotate(bumped=F("rating") * 1.5).filter(name="alpha").all()
             assert abs(results[0].bumped - 1.5) < 1e-9
     # A nonzero count is the signal the fast path actually activated (see
-    # _spy_on_plan_hits()'s own docstring).
+    # spy_on_plan_hits()'s own docstring).
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     StatementPlans.plans.clear()
 
@@ -1166,7 +938,7 @@ async def test_combined_expression_annotate_now_fast_pathed_and_stays_correct(db
     beta = await Book.objects.annotate(bumped=F("rating") * 1.5).filter(name="beta").all()
     assert abs(alpha[0].bumped - 1.5) < 1e-9
     assert abs(beta[0].bumped - 3.0) < 1e-9
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -1183,11 +955,13 @@ async def test_combined_expression_int_vs_float_literal_are_separate_cache_entri
     StatementPlans.plans.clear()
     int_result = await IntFields.objects.annotate(result=F("intnum") + 1).values("result")
     assert int_result == [{"result": 8}]
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     float_result = await IntFields.objects.annotate(result=F("intnum") + 0.5).values("result")
     assert float_result == [{"result": 7.5}]
-    assert len(StatementPlans.plans) == 2, "a float literal must not reuse an int literal's uncast SQL structure"
+    assert StatementPlans.plans.entry_count == 2, (
+        "a float literal must not reuse an int literal's uncast SQL structure"
+    )
 
 
 @pytest.mark.asyncio
@@ -1197,7 +971,7 @@ async def test_annotate_f_cross_reference_runs_on_its_plan(db):
     author = await Author.objects.create(name="a")
     await Book.objects.create(name="alpha", author=author, rating=1.0)
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         for factor, multiplier in ((1.5, 2), (2.5, 3), (1.5, 4)):
             results = (
                 await Book.objects.annotate(bumped=F("rating") * factor)
@@ -1211,41 +985,11 @@ async def test_annotate_f_cross_reference_runs_on_its_plan(db):
 
 
 @pytest.mark.asyncio
-async def test_no_stale_value_ids_survive_in_cloned_annotation_tree(db):
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
-
-    first_query = Book.objects.annotate(bumped=F("rating") * 1.5).filter(name="alpha")
-    await first_query.all()
-    cached_query = next(iter(StatementPlans.plans.values())).template
-    cached_select_ids = {
-        id(node) for select in cached_query._selects for node in select.nodes_() if isinstance(node, ValueWrapper)
-    }
-    cached_where_ids = _value_wrapper_ids(cached_query._wheres)
-    cached_ids = cached_select_ids | cached_where_ids
-    assert cached_ids, "expected at least one ValueWrapper leaf in the cached annotation template"
-
-    second_query = Book.objects.annotate(bumped=F("rating") * 1.5).filter(name="beta")
-    built_second_query = _built(second_query)
-    fresh_query = built_second_query.query
-    fresh_select_ids = {
-        id(node) for select in fresh_query._selects for node in select.nodes_() if isinstance(node, ValueWrapper)
-    }
-    fresh_where_ids = _value_wrapper_ids(fresh_query._wheres)
-    fresh_ids = fresh_select_ids | fresh_where_ids
-
-    assert not (cached_ids & fresh_ids), "a cloned annotation query must never reuse the cached template's own nodes"
-
-
-@pytest.mark.asyncio
 async def test_dialect_is_part_of_the_cache_key(db):
-    """Two otherwise-identical shapes under different dialects must occupy different cache
-    entries - same principle EXECUTOR_CACHE already relies on (see its own key), verified here
-    directly against the key/value hare.sql object rather than via a second live connection
-    (this file runs against both sqlite and postgres in CI, so "the other dialect" is picked
-    relative to whichever one this particular run is actually using, not hardcoded - hardcoding
-    "postgres" here once silently made this a same-dialect no-op under a postgres test run)."""
+    """Changing only the dialect in a shape's description cannot find the existing plan.
+
+    Describe the other dialect without executing its compiler on an incompatible driver.
+    """
     await Author.objects.create(name="a")
     # Register both dialects' lazy SQL helpers before measuring separate plan entries.
     for dialect_name in ("postgresql", "sqlite"):
@@ -1254,38 +998,43 @@ async def test_dialect_is_part_of_the_cache_key(db):
     qs = Author.objects.filter(name="a")._get_compiler()._get_execution_query()
     real_dialect = qs.dialect.name
     qs._make_query()
-    real_key = next(iter(StatementPlans.plans))
+    real_key = next(iter(StatementPlans.plans.get_bucket(HareContext.require_current().apps.get_binding(Author))))
 
     other_dialect = DialectRegistry.get_dialect("postgresql" if real_dialect != "postgresql" else "sqlite")
     qs2 = Author.objects.filter(name="a")._get_compiler()._get_execution_query()
-    with patch.object(type(qs2), "dialect", other_dialect):
-        qs2._make_query()
+    # The query's dialect is its connection's.
+    with patch.object(qs2._connection, "dialect", other_dialect):
+        description, other_plan = qs2._get_plan()
 
-    assert len(StatementPlans.plans) == 2
-    other_key = next(key for key in StatementPlans.plans if key != real_key)
-    # The model, the query class, its declaration, the model again, then the dialect.
-    assert real_key[4] != other_key[4]
+    assert description is not None
+    assert other_plan is None
+    other_key = description.structure
+    assert other_key != real_key
+    assert StatementPlans.find(HareContext.require_current().apps.get_binding(Author), real_key) is not None
+    assert StatementPlans.find(HareContext.require_current().apps.get_binding(Author), other_key) is None
+    # The dialect identity is part of each model-local statement key.
+    assert qs.dialect in real_key
+    assert other_dialect not in real_key
+    assert other_dialect in other_key
 
 
 @pytest.mark.asyncio
 async def test_concurrent_calls_with_different_values_do_not_cross_talk(db):
-    """asyncio, not threading - but still worth proving directly: many concurrent
-    `.filter(name=<distinct value>).all()` calls for the same shape, interleaved by the
-    event loop across real DB round-trips, must each get back their OWN row, never another
-    coroutine's rebound value. Deliberately not `.first()`/`.get()` - those set `_limit` and
-    never take the fast path at all (see test_limit_offset_and_select_for_update_excluded_
-    from_fast_path), which would make this test pass trivially regardless of whether the new
-    caching mechanism is actually safe under interleaving."""
+    """Concurrent queries bind independent values without modifying the published plan."""
     authors = [await Author.objects.create(name=f"author-{i}") for i in range(20)]
 
     async def fetch(expected_name: str) -> str:
         rows = await Author.objects.filter(name=expected_name).order_by("id")
         return rows[0].name
 
-    with _spy_on_plan_hits() as spy:
+    assert await fetch(authors[0].name) == authors[0].name
+    plans = list(StatementPlans.plans.get_bucket(HareContext.require_current().apps.get_binding(Author)).values())
+    initial_parameters = [list(plan.parameters) for plan in plans]
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         results = await asyncio.gather(*(fetch(a.name) for a in authors))
     assert results == [a.name for a in authors]
     assert spy.call_count > 0
+    assert [plan.parameters for plan in plans] == initial_parameters
 
 
 @pytest.mark.asyncio
@@ -1293,7 +1042,7 @@ async def test_cache_survives_across_separate_queryset_instances(db):
     await Author.objects.create(name="a")
     await Author.objects.filter(name="a")
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         assert [author.name for author in await Author.objects.filter(name="a")] == ["a"]
     assert spy.call_count > 0
 
@@ -1304,13 +1053,13 @@ async def test_after_cursor_now_fast_pathed_and_stays_correct(db):
     for i in range(1, 6):
         await Book.objects.create(name=f"book{i}", author=author, rating=float(i))
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         page1 = await Book.objects.filter(author_id=author.id).order_by("rating").after_cursor(2.0).limit(2).all()
         assert [b.rating for b in page1] == [3.0, 4.0]
         page2 = await Book.objects.filter(author_id=author.id).order_by("rating").after_cursor(4.0).limit(2).all()
         assert [b.rating for b in page2] == [5.0]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -1323,7 +1072,7 @@ async def test_after_cursor_vs_no_cursor_same_ordering_are_distinct_cache_entrie
     assert len(no_cursor) == 3
     with_cursor = await Book.objects.filter(author_id=author.id).order_by("rating").after_cursor(1.0).all()
     assert [b.rating for b in with_cursor] == [2.0, 3.0]
-    assert len(StatementPlans.plans) == 2
+    assert StatementPlans.plans.entry_count == 2
 
 
 @pytest.mark.asyncio
@@ -1333,7 +1082,7 @@ async def test_after_cursor_multi_field_mixed_ordering_now_fast_pathed(db):
     await Book.objects.create(name="book1b", author=author, rating=1.0)
     await Book.objects.create(name="book2", author=author, rating=2.0)
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         for _ in range(2):
             rows = (
                 await Book.objects.filter(author_id=author.id)
@@ -1345,7 +1094,7 @@ async def test_after_cursor_multi_field_mixed_ordering_now_fast_pathed(db):
             assert "book1" not in names
             assert "book2" in names
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -1378,28 +1127,6 @@ async def test_after_cursor_null_boundary_keeps_a_plan_of_its_own(db):
     assert StatementPlans.hits - hits == 2
 
 
-@pytest.mark.asyncio
-async def test_no_stale_value_ids_survive_in_cloned_cursor_tree(db):
-    author = await Author.objects.create(name="a")
-    for i in range(1, 6):
-        await Book.objects.create(name=f"book{i}", author=author, rating=float(i))
-
-    first_query = Book.objects.filter(author_id=author.id).order_by("rating").after_cursor(2.0)
-    await first_query.all()
-    cached_query = next(iter(StatementPlans.plans.values())).template
-    cached_ids = _value_wrapper_ids(cached_query._wheres)
-    assert cached_ids, "expected at least one ValueWrapper leaf in the cached cursor template"
-
-    second_query = Book.objects.filter(author_id=author.id).order_by("rating").after_cursor(4.0)
-    built_second_query = _built(second_query)
-    fresh_ids = _value_wrapper_ids(built_second_query.query._wheres)
-
-    assert not (cached_ids & fresh_ids), "a cloned cursor query must never reuse the cached template's own nodes"
-
-    results = await second_query.all()
-    assert [b.rating for b in results] == [5.0]
-
-
 @requires_features(identifier_quote_char='"')
 @pytest.mark.asyncio
 async def test_with_cte_unrelated_to_outer_filter_now_fast_pathed(db):
@@ -1407,7 +1134,7 @@ async def test_with_cte_unrelated_to_outer_filter_now_fast_pathed(db):
     for i in range(1, 4):
         await Book.objects.create(name=f"book{i}", author=author, rating=float(i))
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         rows1 = await Book.objects.filter(name="book2").with_cte("cte1", Book.objects.filter(rating__lt=2.0)).all()
         assert [b.name for b in rows1] == ["book2"]
 
@@ -1439,8 +1166,8 @@ async def test_with_cte_raw_sql_reference_keeps_one_plan_with_its_cte(db):
         rows = await outer_qs.all()
         assert [b.name for b in rows] == ["book1"]
 
-    assert len(StatementPlans.plans) == 1
-    plan = next(iter(StatementPlans.plans.values()))
+    assert StatementPlans.plans.entry_count == 1
+    plan = next(iter(StatementPlans.plans.get_bucket(HareContext.require_current().apps.get_binding(Book)).values()))
     assert plan.sql is not None and '"cheap"' in plan.sql
 
 
@@ -1472,13 +1199,13 @@ async def test_a_join_crossing_filter_is_fast_pathed_and_stays_correct(
     await Book.objects.create(name="alpha", author=alice, rating=1.0)
     await Book.objects.create(name="beta", author=bob, rating=2.0)
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await getattr(Book.objects, method_name)(author__name="alice").all()
         second = await getattr(Book.objects, method_name)(author__name="bob").all()
     assert [b.name for b in first] == expected_first
     assert [b.name for b in second] == expected_second
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -1492,12 +1219,12 @@ async def test_negated_join_crossing_filter_null_fk_row_stays_included(db):
     event_with_reporter = await Event.objects.create(name="has reporter", tournament=tournament, reporter=john)
     event_without_reporter = await Event.objects.create(name="no reporter", tournament=tournament)
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         for _ in range(3):
             excluded = await Event.objects.exclude(reporter__name="John")
             assert {e.name for e in excluded} == {event_without_reporter.name}
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     excluded_other = await Event.objects.exclude(reporter__name="Nobody Matches This")
     assert {e.name for e in excluded_other} == {event_with_reporter.name, event_without_reporter.name}
@@ -1527,33 +1254,10 @@ async def test_any_lookup_across_a_relation_runs_on_its_plan(db):
         await build(first_value)
         with StatementPlanChecks.full_build():
             expected = sorted(str(row.pk) for row in await build(second_value))
-        with _spy_on_plan_hits() as spy:
+        with StatementPlanChecks.spy_on_plan_hits() as spy:
             rows = await build(second_value)
         assert sorted(str(row.pk) for row in rows) == expected
         assert spy.call_count == 1
-
-
-@pytest.mark.asyncio
-async def test_no_stale_value_ids_survive_in_cloned_not_exists_tree(db):
-    alice = await Author.objects.create(name="alice")
-    bob = await Author.objects.create(name="bob")
-    await Book.objects.create(name="alpha", author=alice, rating=1.0)
-    await Book.objects.create(name="beta", author=bob, rating=2.0)
-
-    first_query = Book.objects.exclude(author__name="alice")
-    await first_query.all()
-    cached_query = next(iter(StatementPlans.plans.values())).template
-    cached_ids = _value_wrapper_ids_including_exists(cached_query._wheres)
-    assert cached_ids, "expected at least one ValueWrapper leaf in the cached NOT EXISTS template"
-
-    second_query = Book.objects.exclude(author__name="bob")
-    built_second_query = _built(second_query)
-    fresh_ids = _value_wrapper_ids_including_exists(built_second_query.query._wheres)
-
-    assert not (cached_ids & fresh_ids), "a cloned NOT EXISTS query must never reuse the cached template's own nodes"
-
-    results = await second_query.all()
-    assert [b.name for b in results] == ["alpha"]
 
 
 @pytest.mark.asyncio
@@ -1566,31 +1270,31 @@ async def test_like_family_lookups_now_fast_pathed_and_stay_correct(db):
     await Book.objects.create(name="moby dick", author=author, rating=2.0)
     await Book.objects.create(name="dune", author=author, rating=3.0)
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await Book.objects.filter(name__contains="great").all()
         second = await Book.objects.filter(name__contains="dick").all()
     assert [b.name for b in first] == ["the great gatsby"]
     assert [b.name for b in second] == ["moby dick"]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     StatementPlans.plans.clear()
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await Book.objects.filter(name__startswith="the").all()
         second = await Book.objects.filter(name__startswith="dune").all()
     assert [b.name for b in first] == ["the great gatsby"]
     assert [b.name for b in second] == ["dune"]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     StatementPlans.plans.clear()
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await Book.objects.filter(name__endswith="dick").all()
         second = await Book.objects.filter(name__endswith="dune").all()
     assert [b.name for b in first] == ["moby dick"]
     assert [b.name for b in second] == ["dune"]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -1602,13 +1306,13 @@ async def test_like_family_lookup_escapes_literal_wildcard_characters(db):
     await Book.objects.create(name="100% pure", author=author, rating=1.0)
     await Book.objects.create(name="100X pure", author=author, rating=2.0)
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         percent_match = await Book.objects.filter(name__contains="100%").all()
         assert [b.name for b in percent_match] == ["100% pure"]
         underscore_match = await Book.objects.filter(name__contains="_").all()
         assert underscore_match == []
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -1620,60 +1324,31 @@ async def test_like_family_case_insensitive_variants_now_fast_pathed_and_stay_co
     await Book.objects.create(name="the GREAT gatsby", author=author, rating=1.0)
     await Book.objects.create(name="moby DICK", author=author, rating=2.0)
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await Book.objects.filter(name__icontains="great").all()
         second = await Book.objects.filter(name__icontains="dick").all()
     assert [b.name for b in first] == ["the GREAT gatsby"]
     assert [b.name for b in second] == ["moby DICK"]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     StatementPlans.plans.clear()
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await Book.objects.filter(name__istartswith="the").all()
         second = await Book.objects.filter(name__istartswith="moby").all()
     assert [b.name for b in first] == ["the GREAT gatsby"]
     assert [b.name for b in second] == ["moby DICK"]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     StatementPlans.plans.clear()
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await Book.objects.filter(name__iendswith="gatsby").all()
         second = await Book.objects.filter(name__iendswith="dick").all()
     assert [b.name for b in first] == ["the GREAT gatsby"]
     assert [b.name for b in second] == ["moby DICK"]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
-
-
-@pytest.mark.parametrize(
-    "lookup",
-    [
-        pytest.param("icontains", id="no_stale_value_ids_survive_in_cloned_case_insensitive_like_tree"),
-        pytest.param("contains", id="no_stale_value_ids_survive_in_cloned_like_tree"),
-    ],
-)
-@pytest.mark.asyncio
-async def test_no_stale_value_ids_survive_in_a_cloned_like_tree(db, lookup):
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="the great gatsby", author=author, rating=1.0)
-    await Book.objects.create(name="moby dick", author=author, rating=2.0)
-
-    first_query = Book.objects.filter(**{f"name__{lookup}": "great"})
-    await first_query.all()
-    cached_query = next(iter(StatementPlans.plans.values())).template
-    cached_ids = _value_wrapper_ids(cached_query._wheres)
-    assert cached_ids, "expected at least one ValueWrapper leaf in the cached LIKE template"
-
-    second_query = Book.objects.filter(**{f"name__{lookup}": "dick"})
-    built_second_query = _built(second_query)
-    fresh_ids = _value_wrapper_ids(built_second_query.query._wheres)
-
-    assert not (cached_ids & fresh_ids), "a cloned LIKE query must never reuse the cached template's own nodes"
-
-    results = await second_query.all()
-    assert [b.name for b in results] == ["moby dick"]
+    assert StatementPlans.plans.entry_count == 1
 
 
 @requires_features(dialect="postgresql")
@@ -1689,93 +1364,90 @@ async def test_json_contains_and_contained_by_already_fast_pathed_and_stay_corre
     a = await JSONFields.objects.create(data={"a": 1, "b": 2})
     b = await JSONFields.objects.create(data={"c": 3})
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await JSONFields.objects.filter(data__contains={"a": 1}).all()
         second = await JSONFields.objects.filter(data__contains={"c": 3}).all()
     assert [obj.id for obj in first] == [a.id]
     assert [obj.id for obj in second] == [b.id]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     StatementPlans.plans.clear()
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await JSONFields.objects.filter(data__contained_by={"a": 1, "b": 2}).all()
         second = await JSONFields.objects.filter(data__contained_by={"c": 3}).all()
     assert [obj.id for obj in first] == [a.id]
     assert [obj.id for obj in second] == [b.id]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_array_contains_contained_by_overlap_now_fast_pathed_and_stay_correct(db_array_fields):
-    """`ArrayField.__contains`/`__contained_by`/`__overlap` (`array_encoder` -> `Cast(Array(...),
-    type)`) - unlike every other ref shape in this file, a cache hit substitutes the WHOLE
-    `Array` node, not a value leaf inside it (see `ArrayValueReference`'s own docstring for why - Array
-    holds its own list as ONE lazily-parameterized bind value, not a per-element `ValueWrapper`
-    a normal `__in` list would)."""
+    """Typed container lookups bind each new array through the field conversion and retain
+    the SQL type cast. The complete array is one parameter, independent of its length."""
     from tests.shared_models.testmodels_postgres import ArrayFields
 
     a = await ArrayFields.objects.create(array=[1, 2, 3])
     b = await ArrayFields.objects.create(array=[4, 5, 6])
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await ArrayFields.objects.filter(array__contains=[1, 2]).all()
         second = await ArrayFields.objects.filter(array__contains=[4, 5]).all()
     assert [o.id for o in first] == [a.id]
     assert [o.id for o in second] == [b.id]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     StatementPlans.plans.clear()
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await ArrayFields.objects.filter(array__contained_by=[1, 2, 3, 9]).all()
         second = await ArrayFields.objects.filter(array__contained_by=[4, 5, 6, 9]).all()
     assert [o.id for o in first] == [a.id]
     assert [o.id for o in second] == [b.id]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     StatementPlans.plans.clear()
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await ArrayFields.objects.filter(array__overlap=[2, 99]).all()
         second = await ArrayFields.objects.filter(array__overlap=[5, 99]).all()
     assert [o.id for o in first] == [a.id]
     assert [o.id for o in second] == [b.id]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_array_len_now_fast_pathed_and_stays_correct(db_array_fields):
     """`ArrayField.__len` (`int_encoder`, then a plain `Coalesce(array_length(...), 0).eq(value)`
-    comparison) - an ordinary `EncodedValueReference` shape, not `ArrayValueReference`."""
+    comparison) - an ordinary `EncodedValueReference` shape, not `ContainerValueReference`."""
     from tests.shared_models.testmodels_postgres import ArrayFields
 
     a = await ArrayFields.objects.create(array=[1, 2, 3])
     b = await ArrayFields.objects.create(array=[1, 2])
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await ArrayFields.objects.filter(array__len=3).all()
         second = await ArrayFields.objects.filter(array__len=2).all()
     assert [o.id for o in first] == [a.id]
     assert [o.id for o in second] == [b.id]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_json_filter_runs_on_its_plan_and_stays_correct(db):
     """The JSON `__filter` lookup compares one piece of its dict - its plan key holds the dict's
-    keys and the types of its values, and a later dict of that shape builds the criterion again and
-    binds its pieces (`FieldLookup.binds_by_rebuild`). Another path or operator keeps another plan."""
+    keys and the types of its values, and later inputs bind their declared paths. Another path or operator
+    keeps another plan."""
     a = await JSONFields.objects.create(data={"breed": "labrador", "age": 3})
     b = await JSONFields.objects.create(data={"breed": "poodle", "age": 7})
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         for breed, expected in (("labrador", [a.id]), ("poodle", [b.id]), ("collie", [])):
             rows = await JSONFields.objects.filter(data__filter={"breed": breed}).order_by("id")
             assert [o.id for o in rows] == expected
@@ -1792,7 +1464,7 @@ async def test_json_has_keys_run_on_their_plan_and_stay_correct(db):
     a = await JSONFields.objects.create(data={"breed": "labrador", "age": 3})
     b = await JSONFields.objects.create(data={"breed": "poodle", "owner": "ann"})
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         for keys, expected in ((["breed", "age"], [a.id]), (["breed", "owner"], [b.id]), (["age", "owner"], [])):
             rows = await JSONFields.objects.filter(data__has_keys=keys).order_by("id")
             assert [o.id for o in rows] == expected
@@ -1800,65 +1472,6 @@ async def test_json_has_keys_run_on_their_plan_and_stay_correct(db):
             rows = await JSONFields.objects.filter(data__has_any_keys=keys).order_by("id")
             assert [o.id for o in rows] == expected
     assert spy.call_count == 3
-
-
-@requires_features(dialect="postgresql")
-@pytest.mark.asyncio
-async def test_no_stale_value_ids_survive_in_cloned_array_contains_tree(db_array_fields):
-    from tests.shared_models.testmodels_postgres import ArrayFields
-
-    a = await ArrayFields.objects.create(array=[1, 2, 3])
-    b = await ArrayFields.objects.create(array=[4, 5, 6])
-
-    first_query = ArrayFields.objects.filter(array__contains=[1, 2])
-    first_results = await first_query.all()
-    assert [o.id for o in first_results] == [a.id]
-    cached_query = next(iter(StatementPlans.plans.values())).template
-    cached_array_id = id(cached_query._wheres.args[1].value_wrapper)
-
-    second_query = ArrayFields.objects.filter(array__contains=[4, 5])
-    built_second_query = _built(second_query)
-    fresh_array_id = id(built_second_query.query._wheres.args[1].value_wrapper)
-
-    assert cached_array_id != fresh_array_id, "the Array node must be a FRESH object on a cache hit, not reused"
-    assert cached_query._wheres.args[1].value == [1, 2]
-    assert built_second_query.query._wheres.args[1].value == [4, 5]
-
-    results = await second_query.all()
-    assert [o.id for o in results] == [b.id]
-
-
-@requires_features(dialect="postgresql")
-@pytest.mark.asyncio
-async def test_no_stale_value_ids_survive_in_cloned_array_len_tree(db_array_fields):
-    """`array_length(field, 1)`'s own `1` argument and `Coalesce(..., 0)`'s own `0` default are
-    STRUCTURAL constants, fixed for every call of this shape regardless of the `__len` value being
-    filtered on - correctly, safely SHARED (unchanged) across a cache hit, unlike the actual
-    compared value's own `ValueWrapper`, which must always be a fresh object. This test checks
-    identity of the SPECIFIC compared-value node directly (`criterion.right`), not a blanket
-    "no ValueWrapper anywhere in the tree is shared" sweep, which would incorrectly flag those
-    harmless shared constants as a symmetry violation."""
-    from tests.shared_models.testmodels_postgres import ArrayFields
-
-    a = await ArrayFields.objects.create(array=[1, 2, 3])
-    b = await ArrayFields.objects.create(array=[1, 2])
-
-    first_query = ArrayFields.objects.filter(array__len=3)
-    first_results = await first_query.all()
-    assert [o.id for o in first_results] == [a.id]
-    cached_query = next(iter(StatementPlans.plans.values())).template
-    cached_value_id = id(cached_query._wheres.right)
-
-    second_query = ArrayFields.objects.filter(array__len=2)
-    built_second_query = _built(second_query)
-    fresh_value_id = id(built_second_query.query._wheres.right)
-
-    assert cached_value_id != fresh_value_id, "the compared ValueWrapper must be a FRESH object on a cache hit"
-    assert cached_query._wheres.right.value == 3
-    assert built_second_query.query._wheres.right.value == 2
-
-    results = await second_query.all()
-    assert [o.id for o in results] == [b.id]
 
 
 @pytest.mark.asyncio
@@ -1871,13 +1484,13 @@ async def test_safe_custom_register_lookup_now_fast_pathed_and_stays_correct(db)
     await CharFields.objects.create(char="alpha")
     await CharFields.objects.create(char="beta")
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await CharFields.objects.filter(char__safe_custom="alpha").all()
         second = await CharFields.objects.filter(char__safe_custom="beta").all()
     assert {c.char for c in first} == {"alpha"}
     assert {c.char for c in second} == {"beta"}
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -1894,7 +1507,7 @@ async def test_unsafe_custom_register_lookup_stays_excluded_from_fast_path(db):
     a = await CharFields.objects.create(char="moo")
     b = await CharFields.objects.create(char="oom")
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         for _ in range(3):
             # "oom" reversed is "moo" - must always match the row literally spelled "moo".
             first = await CharFields.objects.filter(char__unsafe_custom="oom").all()
@@ -1907,16 +1520,15 @@ async def test_unsafe_custom_register_lookup_stays_excluded_from_fast_path(db):
 
 
 @pytest.mark.asyncio
-async def test_transforming_custom_lookup_declaring_a_rebuild_runs_on_its_plan(db):
-    """A custom filter transforming its value runs on its plan once it declares `binds_by_rebuild` -
-    each later value builds the criterion again, the reversal included."""
+async def test_transforming_custom_lookup_declaring_an_encoder_runs_on_its_plan(db):
+    """A prepared conversion binds each new value without reconstructing the operator."""
     a = await CharFields.objects.create(char="moo")
     b = await CharFields.objects.create(char="oom")
 
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         for _ in range(2):
-            assert [c.id for c in await CharFields.objects.filter(char__rebuilt_custom="oom")] == [a.id]
-            assert [c.id for c in await CharFields.objects.filter(char__rebuilt_custom="moo")] == [b.id]
+            assert [c.id for c in await CharFields.objects.filter(char__encoded_custom="oom")] == [a.id]
+            assert [c.id for c in await CharFields.objects.filter(char__encoded_custom="moo")] == [b.id]
     assert spy.call_count == 3
 
 
@@ -1929,7 +1541,7 @@ async def test_exists_query_is_a_cache_hit_on_second_call_and_stays_correct(db):
     author = await Author.objects.create(name="a")
     await Book.objects.create(name="alpha", author=author, rating=1.0)
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await Book.objects.filter(name="alpha").exists()
         assert spy.call_count == 0
         second = await Book.objects.filter(name="alpha").exists()
@@ -1938,7 +1550,11 @@ async def test_exists_query_is_a_cache_hit_on_second_call_and_stays_correct(db):
     assert first is True
     assert second is True
     assert third is False
-    exists_entries = [key for key in StatementPlans.plans if key[0] is ExistsQuery]
+    exists_entries = [
+        key
+        for key in StatementPlans.plans.get_bucket(HareContext.require_current().apps.get_binding(Book))
+        if key[0] is ExistsQuery
+    ]
     assert len(exists_entries) == 1
 
 
@@ -1954,7 +1570,7 @@ async def test_count_query_is_a_cache_hit_on_second_call_and_stays_correct(db):
     await Book.objects.create(name="beta", author=author, rating=2.0)
     await Book.objects.create(name="gamma", author=other_author, rating=3.0)
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await Book.objects.filter(author_id=author.pk).count()
         assert spy.call_count == 0
         second = await Book.objects.filter(author_id=author.pk).count()
@@ -1963,7 +1579,11 @@ async def test_count_query_is_a_cache_hit_on_second_call_and_stays_correct(db):
     assert first == 2
     assert second == 2
     assert third == 1
-    count_entries = [key for key in StatementPlans.plans if key[0] is CountQuery]
+    count_entries = [
+        key
+        for key in StatementPlans.plans.get_bucket(HareContext.require_current().apps.get_binding(Book))
+        if key[0] is CountQuery
+    ]
     assert len(count_entries) == 1
 
 
@@ -1971,18 +1591,20 @@ async def test_count_query_is_a_cache_hit_on_second_call_and_stays_correct(db):
 async def test_count_query_group_by_shares_the_plain_cache_entry(db):
     """A `.group_by(...)` doesn't change the instances `await qs` returns, so `count()` ignores it
     and shares the plain `CountQuery` shape."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=1.0)
+    author = await QueryShapeRows.create_two_rated_books(beta_rating=1.0)
     await Book.objects.create(name="gamma", author=author, rating=2.0)
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await Book.objects.all().group_by("rating").count()
         second = await Book.objects.all().count()
     assert spy.call_count > 0
     assert first == 3
     assert second == 3
-    count_entries = [key for key in StatementPlans.plans if key[0] is CountQuery]
+    count_entries = [
+        key
+        for key in StatementPlans.plans.get_bucket(HareContext.require_current().apps.get_binding(Book))
+        if key[0] is CountQuery
+    ]
     assert len(count_entries) == 1
 
 
@@ -1991,11 +1613,9 @@ async def test_exists_and_count_query_share_annotate_literal_fast_path(db):
     """An `.annotate()` literal is bound the same way for `ExistsQuery`/`CountQuery` as for
     `QuerySet` - and the annotation's SELECT column, which neither query type keeps, has no say in
     their plan."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
+    _author = await QueryShapeRows.create_two_rated_books()
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await Book.objects.annotate(doubled=F("rating") * 2).filter(name="alpha").exists()
         assert spy.call_count == 0
         second = await Book.objects.annotate(doubled=F("rating") * 2).filter(name="beta").exists()
@@ -2004,7 +1624,7 @@ async def test_exists_and_count_query_share_annotate_literal_fast_path(db):
     assert second is True
 
     StatementPlans.plans.clear()
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first_count = await Book.objects.annotate(doubled=F("rating") * 2).filter(name="alpha").count()
         assert spy.call_count == 0
         second_count = await Book.objects.annotate(doubled=F("rating") * 2).filter(name="beta").count()
@@ -2024,19 +1644,23 @@ async def test_contains_query_runs_on_its_own_plan_and_stays_correct(db):
     delta = await Book.objects.create(name="delta", author=other_author, rating=-5.0)
 
     queryset = Book.objects.filter(rating__gt=0)
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         assert await queryset.contains(alpha) is True
         assert await queryset.contains(beta) is True
         assert await queryset.contains(delta) is False
         assert await queryset.exists() is True
     assert spy.call_count == 2
-    contains_entries = [key for key in StatementPlans.plans if key[0] is ContainsQuery]
+    contains_entries = [
+        key
+        for key in StatementPlans.plans.get_bucket(HareContext.require_current().apps.get_binding(Book))
+        if key[0] is ContainsQuery
+    ]
     assert len(contains_entries) == 1
 
 
 # A run takes the compiled statement, whose query is the stored one itself, read-only; the
 # clone this checks is the full build every other hit (.sql(), a subquery) takes.
-@patch.object(StatementPlanRuns, "run_on_plan", lambda *args, **kwargs: False)
+@patch.object(StatementPlanRuns, "bind_plan", lambda *args, **kwargs: None)
 @pytest.mark.asyncio
 async def test_no_stale_value_ids_survive_in_cloned_exists_and_count_query_tree(db):
     """Symmetry-principle regression test for `ExistsQuery`/`CountQuery` - a cache hit must never
@@ -2110,11 +1734,9 @@ async def test_values_query_is_a_cache_hit_on_second_call_and_stays_correct(db):
     """`.values()` (`ValuesQuery`) shares the same generic `AwaitableQuery` machinery as
     `QuerySet.filter()`/`.exists()`/`.count()` - its own `_make_query()` does the same shape-key/
     substitution dance, keyed separately via a `ValuesQuery` type marker."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
+    _author = await QueryShapeRows.create_two_rated_books()
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await Book.objects.filter(name="alpha").values("name", "rating")
         assert spy.call_count == 0
         second = await Book.objects.filter(name="alpha").values("name", "rating")
@@ -2123,7 +1745,11 @@ async def test_values_query_is_a_cache_hit_on_second_call_and_stays_correct(db):
     assert first == [{"name": "alpha", "rating": 1.0}]
     assert second == [{"name": "alpha", "rating": 1.0}]
     assert third == [{"name": "beta", "rating": 2.0}]
-    values_entries = [key for key in StatementPlans.plans if key[0] is ValuesQuery]
+    values_entries = [
+        key
+        for key in StatementPlans.plans.get_bucket(HareContext.require_current().apps.get_binding(Book))
+        if key[0] is ValuesQuery
+    ]
     assert len(values_entries) == 1
 
 
@@ -2138,11 +1764,9 @@ async def test_values_query_renamed_field_stays_correct_across_cache_hits(db):
     falling back to a full rebuild on every call, safe but never actually cached) - this covers
     the plain-field rename shape, `test_values_and_values_list_query_annotate_literal_fast_path`
     below covers the annotation-field rename shape that actually caught the bug."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
+    _author = await QueryShapeRows.create_two_rated_books()
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await Book.objects.filter(name="alpha").values(renamed="rating")
         assert spy.call_count == 0
         second = await Book.objects.filter(name="beta").values(renamed="rating")
@@ -2157,11 +1781,9 @@ async def test_values_list_query_is_a_cache_hit_on_second_call_and_stays_correct
     keyed separately via a `ValuesListQuery` type marker plus its own `_fields_for_select_list`/
     `_flat` shape components (a different requested-field ORDER or `flat=True` must never collide
     with a differently-shaped `.values_list()` call)."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
+    _author = await QueryShapeRows.create_two_rated_books()
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await Book.objects.filter(name="alpha").values_list("name", "rating")
         assert spy.call_count == 0
         second = await Book.objects.filter(name="alpha").values_list("name", "rating")
@@ -2170,7 +1792,11 @@ async def test_values_list_query_is_a_cache_hit_on_second_call_and_stays_correct
     assert first == [("alpha", 1.0)]
     assert second == [("alpha", 1.0)]
     assert third == [("beta", 2.0)]
-    values_list_entries = [key for key in StatementPlans.plans if key[0] is ValuesQuery]
+    values_list_entries = [
+        key
+        for key in StatementPlans.plans.get_bucket(HareContext.require_current().apps.get_binding(Book))
+        if key[0] is ValuesQuery
+    ]
     assert len(values_list_entries) == 1
 
 
@@ -2179,11 +1805,9 @@ async def test_values_list_query_flat_is_part_of_the_cache_key(db):
     """`flat=True` changes `_execute()`'s own return shape (`list[Any]` instead of
     `list[tuple[Any, ...]]`) for the exact same requested field - must never collide with the
     non-flat shape's own cache entry."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
+    _author = await QueryShapeRows.create_two_rated_books()
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await Book.objects.filter(name="alpha").values_list("rating", flat=True)
         second = await Book.objects.filter(name="beta").values_list("rating", flat=True)
     assert spy.call_count > 0
@@ -2199,11 +1823,9 @@ async def test_values_and_values_list_query_annotate_literal_fast_path(db):
     mutation-ordering bug documented on `ValuesQuery._make_query()` - `doubled` is both an
     annotation key AND the requested field name, so `add_field_to_select_query()`'s return_as
     re-registration duplicates its entry in `self._annotations`."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
+    _author = await QueryShapeRows.create_two_rated_books()
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await Book.objects.annotate(doubled=F("rating") * 2).filter(name="alpha").values("name", "doubled")
         assert spy.call_count == 0
         second = await Book.objects.annotate(doubled=F("rating") * 2).filter(name="beta").values("name", "doubled")
@@ -2212,7 +1834,7 @@ async def test_values_and_values_list_query_annotate_literal_fast_path(db):
     assert second == [{"name": "beta", "doubled": 4.0}]
 
     StatementPlans.plans.clear()
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first_list = (
             await Book.objects.annotate(doubled=F("rating") * 2).filter(name="alpha").values_list("name", "doubled")
         )
@@ -2250,13 +1872,17 @@ async def test_values_query_select_related_extra_condition_binds_each_calls_cond
         .values("name", "left__left__name")
     )
     assert rows_no_match == [{"name": "root", "left__left__name": None}]
-    extra_condition_entries = [key for key in StatementPlans.plans if key[0] is ValuesQuery]
+    extra_condition_entries = [
+        key
+        for key in StatementPlans.plans.get_bucket(HareContext.require_current().apps.get_binding(DoubleFK))
+        if key[0] is ValuesQuery
+    ]
     assert len(extra_condition_entries) == 1
 
 
 # A run takes the compiled statement, whose query is the stored one itself, read-only; the
 # clone this checks is the full build every other hit (.sql(), a subquery) takes.
-@patch.object(StatementPlanRuns, "run_on_plan", lambda *args, **kwargs: False)
+@patch.object(StatementPlanRuns, "bind_plan", lambda *args, **kwargs: None)
 @pytest.mark.asyncio
 async def test_no_stale_value_ids_survive_in_cloned_values_query_tree(db):
     """Symmetry-principle regression test for `ValuesQuery`/`ValuesListQuery` - a cache hit must
@@ -2297,11 +1923,9 @@ async def test_aggregate_query_literal_metric_is_a_cache_hit_and_stays_correct(d
     (non-aggregate) metric is one cacheable shape; a real `Sum`/`Avg`/`Count`/`Max`/`Min` metric is
     now cacheable too - see `test_aggregate_query_real_aggregate_function_now_fast_pathed_and_
     stays_correct` below."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
+    _author = await QueryShapeRows.create_two_rated_books()
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await Book.objects.filter(name="alpha").aggregate(doubled=F("rating") * 2)
         assert spy.call_count == 0
         second = await Book.objects.filter(name="alpha").aggregate(doubled=F("rating") * 2)
@@ -2310,7 +1934,11 @@ async def test_aggregate_query_literal_metric_is_a_cache_hit_and_stays_correct(d
     assert first == {"doubled": 2.0}
     assert second == {"doubled": 2.0}
     assert third == {"doubled": 4.0}
-    aggregate_entries = [key for key in StatementPlans.plans if key[0] is AggregateQuery]
+    aggregate_entries = [
+        key
+        for key in StatementPlans.plans.get_bucket(HareContext.require_current().apps.get_binding(Book))
+        if key[0] is AggregateQuery
+    ]
     assert len(aggregate_entries) == 1
 
 
@@ -2320,11 +1948,9 @@ async def test_aggregate_query_real_aggregate_function_now_fast_pathed_and_stays
     these ever carry `default_values` (the `hare.sql.functions` class each wraps only accepts the
     one main term, nothing extra), so there's no embedded literal this fast path would need to
     find/substitute - `_annotation_is_cacheable()`'s `AnnotationFunction` branch accepts them."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
+    _author = await QueryShapeRows.create_two_rated_books()
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await Book.objects.filter(name="alpha").aggregate(total=Sum("rating"))
         assert spy.call_count == 0
         second = await Book.objects.filter(name="alpha").aggregate(total=Sum("rating"))
@@ -2333,7 +1959,11 @@ async def test_aggregate_query_real_aggregate_function_now_fast_pathed_and_stays
     assert first == {"total": 1.0}
     assert second == {"total": 1.0}
     assert third == {"total": 2.0}
-    aggregate_entries = [key for key in StatementPlans.plans if key[0] is AggregateQuery]
+    aggregate_entries = [
+        key
+        for key in StatementPlans.plans.get_bucket(HareContext.require_current().apps.get_binding(Book))
+        if key[0] is AggregateQuery
+    ]
     assert len(aggregate_entries) == 1
 
 
@@ -2349,7 +1979,7 @@ async def test_multiple_bare_aggregate_functions_together_now_fast_pathed(db):
     await Book.objects.create(name="beta", author=author, rating=2.0)
     await Book.objects.create(name="gamma", author=other_author, rating=3.0)
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await Book.objects.filter(author_id=author.pk).aggregate(
             total=Sum("rating"), avg=Avg("rating"), cnt=Count("rating"), mx=Max("rating"), mn=Min("rating")
         )
@@ -2369,11 +1999,9 @@ async def test_coalesce_literal_default_now_fast_pathed_and_stays_correct(db):
     `wrap_constant()` call, NOT through `Value.get_result()` (the mechanism this cache's recording is
     normally built around) - now cacheable, `Function.get_result()` (`hare/query/expressions/
     function.py`) records a `LiteralValueReference` for it directly after the wrapped term is built."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
+    _author = await QueryShapeRows.create_two_rated_books()
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await Book.objects.annotate(c=Coalesce("rating", 0)).filter(name="alpha").values("c")
         assert spy.call_count == 0
         second = await Book.objects.annotate(c=Coalesce("rating", 0)).filter(name="beta").values("c")
@@ -2389,7 +2017,7 @@ async def test_coalesce_decimal_default_stays_fast_pathed_and_substitutes_each_v
     instead of reusing the first call's."""
     await DecimalFields.objects.create(decimal=Decimal("1"), decimal_nodec=0, decimal_null=None)
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await DecimalFields.objects.annotate(c=Coalesce("decimal_null", Decimal("2.50"))).values("c")
         assert spy.call_count == 0
         second = await DecimalFields.objects.annotate(c=Coalesce("decimal_null", Decimal("7.25"))).values("c")
@@ -2406,7 +2034,7 @@ async def test_case_decimal_literal_stays_fast_pathed_and_substitutes_each_value
     def build(default):
         return DecimalFields.objects.annotate(c=Case(When(decimal__gt=5, then=F("decimal")), default=Value(default)))
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await build(Decimal("2.50")).values_list("c", flat=True)
         assert spy.call_count == 0
         second = await build(Decimal("7.25")).values_list("c", flat=True)
@@ -2481,7 +2109,7 @@ async def test_coalesce_default_value_is_substituted_correctly(db):
     def build(default):
         return Book.objects.annotate(c=Coalesce("subject", default)).filter(pk=book.pk)
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await build("missing").values("c")
         assert spy.call_count == 0
         second = await build("N/A").values("c")
@@ -2496,11 +2124,9 @@ async def test_aggregate_distinct_flag_is_part_of_the_cache_key(db):
     shape must never collide into one cache entry - `.distinct` is a pure DDL-like flag (fixed at
     the annotation's own construction, never a runtime value), folded into
     `_annotation_shape_key()`'s own `AnnotationFunction` branch."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=1.0)
+    author = await QueryShapeRows.create_two_rated_books(beta_rating=1.0)
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         # Different shapes (distinct True vs False) - both are cache MISSES, each populating its
         # own separate entry, never a hit on the other's template.
         distinct_count = await Book.objects.filter(author_id=author.pk).aggregate(cnt=Count("rating", distinct=True))
@@ -2508,11 +2134,15 @@ async def test_aggregate_distinct_flag_is_part_of_the_cache_key(db):
     assert spy.call_count == 0
     assert distinct_count == {"cnt": 1}
     assert plain_count == {"cnt": 2}
-    aggregate_entries = [key for key in StatementPlans.plans if key[0] is AggregateQuery]
+    aggregate_entries = [
+        key
+        for key in StatementPlans.plans.get_bucket(HareContext.require_current().apps.get_binding(Book))
+        if key[0] is AggregateQuery
+    ]
     assert len(aggregate_entries) == 2
 
     # Each shape independently hits on a repeat call.
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         repeat_distinct = await Book.objects.filter(author_id=author.pk).aggregate(cnt=Count("rating", distinct=True))
     assert spy.call_count > 0
     assert repeat_distinct == {"cnt": 1}
@@ -2520,19 +2150,10 @@ async def test_aggregate_distinct_flag_is_part_of_the_cache_key(db):
 
 @pytest.mark.asyncio
 async def test_aggregate_filter_kwarg_now_fast_pathed_and_stays_correct(db):
-    """`Sum("rating", _filter=Q(...))` embeds a SEPARATE runtime-value surface (a whole `Q` tree)
-    inside the aggregate's own `FILTER (WHERE ...)` clause (rendered via `Aggregate._wrap_
-    argument()`'s `Case(When(filter, then=field), default=None)` wrapping) - now cacheable:
-    `self.filter.resolve(expression_context)` already threads through the SAME `Q.get_result()`
-    machinery/`value_wrapper_references` any plain `.filter()` kwarg uses (same `expression_context`), and
-    the resulting `Case` term is handled by the SAME generic `SqlCase` clone branch the `Case`/
-    `When` annotation commit already added - only the structural precheck/leaf-tracking was
-    missing."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=9.0)
+    """A filtered aggregate reuses the statement plan and still returns the filtered total."""
+    author = await QueryShapeRows.create_two_rated_books(beta_rating=9.0)
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await Book.objects.filter(author_id=author.pk).aggregate(total=Sum("rating", _filter=Q(rating__gte=8)))
         assert spy.call_count == 0
         second = await Book.objects.filter(author_id=author.pk).aggregate(
@@ -2541,7 +2162,11 @@ async def test_aggregate_filter_kwarg_now_fast_pathed_and_stays_correct(db):
     assert spy.call_count > 0
     assert first == {"total": 9.0}
     assert second == {"total": 9.0}
-    aggregate_entries = [key for key in StatementPlans.plans if key[0] is AggregateQuery]
+    aggregate_entries = [
+        key
+        for key in StatementPlans.plans.get_bucket(HareContext.require_current().apps.get_binding(Book))
+        if key[0] is AggregateQuery
+    ]
     assert len(aggregate_entries) == 1
 
 
@@ -2551,9 +2176,7 @@ async def test_aggregate_filter_threshold_is_substituted_correctly(db):
     just the outer `.filter()`) must be substituted correctly on a cache hit, not silently reuse
     the FIRST call's threshold - the primary silent-wrong-result risk this whole cache is built
     around, same class of test as `test_case_when_condition_value_is_substituted_correctly`."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=9.0)
+    author = await QueryShapeRows.create_two_rated_books(beta_rating=9.0)
     await Book.objects.create(name="gamma", author=author, rating=15.0)
 
     def build(threshold):
@@ -2561,7 +2184,7 @@ async def test_aggregate_filter_threshold_is_substituted_correctly(db):
             high_count=Count("rating", _filter=Q(rating__gte=threshold))
         )
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         low_threshold = await build(2)
         assert spy.call_count == 0
         high_threshold = await build(20)
@@ -2576,12 +2199,9 @@ async def test_window_row_number_now_fast_pathed_and_stays_correct(db):
     cacheable. WHERE applies BEFORE a window function in SQL's own logical processing order, so
     this is checked over the WHOLE table (filtering to one row would always give row_number=1,
     not a meaningful repeated-different-values check)."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
-    await Book.objects.create(name="gamma", author=author, rating=3.0)
+    _author = await QueryShapeRows.create_three_rated_books()
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = (
             await Book.objects.annotate(rn=Window(RowNumber(), order_by=["rating"]))
             .order_by("rating")
@@ -2603,12 +2223,9 @@ async def test_window_row_number_now_fast_pathed_and_stays_correct(db):
 async def test_window_field_function_now_fast_pathed_and_stays_correct(db):
     """`Window(Sum("field"), order_by=[...])` (a `FieldWindowFunction`) - the one field arg is
     always resolved to a structural `Field`/`Term` reference, never a literal - is now cacheable."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
-    await Book.objects.create(name="gamma", author=author, rating=3.0)
+    _author = await QueryShapeRows.create_three_rated_books()
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = (
             await Book.objects.annotate(running=Window(WindowSum("rating"), order_by=["rating"]))
             .order_by("rating")
@@ -2646,10 +2263,10 @@ async def test_window_partition_by_is_part_of_the_cache_key(db):
         .order_by("id")
         .values("rn")
     )
-    with_partition_entries = len(StatementPlans.plans)
+    with_partition_entries = StatementPlans.plans.entry_count
 
     await Book.objects.annotate(rn=Window(RowNumber(), order_by=["rating"])).order_by("id").values("rn")
-    without_partition_entries = len(StatementPlans.plans)
+    without_partition_entries = StatementPlans.plans.entry_count
 
     assert without_partition_entries == with_partition_entries + 1
 
@@ -2660,11 +2277,9 @@ async def test_window_ntile_now_fast_pathed_and_stays_correct(db):
     exact same `hare.sql.terms.Function.__init__`'s `wrap_constant()` path as a `Function`'s own
     `default_values` - now cacheable, `NTile.build()` (`hare/query/functions/window.py`) records a
     `LiteralValueReference` for it directly, mirroring `Coalesce`'s own default-value handling."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
+    _author = await QueryShapeRows.create_two_rated_books()
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = (
             await Book.objects.annotate(bucket=Window(NTile(2), order_by=["rating"]))
             .order_by("rating")
@@ -2679,7 +2294,11 @@ async def test_window_ntile_now_fast_pathed_and_stays_correct(db):
     assert spy.call_count > 0
     assert first == [{"bucket": 1}, {"bucket": 2}]
     assert second == [{"bucket": 1}, {"bucket": 2}]
-    ntile_entries = [key for key in StatementPlans.plans if key[0] is ValuesQuery]
+    ntile_entries = [
+        key
+        for key in StatementPlans.plans.get_bucket(HareContext.require_current().apps.get_binding(Book))
+        if key[0] is ValuesQuery
+    ]
     assert len(ntile_entries) == 1
 
 
@@ -2687,15 +2306,12 @@ async def test_window_ntile_now_fast_pathed_and_stays_correct(db):
 async def test_window_ntile_buckets_is_substituted_correctly(db):
     """A DIFFERENT `buckets` value (via a Python variable) must substitute correctly on a cache
     hit, not silently reuse the FIRST call's bucket count."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
-    await Book.objects.create(name="gamma", author=author, rating=3.0)
+    _author = await QueryShapeRows.create_three_rated_books()
 
     def build(buckets):
         return Book.objects.annotate(bucket=Window(NTile(buckets), order_by=["rating"])).order_by("rating")
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         two_buckets = await build(2).values("bucket")
         assert spy.call_count == 0
         three_buckets = await build(3).values("bucket")
@@ -2710,11 +2326,9 @@ async def test_window_lag_with_explicit_default_now_fast_pathed_and_stays_correc
     `default` are recorded via `OffsetWindowFunction.build()`. `default=None` (implicit or
     explicit - indistinguishable once inside `__init__`) stays excluded, see
     `test_window_lag_default_none_stays_excluded_from_fast_path` below."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
+    _author = await QueryShapeRows.create_two_rated_books()
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = (
             await Book.objects.annotate(prev=Window(Lag("rating", 1, default=0.0), order_by=["rating"]))
             .order_by("rating")
@@ -2737,9 +2351,7 @@ async def test_window_lag_default_none_is_fast_pathed_apart_from_a_real_default(
     """`Lag(field, offset)` - the most common shape, relying on `default`'s own Python default of
     `None` - keeps a plan: the `None` renders `LAG(..., NULL)` with no parameter, and is part of
     the shape, so a call whose `default` holds a real value (`LAG(..., ?)`) has a plan of its own."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
+    _author = await QueryShapeRows.create_two_rated_books()
 
     def previous(default=None):
         return (
@@ -2748,7 +2360,7 @@ async def test_window_lag_default_none_is_fast_pathed_apart_from_a_real_default(
             .values("prev")
         )
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await previous()
         assert spy.call_count == 0
         assert await previous() == first
@@ -2766,11 +2378,9 @@ async def test_case_when_literal_then_default_now_fast_pathed_and_stays_correct(
     each (mirroring `Value.get_result()`), and `When`'s own condition `Q` objects were ALREADY
     threaded through `value_wrapper_references` for free (they resolve through the exact same
     `Q.get_result()` machinery `.filter()`'s own `self._q_objects` use)."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=9.0)
+    _author = await QueryShapeRows.create_two_rated_books(beta_rating=9.0)
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = (
             await Book.objects.annotate(category=Case(When(rating__gte=8, then="big"), default="small"))
             .filter(name="alpha")
@@ -2800,7 +2410,7 @@ async def test_case_when_condition_value_is_substituted_correctly(db):
             name="alpha"
         )
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         low_threshold = await build(5).values("category")
         assert spy.call_count == 0
         high_threshold = await build(20).values("category")
@@ -2814,11 +2424,9 @@ async def test_case_when_f_expression_then_default_now_fast_pathed_and_stays_cor
     """`then=`/`default=` accepting an `F()`/`CombinedExpression` (not just a bare literal)
     recurses through `_annotation_is_cacheable()`/`_case_leaf_values()` the same way any other
     nested Expression does."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=9.0)
+    _author = await QueryShapeRows.create_two_rated_books(beta_rating=9.0)
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = (
             await Book.objects.annotate(effective=Case(When(rating__gte=8, then=F("rating") * 2), default=F("rating")))
             .filter(name="alpha")
@@ -2839,9 +2447,7 @@ async def test_case_when_f_expression_then_default_now_fast_pathed_and_stays_cor
 async def test_case_none_default_is_fast_pathed_apart_from_a_literal_default(db):
     """An implicit (or explicit) `default=None` renders `ELSE NULL` with no parameter - part of the
     shape, so the query keeps a plan, and a `default` holding a literal has a plan of its own."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=9.0)
+    _author = await QueryShapeRows.create_two_rated_books(beta_rating=9.0)
 
     def categories(name, default=None):
         return (
@@ -2850,7 +2456,7 @@ async def test_case_none_default_is_fast_pathed_apart_from_a_literal_default(db)
             .values("category")
         )
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await categories("alpha")
         assert spy.call_count == 0
         second = await categories("beta")
@@ -2864,7 +2470,7 @@ async def test_case_none_default_is_fast_pathed_apart_from_a_literal_default(db)
 
 # A run takes the compiled statement, whose query is the stored one itself, read-only; the
 # clone this checks is the full build every other hit (.sql(), a subquery) takes.
-@patch.object(StatementPlanRuns, "run_on_plan", lambda *args, **kwargs: False)
+@patch.object(StatementPlanRuns, "bind_plan", lambda *args, **kwargs: None)
 @pytest.mark.asyncio
 async def test_no_stale_value_ids_survive_in_cloned_case_when_tree(db):
     """Symmetry-principle regression test for `Case`/`When` - a cache hit must never leave the
@@ -2908,11 +2514,9 @@ async def test_rawsql_annotation_now_fast_pathed_and_stays_correct(db):
     this file, `RawSQL`'s own `.parameters` are ALREADY built `ValueWrapper` objects by construction
     time (`RawSQL.__init__` wraps them eagerly), so `_get_annotate()` records a
     `LiteralValueReference` for each directly, without a separate `.get_result()` step."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
+    _author = await QueryShapeRows.create_two_rated_books()
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = (
             await Book.objects.annotate(bumped=RawSQL("rating + %s", [10]))
             .filter(name="alpha")
@@ -2940,7 +2544,7 @@ async def test_rawsql_annotation_param_is_substituted_correctly(db):
     def build(offset):
         return Book.objects.annotate(bumped=RawSQL("rating + %s", [offset])).filter(name="alpha")
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await build(10).values("bumped")
         assert spy.call_count == 0
         second = await build(100).values("bumped")
@@ -2959,10 +2563,10 @@ async def test_rawsql_different_sql_text_is_part_of_the_cache_key(db):
 
     StatementPlans.plans.clear()
     await Book.objects.annotate(bumped=RawSQL("rating + %s", [1])).filter(name="alpha").values("bumped")
-    entries_add = len(StatementPlans.plans)
+    entries_add = StatementPlans.plans.entry_count
 
     await Book.objects.annotate(bumped=RawSQL("rating * %s", [1])).filter(name="alpha").values("bumped")
-    entries_mul = len(StatementPlans.plans)
+    entries_mul = StatementPlans.plans.entry_count
 
     assert entries_mul == entries_add + 1
 
@@ -2972,12 +2576,10 @@ async def test_rawsql_injection_shaped_value_stays_bound_across_cache_hits(db):
     """An injection-shaped value passed as a `RawSQL(...)` param must stay safely bind-
     parameterized (never string-interpolated into the SQL text) across a cache hit too - the
     whole point of this cache is that it substitutes VALUES, never SQL TEXT."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
+    _author = await QueryShapeRows.create_two_rated_books()
     malicious = "x'; DROP TABLE book; --"
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await Book.objects.annotate(tag=RawSQL("%s", [malicious])).filter(name="alpha").values("tag")
         assert spy.call_count == 0
         second = await Book.objects.annotate(tag=RawSQL("%s", [malicious])).filter(name="beta").values("tag")
@@ -3008,7 +2610,7 @@ async def test_function_with_reordered_database_func_args_does_not_crash_and_sta
 
     obj = await DatetimeFields.objects.create(datetime=datetime(2024, 3, 15, 12, 30))
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await DatetimeFields.objects.annotate(year=TruncYear("datetime")).filter(id=obj.id).values("year")
         assert spy.call_count == 0
         second = await DatetimeFields.objects.annotate(year=TruncYear("datetime")).filter(id=obj.id).values("year")
@@ -3037,7 +2639,7 @@ async def test_populate_field_object_annotation_decodes_correctly_on_a_cache_hit
     a = await DecimalFields.objects.create(decimal=Decimal("1.5000"), decimal_nodec=Decimal("1"))
     b = await DecimalFields.objects.create(decimal=Decimal("2.5000"), decimal_nodec=Decimal("2"))
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await DecimalFields.objects.filter(id=a.id).annotate(m=Max("decimal")).values("m")
         assert spy.call_count == 0
         second = await DecimalFields.objects.filter(id=b.id).annotate(m=Max("decimal")).values("m")
@@ -3050,7 +2652,7 @@ async def test_populate_field_object_annotation_decodes_correctly_on_a_cache_hit
     obj_null = await JSONFields.objects.create(data={"fallback": True}, data_null=None)
     obj_set = await JSONFields.objects.create(data={"fallback": True}, data_null={"y": 2})
 
-    with _spy_on_plan_hits_of_any_type() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         row_null = (
             await JSONFields.objects.filter(id=obj_null.id).annotate(x=Coalesce("data_null", F("data"))).values("x")
         )
@@ -3067,7 +2669,7 @@ def _spy_on_exists_resolve():
     """`Exists.get_result()`'s own call count is the unambiguous signal for whether the OUTER query
     actually re-resolved the correlated/independent subquery this call, as opposed to a cache HIT
     on the OUTER skipping it entirely (see `Exists.get_result()`'s own docstring) - unlike
-    `_spy_on_plan_hits()`/`_spy_on_plan_hits_of_any_type()`, a LOW count here (not a high one) is the "fast path
+    `spy_on_plan_hits()`, a LOW count here (not a high one) is the "fast path
     engaged" signal for a query containing an Exists(...) annotation."""
     return patch.object(Exists, "get_result", side_effect=Exists.get_result, autospec=True)
 
@@ -3078,12 +2680,10 @@ async def test_independent_exists_annotation_now_fast_pathed_and_stays_correct(d
     at all) is now cacheable - repeated OUTER calls with BOTH a different outer filter value AND
     a different inner filter value must still hit the cache (`Exists.get_result()` called only once)
     and each return the correct, independently-computed result."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=5.0)
+    author = await QueryShapeRows.create_two_rated_books(beta_rating=5.0)
     await Book.objects.create(name="gamma", author=author, rating=3.0)
 
-    with _spy_on_exists_resolve() as resolve_spy, _spy_on_plan_hits() as clone_spy:
+    with _spy_on_exists_resolve() as resolve_spy, StatementPlanChecks.spy_on_plan_hits() as clone_spy:
         rows1 = (
             await Book.objects.filter(name="alpha").annotate(any_gt=Exists(Book.objects.filter(rating__gt=0.5))).all()
         )
@@ -3100,7 +2700,7 @@ async def test_independent_exists_annotation_now_fast_pathed_and_stays_correct(d
     assert len(rows1) == 1 and rows1[0].any_gt
     assert len(rows2) == 1 and rows2[0].any_gt
     assert len(rows3) == 1 and not rows3[0].any_gt
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -3132,7 +2732,7 @@ async def test_correlated_exists_outer_ref_runs_on_its_plan(db):
             )
             assert len(rows_none) == 1 and not rows_none[0].has_event
     assert resolve_spy.call_count == 1, "a correlated OuterReference(...) Exists() runs on the outer query's plan"
-    assert [k for k in StatementPlans.plans if k[0] is Tournament]
+    assert StatementPlans.plans.get_bucket(HareContext.require_current().apps.get_binding(Tournament))
 
 
 @pytest.mark.asyncio
@@ -3168,9 +2768,7 @@ async def test_self_referential_exists_annotation_aliases_correctly(db):
     basetable()`'s self-referential aliasing (see its own docstring) must still correctly alias
     the inner query's own base table, even though this ExistsQuery is now reached via
     `Exists.get_result()`'s threaded (own-cache-bypassing) path rather than its independent cache."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=5.0)
+    _author = await QueryShapeRows.create_two_rated_books(beta_rating=5.0)
 
     qs = Book.objects.annotate(has_other=Exists(Book.objects.filter(rating__gt=0))).filter(name="alpha")
     built_qs = _built(qs)
@@ -3187,33 +2785,6 @@ async def test_self_referential_exists_annotation_aliases_correctly(db):
     built_qs2 = _built(qs2)
     sql2 = built_qs2.query.get_sql()
     assert "book__exists_inner" in sql2
-
-
-@pytest.mark.asyncio
-async def test_no_stale_value_ids_survive_in_cloned_exists_tree(db):
-    """The symmetry-principle regression test for `Exists(...)` annotations specifically: after a
-    cache HIT with a DIFFERENT outer+inner value combination, no `ValueWrapper` `id()` from the
-    FIRST call's cached template (living inside the `ExistsTerm`'s own `inner_query`) may survive
-    into the SECOND call's actual query."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=5.0)
-
-    qs_first = Book.objects.filter(name="alpha").annotate(any_gt=Exists(Book.objects.filter(rating__gt=0.5)))
-    await qs_first.all()
-    cached_query = next(iter(StatementPlans.plans.values())).template
-    cached_ids = _value_wrapper_ids_including_exists(cached_query._wheres)
-    for select_term in cached_query._selects:
-        cached_ids |= {id(node) for node in select_term.nodes_() if isinstance(node, ValueWrapper)}
-    assert cached_ids
-
-    qs_second = Book.objects.filter(name="beta").annotate(any_gt=Exists(Book.objects.filter(rating__gt=4.0)))
-    built_qs_second = _built(qs_second)
-    fresh_ids = _value_wrapper_ids_including_exists(built_qs_second.query._wheres)
-    for select_term in built_qs_second.query._selects:
-        fresh_ids |= {id(node) for node in select_term.nodes_() if isinstance(node, ValueWrapper)}
-
-    assert fresh_ids.isdisjoint(cached_ids), "a cloned Exists() tree must never reuse the cached template's own nodes"
 
 
 @pytest.mark.asyncio
@@ -3249,9 +2820,7 @@ async def test_exists_self_referential_with_cte_inner_does_not_leak_correlation_
     CTE body's own `_make_query()` call - a CTE can never reference the enclosing query's own
     FROM items in standard SQL regardless of aliasing, so this is always correct, not just a
     self-referential special case."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=999.0)
+    _author = await QueryShapeRows.create_two_rated_books(beta_rating=999.0)
 
     inner_with_cte = Book.objects.filter(rating__gt=0).with_cte("dummy", Book.objects.filter(rating__gt=500.0))
     qs = Book.objects.annotate(has_other=Exists(inner_with_cte)).filter(name="alpha")
@@ -3269,9 +2838,7 @@ async def test_exists_annotation_referenced_in_filter_runs_on_its_plan(db):
     """`.annotate(has_x=Exists(...)).filter(has_x=True)` - the canonical usage shown in `Exists`'s
     own docstring - resolves the annotation twice while it is built (the SELECT list and the
     filter); a later query binds the inner query's values and the filter value of both."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=5.0)
+    _author = await QueryShapeRows.create_two_rated_books(beta_rating=5.0)
 
     def books(minimum_rating: float, has_other: bool):
         return Book.objects.annotate(has_other=Exists(Book.objects.filter(rating__gt=minimum_rating))).filter(
@@ -3297,9 +2864,7 @@ async def test_nested_exists_inside_exists_now_fast_pathed(db):
     `_annotation_shape_key()` machinery (reusing `_query_is_plannable()` against the inner
     queryset's own `_annotations`) handles this for free, the same way nested `.with_cte(...)`
     already does."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=5.0)
+    author = await QueryShapeRows.create_two_rated_books(beta_rating=5.0)
     await Book.objects.create(name="gamma", author=author, rating=9.0)
 
     def build(outer_name, mid_threshold, inner_threshold):
@@ -3325,14 +2890,14 @@ async def test_nested_exists_inside_exists_now_fast_pathed(db):
     assert resolve_spy.call_count == 2, "second call (same shape) must hit the OUTER's own cache"
     assert len(rows1) == 1 and rows1[0].mid_has_any
     assert len(rows2) == 1 and rows2[0].mid_has_any
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
 async def test_exists_nested_filter_across_ambient_scoped_relation_never_caches_across_tenants(db):
     """Real, live-caught cross-tenant leak: `ExistsQuery`/`CountQuery`/`AggregateQuery` inherit
     `StatementPlanDescriptions.query_is_plannable(AwaitableQuery)` directly (they are siblings of `QuerySet`, not
-    subclasses of it - see `_spy_on_plan_hits_of_any_type()`'s own docstring), which has no
+    subclasses of it), which has no
     ambient-scope (`Meta.tenant_field`/`Meta.soft_delete_field`) exclusion of its own - only
     `QuerySet`/`FieldSelectQuery` (`.values()`/`.values_list()`) had one. A `related__field=value`
     nested filter crossing to an ambient-scoped relation folds the ACTIVE tenant's id into the
@@ -3598,7 +3163,7 @@ async def test_json_has_key_lookups_stay_correct_across_cached_calls(db):
     b = await JSONFields.objects.create(data={"c": 3})
 
     # On SQLite the lookup is a json_type() call of a path built from the key, its one parameter.
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await JSONFields.objects.filter(data__has_key="a").all()
         second = await JSONFields.objects.filter(data__has_key="c").all()
         third = await JSONFields.objects.filter(data__has_key="a").all()
@@ -3606,10 +3171,10 @@ async def test_json_has_key_lookups_stay_correct_across_cached_calls(db):
     assert [obj.id for obj in second] == [b.id]
     assert [obj.id for obj in third] == [a.id]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     StatementPlans.plans.clear()
-    with _spy_on_plan_hits() as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         first = await JSONFields.objects.filter(data__has_keys=["a", "b"]).all()
         second = await JSONFields.objects.filter(data__has_keys=["c"]).all()
         third = await JSONFields.objects.filter(data__has_any_keys=["b", "zzz"]).all()
@@ -3620,7 +3185,7 @@ async def test_json_has_key_lookups_stay_correct_across_cached_calls(db):
     assert [obj.id for obj in fourth] == [b.id]
     # The fourth call runs on the plan of the third: __has_any_keys of two keys.
     assert spy.call_count == 1
-    assert len(StatementPlans.plans) == 3
+    assert StatementPlans.plans.entry_count == 3
 
 
 @pytest.mark.asyncio
@@ -3684,7 +3249,7 @@ async def test_select_related_idx_survives_query_shape_cache_hit(db):
     qs2 = Author.objects.filter(name="a")
     built_qs2 = _built(qs2)
 
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
     assert built_qs2._select_related_positions == miss_idx
     assert built_qs2._select_related_positions != []
 

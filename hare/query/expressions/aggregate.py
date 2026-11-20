@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from copy import copy
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import FieldError, QueryError, UnSupportedError
@@ -11,7 +11,6 @@ from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
 from hare.fields.field import Field
 from hare.fields.generated_field import GeneratedField
 from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import AggregatedMultiValuedPaths
-from hare.query.expressions.arithmetic.combined_expression import CombinedExpression
 from hare.query.expressions.conditions.q import Q
 from hare.query.expressions.conditions.query_modifier import QueryModifier
 from hare.query.expressions.expression import Expression
@@ -19,8 +18,9 @@ from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
 from hare.query.expressions.f import F
 from hare.query.expressions.function import Function
-from hare.query.expressions.numeric.numeric_typing import NumericTyping
 from hare.query.expressions.ordering import Ordering
+from hare.query.expressions.structure.enums import ArgumentRole
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.query.expressions.subqueries.exists import Exists
 from hare.query.key_columns import KeyColumns
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
@@ -36,6 +36,7 @@ from hare.sql.terms.functions.window_frame_analytic_function import WindowFrameA
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
+    from hare.sql.terms.term import Term
 
 
 class Aggregate(Function):
@@ -48,6 +49,11 @@ class Aggregate(Function):
         _filter: The condition of the rows aggregated (``FILTER (WHERE ...)``), None for every row.
         order_by: The order the values are aggregated in, for an ordered aggregate.
     """
+
+    structure = ExpressionStructure(
+        positions=((0, ArgumentRole.FIELD),),
+        keywords=(("field", ArgumentRole.FIELD), ("order_by", ArgumentRole.ORDERING)),
+    )
 
     database_function: type[AggregateFunction] = DistinctOptionFunction
     #: The result doesn't change when a row repeats (MAX/MIN/BOOL_AND/BOOL_OR), so another
@@ -75,39 +81,11 @@ class Aggregate(Function):
         ("field", PlanPartType.FIELD),
         ("filter", PlanPartType.EXPRESSION),
         ("default_values", PlanPartType.ARGUMENTS),
-        ("field_object", PlanPartType.NONE),
     )
-
-    @staticmethod
-    def _get_statistic_result(
-        result: ExpressionResult, value_field: Field[Any] | None, expression_context: ExpressionContext
-    ) -> ExpressionResult:
-        """The result of an average or a statistic as the database computes it - over integers or
-        Decimals the exact Decimal where it computes one, elsewhere a float, cast by the dialect where
-        the database gives another type. Any other result is returned as it is.
-
-        Args:
-            result: The aggregate's result.
-            value_field: The field of the values it reads.
-            expression_context: The query's resolve context.
-
-        Returns:
-            The result.
-        """
-        if not NumericTyping.is_statistic_a_float(value_field, expression_context.dialect):
-            return result
-        float_term = expression_context.dialect.renderers.get_statistic_as_float(result.term)
-        if float_term is result.term:
-            return result
-        return ExpressionResult(
-            term=float_term,
-            joins=result.joins,
-            output_field=result.output_field,
-        )
 
     def __init__(
         self,
-        field: str | F | CombinedExpression,
+        field: str | Expression | Term,
         *default_values: Any,
         distinct: bool = False,
         _filter: Q | Exists | None = None,
@@ -236,6 +214,13 @@ class Aggregate(Function):
                 self.distinct or self.ignores_repeated_rows, aggregate_name=type(self).__name__
             ):
                 result = super().get_result(expression_context)
+        return result
+
+    def _finalize_result(
+        self, result: ExpressionResult, function_arg: ExpressionResult, expression_context: ExpressionContext
+    ) -> ExpressionResult:
+        """Apply keyed comparison and NULL metadata before a subclass adapts the final SQL."""
+        result = super()._finalize_result(result, function_arg, expression_context)
         if self.keyed_function_name is not None:
             result.term = self.get_keyed_term(result, expression_context)
         output_field = result.output_field
@@ -272,7 +257,7 @@ class Aggregate(Function):
         if ordering_key is term.args[0]:
             return term
         keyed_term = copy(term)
-        keyed_term.name = cast("str", self.keyed_function_name)
+        keyed_term.name = self.keyed_function_name  # type: ignore[assignment]
         keyed_term.args = [term.args[0], ordering_key]
         return keyed_term
 
@@ -288,20 +273,21 @@ class Aggregate(Function):
         """
         term = super()._get_function_term(function_arg, default_terms)
         if function_arg.aggregate_orderings:
-            term = cast("AggregateFunction", term).order_arguments(*function_arg.aggregate_orderings)
+            term = term.order_arguments(*function_arg.aggregate_orderings)  # type: ignore[attr-defined]
         if function_arg.aggregate_filter is None:
             return term
-        return cast("AggregateFunction", term).filter(function_arg.aggregate_filter)
+        return term.filter(function_arg.aggregate_filter)  # type: ignore[attr-defined]
 
     def get_function_term(  # type:ignore[override]
         self, field: ArithmeticExpression | HareSqlField | str, *default_values: Any
     ) -> DistinctOptionFunction:
-        function = cast("DistinctOptionFunction", super().get_function_term(field, *default_values))
+        function = super().get_function_term(field, *default_values)
         if self.distinct:
-            function = function.distinct()
-        return function
+            function = function.distinct()  # type: ignore[attr-defined]
+        return function  # type: ignore[return-value]
 
-    def raise_if_values_not_ordered(self, dialect: Dialect, output_field: Field[Any]) -> None:
+    @classmethod
+    def check_field_orderability(cls, dialect: Dialect, output_field: Field[Any]) -> None:
         """Refuses ``Min()``/``Max()`` of a value the database orders none of - before any SQL.
 
         Args:
@@ -309,36 +295,28 @@ class Aggregate(Function):
             output_field: The field of the argument's value.
 
         Raises:
+            FieldError: Comparing JSON here would compare its serialized text.
             UnSupportedError: The value's field isn't orderable, or the database has no ``MIN``/``MAX`` of
                 its column type.
         """
+        if cls.keyed_function_name is None:
+            return
         value_field = GeneratedField.get_effective_field(output_field)
+        if isinstance(value_field, JSONField) and not dialect.features.orders_json_values_in_aggregates:
+            raise FieldError(
+                f"{cls.__name__}() of a JSON value would compare its text on {dialect.name} - convert it with Cast()"
+            )
         if not value_field.is_orderable or not dialect.has_min_max_of(value_field.get_column_type(dialect)):
             raise UnSupportedError(
-                f"{type(self).__name__}() of a {type(value_field).__name__} - the {dialect.name} database has no "
-                f"{self.function_name} of its values"
+                f"{cls.__name__}() of a {type(value_field).__name__} - the {dialect.name} database has no "
+                f"{cls.function_name} of its values"
             )
 
     def _wrap_argument(
         self, expression_context: ExpressionContext, function_arg: ExpressionResult
     ) -> ExpressionResult:
-        if (
-            self.keyed_function_name is not None
-            and isinstance(
-                GeneratedField.get_effective_field(function_arg.output_field)
-                if function_arg.output_field is not None
-                else None,
-                JSONField,
-            )
-            and not expression_context.dialect.features.orders_json_values_in_aggregates
-        ):
-            # An aggregate comparing values would compare the JSON text (Features.orders_json_values_in_aggregates).
-            raise FieldError(
-                f"{type(self).__name__}() of a JSON value would compare its text on "
-                f"{expression_context.dialect.name} - convert it with Cast()"
-            )
         if self.keyed_function_name is not None and function_arg.output_field is not None:
-            self.raise_if_values_not_ordered(expression_context.dialect, function_arg.output_field)
+            self.check_field_orderability(expression_context.dialect, function_arg.output_field)
         function_arg = self._with_argument_orderings(expression_context, function_arg)
         missing_row_guard = self.get_missing_row_guard(expression_context, function_arg)
         if not self.filter:
@@ -362,7 +340,7 @@ class Aggregate(Function):
             )
         # The joins the filter's relation path needs are appended after the aggregate's own - a
         # deeper join depends on them, and joins are applied in list order.
-        function_arg.joins = function_arg.joins + [join for join in modifier.joins if join not in function_arg.joins]
+        function_arg.joins = ExpressionResult.dedup_joins(function_arg.joins, modifier.joins)
 
         return function_arg
 
@@ -391,11 +369,11 @@ class Aggregate(Function):
             or field.model is None
             or term.table is None
             or term.table is expression_context.table
-            or not field.model._meta.has_primary_key
+            or not field.get_binding().model_binding.has_primary_key  # type: ignore[union-attr]
             or expression_context.dialect.types.holds_null(field)
         ):
             return None
-        return term.table[KeyColumns.get_source_columns(field.model._meta)[0]].notnull()
+        return term.table[KeyColumns.get_source_columns(field.get_binding().model_binding)[0]].notnull()  # type: ignore[arg-type]
 
     def _with_argument_orderings(
         self, expression_context: ExpressionContext, function_arg: ExpressionResult
@@ -411,15 +389,10 @@ class Aggregate(Function):
         """
         if not self.order_by:
             return function_arg
-        # Deferred import: hare.query.queryset imports this package at import time.
-        from hare.query.queryset import QuerySet
-
         for ordering in self.order_by:
-            target, order = QuerySet._get_ordering_string(ordering)
+            target, order = Ordering.get_parts(ordering)
             field_result = (F(target) if isinstance(target, str) else target).get_result(expression_context)
             EncryptedFieldBase.raise_if_encrypted(field_result.output_field, f"{type(self).__name__}(order_by=...)")
             function_arg.aggregate_orderings.append((field_result.term, order))
-            function_arg.joins = function_arg.joins + [
-                join for join in field_result.joins if join not in function_arg.joins
-            ]
+            function_arg.joins = ExpressionResult.dedup_joins(function_arg.joins, field_result.joins)
         return function_arg

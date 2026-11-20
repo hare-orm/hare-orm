@@ -15,7 +15,9 @@ class HareClickhouseSuite(ClickhouseSuite):
     MODELS_MODULE = "orm_benchmark.suites.clickhouse.hare_clickhouse_models"
 
     def load(self) -> None:
-        import hare  # noqa: F401
+        from orm_benchmark.suites.clickhouse.hare_clickhouse_models import Event
+
+        self.event_class = Event
 
     async def connect(self) -> None:
         from hare import Hare
@@ -31,11 +33,8 @@ class HareClickhouseSuite(ClickhouseSuite):
                 "apps": {"models": {"models": [self.MODELS_MODULE], "default_connection": "default"}},
             }
         )
-        from orm_benchmark.suites.clickhouse.hare_clickhouse_models import Event
-
-        self.events = Event.objects
-        self.event_class = Event
-        await Event.get_connection().execute_dicts("SELECT 1")
+        self.events = self.event_class.objects
+        await self.event_class.get_connection().execute_dicts("SELECT 1")
 
     async def close(self) -> None:
         from hare import Hare

@@ -14,7 +14,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from typing import Self
 
-    from hare.sql.terms.node import TNode
+    from hare.sql.terms.node import Node
+    from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 
 class ExistsTerm(Criterion):
@@ -22,16 +23,20 @@ class ExistsTerm(Criterion):
     the outer one, as a ``Subquery``'s do, so bind-parameter numbers
     don't diverge between the outer and the correlated child query."""
 
+    structure_attributes = ("inner_query", "limit_guard")
+
     is_subquery = True
     rewrites_inner_correlation = True
 
-    def __init__(self, inner_query: Any) -> None:
+    def __init__(self, inner_query: Any, *, limit_guard: ValueWrapper | None = None) -> None:
         super().__init__()
         self.inner_query = inner_query
+        self.limit_guard = limit_guard
 
-    def nodes_(self) -> Iterator[TNode]:
-        yield self  # type:ignore[misc]
-        yield from self.inner_query.nodes_()
+    def get_children(self) -> Iterator[Node]:
+        yield self.inner_query
+        if self.limit_guard is not None:
+            yield self.limit_guard
 
     @BuilderMethods.builder
     def replace_table(self, current_table: Table | None, new_table: Table | None) -> Self:
@@ -96,7 +101,7 @@ class ExistsTerm(Criterion):
         )
 
     def get_sql(self, sql_context: SqlContext) -> str:
-        features = sql_context.dialect.features
+        features = sql_context.effective_features
         if features.supports_correlated_subqueries and not features.rewrites_correlated_exists:
             sql = f"EXISTS {self.inner_query.get_sql(sql_context)}"
         elif (union_parts := self.get_union_parts()) is not None:
@@ -106,6 +111,8 @@ class ExistsTerm(Criterion):
             )
         else:
             sql = CorrelatedSubqueries.get_exists_sql(self.inner_query, sql_context)
+        if self.limit_guard is not None:
+            sql = f"({sql} AND {self.limit_guard.get_sql(sql_context)}<>0)"
         if sql_context.with_alias and self.alias:
             return sql_context.format_alias_sql(sql, self.alias)
         return sql

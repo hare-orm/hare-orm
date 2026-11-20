@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 
 from hare.classes.value_descriptions import ValueDescriptions
@@ -26,6 +27,7 @@ class BinaryField(Field[TBinary]):
     argument_value_type = BINARY_VALUE_TYPE
 
     field_type = bytes
+    accepted_value_types = (bytearray, memoryview)
 
     SQL_TYPE = "BLOB"
     supported_lookups = BINARY_FIELD_SUPPORTED_LOOKUPS
@@ -42,6 +44,9 @@ class BinaryField(Field[TBinary]):
     def to_db_value(self, value: Any, instance: type[Model] | Model | None) -> Any:
         self.raise_if_not_bytes_like(value)
         return super().to_db_value(value, instance)
+
+    def get_assign_normalized_types(self) -> frozenset[type]:
+        return self._get_unchanged_assign_types(BinaryField.to_python, self.field_type)
 
     def to_python(self, value: Any) -> Any:
         # The same on construction.
@@ -62,3 +67,9 @@ class BinaryField(Field[TBinary]):
             raise ValidationError(
                 f"{self.model_field_name}: expected bytes-like data, got {ValueDescriptions.get_description(value)}"
             )
+
+    def get_unchanged_write_types(self, converter: Callable[..., Any] | None) -> tuple[type, ...] | None:
+        # This class's to_db_value() writes a bytes as it is.
+        if converter is None and type(self).to_db_value is BinaryField.to_db_value:
+            return (bytes,)
+        return None

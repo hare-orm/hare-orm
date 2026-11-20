@@ -10,6 +10,7 @@ from hare.query.query_connection import QueryConnection
 from hare.sql.builder.tables.selectable import Selectable
 
 if TYPE_CHECKING:
+    from hare.models.model_binding import ModelBinding
     from hare.query.statements.awaitable_query import AwaitableQuery
 
 
@@ -36,10 +37,15 @@ class QueryCtes:
         # Local import: the query module imports this one.
         from hare.query.statements.awaitable_query import AwaitableQuery
 
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
         for name, cte_body in query._with_ctes:
             if isinstance(cte_body, AwaitableQuery):
                 body_query = QueryConnection.get_bound_to(
-                    cte_body, query._connection, query.model, f"the body of with_cte({name!r}, ...)"
+                    cte_body,
+                    query._connection,
+                    model_binding,
+                    f"the body of with_cte({name!r}, ...)",
+                    context=query._context,
                 )
                 # A relation's field-level lazy="joined"/"select" default counts like an explicit
                 # select_related()/prefetch_related().
@@ -53,12 +59,7 @@ class QueryCtes:
                 outer_token = OuterScope.current_expression_context.set(None)
                 joins_token = OuterScope.current_extra_joins.set(None)
                 try:
-                    if value_wrapper_references is not None and body_query.plannable:
-                        body_query._make_subquery(value_wrapper_references=value_wrapper_references)
-                    else:
-                        body_query._make_subquery()
-                        if value_wrapper_references is not None:
-                            value_wrapper_references.append((UNBINDABLE_VALUE_ORIGIN, None))
+                    body_query._make_embedded_subquery(value_wrapper_references)
                 finally:
                     OuterScope.current_expression_context.reset(outer_token)
                     OuterScope.current_extra_joins.reset(joins_token)

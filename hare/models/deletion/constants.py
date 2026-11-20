@@ -27,3 +27,5 @@ CASCADE_LOOKUP_MAX_COMPOSITE_ROWS = 500
 #: The name of the recursive ``WITH`` listing the rows below deleted ones through a relation of a
 #: model onto itself.
 DELETION_TREE_CTE_NAME = "hare_deletion_tree"
+
+TENANT_VISIT_REQUIRES_SAVEPOINT = "Visiting tenant schemas during deletion requires savepoints"

@@ -4,6 +4,7 @@ third-party dialect's client may return them - runs every query through the by-n
 import pytest
 
 from hare.core.caching.caches import Caches
+from hare.core.hare_context import HareContext
 from hare.dialects.base.results import StatementResult
 from tests.shared_models.testmodels import Tournament
 
@@ -12,7 +13,7 @@ from tests.shared_models.testmodels import Tournament
 def mapping_rows_connection(db, monkeypatch):
     # A connection's features are fixed when it's created, so plans cached for this model on
     # the same connection name by earlier tests assume positional rows - dropped for this test.
-    Caches.forget_model_caches([Tournament])
+    Caches.forget_model_caches([HareContext.require_current().apps.get_binding(Tournament)])
     connection = Tournament.get_connection()
     execute = connection.execute
 
@@ -23,7 +24,7 @@ def mapping_rows_connection(db, monkeypatch):
     monkeypatch.setattr(connection, "execute", execute_query_as_mappings)
     monkeypatch.setattr(connection, "features", connection.features.replace(supports_positional_rows=False))
     yield connection
-    Caches.forget_model_caches([Tournament])
+    Caches.forget_model_caches([HareContext.require_current().apps.get_binding(Tournament)])
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from hare.sql.enums import JoinType
+from hare.dialects.base.clauses.enums import JoinType
 from hare.sql.exceptions import JoinException
 from hare.sql.terms.criteria.criterion import Criterion
 
@@ -34,5 +34,5 @@ class Joiner:
                 f"Parameter 'criterion' is required for a {self.type_label} JOIN but was not supplied."
             )
 
-        self.query.do_join(JoinOn(self.item, self.how, criterion, collate))  # type:ignore[arg-type]
+        self.query.do_join(JoinOn(self.item, self.how, criterion, collate))
         return self.query

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
@@ -59,7 +60,7 @@ class AbstractMetaInheritance:
         ancestor_meta = ancestor.__dict__.get("Meta")
         if ancestor_meta is None:
             return False
-        model_meta = ancestor.__dict__.get("_meta")
+        model_meta = ancestor.__dict__.get("_declaration")
         if model_meta is not None:
             return bool(model_meta.abstract)
         return bool(getattr(ancestor_meta, ModelOption.ABSTRACT, False))
@@ -82,7 +83,7 @@ class AbstractMetaInheritance:
         for ancestor in canonical_mro:
             if not AbstractMetaInheritance.is_abstract_ancestor(ancestor):
                 continue
-            for key, value in vars(ancestor.__dict__["Meta"]).items():
+            for key, value in AbstractMetaInheritance.get_declared_options(ancestor).items():
                 if key.startswith("__") or key in ("abstract", *ADDITIVE_ABSTRACT_META_KEYS):
                     continue
                 # The nearest ancestor comes first: a name already there is a nearer ancestor's.
@@ -109,7 +110,7 @@ class AbstractMetaInheritance:
                     continue
                 base_meta_attributes.update(
                     (key, value)
-                    for key, value in vars(ancestor.__dict__["Meta"]).items()
+                    for key, value in AbstractMetaInheritance.get_declared_options(ancestor).items()
                     if key in ADDITIVE_ABSTRACT_META_KEYS
                 )
             for key, value in base_meta_attributes.items():
@@ -125,3 +126,12 @@ class AbstractMetaInheritance:
             copied_entries = [deepcopy(entry) for entry in entries]
             additive_attributes[key] = copied_entries if key == ModelOption.INDEXES else tuple(copied_entries)
         return additive_attributes
+
+    @staticmethod
+    def get_declared_options(ancestor: type) -> Mapping[str, Any]:
+        """Use captured model inputs; non-model mixins supply their ordinary Meta namespace."""
+        declaration = ancestor.__dict__.get("_declaration")
+        if declaration is not None:
+            return declaration.declared_options
+        meta = ancestor.__dict__.get("Meta")
+        return vars(meta) if meta is not None else {}

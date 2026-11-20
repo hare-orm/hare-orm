@@ -10,6 +10,7 @@ import pytest
 import pytest_asyncio
 
 from hare import fields
+from hare.core.hare_context import HareContext
 from hare.dialects.clickhouse.constants import CLICKHOUSE_DIALECT
 from hare.dialects.clickhouse.fields import (
     ClickhouseDateField,
@@ -20,7 +21,7 @@ from hare.dialects.clickhouse.fields import (
 from hare.dialects.clickhouse.introspection.clickhouse_type_parser import ClickhouseTypeParser
 from hare.exceptions import ConfigurationError, FieldError, OperationalError, ValidationError
 from hare.query.expressions import Case, F, Value, When
-from hare.query.functions import Abs, Avg, Max, Min, Sum
+from hare.query.functions import Abs, Avg, Coalesce, Max, Min, Sum
 from tests.dialects.clickhouse.models import (
     Country,
     Device,
@@ -81,7 +82,7 @@ async def devices(clickhouse_db):
 def test_column_types():
     from hare.dialects.clickhouse.constants import CLICKHOUSE_DIALECT
 
-    fields_map = Device._meta.fields_map
+    fields_map = Device._declaration.fields_map
 
     def column_type(name):
         return fields_map[name].get_column_type(CLICKHOUSE_DIALECT)
@@ -160,7 +161,8 @@ async def test_values_out_of_range_are_refused(clickhouse_db):
 
 
 @pytest.mark.asyncio
-async def test_an_update_to_a_number_of_no_enum_member_is_refused(clickhouse_db):
+@pytest.mark.parametrize("fallback", ["case", "coalesce"])
+async def test_an_update_to_a_number_of_no_enum_member_is_refused(clickhouse_db, fallback):
     """The mutation wrote it into the Enum8 column - clickhouse-connect read it back as None,
     clickhouse-driver failed with a KeyError."""
     await make_device(1, tiny=1).save()
@@ -173,7 +175,12 @@ async def test_an_update_to_a_number_of_no_enum_member_is_refused(clickhouse_db)
         await Device.objects.filter(id=1).update(level=F("tiny"))
     assert (await Device.objects.get(id=1)).level is DeviceLevel.LOW
 
-    await Device.objects.filter(id=1).update(level=Case(When(tiny=7, then=Value(500)), default=F("level")))
+    if fallback == "case":
+        expression = Case(When(tiny=7, then=Value(500)), default=F("level"))
+    else:
+        await Device.objects.filter(id=1).update(level=None)
+        expression = Coalesce(F("level"), Value(500))
+    await Device.objects.filter(id=1).update(level=expression)
     assert (await Device.objects.get(id=1)).level is DeviceLevel.HIGH
 
 
@@ -181,11 +188,10 @@ async def test_an_update_to_a_number_of_no_enum_member_is_refused(clickhouse_db)
 async def test_inspectdb_reads_the_types_and_drift_finds_none(clickhouse_db):
     from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
     from hare.migrations.drift import detect_drift
-    from hare.migrations.state.model_state import ModelState
     from hare.migrations.state.state import State
     from tests.utils.model_source_generator import ModelSourceGenerator
 
-    connection = Device._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Device).get_connection()
     table = await DatabaseCatalog.inspect_table(connection, "device")
     source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name)
     compile(source, "<generated>", "exec")
@@ -201,8 +207,7 @@ async def test_inspectdb_reads_the_types_and_drift_finds_none(clickhouse_db):
         "gateway = fields.IPv4AddressField(null=True)",
     ):
         assert expected in source, expected
-    state = State()
-    state.models[("models", "Device")] = ModelState.make_from_model("models", Device)
+    state = State.from_models([Device], app_label="models")
     drift = await detect_drift(connection, state, ["models"])
     assert drift.mismatched_columns == []
     assert [
@@ -467,8 +472,13 @@ async def test_a_moment_is_kept_in_the_columns_own_type_and_precision(clickhouse
     assert await MomentReading.objects.filter(second=moment, milli=moment, local__in=[moment]).count() == 1
     _reading, created = await MomentReading.objects.get_or_create(second=moment, milli=moment, defaults={"id": 2})
     assert not created
-    columns = await MomentReading._meta.connection.execute_dicts(
-        "SELECT name, type FROM system.columns WHERE table = 'momentreading' AND database = currentDatabase()"
+    columns = (
+        await HareContext.require_current()
+        .apps.get_queryset(MomentReading)
+        .get_connection()
+        .execute_dicts(
+            "SELECT name, type FROM system.columns WHERE table = 'momentreading' AND database = currentDatabase()"
+        )
     )
     assert {column["name"]: column["type"] for column in columns} == {
         "id": "Int64",

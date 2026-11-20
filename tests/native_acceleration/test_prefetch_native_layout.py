@@ -1,14 +1,11 @@
-"""The native layout of prefetched rows (``rust.native.rows``) gives every relation the same rows,
-in the same order, as the pure-Python one."""
-
-from unittest.mock import patch
+"""The native layout of prefetched rows (``rust.native.rows``) gives every relation its rows, in the
+order its queryset reads them."""
 
 import pytest
 
 from hare.contrib.test import capture_queries
-from hare.query.relation_loading.constants import PREFETCH_OWNER_KEY_ANNOTATION
+from hare.query.relation_loading.constants import PREFETCH_PARENT_KEY_ANNOTATION
 from hare.query.relation_loading.prefetching.prefetch import Prefetch
-from hare.query.rows.native.hydrate_accelerator import HydrateAccelerator
 from tests.shared_models.testmodels import Event, Team, Tournament
 
 
@@ -41,14 +38,14 @@ async def read_layout() -> list[tuple[int, list[tuple[int, list[int]]], list[int
 
 
 @pytest.mark.asyncio
-async def test_native_and_python_layouts_match(db):
+async def test_every_relation_gets_its_rows_in_the_order_of_its_queryset(db):
     await make_rows()
-    native_layout = await read_layout()
-    with patch.object(HydrateAccelerator, "module", None):
-        python_layout = await read_layout()
-    assert native_layout == python_layout
-    assert native_layout[0] == (1, [(10, [1, 2])], [10])
-    assert native_layout[-1] == (9, [(99, [])], [99])
+    assert await read_layout() == [
+        (1, [(10, [1, 2])], [10]),
+        (2, [(21, [2, 3]), (20, [1, 2])], [20, 21]),
+        (3, [(32, [3, 4]), (31, [2, 3]), (30, [1, 2])], [30, 31, 32]),
+        (9, [(99, [])], [99]),
+    ]
 
 
 @pytest.mark.asyncio
@@ -56,11 +53,11 @@ async def test_a_many_to_many_prefetch_reads_the_related_rows_in_one_query(db):
     await make_rows()
     async with capture_queries() as counter:
         events = await Event.objects.filter(tournament_id=3).order_by("event_id").prefetch_related("participants")
-    assert counter.count == (2 if HydrateAccelerator.module is not None else 3)
+    assert counter.count == 2
     assert [[team.id for team in event.participants] for event in events] == [[1, 2], [2, 3], [3, 4]]
     # A team linked to two events is one instance, without the owner key it was read with.
     assert events[0].participants[1] is events[1].participants[0]
-    assert not hasattr(events[0].participants[1], PREFETCH_OWNER_KEY_ANNOTATION)
+    assert not hasattr(events[0].participants[1], PREFETCH_PARENT_KEY_ANNOTATION)
 
 
 @pytest.mark.asyncio

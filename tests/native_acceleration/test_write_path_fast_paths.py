@@ -9,11 +9,14 @@ from decimal import Decimal
 import pytest
 
 from hare.core.caching.caches import Caches
+from hare.core.hare_context import HareContext
 from hare.exceptions import ValidationError
 from hare.fields.data.json.json_codec import JsonCodec
 from hare.models.tenancy.tenancy import Tenancy
 from hare.models.write.instance_writer import InstanceWriter
 from tests.shared_models import testmodels, testmodels_postgres
+
+pytestmark = pytest.mark.usefixtures("model_conversion_context")
 
 
 @pytest.mark.postgresql_models
@@ -21,17 +24,21 @@ from tests.shared_models import testmodels, testmodels_postgres
 async def test_insert_values_match_the_field_by_field_conversion(db):
     instance = testmodels_postgres.DecimalFields(decimal=Decimal("1.23456"), decimal_nodec=Decimal("7"))
     connection = testmodels_postgres.DecimalFields.get_connection()
-    executor = InstanceWriter(testmodels_postgres.DecimalFields, connection)
-    for columns in (executor.regular_columns, executor.regular_columns_all):
+    executor = InstanceWriter(
+        HareContext.require_current().apps.get_binding(testmodels_postgres.DecimalFields), connection
+    )
+    for columns in (executor.templates.insert_fields, executor.templates.explicit_key_fields):
         if "id" in columns:
             instance.id = 5
         expected = [
             connection.dialect.types.get_db_value(
-                testmodels_postgres.DecimalFields._meta.fields_map[name], getattr(instance, name), instance
+                HareContext.require_current().apps.get_binding(testmodels_postgres.DecimalFields).fields_map[name],
+                getattr(instance, name),
+                instance,
             )
             for name in columns
         ]
-        assert executor._get_insert_values(instance, columns) == expected
+        assert executor._get_instance_values(instance, columns) == expected
     created = await testmodels_postgres.DecimalFields.objects.create(
         decimal=Decimal("1.23456"), decimal_nodec=Decimal("7")
     )
@@ -42,14 +49,14 @@ async def test_insert_values_match_the_field_by_field_conversion(db):
 
 @pytest.mark.database_independent
 def test_json_shortcut_encodes_like_the_full_path():
-    field = testmodels.JSONFields._meta.fields_map["data"]
+    field = HareContext.require_current().apps.get_binding(testmodels.JSONFields).fields_map["data"]
     for value in ({"a": [1, 2.5, "x"], "b": None}, [1, {"k": "v"}], "text", 12):
         assert field.encode_value(value) == JsonCodec.dumps(value)
 
 
 @pytest.mark.database_independent
 def test_json_shortcut_leaves_problem_values_to_the_full_path():
-    field = testmodels.JSONFields._meta.fields_map["data"]
+    field = HareContext.require_current().apps.get_binding(testmodels.JSONFields).fields_map["data"]
     long_integer = 2**70
     assert field.encode_value({"big": long_integer}) == JsonCodec.dumps_exact({"big": long_integer})
     assert field.encode_value({"text": "a\x00b"}) == '{"text":"a\\u0000b"}'
@@ -62,20 +69,20 @@ def test_json_shortcut_leaves_problem_values_to_the_full_path():
 @pytest.mark.requires("asyncpg")
 @pytest.mark.database_independent
 def test_asyncpg_binds_a_row_of_plain_values_as_it_is():
-    from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
+    from hare.dialects.postgresql.drivers.asyncpg.client.asyncpg_parameters import AsyncpgParameters
 
     row = [1, "text", 2.5, None, True, b"bytes", Decimal("1.5"), datetime.date(2020, 1, 2)]
-    assert AsyncpgClient._asyncpg_bind_values(row) is row
-    assert AsyncpgClient._asyncpg_bind_values(tuple(row)) == row
+    assert AsyncpgParameters.get_bound_values(row) is row
+    assert AsyncpgParameters.get_bound_values(tuple(row)) == row
 
 
 @pytest.mark.requires("asyncpg")
 @pytest.mark.database_independent
 def test_asyncpg_still_adapts_a_row_holding_a_value_that_needs_it():
-    from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
+    from hare.dialects.postgresql.drivers.asyncpg.client.asyncpg_parameters import AsyncpgParameters
 
     naive_time = datetime.time(10, 30)
-    bound = AsyncpgClient._asyncpg_bind_values([1, naive_time, "x"])
+    bound = AsyncpgParameters.get_bound_values([1, naive_time, "x"])
     assert bound[0] == 1 and bound[2] == "x"
     assert bound[1] == naive_time.replace(tzinfo=datetime.UTC)
 
@@ -83,10 +90,12 @@ def test_asyncpg_still_adapts_a_row_holding_a_value_that_needs_it():
 @pytest.mark.asyncio
 async def test_tenant_scoped_relations_flag_is_kept_per_model_and_forgotten(db):
     cache = Tenancy.has_tenant_scoped_relations.cache
-    assert Tenancy.has_tenant_scoped_relations(testmodels.Event) is False
-    assert testmodels.Event in cache
-    Caches.forget_model_caches([testmodels.Event])
-    assert testmodels.Event not in cache
+    assert (
+        Tenancy.has_tenant_scoped_relations(HareContext.require_current().apps.get_binding(testmodels.Event)) is False
+    )
+    assert HareContext.require_current().apps.get_binding(testmodels.Event) in cache
+    Caches.forget_model_caches([HareContext.require_current().apps.get_binding(testmodels.Event)])
+    assert HareContext.require_current().apps.get_binding(testmodels.Event) not in cache
 
 
 @pytest.mark.asyncio

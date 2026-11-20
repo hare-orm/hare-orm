@@ -1,5 +1,6 @@
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.core.routing.connection_router import ConnectionRouter
 from hare.exceptions import ConfigurationError
 from tests.shared_models.testmodels import Tournament
@@ -35,15 +36,11 @@ class _UnknownConnectionRouter:
         return "does-not-exist"
 
 
-class _NotCallableRouter:
-    db_for_read = "models"
-
-
 @pytest.mark.asyncio
 async def test_no_routers_returns_none(db):
     router = ConnectionRouter()
-    assert router.db_for_read(Tournament) is None
-    assert router.db_for_write(Tournament) is None
+    assert router.db_for_read(HareContext.require_current().apps.get_binding(Tournament)) is None
+    assert router.db_for_write(HareContext.require_current().apps.get_binding(Tournament)) is None
 
 
 @pytest.mark.parametrize(
@@ -57,7 +54,7 @@ async def test_no_routers_returns_none(db):
 async def test_a_router_without_an_answer_falls_through_to_the_next(db, first_router, method_name):
     router = ConnectionRouter()
     router.init_routers([first_router, _RealRouter])
-    connection = getattr(router, method_name)(Tournament)
+    connection = getattr(router, method_name)(HareContext.require_current().apps.get_binding(Tournament))
     assert connection is not None
     assert connection.connection_alias == "models"
 
@@ -71,4 +68,4 @@ async def test_unknown_connection_name_raises(db):
     router = ConnectionRouter()
     router.init_routers([_UnknownConnectionRouter])
     with pytest.raises(ConfigurationError):
-        router.db_for_read(Tournament)
+        router.db_for_read(HareContext.require_current().apps.get_binding(Tournament))

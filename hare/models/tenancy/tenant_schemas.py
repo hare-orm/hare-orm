@@ -5,7 +5,7 @@ through a client whose search path starts with that schema.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import ConfigurationError, QueryError, UnSupportedError, ValidationError
 from hare.models.tenancy.constants import (
@@ -71,7 +71,7 @@ class TenantSchemas:
                 f"A tenant schema is named after an int or a string of lower-case letters, digits and _, "
                 f"got {tenant!r}"
             )
-        schema_name = cast("str", client.tenant_schema_template).replace(TENANT_SCHEMA_PLACEHOLDER, tenant_text)
+        schema_name = client.tenant_schema_template.replace(TENANT_SCHEMA_PLACEHOLDER, tenant_text)  # type: ignore[union-attr]
         max_length = client.features.max_identifier_length
         if max_length is not None and len(schema_name.encode()) > max_length:
             raise ValidationError(
@@ -91,7 +91,7 @@ class TenantSchemas:
         Returns:
             The tenant value as text; None when the template doesn't name the schema.
         """
-        prefix, _, suffix = cast("str", client.tenant_schema_template).partition(TENANT_SCHEMA_PLACEHOLDER)
+        prefix, _, suffix = client.tenant_schema_template.partition(TENANT_SCHEMA_PLACEHOLDER)  # type: ignore[union-attr]
         if len(schema_name) <= len(prefix) + len(suffix):
             return None
         if not schema_name.startswith(prefix) or not schema_name.endswith(suffix):
@@ -119,7 +119,7 @@ class TenantSchemas:
         scope = RowVisibility.active_tenant.get()
         scope_class = type(scope)
         if scope_class is ModelTenants:
-            scope = cast("ModelTenants", scope).get_schema_tenant(client.connection_alias)
+            scope = scope.get_schema_tenant(client.connection_alias)  # type: ignore[union-attr]
         elif scope_class is TenantValues or scope_class is AllTenants:
             return None
         if scope is None:

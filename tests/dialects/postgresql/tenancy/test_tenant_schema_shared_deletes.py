@@ -53,6 +53,33 @@ async def get_live_bill_ids(tenant: str) -> list[int]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("scope", (None, "acme"))
+async def test_shared_deletion_with_an_explicit_base_client_visits_all_schemas(scope):
+    skip_if_not_postgres()
+    await DatabaseUnderTest.skip_if_the_pooler_loses_the_search_path()
+    async with tenant_context() as context:
+        connection = context.get_connection("models")
+        await create_tenants_with_bills()
+        client = await SharedClient.objects.get(id=1)
+        with Tenancy.scope(scope):
+            preview = await client.delete_preview(using=connection)
+            assert preview.soft_deleted == {SharedClient: 1, TenantBill: 2}
+            await client.delete(using=connection)
+        assert await get_live_bill_ids("acme") == [2]
+        assert await get_live_bill_ids("beta") == [2]
+        with Tenancy.scope(scope):
+            await client.restore(using=connection, cascade=True)
+        assert await get_live_bill_ids("acme") == [1, 2]
+        assert await get_live_bill_ids("beta") == [1, 2]
+        with Tenancy.scope(scope):
+            await SharedClient.objects.using(connection).filter(id=1).delete()
+            await SharedClient.objects.using(connection).filter(id=1).restore(cascade=True)
+            await client.hard_delete(using=connection)
+        assert await get_live_bill_ids("acme") == [2]
+        assert await get_live_bill_ids("beta") == [2]
+
+
+@pytest.mark.asyncio
 async def test_a_shared_row_deleted_in_one_tenant_cascades_in_every_tenant_schema():
     """The cascade ran in the deleting tenant's schema alone - beta's bills kept pointing at a
     soft-deleted client."""

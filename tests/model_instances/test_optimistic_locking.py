@@ -1,11 +1,11 @@
 import asyncio
-import os
 
 import pytest
 import pytest_asyncio
 
 from hare.contrib import test as hare_test
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.exceptions import (
     ConfigurationError,
     IncompleteInstanceError,
@@ -13,6 +13,7 @@ from hare.exceptions import (
     QueryError,
     StaleObjectError,
 )
+from hare.instrumentation import Observers, RowsChanged
 from hare.models.class_building.model_definition_checks import ModelDefinitionChecks
 from hare.transactions.transactions import Transactions
 from tests.shared_models.testmodels import (
@@ -619,12 +620,7 @@ async def test_bulk_update_unversioned_model_unaffected(db):
 @requires_features(supports_unique_constraints=True)
 @pytest.mark.asyncio
 async def test_bulk_create_upsert_bumps_version_on_conflict(db):
-    """The real bug: BulkCreateQuery._apply_on_conflict() built its ON CONFLICT DO UPDATE SET
-    clause purely from the caller's own update_fields, with no equivalent to bulk_update()'s
-    automatic optimistic_lock_field bump - an upsert that genuinely fired its DO UPDATE branch (matching
-    an existing row) left that row's version completely unchanged, defeating optimistic locking
-    for any code that reads the row again afterward expecting version to reflect the write that
-    just happened."""
+    """An upsert increments the optimistic-lock version when its conflict branch updates an existing row."""
     existing = await VersionedUnique.objects.create(name="Alice", tag="alice-tag")
     assert existing.version == 0
 
@@ -709,7 +705,7 @@ async def test_update_or_create_allows_optimistic_lock_field_in_defaults_on_crea
     ],
 )
 def test_an_optimistic_lock_field_of_no_int_field_is_refused(db, field_name):
-    meta = VersionedThing._meta
+    meta = HareContext.require_current().apps.get_binding(VersionedThing)
     original = meta.optimistic_lock_field
     meta.optimistic_lock_field = field_name
     try:
@@ -742,18 +738,25 @@ async def test_optimistic_lock_field_with_composite_pk(db):
 
 
 @pytest.mark.asyncio
-async def test_optimistic_lock_field_with_composite_pk_stale_save_raises(db):
+async def test_optimistic_lock_field_with_composite_pk_stale_save_raises(db_isolated):
     obj = await VersionedComposite.objects.create(a=1, b=2, name="X")
+    await VersionedComposite.objects.create(a=1, b=3, name="neighbor")
     stale_copy = await VersionedComposite.objects.get(a=1, b=2)
 
-    obj.name = "first writer"
-    await obj.save()
+    events = []
+    with Observers.observing(RowsChanged, events.append, models=[VersionedComposite]):
+        obj.name = "first writer"
+        await obj.save()
 
-    stale_copy.name = "stale writer"
-    with pytest.raises(StaleObjectError):
-        await stale_copy.save()
+        stale_copy.name = "stale writer"
+        with pytest.raises(StaleObjectError):
+            await stale_copy.save()
 
-    assert (await VersionedComposite.objects.get(a=1, b=2)).name == "first writer"
+    assert await VersionedComposite.objects.order_by("a", "b").values_list("a", "b", "name", "version") == [
+        (1, 2, "first writer", 1),
+        (1, 3, "neighbor", 0),
+    ]
+    assert [(event.operation.value, event.pks) for event in events] == [("update", ((1, 2),))]
 
 
 @pytest.mark.asyncio
@@ -775,14 +778,9 @@ async def file_db(tmp_path):
     database. Mirrors the ambient HARE_TEST_DB when it's already a real (Postgres) URL, so the
     Postgres-only test below actually gets a Postgres "models" connection for requires_features to
     see - falls back to a real file-backed SQLite DB otherwise."""
-    from hare.contrib.test.isolated_contexts import hare_test_context
-
-    db_url = os.getenv("HARE_TEST_DB")
-    if not db_url or DatabaseUnderTest.is_file_database(db_url):
-        scheme = (db_url or DatabaseUnderTest.DEFAULT_URL).split("://", 1)[0]
-        db_path = tmp_path / "optimistic_lock_field_autonomous_test.sqlite"
-        db_url = f"{scheme}:///{db_path}?synchronous=OFF"
-    async with hare_test_context(["tests.shared_models.testmodels"], db_url=db_url, connection_label="models") as ctx:
+    async with DatabaseUnderTest.open_persistent_model_context(
+        tmp_path / "optimistic_lock_field_autonomous_test.sqlite"
+    ) as ctx:
         yield ctx
 
 

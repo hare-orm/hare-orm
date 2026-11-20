@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any
 
 from hare.query.expressions.constants import NAMED_COLUMN_FILTER_ANNOTATION
 from hare.query.expressions.joins.named_join import NamedJoin
-from hare.query.plans.plan_origins import PlanOrigins
 
 if TYPE_CHECKING:
     from hare.query.expressions.conditions.query_modifier import QueryModifier
@@ -25,17 +24,12 @@ class NamedColumns(NamedJoin, abstract=True):
         value_origin: tuple[Any, ...] | None = None,
     ) -> QueryModifier:
         """The filter on the column ``path`` starts with - ``<column>__<lookup>``."""
-        # Local imports: F and Q import the module of this base.
-        from hare.query.expressions.conditions.q import Q
+        # Local import: F imports the module of this base.
         from hare.query.expressions.f import F
 
         column_name, separator, lookup = path.partition("__")
         filter_key = f"{NAMED_COLUMN_FILTER_ANNOTATION}{separator}{lookup}"
-        condition = Q(**{filter_key: value})
-        condition._filter_call_generation = filter_call_generation
-        if value_origin is not None:
-            # The value is the filter's on the name.
-            PlanOrigins.derive(condition, {filter_key: value_origin})
+        condition = self._get_filter_condition(filter_key, value, filter_call_generation, value_origin)
         column_annotations = {
             **expression_context.annotations,
             NAMED_COLUMN_FILTER_ANNOTATION: F(f"{self.name}__{column_name}"),

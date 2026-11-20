@@ -2,26 +2,23 @@ from __future__ import annotations
 
 import argparse
 
-from hare import Hare, __version__  # noqa: F401 - Hare re-exported for `cli_module.Hare` test monkeypatches
+from hare import __version__
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.cli.commands.database_shell_commands import DatabaseShellCommands
 from hare.cli.commands.distributed_recovery_commands import DistributedRecoveryCommands
 from hare.cli.commands.migration_commands import MigrationCommands
 from hare.cli.commands.schema_commands import SchemaCommands
 from hare.cli.commands.stub_commands import StubCommands
+from hare.cli.parsed_command import CommandHandler
 from hare.cli.plugins.cli_command_registry import CLICommandRegistry
 from hare.cli.plugins.loaded_cli_command import LoadedCLICommand
 from hare.stubs.constants import DEFAULT_RELATION_DEPTH, DEFAULT_STUBS_DIRECTORY
-from hare.transactions.constants import (
-    DEFAULT_DISTRIBUTED_RECOVERY_OLDER_THAN_SECONDS,
-    MAX_DISTRIBUTED_RECOVERY_OLDER_THAN_SECONDS,
-)
+from hare.transactions.constants import DEFAULT_DISTRIBUTED_RECOVERY_OLDER_THAN_SECONDS
 
 
 class ArgParserBuilder:
     """Builds the `hare` CLI's argparse.ArgumentParser: global options, every subcommand's
-    arguments, and the dispatch wiring (`set_defaults(func=...)`) pointing each subcommand at
-    its command class's `run_*` method."""
+    arguments, and command handlers registered outside the parsed argument namespace."""
 
     @staticmethod
     def parse_name(raw_value: str) -> str:
@@ -48,19 +45,18 @@ class ArgParserBuilder:
             raw_value: The raw command-line text.
 
         Returns:
-            The number of seconds, within 0..MAX_DISTRIBUTED_RECOVERY_OLDER_THAN_SECONDS.
+            A nonnegative integer number of seconds.
 
         Raises:
-            argparse.ArgumentTypeError: If the value isn't an integer inside that range.
+            argparse.ArgumentTypeError: The value isn't an integer or is negative.
         """
         try:
             seconds = int(raw_value)
         except ValueError:
             raise argparse.ArgumentTypeError(f"{raw_value!r} is not an integer number of seconds") from None
-        if not 0 <= seconds <= MAX_DISTRIBUTED_RECOVERY_OLDER_THAN_SECONDS:
+        if seconds < 0:
             raise argparse.ArgumentTypeError(
-                f"must be between 0 and {MAX_DISTRIBUTED_RECOVERY_OLDER_THAN_SECONDS} seconds, got "
-                f"{ValueDescriptions.get_shown_text(seconds)}"
+                f"must be at least 0 seconds, got {ValueDescriptions.get_shown_text(seconds)}"
             )
         return seconds
 
@@ -74,23 +70,43 @@ class ArgParserBuilder:
         parser.add_argument("-V", "--version", action="version", version=__version__)
 
     @staticmethod
-    def _add_init_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-        init_parser = subparsers.add_parser("init", help="Create migrations packages for configured apps.")
+    def _add_init_parser(
+        subparsers: argparse._SubParsersAction[argparse.ArgumentParser], command_handlers: dict[str, CommandHandler]
+    ) -> None:
+        init_parser = CLICommandRegistry.add_parser(
+            subparsers,
+            command_handlers,
+            MigrationCommands.run_init,
+            "init",
+            help="Create migrations packages for configured apps.",
+        )
         init_parser.add_argument("app_labels", nargs="*")
-        init_parser.set_defaults(func=MigrationCommands.run_init)
 
     @staticmethod
-    def _add_shell_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    def _add_shell_parser(
+        subparsers: argparse._SubParsersAction[argparse.ArgumentParser], command_handlers: dict[str, CommandHandler]
+    ) -> None:
         # Imported here: the modules import each other.
         from hare.cli.hare_cli import HareCLI
 
-        shell_parser = subparsers.add_parser("shell", help="Start an IPython shell with the models loaded.")
-        shell_parser.set_defaults(func=HareCLI.run_shell)
+        CLICommandRegistry.add_parser(
+            subparsers,
+            command_handlers,
+            HareCLI.run_shell,
+            "shell",
+            help="Start an IPython shell with the models loaded.",
+        )
 
     @staticmethod
-    def _add_makemigrations_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-        makemigrations_parser = subparsers.add_parser(
-            "makemigrations", help="Create new migrations from model changes."
+    def _add_makemigrations_parser(
+        subparsers: argparse._SubParsersAction[argparse.ArgumentParser], command_handlers: dict[str, CommandHandler]
+    ) -> None:
+        makemigrations_parser = CLICommandRegistry.add_parser(
+            subparsers,
+            command_handlers,
+            MigrationCommands.run_makemigrations,
+            "makemigrations",
+            help="Create new migrations from model changes.",
         )
         makemigrations_parser.add_argument("app_labels", nargs="*")
         makemigrations_parser.add_argument("--empty", action="store_true", help="Create an empty migration.")
@@ -125,13 +141,17 @@ class ArgParserBuilder:
         makemigrations_parser.add_argument(
             "--no-input",
             action="store_true",
-            help="Ask no rename question - only the --rename answers rename anything.",
+            help="Ask no rename question; keep automatic field matches and explicit --rename answers.",
         )
-        makemigrations_parser.set_defaults(func=MigrationCommands.run_makemigrations)
 
     @staticmethod
-    def _add_squashmigrations_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-        squashmigrations_parser = subparsers.add_parser(
+    def _add_squashmigrations_parser(
+        subparsers: argparse._SubParsersAction[argparse.ArgumentParser], command_handlers: dict[str, CommandHandler]
+    ) -> None:
+        squashmigrations_parser = CLICommandRegistry.add_parser(
+            subparsers,
+            command_handlers,
+            MigrationCommands.run_squashmigrations,
             "squashmigrations",
             help="Squash a run of an app's migrations - [START] END, from its first one without START - into one.",
         )
@@ -148,7 +168,6 @@ class ArgParserBuilder:
             type=ArgParserBuilder.parse_name,
             help="The squashed migration's name after its number (squashed_<END> by default).",
         )
-        squashmigrations_parser.set_defaults(func=MigrationCommands.run_squashmigrations)
 
     @staticmethod
     def _add_migration_direction_arguments(parser: argparse.ArgumentParser) -> None:
@@ -160,9 +179,15 @@ class ArgParserBuilder:
         parser.add_argument("--dry-run", action="store_true", help="Show what would run without changing DB state.")
 
     @staticmethod
-    def _add_migrate_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-        migrate_parser = subparsers.add_parser(
-            "migrate", help="Apply migrations, or unapply them back to an earlier one ('zero' for none)."
+    def _add_migrate_parser(
+        subparsers: argparse._SubParsersAction[argparse.ArgumentParser], command_handlers: dict[str, CommandHandler]
+    ) -> None:
+        migrate_parser = CLICommandRegistry.add_parser(
+            subparsers,
+            command_handlers,
+            MigrationCommands.run_migrate,
+            "migrate",
+            help="Apply migrations, or unapply them back to an earlier one ('zero' for none).",
         )
         ArgParserBuilder._add_migration_direction_arguments(migrate_parser)
         migrate_parser.add_argument(
@@ -172,24 +197,39 @@ class ArgParserBuilder:
             help="Fail a migration whose statement waits longer for a lock another session holds "
             '(the config\'s "migrations.lock_timeout" by default).',
         )
-        migrate_parser.set_defaults(func=MigrationCommands.run_migrate)
 
     @staticmethod
-    def _add_history_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-        history_parser = subparsers.add_parser("history", help="List applied migrations from the database.")
+    def _add_history_parser(
+        subparsers: argparse._SubParsersAction[argparse.ArgumentParser], command_handlers: dict[str, CommandHandler]
+    ) -> None:
+        history_parser = CLICommandRegistry.add_parser(
+            subparsers,
+            command_handlers,
+            MigrationCommands.run_history,
+            "history",
+            help="List applied migrations from the database.",
+        )
         history_parser.add_argument("app_labels", nargs="*")
-        history_parser.set_defaults(func=MigrationCommands.run_history)
 
     @staticmethod
-    def _add_heads_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-        heads_parser = subparsers.add_parser("heads", help="List migration heads on disk.")
+    def _add_heads_parser(
+        subparsers: argparse._SubParsersAction[argparse.ArgumentParser], command_handlers: dict[str, CommandHandler]
+    ) -> None:
+        heads_parser = CLICommandRegistry.add_parser(
+            subparsers, command_handlers, MigrationCommands.run_heads, "heads", help="List migration heads on disk."
+        )
         heads_parser.add_argument("app_labels", nargs="*")
-        heads_parser.set_defaults(func=MigrationCommands.run_heads)
 
     @staticmethod
-    def _add_inspectdb_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-        inspectdb_parser = subparsers.add_parser(
-            "inspectdb", help="Generate hare-orm model source from an existing database schema."
+    def _add_inspectdb_parser(
+        subparsers: argparse._SubParsersAction[argparse.ArgumentParser], command_handlers: dict[str, CommandHandler]
+    ) -> None:
+        inspectdb_parser = CLICommandRegistry.add_parser(
+            subparsers,
+            command_handlers,
+            SchemaCommands.run_inspectdb,
+            "inspectdb",
+            help="Generate hare-orm model source from an existing database schema.",
         )
         inspectdb_parser.add_argument("tables", nargs="*", help="Specific table names (default: every table).")
         inspectdb_parser.add_argument(
@@ -206,12 +246,17 @@ class ArgParserBuilder:
             help="Schema to inspect - a schema, an attached database or a database of the server: the "
             "namespace of tables the database has (default: the connection's default schema).",
         )
-        inspectdb_parser.set_defaults(func=SchemaCommands.run_inspectdb)
 
     @staticmethod
-    def _add_dbshell_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-        dbshell_parser = subparsers.add_parser(
-            "dbshell", help="Run the database's own interactive client on a connection."
+    def _add_dbshell_parser(
+        subparsers: argparse._SubParsersAction[argparse.ArgumentParser], command_handlers: dict[str, CommandHandler]
+    ) -> None:
+        dbshell_parser = CLICommandRegistry.add_parser(
+            subparsers,
+            command_handlers,
+            DatabaseShellCommands.run_dbshell,
+            "dbshell",
+            help="Run the database's own interactive client on a connection.",
         )
         dbshell_parser.add_argument(
             "--connection",
@@ -220,12 +265,17 @@ class ArgParserBuilder:
             type=ArgParserBuilder.parse_name,
             help="Connection alias to open (default: the first one configured).",
         )
-        dbshell_parser.set_defaults(func=DatabaseShellCommands.run_dbshell)
 
     @staticmethod
-    def _add_stubs_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-        stubs_parser = subparsers.add_parser(
-            "stubs", help="Write the stubs pyright and Pylance type-check the modules of models with."
+    def _add_stubs_parser(
+        subparsers: argparse._SubParsersAction[argparse.ArgumentParser], command_handlers: dict[str, CommandHandler]
+    ) -> None:
+        stubs_parser = CLICommandRegistry.add_parser(
+            subparsers,
+            command_handlers,
+            StubCommands.run_stubs,
+            "stubs",
+            help="Write the stubs pyright and Pylance type-check the modules of models with.",
         )
         stubs_parser.add_argument(
             "--output", default=DEFAULT_STUBS_DIRECTORY, help="The directory of the stubs (default: typings)."
@@ -239,21 +289,32 @@ class ArgParserBuilder:
         stubs_parser.add_argument(
             "--check", action="store_true", help="Write nothing; exit 1 when a stub is missing or outdated."
         )
-        stubs_parser.set_defaults(func=StubCommands.run_stubs)
 
     @staticmethod
-    def _add_checkmigrations_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-        checkmigrations_parser = subparsers.add_parser(
+    def _add_checkmigrations_parser(
+        subparsers: argparse._SubParsersAction[argparse.ArgumentParser], command_handlers: dict[str, CommandHandler]
+    ) -> None:
+        checkmigrations_parser = CLICommandRegistry.add_parser(
+            subparsers,
+            command_handlers,
+            MigrationCommands.run_checkmigrations,
             "checkmigrations",
             help="Check the migrations not applied yet for operations risky on the database in use; "
             "exits with 1 when one isn't listed in its migration's safety_exemptions.",
         )
         checkmigrations_parser.add_argument("app_labels", nargs="*")
-        checkmigrations_parser.set_defaults(func=MigrationCommands.run_checkmigrations)
 
     @staticmethod
-    def _add_sqlmigrate_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-        sqlmigrate_parser = subparsers.add_parser("sqlmigrate", help="Print the SQL for a migration.")
+    def _add_sqlmigrate_parser(
+        subparsers: argparse._SubParsersAction[argparse.ArgumentParser], command_handlers: dict[str, CommandHandler]
+    ) -> None:
+        sqlmigrate_parser = CLICommandRegistry.add_parser(
+            subparsers,
+            command_handlers,
+            MigrationCommands.run_sqlmigrate,
+            "sqlmigrate",
+            help="Print the SQL for a migration.",
+        )
         sqlmigrate_parser.add_argument("app_label", nargs="?", help="App label.")
         sqlmigrate_parser.add_argument(
             "migration_name", nargs="?", type=ArgParserBuilder.parse_name, help="Migration name."
@@ -263,11 +324,15 @@ class ArgParserBuilder:
             action="store_true",
             help="Generate SQL to unapply the migration.",
         )
-        sqlmigrate_parser.set_defaults(func=MigrationCommands.run_sqlmigrate)
 
     @staticmethod
-    def _add_drift_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-        drift_parser = subparsers.add_parser(
+    def _add_drift_parser(
+        subparsers: argparse._SubParsersAction[argparse.ArgumentParser], command_handlers: dict[str, CommandHandler]
+    ) -> None:
+        drift_parser = CLICommandRegistry.add_parser(
+            subparsers,
+            command_handlers,
+            SchemaCommands.run_drift,
             "drift",
             help="Compare the live database schema against the current models; non-zero exit on mismatch.",
         )
@@ -294,11 +359,15 @@ class ArgParserBuilder:
             help="A migration journal besides hare_migrations - MigrationRecorder(table_name=...) - not reported "
             "as untracked. Repeatable.",
         )
-        drift_parser.set_defaults(func=SchemaCommands.run_drift)
 
     @staticmethod
-    def _add_distributed_recover_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-        distributed_recover_parser = subparsers.add_parser(
+    def _add_distributed_recover_parser(
+        subparsers: argparse._SubParsersAction[argparse.ArgumentParser], command_handlers: dict[str, CommandHandler]
+    ) -> None:
+        distributed_recover_parser = CLICommandRegistry.add_parser(
+            subparsers,
+            command_handlers,
+            DistributedRecoveryCommands.run_distributed_recover,
             "distributed-recover",
             help="Report (or finish) Transactions.distributed() prepared transactions left pending.",
         )
@@ -322,7 +391,6 @@ class ArgParserBuilder:
                 f"(default: {DEFAULT_DISTRIBUTED_RECOVERY_OLDER_THAN_SECONDS})."
             ),
         )
-        distributed_recover_parser.set_defaults(func=DistributedRecoveryCommands.run_distributed_recover)
 
     @staticmethod
     def parse_global_options(argv: list[str] | None) -> argparse.Namespace:
@@ -333,19 +401,27 @@ class ArgParserBuilder:
             argv: The command-line arguments, or None for ``sys.argv[1:]``.
 
         Returns:
-            The config options; everything else on the command line is left for the full parser.
+            The leading config options and the untouched command tokens. Parsing stops at
+            the subcommand, whose flags belong to its parser even when they start with ``-c``.
         """
         parser = argparse.ArgumentParser(prog="hare", add_help=False)
         parser.add_argument("-c", "--config")
+        parser.add_argument("command_arguments", nargs=argparse.REMAINDER)
         global_options, _ = parser.parse_known_args(argv)
         return global_options
 
     @staticmethod
-    def build_parser(plugin_commands: list[LoadedCLICommand] | None = None) -> argparse.ArgumentParser:
+    def build_parser(
+        plugin_commands: list[LoadedCLICommand] | None = None,
+        *,
+        command_handlers: dict[str, CommandHandler] | None = None,
+    ) -> argparse.ArgumentParser:
         """Builds the `hare` parser: the built-in subcommands, then any plugin ones.
 
         Args:
             plugin_commands: Commands from installed packages and the project's config.
+            command_handlers: Receives successful command registrations separately from
+                argument destinations, which may use the same names as execution metadata.
 
         Returns:
             The parser.
@@ -353,21 +429,23 @@ class ArgParserBuilder:
         parser = argparse.ArgumentParser(prog="hare")
         ArgParserBuilder._add_global_options(parser)
         subparsers = parser.add_subparsers(dest="command", required=True)
+        if command_handlers is None:
+            command_handlers = {}
 
-        ArgParserBuilder._add_init_parser(subparsers)
-        ArgParserBuilder._add_shell_parser(subparsers)
-        ArgParserBuilder._add_makemigrations_parser(subparsers)
-        ArgParserBuilder._add_squashmigrations_parser(subparsers)
-        ArgParserBuilder._add_migrate_parser(subparsers)
-        ArgParserBuilder._add_history_parser(subparsers)
-        ArgParserBuilder._add_heads_parser(subparsers)
-        ArgParserBuilder._add_inspectdb_parser(subparsers)
-        ArgParserBuilder._add_dbshell_parser(subparsers)
-        ArgParserBuilder._add_stubs_parser(subparsers)
-        ArgParserBuilder._add_checkmigrations_parser(subparsers)
-        ArgParserBuilder._add_sqlmigrate_parser(subparsers)
-        ArgParserBuilder._add_drift_parser(subparsers)
-        ArgParserBuilder._add_distributed_recover_parser(subparsers)
-        CLICommandRegistry.register(subparsers, plugin_commands or [])
+        ArgParserBuilder._add_init_parser(subparsers, command_handlers)
+        ArgParserBuilder._add_shell_parser(subparsers, command_handlers)
+        ArgParserBuilder._add_makemigrations_parser(subparsers, command_handlers)
+        ArgParserBuilder._add_squashmigrations_parser(subparsers, command_handlers)
+        ArgParserBuilder._add_migrate_parser(subparsers, command_handlers)
+        ArgParserBuilder._add_history_parser(subparsers, command_handlers)
+        ArgParserBuilder._add_heads_parser(subparsers, command_handlers)
+        ArgParserBuilder._add_inspectdb_parser(subparsers, command_handlers)
+        ArgParserBuilder._add_dbshell_parser(subparsers, command_handlers)
+        ArgParserBuilder._add_stubs_parser(subparsers, command_handlers)
+        ArgParserBuilder._add_checkmigrations_parser(subparsers, command_handlers)
+        ArgParserBuilder._add_sqlmigrate_parser(subparsers, command_handlers)
+        ArgParserBuilder._add_drift_parser(subparsers, command_handlers)
+        ArgParserBuilder._add_distributed_recover_parser(subparsers, command_handlers)
+        CLICommandRegistry.register(subparsers, plugin_commands or [], command_handlers=command_handlers)
 
         return parser

@@ -57,9 +57,11 @@ body:
       label: Dialect and driver / Диалект и драйвер
       multiple: true
       options:
-        - SQLite
+        - SQLite (aiosqlite, sqlite+aiosqlite://)
         - PostgreSQL (rust_pg, postgresql://)
         - PostgreSQL (asyncpg, postgresql+asyncpg://)
+        - ClickHouse (clickhouse-connect, clickhouse+clickhouse-connect://)
+        - ClickHouse (clickhouse-driver, clickhouse+clickhouse-driver://)
         - A third-party dialect / Сторонний диалект
     validations:
       required: true

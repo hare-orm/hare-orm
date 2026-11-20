@@ -13,6 +13,26 @@ from tests.shared_models.testmodels import Event, Team, Tournament
 
 
 @pytest.mark.asyncio
+async def test_reading_prefetched_many_to_many_rows_does_not_choose_connections(db, monkeypatch):
+    tournament = await Tournament.objects.create(name="cup")
+    event = await Event.objects.create(name="final", tournament=tournament)
+    team = await Team.objects.create(name="reds")
+    await event.participants.add(team)
+    loaded = await Event.objects.filter(pk=event.pk).prefetch_related("participants").get()
+
+    def unexpected_connection(*args, **kwargs):
+        raise AssertionError("Fetched relation rows must not consult connection routing")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Event, "get_connection", unexpected_connection)
+        patch.setattr(Team, "get_connection", unexpected_connection)
+        assert [obj.name for obj in loaded.participants] == ["reds"]
+        assert len(loaded.participants) == 1
+
+    assert [obj.name for obj in await loaded.participants.filter(name="reds")] == ["reds"]
+
+
+@pytest.mark.asyncio
 async def test_an_instance_whose_prefetched_relations_were_read_is_freed_without_the_collector(db):
     tournament = await Tournament.objects.create(name="cup")
     event = await Event.objects.create(name="final", tournament=tournament)

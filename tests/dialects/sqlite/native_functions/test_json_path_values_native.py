@@ -13,25 +13,16 @@ import pytest
 from hare.dialects.sqlite.functions.json.sqlite_json_datetime import SqliteJsonDatetime
 from hare.dialects.sqlite.functions.json.sqlite_json_path import SqliteJsonPath
 from hare.dialects.sqlite.functions.sqlite_native_functions import SqliteNativeFunctions
-
-REQUIRES = ("native",)
+from tests.dialects.sqlite.native_functions.function_comparison import FunctionComparison
 
 pytestmark = [
     pytest.mark.database_independent,
 ]
 
 
-def get_outcome(function: Callable[..., Any], *arguments: Any) -> tuple[str, Any]:
-    try:
-        result = function(*arguments)
-    except Exception as error:
-        return "error", type(error)
-    return "value", (type(result), result)
-
-
 def assert_same(native_function: Callable[..., Any], python_function: Callable[..., Any], *arguments: Any) -> None:
-    native_outcome = get_outcome(native_function, *arguments)
-    python_outcome = get_outcome(python_function, *arguments)
+    native_outcome = FunctionComparison.get_outcome(native_function, *arguments)
+    python_outcome = FunctionComparison.get_outcome(python_function, *arguments)
     if native_outcome[0] == "value" and python_outcome[0] == "value":
         native_result, python_result = native_outcome[1][1], python_outcome[1][1]
         if isinstance(python_result, float) and math.isnan(python_result):
@@ -61,6 +52,19 @@ def test_json_path() -> None:
         for path in PATHS:
             for mode in ["text", "json", "type", "other"]:
                 assert_same(extract, SqliteJsonPath.extract, document, path, mode)
+
+
+@pytest.mark.parametrize("native", [False, True], ids=["python", "rust"])
+def test_digit_segments_keep_object_keys_array_indexes_and_missing_values(native):
+    extract = SqliteJsonPath.extract
+    if native:
+        extract = SqliteNativeFunctions.module.JsonPath(extract).extract
+    document = '{"01":"object key","items":[10,20,null],"empty":{}}'
+    assert extract(document, '["01"]', "text") == "object key"
+    assert extract(document, '["items","01"]', "text") == 20
+    assert extract(document, '["items",2]', "type") == "null"
+    assert extract(document, '["empty","01"]', "type") is None
+    assert extract(document, '["absent"]', "json") is None
 
 
 def get_moment_texts() -> list[str]:
@@ -107,5 +111,8 @@ def test_json_datetime() -> None:
             assert_same(normalize, SqliteJsonDatetime.normalize, text, mode)
     for value in [None, 5, 2.5, b"2020-01-02"]:
         assert_same(normalize, SqliteJsonDatetime.normalize, value, "wall")
+    for text in ["2020-01-02\n", "2020-01-02T03:04:05Z\n"]:
+        assert SqliteJsonDatetime.normalize(text, "wall") is None
+        assert normalize(text, "wall") is None
     assert_same(normalize, SqliteJsonDatetime.normalize, "2020-01-02", None)
     assert json.dumps(normalize("2020-01-02T03:04:05+01:00", "instant")) == "1577930645000000"

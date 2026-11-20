@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 from hare.classes.class_path import ClassPath
 from hare.ddl.constants import COLUMN_PRIVILEGES, GRANT_TARGET_PRIVILEGES
@@ -39,7 +39,7 @@ class Grant:
     def __post_init__(self) -> None:
         if not isinstance(self.on, str) or self.on not in set(GrantTarget):
             raise ConfigurationError(f"Grant.on must be one of {', '.join(GrantTarget)}, got {self.on!r}")
-        if not isinstance(cast("object", self.privileges), (list, tuple)) or not self.privileges:
+        if not isinstance(self.privileges, (list, tuple)) or not self.privileges:
             raise ConfigurationError(f"Grant.privileges must be a non-empty sequence, got {self.privileges!r}")
         allowed_privileges = GRANT_TARGET_PRIVILEGES[GrantTarget(self.on)]
         for privilege in self.privileges:
@@ -52,7 +52,7 @@ class Grant:
         if len(set(self.privileges)) != len(self.privileges):
             raise ConfigurationError(f"Grant.privileges names a privilege twice: {self.privileges!r}")
         if (
-            not isinstance(cast("object", self.roles), (list, tuple))
+            not isinstance(self.roles, (list, tuple))
             or not self.roles
             or not all(isinstance(role, str) and role for role in self.roles)
         ):
@@ -63,9 +63,7 @@ class Grant:
                 raise ConfigurationError("Grant.object_name names a view, sequence or function - not the table")
         elif not isinstance(self.object_name, str) or not self.object_name:
             raise ConfigurationError(f"Grant on a {self.on} needs the object_name of it")
-        if isinstance(cast("object", self.columns), str) or not all(
-            isinstance(column, str) and column for column in self.columns
-        ):
+        if isinstance(self.columns, str) or not all(isinstance(column, str) and column for column in self.columns):  # type: ignore[unreachable]
             raise ConfigurationError(f"Grant.columns must be a sequence of field names, got {self.columns!r}")
         object.__setattr__(self, "columns", tuple(self.columns))
         if self.columns:

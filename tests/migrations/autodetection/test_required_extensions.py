@@ -4,7 +4,6 @@ generate_schemas() ask the same source."""
 
 from __future__ import annotations
 
-import os
 import sys
 import types
 
@@ -17,7 +16,6 @@ from hare.dialects.dialect_registry import DialectRegistry
 from hare.dialects.postgresql.fields.citext_field import CitextField
 from hare.dialects.postgresql.indexes import BloomIndex, GinIndex, GistIndex
 from hare.migrations.autodetection.operation_generator import OperationGenerator
-from hare.migrations.autodetection.required_extensions import RequiredExtensions
 from hare.migrations.operations import CreateExtension, CreateModel
 from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state import State
@@ -52,8 +50,8 @@ def get_model_state(**options: object) -> ModelState:
 )
 def test_an_index_names_the_extension_it_needs(index, extension) -> None:
     model_state = get_model_state(indexes=[index])
-    assert RequiredExtensions.get_for_model_state(model_state, DialectRegistry.get_dialects()) == {extension}
-    assert RequiredExtensions.get_for_model_state(model_state, [DialectRegistry.get_dialect("sqlite")]) == set()
+    assert model_state.get_required_extensions(DialectRegistry.get_dialects()) == {extension}
+    assert model_state.get_required_extensions([DialectRegistry.get_dialect("sqlite")]) == set()
 
 
 @pytest.mark.database_independent
@@ -69,7 +67,7 @@ def test_an_index_names_the_extension_it_needs(index, extension) -> None:
 )
 def test_an_index_needing_no_extension_names_none(index) -> None:
     model_state = get_model_state(indexes=[index])
-    assert RequiredExtensions.get_for_model_state(model_state, DialectRegistry.get_dialects()) == set()
+    assert model_state.get_required_extensions(DialectRegistry.get_dialects()) == set()
 
 
 @pytest.mark.database_independent
@@ -103,7 +101,7 @@ class ExtensionReading(Model):
 @pytest.mark.asyncio
 async def test_generate_schemas_creates_the_extensions_of_the_indexes() -> None:
     """Skips manually - the test opens its own context."""
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:").replace("\\{", "{").replace("\\}", "}")
+    db_url = DatabaseUnderTest.normalize_url_template(DatabaseUnderTest.get_url())
     if DatabaseUnderTest.get_dialect(db_url).name != "postgresql":
         pytest.skip("Capability dialect != postgres")
     module = types.ModuleType(MODULE_NAME)

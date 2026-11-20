@@ -6,6 +6,7 @@ from typing import Any
 from hare.fields.constants import E164_PHONE_PATTERN
 from hare.fields.validators.exceptions import InvalidPhoneNumber
 from hare.fields.validators.validator import Validator
+from hare.native.native_modules import NativeModules
 
 
 class E164PhoneValidator(Validator):
@@ -19,10 +20,10 @@ class E164PhoneValidator(Validator):
         InvalidPhoneNumber: The value isn't an E.164 number.
     """
 
-    regex = re.compile(E164_PHONE_PATTERN)
+    check = NativeModules.rows.ValueCheck.pattern(re.compile(E164_PHONE_PATTERN), "fullmatch", True)
 
     def __call__(self, value: Any) -> None:
-        if not isinstance(value, str) or self.regex.fullmatch(value) is None:
+        if self.check.failure(value) is not None:
             raise InvalidPhoneNumber(self.message)
 
 

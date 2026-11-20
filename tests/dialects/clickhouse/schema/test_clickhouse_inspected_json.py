@@ -6,13 +6,14 @@ import importlib
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.inspectdb import SchemaInspector
 from tests.dialects.clickhouse.models import Player
 
 
 @pytest.mark.asyncio
 async def test_a_json_column_is_a_json_field_of_its_type_where_the_driver_reads_one(clickhouse_db):
-    connection = Player._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Player).get_connection()
     await connection.execute_script("CREATE TABLE inspected_json (id Int32, data JSON) ENGINE = MergeTree ORDER BY id")
     try:
         source = await SchemaInspector.inspect(connection, tables=["inspected_json"])

@@ -25,8 +25,9 @@ If that's not an option, email **[vlad.yaremenko.98@yandex.ru](mailto:vlad.yarem
 - A description of the vulnerability and its potential impact.
 - Steps to reproduce it (a minimal repro model/query is ideal).
 - The hare-orm version or commit.
-- Which dialect and driver it affects (SQLite, PostgreSQL via `asyncpg` or via the Rust `rust_pg`
-  driver, or any dialect) — hare-orm's own query builder, and its vendored copy of PyPika, are both
+- Which dialect and driver it affects (SQLite via `aiosqlite`, PostgreSQL via `asyncpg` or the Rust
+  `rust_pg` driver, ClickHouse via `clickhouse-connect` or `clickhouse-driver`, or any dialect) —
+  hare-orm's own query builder, and its vendored copy of PyPika, are both
   in scope; so are the Rust extensions under `rust/`.
 
 ## What happens next
@@ -47,6 +48,6 @@ You are credited in the advisory and in the release notes, unless you'd rather s
 In scope: hare-orm itself (`hare/`, including its dialects and `hare.contrib`), its Rust
 extensions (`rust/`: the PostgreSQL driver and the row hydration accelerator), and the
 migration/CLI tooling it ships. Vulnerabilities in a database engine you point hare-orm at
-(PostgreSQL, SQLite), in a third-party dialect package, or in an application built with
+(PostgreSQL, SQLite, ClickHouse), in a third-party dialect package, or in an application built with
 hare-orm, are out of scope for this repository — report those to the relevant upstream project
 or your own application's maintainers.

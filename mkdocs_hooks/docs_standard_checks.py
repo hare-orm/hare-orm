@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import ast
+import io
 import logging
+import tokenize
+from itertools import chain
 from pathlib import Path
 from typing import Any
+
+from pygments import lex
+from pygments.lexers.shell import BashLexer
+from pygments.token import Comment
 
 from hare.dialects.clickhouse.server_versions import CLICKHOUSE_MINIMUM_SERVER_VERSION
 from hare.dialects.postgresql.server_versions import POSTGRESQL_MINIMUM_SERVER_VERSION
 from hare.dialects.sqlite.server_versions import SQLITE_MINIMUM_SERVER_VERSION
 from mkdocs_hooks.constants import (
     CHECKED_SITE_LANGUAGE,
-    CODE_COMMENT,
     DATABASE_HEADING_FORM,
     DATABASE_NAMES_BY_FOLDER,
     EMPTY_LINK_TEXT,
@@ -24,7 +30,6 @@ from mkdocs_hooks.constants import (
     LINK_TARGET,
     MAX_PROSE_LINE_LENGTH,
     MAX_TABLE_CELL_LENGTH,
-    ONE_LINE_DOCSTRING,
     OTHER_ORM_COMPARISONS,
     OTHER_ORM_PAGE_NAME,
     OTHER_ORM_PAGE_PREFIXES,
@@ -118,7 +123,7 @@ class DocsStandardChecks:
                 )
             following = page.headings[index + 1] if index + 1 < len(page.headings) else None
             opens_subsection = following is not None and following.level > heading.level
-            section_end = following.line if following is not None else len(page.lines) + 1
+            section_end = following.line if following is not None else page.line_count + 1
             has_code = any(heading.line < block.line < section_end for block in page.code_blocks)
             # A section going straight into its subsections needs no text of its own - one holding code does.
             if heading.level > 1 and not page.heading_has_text[heading.line] and (has_code or not opens_subsection):
@@ -149,7 +154,7 @@ class DocsStandardChecks:
             if block.language != "python":
                 continue
             try:
-                compile(block.code, page.name, "exec", flags=ast.PyCF_ONLY_AST | ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+                ast.parse(block.code, filename=page.name)
             except SyntaxError as error:
                 problems.append(DocsProblem(page.name, block.line, f"a python block that doesn't parse: {error.msg}"))
         return problems
@@ -167,15 +172,15 @@ class DocsStandardChecks:
         """
         problems: list[DocsProblem] = [
             DocsProblem(page.name, line, "a link without a text")
-            for line, text in [
-                *((prose.line, prose.text) for prose in page.prose),
-                *((line, " ".join(cells)) for table in page.tables for line, cells in table),
-            ]
+            for line, text in chain(
+                ((prose.line, prose.text) for prose in page.prose),
+                ((line, " ".join(cells)) for table in page.tables for line, cells in table),
+            )
             if EMPTY_LINK_TEXT.search(text)
         ]
         if not page.is_russian:
             return problems
-        for line, linked_name in page.get_linked_page_names():
+        for line, linked_name in page.linked_page_names:
             linked = pages.get(linked_name)
             if linked is not None and not linked.is_russian:
                 problems.append(DocsProblem(page.name, line, f"a Russian page links the English {linked_name}"))
@@ -196,9 +201,10 @@ class DocsStandardChecks:
         replaced_wording = RUSSIAN_REPLACED_WORDING if page.is_russian else ENGLISH_REPLACED_WORDING
         compares_orms = page.english_name.startswith(OTHER_ORM_PAGE_PREFIXES)
         for prose in page.prose:
-            if len(LINK_TARGET.sub("]()", prose.text)) > MAX_PROSE_LINE_LENGTH:
+            text_without_link_targets = LINK_TARGET.sub("]()", prose.text)
+            if len(text_without_link_targets) > MAX_PROSE_LINE_LENGTH:
                 problems.append(DocsProblem(page.name, prose.line, f"a line longer than {MAX_PROSE_LINE_LENGTH}"))
-            text = INLINE_CODE.sub("`code`", LINK_TARGET.sub("]()", prose.text))
+            text = INLINE_CODE.sub("`code`", text_without_link_targets)
             if HYPHEN_AS_DASH.search(text):
                 problems.append(DocsProblem(page.name, prose.line, 'a dash written " - " - write "—"'))
             if page.is_russian and STRAIGHT_QUOTED_RUSSIAN.search(text):
@@ -291,8 +297,12 @@ class DocsStandardChecks:
         russian_anchors = [heading.anchor for heading in russian.headings]
         if english_anchors != russian_anchors:
             problems.append(DocsProblem(russian.name, 1, f"the headings differ from {english.name}'s"))
-        english_code = [DocsStandardChecks.get_code_without_comments(block.code) for block in english.code_blocks]
-        russian_code = [DocsStandardChecks.get_code_without_comments(block.code) for block in russian.code_blocks]
+        english_code = [
+            DocsStandardChecks.get_code_without_comments(block.code, block.language) for block in english.code_blocks
+        ]
+        russian_code = [
+            DocsStandardChecks.get_code_without_comments(block.code, block.language) for block in russian.code_blocks
+        ]
         if len(english_code) != len(russian_code):
             problems.append(
                 DocsProblem(
@@ -304,7 +314,9 @@ class DocsStandardChecks:
             english.code_blocks, russian.code_blocks, english_code, russian_code, strict=True
         ):
             # A text block is a figure - a tree, an output - its words translated with the page.
-            if english_block.language != "text" and code != russian_text:
+            if english_block.language != russian_block.language or (
+                english_block.language != "text" and code != russian_text
+            ):
                 problems.append(
                     DocsProblem(
                         russian.name, russian_block.line, f"the code differs from {english.name}:{english_block.line}"
@@ -313,18 +325,60 @@ class DocsStandardChecks:
         return problems
 
     @staticmethod
-    def get_code_without_comments(code: str) -> str:
-        """The code with its comments, one-line docstrings and trailing spaces left out - what a
-        translation keeps.
+    def get_code_without_comments(code: str, language: str = "python") -> str:
+        """Compare Python tokens while preserving strings and executable expressions.
+
+        Only Python comments and actual module/class/function docstrings may be translated.
+        Bash comments use its language lexer, retaining shebangs and literal text; text the
+        lexer cannot identify as a comment remains significant. INI permits
+        translated whole-line comments; inline values are preserved. Other languages remain
+        literal. Invalid Python remains unchanged so a separate syntax diagnostic cannot
+        accidentally hide a translation difference.
 
         Args:
             code: The code of a block.
+            language: The fence language.
 
         Returns:
             The code to compare.
         """
-        lines = (CODE_COMMENT.sub("", line).rstrip() for line in code.splitlines())
-        return "\n".join(line for line in lines if line and not ONE_LINE_DOCSTRING.match(line))
+        if language == "ini":
+            return "\n".join(
+                line.rstrip() for line in code.splitlines() if not line.lstrip().startswith(("#", ";"))
+            ).strip()
+        if language == "bash":
+            code = "".join(
+                "\n" * value.count("\n") if token in Comment.Single else value
+                for token, value in lex(code, BashLexer(stripnl=False))
+            )
+        if language != "python":
+            return "\n".join(line.rstrip() for line in code.splitlines()).strip()
+        try:
+            tree = ast.parse(code)
+            docstrings = [
+                (
+                    (node.body[0].lineno, node.body[0].col_offset),
+                    (node.body[0].end_lineno, node.body[0].end_col_offset),
+                )
+                for node in ast.walk(tree)
+                if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+                and ast.get_docstring(node) is not None
+            ]
+            lines = code.splitlines(keepends=True)
+            tokens = []
+            for token in tokenize.generate_tokens(io.StringIO(code).readline):
+                if token.type in {tokenize.COMMENT, tokenize.NL, tokenize.NEWLINE, tokenize.ENDMARKER}:
+                    continue
+                if token.type == tokenize.STRING:
+                    # AST columns are UTF-8 byte offsets; tokenize columns count characters.
+                    start = (token.start[0], len(lines[token.start[0] - 1][: token.start[1]].encode("utf-8")))
+                    end = (token.end[0], len(lines[token.end[0] - 1][: token.end[1]].encode("utf-8")))
+                    if any(first <= start and end <= last for first, last in docstrings):
+                        continue
+                tokens.append((token.type, token.string))
+        except (SyntaxError, tokenize.TokenError):
+            return code
+        return repr(tokens)
 
     @staticmethod
     def check_inbound_links(pages: dict[str, DocsPage]) -> list[DocsProblem]:
@@ -338,7 +392,7 @@ class DocsStandardChecks:
         """
         linked: set[str] = set()
         for page in pages.values():
-            linked.update(name for _line, name in page.get_linked_page_names() if name != page.name)
+            linked.update(name for _line, name in page.linked_page_names if name != page.name)
         return [
             DocsProblem(name, 1, "no other page links it")
             for name in pages

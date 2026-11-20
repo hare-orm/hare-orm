@@ -21,12 +21,6 @@ SENSITIVE_VALUE_PLACEHOLDER = "<hidden>"
 #: The suffix of a blind index field's name and column - ``email`` -> ``email_blind_index``.
 BLIND_INDEX_NAME_SUFFIX = "_blind_index"
 
-#: orjson decodes an integer literal outside its range as a float - a JSON text with a run of at
-#: least this many digits is decoded by the standard library instead, which reads any int exactly.
-JSON_LONG_INTEGER_MIN_DIGITS = 19
-#: A run of JSON_LONG_INTEGER_MIN_DIGITS digits after JSON_DIGIT_MARKER_TABLE is applied.
-JSON_LONG_INTEGER_MARKER = b"1" * JSON_LONG_INTEGER_MIN_DIGITS
-
 #: The ``db_default`` of a field that declares none.
 DB_DEFAULT_NOT_SET = DbDefaultNotSet()
 
@@ -132,6 +126,3 @@ UUID7_FACTORY = getattr(uuid, "uuid7", None)
 #: The 74 random bits of a version 7 UUID, and the 62 of them after its variant.
 UUID7_RANDOM_MASK = (1 << 74) - 1
 UUID7_RANDOM_B_MASK = (1 << 62) - 1
-#: The bits of a UUID's integer holding its version and its variant, and the variant of RFC 9562 in them.
-UUID_VERSION_AND_VARIANT_MASK = 0xF << 76 | 0b11 << 62
-UUID_RFC_VARIANT_BITS = 0b10 << 62

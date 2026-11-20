@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.query.expressions.subqueries.outer_scope import OuterScope
+from hare.query.lookup_info.lookup_paths import LookupPaths
 from hare.query.plans.description.hashable_values import HashableValues
 from hare.query.plans.description.plan_context import PlanContext
 from hare.query.plans.description.plan_description import PlanDescription
@@ -11,12 +12,15 @@ from hare.query.plans.description.plan_parts import PlanParts
 from hare.query.plans.description.plannable import Plannable
 from hare.query.plans.enums import PlanKeyForm
 from hare.query.plans.plan_origins import PlanOrigins
-from hare.query.query_connection import QueryConnection
 from hare.query.queryset.options.query_options import QueryOptions
 from hare.query.statements.building.query_annotations import QueryAnnotations
-from hare.time import Timezone
+from hare.time.zone_settings import ZoneSettings
 
 if TYPE_CHECKING:
+    from hare.core.hare_context import HareContext
+    from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.fields.relations.fields.relational_field import RelationalField
+    from hare.models.model_binding import ModelBinding
     from hare.query.expressions.conditions.q import Q
     from hare.query.plans.statement.declared_plan_slots import DeclaredPlanSlots
     from hare.query.statements.awaitable_query import AwaitableQuery
@@ -61,9 +65,10 @@ class StatementPlanDescriptions:
 
     @staticmethod
     def query_state_is_plannable(query: AwaitableQuery[Any]) -> bool:
-        """Whether the state the description doesn't cover allows a plan: no table sample, no grouping or
-        ordering by an annotation rendering values of its own, every ``.alias()`` used, and no
-        correlation to an enclosing query on the same table. Checked before the build.
+        """Apply the plan restrictions that can be decided before building SQL.
+
+        SQL building decides which aliases are used. Plan recording checks whether each
+        parameter in the description has a reference in the built statement.
 
         Args:
             query: The query.
@@ -76,7 +81,8 @@ class StatementPlanDescriptions:
             return False
         outer_context = OuterScope.current_expression_context.get()
         outer_table_name = outer_context.table.get_table_name() if outer_context is not None else None
-        if outer_table_name is not None and query.model._meta.basetable.get_table_name() == outer_table_name:
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
+        if outer_table_name is not None and model_binding.basetable.get_table_name() == outer_table_name:
             return False
         annotations = query._annotations
         if not annotations:
@@ -91,18 +97,11 @@ class StatementPlanDescriptions:
                     name not in query._distinct_on and not query._annotation_renders_as_expression(name)
                 ):
                     continue
-                annotation_description = annotation.get_plan_description(PlanContext.EMPTY)
+                annotation_description = annotation.get_plan_description(
+                    PlanContext(binding=model_binding, application_context=query._context)
+                )
                 if annotation_description is not None and annotation_description.values:
                     return False
-        # An unused .alias() is left out of the built query, so the values it holds would no
-        # longer line up with every annotation's - one holding none (a renamed field) is harmless.
-        for name in query._get_unused_alias_keys():
-            annotation = annotations[name]
-            if not isinstance(annotation, Plannable):
-                return False
-            annotation_description = annotation.get_plan_description(PlanContext.EMPTY)
-            if annotation_description is None or annotation_description.values:
-                return False
         return True
 
     @staticmethod
@@ -120,7 +119,7 @@ class StatementPlanDescriptions:
         annotations = query._annotations
         if not annotations:
             return PlanDescription.EMPTY
-        context = PlanContext(annotations, model=query.model)
+        context = PlanContext(annotations, binding=query._binding, application_context=query._context)
         structures: list[tuple[Any, ...]] = []
         values: list[Any] = []
         origins: list[Any] | None = [] if PlanOrigins.records else None
@@ -189,7 +188,8 @@ class StatementPlanDescriptions:
             PlanContext(
                 query._annotations or None,
                 connection.dialect.parameters.single_parameter_in_list_min_length if connection is not None else None,
-                model=query.model,
+                binding=query._binding,
+                application_context=query._context,
             ),
         )
         if filters_description is None:
@@ -215,19 +215,52 @@ class StatementPlanDescriptions:
             The relations' paths and the conditions' structures, and their values - None when a
             condition keeps no plan.
         """
-        extra_conditions = query._select_related_extra_conditions
-        if not extra_conditions:
-            return PlanDescription.EMPTY
-        description = StatementPlanDescriptions.get_conditions_plan_description(
-            extra_conditions.values(), PlanContext.EMPTY
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
+        description = StatementPlanDescriptions.get_join_conditions_plan_description(
+            model_binding,
+            query._select_related_extra_conditions.items(),
+            application_context=query._context,
         )
         if description is None:
             return None
         return PlanDescription(
-            (tuple(extra_conditions), description.structure),
+            description.structure,
             description.values,
             PlanParts.get_optional_origins(description, []) if PlanOrigins.records else None,
         )
+
+    @staticmethod
+    def get_join_conditions_plan_description(
+        binding: ModelBinding,
+        paths_and_conditions: Iterable[tuple[str, Q]],
+        *,
+        application_context: HareContext | None = None,
+    ) -> PlanDescription | None:
+        """Describe each JOIN condition against its related model, retaining the supplied order.
+
+        Field paths in an extra condition start at the joined model, as they do when
+        building its SQL. Values and recorded origins follow the same JOIN order.
+        """
+        paths = []
+        structures = []
+        values: list[Any] = []
+        origins: list[Any] | None = [] if PlanOrigins.records else None
+        for path, condition in paths_and_conditions:
+            _, field = LookupPaths.get_expression_path(binding, path)
+            relation: RelationalField[Any] = field  # type: ignore[assignment]
+            description = condition.get_plan_description(
+                PlanContext(binding=relation.get_related_binding(), application_context=application_context)
+            )
+            if description is None:
+                return None
+            paths.append(path)
+            structures.append(description.structure)
+            values.extend(description.values)
+            if origins is not None:
+                origins = PlanParts.get_origins(description, origins)
+        if not paths:
+            return PlanDescription.EMPTY
+        return PlanDescription((tuple(paths), tuple(structures)), values, origins)
 
     @staticmethod
     def get_cursor_plan_description(query: AwaitableQuery[Any]) -> PlanDescription:
@@ -289,10 +322,13 @@ class StatementPlanDescriptions:
         for name, cte_body in options.with_ctes:
             if not isinstance(cte_body, AwaitableQuery):
                 return None
+            bound_connection: DatabaseClient | None = cte_body._connection
+            if bound_connection is not None:
+                return None
             cte_description = cte_body.get_plan_description(PlanContext.EMPTY)
             if cte_description is None:
                 return None
-            structures.append((name, QueryConnection.get_pinned_connection_name(cte_body), cte_description.structure))
+            structures.append((name, cte_description.structure))
             values.extend(cte_description.values)
             if origins is not None:
                 origins = PlanParts.get_origins(cte_description, origins)
@@ -348,7 +384,8 @@ class StatementPlanDescriptions:
                         connection.dialect.parameters.single_parameter_in_list_min_length
                         if connection is not None
                         else None,
-                        model=query.model,
+                        binding=query._binding,
+                        application_context=query._context,
                     )
                 description = argument.get_plan_description(context)
                 if description is None:
@@ -389,7 +426,7 @@ class StatementPlanDescriptions:
         Returns:
             The zone's name, or the mark of naive datetimes with the machine's zone name.
         """
-        return Timezone.get_rendered_zone_key()
+        return ZoneSettings.get_rendered_zone_key()
 
     @staticmethod
     def get_visibility_structure(query: AwaitableQuery[Any]) -> tuple[Any, ...]:

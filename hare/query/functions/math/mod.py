@@ -7,10 +7,8 @@ from hare.fields.field import Field
 from hare.fields.generated_field import GeneratedField
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
-from hare.query.expressions.numeric.numeric_type import NumericType
 from hare.query.expressions.numeric.numeric_typing import NumericTyping
 from hare.query.expressions.numeric.unrounded_decimal_field import UnroundedDecimalField
-from hare.query.functions.math.enums import MathResultType
 from hare.query.functions.math.math_function import MathFunction
 from hare.sql.terms.functions.decimal_mod import DecimalMod
 from hare.sql.terms.functions.function import Function
@@ -22,19 +20,16 @@ class Mod(MathFunction):
     float."""
 
     function_name: ClassVar[str] = "MOD"
-    output: ClassVar[MathResultType] = MathResultType.REMAINDER
     arity: ClassVar[int] = 2
 
     def _get_output_field(
         self, function_arg: ExpressionResult, default_results: list[ExpressionResult]
     ) -> Field[Any] | None:
-        fields = [result.output_field for result in (function_arg, *default_results)]
-        numeric_types: list[NumericType] = []
-        for field in fields:
-            numeric_type = NumericTyping.get_field_type(field)
-            if numeric_type is None:
-                return None
-            numeric_types.append(numeric_type)
+        numeric_types = NumericTyping.get_field_types(
+            result.output_field for result in (function_arg, *default_results)
+        )
+        if numeric_types is None:
+            return None
         return NumericTyping.get_common_output_field(numeric_types, [])
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:

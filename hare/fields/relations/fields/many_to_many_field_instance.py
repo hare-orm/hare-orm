@@ -5,13 +5,13 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from hare.exceptions import (
     ConfigurationError,
 )
-from hare.fields.constants import CASCADE, PROTECT, SET_DEFAULT
+from hare.fields.constants import CASCADE, SET_DEFAULT
 from hare.fields.enums import OnDelete, RelationLoadStrategy, RelationType
-from hare.fields.relations.constants import PROTECT_DB_ON_DELETE_SQL
 from hare.fields.relations.swappable_model_reference import SwappableModelReference
 
 if TYPE_CHECKING:
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.filters.lookups.field_lookup import FieldLookup
 from hare.fields.relations.fields.relational_field import RelationalField
 
@@ -53,23 +53,24 @@ class ManyToManyFieldInstance(RelationalField[TModel]):
         # from them, and deconstruct() writes them.
         self.declared_forward_key: str = forward_key or ""
         self.declared_backward_key: str = backward_key
-        self.forward_key: str = forward_key or ""
-        self.forward_keys: tuple[str, ...] = ()
-        self.backward_key: str = backward_key
-        self.backward_keys: tuple[str, ...] = ()
+        self.declared_through = through
+        self.forward_key = forward_key or ""
+        self.forward_keys = ()
+        self.backward_key = backward_key
+        self.backward_keys = ()
         # The through table: its name, or a model declared with its own fields - an "app.Model"
         # string is a deferred model reference. Resolved by Apps, never overwritten.
         self.through_model: type[Model] | str | SwappableModelReference | None = None
         # The through model's resolved class.
-        self.through_model_class: type[Model] | None = None
-        self.through: str = ""
+        self.through_model_class = None
+        self.through = ""
         if through is not None and (not isinstance(through, str) or self.is_model_reference_string(through)):
             self.through_model = through
             if not isinstance(through, (str, SwappableModelReference)):
                 self.through_model_class = through
         else:
             self.through = through or ""
-        self.through_schema: str | None = None
+        self.through_schema = None
         self._generated: bool = False
         self.validate_on_delete(on_delete)
         # For hare's automatic through table only - a through model's own foreign keys carry their
@@ -80,6 +81,84 @@ class ManyToManyFieldInstance(RelationalField[TModel]):
                 "way to declare a default target row for the through-table's columns"
             )
         self.on_delete = on_delete
+
+    @property
+    def forward_key(self) -> str:
+        return self.get_relation_binding().forward_key
+
+    @forward_key.setter
+    def forward_key(self, value: str) -> None:
+        self.get_relation_binding().forward_key = value
+
+    @property
+    def forward_keys(self) -> tuple[str, ...]:
+        return self.get_relation_binding().forward_keys
+
+    @forward_keys.setter
+    def forward_keys(self, value: tuple[str, ...]) -> None:
+        self.get_relation_binding().forward_keys = value
+
+    @property
+    def backward_key(self) -> str:
+        return self.get_relation_binding().backward_key
+
+    @backward_key.setter
+    def backward_key(self, value: str) -> None:
+        self.get_relation_binding().backward_key = value
+
+    @property
+    def backward_keys(self) -> tuple[str, ...]:
+        return self.get_relation_binding().backward_keys
+
+    @backward_keys.setter
+    def backward_keys(self, value: tuple[str, ...]) -> None:
+        self.get_relation_binding().backward_keys = value
+
+    @property
+    def through(self) -> str:
+        return self.get_relation_binding().through
+
+    @through.setter
+    def through(self, value: str) -> None:
+        self.get_relation_binding().through = value
+
+    def _get_constructor_argument_value(self, name: str) -> Any:
+        """Write the declared through model instead of its bound table name."""
+        if name == "through" and self.through_model is not None:
+            if isinstance(self.through_model, (str, SwappableModelReference)):
+                return self.through_model
+            binding = self.get_binding().model_binding
+            app = (
+                binding.graph.get_binding(self.through_model).app
+                if binding is not None
+                else self.through_model._declaration.app
+            )
+            return f"{app}.{self.through_model.__name__}" if app is not None else self.through_model
+        return super()._get_constructor_argument_value(name)
+
+    def get_through_binding(self) -> ModelBinding | None:
+        """The linked explicit through node, None for an automatic through table.
+
+        Relation linking fills both sides before model finalization. Runtime metadata
+        consumers use this node from the retained graph, independent of the current app.
+        """
+        return self.get_relation_binding().through_binding
+
+    @property
+    def through_model_class(self) -> type[Model] | None:
+        return self.get_relation_binding().through_model_class
+
+    @through_model_class.setter
+    def through_model_class(self, value: type[Model] | None) -> None:
+        self.get_relation_binding().through_model_class = value
+
+    @property
+    def through_schema(self) -> str | None:
+        return self.get_relation_binding().through_schema
+
+    @through_schema.setter
+    def through_schema(self, value: str | None) -> None:
+        self.get_relation_binding().through_schema = value
 
     def deconstruct(self) -> tuple[str, list[Any], dict[str, Any]]:
         path, args, kwargs = super().deconstruct()
@@ -101,6 +180,24 @@ class ManyToManyFieldInstance(RelationalField[TModel]):
 
         return FieldLookups.get_many_to_many(self)
 
+    def get_declaration_values(self) -> dict[str, Any]:
+        """Keep declared keys and through references without the previous model binding."""
+        values = super().get_declaration_values()
+        values.update(
+            forward_key=self.declared_forward_key,
+            backward_key=self.declared_backward_key,
+            forward_keys=(),
+            backward_keys=(),
+            through_model_class=None,
+            through_schema=None,
+        )
+        values["through"] = (
+            self.declared_through
+            if isinstance(self.declared_through, str) and not self.is_model_reference_string(self.declared_through)
+            else ""
+        )
+        return values
+
     def get_through_index_keys(self) -> list[tuple[str, ...]]:
         """The key column groups of the automatic through table that get a plain index.
 
@@ -119,4 +216,4 @@ class ManyToManyFieldInstance(RelationalField[TModel]):
         """The ``ON DELETE`` clause text to emit in DDL - ``PROTECT`` has no SQL keyword of its own
         (it's enforced in Python before the DELETE is issued), so the database gets a deferrable
         ``NO ACTION`` backstop instead."""
-        return PROTECT_DB_ON_DELETE_SQL if self.on_delete == PROTECT else self.on_delete
+        return self.get_db_on_delete(self.on_delete)

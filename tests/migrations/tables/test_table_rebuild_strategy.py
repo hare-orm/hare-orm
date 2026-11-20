@@ -4,6 +4,7 @@ import pytest
 
 from hare.contrib.test import requires_features
 from hare.ddl.constraints import UniqueConstraint
+from hare.exceptions import IntegrityError
 from hare.fields import CharField, IntField
 from tests.migrations.round_trips.test_round_trip_real_db import RoundTrip, build_model
 
@@ -24,12 +25,15 @@ async def test_rebuilt_table_keeps_its_rows_indexes_and_unique_constraints(db_is
     )
     indexes_before = set(await round_trip.get_index_definitions("rebuilt_widget"))
 
-    await round_trip.editor.table_rebuild.remake_table(widget, widget)
+    await round_trip.editor.table_rebuild.get_rebuild_plan(
+        round_trip.tracked_state.apps.get_binding("models.RebuiltWidget"),
+        round_trip.tracked_state.apps.get_binding("models.RebuiltWidget"),
+    ).execute(round_trip.editor)
 
     rows = await round_trip.connection.execute_dicts("SELECT id, code, size FROM rebuilt_widget ORDER BY id")
     assert rows == [{"id": 1, "code": "a", "size": 1}, {"id": 2, "code": "b", "size": 2}]
     assert set(await round_trip.get_index_definitions("rebuilt_widget")) == indexes_before
-    with pytest.raises(Exception, match="(?i)unique|duplicate"):
+    with pytest.raises(IntegrityError, match="(?i)unique|duplicate"):
         await round_trip.connection.execute_script("INSERT INTO rebuilt_widget (id, code, size) VALUES (3, 'a', 1)")
 
 
@@ -47,7 +51,10 @@ async def test_rebuilt_table_keeps_its_table_and_column_comments(db_isolated_no_
     widget._no_comments = False  # type: ignore[attr-defined]
     await round_trip.migrate_to(widget)
 
-    await round_trip.editor.table_rebuild.remake_table(widget, widget)
+    await round_trip.editor.table_rebuild.get_rebuild_plan(
+        round_trip.tracked_state.apps.get_binding("models.CommentedWidget"),
+        round_trip.tracked_state.apps.get_binding("models.CommentedWidget"),
+    ).execute(round_trip.editor)
 
     (row,) = await round_trip.connection.execute_dicts(
         "SELECT obj_description('commented_widget'::regclass, 'pg_class') AS table_comment, "

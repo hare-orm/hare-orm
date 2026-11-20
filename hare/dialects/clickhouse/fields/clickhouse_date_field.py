@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.clickhouse.fields.constants import CLICKHOUSE_DATE_RANGE
 from hare.dialects.clickhouse.types.declarations import ClickhouseTypedValue
 from hare.exceptions import ValidationError
@@ -22,7 +23,7 @@ class ClickhouseDateField(DateField[TDate]):
     """``Date`` - a day from 1970-01-01 to 2149-06-06 in two bytes; a day outside them is refused, as
     the server would write the nearest one. ``DateField`` writes the wider ``Date32``."""
 
-    SQL_TYPE = "Date"
+    SQL_TYPE = ClickhouseTypeName.DATE
     COLUMN_TYPE_FROM_DIALECT = True
 
     def get_narrowing_limit(self, old_field: Field[Any]) -> NarrowingLimit | None:
@@ -42,7 +43,8 @@ class ClickhouseDateField(DateField[TDate]):
         first_day, last_day = CLICKHOUSE_DATE_RANGE
         if isinstance(value, datetime.date) and not first_day <= value <= last_day:
             raise ValidationError(
-                f"{self.model_field_name}: {value} is outside the days a Date column holds, {first_day} to {last_day}"
+                f"{self.model_field_name}: {self.get_value_for_message(value)} is outside the days a Date column "
+                f"holds, {first_day} to {last_day}"
             )
         # Typed as the column - a day's literal is a Date32, which VALUES doesn't write into a Date.
         return value if value is None else ClickhouseTypedValue(value, self.SQL_TYPE)

@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import datetime
 
-from hare.exceptions import ConfigurationError
 from hare.fields.db_defaults.sql_default import SqlDefault
 from hare.fields.enums import NowValueType
-from hare.time import Timezone
 from hare.time.system_clock import SystemClock
 
 
@@ -27,8 +25,6 @@ class Now(SqlDefault):
     """
 
     def __init__(self, value_type: NowValueType = NowValueType.DATETIME) -> None:
-        if not isinstance(value_type, str) or value_type not in set(NowValueType):
-            raise ConfigurationError(f"Now() takes a NowValueType, got {value_type!r}")
         super().__init__("CURRENT_TIMESTAMP")
         self.value_type = NowValueType(value_type)
 
@@ -54,23 +50,6 @@ class Now(SqlDefault):
         return self.sql
 
     @staticmethod
-    def get_offset_text(offset: datetime.timedelta) -> str:
-        """A UTC offset as ``+HH:MM`` (``+HH:MM:SS`` when it has seconds).
-
-        Args:
-            offset: The offset.
-
-        Returns:
-            The offset text.
-        """
-        sign = "-" if offset < datetime.timedelta(0) else "+"
-        total_seconds = int(abs(offset).total_seconds())
-        hours, remainder = divmod(total_seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        text = f"{sign}{hours:02d}:{minutes:02d}"
-        return f"{text}:{seconds:02d}" if seconds else text
-
-    @staticmethod
     def get_constant_utc_offset(zone: datetime.tzinfo) -> datetime.timedelta | None:
         """The UTC offset of a zone that doesn't observe DST this year.
 
@@ -84,13 +63,3 @@ class Now(SqlDefault):
         winter_offset = datetime.datetime(year, 1, 1, tzinfo=datetime.UTC).astimezone(zone).utcoffset()
         summer_offset = datetime.datetime(year, 7, 1, tzinfo=datetime.UTC).astimezone(zone).utcoffset()
         return winter_offset if winter_offset == summer_offset else None
-
-    @classmethod
-    def get_configured_offset_text(cls) -> str:
-        """The offset a ``TimeField`` value written from Python carries under ``use_timezone=True``.
-
-        Returns:
-            The configured zone's standard offset.
-        """
-        fixed_offset = Timezone.get_fixed_offset().utcoffset(None)
-        return cls.get_offset_text(fixed_offset if fixed_offset is not None else datetime.timedelta(0))

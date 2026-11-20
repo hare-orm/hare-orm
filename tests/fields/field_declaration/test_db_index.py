@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.ddl.indexes import Index
 from hare.exceptions import ConfigurationError, IntegrityError
 from hare.sql.terms import Field
@@ -67,13 +68,13 @@ def test_index_repr():
 
 @pytest.mark.asyncio
 async def test_model_with_indexes_meta(db):
-    assert ModelWithIndexes._meta.indexes == [
+    assert HareContext.require_current().apps.get_binding(ModelWithIndexes).indexes == (
         Index(fields=("f1", "f2")),
         Index(fields=("f3",), name="model_with_indexes__f3"),
-    ]
-    assert ModelWithIndexes._meta.fields_map["id"].index
-    assert ModelWithIndexes._meta.fields_map["indexed"].index
-    assert ModelWithIndexes._meta.fields_map["unique_indexed"].unique
+    )
+    assert HareContext.require_current().apps.get_binding(ModelWithIndexes).fields_map["id"].index
+    assert HareContext.require_current().apps.get_binding(ModelWithIndexes).fields_map["indexed"].index
+    assert HareContext.require_current().apps.get_binding(ModelWithIndexes).fields_map["unique_indexed"].unique
 
 
 @pytest.mark.asyncio
@@ -96,7 +97,6 @@ async def test_unique_index_with_coalesce_enforces_null_safe_uniqueness(db):
     # A non-NULL variant still keeps ordinary per-value uniqueness within the same group.
     await ModelWithNullSafeUniqueIndex.objects.create(group="a", variant="x")
     await ModelWithNullSafeUniqueIndex.objects.create(group="a", variant="y")
-    assert await ModelWithNullSafeUniqueIndex.objects.count() == 4
     assert await ModelWithNullSafeUniqueIndex.objects.count() == 4
     assert await ModelWithNullSafeUniqueIndex.objects.count() == 4
 

@@ -55,7 +55,7 @@ class UniqueConstraintIndexRule(MigrationSafetyRule):
             or not new_field.unique
             or new_field.pk
             # A many-to-many relation's unique pairs live in the through table the operation creates.
-            or operation.name in new_field.model._meta.many_to_many_fields
+            or operation.name in new_field.get_binding().model_binding.many_to_many_fields  # type: ignore[union-attr]
         ):
             return None
         if isinstance(operation, AlterField):

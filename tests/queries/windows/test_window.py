@@ -4,6 +4,7 @@ from decimal import Decimal
 import pytest
 import pytest_asyncio
 
+from hare.core.hare_context import HareContext
 from hare.exceptions import FieldError, QueryError
 from hare.query.expressions import F, Ordering, Q, Subquery, Window
 from hare.query.expressions.expression_result import ExpressionResult
@@ -850,7 +851,10 @@ async def test_a_window_takes_arithmetic(db, intfields_data):
 @pytest.mark.asyncio
 async def test_a_window_filter_keeps_annotations_named_apart_by_letter_case(db, intfields_data, read_method):
     """Both the derived table and the row reader preserve annotations differing only by case."""
-    if read_method in {"stream", "union_stream"} and not IntFields._meta.connection.features.supports_streaming:
+    if (
+        read_method in {"stream", "union_stream"}
+        and not HareContext.require_current().apps.get_queryset(IntFields).get_connection().features.supports_streaming
+    ):
         pytest.skip("The database has no cursor streaming")
     query = (
         IntFields.objects.filter(intnum_null=0)

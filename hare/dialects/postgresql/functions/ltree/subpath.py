@@ -4,7 +4,7 @@ from typing import Any
 
 from hare.exceptions import ValidationError
 from hare.query.expressions import (
-    F,
+    Expression,
     Function as HareFunction,
 )
 from hare.sql.terms.term import Term
@@ -29,7 +29,7 @@ class Subpath(HareFunction):
     function_name = "subpath"
     populate_field_object = True
 
-    def __init__(self, field: str | F | HareFunction | Term, offset: int, length: int | None = None) -> None:
+    def __init__(self, field: str | Expression | Term, offset: int, length: int | None = None) -> None:
         arguments: list[Any] = [self.get_validated_int("offset", offset)]
         if length is not None:
             arguments.append(self.get_validated_int("length", length))

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import ClassVar, TypeVar
 
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.clickhouse.fields.clickhouse_integer_field import ClickhouseIntegerField
 from hare.dialects.clickhouse.fields.constants import (
     INT8_RANGE,
@@ -21,61 +22,61 @@ TInt = TypeVar("TInt", int, int | None)
 class Int8Field(ClickhouseIntegerField[TInt]):
     """``Int8`` - -128 to 127; the sign column of a ``CollapsingMergeTree``."""
 
-    SQL_TYPE = "Int8"
+    SQL_TYPE = ClickhouseTypeName.INT8
     COLUMN_TYPE_RANGE: ClassVar[tuple[int, int]] = INT8_RANGE
 
 
 class UInt8Field(ClickhouseIntegerField[TInt]):
     """``UInt8`` - 0 to 255."""
 
-    SQL_TYPE = "UInt8"
+    SQL_TYPE = ClickhouseTypeName.UINT8
     COLUMN_TYPE_RANGE: ClassVar[tuple[int, int]] = UINT8_RANGE
 
 
 class UInt16Field(ClickhouseIntegerField[TInt]):
     """``UInt16`` - 0 to 65 535."""
 
-    SQL_TYPE = "UInt16"
+    SQL_TYPE = ClickhouseTypeName.UINT16
     COLUMN_TYPE_RANGE: ClassVar[tuple[int, int]] = UINT16_RANGE
 
 
 class UInt32Field(ClickhouseIntegerField[TInt]):
     """``UInt32`` - 0 to 2**32 - 1."""
 
-    SQL_TYPE = "UInt32"
+    SQL_TYPE = ClickhouseTypeName.UINT32
     COLUMN_TYPE_RANGE: ClassVar[tuple[int, int]] = UINT32_RANGE
 
 
 class UInt64Field(ClickhouseIntegerField[TInt]):
     """``UInt64`` - 0 to 2**64 - 1."""
 
-    SQL_TYPE = "UInt64"
+    SQL_TYPE = ClickhouseTypeName.UINT64
     COLUMN_TYPE_RANGE: ClassVar[tuple[int, int]] = UINT64_RANGE
 
 
 class UInt128Field(ClickhouseIntegerField[TInt]):
     """``UInt128`` - 0 to 2**128 - 1."""
 
-    SQL_TYPE = "UInt128"
+    SQL_TYPE = ClickhouseTypeName.UINT128
     COLUMN_TYPE_RANGE: ClassVar[tuple[int, int]] = UINT128_RANGE
 
 
 class UInt256Field(ClickhouseIntegerField[TInt]):
     """``UInt256`` - 0 to 2**256 - 1."""
 
-    SQL_TYPE = "UInt256"
+    SQL_TYPE = ClickhouseTypeName.UINT256
     COLUMN_TYPE_RANGE: ClassVar[tuple[int, int]] = UINT256_RANGE
 
 
 class Int128Field(ClickhouseIntegerField[TInt]):
     """``Int128`` - -2**127 to 2**127 - 1."""
 
-    SQL_TYPE = "Int128"
+    SQL_TYPE = ClickhouseTypeName.INT128
     COLUMN_TYPE_RANGE: ClassVar[tuple[int, int]] = INT128_RANGE
 
 
 class Int256Field(ClickhouseIntegerField[TInt]):
     """``Int256`` - -2**255 to 2**255 - 1."""
 
-    SQL_TYPE = "Int256"
+    SQL_TYPE = ClickhouseTypeName.INT256
     COLUMN_TYPE_RANGE: ClassVar[tuple[int, int]] = INT256_RANGE

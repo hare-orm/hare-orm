@@ -2,7 +2,9 @@ import pytest
 
 from hare.contrib import test as hare_test
 from hare.contrib.test import requires_features
+from hare.core.apps.model_binding_graph import ModelBindingGraph
 from hare.core.connections.connections import Connections
+from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError, FieldError, IntegrityError, QueryError
 from hare.query.expressions import Q
 from hare.query.functions import Count
@@ -82,17 +84,10 @@ async def test_pk_returns_tuple(db):
 
 
 @pytest.mark.database_independent
+@pytest.mark.usefixtures("model_conversion_context")
 def test_default_custom_generated_pk_is_false_for_composite_pk():
-    """A composite pk's own component fields can never be generated=True
-    (ModelMeta._parse_composite_pk forbids it), so there's no such thing as a DB-auto-generated
-    composite pk to distinguish a "custom" value from - unlike a single-column pk, where
-    default_custom_generated_pk tells DB-hydrated/cloned instances apart by whether their pk
-    column is in generated_db_fields. Before this fix, db_pk_column stayed "" (never a real
-    column name) for a composite pk, so `"" not in generated_db_fields` evaluated True
-    unconditionally - inconsistent with a freshly-constructed composite-pk instance, whose
-    _custom_generated_pk starts and stays False (the pk=True-and-generated=True condition that
-    would ever flip it True can never be satisfied by a composite pk member either)."""
-    assert CompositePkThing._meta.default_custom_generated_pk is False
+    """A composite primary key has no database-generated value to distinguish from a caller-supplied key."""
+    assert HareContext.require_current().apps.get_binding(CompositePkThing).default_custom_generated_pk is False
 
 
 @pytest.mark.asyncio
@@ -116,7 +111,7 @@ async def test_composite_pk_assignment_never_marks_custom_generated_pk(db):
     thing.pk = (2, 2)
     cloned = thing.clone(pk=(3, 3))
 
-    assert CompositePkThing._meta.generated_pk_field_name is None
+    assert HareContext.require_current().apps.get_binding(CompositePkThing).generated_pk_field_name is None
     assert thing._custom_generated_pk is False
     assert cloned._custom_generated_pk is False
     await cloned.save()
@@ -408,6 +403,7 @@ def test_diamond_inheritance_from_same_composite_pk_ancestor_via_two_paths_is_fi
     SAME composite PK - is not a conflict (the field is inherited exactly once, just reachable
     through two paths) and must not raise, matching how a plain .pk=True field inherited via two
     paths already causes no error either."""
+    declaration_graph = ModelBindingGraph()
     from hare import fields
     from hare.models import Model
 
@@ -430,8 +426,8 @@ def test_diamond_inheritance_from_same_composite_pk_ancestor_via_two_paths_is_fi
     class ConcreteDiamondSamePk(AbstractDiamondLeft, AbstractDiamondRight):
         pass
 
-    assert ConcreteDiamondSamePk._meta.primary_key_attribute == ("a", "b")
-    assert set(ConcreteDiamondSamePk._meta.fields_map) >= {"a", "b"}
+    assert declaration_graph.include(ConcreteDiamondSamePk).primary_key_attribute == ("a", "b")
+    assert set(declaration_graph.include(ConcreteDiamondSamePk).fields_map) >= {"a", "b"}
 
 
 @pytest.mark.sqlite_only
@@ -446,31 +442,26 @@ async def test_fk_to_composite_pk_model_generates_one_shadow_column_per_pk_compo
     async with hare_test_context(["tests.composite_primary_keys.foreign_key_target_with_constraint_models"]):
         from tests.composite_primary_keys.foreign_key_target_with_constraint_models import CompositeTarget, FkTarget
 
-        fk_object = FkTarget._meta.fields_map["other"]
+        fk_object = HareContext.require_current().apps.get_binding(FkTarget).fields_map["other"]
         assert fk_object.to_field_names == ("a", "b")
         assert fk_object.to_field_instances == (
-            CompositeTarget._meta.fields_map["a"],
-            CompositeTarget._meta.fields_map["b"],
+            HareContext.require_current().apps.get_binding(CompositeTarget).fields_map["a"],
+            HareContext.require_current().apps.get_binding(CompositeTarget).fields_map["b"],
         )
         assert fk_object.source_fields == ("other_a", "other_b")
         assert fk_object.source_field == "other_a"
-        assert "other_a" in FkTarget._meta.fields_map
-        assert "other_b" in FkTarget._meta.fields_map
-        assert FkTarget._meta.fields_map["other_a"].reference is fk_object
-        assert FkTarget._meta.fields_map["other_b"].reference is fk_object
+        assert "other_a" in HareContext.require_current().apps.get_binding(FkTarget).fields_map
+        assert "other_b" in HareContext.require_current().apps.get_binding(FkTarget).fields_map
+        assert HareContext.require_current().apps.get_binding(FkTarget).fields_map["other_a"].reference is fk_object
+        assert HareContext.require_current().apps.get_binding(FkTarget).fields_map["other_b"].reference is fk_object
 
 
 @pytest.mark.sqlite_only
 @pytest.mark.asyncio
 async def test_fk_to_composite_pk_model_setter_getter_round_trip():
-    """Assigning a composite-target FK via the model kwarg (not the raw shadow columns)
-    populates every shadow column, and reading it back resolves the actual related row -
-    exercises the lazy property get/set wired up in
-    MetaInfo._generate_lazy_forward_relation_fields / Model._fk_setter/_fk_getter for
-    the composite case. Built in memory (not FkTarget.objects.create()) - a real DB-level composite FK
-    constraint on fktarget's own shadow columns is a later, DDL-layer commit; this only
-    exercises the ORM-level property plumbing, querying CompositeTarget (already fully correct)
-    for the getter half."""
+    """Assigning a related object fills every component of the composite foreign key. Loading the relation uses all
+    those components.
+    """
     from hare.contrib.test.isolated_contexts import hare_test_context
 
     async with hare_test_context(["tests.composite_primary_keys.foreign_key_target_with_constraint_models"]):
@@ -860,12 +851,15 @@ async def test_o2o_to_composite_pk_model_generates_composite_unique_constraint()
         from hare.ddl.constraints import UniqueConstraint
         from tests.composite_primary_keys.one_to_one_target_models import O2OTarget
 
-        fk_object = O2OTarget._meta.fields_map["other"]
+        fk_object = HareContext.require_current().apps.get_binding(O2OTarget).fields_map["other"]
         assert fk_object.to_field_names == ("a", "b")
         assert fk_object.source_fields == ("other_a", "other_b")
-        assert not O2OTarget._meta.fields_map["other_a"].unique
-        assert not O2OTarget._meta.fields_map["other_b"].unique
-        assert UniqueConstraint(fields=("other_a", "other_b")) in O2OTarget._meta.constraints
+        assert not HareContext.require_current().apps.get_binding(O2OTarget).fields_map["other_a"].unique
+        assert not HareContext.require_current().apps.get_binding(O2OTarget).fields_map["other_b"].unique
+        assert (
+            UniqueConstraint(fields=("other_a", "other_b"))
+            in HareContext.require_current().apps.get_binding(O2OTarget).constraints
+        )
 
 
 @SKIP_ON_RETURNING_FOREIGN_KEY_ERROR_FAULT
@@ -946,7 +940,7 @@ async def test_m2m_owned_by_composite_pk_model_gets_one_through_column_per_pk_co
     async with hare_test_context(["tests.composite_primary_keys.many_to_many_owner_models"]):
         from tests.composite_primary_keys.many_to_many_owner_models import CompositePkM2MOwner
 
-        field = CompositePkM2MOwner._meta.fields_map["others"]
+        field = HareContext.require_current().apps.get_binding(CompositePkM2MOwner).fields_map["others"]
         assert field.forward_keys == ("plaintarget_id",)
         assert field.backward_keys == ("compositepkm2mowner_a", "compositepkm2mowner_b")
         assert field.forward_key == "plaintarget_id"
@@ -964,11 +958,13 @@ async def test_m2m_targeting_composite_pk_model_gets_one_through_column_per_pk_c
     async with hare_test_context(["tests.composite_primary_keys.many_to_many_target_models"]):
         from tests.composite_primary_keys.many_to_many_target_models import CompositeTarget, M2MTargetingCompositePk
 
-        field = M2MTargetingCompositePk._meta.fields_map["others"]
+        field = HareContext.require_current().apps.get_binding(M2MTargetingCompositePk).fields_map["others"]
         assert field.forward_keys == ("compositetarget_a", "compositetarget_b")
         assert field.backward_keys == ("m2mtargetingcompositepk_id",)
 
-        backward_field = CompositeTarget._meta.fields_map["m2mtargetingcompositepks"]
+        backward_field = (
+            HareContext.require_current().apps.get_binding(CompositeTarget).fields_map["m2mtargetingcompositepks"]
+        )
         assert backward_field.forward_keys == field.backward_keys
         assert backward_field.backward_keys == field.forward_keys
 
@@ -983,7 +979,7 @@ async def test_m2m_both_sides_composite_pk_get_independent_column_counts():
     async with hare_test_context(["tests.composite_primary_keys.many_to_many_both_sides_models"]):
         from tests.composite_primary_keys.many_to_many_both_sides_models import BothSidesCompositeOwner
 
-        field = BothSidesCompositeOwner._meta.fields_map["others"]
+        field = HareContext.require_current().apps.get_binding(BothSidesCompositeOwner).fields_map["others"]
         assert field.backward_keys == ("bothsidescompositeowner_a", "bothsidescompositeowner_b")
         assert field.forward_keys == (
             "bothsidescompositetarget_x",
@@ -1002,7 +998,7 @@ async def test_m2m_self_referential_composite_pk_avoids_column_collision():
     async with hare_test_context(["tests.composite_primary_keys.many_to_many_self_referential_models"]):
         from tests.composite_primary_keys.many_to_many_self_referential_models import CompositePkPerson
 
-        field = CompositePkPerson._meta.fields_map["friends"]
+        field = HareContext.require_current().apps.get_binding(CompositePkPerson).fields_map["friends"]
         assert field.forward_keys == ("compositepkperson_org_id", "compositepkperson_person_id")
         assert field.backward_keys == ("compositepkperson_rel_org_id", "compositepkperson_rel_person_id")
         assert field.forward_keys != field.backward_keys
@@ -1040,7 +1036,9 @@ async def test_m2m_both_sides_composite_pk_add_remove_clear_and_orphan_reject():
         assert list(await owner.others.filter()) == []
 
         conn = ctx.get_connection()
-        through_table = BothSidesCompositeOwner._meta.fields_map["others"].through
+        through_table = (
+            HareContext.require_current().apps.get_binding(BothSidesCompositeOwner).fields_map["others"].through
+        )
         with pytest.raises(IntegrityError):
             await conn.execute_script(
                 f'INSERT INTO "{through_table}" ("bothsidescompositeowner_a","bothsidescompositeowner_b",'
@@ -1499,6 +1497,7 @@ async def test_composite_pk_saved_instance_is_hashable(db):
 
 
 @pytest.mark.database_independent
+@pytest.mark.usefixtures("model_conversion_context")
 def test_composite_pk_unset_instance_repr_does_not_print_a_fake_pk():
     """__repr__ used the same naive `if self.pk:` truthiness check __hash__ was already fixed
     to avoid right next to it - self.pk is a non-empty tuple ((None, None)) for an unsaved
@@ -1621,13 +1620,8 @@ async def test_filter_composite_pk_parent_by_backward_o2o_isnull():
 
 @pytest.mark.sqlite_only
 @pytest.mark.asyncio
-async def test_f_expression_terminal_relation_to_composite_pk_target_raises():
-    """F("<relation>") (and any other resolve_nested_field caller - order_by, annotate) used to
-    build `related_table[""]` when the relation's *last* segment targets a composite-PK model -
-    a composite PK has no single column, so there's no well-defined scalar term to return here
-    (unlike a JOIN condition, every caller of resolve_nested_field - F() arithmetic, annotate/
-    aggregate, cursor pagination - consumes the result as ONE scalar Term). Raises a clear
-    ConfigurationError instead of building broken SQL."""
+async def test_arithmetic_on_a_composite_relation_refuses_a_scalar_operand():
+    """Selecting a composite relation expands its key, but scalar arithmetic cannot use that key."""
     from hare.contrib.test.isolated_contexts import hare_test_context
     from hare.query.expressions import F
 
@@ -1640,7 +1634,7 @@ async def test_f_expression_terminal_relation_to_composite_pk_target_raises():
         with pytest.raises(QueryError):
             await (
                 FkTargetNoConstraint.objects.filter(id=child.id)
-                .annotate(other_val=F("other"))
+                .annotate(other_val=F("other") + 1)
                 .values("id", "other_val")
             )
 

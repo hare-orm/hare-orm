@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
 from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
@@ -25,7 +26,13 @@ class ColumnConversionCheck(SchemaEditorPart):
             quoted_column: The already-quoted column.
         """
 
-    async def get_unread_value(self, qualified_table: str, quoted_column: str, new_field: Field[Any]) -> str | None:
+    @staticmethod
+    def get_shown_conversion_value(old_field: Field[Any], new_field: Field[Any], value: Any) -> str:
+        """A conversion diagnostic protects values sensitive in either column definition."""
+        field = old_field if old_field.sensitive else new_field
+        return field.get_value_for_message(value)
+
+    async def get_unread_value(self, qualified_table: str, quoted_column: str, new_field: Field[Any]) -> Any | None:
         """A stored value the new field's reader doesn't read.
 
         Args:
@@ -34,18 +41,22 @@ class ColumnConversionCheck(SchemaEditorPart):
             new_field: The field's new definition.
 
         Returns:
-            One such value as its text, None when every one is read.
+            One raw stored value, None when every non-NULL value is read. The caller formats it
+            with both the old and the new field's diagnostic policy.
         """
         read_value = self.editor.client.dialect.types.get_python_reader(new_field)
-        _, rows = await self.editor.client.execute(
-            f"SELECT DISTINCT {quoted_column} AS value FROM {qualified_table} "  # nosec B608
-            f"WHERE {quoted_column} IS NOT NULL"
-        )
-        for row in rows:
-            value = dict(row)["value"]
+        for value in await self.iter_distinct_stored_values(qualified_table, quoted_column):
             try:
                 read_value(value)
             except (ValueError, TypeError, ArithmeticError):
                 # The reader refuses a value it doesn't read.
-                return str(value)
+                return value
         return None
+
+    async def iter_distinct_stored_values(self, qualified_table: str, quoted_column: str) -> Iterator[Any]:
+        """Read distinct non-NULL values from the already quoted table and column."""
+        _, rows = await self.editor.client.execute(
+            f"SELECT DISTINCT {quoted_column} AS value FROM {qualified_table} "  # nosec B608
+            f"WHERE {quoted_column} IS NOT NULL"
+        )
+        return (row["value"] for row in rows)

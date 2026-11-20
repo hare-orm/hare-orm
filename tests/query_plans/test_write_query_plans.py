@@ -15,21 +15,11 @@ from hare.exceptions import (
 )
 from hare.query.expressions import F, Q, RawSQL
 from hare.query.functions import Count
-from hare.query.plans.statement.statement_plans import StatementPlans
+from hare.time import Timezone
 from tests.shared_models import testmodels
 from tests.shared_models.testmodels import DatetimeFields, Event, IntFields, Reporter, Tournament, VersionedThing
 from tests.shared_models.testmodels_postgres import DecimalFields
-
-
-async def count_plan_hits(statement) -> tuple[int, int]:
-    """Awaits ``statement``.
-
-    Returns:
-        Its result, and how many statements ran on a found plan meanwhile.
-    """
-    hits = StatementPlans.hits
-    result = await statement
-    return result, StatementPlans.hits - hits
+from tests.utils.statement_plan_checks import StatementPlanChecks
 
 
 @pytest.mark.asyncio
@@ -37,7 +27,7 @@ async def test_update_binds_its_filters_and_values(db):
     first = await IntFields.objects.create(intnum=1)
     second = await IntFields.objects.create(intnum=2)
     assert await IntFields.objects.filter(id=first.id).update(intnum=10) == 1
-    updated, hits = await count_plan_hits(IntFields.objects.filter(id=second.id).update(intnum=20))
+    updated, hits = await StatementPlanChecks.count_plan_hits(IntFields.objects.filter(id=second.id).update(intnum=20))
     assert updated == 1
     assert hits == 1
     assert (await IntFields.objects.get(id=first.id)).intnum == 10
@@ -48,13 +38,13 @@ async def test_update_binds_its_filters_and_values(db):
 async def test_update_with_an_expression_binds_its_literals(db):
     obj = await testmodels.FloatFields.objects.create(id=1, floatnum=1.0)
     await testmodels.FloatFields.objects.filter(id=obj.id).update(floatnum=F("floatnum") + 1.5)
-    _, hits = await count_plan_hits(
+    _, hits = await StatementPlanChecks.count_plan_hits(
         testmodels.FloatFields.objects.filter(id=obj.id).update(floatnum=F("floatnum") + 5.5)
     )
     assert hits == 1
     assert (await testmodels.FloatFields.objects.get(id=obj.id)).floatnum == 8.0
     # Another operator is another shape.
-    _, hits = await count_plan_hits(
+    _, hits = await StatementPlanChecks.count_plan_hits(
         testmodels.FloatFields.objects.filter(id=obj.id).update(floatnum=F("floatnum") * 2.0)
     )
     assert hits == 0
@@ -72,16 +62,16 @@ async def test_update_of_an_int_with_an_expression(db):
 
 
 @pytest.mark.asyncio
-async def test_update_sets_every_auto_now_field_to_its_own_moment(db):
+async def test_update_sets_every_auto_now_field_to_its_own_moment(db, monkeypatch):
     tournament = await Tournament.objects.create(name="t")
     event = await Event.objects.create(name="e", tournament=tournament)
-    moments = []
-    for name in ("first", "second", "third"):
+    for index, name in enumerate(("first", "second", "third"), start=1):
+        moment = datetime.datetime(2026, 1, index, tzinfo=datetime.UTC)
+        monkeypatch.setattr(Timezone, "now", lambda value=moment: value)
         await Event.objects.filter(event_id=event.event_id).update(name=name)
         fetched = await Event.objects.get(event_id=event.event_id)
         assert fetched.name == name
-        moments.append(fetched.modified)
-    assert moments[0] < moments[1] < moments[2]
+        assert fetched.modified == moment
 
 
 @pytest.mark.asyncio
@@ -158,7 +148,9 @@ async def test_update_value_types_keep_separate_plans(db):
     obj = await testmodels.FloatFields.objects.create(id=1, floatnum=1.5)
     await testmodels.FloatFields.objects.filter(id=obj.id).update(floatnum=2.5)
     # A Decimal is written as a float, by another plan than the float's.
-    _, hits = await count_plan_hits(testmodels.FloatFields.objects.filter(id=obj.id).update(floatnum=Decimal("3.5")))
+    _, hits = await StatementPlanChecks.count_plan_hits(
+        testmodels.FloatFields.objects.filter(id=obj.id).update(floatnum=Decimal("3.5"))
+    )
     assert hits == 0
     assert (await testmodels.FloatFields.objects.get(id=obj.id)).floatnum == 3.5
 
@@ -190,7 +182,7 @@ async def test_update_through_a_relation_filter(db):
 async def test_delete_binds_its_filters(db):
     rows = [await IntFields.objects.create(intnum=index) for index in range(4)]
     assert await IntFields.objects.filter(intnum=0).delete() == 1
-    deleted, hits = await count_plan_hits(IntFields.objects.filter(intnum=1).delete())
+    deleted, hits = await StatementPlanChecks.count_plan_hits(IntFields.objects.filter(intnum=1).delete())
     assert deleted == 1
     assert hits == 1
     assert sorted(row.intnum for row in await IntFields.objects.all()) == [2, 3]
@@ -220,13 +212,17 @@ async def test_update_and_delete_filtered_across_a_relation_run_on_their_plan(db
     for tournament in tournaments:
         await Event.objects.create(name=f"{tournament.name}-event", tournament=tournament)
     await Event.objects.filter(tournament__name="a").update(name="first")
-    updated, hits = await count_plan_hits(Event.objects.filter(tournament__name__in=["b", "c"]).update(name="second"))
+    updated, hits = await StatementPlanChecks.count_plan_hits(
+        Event.objects.filter(tournament__name__in=["b", "c"]).update(name="second")
+    )
     assert (updated, hits) == (2, 0)
-    updated, hits = await count_plan_hits(Event.objects.filter(tournament__name__in=["a", "b"]).update(name="third"))
+    updated, hits = await StatementPlanChecks.count_plan_hits(
+        Event.objects.filter(tournament__name__in=["a", "b"]).update(name="third")
+    )
     assert (updated, hits) == (2, 1)
     assert sorted(await Event.objects.all().values_list("name", flat=True)) == ["second", "third", "third"]
     await Event.objects.filter(tournament__name="c").delete()
-    deleted, hits = await count_plan_hits(Event.objects.filter(tournament__name="a").delete())
+    deleted, hits = await StatementPlanChecks.count_plan_hits(Event.objects.filter(tournament__name="a").delete())
     # A dialect may run statements of its own around a delete (reading the keys first) - each
     # on its plan too.
     assert deleted == 1
@@ -247,7 +243,7 @@ async def test_update_filtered_on_an_aggregate_annotation_runs_on_its_plan(db):
         )
 
     await with_events(3, "many")
-    updated, hits = await count_plan_hits(with_events(2, "some"))
+    updated, hits = await StatementPlanChecks.count_plan_hits(with_events(2, "some"))
     assert (updated, hits) == (2, 1)
     assert {tournament.name: tournament.desc for tournament in await Tournament.objects.all()} == {
         "a": None,
@@ -267,11 +263,11 @@ async def test_update_and_delete_with_a_cte_run_on_their_plan(db):
         )
 
     await picked(6).update(intnum_null=1)
-    updated, hits = await count_plan_hits(picked(4).update(intnum_null=2))
+    updated, hits = await StatementPlanChecks.count_plan_hits(picked(4).update(intnum_null=2))
     assert (updated, hits) == (3, 1)
     assert sorted(await IntFields.objects.filter(intnum_null=2).values_list("intnum", flat=True)) == [4, 5, 6]
     await picked(6).delete()
-    deleted, hits = await count_plan_hits(picked(4).delete())
+    deleted, hits = await StatementPlanChecks.count_plan_hits(picked(4).delete())
     assert (deleted, hits) == (2, 1)
     assert sorted(await IntFields.objects.all().values_list("intnum", flat=True)) == [1, 2, 3]
 
@@ -289,7 +285,9 @@ async def test_update_of_a_relation_to_a_composite_key_runs_on_its_plan():
         ]
         child = await FkTargetNoConstraint.objects.create(other=targets[0], name="child")
         await FkTargetNoConstraint.objects.filter(id=child.id).update(other=targets[1])
-        _, hits = await count_plan_hits(FkTargetNoConstraint.objects.filter(id=child.id).update(other=targets[2]))
+        _, hits = await StatementPlanChecks.count_plan_hits(
+            FkTargetNoConstraint.objects.filter(id=child.id).update(other=targets[2])
+        )
         assert hits == 1
         fetched = await FkTargetNoConstraint.objects.get(id=child.id)
         assert (fetched.other_a, fetched.other_b) == (3, 30)
@@ -299,7 +297,7 @@ async def test_update_of_a_relation_to_a_composite_key_runs_on_its_plan():
 async def test_update_after_a_keyset_boundary_runs_on_its_plan(db):
     await create_numbered_rows()
     await IntFields.objects.all().order_by("intnum").after_cursor(4).update(intnum_null=1)
-    updated, hits = await count_plan_hits(
+    updated, hits = await StatementPlanChecks.count_plan_hits(
         IntFields.objects.all().order_by("intnum").after_cursor(2).update(intnum_null=2)
     )
     assert (updated, hits) == (4, 1)

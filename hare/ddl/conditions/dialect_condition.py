@@ -6,7 +6,7 @@ from hare.ddl.conditions.field_condition import FieldCondition
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class DialectCondition(FieldCondition):
@@ -15,11 +15,11 @@ class DialectCondition(FieldCondition):
 
     __slots__ = ()
 
-    def get_condition_sql(self, model: type[Model], client: DatabaseClient) -> str:
-        """The predicate written into a table of ``model``.
+    def get_condition_sql(self, binding: ModelBinding, client: DatabaseClient) -> str:
+        """The predicate written into a table of ``binding``.
 
         Args:
-            model: The model the constraint, the index or the policy belongs to.
+            binding: The structural metadata the constraint, index or policy belongs to.
             client: The client of the database the DDL runs on.
 
         Returns:

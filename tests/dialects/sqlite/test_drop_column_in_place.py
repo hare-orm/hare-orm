@@ -48,7 +48,7 @@ async def remove_pages(*, pages_field=None, options=None, database_sql: str = ""
     try:
         recorder = RecordingEditor(client)
         state = State()
-        await apply_operations(
+        state = await apply_operations(
             "models",
             state,
             CreateModel(

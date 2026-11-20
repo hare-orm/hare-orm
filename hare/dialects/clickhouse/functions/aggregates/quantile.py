@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.dialects.clickhouse.functions.aggregates.parametric_aggregate import ParametricAggregate
@@ -56,7 +56,7 @@ class Quantile(ParametricAggregate):
         Raises:
             QueryError: It isn't one.
         """
-        if isinstance(level, bool) or not isinstance(level, int | float) or not 0 <= level <= 1:
+        if isinstance(level, bool) or not isinstance(level, (int, float)) or not 0 <= level <= 1:
             raise QueryError(
                 f"A quantile's level is a number from 0 to 1, got {ValueDescriptions.get_shown_value(level)}"
             )
@@ -72,4 +72,4 @@ class Quantile(ParametricAggregate):
         # An exact quantile is one of the values; an estimate of integers is interpolated.
         if self.exact:
             return field_object
-        return cast("Field[Any]", NumericTyping.get_quotient_output_field(field_object, expression_context.dialect))
+        return NumericTyping.get_quotient_output_field(field_object, expression_context.dialect)  # type: ignore[return-value]

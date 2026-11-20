@@ -1,9 +1,5 @@
-"""Regression tests for MetaInfo._generate_lazy_fk_m2m_fields after consolidating its four
-near-identical loops (foreign_key_fields/one_to_one_fields sharing _generate_lazy_forward_relation_fields,
-backward_foreign_key_fields/backward_one_to_one_fields sharing _generate_lazy_backward_relation_fields) into
-two parameterized helpers. Covers all four relation types plus the classic
-partial()/closure cross-contamination risk of that type of refactor: two FK fields on the
-same model must never resolve to each other's value.
+"""Forward and backward relation descriptors stay independent when several fields or instances use the same relation
+type.
 """
 
 import pytest
@@ -87,12 +83,9 @@ async def test_forward_and_backward_o2o_resolve_correctly(db):
 
 @pytest.mark.asyncio
 async def test_backward_o2o_getter_does_not_cache_a_stale_pre_save_result(db):
-    """Model._ro2o_getter used to setattr(instance, _key, val) after resolving once, caching
-    the QuerySetSingle it built from whatever value the owning side's own pk held AT THAT
-    moment. Accessing event.address before event is saved (pk still None) permanently cached
-    a queryset built from event_id=None, so even after saving the event and creating its
-    Address, event.address kept re-running that same stale, frozen query and returning None
-    forever instead of resolving against the instance's current (now-set) pk."""
+    """Reading a backward one-to-one relation on an unsaved instance does not hide a related row created after saving
+    it.
+    """
     tournament = await Tournament.objects.create(name="cup")
     event = Event(name="final", tournament=tournament)
     assert await event.address is None  # accessed before save() - pk is still None here

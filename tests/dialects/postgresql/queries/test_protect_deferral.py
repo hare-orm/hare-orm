@@ -4,6 +4,7 @@ fails takes it back too, so a later statement of the same transaction is checked
 import pytest
 
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.dialects.postgresql.schema.runtime_statements.postgresql_foreign_key_deferral import (
     PostgresqlForeignKeyDeferral,
 )
@@ -17,7 +18,7 @@ class BlockFailed(Exception):
 
 
 async def delete_parent_row(db, parent: SoftDeleteParent) -> None:
-    table = SoftDeleteParent._meta.db_table
+    table = HareContext.require_current().apps.get_binding(SoftDeleteParent).db_table
     await db.execute(f'DELETE FROM "{table}" WHERE "id" = $1', [parent.id])
 
 
@@ -28,7 +29,9 @@ async def test_a_failed_block_takes_the_deferral_back(db_truncate):
     await SoftDeleteChildProtect.objects.create(name="child", parent=parent)
     async with Transactions.atomic() as transaction:
         with pytest.raises(BlockFailed):
-            async with PostgresqlForeignKeyDeferral.defer(SoftDeleteParent, transaction) as deferred:
+            async with PostgresqlForeignKeyDeferral.defer(
+                HareContext.require_current().apps.get_binding(SoftDeleteParent), transaction
+            ) as deferred:
                 assert deferred
                 raise BlockFailed
         with pytest.raises(IntegrityError):
@@ -45,9 +48,11 @@ async def test_a_block_failing_on_a_database_error_keeps_that_error(db_truncate)
     async with Transactions.atomic():
         with pytest.raises(IntegrityError, match="duplicate key|unique"):
             async with Transactions.atomic() as savepoint:
-                async with PostgresqlForeignKeyDeferral.defer(SoftDeleteParent, savepoint) as deferred:
+                async with PostgresqlForeignKeyDeferral.defer(
+                    HareContext.require_current().apps.get_binding(SoftDeleteParent), savepoint
+                ) as deferred:
                     assert deferred
-                    table = SoftDeleteParent._meta.db_table
+                    table = HareContext.require_current().apps.get_binding(SoftDeleteParent).db_table
                     await savepoint.execute(
                         f'INSERT INTO "{table}" ("id", "name") VALUES ($1, $2)', [parent.id, "duplicate"]
                     )

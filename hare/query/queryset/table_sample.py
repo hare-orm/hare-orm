@@ -45,8 +45,8 @@ class TableSample:
                 f"sample() takes a percent from 0 to {MAX_TABLE_SAMPLE_PERCENT}, got "
                 f"{ValueDescriptions.get_shown_value(percent)}"
             )
-        method_names = ", ".join(sample_method.value for sample_method in TableSampleMethod)
-        if not isinstance(method, str) or method.upper() not in set(TableSampleMethod):
+        if not isinstance(method, str) or method.upper() not in TableSampleMethod:
+            method_names = ", ".join(sample_method.value for sample_method in TableSampleMethod)
             raise QueryError(
                 f"sample(method=...) takes one of {method_names}, got {ValueDescriptions.get_shown_value(method)}"
             )

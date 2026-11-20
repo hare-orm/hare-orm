@@ -3,15 +3,54 @@ from __future__ import annotations
 import pytest
 
 from hare import fields
+from hare.contrib.test.databases.temporary_databases import TemporaryDatabases
 from hare.ddl import RawSQLTerm
 from hare.ddl.constraints import UniqueConstraint
 from hare.dialects.sqlite.drivers.aiosqlite.client import AiosqliteClient
 from hare.dialects.sqlite.schema.sqlite_schema_editor import SqliteSchemaEditor
-from hare.migrations.state.state_apps import StateApps
+from hare.exceptions import IntegrityError
 from hare.models import Model
 from tests.utils.fake_client import FakeClient
+from tests.utils.model_bindings import ModelBindings
 
 pytestmark = pytest.mark.database_independent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("schema", ("main", "aux", 'aux "archive"'))
+@pytest.mark.parametrize("composite", (False, True))
+@pytest.mark.parametrize("orphan", (False, True))
+async def test_sqlite_constraint_checks_include_each_attached_catalog(schema, composite, orphan):
+    async with TemporaryDatabases(
+        {"connections": {"main": None}, "apps": {}}, "sqlite+aiosqlite://:memory:", generate_schemas=False
+    ) as context:
+        client = context.connections.get_main("main")
+        editor = SqliteSchemaEditor(client)
+        quote = editor.quote
+        if schema != "main":
+            await client.execute(f"ATTACH DATABASE ':memory:' AS {quote(schema)}")
+        parent = editor.qualify_table_name("parent", schema)
+        child = editor.qualify_table_name("child", schema)
+        columns = '"region", "id"' if composite else '"id"'
+        values = "7, 1" if composite else "1"
+        child_values = f"7, {99 if orphan else 1}" if composite else str(99 if orphan else 1)
+        await client.execute(f'CREATE TABLE {parent} ("region" INT, "id" INT, PRIMARY KEY ({columns}))')
+        await client.execute(f"INSERT INTO {parent} ({columns}) VALUES ({values})")
+        async with editor.constraint_checking_disabled() as needs_check:
+            assert needs_check
+            await client.execute(
+                f'CREATE TABLE {child} ("region" INT, "id" INT, '
+                f'FOREIGN KEY ({columns}) REFERENCES "parent" ({columns}))'
+            )
+            await client.execute(f"INSERT INTO {child} ({columns}) VALUES ({child_values})")
+            native_violations = await client.execute_dicts(f"PRAGMA {quote(schema)}.foreign_key_check")
+            assert bool(native_violations) is orphan
+            if orphan:
+                with pytest.raises(IntegrityError, match="foreign key violation"):
+                    await editor.check_constraints()
+            else:
+                await editor.check_constraints()
+        assert await client.read_foreign_key_state() is True
 
 
 class Widget(Model):
@@ -23,11 +62,7 @@ class Widget(Model):
         app = "models"
 
 
-def init_apps(*models: type[Model]) -> None:
-    apps = StateApps()
-    for model in models:
-        apps.register_model("models", model)
-    apps.init_relations()
+schema_apps = ModelBindings.prepare(Widget)
 
 
 @pytest.mark.asyncio
@@ -35,7 +70,7 @@ async def test_sqlite_add_field_unique_uses_index() -> None:
     client = FakeClient("sqlite")
     editor = SqliteSchemaEditor(client)
 
-    await editor.add_field(Widget, Widget, "slug")
+    await editor.add_field(schema_apps.get_binding(Widget), schema_apps.get_binding(Widget), "slug")
 
     assert len(client.executed) == 2
     add_column_sql = client.executed[0]
@@ -67,12 +102,12 @@ async def test_sqlite_add_field_foreign_key_includes_inline_reference() -> None:
             table = "item"
             app = "models"
 
-    init_apps(Category, Item)
+    apps_1 = ModelBindings.prepare(Category, Item)
 
     client = FakeClient("sqlite")
     editor = SqliteSchemaEditor(client)
 
-    await editor.add_field(Item, Item, "category")
+    await editor.add_field(apps_1.get_binding(Item), apps_1.get_binding(Item), "category")
 
     # The column, then the index its relation's db_index gives it.
     assert len(client.executed) == 2
@@ -104,12 +139,12 @@ async def test_sqlite_add_field_foreign_key_db_constraint_false_omits_reference(
             table = "item"
             app = "models"
 
-    init_apps(Category, Item)
+    apps_1 = ModelBindings.prepare(Category, Item)
 
     client = FakeClient("sqlite")
     editor = SqliteSchemaEditor(client)
 
-    await editor.add_field(Item, Item, "category")
+    await editor.add_field(apps_1.get_binding(Item), apps_1.get_binding(Item), "category")
 
     # The column, then the index its relation's db_index gives it.
     assert len(client.executed) == 2
@@ -142,12 +177,12 @@ async def test_sqlite_add_field_foreign_key_with_description_includes_comment() 
             table = "item"
             app = "models"
 
-    init_apps(Category, Item)
+    apps_1 = ModelBindings.prepare(Category, Item)
 
     client = FakeClient("sqlite")
     editor = SqliteSchemaEditor(client)
 
-    await editor.add_field(Item, Item, "category")
+    await editor.add_field(apps_1.get_binding(Item), apps_1.get_binding(Item), "category")
 
     # The column, then the index its relation's db_index gives it.
     assert len(client.executed) == 2
@@ -180,12 +215,12 @@ async def test_sqlite_add_field_m2m_db_constraint_false_omits_both_references() 
             table = "post"
             app = "models"
 
-    init_apps(Tag, Post)
+    apps_1 = ModelBindings.prepare(Tag, Post)
 
     client = FakeClient("sqlite")
     editor = SqliteSchemaEditor(client)
 
-    await editor.add_field(Post, Post, "tags")
+    await editor.add_field(apps_1.get_binding(Post), apps_1.get_binding(Post), "tags")
 
     assert len(client.executed) == 1
     sql = client.executed[0]
@@ -216,12 +251,12 @@ async def test_sqlite_add_field_m2m_honors_on_delete() -> None:
             table = "post"
             app = "models"
 
-    init_apps(Tag, Post)
+    apps_1 = ModelBindings.prepare(Tag, Post)
 
     client = FakeClient("sqlite")
     editor = SqliteSchemaEditor(client)
 
-    await editor.add_field(Post, Post, "tags")
+    await editor.add_field(apps_1.get_binding(Post), apps_1.get_binding(Post), "tags")
 
     assert len(client.executed) == 1
     sql = client.executed[0]
@@ -253,12 +288,12 @@ async def test_sqlite_add_field_m2m_set_null_produces_nullable_columns() -> None
             table = "post"
             app = "models"
 
-    init_apps(Tag, Post)
+    apps_1 = ModelBindings.prepare(Tag, Post)
 
     client = FakeClient("sqlite")
     editor = SqliteSchemaEditor(client)
 
-    await editor.add_field(Post, Post, "tags")
+    await editor.add_field(apps_1.get_binding(Post), apps_1.get_binding(Post), "tags")
 
     assert len(client.executed) == 1
     sql = client.executed[0]
@@ -291,7 +326,7 @@ async def test_sqlite_constraint_with_condition_is_a_partial_unique_index(method
     editor = SqliteSchemaEditor(client)
 
     constraint = UniqueConstraint(fields=("slug",), name="uq_active_slug", condition=RawSQLTerm("is_active = 1"))
-    await getattr(editor, method_name)(Widget, constraint)
+    await getattr(editor, method_name)(schema_apps.get_binding(Widget), constraint)
     assert client.executed == [expected]
 
 
@@ -308,7 +343,7 @@ async def test_sqlite_rename_constraint_preserves_uniqueness() -> None:
     old_constraint = UniqueConstraint(fields=("slug",), name="uq_widget_slug")
     new_constraint = UniqueConstraint(fields=("slug",), name="uq_widget_slug_renamed")
 
-    await editor.rename_constraint(Widget, old_constraint, new_constraint)
+    await editor.rename_constraint(schema_apps.get_binding(Widget), old_constraint, new_constraint)
 
     assert len(client.executed) == 2
     assert client.executed[0] == 'DROP INDEX "uq_widget_slug"'
@@ -332,14 +367,18 @@ async def test_sqlite_alter_field_rename_and_type_change_applies_both() -> None:
             table = "widget"
             app = "models"
 
+    prepared_apps = ModelBindings.prepare(WidgetWithLongerSlug)
+
     # The table is rebuilt from the model the field belongs to.
     await editor.alter_column(
-        WidgetWithLongerSlug, Widget._meta.fields_map["slug"], WidgetWithLongerSlug._meta.fields_map["slug"]
+        prepared_apps.get_binding(WidgetWithLongerSlug),
+        schema_apps.get_binding(Widget).fields_map["slug"],
+        prepared_apps.get_binding(WidgetWithLongerSlug).fields_map["slug"],
     )
 
     # Not the single-statement RENAME COLUMN fast path - the type change forces a rebuild.
     assert not (len(client.executed) == 1 and "RENAME COLUMN" in client.executed[0])
-    create_new_table_sql = next(sql for sql in client.executed if sql.startswith('CREATE TABLE "new__widget"'))
+    create_new_table_sql = next(sql for sql in client.executed if sql.startswith('CREATE TABLE "new__widget '))
     assert "VARCHAR(100)" in create_new_table_sql
     assert '"new_slug"' in create_new_table_sql
 
@@ -350,10 +389,10 @@ async def test_sqlite_constraint_name_used_for_drop() -> None:
     editor = SqliteSchemaEditor(client)
 
     constraint = UniqueConstraint(fields=("slug",))
-    constraint_name = editor.constraint_names.constraint_name_for_model(Widget, constraint)
+    constraint_name = editor.constraint_names.constraint_name_for_model(schema_apps.get_binding(Widget), constraint)
 
-    await editor.add_constraint(Widget, constraint)
-    await editor.remove_constraint(Widget, constraint)
+    await editor.add_constraint(schema_apps.get_binding(Widget), constraint)
+    await editor.remove_constraint(schema_apps.get_binding(Widget), constraint)
 
     assert constraint_name in client.executed[0]
     assert f'DROP INDEX "{constraint_name}"' in client.executed[1]

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.fields.constants import GENERIC_FOREIGN_KEY_TYPE_FIELD
+from hare.models import Model
 
 if TYPE_CHECKING:
     from hare.fields.relations.fields.generic_foreign_key_field_instance import GenericForeignKeyFieldInstance
@@ -26,8 +27,8 @@ class GenericForeignKeyTagReader:
 
     def __call__(self, value: Any) -> str | None:
         if isinstance(value, dict):
-            return cast("str | None", value.get(GENERIC_FOREIGN_KEY_TYPE_FIELD))
-        if hasattr(value, "_meta"):
+            return value.get(GENERIC_FOREIGN_KEY_TYPE_FIELD)
+        if isinstance(value, Model):
             return self.generic_field.branch_by_model.get(type(value))
         return getattr(value, GENERIC_FOREIGN_KEY_TYPE_FIELD, None)
 

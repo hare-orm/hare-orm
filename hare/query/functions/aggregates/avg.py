@@ -8,7 +8,8 @@ from hare.query.functions.aggregates.statistic_result_aggregate import Statistic
 
 
 class Avg(StatisticResultAggregate):
-    """The mean of the values of a group, NULLs left out - NULL for a group of none: ``Avg("price")``.
+    """The mean of a group's values, NULLs left out: ``Avg("price")``.
+    The database determines the result for an empty group.
     An average of integers or Decimals is an exact Decimal where the database computes one
     (``Features.computes_integer_statistics_exactly``, ``computes_decimal_statistics_exactly``), else a
     float."""

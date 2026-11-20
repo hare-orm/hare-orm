@@ -61,7 +61,7 @@ class RenameSchemaObject(ModelBoundOperation):
         """
         model_state = self.get_model_state(state, app_label, self.model_name)
         return self.object_type.find_for_rename(
-            model_state, lambda: self._model(state, app_label), name=self.old_name, fields=self.old_fields
+            model_state, lambda: self.get_model_binding(state, app_label), name=self.old_name, fields=self.old_fields
         )
 
     def find_new(self, state: State, app_label: str) -> Any:
@@ -75,7 +75,7 @@ class RenameSchemaObject(ModelBoundOperation):
             The object.
         """
         model_state = self.get_model_state(state, app_label, self.model_name)
-        return self.object_type.find(model_state, lambda: self._model(state, app_label), name=self.new_name)
+        return self.object_type.find(model_state, lambda: self.get_model_binding(state, app_label), name=self.new_name)
 
     def state_forward(self, app_label: str, state: State) -> None:
         model_state = self.get_model_state(state, app_label, self.model_name)
@@ -99,7 +99,7 @@ class RenameSchemaObject(ModelBoundOperation):
     ) -> None:
         if not state_editor:
             return
-        model = self._model(new_state, app_label)
+        model = self.get_model_binding(new_state, app_label)
         await self.object_type.rename(
             state_editor, model, self.find_old(old_state, app_label), self.find_new(new_state, app_label)
         )
@@ -115,7 +115,7 @@ class RenameSchemaObject(ModelBoundOperation):
             return
         # Going back, old_state is the renamed state and new_state the one before the rename - the
         # model it goes back to: a database without ALTER of constraints renames one by rebuilding the table from it.
-        model = self._model(new_state, app_label)
+        model = self.get_model_binding(new_state, app_label)
         await self.object_type.rename(
             state_editor, model, self.find_new(old_state, app_label), self.find_old(new_state, app_label)
         )

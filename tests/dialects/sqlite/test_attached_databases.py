@@ -2,10 +2,14 @@
 model's ``Meta.schema`` names one of them, and the DDL names an index or trigger in it - its table and
 the table a foreign key references are of the same database."""
 
+from collections import UserDict
+from types import MappingProxyType
+
 import pytest
 
 from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.core.apps.model_connection_checks import ModelConnectionChecks
+from hare.core.hare_context import HareContext
 from hare.dialects.sqlite.drivers.aiosqlite.client.aiosqlite_client import AiosqliteClient
 from hare.exceptions import ConfigurationError, OperationalError
 from tests.utils.attached_databases import get_url_with_attached_databases
@@ -20,10 +24,12 @@ SCHEMA_MODULES = ["tests.schema.models_schema_qualified"]
     ("setting", "attached"),
     [
         ({"custom": ":memory:"}, {"custom": ":memory:"}),
+        (UserDict({"custom": ":memory:"}), {"custom": ":memory:"}),
+        (MappingProxyType({"custom": ":memory:"}), {"custom": ":memory:"}),
         ("custom::memory:,archive:C:\\data\\archive.db", {"custom": ":memory:", "archive": "C:\\data\\archive.db"}),
     ],
 )
-def test_the_attached_databases_are_read_from_a_dict_or_a_url_text(setting, attached):
+def test_the_attached_databases_are_read_from_a_mapping_or_a_url_text(setting, attached):
     client = AiosqliteClient(file_path=":memory:", connection_alias="default", attached_databases=setting)
     assert client.attached_databases == attached
 
@@ -37,7 +43,6 @@ def test_the_attached_databases_are_read_from_a_dict_or_a_url_text(setting, atta
         ("", "name:file pairs"),
         (",", "name:file pairs"),
         ("a::memory:,a:other.db", "a database name is given twice"),
-        (["custom"], "a dict of database names to files"),
         ({"main": ":memory:"}, "keeps the database name 'main'"),
         ({"TEMP": ":memory:"}, "keeps the database name 'TEMP'"),
         ({"": ":memory:"}, "a database name must be a non-empty text"),
@@ -62,7 +67,7 @@ async def test_the_ddl_names_indexes_in_the_attached_database_and_references_its
     async with hare_test_context(
         SCHEMA_MODULES, db_url=get_url_with_attached_databases("sqlite+aiosqlite://:memory:", ["custom"])
     ) as ctx:
-        connection = ctx.apps.get_model("models.SchemaCategory")._meta.connection
+        connection = ctx.apps.get_queryset("models.SchemaCategory").get_connection()
         schema_sql = connection.get_schema_sql(safe=False)
         assert 'CREATE TABLE "custom"."product"' in schema_sql
         assert 'CREATE INDEX "custom"."idx_product_categor_2b519b10056a" ON "product" ("category_id")' in schema_sql
@@ -80,7 +85,7 @@ async def test_the_migration_safety_check_counts_the_rows_of_the_attached_databa
     async with hare_test_context(
         SCHEMA_MODULES, db_url=get_url_with_attached_databases("sqlite+aiosqlite://:memory:", ["custom"])
     ) as ctx:
-        connection = ctx.apps.get_model("models.SchemaCategory")._meta.connection
+        connection = ctx.apps.get_queryset("models.SchemaCategory").get_connection()
         await connection.execute_script("INSERT INTO \"custom\".\"category\" (id, name) VALUES (1, 'a'), (2, 'b')")
         await connection.execute_script('CREATE TABLE "main"."category" (id INTEGER PRIMARY KEY)')
         rules = connection.dialect.migration_safety_rules
@@ -97,16 +102,22 @@ async def test_a_constrained_relation_to_a_model_of_another_schema_is_refused(mo
         product_model = ctx.apps.get_model("models.SchemaProduct")
         category_model = ctx.apps.get_model("models.SchemaCategory")
         tag_model = ctx.apps.get_model("models.SchemaTag")
-        monkeypatch.setattr(category_model._meta, "schema", "archive")
-        monkeypatch.setattr(tag_model._meta, "schema", "archive")
+        monkeypatch.setattr(ctx.apps.get_binding(category_model), "schema", "archive")
+        monkeypatch.setattr(ctx.apps.get_binding(tag_model), "schema", "archive")
         with pytest.raises(
             ConfigurationError,
             match=r"relations category, tags to models of another schema.*reference only tables of their own schema",
         ):
-            ModelConnectionChecks.check_model_writes(product_model)
-        monkeypatch.setattr(product_model._meta.fields_map["category"], "db_constraint", False)
-        monkeypatch.setattr(product_model._meta.fields_map["tags"], "db_constraint", False)
-        ModelConnectionChecks.check_model_writes(product_model)
+            ModelConnectionChecks.check_model_writes(
+                ctx.apps.get_binding("models.SchemaProduct"),
+                ctx.apps.get_queryset("models.SchemaProduct").get_connection(),
+            )
+        monkeypatch.setattr(ctx.apps.get_binding(product_model).fields_map["category"], "db_constraint", False)
+        monkeypatch.setattr(ctx.apps.get_binding(product_model).fields_map["tags"], "db_constraint", False)
+        ModelConnectionChecks.check_model_writes(
+            ctx.apps.get_binding("models.SchemaProduct"),
+            ctx.apps.get_queryset("models.SchemaProduct").get_connection(),
+        )
 
 
 @pytest.mark.asyncio
@@ -137,7 +148,7 @@ async def test_a_full_text_index_and_a_trigger_of_an_attached_database():
         assert (await ArchivedArticle.objects.get(id=hares.id)).edits == 1
         assert [article.id for article in await ArchivedArticle.objects.filter(title__search="rabbits")] == [hares.id]
 
-        connection = ArchivedArticle._meta.connection
+        connection = HareContext.require_current().apps.get_queryset(ArchivedArticle).get_connection()
         _, rows = await connection.execute("SELECT type, name FROM archive.sqlite_master WHERE type = 'trigger'")
         assert {row[1] for row in rows} >= {"archived_article_counts_edits"}
         _, main_rows = await connection.execute("SELECT name FROM main.sqlite_master")
@@ -154,11 +165,13 @@ async def test_a_spatial_index_of_an_attached_database_is_refused(monkeypatch):
         ["tests.dialects.sqlite.models_attached_database"],
         db_url=get_url_with_attached_databases("sqlite+aiosqlite://:memory:", ["archive"]),
     ):
-        connection = ArchivedArticle._meta.connection
+        connection = HareContext.require_current().apps.get_queryset(ArchivedArticle).get_connection()
         monkeypatch.setattr(connection, "features", connection.features.replace(supports_spatial_index=True))
         editor = connection.dialect.schema_editor_class(connection)
         with pytest.raises(UnSupportedError, match="geometry columns of the main database only"):
-            SpatialiteIndex(fields=("body",)).get_create_sqls(editor, ArchivedArticle, safe=False)
+            SpatialiteIndex(fields=("body",)).get_create_sqls(
+                editor, HareContext.require_current().apps.get_binding(ArchivedArticle), safe=False
+            )
 
 
 @pytest.mark.asyncio
@@ -168,7 +181,7 @@ async def test_inspectdb_reads_the_tables_of_an_attached_database_as_models_of_i
     async with hare_test_context(
         SCHEMA_MODULES, db_url=get_url_with_attached_databases("sqlite+aiosqlite://:memory:", ["custom"])
     ) as ctx:
-        connection = ctx.apps.get_model("models.SchemaCategory")._meta.connection
+        connection = ctx.apps.get_queryset("models.SchemaCategory").get_connection()
         await connection.execute_script('CREATE TABLE "main"."category" (id INTEGER PRIMARY KEY)')
 
         source = await SchemaInspector.inspect(connection, schema="custom")
@@ -199,4 +212,7 @@ async def test_drift_reads_the_indexes_and_triggers_of_an_attached_database():
 
         result = await detect_drift_for_alias(ctx.apps, apps_config, "models")
 
-        assert [type(operation).__name__ for operation in result.operations] == ["AddTrigger"]
+        assert [type(operation).__name__ for operation in result.operations] == [
+            "SeparateDatabaseAndState",
+            "AddTrigger",
+        ]

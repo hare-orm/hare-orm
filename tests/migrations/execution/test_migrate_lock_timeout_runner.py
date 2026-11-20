@@ -57,7 +57,7 @@ async def test_postgresql_migration_fails_behind_a_table_lock(db_simple, atomic)
         await asyncio.wait_for(lock_taken.wait(), timeout=10)
         started_at = time.perf_counter()
         with pytest.raises(Exception, match="lock timeout"):
-            await runner.apply(add_size, state.clone())
+            await runner.apply(add_size, state)
         assert time.perf_counter() - started_at < 5
     finally:
         release_lock.set()

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Generator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Sequence
 from copy import copy
-from typing import TYPE_CHECKING, Any, ClassVar, Self, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Self, TypeVar
 
 from hare.exceptions import QueryError
 from hare.fields.data.constants import INT32_MAX
+from hare.query.execution.query_execution import QueryExecution
 from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import AggregatedMultiValuedPaths
+from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
 from hare.query.queryset.extensions.query_set_extensions import QuerySetExtensions
 from hare.query.queryset.single_rows.get_exceptions import GetExceptions
 from hare.query.statements.awaitable_query import AwaitableQuery
@@ -16,6 +18,14 @@ from hare.sql import Order
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
+    from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
+    from hare.query.plans.description.plan_description import PlanDescription
+    from hare.query.plans.statement.declarations import CallPlanHit
+    from hare.query.queryset.query_specification import QuerySpecification
+    from hare.query.queryset.queryset import QuerySet
+    from hare.sql.builder.queries.query_builder import QueryBuilder
+    from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 TModel = TypeVar("TModel", bound="Model")
 
@@ -29,17 +39,61 @@ class RowsQuery(AwaitableQuery[TModel], abstract=True):
     #: A plain SELECT - see AwaitableQuery.is_read_only.
     is_read_only: ClassVar[bool] = True
 
-    def __await__(self) -> Generator[Any, None, Any]:
-        if self._is_none:
-            return self._execute_none().__await__()
-        query = self._get_execution_query(self._select_for_update)
-        query._make_query_to_run()
-        if query._extension_calls and QuerySetExtensions.runs_queries(query):
-            return query._execute_with_retry_context(QuerySetExtensions.run(query)).__await__()
-        return query._execute_with_retry_context(query._execute()).__await__()
+    def _prepare_slice_terms(
+        self, query: QueryBuilder, offset: int | None
+    ) -> tuple[ValueWrapper | None, ValueWrapper | None]:
+        """Build the same slice terms used by SQL and recorded value references."""
+        wrapper = query._wrapper_class
+        terms = (
+            wrapper(self._limit) if self._limit is not None else None,
+            wrapper(offset) if offset is not None else None,
+        )
+        self._slice_boundary_terms = terms
+        return terms
 
-    async def _execute_none(self) -> Any:
-        return GetExceptions.empty_single_or_list_result(self)
+    def _record_slice_values(
+        self, references: RecordedValueReferences, terms: tuple[ValueWrapper | None, ValueWrapper | None]
+    ) -> None:
+        for name, term in zip(("_limit", "_offset"), terms, strict=True):
+            if term is not None:
+                ExpressionArguments.record_literal(references, self, name, term)
+
+    def _get_build_plan_description(self) -> PlanDescription | None:
+        return self._describe_statement(False)
+
+    def _needs_dependency_values(self) -> bool:
+        # Extensions may change the slice; ordinary zero-limit reads consume no inputs.
+        return super()._needs_dependency_values() and (self._limit != 0 or bool(self._extension_calls))
+
+    async def _execute_bound(self) -> Any:
+        if self._is_none:
+            return GetExceptions.empty_single_or_list_result(self)
+        query = self._get_execution_query(self._select_for_update)
+        statement = query._make_query_to_run()
+        result = await query._execute(statement)
+        return (
+            QuerySetExtensions.transform_result(query, result)
+            if query._extension_calls and query._applies_result_transform
+            else result
+        )
+
+    def _execute(self, statement: tuple[str, list[Any]]) -> Coroutine[Any, Any, Any]:
+        """The read of the built statement - the one road a plan found by the calls takes too
+        (``read_call_plan()``), with the read checks of ``QueryExecution``."""
+        raise NotImplementedError
+
+    @staticmethod
+    def read_call_plan(
+        queryset: QuerySet[Any, Any], connection: DatabaseClient, hit: CallPlanHit
+    ) -> Coroutine[Any, Any, Any]:
+        """Reads a queryset's rows on the plan of its calls, with no query object made.
+
+        Args:
+            queryset: The queryset.
+            connection: This execution's connection.
+            hit: The plan found (``StatementPlanRuns.find_call_plan()``).
+        """
+        raise NotImplementedError()
 
     def iterator(self, chunk_size: int = 1000) -> AsyncIterator[Any]:
         """Pages through the rows ``chunk_size`` at a time - see ``iterate_query()``.
@@ -50,32 +104,53 @@ class RowsQuery(AwaitableQuery[TModel], abstract=True):
         Returns:
             The rows.
         """
-        return RowsQuery.iterate_query(lambda: self, chunk_size)
+        return RowsQuery.iterate_query(self, chunk_size)
 
     @staticmethod
-    async def iterate_query(get_query: Callable[[], RowsQuery[Any]], chunk_size: int) -> AsyncGenerator[Any]:
-        """Pages through the rows of the query ``get_query()`` makes once iteration starts,
+    async def iterate_query(specification: QuerySpecification[Any], chunk_size: int) -> AsyncGenerator[Any]:
+        """Read with one set of dependency inputs throughout the iterator's lifetime."""
+        source = QueryExecution.get_bound(specification)
+        with QueryExecution(source._context):
+            query = source._get_compiler()
+        query._check_chunk_size(chunk_size)
+        iterator = QueryExecution.iterate(query, RowsQuery._iterate_rows(query, chunk_size))
+        async with contextlib.aclosing(iterator):
+            async for page in iterator:
+                for row in page:
+                    yield row
+
+    @staticmethod
+    async def _iterate_rows(rows_query: RowsQuery[Any], chunk_size: int) -> AsyncGenerator[list[Any]]:
+        """Pages through the rows of the prepared query,
         ``chunk_size`` at a time - one generator hands out every row. An unordered query follows its
         default iteration order; a tie-breaker makes the ordering unique per row. Pages by keyset
-        when every ordering value can be read off a row, else by ``OFFSET``. The query's own slice
+        when the query provides supported keyset readers, else by ``OFFSET``. The query's own slice
         and keyset boundary bound the whole iteration; a page is fetched with one row more,
         which tells whether another page follows.
 
         Args:
-            get_query: Makes the query - an error in making it is raised by the first ``anext()``.
-            chunk_size: The page size.
+            rows_query: The query created when iteration starts.
+            chunk_size: The validated page size.
 
         Raises:
-            QueryError: ``chunk_size`` isn't an int from 1 to ``2**63 - 2``, or a ``before_cursor()`` query.
+            QueryError: The query uses ``before_cursor()``.
         """
-        rows_query = get_query()
-        rows_query._check_chunk_size(chunk_size)
         if rows_query._reverse_result_order:
             raise QueryError("iterator() does not support .before_cursor() - await the page instead")
         if rows_query._is_none:
             return
-        query = rows_query._get_iterated_query()
+        query: RowsQuery[Any]
+        bound_source = (
+            rows_query._get_execution_query(rows_query._select_for_update) if rows_query._extension_calls else None
+        )
+        if bound_source is not None and QuerySetExtensions.changes_rows(bound_source):
+            from hare.query.statements.select.iterator_page_query import IteratorPageQuery
+
+            query = IteratorPageQuery(bound_source)
+        else:
+            query = rows_query._get_iterated_query()
         page_template = query._get_execution_query(query._select_for_update)
+        page_template._applies_result_transform = False
         page_template._single = False
         page_template._raise_does_not_exist = False
         keyset_readers = page_template._prepare_paging()
@@ -90,7 +165,7 @@ class RowsQuery(AwaitableQuery[TModel], abstract=True):
             page._limit = page_size + 1 if probes_next_page else page_size
             page._offset = offset
             page._cursor_values = cursor_values
-            rows = await cast("Awaitable[list[Any]]", page)
+            rows = await page
             has_next_page = len(rows) > page_size
             if has_next_page:
                 rows = rows[:page_size]
@@ -108,8 +183,7 @@ class RowsQuery(AwaitableQuery[TModel], abstract=True):
         while remaining is None or remaining > 0:
             page_size = chunk_size if remaining is None else min(chunk_size, remaining)
             rows, has_next_page = await fetch_page(page_size, remaining is None or remaining > page_size)
-            for row in rows:
-                yield row
+            yield rows
             if not has_next_page:
                 return
             if remaining is not None:
@@ -153,7 +227,8 @@ class RowsQuery(AwaitableQuery[TModel], abstract=True):
         """Whether no two rows can share the values of the ordering fields - they include the
         primary key, a non-nullable unique field, or every field of a non-nullable unconditional
         ``UniqueConstraint``."""
-        return AggregatedMultiValuedPaths.field_names_identify_row(self.model, ordering_field_names)
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        return AggregatedMultiValuedPaths.field_names_identify_row(model_binding, ordering_field_names)
 
     def stream(self, chunk_size: int = 1000) -> AsyncGenerator[Any]:
         """Streams the rows off a cursor, inside a transaction - see
@@ -165,26 +240,33 @@ class RowsQuery(AwaitableQuery[TModel], abstract=True):
         Returns:
             The rows.
         """
-        return RowsQuery.stream_query(lambda: self, chunk_size)
+        return RowsQuery.stream_query(self, chunk_size)
 
     @staticmethod
-    async def stream_query(get_query: Callable[[], RowsQuery[Any]], chunk_size: int) -> AsyncGenerator[Any]:
-        """Streams the rows of the query ``get_query()`` makes once iteration starts - an error in
-        making it is raised by the first ``anext()``, like any other.
+    async def stream_query(specification: QuerySpecification[Any], chunk_size: int) -> AsyncGenerator[Any]:
+        """Read with one set of dependency inputs throughout the iterator's lifetime."""
+        source = QueryExecution.get_bound(specification)
+        with QueryExecution(source._context):
+            query = source._get_compiler()
+        query._check_chunk_size(chunk_size, INT32_MAX)
+        iterator = QueryExecution.iterate(query, RowsQuery._stream_rows(query, chunk_size))
+        async with contextlib.aclosing(iterator):
+            async for row in iterator:
+                yield row
+
+    @staticmethod
+    async def _stream_rows(rows_query: RowsQuery[Any], chunk_size: int) -> AsyncGenerator[Any]:
+        """Stream an already created query with its dependency inputs bound.
 
         Args:
-            get_query: Makes the query.
-            chunk_size: How many rows to fetch per round trip.
+            rows_query: The query created when iteration starts.
+            chunk_size: The validated number of rows to fetch per round trip.
 
         Raises:
-            QueryError: ``chunk_size`` isn't an int from 1 to ``2**31 - 1``.
             UnSupportedError: The database has no streaming (``features.supports_streaming``).
             QueryError: Outside a transaction, a ``before_cursor()`` query, or model instances
                 with ``prefetch_related()``.
         """
-        rows_query = get_query()
-        # The rows a cursor fetch takes at once - a 32-bit count on every driver.
-        rows_query._check_chunk_size(chunk_size, INT32_MAX)
         if rows_query._is_none:
             return
         if rows_query._reverse_result_order:
@@ -192,8 +274,8 @@ class RowsQuery(AwaitableQuery[TModel], abstract=True):
         query = rows_query._get_execution_query(rows_query._select_for_update)
         connection = rows_query._check_streamable(query._connection)
         query._raise_if_not_streamable()
-        query._make_query_to_run()
-        batches = query._stream_batches(connection, chunk_size)
+        statement = query._make_query_to_run()
+        batches = query._stream_batches(connection, chunk_size, statement)
         # Closing this generator (break + aclose(), cancellation) closes the driver's cursor right
         # away instead of whenever the garbage collector finalizes the inner generators.
         async with contextlib.aclosing(batches):
@@ -205,6 +287,8 @@ class RowsQuery(AwaitableQuery[TModel], abstract=True):
     def _raise_if_not_streamable(self) -> None:
         """Rejects streaming rows that can't be read one at a time. Rejects none by default."""
 
-    def _stream_batches(self, connection: DatabaseClient, chunk_size: int) -> AsyncGenerator[list[Any]]:
+    def _stream_batches(
+        self, connection: DatabaseClient, chunk_size: int, statement: tuple[str, list[Any]]
+    ) -> AsyncGenerator[list[Any]]:
         """The rows of the built statement, read off a server-side cursor a batch at a time."""
         raise NotImplementedError()

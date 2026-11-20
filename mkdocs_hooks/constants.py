@@ -20,8 +20,6 @@ RUSSIAN_CALLOUT_TITLES = {
 }
 #: A heading whose anchor an inline ``<a id="...">`` names - the form GitHub reads.
 HTML_ANCHORED_HEADING = re.compile(r'^(?P<level>#{1,6}) <a id="(?P<anchor>[A-Za-z0-9_-]+)"></a>(?P<title>.*)$', re.M)
-#: A fenced code block, its fences included - left as it is.
-FENCED_CODE = re.compile(r"(^[ \t>]*```.*?^[ \t>]*```)", re.M | re.S)
 #: The suffix of a Russian page - its English sibling has the same name without ``.ru``.
 RUSSIAN_PAGE_SUFFIX = ".ru.md"
 #: The language of the site build the pages are checked in - the i18n plugin builds the site once per
@@ -69,10 +67,6 @@ DATABASE_HEADING_FORM = re.compile(
     r"|\((?:PostgreSQL|SQLite|ClickHouse) only\)"
     r"|(?:PostgreSQL|SQLite|ClickHouse)-only"
 )
-#: A comment of a code block - Python's, SQL's, a shell's, an INI file's - to the end of its line.
-CODE_COMMENT = re.compile(r"\s*(?:#|--|//|;).*$")
-#: A docstring on one line - the text of an example, translated with the page.
-ONE_LINE_DOCSTRING = re.compile(r'^\s*""".*"""$')
 #: A hyphen standing for a dash between words of prose.
 HYPHEN_AS_DASH = re.compile(r"\w - \w")
 #: Straight quotes around Russian words, where the standard has «ёлочки».

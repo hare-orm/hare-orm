@@ -1,24 +1,32 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.sql.builder_methods import BuilderMethods
 from hare.sql.order import Order
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms.criteria.criterion import Criterion
-from hare.sql.terms.node import TNode
+from hare.sql.terms.node import Node
 from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
     from typing import Self
 
-    from hare.sql.builder.tables.table import Table
 from hare.sql.terms.functions.function import Function
 
 
 class AggregateFunction(Function):
     """An aggregate function - one value per group, its rows filtered by ``FILTER (WHERE ...)``."""
+
+    structure_attributes: ClassVar[tuple[str, ...]] = (
+        "_argument_orderings",
+        "_filters",
+        "_include_filter",
+        "args",
+        "result_holds_null",
+    )
+    has_repeatable_value = True
 
     is_aggregate = True
 
@@ -40,12 +48,11 @@ class AggregateFunction(Function):
         new_term._argument_orderings = list(self._argument_orderings)
         return new_term
 
-    def nodes_(self) -> Iterator[TNode]:
-        yield from super().nodes_()
-        for aggregate_filter in self._filters:
-            yield from aggregate_filter.nodes_()
+    def get_children(self) -> Iterator[Node]:
+        yield from super().get_children()
+        yield from self._filters
         for ordering_term, __ in self._argument_orderings:
-            yield from ordering_term.nodes_()
+            yield ordering_term
 
     @BuilderMethods.builder
     def order_arguments(self, *orderings: tuple[Term, Order | None]) -> Self:
@@ -67,28 +74,6 @@ class AggregateFunction(Function):
             for term, order in self._argument_orderings
         )
         return f"ORDER BY {ordering_sql}"
-
-    @BuilderMethods.builder
-    def replace_table(self, current_table: Table | None, new_table: Table | None) -> Self:
-        """Replaces all occurrences of the specified table with the new table, in the arguments
-        and the ``FILTER`` condition.
-
-        Args:
-            current_table: The table to be replaced.
-            new_table: The table to replace with.
-
-        Returns:
-            A copy of the function with the tables replaced.
-        """
-        self.args = [parameter.replace_table(current_table, new_table) for parameter in self.args]
-        self._filters = [
-            aggregate_filter.replace_table(current_table, new_table) for aggregate_filter in self._filters
-        ]
-        self._argument_orderings = [
-            (ordering_term.replace_table(current_table, new_table), order)
-            for ordering_term, order in self._argument_orderings
-        ]
-        return self
 
     @BuilderMethods.builder
     def filter(self, *filters: Any) -> Self:

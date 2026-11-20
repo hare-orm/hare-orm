@@ -9,5 +9,7 @@ from hare.sql.terms.functions.analytic_function import AnalyticFunction
 class RowNumber(AnalyticFunction):
     """``ROW_NUMBER() OVER (...)`` - the place of a row in its window."""
 
+    structure_attributes = ()
+
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(AnalyticFunctionName.ROW_NUMBER, **kwargs)

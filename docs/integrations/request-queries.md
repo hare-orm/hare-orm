@@ -1,5 +1,10 @@
 # Request queries
 
+`RequestQuery` exposes declaration and execution hooks. `RequestQueryInputs` collects URL
+parameters, `RequestQueryFactory` builds classes for runtime models, and `RequestQueryRegistry`
+owns declaration caches and model dependencies. `RequestQueryBuilding` combines filters,
+access conditions, ordering and selection through the query's hooks, including subclass overrides.
+
 `hare.contrib.request_query` describes the rows a request asks for once, on a class: the queryset it
 starts from, the parameters it filters by, the search, the orderings a request may choose and the
 pagination. The class is a pydantic model of the request's parameters; a framework adapter
@@ -102,9 +107,46 @@ A parametrized type takes the value of its class: `dict[str, str] | None` for a 
 (`HStoreField`'s `contains`).
 
 The parameters are added once the models are bound — by `Hare.bind_models()`, which needs no connection,
-or `Hare.init()` — when a framework adapter reads the parameters for the handlers' signatures
+or `Hare.init()` — and selected by `prepare_parameters(apps=apps)` or the current application.
+A framework adapter prepares them when reading the handlers' signatures
 (`HarePlugin` binds the models itself), when the query is first built, or on `prepare_parameters()`. A
 subclass gets the parameters of the `Meta.filters` it inherits.
+
+`prepare_parameters()` returns a completed Pydantic subclass containing the generated fields
+and the checked query declaration. Use that class for introspection and Pydantic integration:
+
+```python
+from pydantic import TypeAdapter
+
+BookParameters = BookQuery.prepare_parameters()
+fields = BookParameters.model_fields
+schema = BookParameters.model_json_schema()
+adapter = TypeAdapter(BookParameters)
+```
+
+`BookQuery(...)` automatically constructs an instance of this subclass, so
+`isinstance(query, BookQuery)` remains true. The source class's `model_fields` contains its
+declared fields and option parameters; it is not mutated when filters are prepared.
+Use the returned class also for nested Pydantic annotations and `model_validate*()` calls.
+For preparation before startup, pass the registry explicitly: `BookQuery.prepare_parameters(apps=apps)`.
+Preparation failure publishes nothing. Concurrent preparation is serialized; invalidation
+builds a new generation on the next call. Existing instances and explicitly retained schema
+classes keep their fields and declaration, including the selected model graph.
+Frameworks compile handler signatures and OpenAPI during application setup. Rebuild the application's
+routes when changing a declaration's parameter names or types; cache invalidation does not rewrite
+an already registered route or its OpenAPI document.
+
+`from_query_string()` and `from_query_parameters()` accept Pydantic validation aliases and
+`AliasChoices`, preserving repeated values for list parameters. An `AliasPath` with a numeric
+index can select a repeated value. Query strings remain flat: structured object paths must
+receive their mapping through explicit keyword values, rather than an invented dotted-key syntax.
+Explicit keyword values override collected input for the same field, including its aliases.
+When multiple fields share an input root, they receive the same collected value. It remains a
+list if any consumer requires repeated values or an indexed alias path, regardless of field
+order. Pydantic rejects incompatible field requirements; use separate aliases for independent inputs.
+An explicit field value removes its URL alias roots for all consumers. Other fields sharing those
+roots must receive another accepted input or use their defaults; the shared URL value cannot
+override the explicit argument through a neighbouring field.
 
 ### <a id="descriptions"></a>Descriptions
 
@@ -297,8 +339,9 @@ page exists is read from one row fetched past the page. `page()` returns a `Scro
 
 `CursorPagination(default_limit=100, max_limit=1000, limit_parameter="limit", cursor_parameter="cursor")`
 pages by a cursor: the ordering values of the row a page starts after or ends before
-(`after_cursor()`/`before_cursor()`). A page costs the same wherever it is, rows added between requests
-don't shift the pages, and there is no count. `page()` returns a `CursorPage`: `result`, `limit`,
+(`after_cursor()`/`before_cursor()`). It does not skip preceding rows with `OFFSET`; the cost depends on
+filters, ordering and indexes. Insertions or deletions before the boundary do not shift it. There is no
+count. `page()` returns a `CursorPage`: `result`, `limit`,
 `next_cursor`, `previous_cursor`, `next`, `previous`. A cursor names the ordering it was made for; one of
 another ordering, text that isn't a cursor, or a cursor whose value doesn't fit its field (a text for an
 `IntField`, NULL for a `NOT NULL` field read on the row itself) is an `InvalidRequestQuery`. The ordering
@@ -312,8 +355,14 @@ An untyped `JSONField` keeps its JSON values in the cursor, including scalars; t
 a `GeneratedField` with that output field. The boundary is compared in the field's JSON ordering.
 Container boundaries retain their element types, including UUIDs and binary data, and named
 `TupleField` values retain their named elements when the cursor is read.
+Enum fields identify members by name inside the opaque cursor, so an enum whose values are
+bytes, tuples, dates or other Python values can be read back without changing its value.
+The same conversion applies to enum elements nested in arrays, tuples and maps.
 
-Page sizes are checked when the option is created: `1 <= default_limit <= max_limit <= 100000`.
+Page sizes are checked when the option is created: `1 <= default_limit <= max_limit`.
+The application chooses `max_limit`; request parameters must stay between `1` and that limit.
+The generated query remains subject to the ORM's SQL count bounds, including the extra row fetched by
+cursor and scroll pagination.
 
 ### <a id="fields-and-include"></a>Fields and relations: `FieldsConfig`, `IncludeConfig`
 
@@ -434,9 +483,12 @@ each item of the answer goes to the rows holding the value it answers. Needs the
   the row itself (`key`) to another attribute (`set_key`).
 - **One run.** The sources of a run are asked at the same time, through one HTTP client, and their values
   are applied in their order — a target two sources set keeps the later one's value. A source sends at
-  most `concurrency` (10) requests at a time, each taking at most `timeout_seconds` (10). `headers` is a
-  dict of ASCII texts on one line, or an `async` function giving it — called once a run; the headers
-  are left out of the source's `repr()`.
+  most `concurrency` (10) requests at a time. `timeout_seconds` (10) sets HTTPX's timeout separately for
+  connecting, reading, writing and waiting for a pooled connection; it is not a total request deadline.
+  Header generation and retry delays are outside these timeouts. `headers` is a dict of ASCII texts on
+  one line, or an `async` function giving it — called once a run; the headers are left out of the source's
+  `repr()`. Cleanup drains pending header work and closes the client; if it fails while another error is
+  propagating, both errors are retained in an exception group.
 - **Repeats.** `retry=ApiGetterRetry(attempts=3)` repeats a request whose connection broke, or that was
   answered with one of `status_codes` (`429`, `502`, `503`, `504`), up to `attempts` times (0 by default):
   after a random pause of up to `base_delay_seconds * 2 ** repeat` (0.5 s), at most `max_delay_seconds`
@@ -474,6 +526,21 @@ each item of the answer goes to the rows holding the value it answers. Needs the
 Settings contradicting each other are refused when they are made — a `PATH` URL not naming the key, a
 query mode without `query_parameter`, a `required` mapping with a `default` — `ConfigurationError`.
 `ApiGetter.set(objs, sources, mappings)` fills any objects — dicts too — without a request query.
+
+`await ApiGetter.prepare(objs, sources, mappings)` returns a tuple of `ApiAssignment` values
+(`container`, `set_name`, `value`) without assigning them. A serializer may use those values directly;
+`ApiGetter.apply(assignments)` applies them later. `set()` performs both steps. All conversions,
+defaults and required checks finish before the first assignment, so a loading or preparation error
+leaves targets unchanged. Custom converters should not mutate their inputs. Arbitrary setters can
+have side effects; applying assignments does not provide rollback for them.
+
+`None` retains its meaning as an absent value: it is not requested as a key, is not converted, and
+allows a mapping's default or required check to apply. Sources read the original keys independently;
+one source's result does not become another source's input. Repeated keys are fetched once per source.
+Each source has at most `concurrency` request workers, including those waiting for headers or retries.
+Workers take keys or batches gradually; a large result does not create a task per key. Cancellation
+waits for workers and the shared headers tasks to finish, then closes the HTTP client.
+Repeated cancellation of the caller does not detach that cleanup.
 
 ## <a id="running-a-query"></a>Running a query
 
@@ -634,31 +701,40 @@ The model is given by its class or its `"app.Model"` label (`RequestQuery.for_mo
 looked up in the current context. It takes each `Meta` option as a keyword argument — `queryset`
 (`model.objects` by default), `filters`,
 `search`, `ordering`, `pagination` (an `OffsetPagination()` by default), `fields`, `include`, `deleted`,
-`versions`, `join_type` — and `name`, the class's name (`<Model>RequestQuery` by default). A wrong
+`versions`, `join_type`, `api_getter` — and `name`, the class's name (`<Model>RequestQuery` by default).
+A wrong
 declaration raises `ConfigurationError` right there, as `check_declarations()` would find it. Called on a
 dialect's request query (`PostgresqlRequestQuery.for_model()`), the class is of that dialect. The class
 works wherever a declared one does — `RequestQueryDIPlugin.provide()`,
 `RequestQueryDependency.provide()`, a Robyn handler's parameter, `PageSchema[...]`, `HareDTO` — and is
 held weakly: once nothing holds it, it leaves the declarations and `get_concrete_subclasses()`.
 
-A request query class forgets its declaration and its parameters with every model they read — its
-queryset's model, and each model its filters, search, orderings, `fields` or `include` cross. That
-happens when such a model is unregistered or registered again (`Hare.unregister_live_models()`,
-`register_live_models()`), when a relation is added to it, and after any registration in `Registries` (a
-lookup, a renderer, a type mapping, a QuerySet method, a driver). The next use builds them again from the
-models as they are now: a parameter of `Meta.filters` gets the type its field has now, a field that is
-gone is a `ConfigurationError`. A class whose `Meta.queryset` is of an unregistered model refuses to run
-with a `ConfigurationError` — build the class again for the model registered in its place.
-`check_declaration()` rebuilds and checks one class.
+An explicitly bound `Meta.queryset` selects its original model graph and application. Its
+completed schemas and request objects retain that origin after live registration publishes a new
+graph. Removing the model from the new registry does not alter already retained query objects;
+closing their originating application prevents further database operations.
+
+An unbound `Meta.queryset` is a reusable template. `prepare_parameters()` selects the active
+application's graph; `prepare_parameters(apps=apps)` selects an explicit registry, including the
+offline registry returned by `Hare.bind_models(config)`. Each graph has a separate completed schema.
+For a dynamically built declaration the same explicit registry is accepted by
+`RequestQuery.for_model(Model, apps=apps, ...)`. An offline declaration remains a template for runtime
+requests. A missing model or field in the selected graph raises `ConfigurationError`.
+
+Extension registration and explicit `check_declaration()`/`forget_parameters()` invalidate future
+generations. Completed schemas and existing request objects keep their fields and checked declaration.
+An explicitly bound declaration owns its cache, so the application does not retain a dynamic class
+through its schema. Template generations are bounded by their selected application or offline binding.
 
 ## <a id="describe-parameters"></a>Describing the parameters: `describe_parameters()`
 
 `describe_parameters()` says what each parameter is — what a filter panel, a relation picker or a sort
-menu needs beyond the JSON schema. It needs the models bound, not the connections, so it works after
-`Hare.bind_models()`:
+menu needs beyond the JSON schema. Select an offline registry explicitly with `apps=`; this opens no
+connection. Within an active application, omitting `apps` selects that application:
 
 ```python
-for parameter in BookQuery.describe_parameters():
+apps = Hare.bind_models(HARE_CONFIG)
+for parameter in BookQuery.describe_parameters(apps=apps):
     print(parameter.name, parameter.parameter_type, parameter.filter_key, parameter.relation)
 ```
 
@@ -667,7 +743,8 @@ Each `ParameterDescription` has:
 | Attribute | What it is |
 |---|---|
 | `name`, `parameter_type` | The parameter and what it does — `ParameterType.FILTER`, `FILTER_METHOD` (a `filter_<name>` method), `NO_FILTER`, `SEARCH`, `ORDERING`, `LIMIT`, `OFFSET`, `CURSOR`, `FIELDS`, `INCLUDE`, `DELETED`, `OPTION` (an option of your own). |
-| `annotation`, `description`, `default`, `required` | Its type, its description, its default. |
+| `annotation`, `description`, `default`, `required` | Its type, description and static default. `default` is `None` for required parameters and factories. |
+| `has_default_factory` | Whether Pydantic creates the default for each request that omits the parameter. Describing parameters never calls the factory. |
 | `takes_many_values` | It takes every value of a repeated parameter, or a `CommaSeparated` list — a multi-select. |
 | `in_path` | It is read from the route's path (`InPath()`). |
 | `choices` | The members of the enum it takes, as `ParameterChoice(value, label)` — the label is the member's name. |
@@ -680,3 +757,10 @@ Each `ParameterDescription` has:
 
 A class forgotten with its models describes them as they are now. Fields have no choices of their own
 besides an enum: a field of `CharEnumField`/`IntEnumField` gives its enum's members.
+
+FastAPI and Litestar also leave `Field(default_factory=...)` unevaluated while building dependencies
+and OpenAPI. The complete request model evaluates a factory only when its value is missing, so a
+factory accepting `validated_data` sees preceding validated fields in declaration order. An explicit
+value bypasses the factory; an explicit `None` remains a value and is validated against the field's
+type. A path parameter remains required even if its field declares a factory. RequestQuery accepts
+both declared field names and Pydantic aliases by default; HTTP aliases appear in OpenAPI.

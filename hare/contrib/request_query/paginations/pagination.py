@@ -13,13 +13,12 @@ from hare.contrib.request_query.paginations.constants import (
     DEFAULT_LIMIT_PARAMETER,
     DEFAULT_MAX_PAGE_LIMIT,
     DEFAULT_PAGE_LIMIT,
-    MAX_PAGE_LIMIT_CEILING,
 )
 from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
     from hare.contrib.request_query.request_query import RequestQuery
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.lookup_info.ordering_info import OrderingInfo
 
 
@@ -34,8 +33,7 @@ class Pagination(RequestOption):
         limit_parameter: The name of the page size parameter.
 
     Raises:
-        ConfigurationError: A size isn't an int or isn't in ``1 <= default_limit <= max_limit <=
-            MAX_PAGE_LIMIT_CEILING``.
+        ConfigurationError: A size isn't an int or doesn't satisfy ``1 <= default_limit <= max_limit``.
     """
 
     default_limit: int = DEFAULT_PAGE_LIMIT
@@ -47,9 +45,9 @@ class Pagination(RequestOption):
         for name, value in (("default_limit", self.default_limit), ("max_limit", self.max_limit)):
             if isinstance(value, bool) or not isinstance(value, int):
                 raise ConfigurationError(f"{option_name}.{name} must be an int, got {value!r}")
-        if not 1 <= self.default_limit <= self.max_limit <= MAX_PAGE_LIMIT_CEILING:
+        if not 1 <= self.default_limit <= self.max_limit:
             raise ConfigurationError(
-                f"{option_name} needs 1 <= default_limit <= max_limit <= {MAX_PAGE_LIMIT_CEILING}, "
+                f"{option_name} needs 1 <= default_limit <= max_limit, "
                 f"got default_limit={self.default_limit}, max_limit={self.max_limit}"
             )
 
@@ -63,12 +61,12 @@ class Pagination(RequestOption):
             ),
         )
 
-    def check_model(self, owner: str, model: type[Model]) -> None:
+    def check_model(self, owner: str, binding: ModelBinding) -> None:
         """Checks that the pagination can page the model's rows - any model by default.
 
         Args:
             owner: The request query class, for the error.
-            model: The model.
+            binding: The model binding.
         """
 
     def check_ordering(self, owner: str, name: str, ordering_info: OrderingInfo) -> None:

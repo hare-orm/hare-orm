@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from itertools import chain, pairwise
+from typing import TYPE_CHECKING, Any
 
 from hare.dialects.clickhouse.spatial.constants import CLICKHOUSE_GEOMETRY_COLUMN_TYPES, CLICKHOUSE_OTHER_SRID_MESSAGE
 from hare.dialects.clickhouse.types.declarations import ClickhouseTypedValue
@@ -25,8 +26,8 @@ class ClickhouseGeometryValues:
     them, with no SRID (a value read takes the field's). A polygon's rings are stored in the
     orientation ClickHouse's functions read - the outer ring clockwise, the holes counter-clockwise -
     so a polygon given the other way round reads back with its rings reversed. A geometry type is never
-    ``Nullable``: as a container's, a NULL line or area is written as an empty one, read back empty; a
-    point, which has no empty value, holds no NULL. An area a function computes (an intersection) is read
+    ``Nullable``: ``null=True`` declarations and ``None`` values are refused. An area a function computes
+    (an intersection) is read
     as a polygon or a multipolygon, as it has one or several."""
 
     @staticmethod
@@ -44,7 +45,7 @@ class ClickhouseGeometryValues:
             UnSupportedError: The field is declared with ``null=True`` - a geometry of ClickHouse is a
                 tuple or an array, which holds no NULL.
         """
-        geometry_field = cast("GeometryField", field)
+        geometry_field: GeometryField = field  # type: ignore[assignment]
         if geometry_field.dimensions != 2:
             return None
         geometry_type = geometry_field.get_geometry_type()
@@ -66,11 +67,7 @@ class ClickhouseGeometryValues:
             The area.
         """
         return (
-            sum(
-                first[0] * second[1] - second[0] * first[1]
-                for first, second in zip(ring, [*ring[1:], *ring[:1]], strict=True)
-            )
-            / 2
+            sum(first[0] * second[1] - second[0] * first[1] for first, second in pairwise(chain(ring, ring[:1]))) / 2
         )
 
     @classmethod
@@ -154,7 +151,7 @@ class ClickhouseGeometryValues:
         Raises:
             ValidationError: The value isn't such a geometry - None among them: the column holds no NULL.
         """
-        geometry_field = cast("GeometryField", field)
+        geometry_field: GeometryField = field  # type: ignore[assignment]
         geometry_field.validate(value)
         if value is None:
             raise ValidationError(f"{field.model_field_name}: a ClickHouse geometry holds no NULL, got None")
@@ -170,7 +167,7 @@ class ClickhouseGeometryValues:
         """
         if value is None:
             return None
-        geometry_field = cast("GeometryField", field)
+        geometry_field: GeometryField = field  # type: ignore[assignment]
         geometry = geometry_field.get_parsed_geometry(value)
         if geometry.srid != geometry_field.srid:
             raise UnSupportedError(
@@ -193,7 +190,7 @@ class ClickhouseGeometryValues:
         """
         if value is None:
             return None
-        geometry_field = cast("GeometryField", field)
+        geometry_field: GeometryField = field  # type: ignore[assignment]
         srid = geometry_field.srid
         geometry_type = geometry_field.get_geometry_type()
         if geometry_type == GeometryType.POINT:

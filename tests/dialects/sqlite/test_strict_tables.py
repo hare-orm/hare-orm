@@ -225,7 +225,7 @@ async def test_strict_add_field_and_rebuild_on_a_live_table():
     try:
         editor = client.dialect.schema_editor_class(client, atomic=True, collect_sql=False)
         state = State()
-        await apply_operations(
+        state = await apply_operations(
             APP_LABEL,
             state,
             CreateModel(
@@ -238,7 +238,7 @@ async def test_strict_add_field_and_rebuild_on_a_live_table():
             ),
             schema_editor=editor,
         )
-        await apply_operations(
+        state = await apply_operations(
             APP_LABEL, state, AddField("Tally", "seen", fields.DatetimeField(null=True)), schema_editor=editor
         )
         await apply_operations(

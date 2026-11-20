@@ -8,12 +8,15 @@ import pytest
 
 from hare.contrib.outbox import ChangeCapture, ChangePayload
 from hare.contrib.test import capture_queries, requires_features
+from hare.core.apps.model_binding_graph import ModelBindingGraph
+from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError, StaleObjectError, ValidationError
 from hare.instrumentation.capture.change_capturing import ChangeCapturing
-from hare.instrumentation.declarations import RowsChanged
+from hare.instrumentation.declarations import QueryExecuted, RowsChanged
 from hare.instrumentation.enums import RowOperation
 from hare.instrumentation.observers.observers import Observers
 from hare.models.tenancy.tenancy import Tenancy
+from hare.query.expressions import Value
 from hare.transactions.transactions import Transactions
 from tests.contrib.outbox.capture_models import (
     AuditedOrder,
@@ -38,6 +41,7 @@ from tests.contrib.outbox.capture_models import (
     VersionedCapturedOrder,
 )
 from tests.utils.database_under_test import DatabaseUnderTest
+from tests.utils.model_bindings import ModelBindings
 
 
 async def get_events(topic: str | None = None) -> list[CaptureOutboxEvent]:
@@ -214,8 +218,8 @@ async def test_a_walk_reaching_captured_rows_locks_each_row_it_reads(db_capture)
     async with capture_queries(db) as counter:
         await UncapturedParent.objects.filter(id=1).delete()
     reads = [sql.upper() for sql in counter.queries if sql.upper().startswith("SELECT")]
-    parent_table = UncapturedParent._meta.db_table.upper()
-    child_table = CapturedChild._meta.db_table.upper()
+    parent_table = HareContext.require_current().apps.get_binding(UncapturedParent).db_table.upper()
+    child_table = HareContext.require_current().apps.get_binding(CapturedChild).db_table.upper()
     parent_reads = [sql for sql in reads if parent_table in sql]
     child_reads = [sql for sql in reads if child_table in sql]
     locks = db.features.supports_select_for_update and db.features.supports_transactions
@@ -234,6 +238,31 @@ async def test_bulk_create_and_bulk_update_are_captured(db_capture):
     for order in orders:
         order.status = "packed"
     await CapturedOrder.objects.bulk_update(orders, fields=["status"])
+    events = await get_events("models.capturedorder.updated")
+    assert sorted(event.payload["pk"] for event in events) == [1, 2]
+    assert all(event.payload["after"]["status"] == "packed" for event in events)
+
+
+@requires_features(supports_transactions=True)
+@pytest.mark.asyncio
+async def test_captured_bulk_write_preview_includes_its_transaction_and_returning_sql(db_capture):
+    orders = [CapturedOrder(id=1), CapturedOrder(id=2)]
+    for order in orders:
+        query = CapturedOrder.objects.bulk_create([order], returning=False)
+        preview = query.preview()
+        assert preview.requires_transaction is True
+        assert preview.commands is not None
+        async with capture_queries() as captured:
+            await query
+        inserts = [sql for sql in captured.queries if sql.startswith('INSERT INTO "capturedorder"')]
+        assert inserts == [command.sql for command in preview.commands]
+    assert sorted(event.payload["pk"] for event in await get_events("models.capturedorder.inserted")) == [1, 2]
+
+    for order in orders:
+        order.status = "packed"
+    query = CapturedOrder.objects.bulk_update(orders, fields=["status"], batch_size=1)
+    assert query.preview().requires_transaction is True
+    await query
     events = await get_events("models.capturedorder.updated")
     assert sorted(event.payload["pk"] for event in events) == [1, 2]
     assert all(event.payload["after"]["status"] == "packed" for event in events)
@@ -276,7 +305,7 @@ async def test_update_reads_the_rows_as_they_were_by_returning_old_or_a_read_bef
     database has it; otherwise a read of the rows first - locked where it can lock them."""
     await AuditedOrder.objects.create(id=1, note="first")
     db = AuditedOrder.get_connection()
-    table = AuditedOrder._meta.db_table
+    table = HareContext.require_current().apps.get_binding(AuditedOrder).db_table
     async with capture_queries(db) as counter:
         await AuditedOrder.objects.filter(id=1).update(note="second")
     statements = [sql.upper() for sql in counter.queries if table.upper() in sql.upper()]
@@ -421,7 +450,9 @@ async def test_extend_topic_ordering_key_and_fields(db_capture):
 @pytest.mark.asyncio
 async def test_a_topic_function_giving_a_key_longer_than_its_field_fails_the_write(db_capture, monkeypatch):
     """The event's field checks the key a function gives - the write of the row fails with it."""
-    monkeypatch.setattr(ExtendedRow._meta.change_capture, "topic", lambda change: "t" * 256)
+    monkeypatch.setattr(
+        HareContext.require_current().apps.get_binding(ExtendedRow).change_capture, "topic", lambda change: "t" * 256
+    )
     with pytest.raises(ValidationError):
         await ExtendedRow.objects.create(id=1, name="a")
     assert await ExtendedRow.objects.count() == 0
@@ -452,6 +483,25 @@ async def test_insert_from_is_captured(db_capture):
     assert event.payload["after"] == {"id": 4, "name": "from row"}
 
 
+@pytest.mark.sqlite_only
+@pytest.mark.parametrize("supports_returning", [False, True])
+@pytest.mark.asyncio
+async def test_captured_insert_from_keeps_sensitive_parameters_masked(db_capture, monkeypatch, supports_returning):
+    await UncapturedRow.objects.create(id=4, name="source")
+    connection = CapturedOrder.get_connection()
+    monkeypatch.setattr(connection, "features", connection.features.replace(supports_returning=supports_returning))
+    source = UncapturedRow.objects.annotate(secret=Value("private-source-value")).values("id", "name", "secret")
+    statements = []
+    with Observers.observing(QueryExecuted, statements.append):
+        assert await CapturedOrder.objects.insert_from(source, fields=["id", "status", "secret"]) == 1
+        await Observers.wait_for_pending()
+    source_statements = [event for event in statements if "uncapturedrow" in event.sql and event.parameters]
+    assert len(source_statements) == (1 if supports_returning else 2)
+    assert all("private-source-value" not in repr(event.parameters) for event in source_statements)
+    assert (await CapturedOrder.objects.get(id=4)).secret == "private-source-value"
+    assert len(await get_events()) == 1
+
+
 @requires_features(supports_merge_returning=True)
 @pytest.mark.asyncio
 async def test_merge_is_captured_by_action(db_capture):
@@ -472,36 +522,54 @@ async def test_merge_is_captured_by_action(db_capture):
 
 @pytest.mark.database_independent
 def test_the_declaration_is_checked():
+    apps = ModelBindings.prepare(CaptureOutboxEvent, UncapturedRow)
     with pytest.raises(ConfigurationError):
         ChangeCapture(CaptureOutboxEvent, payload="everything")
     with pytest.raises(ConfigurationError, match="fields or exclude"):
         ChangeCapture(CaptureOutboxEvent, fields=["name"], exclude=["id"])
     with pytest.raises(ConfigurationError, match="nope"):
-        ChangeCapture(CaptureOutboxEvent, fields=["nope"]).get_field_names(UncapturedRow)
+        linked_capture(ChangeCapture(CaptureOutboxEvent, fields=["nope"]), apps=apps).get_field_names(
+            apps.get_binding(UncapturedRow)
+        )
     with pytest.raises(ConfigurationError, match="track_dirty_fields"):
-        ChangeCapture(CaptureOutboxEvent, payload=ChangePayload.BEFORE_AND_AFTER).get_field_names(UncapturedRow)
+        linked_capture(
+            ChangeCapture(CaptureOutboxEvent, payload=ChangePayload.BEFORE_AND_AFTER), apps=apps
+        ).get_field_names(apps.get_binding(UncapturedRow))
     with pytest.raises(ConfigurationError, match="template"):
-        ChangeCapture(CaptureOutboxEvent, topic="{nope}").get_field_names(UncapturedRow)
+        linked_capture(ChangeCapture(CaptureOutboxEvent, topic="{nope}"), apps=apps).get_field_names(
+            apps.get_binding(UncapturedRow)
+        )
     with pytest.raises(ConfigurationError, match="capture changes itself"):
-        ChangeCapture(CaptureOutboxEvent).get_field_names(CaptureOutboxEvent)
+        linked_capture(ChangeCapture(CaptureOutboxEvent), apps=apps).get_field_names(
+            apps.get_binding(CaptureOutboxEvent)
+        )
 
 
 @pytest.mark.asyncio
 async def test_sensitive_and_encrypted_fields_are_left_out_unless_named(db_capture):
     from tests.fields.models_encrypted import EncryptedRecord
 
-    default_names = ChangeCapture(CaptureOutboxEvent).get_field_names(EncryptedRecord)
+    encrypted_binding = ModelBindingGraph().include(EncryptedRecord)
+    default_names = linked_capture(ChangeCapture(CaptureOutboxEvent)).get_field_names(encrypted_binding)
     assert "title" in default_names
     assert not {"secret", "config", "api_token", "public_note"} & set(default_names)
-    named = ChangeCapture(CaptureOutboxEvent, fields=["title", "api_token"]).get_field_names(EncryptedRecord)
+    named = linked_capture(ChangeCapture(CaptureOutboxEvent, fields=["title", "api_token"])).get_field_names(
+        encrypted_binding
+    )
     assert named == ("title", "api_token")
-    assert "sensitive" not in str(CapturedOrder._meta.change_capture_needs.field_names)
-    assert "secret" not in CapturedOrder._meta.change_capture_needs.field_names
+    assert "sensitive" not in str(
+        HareContext.require_current().apps.get_binding(CapturedOrder).change_capture_needs.field_names
+    )
+    assert (
+        "secret" not in HareContext.require_current().apps.get_binding(CapturedOrder).change_capture_needs.field_names
+    )
 
 
 @pytest.mark.asyncio
 async def test_an_outbox_named_by_its_label_is_found_as_the_models_are_bound(db_capture):
-    assert CapturedMeasurement._meta.change_capture.outbox is CaptureOutboxEvent
+    assert (
+        HareContext.require_current().apps.get_binding(CapturedMeasurement).change_capture.outbox is CaptureOutboxEvent
+    )
     await CapturedMeasurement.objects.create(id=1, value=1.5)
     assert [event.payload["after"] for event in await get_events()] == [{"id": 1, "value": 1.5}]
 
@@ -595,7 +663,9 @@ async def test_a_change_failing_in_an_open_transaction_undoes_its_write(db_captu
     """In an open transaction the write joined it: a change failing after its row was written, caught by the
     caller going on in the transaction, left the row written without its event."""
     await ExtendedRow.objects.create(id=1, name="kept")
-    monkeypatch.setattr(ExtendedRow._meta.change_capture, "extend", fail_extension)
+    monkeypatch.setattr(
+        HareContext.require_current().apps.get_binding(ExtendedRow).change_capture, "extend", fail_extension
+    )
 
     async with Transactions.atomic("models"):
         with pytest.raises(RuntimeError, match="the extension failed"):
@@ -612,7 +682,9 @@ async def test_a_change_failing_in_an_open_transaction_undoes_its_write(db_captu
 async def test_a_link_change_failing_in_an_open_transaction_undoes_the_link(db_capture, monkeypatch):
     article = await CapturedArticle.objects.create(id=1, title="a")
     tag = await CapturedTag.objects.create(id=1, name="t")
-    monkeypatch.setattr(CapturedArticleTag._meta.change_capture, "extend", fail_extension)
+    monkeypatch.setattr(
+        HareContext.require_current().apps.get_binding(CapturedArticleTag).change_capture, "extend", fail_extension
+    )
 
     async with Transactions.atomic("models"):
         with pytest.raises(RuntimeError, match="the extension failed"):
@@ -621,3 +693,8 @@ async def test_a_link_change_failing_in_an_open_transaction_undoes_the_link(db_c
 
     assert await CapturedArticleTag.objects.count() == 0
     assert await get_events() == []
+
+
+def linked_capture(capture: ChangeCapture, *, apps=None) -> ChangeCapture:
+    capture.link_models(HareContext.require_current().apps if apps is None else apps)
+    return capture

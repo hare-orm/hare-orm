@@ -15,6 +15,7 @@ from hare.contrib.factories.field_declarations.lazy_attribute import LazyAttribu
 from hare.contrib.factories.field_declarations.post_declaration import PostDeclaration
 from hare.contrib.factories.field_declarations.sub_factory import SubFactory
 from hare.contrib.factories.trait import Trait
+from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError
 from hare.models.write.rules.tenant_write_rules import TenantWriteRules
 
@@ -93,7 +94,7 @@ class ModelFactory(Generic[TModel]):
         return not (
             name.startswith("_")
             or name in FACTORY_CLASS_ATTRIBUTES
-            or isinstance(value, FunctionType | classmethod | staticmethod | property)
+            or isinstance(value, (FunctionType, classmethod, staticmethod, property))
         )
 
     @classmethod
@@ -118,7 +119,7 @@ class ModelFactory(Generic[TModel]):
         model = getattr(cls, "factory_model", None)
         if model is None:
             raise ConfigurationError(f"{cls.__name__} names no model - declare it as ModelFactory[TheModel]")
-        return typing.cast("type[TModel]", model)
+        return model
 
     @classmethod
     def reset_sequence(cls, number: int = 0) -> None:
@@ -188,7 +189,7 @@ class ModelFactory(Generic[TModel]):
             elif isinstance(declaration, FACTORY_COPIED_VALUE_TYPES):
                 # Each object gets a list, dict or set of its own - a change to one changes no other.
                 values[name] = copy.deepcopy(declaration)
-            elif not isinstance(declaration, LazyAttribute | PostDeclaration | SubFactory):
+            elif not isinstance(declaration, (LazyAttribute, PostDeclaration, SubFactory)):
                 values[name] = declaration
         for name, declaration in declarations.items():
             if isinstance(declaration, LazyAttribute):
@@ -215,8 +216,9 @@ class ModelFactory(Generic[TModel]):
         the active scope."""
         model = cls.get_model()
         model_values = {name: value for name, value in values.items() if name not in parameter_names}
-        if model._meta.tenant_field:
-            TenantWriteRules.fill_new_values(model, model_values, "create")
+        binding = HareContext.require_current().get_model_binding(model)
+        if binding.tenant_field:
+            TenantWriteRules.fill_new_values(binding, model_values, "create")
         return model(**model_values)
 
     @classmethod
@@ -262,23 +264,26 @@ class ModelFactory(Generic[TModel]):
     async def create_batch(cls, size: int, **given: Any) -> list[TModel]:
         """``size`` objects of the model, saved - in one ``bulk_create()`` when none of them makes a
         related object or acts once created, and the database gives back the keys it generates;
-        else one by one.
+        else one by one. The model's generated-key declaration decides whether keys must be returned,
+        even when ``given`` supplies their values.
 
         Args:
             size: How many.
             given: As ``create()`` takes.
 
         Returns:
-            The objects, each with its primary key.
+            The objects, with their primary keys when the model declares one.
         """
         declarations, _post_values, _parameter_names = cls.get_declarations(given)
+        if any(isinstance(declaration, (SubFactory, PostDeclaration)) for declaration in declarations.values()):
+            return [await cls.create(**given) for _ in range(size)]
         model = cls.get_model()
-        reads_back_keys = model._meta.generated_pk_field_name is not None
-        features = model._meta.connection.features
-        if any(isinstance(declaration, SubFactory | PostDeclaration) for declaration in declarations.values()) or (
-            reads_back_keys and not (features.supports_returning and features.guarantees_returning_order)
-        ):
+        queryset = HareContext.require_current().apps.get_queryset(model)  # type: ignore[union-attr]
+        reads_back_keys = queryset._binding.generated_pk_field_name is not None
+        connection = queryset.get_connection(for_write=True)
+        features = connection.features
+        if reads_back_keys and not (features.supports_returning and features.guarantees_returning_order):
             return [await cls.create(**given) for _ in range(size)]
         objs = cls.build_batch(size, **given)
-        await model.objects.bulk_create(objs, returning=True if reads_back_keys else None)
+        await queryset.using(connection).bulk_create(objs, returning=True if reads_back_keys else None)
         return objs

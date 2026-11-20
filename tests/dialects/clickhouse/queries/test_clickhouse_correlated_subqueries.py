@@ -8,6 +8,7 @@ import decimal
 import pytest
 import pytest_asyncio
 
+from hare.core.hare_context import HareContext
 from hare.exceptions import UnSupportedError
 from hare.query.expressions import Exists, OuterReference, Q, Subquery
 from hare.query.functions import Count, Max, Sum
@@ -36,7 +37,7 @@ def players_of_team():
 
 @pytest.mark.asyncio
 async def test_a_scalar_correlated_subquery_runs(teams):
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     if not connection.features.supports_correlated_subqueries:
         with pytest.raises(UnSupportedError, match="no correlated subqueries"):
             await Team.objects.annotate(headcount=Subquery(players_of_team().annotate(n=Count("id")).values("n")))
@@ -73,7 +74,12 @@ async def test_a_scalar_correlated_subquery_runs(teams):
 
 @pytest.mark.asyncio
 async def test_a_subquery_over_the_table_of_the_query_around_it_reads_that_querys_row(teams):
-    if not Team._meta.connection.features.supports_correlated_subqueries:
+    if (
+        not HareContext.require_current()
+        .apps.get_queryset(Team)
+        .get_connection()
+        .features.supports_correlated_subqueries
+    ):
         pytest.skip("the server runs no correlated subquery")
     team_best = Subquery(
         Player.objects.filter(team_id=OuterReference("team_id"))
@@ -109,7 +115,7 @@ async def test_an_exists_is_a_membership_test(teams):
 @pytest.mark.asyncio
 async def test_a_subquery_ordering_its_own_rows_is_refused(teams):
     first_player = Subquery(players_of_team().order_by("name").values("name")[:1])
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     message = "ordering or limiting" if connection.features.supports_correlated_subqueries else "no correlated"
     with pytest.raises(UnSupportedError, match=message):
         await Team.objects.annotate(first_player=first_player)
@@ -117,7 +123,12 @@ async def test_a_subquery_ordering_its_own_rows_is_refused(teams):
 
 @pytest.mark.asyncio
 async def test_a_correlated_subquery_beside_a_condition_of_alternatives(teams):
-    if not Team._meta.connection.features.supports_correlated_subqueries:
+    if (
+        not HareContext.require_current()
+        .apps.get_queryset(Team)
+        .get_connection()
+        .features.supports_correlated_subqueries
+    ):
         pytest.skip("the server runs no correlated subquery")
     headcount = Subquery(players_of_team().values("team_id").annotate(n=Count("id")).values("n"))
     rows = (
@@ -133,7 +144,7 @@ async def test_a_correlated_subquery_beside_a_condition_of_alternatives(teams):
 async def test_a_subquery_correlated_by_a_joined_column_is_refused(teams):
     """The server's own 'can't find correlated column' error came out as it was; a subquery joining the
     outer query's table read the outer name as its joined table and returned every row."""
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     if not connection.features.supports_correlated_subqueries:
         pytest.skip("the server runs no correlated subquery")
 
@@ -153,7 +164,12 @@ async def test_a_subquery_correlated_by_a_joined_column_is_refused(teams):
 async def test_a_count_correlated_by_a_column_rows_share_is_refused(teams):
     """The server read each player of a team once per outer player of that team - Bob and Ann each
     counted 4 teammates of blue, where 2 play."""
-    if not Team._meta.connection.features.supports_correlated_subqueries:
+    if (
+        not HareContext.require_current()
+        .apps.get_queryset(Team)
+        .get_connection()
+        .features.supports_correlated_subqueries
+    ):
         pytest.skip("the server runs no correlated subquery")
     teammates = Player.objects.filter(team=OuterReference("team"))
     with pytest.raises(UnSupportedError, match="COUNT of a correlated subquery"):

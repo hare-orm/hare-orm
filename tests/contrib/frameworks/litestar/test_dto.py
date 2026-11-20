@@ -13,14 +13,14 @@ from hare import Hare
 from hare.contrib.frameworks.litestar import HareDTO, HarePlugin
 from tests.contrib.frameworks.models import Badge, Chapter, Draft, Memo, Tag, Writer
 
-REQUIRES = ("litestar",)
-
 pytestmark = pytest.mark.sqlite_only
 
 CONFIG = {
     "connections": {"default": "sqlite+aiosqlite://:memory:"},
     "apps": {"models": {"models": ["tests.contrib.frameworks.models"], "default_connection": "default"}},
 }
+
+MODEL_APPS = Hare.bind_models(CONFIG)
 
 
 @asynccontextmanager
@@ -38,10 +38,12 @@ async def create_rows(app: Litestar) -> AsyncGenerator[None]:
 
 
 class CamelWriterDTO(HareDTO[Writer]):
+    binding = MODEL_APPS.get_binding(Writer)
     config = DTOConfig(exclude={"chapters", "tags"}, rename_fields={"name": "fullName"})
 
 
 class RenamedChapterDTO(HareDTO[Chapter]):
+    binding = MODEL_APPS.get_binding(Chapter)
     config = DTOConfig(
         max_nested_depth=2,
         include={"title", "writer.name", "writer.tags.name"},
@@ -50,14 +52,17 @@ class RenamedChapterDTO(HareDTO[Chapter]):
 
 
 class DeepChapterDTO(HareDTO[Chapter]):
+    binding = MODEL_APPS.get_binding(Chapter)
     config = DTOConfig(max_nested_depth=2)
 
 
 class DeepDraftDTO(HareDTO[Draft]):
+    binding = MODEL_APPS.get_binding(Draft)
     config = DTOConfig(max_nested_depth=2)
 
 
 class TrimmedChapterDTO(HareDTO[Chapter]):
+    binding = MODEL_APPS.get_binding(Chapter)
     config = DTOConfig(max_nested_depth=2, exclude={"writer.chapters", "writer.tags.id", "writer_id"})
 
 
@@ -145,6 +150,7 @@ async def create_writer(data: Writer) -> Writer:
 
 
 class PartialMemoDTO(HareDTO[Memo]):
+    binding = MODEL_APPS.get_binding(Memo)
     config = DTOConfig(partial=True)
 
 
@@ -183,7 +189,7 @@ ROUTES = [
 
 
 def build_app() -> Litestar:
-    return Litestar(ROUTES, plugins=[HarePlugin(CONFIG)], lifespan=[create_rows])
+    return Litestar(ROUTES, plugins=[HarePlugin(CONFIG)], lifespan=[create_rows], logging_config=None)
 
 
 @pytest.mark.asyncio
@@ -294,12 +300,20 @@ async def test_a_nested_field_is_named_by_its_path_through_the_relations():
 @pytest.mark.asyncio
 async def test_a_path_through_the_relations_as_litestar_names_it():
     async with AsyncTestClient(build_app()):
-        assert HareDTO.get_litestar_path(Chapter, "writer.name") == "writer.0.name"
-        assert HareDTO.get_litestar_path(Chapter, "writer.tags.name") == "writer.0.tags.0.0.name"
-        assert HareDTO.get_litestar_path(Writer, "chapters.writer.name") == "chapters.0.0.writer.0.name"
-        assert HareDTO.get_litestar_path(Chapter, "writer.0.tags.0.0.name") == "writer.0.tags.0.0.name"
-        assert HareDTO.get_litestar_path(Chapter, "writer") == "writer"
-        assert HareDTO.get_litestar_path(Chapter, "title") == "title"
+        assert HareDTO.get_litestar_path(MODEL_APPS.get_binding(Chapter), "writer.name") == "writer.0.name"
+        assert (
+            HareDTO.get_litestar_path(MODEL_APPS.get_binding(Chapter), "writer.tags.name") == "writer.0.tags.0.0.name"
+        )
+        assert (
+            HareDTO.get_litestar_path(MODEL_APPS.get_binding(Writer), "chapters.writer.name")
+            == "chapters.0.0.writer.0.name"
+        )
+        assert (
+            HareDTO.get_litestar_path(MODEL_APPS.get_binding(Chapter), "writer.0.tags.0.0.name")
+            == "writer.0.tags.0.0.name"
+        )
+        assert HareDTO.get_litestar_path(MODEL_APPS.get_binding(Chapter), "writer") == "writer"
+        assert HareDTO.get_litestar_path(MODEL_APPS.get_binding(Chapter), "title") == "title"
 
 
 @pytest.mark.asyncio
@@ -332,14 +346,15 @@ async def test_a_live_model_registered_again_gets_a_dto_of_its_own():
             },
         )
 
-    plugin = HarePlugin(CONFIG)
-    async with hare_test_context(modules=["tests.contrib.frameworks.models"], app_label="models"):
+    async with hare_test_context(modules=["tests.contrib.frameworks.models"], app_label="models") as context:
+        plugin = HarePlugin(CONFIG, hare_context=context)
         first_note = build_note(fields.IntField())
         Hare.register_live_models([first_note], "live")
         first_dto = plugin.create_dto_for_type(FieldDefinition.from_annotation(first_note))
         assert plugin.create_dto_for_type(FieldDefinition.from_annotation(first_note)) is first_dto
         Hare.unregister_live_models([first_note])
-        assert first_note not in HarePlugin.model_dtos
+        assert context.apps.get_prepared_binding(first_note) is None
+        assert first_dto.binding._model is first_note
         second_note = build_note(fields.CharField(max_length=20))
         Hare.register_live_models([second_note], "live")
         try:
@@ -367,7 +382,19 @@ def test_the_soft_delete_field_is_read_only():
 
     from tests.shared_models.testmodels import SoftDeleteParent
 
-    definitions = {definition.name: definition for definition in HareDTO.generate_field_definitions(SoftDeleteParent)}
+    apps = Hare.bind_models(
+        {
+            "connections": {"default": "sqlite+aiosqlite://:memory:"},
+            "apps": {"models": {"models": ["tests.shared_models.testmodels"], "default_connection": "default"}},
+        }
+    )
+
+    class SoftDeleteDTO(HareDTO[SoftDeleteParent]):
+        binding = apps.get_binding(SoftDeleteParent)
+
+    definitions = {
+        definition.name: definition for definition in SoftDeleteDTO.generate_field_definitions(SoftDeleteParent)
+    }
 
     assert definitions["deleted_at"].dto_field.mark is Mark.READ_ONLY
     assert definitions["name"].dto_field.mark is None

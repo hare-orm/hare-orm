@@ -8,8 +8,9 @@ from typing import Any
 
 import aiosqlite
 
+from hare.core.resource_completion import ResourceCompletion
 from hare.dialects.base.client.connection_wrapper import ConnectionWrapper
-from hare.dialects.base.client.transaction_lifecycle.pending_statements import PendingStatements
+from hare.dialects.base.client.enums import StatementForm
 from hare.dialects.sqlite.client.sqlite_client import SqliteClient
 from hare.dialects.sqlite.client.sqlite_transaction_client import SqliteTransactionClient
 from hare.dialects.sqlite.constants import SQLITE_TRANSACTION_ABORTED_MESSAGE
@@ -20,7 +21,12 @@ from hare.dialects.sqlite.drivers.aiosqlite.client.aiosqlite_statement_timeout_c
 from hare.dialects.sqlite.drivers.aiosqlite.client.aiosqlite_transaction_connection_wrapper import (
     AiosqliteTransactionConnectionWrapper,
 )
-from hare.dialects.sqlite.drivers.constants import SQLITE_FIRST_NUMBERED_PLACEHOLDER, SQLITE_STREAM_BATCH_SIZE
+from hare.dialects.sqlite.drivers.constants import (
+    SQLITE_EXECUTE_MANY_RELEASE_SQL,
+    SQLITE_EXECUTE_MANY_ROLLBACK_SQL,
+    SQLITE_EXECUTE_MANY_SAVEPOINT_SQL,
+    SQLITE_STREAM_BATCH_SIZE,
+)
 from hare.exceptions import TransactionManagementError
 
 
@@ -62,10 +68,9 @@ class AiosqliteTransactionClient(SqliteTransactionClient, AiosqliteClient):
             raise TransactionManagementError(SQLITE_TRANSACTION_ABORTED_MESSAGE)
         if self.log.isEnabledFor(logging.DEBUG):
             self.log.debug("%s: %s", query, values)
-        if values and self.binds_parameters_by_number and SQLITE_FIRST_NUMBERED_PLACEHOLDER in query:
-            values = self.get_values_by_number(values)  # type: ignore[assignment]
+        cursor_values = self._get_bound_parameters(query, values)
         batch_size = chunk_size or SQLITE_STREAM_BATCH_SIZE
-        cursor = await self._open_stream_cursor(query, values or [])
+        cursor = await self._open_stream_cursor(query, cursor_values)
         try:
             while True:
                 self._check_statement_allowed()
@@ -74,28 +79,52 @@ class AiosqliteTransactionClient(SqliteTransactionClient, AiosqliteClient):
                     return
                 yield rows
         finally:
-            await asyncio.shield(self._run_on_worker_thread(self._connection, self._close_cursor, cursor))
+            await ResourceCompletion.wait(self._run_on_worker_thread(self._connection, self._close_cursor, cursor))
 
-    @SqliteClient.translate_exceptions
-    async def _open_stream_cursor(self, query: str, values: list[Any]) -> sqlite3.Cursor:
+    async def _open_stream_cursor(self, query: str, values: list[Any] | dict[str, Any]) -> sqlite3.Cursor:
         """Runs ``query`` on a cursor of the transaction's connection, its rows left on the cursor."""
         async with self.acquire_connection() as connection:
-            return await self._run_on_worker_thread(connection, self._execute_on_cursor, query, values)
+            opening = asyncio.create_task(
+                self._run_on_worker_thread(connection, self._execute_on_cursor, query, values)
+            )
+            try:
+                return await asyncio.shield(opening)
+            except asyncio.CancelledError:
+                connection._conn.interrupt()
+                await ResourceCompletion.wait(self._close_opening_cursor(connection, opening))
+                raise
 
-    @SqliteClient.translate_exceptions
+    async def _close_opening_cursor(
+        self, connection: aiosqlite.Connection, opening: asyncio.Task[sqlite3.Cursor]
+    ) -> None:
+        """Drain cursor creation after cancellation and close any cursor it produced."""
+        try:
+            cursor = await opening
+        except sqlite3.Error:
+            # sqlite3_interrupt normally ends execute() with an error; its helper
+            # already closed that cursor. No result may escape to a cancelled waiter.
+            return
+        await self._run_on_worker_thread(connection, self._close_cursor, cursor)
+
     async def _fetch_stream_rows(self, cursor: sqlite3.Cursor, batch_size: int) -> list[sqlite3.Row]:
         """The next ``batch_size`` rows of a streamed cursor - fewer, or none, at its end."""
         async with self.acquire_connection() as connection:
             return await self._run_on_worker_thread(connection, self._fetch_many, cursor, batch_size)
 
     @staticmethod
-    def _execute_on_cursor(raw_connection: sqlite3.Connection, query: str, values: list[Any]) -> sqlite3.Cursor:
+    def _execute_on_cursor(
+        raw_connection: sqlite3.Connection, query: str, values: list[Any] | dict[str, Any]
+    ) -> sqlite3.Cursor:
         """Runs a statement on aiosqlite's worker thread and gives its cursor - of rows read by
         name too."""
         cursor = raw_connection.cursor()
         # typeshed types a cursor's row factory as a callable of (cursor, row) - sqlite3.Row is one.
         cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
-        return cursor.execute(query, values)
+        try:
+            return cursor.execute(query, values)
+        except BaseException:
+            cursor.close()
+            raise
 
     @staticmethod
     def _fetch_many(_raw_connection: sqlite3.Connection, cursor: sqlite3.Cursor, batch_size: int) -> list[sqlite3.Row]:
@@ -107,17 +136,44 @@ class AiosqliteTransactionClient(SqliteTransactionClient, AiosqliteClient):
         """Closes a cursor on aiosqlite's worker thread."""
         cursor.close()
 
-    @SqliteClient.translate_exceptions
+    @SqliteClient.translate_exceptions(StatementForm.MANY)
     async def execute_many(self, query: str, values: list[list[Any]]) -> None:
         async with self.acquire_connection() as connection:
             if self.log.isEnabledFor(logging.DEBUG):
                 self.log.debug("%s: %s", query, values)
-            if self.binds_parameters_by_number and SQLITE_FIRST_NUMBERED_PLACEHOLDER in query:
-                values = [self.get_values_by_number(row) for row in values]  # type: ignore[misc]
-            # Already within transaction, so ideal for performance
-            await connection.executemany(query, values)
+            bound = self._get_many_parameters(query, values)
+            if len(bound) < 2:
+                await connection.executemany(query, bound)
+            else:
+                await self._run_on_worker_thread(connection, self._execute_many_in_savepoint, query, bound)
 
-    @SqliteClient.translate_exceptions
+    @staticmethod
+    def _execute_many_in_savepoint(
+        raw_connection: sqlite3.Connection, query: str, values: list[list[Any]] | list[dict[str, Any]]
+    ) -> None:
+        """Runs every row atomically within the caller's transaction, in one worker-thread hop.
+
+        Catching a constraint error must not commit the earlier rows of this call. The savepoint
+        and its cleanup run on the worker together, so cancellation cannot leave cleanup queued
+        behind an unrelated statement. A trigger's RAISE(ROLLBACK) can end the whole transaction;
+        in that case its original error is preserved and no vanished savepoint is touched.
+        """
+        cursor = raw_connection.cursor()
+        try:
+            cursor.execute(SQLITE_EXECUTE_MANY_SAVEPOINT_SQL)
+            try:
+                cursor.executemany(query, values)
+            except BaseException:
+                if raw_connection.in_transaction:
+                    cursor.execute(SQLITE_EXECUTE_MANY_ROLLBACK_SQL)
+                raise
+            finally:
+                if raw_connection.in_transaction:
+                    cursor.execute(SQLITE_EXECUTE_MANY_RELEASE_SQL)
+        finally:
+            cursor.close()
+
+    @SqliteClient.translate_exceptions(StatementForm.SCRIPT)
     async def execute_script(self, query: str) -> None:
         """Runs the script's statements one by one inside this transaction - sqlite3's own
         executescript() would commit the open transaction before running anything."""
@@ -147,14 +203,15 @@ class AiosqliteTransactionClient(SqliteTransactionClient, AiosqliteClient):
     async def _driver_rollback(self) -> None:
         await self._connection.rollback()
 
+    @SqliteClient.translate_exceptions(StatementForm.CONTROL)
     async def _driver_savepoint(self, name: str) -> None:
-        # A SAVEPOINT outside a transaction would start one its RELEASE commits.
-        await PendingStatements.send_pending_begin(self)
         await self._connection.execute(f"SAVEPOINT {name}")
 
+    @SqliteClient.translate_exceptions(StatementForm.CONTROL)
     async def _driver_release_savepoint(self, name: str) -> None:
         await self._connection.execute(f"RELEASE {name}")
 
+    @SqliteClient.translate_exceptions(StatementForm.CONTROL)
     async def _driver_rollback_to_savepoint(self, name: str) -> None:
         # SQLite may already have rolled the whole transaction back, the savepoint with it - the
         # transaction is then marked aborted.

@@ -28,14 +28,27 @@ Maintainer: Vladislav Yaremenko ([@VladislavYar](https://github.com/VladislavYar
 
 ## Setup
 
-Requires Python 3.12, 3.13 or 3.14 and [Poetry](https://python-poetry.org/).
+hare is developed and checked in a Linux Docker container, including when the host runs Windows or macOS.
+Requires Python 3.12, 3.13, 3.14 or 3.15, [Poetry](https://python-poetry.org/) and
+[rustup](https://rustup.rs/): every test run needs the `rust.native` extension built
+([Building the Rust extensions](#building-the-rust-extensions)).
 
 ```bash
 make deps
+make build_native
 ```
 
-(runs `poetry install --extras asyncpg --extras opentelemetry`). This pulls in the
-dev/test/contrib/docs dependency groups too — you don't need to install those separately.
+This selects extras compatible with the interpreter from `tests/matrix/catalog.toml` and passes
+them to `poetry install --with pyright-cli,pytz`, installing available extras and the
+development, test and documentation tools, including the optional pyright and pytz groups.
+The isolated matrix environments below install only the dependencies declared for each run.
+On Python 3.15, `make test_clickhouse` and `make test_clickhouse_cluster` run HTTP and explicitly
+report that TCP is unavailable; CI retains TCP checks on Python 3.14. Robyn tests likewise run on
+Python 3.12–3.14, while other compatible integrations run on 3.15 too.
+The checks include the Python build and wheel-installation scripts under `.github/scripts/`.
+The `check` and `test-poetry-add` CI jobs download the Linux extension artifact before importing hare;
+the documentation workflow builds the extension for its own interpreter. Wheel builders use the
+Maturin version in `poetry.lock`, and wheel smoke checks use the catalog's newest PostgreSQL.
 
 Install the git hooks once so style/type issues are caught before they reach CI:
 
@@ -57,11 +70,11 @@ it holds. The public API is what `hare`, `hare.fields`, `hare.models`, `hare.que
 
 | Package | What it holds |
 | --- | --- |
-| `hare/` | The public entry points (`__init__.py`), `exceptions.py` and `warnings.py` — nothing else. |
+| `hare/` | The public entry points (`__init__.py`), `exceptions.py`, `warnings.py` and the `py.typed` marker. |
 | `hare/core/` | Starting and holding the ORM: `Hare` (`hare.py`), its config (`config/`), the context a process or test runs in (`hare_context.py`), the connections (`connections/`) and the router (`routing/`), the app and model registry (`apps/`: the registry, relation linking, swappable models, model discovery, table name checks), the caches and dropping them (`caching/`), and `Registries` — what dialects, fields and packages register. |
-| `hare/models/` | `Model` — its public API — and the classes running its steps: an instance's set-up, connections, copies, saving, checks and dirty fields (`instances/`), writing rows (`write/`: the writer, inserts, updates, rollback restores, captured changes), deletion and soft deletion with their cascades and previews (`deletion/`), building the class and checking its definition (`class_building/`), `MetaInfo` and the metaclass (`model_meta.py`), tenancy (`tenancy/`). |
+| `hare/models/` | `Model` and its metaclass (`model_meta.py`), the class-level `ModelDeclaration` and the per-graph `ModelBinding`, class construction and checks (`class_building/`), instance setup and tracking (`instances/`), row writes and rollback restores (`write/`), cascades and previews (`deletion/`), tenancy (`tenancy/`) and declared uniqueness (`uniqueness/`). |
 | `hare/fields/` | `Field` (`field.py`), the value fields by family (`data/`: `numeric`, `text`, `temporal`, `json`, `choices`, `containers` — arrays, maps, tuples —, `network`, boolean, binary and UUID fields), relational fields, their accessors and related managers (`relations/`), generated, encrypted and swappable fields, database defaults (`db_defaults/`), registered lookups and transforms (`registrations/`), validators (`validators/`: limits and formats). |
-| `hare/query/` | Building queries: `QuerySet` and the classes checking its arguments (`queryset/`), the statements a queryset runs (`statements/`: building — joins, grouping, ordering, keysets, row locks, annotations, conditions, CTEs; `select/` — values, model rows, set operations; `summary/`; `write/` — update, delete, bulk writes, merge), statement plans and how the parts of a query describe them (`plans/`), expressions (`expressions/`), ORM functions (`functions/`), lookups and filters (`filters/`), managers, scopes, relation loading, lookup paths and the lookup-info API (`lookup_info/`). |
+| `hare/query/` | Query declarations and arguments (`queryset/`), SQL assembly and statement executors (`statements/`), statement planning and binding (`plans/`), execution context and driver calls (`execution/`), model and value projections (`rows/`), expressions and functions, filters, managers, scopes, relation loading and the lookup-info API. |
 | `hare/sql/` | The SQL builder the ORM renders through: terms, criteria, functions and query builders (`builder/`) — no models, no connections. |
 | `hare/ddl/` | Schema objects declared in `Meta`: indexes, constraints, triggers, table options, the expressions a declaration writes into DDL (`expressions/`), and the dialect-neutral quoting of names and literals. |
 | `hare/dialects/` | One package per database (`sqlite/`, `postgresql/` with `drivers/asyncpg` and `drivers/rust_pg`, `clickhouse/` with `drivers/clickhouse_connect` and `drivers/clickhouse_driver`) on the contract in `base/`: `Dialect` and `Features`, the connection and its client (`connection/`, `client/`), transactions, literals, parameters, clauses, renderers, types, lookups, full-text search (`search/`), schema editors and their parts (`schema/`), migration safety rules. What several of hare's dialects write alike beyond ISO SQL is a class of `base/` too, named after what it holds (`LimitReturningConflictQueryClauses`). The core imports no dialect; a dialect-specific class lives in its dialect. |
@@ -76,7 +89,7 @@ it holds. The public API is what `hare`, `hare.fields`, `hare.models`, `hare.que
 | `hare/health/` | Health checks of the connections and the criteria they judge them by. |
 | `hare/stubs/` | The `hare stubs` command's stubs of model modules for pyright. |
 | `hare/typing_info/` | What the typing tools — the mypy plugin, `hare stubs` — know of the models. |
-| `hare/classes/` | Class paths a migration writes and reads, class properties, declared subclasses. |
+| `hare/classes/` | Class paths a migration writes and reads, class properties, declared subclasses, class attributes importing a module that imports theirs (`DeferredImport`). |
 | `hare/lazy_loading/` | What hare prepares on first use instead of on import: regular expressions, pydantic's classes. |
 | `hare/native/` | The parts of hare's compiled extension `rust.native` the Python code speeds itself up with. |
 | `hare/numbers/` | Telling a finite number apart from anything else a setting or an argument may be. |
@@ -85,13 +98,27 @@ Where new code goes: a constant into the `constants.py` of the package using it,
 `enums.py`; a helper that belongs to a class is a method of that class, not a function next to it;
 a module of its own for a new concept rather than a new class in an unrelated module.
 
-Every process-wide cache is registered in `hare.core.caching.caches.Caches` where it is declared, so a
-change to a model or a registry drops it — never `functools.cache`/`lru_cache` or a module-level dict:
-a `Cache(max_size)` for values by key (a key holding a model class is kept and dropped with that
-model), a `ModelCache()` for one value per model class (`ModelCache(depends_on_other_models=True)`
-when a value describes other models too), or `Caches.register(cache)` for anything else with
-`forget_model(model)` and `forget_all()`.
-`tests/model_setup/binding/test_model_caches.py` fails on a model-keyed `WeakKeyDictionary` declared in its place.
+Every cache uses `Cache` or `ModelCache`, which register with `Caches` when constructed.
+Use `Cache(max_size)` for bounded global values and `get_bucket(holder)` for values following an
+explicit holder. Model-dependent facts use a `ModelBinding` holder or `ModelCache()`; their lifetime
+follows that graph node, not the shared Python model class. `depends_on_other_models=True` also
+invalidates dependent facts in that graph. Independent registries keep independent entries.
+Never replace this storage with `functools.cache`/`lru_cache`, a module-level dictionary or a
+model-keyed `WeakKeyDictionary`.
+
+Model options are normalized when their declaration is captured; a binding consumes those values
+and snapshots mutable schema objects for its graph. Container shapes implement `_prepare_encoder()`
+and `_prepare_decoder()`; `ContainerField` supplies the common hook-aware preparation interface.
+
+Related-model and explicit through-model metadata use `get_related_binding()` and
+`get_through_binding()` on linked fields. Through nodes are linked before model finalization, so
+schema compilation and runtime relations use the same graph identity. `through_model_class` remains
+for declaration and incomplete-state work. Use `types.get_native_reader(field, native_types)` for a
+native column reader and `PlanDescription.structure`/`.values` for a statement's prepared description.
+
+Deferred class or callable imports use `DeferredImport(module_name, attribute_path)`. The attribute
+path may be dotted; after the first access the class stores the imported object itself. Access an
+imported plain callable through its holding class when the caller supplies its arguments explicitly.
 
 A new part of a query declares how it meets its statement plan instead of describing it by hand:
 an expression or a window function lists how each attribute meets the plan in `plan_parts`
@@ -103,11 +130,39 @@ from, not by the order the build records them. A class keeping no plan declares 
 a class doing neither fails when it is defined, and `--verify-plans` fails on an attribute no part
 declares. Plan keys are never built by walking a query's parts from outside them.
 
+Preparation stays within the responsibility that consumes it. `Identifiers(taken_names)` keeps
+case-folded occupied names for one allocation scope; `get_free_name(name)` only chooses a name,
+and `add(name)` reserves it. Reuse the scope while assembling a projection instead of rebuilding
+its occupied-name set for each column. Model-derived name maps still use `ModelCache`.
+
+Schema matching creates `SchemaObjectComparison` entries for one `SchemaObjectDiff.get_operations()`
+call. Names, declaration signatures, rename eligibility and changed-column dependencies are evaluated
+on demand through the diff's hooks. `is_unchanged()` receives these entries; operation builders
+receive their original declarations. These facts must not survive the comparison or cross a state
+change. `PreparedOperationGraph` prepares provider keys once for its operation sequence; rebuilding
+the graph after a rewrite also rebuilds those keys and the state boundaries used for requirements.
+
+Prepared migration nodes retain private before/after declarations and executable database children.
+`StateSnapshot` materializes an independent working `State`; its `ModelStateMap` detaches each model
+on first access and protects exposed declarations again on publication. Rendered registries belong
+to the working state, not to the retained operation tree. `State.clone()` remains a deep copy.
+Safety checks release their cached schema plans after each assessment scope. State-only children
+are prepared to compute the resulting state; their intermediate tree is not retained in
+`PreparedOperation`. Sorting and migration splitting share the provider-position matcher
+of `PreparedOperationGraph`.
+
 ## Running the test suite
 
-The suite runs in full against four databases. A test that needs something a dialect lacks
+The full database suite runs on SQLite and PostgreSQL. ClickHouse runs the selected dialect, contract
+and field tests listed in `tests/matrix/catalog.toml`. A test that needs something a dialect lacks
 (transactions, foreign keys, a PostgreSQL extension) is skipped there by its feature marker, not by
-the dialect's name.
+the dialect's name. Contract samples separately declare their expected dialect support;
+an unexpected refusal by the field being tested fails the test instead of producing a skip.
+The request-filter matrix checks the complete matching row set. Meta inheritance compares
+declaration values, preserving raw SQL text, rather than object display strings.
+The `inspectdb` matrix recreates the sampled tables from the inspected models and compares
+their catalogs. The database canonicalizes expressions and type aliases; the test does not
+remove quotes, parentheses or spaces from SQL literals to make declarations compare equal.
 
 ```bash
 make test            # the whole suite against SQLite
@@ -123,13 +178,25 @@ for SQLite and each PostgreSQL driver:
 make test_database_independent
 ```
 
+Each mypy plugin run has its own temporary configuration and cache. The harness reaps every
+started checker on failure, checks its exit status and requires exactly the declared diagnostics,
+including their counts on each line. Test HTTP receivers close accepted sockets and drain their
+handlers before leaving the context, including incomplete requests and cancellation.
+
+CLI migration round trips inspect the imported migration's operations and dependencies, then
+check database state and stored rows. Text assertions belong to source-printer contracts.
+Temporary projects restore their imported namespaces, search paths and working directory;
+running one project must not remove another project's modules or truncate a connection URL.
+Use `ProjectSources` to write temporary modules, packages and migrations beneath the fixture
+directory; activate their imports through `ProjectImports`.
+
 Mark a new module of that sort with `pytestmark = pytest.mark.database_independent`. `make test`
 and a plain `pytest` run every test, these included - all but the `timing` ones below.
 
 A test waits for what a background task does by the thing itself - an event, a pool status, a
 signal that arrived (`tests/utils/waiting.py`: `wait_until`) - never by a delay: its outcome must not
-depend on how fast the machine is. A test whose very subject is time - a timeout, a lease, a refresh
-period running out - is marked `@pytest.mark.timing` and left out of every run unless asked for:
+depend on how fast the machine is. Elapsed-time assertions and stress scenarios scheduled by short
+delays are marked `@pytest.mark.timing` and left out of every run unless asked for:
 
 ```bash
 make test_timing                       # the timing tests against SQLite
@@ -138,6 +205,31 @@ HARE_TEST_DB=clickhouse+... pytest --run-timing -m timing tests/dialects/clickho
 pytest --run-timing                    # every test, the timing ones included
 ```
 
+Reconnect tests pause real ORM operations at connection acquisition and drain every task on exit.
+`SqliteProgressSignal` observes when the worker starts a real statement;
+`PostgresqlQueryCancellation` waits for the target SQL in `pg_stat_activity` before cancelling it.
+Query and stream tests must demonstrate the driver's own server cancellation; the observer
+does not stop the server statement on the driver's behalf.
+Both require completion of the cancelled operation before its resources are released. A subprocess
+watchdog may protect against a stuck native event loop, but the parent fixture retains ownership
+of the database. Connection-only tests use `create_independent()` and close their own clients.
+Retry tests count confirmed server attempts and observer events; `ManualClock` checks durations.
+Tests of pool exhaustion hold a slot explicitly and observe waiting callers, without elapsed-time
+assertions; the acquisition timeout itself remains a real pool setting.
+Migration-lock tests observe the waiting migrator's PID, database and lock key. Cursor walks check
+each page against the expected prefix or suffix, so a repeating cursor fails immediately.
+The default `Now()` check verifies the database expression in each statement; comparing elapsed
+wall-clock moments belongs to the optional timing suite.
+
+Server setup failures are test failures. ClickHouse profiles require their configured types,
+Keeper and transaction support. PostgreSQL tests check `pg_available_extensions` before installing
+PostGIS or pgvector. A local run may explicitly allow an absent package with
+`HARE_TEST_OPTIONAL_POSTGRES_EXTENSIONS=postgis,vector`; this only permits a skip for catalog-confirmed
+absence. Permission, connection and installation failures still fail. CI ignores this opt-out,
+and the matrix runner removes inherited `HARE_TEST_*` settings before constructing each profile.
+Shared PostgreSQL fixtures clear the exclusively leased database through its catalog, using
+schema-qualified names and excluding extension-owned objects.
+
 PostgreSQL tests need a running server. `make test_db_up` builds and starts the test server
 (`tests/docker/postgres`: PostGIS, pgvector and the contrib extensions, so no PostgreSQL-only test
 skips) on `localhost:5433`, with durability switched off — the suite creates and drops hundreds of
@@ -145,7 +237,7 @@ databases, and every `DROP DATABASE` forces a checkpoint:
 
 ```bash
 make test_db_up                 # once; `make test_db_down` removes it
-make test_postgres_asyncpg      # the whole suite via the pure-Python asyncpg driver
+make test_postgres_asyncpg      # the whole suite through asyncpg
 make test_postgres_rust         # the whole suite via the Rust driver (needs it built first, below)
 ```
 
@@ -162,20 +254,19 @@ by its `*_down` target:
 
 ```bash
 make test_db_up test_pgbouncer_up && make test_pgbouncer   # the PostgreSQL suite through PgBouncer (port 6432), both drivers
-make deps options="--extras clickhouse-connect --extras clickhouse-driver"   # both ClickHouse drivers, for the next line
-make test_clickhouse_up && make test_clickhouse            # the ClickHouse dialect's tests on both drivers, ClickHouse 25.8 on ports 8124 (HTTP) and 9124 (native)
+make test_clickhouse_up && make test_clickhouse            # compatible drivers, ClickHouse 25.8 on ports 8124 (HTTP) and 9124 (native)
 make test_brokers_up && make test_brokers                  # the outbox against Redis (6390), RabbitMQ (5673), Kafka (9095)
 ```
 
 PgBouncer runs in transaction pooling with prepared statements across transactions (1.22.1+, the
 oldest hare supports); what needs a session of its own (`LISTEN`, a session lock timeout) goes
-straight to the server. ClickHouse runs only the dialect's own tests (`tests/dialects/clickhouse`):
-the shared test models of the rest of the suite need the unique and foreign key constraints ClickHouse
-doesn't keep. Without their
-servers, the broker tests are skipped.
+straight to the server. ClickHouse runs the dialect tests, contract matrices and selected field tests
+listed in `tests/matrix/catalog.toml`. Other shared models require unique and foreign key constraints
+ClickHouse doesn't enforce. Without their servers, the broker tests are skipped.
 
-Every `make` target and every matrix run passes `--verify-plans`
-(`tests/plan_verification`): each query that runs on a cached plan — a statement plan, a plan by call
+The main database suites (`make test`, `make test_sqlite`, the PostgreSQL targets) and matrix runs
+pass `--verify-plans` (`tests/plan_verification`). `make test_fast` deliberately omits it and does not
+replace these checks. Each query that runs on a cached plan — a statement plan, a plan by call
 signature — is built again without plans, and its SQL and parameters compared with the plan's. A
 difference fails the test with both statements and the plan's key, so a plan that forgets part of
 its query is caught by the test that ran it. Pass it to a `pytest` of your own too:
@@ -184,32 +275,49 @@ its query is caught by the test that ran it. Pass it to a `pytest` of your own t
 HARE_TEST_DB=sqlite+aiosqlite://:memory: poetry run pytest --verify-plans tests/queries/querysets/test_queryset.py
 ```
 
-`make testall`/`make ci` runs `check` plus `test_database_independent`, `test_sqlite` and
-`test_postgres_asyncpg` — everything except `test_postgres_rust`, which needs a Rust toolchain.
+`make testall` installs dependencies and runs `test_database_independent`, `test_sqlite` and
+`test_postgres_asyncpg`. `make ci` runs `check` and those same suites. Other targets cover the Rust
+driver, ClickHouse, brokers and additional configurations; these two commands are not the full matrix.
 CI runs the suite on the Python, SQLite and PostgreSQL versions of the
 [test matrix](#test-matrix-and-ci), through both PostgreSQL drivers — all of them, on every run.
 
 ## Building the Rust extensions
 
-`test_postgres_rust` and any local work on `rust/` need [rustup](https://rustup.rs/) plus
-[maturin](https://www.maturin.rs/). `rust-toolchain.toml` pins the Rust version CI uses too - rustup
-installs it on the first `cargo` call in the checkout, so a check passing locally passes in CI:
+hare doesn't run without `rust.native`; building it needs [rustup](https://rustup.rs/) plus
+[maturin](https://www.maturin.rs/) (a development dependency). `rust-toolchain.toml` pins the Rust
+version CI uses too - rustup installs it on the first `cargo` call in the checkout:
 
 ```bash
-make build_native           # rust.native for this OS and the current Python, into rust/
-make build_native_linux     # the Linux rust.native of Python 3.12-3.14, in Docker
-make build_native_windows   # the Windows rust.native of Python 3.12-3.14 (.venv-3.X-core)
-make build_native_macos     # the macOS rust.native of Python 3.12-3.14 (.venv-3.X-core), universal2
+make build_native           # rust.native for the current Python, into rust/
+make build_native_linux     # the Linux rust.native of Python 3.12-3.15, in Docker
 make rust_check             # cargo fmt --check, clippy and the Rust unit tests (part of make check)
 ```
 
 `rust.native` (`rust/native/`) holds the PostgreSQL driver behind `postgresql://` URLs (`rust.native.pg`)
-and the row readers/writers with the field codecs (`rust.native.rows`). It is optional at runtime:
-without it, use `postgresql+asyncpg://` URLs, and rows are read and written in pure Python. CI builds
-it on every run for Python 3.12, 3.13 and 3.14 on Linux, Windows and macOS (one universal2 file per
-Python for Apple silicon and Intel Macs) and shares it with every job that needs it. The built files
+and the shared model row layouts (`rust.native.rows`). Python prepares the column keys and field
+readers. The native layout applies them, creates model instances, attaches related objects and
+annotations, and calls the dirty-field snapshot hook. Large results are read in bounded chunks,
+yielding to the event loop between chunks. Configured converters run in row order, including on
+NULL values, and the first conversion error stops the batch. Every wheel carries the extension,
+on Windows without the PostgreSQL driver
+(`rust.native.pg`, `rust.native.pool`), which is built on Linux and macOS alone. CI builds it on every
+run for Python 3.12, 3.13, 3.14 and 3.15 on Linux and shares it with every job that needs it. The built files
 aren't committed: a checkout has no `rust.native` until `make build_native` builds it with the Rust
 toolchain `rust-toolchain.toml` pins, and the wheels on PyPI carry it built.
+
+Native annotation readers are classified when the result layout is prepared. Their conversions and attribute
+assignments still run for each row in order. Ordinary Python callbacks use PyO3 `call1` with Rust
+tuples. The small CPython FFI module retains generic attribute assignment and exact-integer
+extraction, whose behavior is distinct from ordinary Python method calls. PostgreSQL bind and COPY
+parameters are borrowed iterators over the prepared values; binary COPY retains its own binary
+parameter wrapper. Collection conversion and string formatting avoid intermediate vectors and
+owned strings where a borrowed value or a single output buffer suffices. These changes do not
+introduce alternate field codecs or bypass custom readers, writers, validation or cancellation.
+
+When comparing checkouts, use a separate `CARGO_TARGET_DIR` for each source tree and Python version.
+Build the release extension from that tree and verify the imported `hare` and `rust.native` paths
+before measuring; an editable installation or another `rust` package on `PYTHONPATH` can select a
+different tree. See [Benchmark comparisons](benchmarks/README.md#comparing-changes).
 
 ## Test matrix and CI
 
@@ -217,65 +325,90 @@ The test matrix is every combination the suite runs on:
 
 | Axis | Versions |
 | --- | --- |
-| Python | 3.12, 3.13, 3.14 |
-| SQLite | 3.35.5 (the oldest supported), 3.37.2 (Ubuntu 22.04's own; `STRICT` tables from 3.37), 3.38.0 (`->>`), 3.41.0 (`unhex()`) and 3.53.4 (the newest) — plus the newest with SQLite's regular expression functions installed; on Linux, Windows and macOS |
+| Python | 3.12, 3.13, 3.14, 3.15 |
+| SQLite | 3.35.5 (the oldest supported), 3.37.2 (Ubuntu 22.04's own; `STRICT` tables from 3.37), 3.38.0 (`->>`), 3.41.0 (`unhex()`) and 3.53.4 (the newest) — plus the newest with SQLite's regular expression functions installed; on Linux |
 | PostgreSQL | 14, 15, 16, 17, 18 — each through `asyncpg` (`postgresql+asyncpg://`) and through the Rust driver (`postgresql://`); on Linux |
 | PgBouncer | 1.22, 1.23, 1.24, 1.25, 1.26 — each in front of PostgreSQL 18, 1.26 also in front of 14, through both PostgreSQL drivers; on Linux |
 | ClickHouse | 25.8, 25.10, 25.12, 26.3, 26.7, 26.8, 26.9 — each a server and a two-server cluster, through `clickhouse-connect` (HTTP) and `clickhouse-driver` (the native protocol); on Linux |
 | Redis, RabbitMQ, Kafka | the oldest version hare supports and the newest: Redis 7.2 and 8.10, RabbitMQ 4.0 and 4.3, Kafka 3.9 and 4.3; on Linux |
 
-Each version of an axis runs at least once, not with every version of every other axis: CI runs every
-SQLite and PostgreSQL version on every Python, and PgBouncer, ClickHouse and the brokers on the newest
-Python (the [CI](#ci) table says which combinations run). The versions are listed in
-`tests/matrix/constants.py` and in the Makefile's `matrix_*` variables.
+CI uses the selected combinations described in the [CI table](#ci), rather than the full product of
+all axes. `tests/matrix/catalog.toml` is the shared source for versions, images, environments and reduced
+CI profiles. Database-independent, build and installation jobs provide the cross-platform coverage.
+The Makefile reads it with `matrix_catalog_python` (default `python`); CI's small `catalog` job emits
+the matrices while independent check and native-build jobs start normally. The final gate requires
+every declared job to succeed; only the explicit `dev` to `main` PR reduction permits skipped tests.
+Native builds install the catalog's Python versions together with `setup-python`. The development
+dependency `findpython` locates those CPython interpreters on PATH for build and import checks;
+it is not needed to read the catalog or create test environments.
 
-The SQLite versions are listed in `tests/sqlite_versions/constants.py`. A run on one of them loads
-exactly that version, whatever SQLite the Python was built with:
+Each local process has a `RunSpec` and a separate `RunResult`. Shared server resources serialize
+direct PostgreSQL and pooler profiles, both drivers of a ClickHouse server, and cluster profiles.
+Independent resources can run concurrently within `--jobs`; small runs keep their separate limit.
+Profiles clear inherited `HARE_TEST_*` settings before applying their declared environment.
+JSON reports beside the logs retain pytest counts, the actual random seed and tool versions.
+Exit code 5 fails unless a run explicitly permits an empty selection. Missing reports also fail.
+Cancellation ends each run's process session before joining workers.
 
-- **Linux**: `libsqlite3.so.0` compiled from the version's amalgamation, found through
-  `LD_LIBRARY_PATH`;
-- **Windows**: the version's official `sqlite3.dll` next to a copy of the Python's own
-  `_sqlite3.pyd`, put first on `PYTHONPATH`;
-- **macOS**: `libsqlite3.0.dylib` compiled from the amalgamation, through `DYLD_LIBRARY_PATH`. The
-  python.org builds (which `actions/setup-python` installs) have SQLite linked into `_sqlite3`
-  statically, so the library path changes nothing there: the `_sqlite3` module is then compiled
-  from the CPython sources of the running Python version (downloaded from python.org) against the
-  compiled library and put first on `PYTHONPATH`. The same happens on Linux for a Python whose
-  `_sqlite3` finds its SQLite through its own `RPATH` (the manylinux builds).
+The catalog's `sqlite_releases` table lists SQLite versions and download paths. A run on one of them loads
+exactly that version, whatever SQLite the Python was built with: `libsqlite3.so.0` compiled from the
+version's amalgamation, found through `LD_LIBRARY_PATH`. For a Python whose `_sqlite3` finds its
+SQLite through its own `RPATH` (the manylinux builds) the library path changes nothing: the `_sqlite3`
+module is then compiled from the CPython sources of the running Python version (downloaded from
+python.org) against the compiled library and put first on `PYTHONPATH`.
 
 Preparing a version checks with a fresh interpreter that `sqlite3.sqlite_version` is the
 requested one and fails otherwise; every test run also gets `HARE_TEST_SQLITE_VERSION` and stops
 before its first test when another SQLite is loaded — a run never falls back to the system's
 SQLite silently.
 
+SQLite libraries and Python SQLite extensions use the artifact preparation
+helpers in `tests/artifacts/`. A build records source digests, platform, compiler and options, plus
+the full Python ABI for a Python extension. Existing files are reused only when their manifest and
+hashes match. Builds and downloads use temporary directories; load and version checks run before an
+immutable artifact directory is published. Minor-version selection files point to those directories,
+so an interrupted or concurrent preparation cannot replace a library another process is using.
+
 ### Test environments
 
-Each test runs in the one environment of `tests/matrix/constants.py` `SUITE_ENVIRONMENTS` that installs
-exactly the packages it needs: `core` installs none of the extras, `litestar` the `litestar` extra, `pure`
-nothing optional and no `rust.native` either (the pure wheel). Code that breaks without a package is then
+Each pytest session stores its `TestRunResources` in pytest's configuration stash. Workers use
+distinct database tags and hold a direct-server advisory lock until fixture teardown finishes.
+Cleanup can remove a tagged database only after taking its finished run's lock; databases without
+that tag protocol are left alone. Environment changes are restored even after collection errors.
+Failure to acquire the run lock stops setup, and a partially opened session is closed.
+
+Each test runs in the one environment of `tests/matrix/catalog.toml` that installs
+exactly the packages it needs: `core` installs none of the extras, `litestar` the `litestar` extra. Code
+that breaks without a package is then
 caught by the environments without it, and a test never skips because a package is missing.
 
-The matrix runs the environments of extras on the tests reading no database, once per Python and OS -
-each collecting only the modules that may hold its tests (`tests/matrix/extra_test_modules.py`): a module
-whose `REQUIRES`, a `conftest.py` above it, or what it imports from the test suite names one of the
-environment's extras in a string; an environment no module may hold tests of doesn't run. On
-a database every test runs in `all`, installing every extra, on each server version - one run per
-version and driver; `core` and `pure` run there on the newest server of each database and the newest
-Python only.
+The matrix runs the environments of extras on the tests reading no database, once per Python -
+each collecting only candidate modules declared in `tests/matrix/selection.toml`. This manifest is
+read with the standard library before importing tests or fixtures; test source is not interpreted.
+An environment with no candidate modules doesn't run. On
+a database every available test runs in `all`, installing compatible extras, on each server version - one run per
+version and driver; `core` runs there on the newest server of each database and the newest
+compatible Python only.
 
-- A test module needing an extra declares it before its other code: `REQUIRES = ("litestar",)` - read
-  without importing the module, so a run without the package doesn't import it either. A `conftest.py`
-  declares it for its whole directory.
+- Every `test_*.py` module has a `[modules]` entry in the manifest. `requires` lists packages needed
+  to import it; `[scopes]` adds requirements for entire directories, including their fixtures.
+  A run lacking these packages excludes the path before importing it.
 - A single test or parameter adds its own with `@pytest.mark.requires("encryption")` or
   `pytest.param(..., marks=pytest.mark.requires("yaml"))`, and imports the package inside the test.
-- `native` is the requirement of a test needing `rust.native` - such a test doesn't run in `pure`.
+  Declare these optional requirements in the module's `cells` list so preselection can find it.
+  Module requirements from the manifest are also applied as marks during collection.
+- Every run checks for undeclared modules and missing files. Collection, including `all`, rejects
+  undeclared cell requirements. When changing selection, compare selected node IDs against an
+  all-extras collection; matching candidate module lists alone does not prove full coverage.
 - A test requiring what no environment installs exactly fails the collection: add an environment.
 - A test parametrized over the PostgreSQL drivers takes their classes by path
   (`DriverClasses.get_parameters(*POSTGRES_CLIENT_PATHS)`, the `client_class` fixture with
   `indirect=True`), so asyncpg's parameter runs only where asyncpg is installed.
 
 `pytest --hare-suite-environment=<name>` runs one environment's tests; without the option every
-environment's tests run (`all`), which needs a virtualenv installing everything - `make deps`. The matrix
+available environment's tests run (`all`), using the virtualenv installed by `make deps`.
+On Python 3.15, Robyn and ClickHouse TCP are excluded before installation and test imports; all
+other integrations remain covered. `core` selects the latest compatible Python per database driver. The matrix
 runs each environment in a virtualenv of its own, `.venv-<python>-<environment>[-<driver extra>]`, the extra
 of the database's driver added for a run on that database:
 
@@ -286,20 +419,26 @@ make test_environment ENVIRONMENT=litestar HARE_TEST_DB=postgresql://postgres:po
 
 ### Contract matrices
 
-`tests/contracts/` checks each capability of hare against every place it is used, as a matrix: the rows are
-enumerated from hare itself (`HareRegistry` walks its packages), so a class added to hare is checked at once,
-and a row without its expected result fails a completeness test instead of being skipped.
+`tests/contracts/` checks shared guarantees across fields, query forms, write paths and databases. The
+registry-backed matrices use `HareRegistry` to enumerate their classes. A new class without a sample
+or a documented exception fails the corresponding completeness test.
 
 | Matrix | Rows × columns | Where |
 | --- | --- | --- |
 | Field × place of its value | every concrete field class (`field_samples.py`) × migration, change event (strict JSON), pydantic schema, request query and its cursor, factory, inspectdb | `test_field_*.py` |
 | Field × its `GeneratedField` copy | every sample × change event, `JSONObject`, `values()`, `F()` annotation, ordering by the field and by its annotation, filter, `distinct()`, `Min`/`Max` (an empty set too), `Greatest`/`Least`, a fractional `Coalesce` and `Lag` default (`GENERATED_FIELD_OPERATIONS`) — the copy gives what the field gives | `test_generated_field_contract.py` |
-| Field × native codec | every sample and its `GeneratedField` copy × reading the driver's values and writing the sample's, in every time zone setting — `rust.native`'s codec and the field's own conversion agree | `test_field_native_codecs.py` |
+| Field × bound conversion | every sample and its `GeneratedField` copy × model hydration and bound writing, in every time zone setting — results agree with the type registry's conversions | `test_field_native_codecs.py` |
 | Field × query path | representative `FIELD_SAMPLES` with composite keys × model/dict/flat results, iteration, cursor boundaries, windows and returning; expected values come from the input samples | `test_field_query_paths.py` |
 | Keyless rows × operation | repeated rows × slices, iteration, count, existence, aggregation and returning, including refusals before SQL | `test_keyless_query_paths.py` |
+| Reader × scope lifetime | scalar/composite keys × tenant changes in the consumer; early close for iterator and stream, soft-delete visibility for iteration | `test_iterator_scope_lifetime.py` |
 | Prefetch slice × query shape | composite many-to-many relations × masks, windows, distinct, repeated rows and separate connections | `test_prefetch_query_shapes.py` |
 | Query columns × identifier | letter case and byte length × set operations, windows, recursion and old values returned by updates | `test_query_column_names.py` |
-| Query shape × operation | composite aliases, nullable subqueries and their slices, ordering joins and grouped rows × filtering, summaries and set operations | `test_query_shape_interactions.py` |
+| Query shape × operation | composite aliases, nullable subqueries and their slices, ordering joins and grouped rows × filtering, summaries and set operations; single/composite keys × result shapes, ordering and slices, checked against Python keys | `test_query_shape_interactions.py` |
+| Relation × connection choice | reverse FK and many-to-many, single/composite source and target keys × saved connection changes, runtime routers, explicit `using()`, result shapes, summaries, union and sliced prefetch | `test_relation_connection_paths.py` |
+| Mutable input × call snapshot | list/set/dict and their subclasses × filter/exclude/`Q`, pending JSON writes and nested values, with single/composite keys | `test_filter_value_snapshots.py` |
+| Write path × nested outcome | update/save/bulk update/soft delete × inner/outer commit and rollback, single/composite keys, tenant isolation and commit/rollback callbacks | `test_transaction_scope_paths.py` |
+| Migration × state and database | declaration isolation, apply/unapply, connection moves, rewrites across batch boundaries, and rollback followed by reapply with surviving data and history | `test_migration_runner_state.py`, `tests/migrations/execution/test_rollback_history.py` |
+| Tenant model × selected client | single/composite keys × reads, writes, relations and embedded queries; missing template/scope, explicit aliases/clients and remembered aliases; a valid tenant client remains usable | `test_tenant_connection_paths.py` |
 | JSON aggregate × element type | binary and interval `FIELD_SAMPLES` × scalar/nested arrays/generated outputs; refusal before SQL and exact `ArrayAgg` values | `test_json_aggregate_inputs.py` |
 | Write path × observer | every method writing rows (`writes/write_methods.py`) × `ChangeCapture`, `RowsChanged`, validators, `auto_now`, optimistic lock, tenant scope, encryption, `GeneratedField` | `writes/` |
 | Extra × entry point | every module importable in the environment, the dialect registry, the CLI, a URL of a driver without its package | `entry_points/` |
@@ -309,20 +448,24 @@ and a row without its expected result fails a completeness test instead of being
 | `Meta` option × inheritance | every model option and extension option × no `Meta`, a bare one, `Meta(Base.Meta)`, overridden, `None` | `meta_options/` |
 | Exception × integration answer | every public exception × each integration's status, without the database's text | `exceptions/` |
 
+Every field sample keeps the migration source round-trip and declared column-type checks. For fields
+with a row column, the inspectdb matrix also applies the written migration, reverses it, checks that its
+tables are gone and recreates them from the inspected models. Samples without a row column run their
+apply/reverse cycle in the migration matrix, using `FIELD_SAMPLES_WITHOUT_ROW_COLUMN` to partition the cases.
+
 A new field class needs its `FieldSample` (with its values and their JSON forms), a new writing method its
 write path, a new `Meta` option its sample — or an entry with the reason in `tests/contracts/constants.py`.
-A cell failing because of hare is a bug to fix, never an expectation to change. The matrices run in every
-environment and on every database of the matrix (`MATRIX_CLICKHOUSE_TEST_PATHS` includes them). The
+A cell failing because of hare is a bug to fix, never an expectation to change. Cells run in the catalog's
+profiles whose database and dependency requirements they satisfy. ClickHouse includes `tests/contracts/`. The
 ClickHouse test URLs name the server's Keeper (`keeper_hosts`): a test database's `generateSerialID` series are
 deleted with it, so local runs never reach the server's `max_autoincrement_series` (1000).
 
 ### Running the matrix locally
 
-You need Python 3.12, 3.13 and 3.14 (`py -3.X` on Windows, `python3.X` elsewhere), Docker for the
-servers, and on Linux and macOS a C compiler for the SQLite libraries. The rust_pg runs
-use the `rust.native` builds in `rust/`: the committed Linux, Windows and macOS files, or
-`make build_native_linux`/`make build_native_windows`/`make build_native_macos` after changing
-`rust/`.
+You need Linux, Python 3.12, 3.13, 3.14 and 3.15 (`python3.X`), Docker for the servers, and a C compiler
+for the SQLite libraries. The rust_pg runs use locally built `rust.native` artifacts in `rust/`.
+Run `make build_native_linux` before the matrix, and rebuild after changes to `rust/`;
+binaries are not committed.
 
 ```bash
 make matrix_venvs         # the virtualenv of each Python, environment and database driver of the runs
@@ -343,7 +486,13 @@ the suites you run — every ClickHouse server and cluster at once needs a lot o
 
 A run is the tests of one environment in one suite. Each run writes its pytest output to
 `.test-matrix/<python>-<environment>-<suite>.log`; `make test_matrix` fails when any run failed - a
-run choosing no test of its environment passes. The suites are `database-independent`, `sqlite-<version>`,
+run choosing no tests fails unless its declaration explicitly permits `allow_empty=True`.
+The `[contracts]` table in `tests/matrix/catalog.toml` names required pytest cases and their suites
+in the `all` environment. Use the full node ID, including its parameter ID, to require a specific
+case. A test name without a parameter ID requires at least one passing variant. The JSON report
+beside the log records selected case outcomes and skip reasons. A required case that doesn't pass
+fails the matrix run, including when it wasn't collected. List only suites where the case applies.
+The suites are `database-independent`, `sqlite-<version>`,
 `sqlite-regexp`, `asyncpg-<postgres>`, `rust_pg-<postgres>`, `pgbouncer-<asyncpg|rust_pg>-<pgbouncer>-<postgres>`,
 `clickhouse-connect-<clickhouse>`, `clickhouse-driver-<clickhouse>`, `clickhouse-connect-cluster-<clickhouse>`,
 `clickhouse-driver-cluster-<clickhouse>`, `redis-<version>`, `rabbitmq-<version>` and `kafka-<version>`. Run a
@@ -370,10 +519,8 @@ A `--suite` is a name or a shell-style pattern; one that matches no suite is an 
 The SpatiaLite tests (`tests/dialects/sqlite/test_spatialite.py`) load the library
 `HARE_TEST_SPATIALITE_PATH` names — a name the system's loader finds or a path — and point PROJ at
 `HARE_TEST_SPATIALITE_PROJ_DATABASE` when it is set; without the library they skip. On Linux install
-`libsqlite3-mod-spatialite` and set `HARE_TEST_SPATIALITE_PATH=mod_spatialite`; on macOS
-`brew install libspatialite` and `HARE_TEST_SPATIALITE_PATH=$(brew --prefix)/lib/mod_spatialite`; on
-Windows `make spatialite` downloads the official build into `tests/spatialite/` and prints both
-variables. CI sets them in the `test-sqlite` jobs.
+`libsqlite3-mod-spatialite` and set `HARE_TEST_SPATIALITE_PATH=mod_spatialite`. CI sets it in the
+`test-sqlite` jobs.
 
 ### Lowest dependency versions
 
@@ -410,16 +557,16 @@ virtualenv:
 | Job | What it does | Makefile targets |
 | --- | --- | --- |
 | `check` | ruff format check, ruff, mypy and bandit on Python 3.12; cargo fmt, clippy and the Rust unit tests; actionlint; the documentation built in strict mode | `make deps`, `make check` |
-| `build-native-linux` | `rust.native` for Python 3.12, 3.13 and 3.14 on Linux, in the maturin image (manylinux2014) | `make build_native_linux` |
-| `build-native` | `rust.native` for Python 3.12, 3.13 and 3.14 on Windows and on macOS (universal2), one job per system | `make deps`, `make build_native_windows`, `make build_native_macos` |
+| `build-native-linux` | `rust.native` for Python 3.12, 3.13, 3.14 and 3.15 on Linux, in the maturin image (manylinux2014) | `make build_native_linux` |
 | `test-sqlite` | every SQLite version and `sqlite-regexp`, on Linux, one job per Python | `make matrix_venvs`, `make sqlite_versions`, `make test_matrix` |
-| `test-database-independent` | the tests reading no test database (`database-independent`), one job per OS (Linux, Windows, macOS) and Python | `make matrix_venvs`, `make test_matrix` |
+| `test-database-independent` | the tests reading no test database, one job per Python | `make matrix_venvs`, `make test_matrix` |
 | `test-postgres` | one PostgreSQL version through both drivers, one job per version and Python | `make test_db_matrix_up`, `make matrix_venvs`, `make test_matrix` |
 | `test-lowest-dependencies` | the lowest dependency versions, one job per Python | `make test_db_up`, `make lowest_dependencies_venv`, `make test_lowest_dependencies` |
-| `test-pgbouncer` | the PostgreSQL suite through one PgBouncer in front of one PostgreSQL, both drivers, on Python 3.14: each PgBouncer in front of PostgreSQL 18, 1.26 also in front of 14 | `make test_db_matrix_up`, `make test_pgbouncer_matrix_up`, `make matrix_venvs`, `make test_matrix` |
-| `test-clickhouse` | the ClickHouse dialect's tests on one ClickHouse version and on a cluster of it, both drivers: each version on Python 3.14, 25.8 also on 3.12 and 3.13 | `make test_clickhouse_matrix_up`, `make test_clickhouse_cluster_matrix_up`, `make matrix_venvs`, `make test_matrix` |
+| `test-pgbouncer` | the PostgreSQL suite through one PgBouncer in front of one PostgreSQL, both drivers, on Python 3.15: each PgBouncer in front of PostgreSQL 18, 1.26 also in front of 14 on Python 3.14 | `make test_db_matrix_up`, `make test_pgbouncer_matrix_up`, `make matrix_venvs`, `make test_matrix` |
+| `test-clickhouse` | the ClickHouse dialect's tests on one ClickHouse version and on a cluster of it, both drivers: each version over HTTP on Python 3.15 and TCP on 3.14; 25.8 also on 3.12 and 3.13 | `make test_clickhouse_matrix_up`, `make test_clickhouse_cluster_matrix_up`, `make matrix_venvs`, `make test_matrix` |
 | `test-brokers` | the outbox's wakeups and deliveries against the oldest and newest Redis, RabbitMQ and Kafka, one job per Python | `make test_brokers_matrix_up`, `make matrix_venvs`, `make test_matrix` |
-| `test-poetry-add` | a new poetry project adding hare-orm from the checkout, one job per OS (Linux, Windows, macOS) and Python | `make deps`, `make test_poetry_add` |
+| `test-poetry-add` | a new poetry project adding hare-orm from the checkout, one job per Python | `make deps`, `make test_poetry_add` |
+| `platform-wheels` | the wheels of Linux (manylinux x86-64), macOS (ARM64) and Windows (x86-64) built and installed, each checked as a release checks it | — |
 | `ci-passed` | passes when every job above passed, or was skipped for a pull request from `dev` into `main` — the status the rulesets require | — |
 
 The test jobs run the `rust.native` this commit builds, and upload their
@@ -444,6 +591,12 @@ Enforced mechanically (ruff, mypy and bandit in `make check` and CI; codespell i
 descriptive names (no abbreviated variables/identifiers) and on detailed, accurate docstrings and
 comments that explain *why* a piece of code is the way it is (a non-obvious constraint, a database
 quirk) — match that style in new code and comments.
+
+Do not use `typing.cast()` or `typing_extensions.cast()`, including aliases. These calls perform no
+runtime conversion or validation. Express the contract with annotations; where the checker cannot
+infer it, use a targeted `# type: ignore[error-code]` on the relevant line. Do not replace a cast with
+an identity wrapper, assertion or runtime type check solely to satisfy typing. SQL casts and
+Rust/PyO3 casts perform different operations and retain their behavior. Ruff enforces this rule.
 
 ## Docs
 
@@ -495,8 +648,9 @@ navigation. `docs/benchmarks/` and the Benchmarks section of the READMEs are wri
 ### Differences between databases
 
 When a feature isn't on every database, the first paragraph of its section says where it is and
-what the other databases do: they raise `UnSupportedError`, saying why, before any SQL is sent —
-hare doesn't emulate what a database's language lacks. A database writing the same thing in its own
+what the other databases do: they raise `UnSupportedError`, saying why, before the unsupported action.
+Capability discovery may query the server. Hare doesn't emulate what a database's language lacks.
+A database writing the same thing in its own
 equivalent form, or running a function of hare's with its own means, isn't a difference to describe.
 Several differences go into a table `Database | Behavior`. A version is named only when it is newer
 than the oldest server hare supports for that database (`*_MINIMUM_SERVER_VERSION`): "SQLite 3.37"
@@ -524,7 +678,8 @@ yes, "SQLite 3.35" no. The table of every feature by database lives in
 
 - Every fence names its language. A `python` block parses as Python; output, SQL and other text are
   `text`, `sql`, `bash`.
-- A signature is written as a stub, so the build can check it against the code:
+- A signature is written as a valid Python stub; review it against the current API. The docs build
+  checks its syntax, not semantic agreement with the implementation:
   `def name(argument: Type = default) -> Result: ...`, `async def ...: ...`, a class as
   `class Name:` with its `def __init__(...) -> None: ...`. A configuration fragment is valid
   Python: `{"routers": ["app.routers.PrimaryReplicaRouter"], **settings}`, never `{..., }`.
@@ -545,8 +700,8 @@ yes, "SQLite 3.35" no. The table of every feature by database lives in
   URL parameter, a `Meta` option, a setting), with a `Default` column where defaults matter; in
   Russian `Аргумент | Что задаёт` (`Параметр`, `Опция`, `Настройка`, `По умолчанию`).
 - Links are relative and point at the anchor: `[Transactions](../connections/transactions.md#on-commit)`.
-  A Russian page links the `.ru.md` page — GitHub opens the English one otherwise, and
-  `mkdocs build --strict` doesn't notice.
+  A Russian page links the `.ru.md` page — GitHub opens the English one otherwise.
+  The `DocsStandardChecks` build hook checks this, and `mkdocs build --strict` rejects its warnings.
 - A reference in a table cell or a list item is "— see [Topic](...)"; inside a sentence "(see
   [Topic](...))"; on its own "See [Topic](...)."
 
@@ -554,7 +709,9 @@ yes, "SQLite 3.35" no. The table of every feature by database lives in
 
 A Russian page is the English page translated: the same headings and anchors in the same order,
 the same paragraphs, lists, tables and code. Code is not translated — not the placeholders
-(`<fields>`), not inline code; comments in code blocks are. The terms:
+(`<fields>`), not inline code; Python comments and actual docstrings in code blocks are translated.
+Python translation checks use tokens and preserve string literals. Other code blocks keep their
+literal contents; `text` blocks may translate output and diagrams. The terms:
 
 | English | Russian |
 |---|---|
@@ -641,17 +798,23 @@ Maintainers cut a release from `dev`:
 The `release` workflow then checks that the tag matches the version in `pyproject.toml`, that
 the changelog has a section for it and that the tagged commit is on `main`, and runs the whole
 [test matrix](#test-matrix-and-ci) on that commit — nothing is published unless it passes. On each platform's own
-runner — Linux x86-64 and ARM64 (manylinux2014 and musllinux 1.2), macOS Intel and Apple Silicon,
-Windows x64 and ARM64 — it builds the Rust extension for Python 3.12, 3.13 and 3.14 (maturin
-`--interpreter` with the three of them) and a hare-orm wheel per Python carrying it
-(`.github/scripts/build_wheel.py`), and installs each wheel into a fresh environment of its own
-Python to run hare on SQLite, and on PostgreSQL through the Rust driver on Linux (the musllinux
-wheels in the `python:3.X-alpine` images). It also builds the pure wheel for other platforms and the sdist, neither of which carries a
-compiled extension. Publishing to PyPI waits for a maintainer's approval of the `pypi` environment;
+runner — Linux x86-64 and ARM64 (manylinux2014 and musllinux 1.2), macOS x86-64 and ARM64, Windows
+x86-64 and ARM64 (`.github/workflows/platform-wheels.yml`) — it builds the Rust extension for
+Python 3.12, 3.13, 3.14 and 3.15 (maturin `--interpreter` with all four) and a hare-orm wheel per
+Python carrying it (`.github/scripts/build_wheel.py`), and installs each wheel into a fresh
+environment of its own Python to run hare on SQLite, and on PostgreSQL through the Rust driver on
+Linux (the musllinux wheels in the `python:3.X-alpine` images). hare publishes these wheels alone —
+no wheel and no sdist without the extension. Publishing to PyPI waits for a maintainer's approval of
+the `pypi` environment;
 then the GitHub release is created, using the changelog section as its notes.
 
 To try the release build without publishing, run the `release` workflow by hand (Actions →
 release → Run workflow): it builds and checks every wheel and stops there.
+
+The wheel builder creates a `BuildSpec` for each ABI and stages its sources, selected extension
+and bundled libraries in a fresh temporary directory. It leaves checkout binaries untouched,
+checks the staged wheel contents, and only then atomically replaces the output wheel. A failed
+build or content check preserves previously built artifacts.
 
 A security fix is released as a patch release of the latest minor version, following
 [SECURITY.md](SECURITY.md).

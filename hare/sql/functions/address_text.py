@@ -10,6 +10,8 @@ class AddressText(Cast):
     """The text of an IP address the text lookups match - its ``VARCHAR`` cast; a dialect holding an
     IPv4 address as an IPv6 one writes it as the IPv4 text."""
 
+    structure_attributes = ()
+
     def __init__(self, term: Any) -> None:
         """
         Args:

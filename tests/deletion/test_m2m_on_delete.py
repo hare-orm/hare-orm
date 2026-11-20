@@ -11,6 +11,7 @@ nullable column for it (see BaseSchemaGenerator._get_m2m_side_columns).
 import pytest
 
 from hare import Connections
+from hare.core.hare_context import HareContext
 from hare.exceptions import ProtectedError
 from tests.shared_models.testmodels import (
     Club,
@@ -116,7 +117,7 @@ async def test_m2m_set_null_nulls_the_through_row(db, parent_class, peer_class, 
     peer = await peer_class.objects.create(name="Peer")
     await getattr(parent, field_name).add(peer)
 
-    field = parent_class._meta.fields_map[field_name]
+    field = HareContext.require_current().apps.get_binding(parent_class).fields_map[field_name]
     through_table = field.through
     backward_column = field.backward_keys[0]
     forward_column = field.forward_keys[0]
@@ -136,7 +137,7 @@ async def test_bulk_queryset_delete_m2m_set_null_real_db_constraint(db):
     peer = await M2MOnDeleteSetNullPeer.objects.create(name="Peer")
     await parent.peers.add(peer)
 
-    field = M2MOnDeleteSetNullParent._meta.fields_map["peers"]
+    field = HareContext.require_current().apps.get_binding(M2MOnDeleteSetNullParent).fields_map["peers"]
     through_table = field.through
     backward_column = field.backward_keys[0]
 

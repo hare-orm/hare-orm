@@ -1,13 +1,7 @@
-import sys
-
 import pytest
 
 from hare.cli.plugins.cli_command_registry import CLICommandRegistry
-
-
-@pytest.fixture(scope="session", autouse=True)
-def initialize_tests():
-    return None
+from tests.utils.project_imports import ProjectImports
 
 
 @pytest.fixture(scope="session")
@@ -24,19 +18,8 @@ def _read_cli_entry_points_once(monkeypatch: pytest.MonkeyPatch, _installed_cli_
     )
 
 
-def _purge_dynamic_cli_packages() -> None:
-    for name in [name for name in sys.modules if name == "cli_app" or name.startswith("cli_")]:
-        del sys.modules[name]
-
-
 @pytest.fixture(autouse=True)
-def _isolate_dynamic_cli_packages():
-    """Tests across this directory repeatedly create same-named throwaway packages (cli_app,
-    cli_accounts, cli_forked, ...) under a fresh tmp_path and import them by name. Without this,
-    a stale sys.modules entry left by an earlier test in the same worker process can shadow a
-    later test's own tmp_path package (wrong __path__, missing submodules) - individual tests
-    have inconsistently patched around this with ad-hoc sys.modules.pop() calls, which is easy to
-    forget and was causing intermittent failures depending on test order/worker assignment."""
-    _purge_dynamic_cli_packages()
-    yield
-    _purge_dynamic_cli_packages()
+def _isolate_dynamic_cli_packages(tmp_path):
+    """Restore namespaces declared by this test's files without clearing unrelated cli_* modules."""
+    with ProjectImports(tmp_path).isolate_modules():
+        yield

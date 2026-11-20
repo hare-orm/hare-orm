@@ -10,6 +10,8 @@ from hare.dialects.sqlite.indexes import FullTextIndex
 from hare.dialects.sqlite.sqlite_introspector import SqliteIntrospector
 from hare.inspectdb import SchemaInspector
 from hare.migrations.drift import detect_drift
+from hare.migrations.migration import Migration
+from hare.migrations.operations import AddIndex, RemoveIndex, SeparateDatabaseAndState
 from tests.migrations.round_trips.test_round_trip_real_db import APP_LABEL, RoundTrip, build_live_state, build_model
 
 pytestmark = pytest.mark.sqlite_only
@@ -56,8 +58,22 @@ async def test_a_changed_or_missing_index_is_drift(round_trip):
     post = build_post([FullTextIndex(fields=("title",), tokenizer="trigram")])
     await round_trip.migrate_to(post)
     changed = build_post([FullTextIndex(fields=("title",))])
-    drift = await detect_drift(round_trip.connection, build_live_state(changed), [APP_LABEL])
-    assert sorted(type(operation).__name__ for operation in drift.operations) == ["AddIndex", "RemoveIndex"]
+    expected = build_live_state(changed)
+    drift = await detect_drift(round_trip.connection, expected, [APP_LABEL])
+    assert [type(operation) for operation in drift.operations] == [SeparateDatabaseAndState, RemoveIndex, AddIndex]
+    assert drift.mismatched_objects == []
+
+    repair = Migration("repair", APP_LABEL, operations=drift.operations)
+    await repair.apply(expected, schema_editor=round_trip.editor)
+    after_apply = await detect_drift(round_trip.connection, expected, [APP_LABEL])
+    assert after_apply.operations == []
+    assert after_apply.mismatched_objects == []
+
+    await repair.unapply(expected, schema_editor=round_trip.editor)
+    after_rollback = await detect_drift(round_trip.connection, build_live_state(post), [APP_LABEL])
+    assert after_rollback.operations == []
+    assert after_rollback.mismatched_objects == []
+
     operations = await round_trip.migrate_to(changed)
     assert sorted(type(operation).__name__ for operation in operations) == ["AddIndex", "RemoveIndex"]
     assert (await detect_drift(round_trip.connection, build_live_state(changed), [APP_LABEL])).operations == []

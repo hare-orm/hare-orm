@@ -6,7 +6,7 @@ import pytest
 
 from hare import fields
 from hare.core.apps.relation_linking import RelationLinking
-from hare.migrations.exceptions import IncompatibleStateError
+from hare.migrations.exceptions import IncompatibleStateError, InconsistentMigrationStateError
 from hare.migrations.operations import DeleteModel, RenameModel
 from hare.migrations.state.state import State
 from hare.models import Model
@@ -38,6 +38,12 @@ def test_a_model_referenced_by_its_class_is_not_deleted_while_referenced():
         DeleteModel("ReferencedAuthor").state_forward("models", get_state())
 
 
+def test_missing_managed_class_reference_has_the_same_consistency_check_as_a_label():
+    state = State.from_models([BookNamingItsAuthorByClass])
+    with pytest.raises(InconsistentMigrationStateError, match="models.ReferencedAuthor"):
+        state.validate_relations_initialized()
+
+
 def test_renaming_a_model_renames_a_reference_to_its_class():
     state = get_state()
     RenameModel("ReferencedAuthor", "Writer").state_forward("models", state)
@@ -61,5 +67,6 @@ def test_the_backward_relation_name_rule(related_name, expected):
 
 
 def test_the_linking_names_a_backward_relation_by_the_rule():
-    rendered_author = get_state().apps.get_model("models.ReferencedAuthor")
-    assert "books" in rendered_author._meta.fields_map
+    state = get_state()
+    rendered_author = state.apps.get_model("models.ReferencedAuthor")
+    assert "books" in state.apps.get_binding(rendered_author).fields_map

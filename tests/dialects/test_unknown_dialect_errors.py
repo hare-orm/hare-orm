@@ -5,6 +5,7 @@ import types
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.dialects.base.dialect import Dialect
 from hare.dialects.base.renderers import TermRenderers
 from hare.exceptions import UnSupportedError
@@ -37,8 +38,12 @@ def test_json_path_access_on_an_unknown_dialect_raises():
 
 @pytest.mark.asyncio
 async def test_protect_deferral_on_an_unknown_dialect_raises(db_truncate):
-    assert DeletionGraph.has_transitive_protect(TransitiveCascadeGrandparent)
+    assert DeletionGraph.has_transitive_protect(
+        HareContext.require_current().apps.get_binding(TransitiveCascadeGrandparent)
+    )
 
     with pytest.raises(UnSupportedError, match="unknown"):
-        async with ProtectConstraintDeferral.defer(TransitiveCascadeGrandparent, UNKNOWN_DIALECT_CLIENT):
+        async with ProtectConstraintDeferral.defer(
+            HareContext.require_current().apps.get_binding(TransitiveCascadeGrandparent), UNKNOWN_DIALECT_CLIENT
+        ):
             pass

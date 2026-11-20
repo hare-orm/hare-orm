@@ -10,7 +10,6 @@ pub mod iso_moment;
 pub mod json_array_text;
 pub mod json_datetime;
 pub mod json_path;
-pub mod json_string;
 pub mod local_now;
 pub mod math_functions;
 pub mod statistic;

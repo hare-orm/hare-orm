@@ -6,14 +6,15 @@ import pytest
 from hare.contrib.test import requires_features
 from hare.exceptions import DoesNotExist, QueryError
 from hare.models.tenancy.tenancy import Tenancy
-from hare.query.plans.call_signatures.call_signature_plans import CallSignaturePlans
+from hare.query.plans.statement.declarations import CallPlanHit
+from hare.query.plans.statement.statement_plan_runs import StatementPlanRuns
 from hare.query.statements.select.model_rows_query import ModelRowsQuery
 from tests.shared_models import testmodels
 
 
 def get_direct_plan(query):
-    signature_key = CallSignaturePlans.get_key(ModelRowsQuery, query, query.get_connection(), ())
-    return None if signature_key is None else CallSignaturePlans.find(query.model, signature_key[0])
+    found = StatementPlanRuns.find_call_plan(ModelRowsQuery, query, query.get_connection())
+    return found.plan if isinstance(found, CallPlanHit) else None
 
 
 @requires_features(supports_positional_rows=True)

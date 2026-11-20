@@ -2,14 +2,12 @@
 mixed-constraint cascade cycles, select_related() validation and filters by partially loaded
 instances."""
 
-import os
-
 import pytest
 import pytest_asyncio
 
 from hare import prefetch_related_objects
 from hare.contrib.test import RollbackIsolation
-from hare.contrib.test.isolated_contexts import hare_test_context
+from hare.core.hare_context import HareContext
 from hare.exceptions import FieldError, ProtectedError, QueryError
 from hare.models import NoneAwaitable
 from hare.query.expressions import Q
@@ -39,16 +37,12 @@ from tests.relations.relation_edge_case_models import (
     EdgeTarget,
     EdgeTreeNode,
 )
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 @pytest_asyncio.fixture(scope="module")
 async def db_edges_module():
-    async with hare_test_context(
-        modules=["tests.relations.relation_edge_case_models"],
-        db_url=os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:"),
-        app_label="models",
-        connection_label="models",
-    ) as ctx:
+    async with DatabaseUnderTest.open_model_context(["tests.relations.relation_edge_case_models"]) as ctx:
         yield ctx
 
 
@@ -66,10 +60,10 @@ async def enrollment_rows() -> list[tuple[int, int, int | None]]:
 
 
 def test_through_source_field_keys_are_db_columns(db_edges):
-    courses_field = EdgeStudent._meta.fields_map["courses"]
+    courses_field = HareContext.require_current().apps.get_binding(EdgeStudent).fields_map["courses"]
     assert courses_field.backward_keys == ("stud_ref",)
     assert courses_field.forward_keys == ("course_ref",)
-    students_field = EdgeCourse._meta.fields_map["students"]
+    students_field = HareContext.require_current().apps.get_binding(EdgeCourse).fields_map["students"]
     assert students_field.backward_keys == ("course_ref",)
     assert students_field.forward_keys == ("stud_ref",)
 
@@ -150,9 +144,11 @@ async def test_through_source_field_deleting_a_member_cascades_through_rows(db_e
 
 
 def test_hidden_backward_relation_has_no_accessor(db_edges):
-    assert not {name for name in EdgeTarget._meta.fields_map if "hidden" in name}
+    assert not {
+        name for name in HareContext.require_current().apps.get_binding(EdgeTarget).fields_map if "hidden" in name
+    }
     assert not hasattr(EdgeTarget, "edge_hidden_cascades")
-    assert len(EdgeTarget._meta.hidden_backward_relations) == 4
+    assert len(HareContext.require_current().apps.get_binding(EdgeTarget).hidden_backward_relations) == 4
 
 
 @pytest.mark.asyncio

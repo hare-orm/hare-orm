@@ -17,6 +17,30 @@ class RollBack(Exception):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("execute", [False, True])
+async def test_capture_boundary_survives_removal_of_earlier_savepoint_callbacks(db_module, execute):
+    isolation = RollbackIsolation(db_module)
+    called = []
+
+    def previous():
+        called.append("discarded")
+
+    def current():
+        called.append("captured")
+
+    async with isolation:
+        if not Connections.get("models").features.supports_savepoints:
+            pytest.skip("the database has no savepoints")
+        async with Transactions.atomic() as inner:
+            Transactions.on_commit(previous)
+            async with isolation.capture_on_commit(execute=execute) as callbacks:
+                await inner.rollback()
+                Transactions.on_commit(current)
+        assert callbacks == [current]
+        assert called == (["captured"] if execute else [])
+
+
+@pytest.mark.asyncio
 async def test_what_the_block_writes_is_gone_after_it(db_module):
     before = await Tournament.objects.count()
     async with RollbackIsolation(db_module) as context:

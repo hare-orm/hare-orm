@@ -11,6 +11,8 @@ from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.plans.plan_origins import PlanOrigins
 
 if TYPE_CHECKING:
+    from hare.models.model_binding import ModelBinding
+    from hare.query.expressions.conditions.q import Q
     from hare.query.expressions.expression_result import ExpressionResult
 
 
@@ -63,13 +65,13 @@ class NamedJoin(Expression, abstract=True):
         """
         raise NotImplementedError
 
-    def get_filter_key(self, path: str, related_model: Any) -> str:
+    def get_filter_key(self, path: str, related_binding: ModelBinding) -> str:
         """A filter key after the name as the related model reads it - a bare lookup
         (``vegetarian__isnull``) compares its primary key.
 
         Args:
             path: The key after the name.
-            related_model: The related model.
+            related_binding: The related model binding.
 
         Returns:
             The key.
@@ -78,19 +80,19 @@ class NamedJoin(Expression, abstract=True):
             QueryError: The bare name compares a composite primary key with anything but ``isnull``.
         """
         first_segment = path.partition("__")[0]
-        if not path or (first_segment not in related_model._meta.fields_map and first_segment in set(Lookup)):
+        if not path or (first_segment not in related_binding.fields_map and first_segment in Lookup):
             # Whether a row was joined: a column of its primary key is NULL only without one.
             if path != Lookup.ISNULL:
-                self.raise_if_composite_primary_key(related_model)
-            primary_key_name = related_model._meta.primary_key_attribute_names[0]
+                self.raise_if_composite_primary_key(related_binding)
+            primary_key_name = related_binding.primary_key_attribute_names[0]
             return f"{primary_key_name}__{path}" if path else primary_key_name
         return path
 
-    def get_primary_key_name(self, related_model: Any) -> str:
+    def get_primary_key_name(self, related_binding: ModelBinding) -> str:
         """The field the bare name reads - the joined model's primary key.
 
         Args:
-            related_model: The joined model.
+            related_binding: The joined model binding.
 
         Returns:
             The primary key's field name.
@@ -98,22 +100,23 @@ class NamedJoin(Expression, abstract=True):
         Raises:
             QueryError: The primary key is composite - no single column to read.
         """
-        self.raise_if_composite_primary_key(related_model)
-        return related_model._meta.primary_key_attribute_names[0]
+        self.raise_if_composite_primary_key(related_binding)
+        return related_binding.primary_key_attribute_names[0]
 
-    def raise_if_composite_primary_key(self, related_model: Any) -> None:
+    def raise_if_composite_primary_key(self, related_binding: ModelBinding) -> None:
         """Refuses reading the bare name of a joined model with a composite primary key.
 
         Args:
-            related_model: The joined model.
+            related_binding: The joined model binding.
 
         Raises:
             QueryError: Its primary key is composite.
         """
-        meta = related_model._meta
+        meta = related_binding
         if meta.has_composite_primary_key:
             raise QueryError(
-                f"{self.name!r} joins {related_model.__name__}, whose primary key is composite - there's no single "
+                f"{self.name!r} joins {related_binding._model.__name__}, whose primary key is composite - there's no "
+                f"single "
                 f"column to read; read its components: "
                 + ", ".join(f"{self.name}__{name}" for name in meta.primary_key_attribute_names)
             )
@@ -144,17 +147,10 @@ class NamedJoin(Expression, abstract=True):
         Returns:
             The JOINs and the condition.
         """
-        # Imported here: the conditions import the named joins.
-        from hare.query.expressions.conditions.q import Q
-
-        condition = Q(**{filter_key: value})
-        condition._filter_call_generation = filter_call_generation
-        if value_origin is not None:
-            # The value is the filter's on the join's name.
-            PlanOrigins.derive(condition, {filter_key: value_origin})
+        condition = self._get_filter_condition(filter_key, value, filter_call_generation, value_origin)
         modifier = condition.get_result(
             ExpressionContext(
-                model=joined_model,
+                binding=joined_model,
                 dialect=expression_context.dialect,
                 connection=expression_context.connection,
                 table=joined_table,
@@ -163,9 +159,28 @@ class NamedJoin(Expression, abstract=True):
                 annotations={},
                 visibility=expression_context.visibility,
                 value_wrapper_references=expression_context.value_wrapper_references,
+                application_context=expression_context.application_context,
             )
         )
         return QueryModifier(joins=joins) & modifier
+
+    @staticmethod
+    def _get_filter_condition(
+        filter_key: str,
+        value: Any,
+        filter_call_generation: int,
+        value_origin: tuple[Any, ...] | None = None,
+    ) -> Q:
+        """Build the condition with the join filter's parameter origin, when recorded."""
+        # Imported here: the conditions import the named joins.
+        from hare.query.expressions.conditions.q import Q
+
+        condition = Q(**{filter_key: value})
+        condition._filter_call_generation = filter_call_generation
+        if value_origin is not None:
+            # The value is the filter's on the join's name.
+            PlanOrigins.derive(condition, {filter_key: value_origin})
+        return condition
 
     def get_path_filter(
         self,

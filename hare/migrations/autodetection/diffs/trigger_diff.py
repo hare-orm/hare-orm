@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from hare.ddl.schema_objects.trigger import Trigger
 from hare.migrations.autodetection.diffs.schema_object_diff import SchemaObjectDiff
-from hare.migrations.autodetection.state_signatures import StateSignatures
 from hare.migrations.operations import AddTrigger, AlterTrigger, HareOperation, RemoveTrigger, RenameTrigger
 from hare.models.enums import ModelOption
 from hare.query.expressions import Q
@@ -17,7 +17,9 @@ class TriggerDiff(SchemaObjectDiff):
     place."""
 
     def get_objects(self, model_state: ModelState) -> list[Any]:
-        return StateSignatures.normalize_triggers(model_state.get_option_list(ModelOption.TRIGGERS))
+        return [
+            trigger for trigger in model_state.get_option_list(ModelOption.TRIGGERS) if isinstance(trigger, Trigger)
+        ]
 
     def get_read_columns(self, schema_object: Any) -> tuple[tuple[str, str], ...]:
         """The columns a trigger's ``when`` condition reads - the fields of a ``Q``; a raw SQL condition is

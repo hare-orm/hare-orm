@@ -33,14 +33,15 @@ def ManyToManyField(
         to: The related model, or its name as ``"app.Model"``.
         through: The through table's name, or a model declared with a ``ForeignKeyField`` to each
             side and fields of its own - hare then manages it as a model, and it stays queryable.
-            ``.add()`` writes only the key columns, so its other fields need ``null=True`` or a
-            ``db_default``.
+            ``.add()`` fills extra fields from ``through_defaults``, Python defaults and automatic
+            timestamps; remaining fields need ``db_default`` or ``null=True``.
         forward_key: The through table's column referencing the related model.
         backward_key: The through table's column referencing this model.
         related_name: The attribute on the related model reading the reverse relation.
         db_constraint: Whether the database gets foreign key constraints - True by default.
-        on_delete: ``CASCADE`` (default), ``RESTRICT``, ``SET_NULL``, ``SET_DEFAULT`` or
-            ``NO_ACTION`` for the through table's foreign keys. Not ``PROTECT``.
+        on_delete: ``CASCADE`` (default), ``RESTRICT``, ``SET_NULL``, ``PROTECT`` or ``NO_ACTION``
+            for the through table's foreign keys. ``SET_DEFAULT`` requires a declared through model
+            whose two foreign keys meet its default requirements; automatic through tables have no defaults.
         unique: Whether the through table gets a unique index over both keys - True by default.
         lazy: Only ``RelationLoadStrategy.SELECT`` - an implicit ``.prefetch_related(field)``. None by
             default.

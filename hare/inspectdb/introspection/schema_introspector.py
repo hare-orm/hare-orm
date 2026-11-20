@@ -1,34 +1,35 @@
 from __future__ import annotations
 
-import keyword
 from collections.abc import Collection, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar
 
+import sqlparse
+
+from hare.ddl.enums import SchemaPartType
 from hare.fields.db_defaults.now import Now
 from hare.fields.db_defaults.sql_default import SqlDefault
 from hare.inspectdb.constants import (
     FLOAT_LITERAL_RE,
     FOREIGN_KEY_DEFERRAL_TEMPLATE,
     INT_LITERAL_RE,
-    QUOTED_IDENTIFIER_RE,
     QUOTED_STRING_RE,
-    TRIGGER_EVENT_KEYWORD_RE,
-    WHITESPACE_RUN_PATTERN,
 )
 from hare.inspectdb.generation.model_naming import ModelNaming
+from hare.inspectdb.introspection.catalog_sql import CatalogSql
 from hare.inspectdb.introspection.column_info import ColumnInfo
-from hare.inspectdb.introspection.enums import SchemaPartType
 from hare.inspectdb.introspection.schema_part import SchemaPart
 from hare.inspectdb.introspection.table_info import TableInfo
 from hare.inspectdb.introspection.table_parts import TableParts
+from hare.models.class_building.model_field_collection import ModelFieldCollection
 
 if TYPE_CHECKING:
     from hare.ddl.indexes.index import Index
     from hare.ddl.schema_objects.database_function import DatabaseFunction
     from hare.ddl.schema_objects.database_sequence import DatabaseSequence
     from hare.ddl.schema_objects.enum_type import EnumType
-    from hare.ddl.security.grant import Grant
     from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.dialects.base.dialect import Dialect
+    from hare.inspectdb.introspection.catalog_snapshot import CatalogSnapshot
 from hare.exceptions import UnSupportedError
 
 
@@ -53,6 +54,15 @@ class SchemaIntrospector:
     #: The access methods whose ``WITH (...)`` storage parameters are rendered as constructor
     #: kwargs - a NOTE comment flags an index the database reported none for.
     TUNED_INDEX_TYPES: ClassVar[frozenset[str]] = frozenset()
+
+    @staticmethod
+    def get_referenced_column_type(column: ColumnInfo) -> str:
+        """The storage type a plain foreign-key column uses to reference this column.
+
+        Dialects override identity-specific spellings that do not apply to a reference.
+        The original catalog declaration remains unchanged.
+        """
+        return column.db_type
 
     @classmethod
     def get_generated_field(
@@ -194,6 +204,7 @@ class SchemaIntrospector:
             return None
         target_to_local = dict(zip(target_columns, local_columns, strict=True))
         ordered_local_columns = [target_to_local[pk_column] for pk_column in target_pk_columns]
+        reserved_names = ModelFieldCollection.get_reserved_field_names()
         field_name: str | None = None
         for local_column, pk_column in zip(ordered_local_columns, target_pk_columns, strict=True):
             # Assumed: the target's attribute for a key column is its safe identifier.
@@ -202,7 +213,7 @@ class SchemaIntrospector:
             if not local_column.endswith(suffix):
                 return None
             candidate = local_column[: -len(suffix)]
-            if not candidate or not candidate.isidentifier() or keyword.iskeyword(candidate):
+            if candidate != ModelNaming.get_field_name(candidate) or candidate in reserved_names:
                 return None
             if field_name is None:
                 field_name = candidate
@@ -227,78 +238,21 @@ class SchemaIntrospector:
             return None
         stripped_sql = sql.strip()
         if stripped_sql.startswith("("):
-            inner_sql = SchemaIntrospector.extract_balanced_parens(stripped_sql, 0)
+            inner_sql = CatalogSql.extract_parentheses(stripped_sql, 0)
             if inner_sql is not None and len(inner_sql) == len(stripped_sql) - 2:
                 return inner_sql.strip()
         return stripped_sql
-
-    @staticmethod
-    def extract_balanced_parens(text: str, open_paren_index: int) -> str | None:
-        """The text between the ``(`` at ``open_paren_index`` and its matching ``)``, nested
-        parentheses included.
-
-        Returns:
-            The text, None when the parentheses never balance.
-        """
-        depth = 0
-        for index in range(open_paren_index, len(text)):
-            if text[index] == "(":
-                depth += 1
-            elif text[index] == ")":
-                depth -= 1
-                if depth == 0:
-                    return text[open_paren_index + 1 : index]
-        return None
 
     @staticmethod
     def normalize_event_clause(raw: str) -> str:
         """Collapses whitespace and uppercases the keywords of an ``on`` event clause - column names
         keep their spelling.
         """
-        collapsed = WHITESPACE_RUN_PATTERN.sub(" ", raw.strip())
-        parts = QUOTED_IDENTIFIER_RE.split(collapsed)
-        quoted = QUOTED_IDENTIFIER_RE.findall(collapsed)
-        pieces = [SchemaIntrospector._uppercase_event_keywords(parts[0])]
-        for quoted_part, next_part in zip(quoted, parts[1:], strict=True):
-            pieces.append(quoted_part)
-            pieces.append(SchemaIntrospector._uppercase_event_keywords(next_part))
-        return "".join(pieces)
-
-    @staticmethod
-    def _uppercase_event_keywords(text: str) -> str:
-        """Uppercases every trigger event keyword in ``text``, leaving everything else as is."""
-        return TRIGGER_EVENT_KEYWORD_RE.sub(lambda match: match.group(0).upper(), text)
+        return sqlparse.format(raw, keyword_case="upper", strip_whitespace=True).strip()
 
     #: The type rules of ``map_column_type()``: a keyword the lower-cased column type contains,
     #: the field class path it maps onto, and that field's default kwargs - the first match wins.
     TYPE_MAP: ClassVar[list[tuple[str, str, dict[str, Any]]]] = []
-
-    @staticmethod
-    def split_top_level_terms(expressions_sql: str) -> list[str]:
-        """Splits a comma-separated list of SQL terms on top-level commas only - a function call has
-        commas of its own.
-
-        Args:
-            expressions_sql: The list.
-
-        Returns:
-            The terms, unstripped.
-        """
-        terms = []
-        current: list[str] = []
-        depth = 0
-        for char in expressions_sql:
-            if char == "(":
-                depth += 1
-            elif char == ")":
-                depth -= 1
-            if char == "," and depth == 0:
-                terms.append("".join(current))
-                current = []
-            else:
-                current.append(char)
-        terms.append("".join(current))
-        return terms
 
     @staticmethod
     def quote_identifier(name: str) -> str:
@@ -359,19 +313,17 @@ class SchemaIntrospector:
         return set()
 
     @classmethod
-    async def fetch_enum_types(
-        cls, connection: DatabaseClient, default_schema: str
-    ) -> dict[tuple[str | None, str], EnumType]:
-        """Reads the ``ENUM`` types of the database, whatever column is of them - none by default.
+    async def fetch_enum_types(cls, connection: DatabaseClient, schema: str) -> list[EnumType]:
+        """Read the declared ``ENUM`` types of one physical schema, including unused types.
 
         Args:
             connection: The connection.
-            default_schema: The connection's default schema - its types are found without a schema too.
+            schema: The schema to read.
 
         Returns:
-            Each type by its schema and name.
+            The types, with their schema set.
         """
-        return {}
+        return []
 
     @classmethod
     async def fetch_views(cls, connection: DatabaseClient, schema: str) -> list[tuple[str, bool, tuple[str, ...]]]:
@@ -403,7 +355,7 @@ class SchemaIntrospector:
     @classmethod
     async def fetch_unattached_schema_objects(
         cls, connection: DatabaseClient, schema: str
-    ) -> tuple[list[DatabaseSequence], list[DatabaseFunction], list[Grant]]:
+    ) -> tuple[list[DatabaseSequence], list[DatabaseFunction], list[SchemaPart]]:
         """Reads the sequences and functions of a schema no table holds - which inspectdb names, as no
         model declares them by itself. None by default.
 
@@ -433,8 +385,17 @@ class SchemaIntrospector:
         return table in await cls.fetch_table_names(connection, default_schema, True)
 
     @classmethod
+    async def fetch_catalog(cls, connection: DatabaseClient, tables: list[str], schema: str) -> CatalogSnapshot:
+        """Capture immutable physical metadata before reconstructing model declarations.
+
+        Dialect readers retain original SQL and unsupported records. Snapshotting
+        does not select transaction isolation; the supplied connection controls it.
+        """
+        raise NotImplementedError
+
+    @classmethod
     async def fetch_tables(cls, connection: DatabaseClient, tables: list[str], schema: str) -> list[TableInfo]:
-        """Reads existing tables' schemas - implemented by each dialect.
+        """Read tables through the dialect's catalog capture and declaration mapper.
 
         Args:
             connection: The connection.
@@ -444,7 +405,18 @@ class SchemaIntrospector:
         Returns:
             One TableInfo per entry of ``tables``, in the same order.
         """
+        snapshot = await cls.fetch_catalog(connection, tables, schema)
+        return cls.get_table_infos(snapshot, connection.dialect)
+
+    @classmethod
+    def get_table_infos(cls, snapshot: CatalogSnapshot, dialect: Dialect) -> list[TableInfo]:
+        """Reconstruct declarations from captured records without database IO."""
         raise NotImplementedError
+
+    @classmethod
+    def get_table_parts(cls, snapshot: CatalogSnapshot, table_infos: list[TableInfo]) -> list[SchemaPart]:
+        """Read comparison parts; dialects attach physical catalog definitions independently."""
+        return [part for table_info in table_infos for part in TableParts.get(table_info)]
 
     @classmethod
     async def fetch_schema_parts(
@@ -467,16 +439,11 @@ class SchemaIntrospector:
         Returns:
             The parts.
         """
-        parts = [
-            part
-            for table_info in await cls.fetch_tables(connection, tables, schema)
-            for part in TableParts.get(table_info)
-        ]
+        snapshot = await cls.fetch_catalog(connection, tables, schema)
+        parts = cls.get_table_parts(snapshot, cls.get_table_infos(snapshot, connection.dialect))
         enum_types = await cls.fetch_enum_types(connection, schema)
         parts.extend(
-            SchemaPart.of(SchemaPartType.ENUM_TYPE, "", name, enum_type)
-            for (type_schema, name), enum_type in enum_types.items()
-            if type_schema in (None, schema)
+            SchemaPart.of(SchemaPartType.ENUM_TYPE, "", enum_type.name, enum_type) for enum_type in enum_types
         )
         parts.extend(await cls.fetch_object_parts(connection, schema, object_names))
         return parts

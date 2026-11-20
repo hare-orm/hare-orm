@@ -7,6 +7,7 @@ from hare.fields.field import Field
 
 if TYPE_CHECKING:
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -34,10 +35,15 @@ class OrderingInfo:
     """
 
     name: str
-    model: type[Model]
+    binding: ModelBinding
     relations: tuple[Field[Any], ...]
     fields: tuple[Field[Any] | None, ...]
     paths: tuple[str, ...]
     transforms: tuple[str, ...]
     descending: bool
     crosses_to_many: bool
+
+    @property
+    def model(self) -> type[Model]:
+        """The Python class represented by this structural binding."""
+        return self.binding._model

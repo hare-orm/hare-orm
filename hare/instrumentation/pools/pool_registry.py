@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import threading
 import weakref
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
+    from hare.core.connections.connection_handler import ConnectionHandler
     from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.instrumentation.declarations import PoolStatus
 
 
 class PoolRegistry:
@@ -47,3 +50,16 @@ class PoolRegistry:
         """
         with cls.lock:
             return list(cls.clients)
+
+    @classmethod
+    def iter_statuses(
+        cls, *, handler: ConnectionHandler | None = None, alias: str | None = None
+    ) -> Iterator[tuple[DatabaseClient, PoolStatus]]:
+        """Yield a snapshot's available statuses, optionally restricted to one handler or alias."""
+        for client in cls.get_clients():
+            if handler is not None and client.connection_handler is not handler:
+                continue
+            if alias is not None and client.connection_alias != alias:
+                continue
+            if client.features.supports_pool_status and (status := client.get_pool_status()) is not None:
+                yield client, status

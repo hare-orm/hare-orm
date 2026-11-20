@@ -74,11 +74,6 @@ async def test_F_branch(db, intfields_data, then_field, default_field):
     assert sql == expected_sql
 
 
-def get_intnum_plus_one_sql(db) -> str:
-    """``"intnum"+1`` as read - the database's own arithmetic."""
-    return '"intnum"+1'
-
-
 @requires_features(identifier_quote_char='"')
 @pytest.mark.asyncio
 async def test_AE_then(db, intfields_data):
@@ -87,8 +82,7 @@ async def test_AE_then(db, intfields_data):
     sql = IntFields.objects.all().annotate(category=category).values("intnum", "category").sql(parameters_inline=True)
 
     expected_sql = (
-        f'SELECT "intnum" "intnum",CASE WHEN "intnum">=8 THEN {get_intnum_plus_one_sql(db)} ELSE "intnum" END '
-        '"category" FROM "intfields"'
+        'SELECT "intnum" "intnum",CASE WHEN "intnum">=8 THEN "intnum"+1 ELSE "intnum" END "category" FROM "intfields"'
     )
     assert sql == expected_sql
 
@@ -115,7 +109,7 @@ async def test_AE_default(db, intfields_data):
 
     then_sql = "CAST(8 AS BIGINT)" if db.get_connection().dialect.name == "postgresql" else "8"
     expected_sql = (
-        f'SELECT "intnum" "intnum",CASE WHEN "intnum">=8 THEN {then_sql} ELSE {get_intnum_plus_one_sql(db)} '
+        f'SELECT "intnum" "intnum",CASE WHEN "intnum">=8 THEN {then_sql} ELSE "intnum"+1 '
         'END "category" FROM "intfields"'
     )
     assert sql == expected_sql
@@ -165,8 +159,8 @@ async def test_annotation_in_when_annotation(db, intfields_data):
     )
 
     expected_sql = (
-        f'SELECT "id" "id","intnum" "intnum",{get_intnum_plus_one_sql(db)} "intnum_plus_1",CASE WHEN '
-        f'{get_intnum_plus_one_sql(db)}>=10 THEN true ELSE false END "bigger_than_10" FROM "intfields"'
+        'SELECT "id" "id","intnum" "intnum","intnum"+1 "intnum_plus_1",CASE WHEN '
+        '"intnum"+1>=10 THEN true ELSE false END "bigger_than_10" FROM "intfields"'
     )
     assert sql == expected_sql
 
@@ -285,13 +279,29 @@ async def test_case_int_branches_execute_with_correct_type(db, intfields_data):
 # pre-existing, unrelated behavior, not something this fix changes or could fix. Postgres has real
 # native types for all of these and returns them correctly typed once the bind itself succeeds,
 # which is exactly what this fix makes possible.
+@pytest.mark.parametrize(
+    ("then_value", "default_value", "expected_type"),
+    [
+        pytest.param(Decimal("12.50"), Decimal("0.00"), Decimal, id="decimal"),
+        pytest.param(date(2024, 10, 27), date(2000, 1, 1), date, id="date"),
+        pytest.param(
+            datetime(2024, 10, 27, 12, 30, tzinfo=timezone.utc),
+            datetime(2000, 1, 1, tzinfo=timezone.utc),
+            datetime,
+            id="datetime",
+        ),
+        pytest.param(True, False, bool, id="bool"),
+    ],
+)
 @pytest.mark.asyncio
 @requires_features(dialect="postgresql")
-async def test_case_decimal_branches_execute_with_correct_type(db, intfields_data):
-    category = Case(When(intnum__gte=8, then=Decimal("12.50")), default=Decimal("0.00"))
+async def test_case_literal_branches_execute_with_correct_type(
+    db, intfields_data, then_value, default_value, expected_type
+):
+    category = Case(When(intnum__gte=8, then=then_value), default=default_value)
     result = await IntFields.objects.filter(intnum=9).annotate(category=category).values("category")
-    assert result == [{"category": Decimal("12.50")}]
-    assert isinstance(result[0]["category"], Decimal)
+    assert result == [{"category": then_value}]
+    assert isinstance(result[0]["category"], expected_type)
 
 
 @pytest.mark.asyncio
@@ -305,44 +315,8 @@ async def test_case_uuid_branches_execute_with_correct_type(db, intfields_data):
 
 
 @pytest.mark.asyncio
-@requires_features(dialect="postgresql")
-async def test_case_date_branches_execute_with_correct_type(db, intfields_data):
-    the_date = date(2024, 10, 27)
-    category = Case(When(intnum__gte=8, then=the_date), default=date(2000, 1, 1))
-    result = await IntFields.objects.filter(intnum=9).annotate(category=category).values("category")
-    assert result == [{"category": the_date}]
-    assert isinstance(result[0]["category"], date)
-
-
-@pytest.mark.asyncio
-@requires_features(dialect="postgresql")
-async def test_case_datetime_branches_execute_with_correct_type(db, intfields_data):
-    the_datetime = datetime(2024, 10, 27, 12, 30, tzinfo=timezone.utc)
-    category = Case(When(intnum__gte=8, then=the_datetime), default=datetime(2000, 1, 1, tzinfo=timezone.utc))
-    result = await IntFields.objects.filter(intnum=9).annotate(category=category).values("category")
-    assert result == [{"category": the_datetime}]
-    assert isinstance(result[0]["category"], datetime)
-
-
-@pytest.mark.asyncio
-@requires_features(dialect="postgresql")
-async def test_case_bool_branches_still_execute_with_correct_type(db, intfields_data):
-    """Regression guard for the already-fixed bool case, run through the same real
-    bound-parameter path as the sibling types above rather than re-testing it in isolation."""
-    category = Case(When(intnum__gte=8, then=True), default=False)
-    result = await IntFields.objects.filter(intnum=9).annotate(category=category).values("category")
-    assert result == [{"category": True}]
-    assert isinstance(result[0]["category"], bool)
-
-
-@pytest.mark.asyncio
 async def test_case_when_then_referencing_a_field_decodes_through_that_fields_own_type(db):
-    """Case.get_result() used to never set an output_field on its own ExpressionResult at all -
-    unconditionally, regardless of branch types - so QuerySet._get_annotate() never had anything
-    to decode the annotation's result through (getattr(annotation, "populate_field_object", False)
-    was also never set on Case at all). A branch referencing a real field whose from_db_value()
-    does real work (a JSONField decoding its stored text back into a dict) came back as the raw,
-    undecoded driver value instead."""
+    """A Case branch referencing a JSON field uses the field's reader when decoding the result."""
     obj = await JSONFields.objects.create(data={"fallback": True}, data_null={"y": 2})
 
     branch = Case(When(id=obj.id, then=F("data_null")), default=F("data"))

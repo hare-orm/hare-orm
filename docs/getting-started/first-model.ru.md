@@ -51,6 +51,7 @@ async def init_db() -> None:
 ## <a id="3-create-and-query-rows"></a>3. Создаём строки и читаем их
 
 ```python
+# library/queries.py
 from library.models import Author, Book
 
 async def run() -> None:
@@ -77,6 +78,31 @@ async def run() -> None:
 Дальше в документации такие операторы показаны без окружающего `async def`: каждый фрагмент выполняется
 внутри `async`-кода с hare, инициализированным как на шаге 2, а модели импортируют
 `from hare import fields` и `from hare.models import Model`.
+
+## <a id="4-run-the-program"></a>4. Запускаем программу
+
+Сохраните `run()` в `library/queries.py` и выполните `python main.py` из каталога, содержащего `library`.
+Блок `finally` закрывает подключения, если инициализация или запрос завершается ошибкой.
+
+```python
+# main.py
+import asyncio
+
+from hare import Hare
+from library.db import init_db
+from library.queries import run
+
+
+async def main() -> None:
+    try:
+        await init_db()
+        await run()
+    finally:
+        await Hare.close_connections()
+
+
+asyncio.run(main())
+```
 
 ## <a id="next"></a>Что дальше
 

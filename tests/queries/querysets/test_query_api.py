@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TypedDict, Union, assert_type, cast
+from typing import TypedDict, Union, assert_type
 
 import pytest
 import pytest_asyncio
@@ -120,7 +120,7 @@ async def test_execute_hare_sql_pydantic_schema(query_api_db) -> None:
     table = QueryModel.get_table()
     query = Query.from_(table).select(table.id, table.name).where(table.name == "alpha")
 
-    result = cast(SqlQueryResult[QueryRow], await execute_sql(query, schema=QueryRow))
+    result: SqlQueryResult[QueryRow] = await execute_sql(query, schema=QueryRow)
 
     assert isinstance(result.rows[0], QueryRow)
     assert result.rows[0].model_dump() == {"id": 1, "name": "alpha"}
@@ -266,6 +266,7 @@ async def test_execute_hare_sql_explicit_connection_with_multiple_configured() -
 
     class DummyClient:
         query_class = type("QueryClass", (), {"SQL_CONTEXT": None})
+        sql_context = Query.SQL_CONTEXT
         _bound_loop = None
         tenant_schema_template = None
         tenant_row_level_security = False
@@ -343,7 +344,7 @@ async def test_builder_functions_run_on_every_dialect(db) -> None:
     await Tournament.objects.create(id=1, name="abc")
     await Tournament.objects.create(id=2, name="xyz")
     table = Tournament.get_table()
-    connection = Tournament._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Tournament).get_connection()
 
     row_query = Query.from_(table).select(functions.Now().as_("now")).where(table.id == 1)
     rows = (await execute_sql(row_query, using=connection)).rows

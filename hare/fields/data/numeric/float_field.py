@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import math
 import struct
+from collections.abc import Callable
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeVar, overload
 
 from hare.exceptions import ValidationError
 from hare.fields.data.constants import FLOAT32_MAX_DIGITS, FLOAT32_MIN_DIGITS
-from hare.fields.enums import NativeWriteCheck
 from hare.fields.field import Field
 from hare.fields.narrowing.float_precision_limit import FloatPrecisionLimit
 
@@ -23,6 +23,7 @@ class FloatField(Field[TFloat]):
     ``Decimal`` a float holds; a bool or a text is refused."""
 
     field_type = float
+    accepted_value_types = (int, Decimal)
 
     SQL_TYPE = "DOUBLE PRECISION"
     #: The bits of a value's mantissa - an integer past two to their power isn't held exactly.
@@ -76,7 +77,6 @@ class FloatField(Field[TFloat]):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
 
-    native_write_check = NativeWriteCheck.NOT_NAN
     #: A float the driver returns is the value - to_python() only checks what is assigned.
     keeps_native_db_values = True
 
@@ -101,7 +101,16 @@ class FloatField(Field[TFloat]):
         if isinstance(value, Decimal) and value.is_finite() and math.isinf(float(value)):
             raise ValidationError(f"{self.model_field_name}: Decimal too large to convert to float")
 
+    def get_assign_normalized_types(self) -> frozenset[type]:
+        return self._get_unchanged_assign_types(FloatField.to_python, self.field_type)
+
     def to_python(self, value: Any) -> Any:
         if type(value) is not float and value is not None:
             self.raise_if_not_number(value)
         return super().to_python(value)
+
+    def get_unchanged_write_types(self, converter: Callable[..., Any] | None) -> tuple[type, ...] | None:
+        # This class's to_db_value() writes a float as it is.
+        if converter is None and type(self).to_db_value is FloatField.to_db_value:
+            return (float,)
+        return None

@@ -10,7 +10,7 @@ testing a dialect, and observing it.
 | Transactions | Rejects `atomic()`; runs its own multi-statement writes statement by statement. |
 | Savepoints | Joins a nested `atomic()` to its transaction, which rolls back as a whole if the nested block fails. |
 | Generated keys | Refuses a model whose primary key the database generates when it is bound — or takes its keys from a series before the insert (`takes_keys_before_insert`). |
-| `UPDATE` / `DELETE` of stored rows | Refuses each before it is sent; checks a whole cascade before its first write, so a database without transactions is never left with half of one. |
+| `UPDATE` / `DELETE` of stored rows | Checks support for the whole cascade before its first write, preventing partial execution caused by an unsupported operation. Without transactions, runtime failures can still leave partial changes. |
 | Correlated subqueries | Writes an `EXISTS` correlated by equal columns as a membership test; refuses any other correlated subquery before it is sent. |
 | Foreign keys | Runs `on_delete` and `PROTECT` in Python; refuses a relation with `db_constraint=True` when its model is bound. |
 | Unique constraints | Refuses a model declaring a uniqueness when it is bound, and a migration declaring one before its first statement. |
@@ -52,8 +52,10 @@ deterministic SQL. A test database is reset between tests with `TableClearing.cl
 ## <a id="observability"></a>13. Observability and speed
 
 `otel_system_name` is the OpenTelemetry `db.system.name` value (`postgresql`, `clickhouse`, or
-`other_sql` for a database OpenTelemetry names none for). The Rust row readers depend on the client's
-`native_python_types`, not on the dialect's name. Every statement the client runs reaches
+`other_sql` for a database OpenTelemetry names none for). The shared row reader selects conversion using
+the client's
+`native_python_types`, the field's native-value contract and dialect converters, not the dialect's name.
+Every statement the client runs reaches
 [`Observers`](../../observability/observers.md) — `QueryExecuted`, query wrappers, slow-query logging —
 through the decorator described in [the client](driver-and-client.md#client); a client that skips it is
 invisible to `capture_queries`, the N+1 detector and OpenTelemetry.

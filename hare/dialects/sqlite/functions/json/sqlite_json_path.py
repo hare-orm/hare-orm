@@ -11,6 +11,7 @@ from hare.dialects.sqlite.constants import (
     SQLITE_JSON_PATH_FUNCTION_NAME,
 )
 from hare.dialects.sqlite.functions.sqlite_native_functions import SqliteNativeFunctions
+from hare.query.filters.lookups.json.json_filter_parser import JsonFilterParser
 
 
 class SqliteJsonPath:
@@ -97,8 +98,9 @@ class SqliteJsonPath:
             Whether the path is found, and its value.
         """
         for part in path:
-            if isinstance(part, int) and isinstance(value, list):
-                index = part if part >= 0 else len(value) + part
+            if isinstance(value, list) and JsonFilterParser.is_index_segment(part):
+                index = int(part)
+                index = index if index >= 0 else len(value) + index
                 if not 0 <= index < len(value):
                     return False, None
                 value = value[index]
@@ -111,6 +113,5 @@ class SqliteJsonPath:
     @classmethod
     async def install(cls, connection: aiosqlite.Connection) -> None:
         """Registers ``extract`` on ``connection`` as ``SQLITE_JSON_PATH_FUNCTION_NAME``."""
-        native_functions = SqliteNativeFunctions.module
-        extract: Any = cls.extract if native_functions is None else native_functions.JsonPath(cls.extract).extract
+        extract = SqliteNativeFunctions.module.JsonPath(cls.extract).extract
         await connection.create_function(SQLITE_JSON_PATH_FUNCTION_NAME, 3, extract, deterministic=True)

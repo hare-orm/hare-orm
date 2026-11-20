@@ -25,8 +25,8 @@ class CompositePrimaryKey:
     ``UniqueConstraint`` target isn't supported. A ``OneToOneField`` also can't both target a
     composite primary key and be used as its own model's primary key.
 
-    An existing table with a single-column primary key can't be migrated to a composite one -
-    that needs a whole separate design pass this mirrors Django in not attempting.
+    Migration autodetection does not change the fields forming an existing primary key. Such a
+    change needs a hand-written migration updating both the database schema and migration state.
     """
 
     def __init__(self, *field_names: str, without_overlaps: bool = False) -> None:

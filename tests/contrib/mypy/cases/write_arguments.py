@@ -31,3 +31,6 @@ async def reported_fields(writer: Writer, shelf: Shelf, label: Label) -> None:
     Note(subject=shelf)  # E: Argument "subject" to "Note" has incompatible type "Shelf"
     await Volume.objects.create(titel="a")  # E: Volume has no field 'titel' to set
     await Volume.objects.filter(id=1).update(title=2)  # E: Argument "title" to "update" of "QuerySet" has incompatible type "int"
+    await Volume.objects.update(id=2)  # E: Volume.id can't be assigned by update()
+    await Volume.objects.update(pk=2)  # E: Volume.pk can't be assigned by update()
+    await Printing.objects.update(pk=(1, 2))  # E: Printing.pk can't be assigned by update()

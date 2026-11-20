@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import datetime
-from typing import TYPE_CHECKING, Any, cast
+from operator import attrgetter
+from typing import TYPE_CHECKING, Any
 
+from hare.dialects.base.types.prepared_converter import PreparedConverter
 from hare.dialects.base.types.type_mapping import TypeMapping
 from hare.dialects.base.types.type_registry import TypeRegistry
 from hare.dialects.clickhouse.constants import CLICKHOUSE_DATETIME_COLUMN_TYPE
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.clickhouse.fields.clickhouse_date_field import ClickhouseDateField
 from hare.dialects.clickhouse.fields.clickhouse_datetime_field import ClickhouseDatetimeField
 from hare.dialects.clickhouse.fields.clickhouse_integer_field import ClickhouseIntegerField
@@ -61,7 +64,7 @@ class ClickhouseTypes:
         Returns:
             The column type.
         """
-        decimal_field = cast("DecimalField[Any]", field)
+        decimal_field: DecimalField[Any] = field  # type: ignore[assignment]
         return f"Decimal({decimal_field.max_digits}, {decimal_field.decimal_places})"
 
     @staticmethod
@@ -121,32 +124,31 @@ class ClickhouseTypes:
                 to_db=DatetimeField.to_db_instant_value,
                 to_lookup=DatetimeField.to_db_instant_value,
                 to_python=ClickhouseTypes.get_datetime_python_value,
-                naive_datetime_is_utc=True,
             ),
         )
-        types.register(DateField, TypeMapping(column_type="Date32"))
+        types.register(DateField, TypeMapping(column_type=ClickhouseTypeName.DATE32))
         # ClickHouse's own narrower and other-precision types - each column type its field's.
-        types.register(ClickhouseDateField, TypeMapping(column_type="Date"))
-        types.register(ClickhouseIntegerField, TypeMapping(column_type=lambda field: field.SQL_TYPE))
-        types.register(FixedStringField, TypeMapping(column_type=lambda field: field.SQL_TYPE))
+        types.register(ClickhouseDateField, TypeMapping(column_type=ClickhouseTypeName.DATE))
+        types.register(ClickhouseIntegerField, TypeMapping(column_type=attrgetter("SQL_TYPE")))
+        types.register(FixedStringField, TypeMapping(column_type=attrgetter("SQL_TYPE")))
         # A moment is rounded to the column's precision as it is written - and as it is compared, so a filter by
         # it finds the row it was written to.
         types.register(
             ClickhouseDatetimeField,
             TypeMapping(
-                column_type=lambda field: field.SQL_TYPE,
+                column_type=attrgetter("SQL_TYPE"),
                 to_db=ClickhouseDatetimeField.to_db_rounded_value,
                 to_lookup=ClickhouseDatetimeField.to_db_rounded_value,
             ),
         )
-        types.register(FloatField, TypeMapping(column_type="Float64"))
+        types.register(FloatField, TypeMapping(column_type=ClickhouseTypeName.FLOAT64))
         # A time of day is its ISO text - compared and ordered as the text.
-        types.register(TimeField, TypeMapping(column_type="String"))
+        types.register(TimeField, TypeMapping(column_type=ClickhouseTypeName.STRING))
         # Written as the UUID itself: a binary insert takes it as it is, a statement as toUUID().
         types.register(
             UUIDField,
             TypeMapping(
-                column_type="UUID",
+                column_type=ClickhouseTypeName.UUID,
                 to_db=UUIDField.to_db_uuid,
             ),
         )
@@ -157,46 +159,55 @@ class ClickhouseTypes:
                 TypeMapping(
                     column_type=ClickhouseJsonValues.get_column_type,
                     to_db=ClickhouseJsonValues.to_db_escaping_key_dots,
+                    to_lookup=ClickhouseJsonValues.to_lookup,
                 ),
             )
             # Its JSON text in a String column - compared as that text, beside JSON columns.
             types.register(
                 JSONTextField,
-                TypeMapping(column_type=CLICKHOUSE_JSON_TEXT_COLUMN_TYPE, to_lookup=ClickhouseJsonValues.to_lookup),
+                TypeMapping(column_type=CLICKHOUSE_JSON_TEXT_COLUMN_TYPE),
             )
             # The value at a path - any JSON value, as a literal beside it (Coalesce(F("data__n"), Value(0))).
-            types.register(JSONPathField, TypeMapping(to_db=ClickhouseJsonValues.to_db_path_value))
+            types.register(
+                JSONPathField,
+                TypeMapping(
+                    to_db=ClickhouseJsonValues.to_db_path_value,
+                    to_lookup=PreparedConverter(lambda field: field.get_lookup_value_writer()),
+                ),
+            )
         else:
             # JSON text - on a server without the JSON type.
             types.register(JSONField, TypeMapping(column_type=CLICKHOUSE_JSON_TEXT_COLUMN_TYPE))
         types.register(
             BinaryField,
             TypeMapping(
-                column_type="String",
+                column_type=ClickhouseTypeName.STRING,
                 to_db=ClickhouseBinaryValues.to_db,
                 to_lookup=ClickhouseBinaryValues.to_db,
                 to_python=ClickhouseBinaryValues.to_python,
                 json_term=ClickhouseBinaryValues.get_json_term,
             ),
         )
-        types.register(Float32Field, TypeMapping(column_type="Float32", to_lookup=cls.get_float32_lookup_value))
+        types.register(
+            Float32Field, TypeMapping(column_type=ClickhouseTypeName.FLOAT32, to_lookup=cls.get_float32_lookup_value)
+        )
         types.register(
             IPAddressField,
             TypeMapping(
-                column_type="IPv6",
+                column_type=ClickhouseTypeName.IPV6,
                 to_db=ClickhouseAddressValues.to_db,
                 to_lookup=ClickhouseAddressValues.to_db,
             ),
         )
-        types.register(IPv4AddressField, TypeMapping(column_type="IPv4"))
+        types.register(IPv4AddressField, TypeMapping(column_type=ClickhouseTypeName.IPV4))
         low_cardinality_values = ClickhouseLowCardinalityValues(types, dialect)
         types.register(
             LowCardinalityField,
             TypeMapping(
                 column_type=low_cardinality_values.get_column_type,
-                to_db=low_cardinality_values.to_db,
-                to_lookup=low_cardinality_values.to_lookup,
-                to_python=low_cardinality_values.to_python,
+                to_db=PreparedConverter(low_cardinality_values.prepare_db),
+                to_lookup=PreparedConverter(low_cardinality_values.prepare_lookup),
+                to_python=PreparedConverter(low_cardinality_values.prepare_python),
             ),
         )
         types.register(
@@ -205,6 +216,7 @@ class ClickhouseTypes:
                 column_type=ClickhouseEnumTypes.get_char_enum_column_type,
                 function_cast=ClickhouseEnumTypes.get_char_enum_text,
                 to_db=ClickhouseEnumTypes.get_char_enum_db_value,
+                to_lookup=ClickhouseEnumTypes.get_char_enum_lookup_value,
                 to_python=ClickhouseEnumTypes.get_char_enum_python_value,
             ),
         )
@@ -221,7 +233,7 @@ class ClickhouseTypes:
             DynamicField,
             TypeMapping(
                 column_type=ClickhouseDynamicValues.get_column_type,
-                to_db=ClickhouseDynamicValues.to_db,
+                to_db=PreparedConverter(ClickhouseDynamicValues.prepare_db),
                 to_lookup=ClickhouseDynamicValues.to_lookup,
                 to_python=ClickhouseDynamicValues.to_python,
                 inserted_by_select=True,
@@ -232,9 +244,9 @@ class ClickhouseTypes:
             VariantField,
             TypeMapping(
                 column_type=variant_values.get_column_type,
-                to_db=variant_values.to_db,
-                to_lookup=variant_values.to_lookup,
-                to_python=variant_values.to_python,
+                to_db=PreparedConverter(variant_values.prepare_db),
+                to_lookup=PreparedConverter(variant_values.prepare_lookup),
+                to_python=PreparedConverter(variant_values.prepare_python),
                 inserted_by_select=True,
             ),
         )
@@ -253,9 +265,9 @@ class ClickhouseTypes:
             ContainerField,
             TypeMapping(
                 column_type=container_values.get_column_type,
-                to_db=container_values.to_db,
-                to_lookup=container_values.to_db,
-                to_python=container_values.to_python,
+                to_db=PreparedConverter(container_values.prepare_db),
+                to_lookup=PreparedConverter(container_values.prepare_db),
+                to_python=PreparedConverter(container_values.prepare_python),
                 inserted_by_select=ClickhouseContainerValues.holds_typed_values,
                 ordering_key=container_values.get_ordering_key,
                 holds_null=False,

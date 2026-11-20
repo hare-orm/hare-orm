@@ -2,31 +2,16 @@
 its code, liveness answers without the database."""
 
 import tempfile
-from typing import Any
 
 import pytest
-from robyn.testing import TestClient
 
 from hare.contrib.frameworks.health_routes import HealthRoutes
 from hare.contrib.frameworks.robyn import HareRobyn
 from hare.health import HealthCheck
 from tests.contrib.frameworks.health_apps import HEALTHY_CONFIG, AlwaysDegraded, make_unhealthy_config
-
-REQUIRES = ("robyn",)
+from tests.contrib.frameworks.robyn.started_test_client import StartedTestClient
 
 pytestmark = pytest.mark.sqlite_only
-
-
-class StartedTestClient(TestClient):
-    """Robyn's test client, starting and stopping the application as its server would."""
-
-    def __enter__(self) -> "StartedTestClient":
-        self._loop.run_until_complete(self.app.start_hare())
-        return self
-
-    def __exit__(self, *args: Any) -> None:
-        self._loop.run_until_complete(self.app.stop_hare())
-        super().__exit__(*args)
 
 
 def test_a_healthy_application_is_ready_and_alive():

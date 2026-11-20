@@ -5,8 +5,6 @@ from typing import TYPE_CHECKING, Any
 from hare.query.expressions.subqueries.outer_scope import OuterScope
 from hare.query.plans.description.plan_context import PlanContext
 from hare.query.plans.description.plan_description import PlanDescription
-from hare.query.plans.description.plan_parts import PlanParts
-from hare.query.plans.plan_origins import PlanOrigins
 from hare.query.plans.statement.statement_plan import StatementPlan
 from hare.query.plans.statement.statement_plan_descriptions import StatementPlanDescriptions
 from hare.query.plans.statement.statement_plans import StatementPlans
@@ -14,6 +12,7 @@ from hare.query.queryset.options.query_options import QueryOptions
 from hare.query.statements.select.model_rows.select_related_joins import SelectRelatedJoins
 
 if TYPE_CHECKING:
+    from hare.models.model_binding import ModelBinding
     from hare.query.statements.select.model_rows_query import ModelRowsQuery
 
 
@@ -44,6 +43,12 @@ class ModelRowsPlanDescriptions:
         )
 
     @staticmethod
+    def get_conditions_plan_description(query: ModelRowsQuery[Any]) -> PlanDescription | None:
+        """Describe plain filters in the statement's binding and application."""
+        context = PlanContext(binding=query._binding, application_context=query._context)
+        return StatementPlanDescriptions.get_conditions_plan_description(query._q_objects, context)
+
+    @staticmethod
     def get_extra_conditions_plan_description(query: ModelRowsQuery[Any]) -> PlanDescription | None:
         """Describes the ``Select(relation, extra_condition=Q(...))`` conditions in join order -
         two queries selecting the same relations with other conditions never share a plan.
@@ -55,19 +60,24 @@ class ModelRowsPlanDescriptions:
             The description, None when a condition keeps no plan.
         """
         paths_and_conditions = SelectRelatedJoins.select_related_extra_conditions_in_join_order(query)
-        if not paths_and_conditions:
-            return PlanDescription((), [])
-        conditions_description = StatementPlanDescriptions.get_conditions_plan_description(
-            [extra_condition for _path, extra_condition in paths_and_conditions], PlanContext.EMPTY
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
+        return StatementPlanDescriptions.get_join_conditions_plan_description(
+            model_binding, paths_and_conditions, application_context=query._context
         )
-        if conditions_description is None:
-            return None
-        return PlanDescription(
-            (tuple(path for path, _extra_condition in paths_and_conditions), conditions_description.structure),
-            conditions_description.values,
-            # Bound into each JOIN the conditions are folded into - none of a relation the query
-            # doesn't cross.
-            PlanParts.get_optional_origins(conditions_description, []) if PlanOrigins.records else None,
+
+    @staticmethod
+    def describe_queryset(
+        query: ModelRowsQuery[Any], *, plain: bool, built_into_another: bool = False
+    ) -> PlanDescription | None:
+        """Describe the selected statement form without looking up its plan.
+
+        The caller selects the form once and retains its validation order. Origin recording
+        reuses this description after the initial lookup has accepted the query state.
+        """
+        return (
+            query._describe_plain_statement(built_into_another)
+            if plain
+            else query._describe_statement(built_into_another)
         )
 
     @staticmethod
@@ -87,22 +97,27 @@ class ModelRowsPlanDescriptions:
             The description, None for a query that keeps no plan, and the plan found.
         """
         plan: StatementPlan | None = None
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
         if ModelRowsPlanDescriptions.has_plain_query_state(query):
-            description = query._describe_plain_statement(built_into_another)
+            description = ModelRowsPlanDescriptions.describe_queryset(
+                query, plain=True, built_into_another=built_into_another
+            )
             if description is None:
                 return None, None
             # A plan kept under the key is the answer to whether the query keeps one - except
             # inside a correlated subquery, where that also depends on the enclosing query.
             if not built_into_another and OuterScope.current_expression_context.get() is None:
-                plan = StatementPlans.find_for_model(query.model, description.structure)
+                plan = StatementPlans.find(model_binding, description.structure)
             if plan is None and not StatementPlanDescriptions.query_state_is_plannable(query):
                 return None, None
             return description, plan
         if not StatementPlanDescriptions.query_state_is_plannable(query):
             return None, None
-        description = query._describe_statement(built_into_another)
+        description = ModelRowsPlanDescriptions.describe_queryset(
+            query, plain=False, built_into_another=built_into_another
+        )
         if description is None:
             return None, None
         if not built_into_another:
-            plan = StatementPlans.find_for_model(query.model, description.structure)
+            plan = StatementPlans.find(model_binding, description.structure)
         return description, plan

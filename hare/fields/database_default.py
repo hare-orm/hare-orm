@@ -8,8 +8,8 @@ if TYPE_CHECKING:
 
 class DatabaseDefault:
     """The value of a field left to its ``db_default``: a single INSERT leaves its column out; a bulk
-    INSERT leaves out a column every object leaves to the database, and a column only some objects
-    leave raises ``QueryError``.
+    INSERT groups consecutive objects by the columns they leave to the database. Explicit values
+    remain in their group's INSERT; omitted values use the database default.
     """
 
     def __init__(self, field: Field[Any]) -> None:

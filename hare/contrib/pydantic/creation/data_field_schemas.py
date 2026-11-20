@@ -3,14 +3,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from copy import copy
 from enum import Enum
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from pydantic import SerializationInfo, SerializerFunctionWrapHandler, field_validator, model_serializer
 
-from hare import (
-    ForeignKeyFieldInstance,
-    OneToOneFieldInstance,
-)
+from hare import ForeignKeyFieldInstance
 from hare.contrib.pydantic.constants import JSON_SCHEMA_ONLY_CONSTRAINTS
 from hare.contrib.pydantic.models.pydantic_model import PydanticModel
 from hare.exceptions import ValidationError as HareValidationError
@@ -29,6 +26,18 @@ class DataFieldSchemas:
     """The fields a model's data fields get in the pydantic model: the type a generated field computes,
     a tenant field hidden, a caller-supplied primary key required, and the validators running each
     field's own checks."""
+
+    @staticmethod
+    def get_annotation(creator: PydanticModelCreator, field_name: str, field: Field[Any], python_type: Any) -> Any:
+        """Choose the declared Python type before widening nullable or optional data fields.
+
+        Scalar and typed JSON schemas share this order: an explicit annotation refines the
+        value type, while schema nullability still follows the field and creator options.
+        """
+        annotation = creator._annotations.get(field_name) or python_type
+        if field_name in creator._optional or (field.null and not field.pk):
+            annotation = annotation | None
+        return annotation
 
     @staticmethod
     def process_data_field(
@@ -51,33 +60,22 @@ class DataFieldSchemas:
         Returns:
             The annotation.
         """
-        annotation = creator._annotations.get(field_name, None)
         constraints = copy(field.constraints)
         for schema_key in JSON_SCHEMA_ONLY_CONSTRAINTS:
             if schema_key in constraints:
                 json_schema_extra[schema_key] = constraints.pop(schema_key)
         python_type = field.get_value_annotation()
-        underlying_field = DataFieldSchemas.unwrap_generated_field(field)
+        underlying_field = GeneratedField.get_effective_field(field)
         if isinstance(underlying_field, (IntEnumFieldInstance, CharEnumFieldInstance)):
             # The enum already pins the exact allowed values - the column's own numeric range /
             # length constraints next to its $ref are redundant and not valid for an enum schema.
             constraints = {}
         fconfig.update(constraints)
-        ptype = python_type
         if field.null:
             json_schema_extra["nullable"] = True
-        if field_name in creator._optional or (field.null and not field.pk):
-            ptype = ptype | None
         if not (creator._exclude_read_only and json_schema_extra.get("readOnly") is True):
-            return annotation or ptype
+            return DataFieldSchemas.get_annotation(creator, field_name, field, python_type)
         return None
-
-    @staticmethod
-    def unwrap_generated_field(field: Field[Any]) -> Field[Any]:
-        """Unwraps a ``GeneratedField`` to its ``output_field`` - a generated JSON or enum column is
-        typed as one.
-        """
-        return field.output_field if isinstance(field, GeneratedField) else field
 
     @staticmethod
     def is_tenant_field(creator: PydanticModelCreator, field_name: str, field: Field[Any]) -> bool:
@@ -89,14 +87,12 @@ class DataFieldSchemas:
             field_name: The field's name on the model.
             field: The field.
         """
-        tenant_field = creator._model_class._meta.tenant_field
+        tenant_field = creator._binding.tenant_field
         if tenant_field is None:
             return False
         if field_name == tenant_field:
             return True
-        return isinstance(field, (ForeignKeyFieldInstance, OneToOneFieldInstance)) and list(field.source_fields) == [
-            tenant_field
-        ]
+        return isinstance(field, ForeignKeyFieldInstance) and list(field.source_fields) == [tenant_field]
 
     @staticmethod
     def get_caller_supplied_pk_fields(creator: PydanticModelCreator) -> list[Field[Any]]:
@@ -118,63 +114,46 @@ class DataFieldSchemas:
                 *creator._model_description.foreign_key_fields,
                 *creator._model_description.one_to_one_fields,
             )
-            for source_field_name in cast("ForeignKeyFieldInstance[Any]", relation_field).source_fields
+            for source_field_name in relation_field.source_fields  # type: ignore[attr-defined]
         }
         return [
             field
             for field in pk_fields
-            if not (
-                field.generated
-                or field.default is not None
-                or field.has_db_default()
-                or field.model_field_name in relation_source_field_names
-            )
+            if not field.has_insert_default() and field.model_field_name not in relation_source_field_names
         ]
 
     @staticmethod
-    def get_unset_value_dropping_serializer(field_names: frozenset[str], *, uses_aliases: bool = False) -> Any:
+    def get_unset_value_dropping_serializer(field_names: frozenset[str]) -> Any:
         """The serializer leaving out of a dump the fields the database or the ORM fills while they
         hold None - a ``db_default``, a generated value, an ``auto_now`` stamp, the tenant - so
         ``Model.objects.create(**schema.model_dump())`` writes no NULL into a column refusing it.
 
         Args:
             field_names: The fields.
-            uses_aliases: The schema can serialize these fields under aliases.
 
         Returns:
             The ``model_serializer`` of the schema.
         """
 
-        def drop_unset_values(self: PydanticModel, handler: SerializerFunctionWrapHandler) -> Any:
+        # A return annotation would replace the model's serialization schema. The
+        # wrapper only prunes the handler's output and keeps its existing field types.
+        def drop_unset_values(self: PydanticModel, handler: SerializerFunctionWrapHandler, info: SerializationInfo):
             data = handler(self)
             if isinstance(data, dict):
-                for field_name in field_names:
-                    if field_name in data and data[field_name] is None:
-                        del data[field_name]
-            return data
-
-        if not uses_aliases:
-            return model_serializer(mode="wrap")(drop_unset_values)
-
-        def drop_aliased_unset_values(
-            self: PydanticModel, handler: SerializerFunctionWrapHandler, info: SerializationInfo
-        ) -> Any:
-            data = handler(self)
-            if isinstance(data, dict):
-                by_alias = cast("bool | None", info.by_alias)
+                by_alias = info.by_alias
                 if by_alias is None:
-                    by_alias = self.model_config.get("serialize_by_alias", False)
+                    # Earlier supported Pydantic versions expose None here.
+                    by_alias = self.model_config.get("serialize_by_alias", False)  # type: ignore[unreachable]
                 for field_name in field_names:
-                    output_name = (
-                        type(self).model_fields[field_name].serialization_alias or field_name
-                        if by_alias
-                        else field_name
-                    )
+                    field = type(self).model_fields.get(field_name)
+                    if field is None:
+                        continue
+                    output_name = field.serialization_alias or field_name if by_alias else field_name
                     if data.get(output_name) is None:
                         data.pop(output_name, None)
             return data
 
-        return model_serializer(mode="wrap")(drop_aliased_unset_values)
+        return model_serializer(mode="wrap")(drop_unset_values)
 
     @staticmethod
     def build_orm_field_validators(creator: PydanticModelCreator) -> dict[str, Any]:
@@ -199,11 +178,10 @@ class DataFieldSchemas:
                 generated_validators[f"_hare_orm_check_geometry_{field_name}"] = field_validator(field_name)(
                     DataFieldSchemas.make_geometry_validator(field)
                 )
-            if isinstance(DataFieldSchemas.unwrap_generated_field(field), ContainerField):
+            effective_field = GeneratedField.get_effective_field(field)
+            if isinstance(effective_field, ContainerField):
                 generated_validators[f"_hare_orm_check_held_values_{field_name}"] = field_validator(field_name)(
-                    DataFieldSchemas.make_held_values_validator(
-                        cast("ContainerField", DataFieldSchemas.unwrap_generated_field(field))
-                    )
+                    DataFieldSchemas.make_held_values_validator(effective_field)
                 )
         return generated_validators
 

@@ -5,16 +5,12 @@ from datetime import UTC, datetime
 
 import pytest
 
-from hare.query.plans.statement.statement_plans import StatementPlans
-from hare.time import Timezone
+from hare.query.functions import ExtractDay, Trunc
+from hare.time.system_zone import SystemZone
+from hare.time.zone_settings import ZoneSettings
 from tests.shared_models import testmodels
+from tests.utils.statement_plan_checks import StatementPlanChecks
 from tests.utils.timezone_context import override_timezone
-
-
-async def count_plan_hits(statement) -> tuple[object, int]:
-    hits = StatementPlans.hits
-    result = await statement
-    return result, StatementPlans.hits - hits
 
 
 @pytest.mark.requires("tzlocal")
@@ -26,11 +22,15 @@ async def test_query_without_time_zone_support_runs_on_its_plan(db):
             morning = await model.objects.create(datetime=datetime(2024, 1, 15, 5, 0))
             evening = await model.objects.create(datetime=datetime(2024, 7, 15, 17, 0))
             assert await model.objects.filter(id=morning.id, datetime__hour=5).count() == 1
-            count, hits = await count_plan_hits(model.objects.filter(id=evening.id, datetime__hour=17).count())
+            count, hits = await StatementPlanChecks.count_plan_hits(
+                model.objects.filter(id=evening.id, datetime__hour=17).count()
+            )
             assert count == 1
             assert hits == 1
             await model.objects.filter(datetime__gte=datetime(2024, 6, 1)).order_by("id")
-            rows, hits = await count_plan_hits(model.objects.filter(datetime__gte=datetime(2024, 1, 1)).order_by("id"))
+            rows, hits = await StatementPlanChecks.count_plan_hits(
+                model.objects.filter(datetime__gte=datetime(2024, 1, 1)).order_by("id")
+            )
             assert [row.id for row in rows] == [morning.id, evening.id]
             assert hits == 1
         finally:
@@ -44,13 +44,27 @@ async def test_plans_of_the_two_time_zone_modes_stay_apart(db):
     model = testmodels.DatetimeFields
     with override_timezone(use_timezone=True, timezone="Europe/Berlin"):
         try:
-            obj = await model.objects.create(datetime=datetime(2024, 1, 1, 23, 30, tzinfo=UTC))
+            instant = datetime(2024, 1, 1, 23, 30, 0, 123456, tzinfo=UTC)
+            obj = await model.objects.create(datetime=instant)
+            projection = (
+                model.objects.filter(id=obj.id)
+                .annotate(local_day=ExtractDay(Trunc("datetime", "day")))
+                .values_list("datetime", "local_day")
+            )
+            for zone, day in (("Europe/Berlin", 2), ("UTC", 1)):
+                with override_timezone(use_timezone=True, timezone=zone):
+                    for expected_hits in (0, 1):
+                        rows, hits = await StatementPlanChecks.count_plan_hits(projection)
+                        assert [(moment.astimezone(UTC), local_day) for moment, local_day in rows] == [(instant, day)]
+                        assert hits == expected_hits
             # 00:30 on 2 January in Berlin.
             assert await model.objects.filter(id=obj.id, datetime__day=2).count() == 1
             with override_timezone(use_timezone=True, timezone="UTC"):
-                count, hits = await count_plan_hits(model.objects.filter(id=obj.id, datetime__day=2).count())
+                count, hits = await StatementPlanChecks.count_plan_hits(
+                    model.objects.filter(id=obj.id, datetime__day=2).count()
+                )
                 assert (count, hits) == (0, 0)
-            assert Timezone.get_rendered_zone_key() == "Europe/Berlin"
+            assert ZoneSettings.get_rendered_zone_key() == "Europe/Berlin"
         finally:
             await model.objects.all().delete()
 
@@ -61,17 +75,17 @@ async def test_a_plan_of_the_machines_zone_configured_isnt_run_for_naive_datetim
     """The key held the zone's name alone - the machine's own zone, configured under use_timezone,
     shared its plans with naive datetimes, which render no zone at all."""
     model = testmodels.DatetimeFields
-    local_zone_name = Timezone.get_local_zone_name()
+    local_zone_name = SystemZone.get_local_zone_name()
     try:
         with override_timezone(use_timezone=True, timezone=local_zone_name):
-            aware_key = Timezone.get_rendered_zone_key()
+            aware_key = ZoneSettings.get_rendered_zone_key()
             await model.objects.create(datetime=datetime(2024, 1, 1, 12, 30, tzinfo=UTC))
             assert await model.objects.filter(datetime__year=2024).count() == 1
-            _count, hits = await count_plan_hits(model.objects.filter(datetime__year=2024).count())
+            _count, hits = await StatementPlanChecks.count_plan_hits(model.objects.filter(datetime__year=2024).count())
             assert hits == 1
         with override_timezone(use_timezone=False):
-            assert Timezone.get_rendered_zone_key() != aware_key
-            count, hits = await count_plan_hits(model.objects.filter(datetime__year=2024).count())
+            assert ZoneSettings.get_rendered_zone_key() != aware_key
+            count, hits = await StatementPlanChecks.count_plan_hits(model.objects.filter(datetime__year=2024).count())
             assert (count, hits) == (1, 0)
     finally:
         await model.objects.all().delete()

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any
-from weakref import ReferenceType, WeakSet
+from threading import RLock
+from typing import TYPE_CHECKING, Any, ClassVar
+from weakref import ReferenceType, WeakKeyDictionary, WeakSet
 
 from hare.contrib.request_query.declaration.request_query_declaration import RequestQueryDeclaration
-from hare.exceptions import ConfigurationError
+from hare.core.caching.cache import Cache
 from hare.models import Model
 
 if TYPE_CHECKING:
@@ -15,30 +16,18 @@ if TYPE_CHECKING:
 
 
 class RequestQueryRegistry:
-    """The models a request query class reads, tracked so its declaration and parameters are forgotten
-    when one of them changes or leaves the registry - and the refusal of a model already
-    unregistered."""
+    """Track declaration dependencies and invalidate future parameter generations.
 
-    @staticmethod
-    def check_model_registered(query_class: type[RequestQuery[Any]], model: type[Model]) -> None:
-        """Refuses a queryset of a model that was unregistered (``Hare.unregister_live_models()``) -
-        such a class would query a dead class.
+    A generation keeps its selected queryset and graph. Explicit invalidation or an extension
+    change rebuilds later generations; completed schemas and request instances remain intact.
+    """
 
-        Args:
-            query_class: The request query class.
-            model: The model of the class's queryset.
-
-        Raises:
-            ConfigurationError: The model was bound once and no longer is.
-        """
-        # Local import: the request query module imports this module.
-        from hare.contrib.request_query.request_query import RequestQuery
-
-        if model in RequestQuery.bound_models and not model._meta.is_bound:
-            raise ConfigurationError(
-                f"{query_class.__qualname__}.Meta.queryset is a queryset of {model.__name__}, which was "
-                "unregistered - build the request query for the model registered in its place"
-            )
+    lock: ClassVar[RLock] = RLock()
+    revision: ClassVar[int] = 0
+    #: Completed declarations follow each request query class's lifetime through its bucket.
+    declarations: ClassVar[Cache[Any]] = Cache()
+    #: Both ends are weak: invalidation must not keep a runtime model or query class alive.
+    classes_by_model: ClassVar[WeakKeyDictionary[type[Model], WeakSet[type]]] = WeakKeyDictionary()
 
     @staticmethod
     def track_models(query_class: type[RequestQuery[Any]], models: Iterable[type[Model]]) -> None:
@@ -48,11 +37,12 @@ class RequestQueryRegistry:
             query_class: The request query class.
             models: The models.
         """
-        # Local import: the request query module imports this module.
-        from hare.contrib.request_query.request_query import RequestQuery
-
-        for model in models:
-            RequestQuery.classes_by_model.setdefault(model, WeakSet()).add(query_class)
+        with RequestQueryRegistry.lock:
+            for model in models:
+                classes = RequestQueryRegistry.classes_by_model.get(model)
+                if classes is None:
+                    classes = RequestQueryRegistry.classes_by_model[model] = WeakSet()
+                classes.add(query_class)
 
     @staticmethod
     def track_described_models(
@@ -70,21 +60,30 @@ class RequestQueryRegistry:
 
     @staticmethod
     def forget_parameters(query_class: type[RequestQuery[Any]]) -> None:
-        """Forgets the class's declaration and the parameters ``prepare_parameters()`` added or
-        described, so both are built again - the types of the parameters too - on the next use.
+        """Forget future construction's generation without mutating returned schemas.
+
+        Parameters, their types and the checked declaration are built together on
+        the next use. Existing instances keep their completed generation.
 
         Args:
             query_class: The request query class.
         """
-        # Local import: the request query module imports this module.
-        from hare.contrib.request_query.request_query import RequestQuery
+        with RequestQueryRegistry.lock:
+            RequestQueryRegistry.revision += 1
+            RequestQueryRegistry.declarations.forget_holder(query_class)
 
-        RequestQuery.declarations.forget_owner(query_class)
-        if query_class not in RequestQuery.prepared_classes:
-            return
-        RequestQuery.prepared_classes.discard(query_class)
-        unprepared_fields = RequestQuery.unprepared_fields.pop(query_class, None)
-        if unprepared_fields is not None:
-            query_class.__pydantic_fields__.clear()
-            query_class.__pydantic_fields__.update(unprepared_fields)
-            query_class.model_rebuild(force=True)
+    @staticmethod
+    def forget_model(model: type[Model]) -> None:
+        """Invalidate declarations that depend on the model, preserving completed generations."""
+        with RequestQueryRegistry.lock:
+            RequestQueryRegistry.revision += 1
+            for query_class in tuple(RequestQueryRegistry.classes_by_model.pop(model, ())):
+                RequestQueryRegistry.declarations.forget_holder(query_class)
+
+    @staticmethod
+    def forget_all() -> None:
+        """Invalidate all future declaration reads without changing existing request instances."""
+        with RequestQueryRegistry.lock:
+            RequestQueryRegistry.revision += 1
+            RequestQueryRegistry.declarations.clear()
+            RequestQueryRegistry.classes_by_model.clear()

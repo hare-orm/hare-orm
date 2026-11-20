@@ -61,6 +61,21 @@ detects a concurrent modification; `QueryError` if both `force_create` and `forc
   `db_default`/are generated), `save()` of a saved instance and `save(force_update=True)` still check
   that the row exists and raise `IntegrityError` when it doesn't.
 
+An executed write with an unknown row count is distinct from this no-statement case:
+it does not trigger a second existence query or imply that zero rows matched. On rollback,
+Hare restores the instance's prior connection alias, saved/generated-key flags and dirty baseline,
+as well as automatic and returned values. Returned values are registered for rollback before
+assignment, so a custom setter that raises after changing an attribute can still be undone.
+
+If preparing an async default fails or is cancelled before the write starts, the pending
+factory and the automatic values already assigned during preparation are restored, including
+a tenant filled from the active scope. Retrying can evaluate the factory again. A transaction
+rollback restores that pending work too.
+The same preparation is undone when validation or SQL rejects the write. An originally absent
+primary-key component remains absent, with its factory pending, rather than becoming `None`.
+A reporting-listener error after a successful write does not turn that write into a non-write;
+outside a transaction its stored row and prepared values remain.
+
 ### <a id="delete"></a>`delete()`
 
 ```python
@@ -71,16 +86,17 @@ A real `DELETE` — or, if `Meta.soft_delete_field` is set, an `UPDATE` that set
 cascades that same decision to related rows. The cascade and the `PROTECT`/`RESTRICT` checks see every
 related row physically referencing the deleted ones — in every tenant, soft-deleted or hidden by a custom
 `Meta.manager` filter. Whatever part of the cascade the database can't run itself (a soft delete, a
-`db_constraint=False` relation) runs in Python, in the same transaction, wave by wave: each wave costs
-one query per relation and model, however many rows it reaches. A related model that overrides `delete()`
+`db_constraint=False` relation) runs in Python, wave by wave, with queries per relation and batch.
+Writes on the same connection share a transaction where supported; writes on other connections or
+without transaction support have no shared atomicity guarantee. A related model that overrides `delete()`
 has that override called for each of its rows — a relation leading to it, even one the database enforces,
 is then cascaded in Python. A row a hard delete removes for real (`hard_delete()`, or the cascade of a
 model without soft delete) whose model has `Meta.soft_delete_field` goes through that model's own
 `hard_delete()` override instead — its `delete()` would only mark it deleted; without one the cascade
 goes on below it to the overrides there. With `Meta.optimistic_lock_field` the row is deleted only at
-the version the instance read it at — a row changed since raises `StaleObjectError` and stays, the rows
-the cascade
-removed with it too. Raises `QueryError` (never saved), `IncompleteInstanceError` (the pk or
+the version the instance read it at — a row changed since raises `StaleObjectError` and stays.
+Cascade writes in the same transaction roll back with it; this does not undo writes outside that
+transaction. Raises `QueryError` (never saved), `IncompleteInstanceError` (the pk or
 `Meta.optimistic_lock_field` not loaded), `ProtectedError` (a `PROTECT` relation blocks it),
 `IntegrityError`, `StaleObjectError`.
 
@@ -106,7 +122,13 @@ itself). `DeletePreview` (importable from `hare.models`) holds:
 | `many_to_many_through_nulled: dict[str, int]` | auto-generated through rows whose key column becomes `NULL` (M2M `SET_NULL`) |
 | `protected_by: list[Model]` | rows blocking the delete via `PROTECT`, transitively; empty if nothing protects it |
 | `restricted_by: list[Model]` | rows blocking the delete via `RESTRICT`/`NO_ACTION` |
-| `can_delete: bool` | `True` when both lists above are empty |
+| `unknown_actions: dict[type[Model], list[Any]]` | keys handed to overridden deletion methods; their effects are unknown |
+| `can_delete: bool \| None` | False for known blockers, None when overrides make the outcome unknown, True otherwise |
+
+The preview and execution share a prepared cascade policy and relationship selectors.
+Application deletion overrides are never called by preview: their keys appear in
+`unknown_actions` and their effects are excluded from row counts. A root overriding
+`delete()` has only an unknown result. A known count is not a prediction of arbitrary callbacks.
 
 A `through=Model` M2M relation is an ordinary FK of its through model, so its rows show up under that
 model in `deleted`/`nulled`. Every count is of distinct rows; a row the same delete removes is not also
@@ -127,7 +149,9 @@ accounted for.
 
 ```python
 preview = await author.delete_preview()
-if not preview.can_delete:
+if preview.can_delete is None:
+    raise ValidationError("Deletion includes custom actions that need application review")
+if preview.can_delete is False:
     raise ValidationError(f"blocked by {preview.protected_by + preview.restricted_by}")
 print(preview.deleted)  # {Author: 1, Book: 2, Chapter: 3}
 ```
@@ -178,6 +202,11 @@ collection) is a no-op. A relation is named by its own name (`fields=["author"]`
 key column of a relation keyed by several (`document_version` of a relation to a `VersionedModel`)
 refreshes every column of that key, so the instance never holds a key made of two.
 
+All requested values are read before changing the instance; a missing column is not treated as
+`None`. If assigning the refreshed values fails, Hare restores the previous fields, loaded relation
+caches and dirty-field baseline. If a custom setter also fails during restoration, both errors are
+reported. Refresh does not register database rollback callbacks.
+
 To load relations of instances you already hold, use
 [`prefetch_related_objects()`](relations.md#prefetch-related-objects):
 `await prefetch_related_objects([book], "author", "tags")`.
@@ -196,17 +225,40 @@ rejects, `QueryError` for `None` in a non-null field.
 
 ```python
 class Model:
-    def clone(self: TModel, pk: Any = EMPTY) -> TModel: ...
+    def clone(self: TModel, pk: Any = ...) -> TModel: ...
 ```
-Returns a new, unsaved copy (deep-copying mutable field values). For a composite primary key, each
-component is resolved independently — a component with its own `default=`/`db_default=` doesn't need an
-explicit value; only components with neither need to come from `pk=(...)`. A single-column pk that's
-neither `generated=True` nor has a `default` needs an explicit `pk=` too — otherwise `QueryError`. An
+Returns a new, unsaved copy (deep-copying mutable field values). The default above means `pk` was not
+passed. Without `pk`, every component of a composite primary key receives its own `default=` or
+`db_default=`; a component with neither raises `QueryError`. An explicit `pk=(...)` must contain the
+complete key in component order and replaces every component without filling any from defaults.
+A single-column pk that's neither `generated=True` nor has a `default` or `db_default` also needs an
+explicit `pk=` — otherwise `QueryError`. An
 explicit `pk=` is always used, even for an auto-generated pk, and every `auto_now_add` field is reset so
 the new row gets its own first-save value (set one on the clone before `save()` to keep it); a clone of a
 soft-deleted row is live — its `Meta.soft_delete_field` is cleared. The values the database computed for
 the original's row (a `GeneratedField`) aren't copied: the copy reads its own once saved, and reading one
 before raises `NoValuesFetched`.
+
+Structural copies preserve custom attributes in both `__dict__` and `__slots__`, including inherited
+and private slots; uninitialized slots stay unset. Copying, deep-copying and pickling exclude pending
+transaction rollback callbacks. `copy.copy()` and `clone()` isolate mutable field values and reverse
+relation caches while retaining forward-related object identity.
+
+In-process copies (`copy.copy`, `copy.deepcopy`, `clone`) retain the originating graph and context.
+`pickle` retains values, loaded relations and a structural graph recipe, excluding connections,
+the application context and cache contents. Model classes and custom types must be importable under
+Python's normal serialization rules. Restoring an object opens no database connection.
+
+```python
+restored = pickle.loads(pickle.dumps(book))
+context.attach(restored)
+await restored.save()
+```
+
+A restored object performs no IO before `attach()`. Attachment validates the whole loaded relation
+graph before assigning the context, preserving its graph and data. An instance already belonging to
+another application cannot be reassigned. Unloaded relations remain unloaded and subsequently read
+through the explicitly selected context.
 
 ### <a id="to-dict"></a>`to_dict()`
 
@@ -262,6 +314,26 @@ value. A NaN (of a `FloatField`, a `DecimalField`) is no change against a NaN, t
 value in Python. The same holds for `snapshot()`/`diff_against()`. When a transaction containing
 `save()`/`delete()`/`restore()` rolls back, the dirty baseline goes back to what it was before the write.
 
+Values that Hare changes during a write are restored through snapshots tied to the actual
+transaction and savepoint that performed it. Within a scope the first previous value wins;
+released inner savepoints are undone before the outer snapshot. An unloaded field remains
+unloaded rather than becoming `None`. Restoration attempts every captured field even when a
+custom setter fails, then reports all restoration errors. Persistence bookkeeping bypasses
+custom field setters.
+
+A partial save or `bulk_update()` also refreshes the dirty baseline of recomputed generated
+fields: returned values become clean; a value left unloaded loses its previous baseline.
+The same applies to soft-delete and restore. Tracking uses model attribute names even when
+`source_field` gives a generated column a different storage name.
+Other unsaved fields stay dirty. For a `JSONField(field_type=...)`, comparisons use the field's
+JSON representation, including nested Pydantic models and dataclasses. Changing `1` to `True`
+or `1.0` therefore counts as a change even when the document's Python equality treats them as equal;
+the diff still returns the original typed values.
+
+Assigning a value to a field omitted by `only()`/`defer()` makes it dirty, including assigning
+`None`. Its unknown previous value is reported as `None`, so `(None, None)` can represent a new
+explicit assignment; `save(changed_only=True)` writes that field. Fields still unloaded remain clean.
+
 This is the mechanism to reach for instead of a manual "fetch a fresh copy and diff `to_dict()` against
 it" pattern before publishing an event — the diff is computed for you, from an in-memory snapshot rather
 than an extra `SELECT`.
@@ -278,8 +350,9 @@ class Model:
 ```
 A manual "before/after" pair for audit logs, approvals or undo — works on **any** model, no
 `Meta.track_dirty_fields` needed. `snapshot()` captures the direct field values (every loaded direct
-field by default, or just `fields=`) into an immutable `FieldSnapshot`
+field by default, or just `fields=`) into a `FieldSnapshot`
 (`from hare.models import FieldSnapshot`) — a read-only mapping with `.fields` and `.model_class`.
+Its values are copied independently of the model; nested lists and dictionaries are not frozen.
 `diff_against()` returns `{field: (snapshot_value, current_value)}` for the snapshotted fields that
 changed since.
 
@@ -301,6 +374,8 @@ book.snapshot(fields=["status"])        # only these fields are captured and com
   depth, or a JSON field's top-level `1` to `True` — counts as changed, since the database stores it
   differently. Other values compare with `==` (`Decimal("1.50")` and `Decimal("1.5")` are equal).
   `get_dirty_fields()` uses the same comparison.
+  This also applies to JSON held in arrays, maps, tuples and nested rows. Typed documents are compared
+  through their declared JSON representation, including dataclasses whose equality equates `1` and `True`.
 - Nothing happens automatically: loading and `save()` never take a snapshot unless the model has
   `Meta.track_dirty_fields`, so models that don't call `snapshot()` pay nothing.
 - `fields=` takes any iterable of direct field names (an FK's shadow column such as `author_id`, not the
@@ -399,25 +474,43 @@ The connection the router gives the model, its tenancy unchecked — for reading
 ```python
 class Model:
     @classmethod
-    def construct(cls: type[TModel], **kwargs: Any) -> TModel: ...
+    def construct(cls: type[TModel], *, _saved_in_db: bool = False, **kwargs: Any) -> TModel: ...
 ```
 Builds a "detached" instance with **no** validation, no database checks, no FK-saved checks — for tests
 and deserialization. Nested relation values passed as plain values/lists are wrapped so they read back as
-already-fetched. An unsaved instance given an auto-generated pk is inserted with that pk;
+already-fetched. The instance is unsaved by default; `_saved_in_db=True` marks it as saved without
+querying the database. An unsaved instance given an auto-generated pk is inserted with that pk;
 `get_dirty_fields()` on a `track_dirty_fields` model reports every field until the first `save()`.
+
+The writable `pk=` alias fills the actual primary-key columns, including every component of a
+composite key. Defaults do not overwrite those explicitly supplied components.
+
+A logical `GenericForeignKeyField` value uses the same branch mapping as normal construction:
+a target object supplies its branch's keys and remains cached by identity, a complete tagged dict
+supplies raw key columns, and `None` clears every branch. These populated columns are retained
+when defaults are filled. As with other relations in `construct()`, the target may be unsaved and
+`None` is accepted even for a non-nullable declaration; ordinary construction and assignment
+retain their validation. Omitted generic relations do not evaluate their relation defaults here.
 
 ### <a id="model-getitem"></a>`Model[pk]`
 
 ```python
 await Model[some_pk]  # -> Self, or raises DoesNotExist
 ```
-`Model[pk]` is `Model.objects.get(pk=pk)`; a key that can't be a value of the primary key field
+`await Model[pk]` looks up the object through `Model.objects.get(pk=pk)`; a key that can't be a value of
+the primary key field
 (`Book["abc"]` for an integer key) is `DoesNotExist` too.
 
-## <a id="model-meta"></a>`Model._meta`
+## <a id="model-meta"></a>`ModelBinding`
 
-`Model._meta` — a `MetaInfo` (`hare.models`) — describes the model's table and fields. These attributes
-are public and read-only — set them through `Meta` options, never by assigning to `_meta`:
+`apps = context.apps` explicitly selects the model registry being described. `apps.get_binding(Book)`
+returns that graph's binding; switching the current context does not replace it. An instance retains
+its originating binding as `obj._binding`. `Book._declaration` separately holds the class declaration,
+without prepared relations or application connections.
+
+`apps.get_binding(Model)` — a `ModelBinding` (`hare.models`) — describes the model's table and fields. These
+attributes
+are public and read-only — set them through `Meta` options, never by assigning to `ModelBinding`:
 
 | Attribute | Holds |
 |---|---|
@@ -429,7 +522,7 @@ are public and read-only — set them through `Meta` options, never by assigning
 | `primary_key_attribute` | The primary key field's name; a tuple of names for a `CompositePrimaryKey`; `()` for a model with `Meta.primary_key = None`. |
 | `primary_key_attribute_names` | `primary_key_attribute` as a tuple in every case — `("id",)`, `("id", "version")`, `()`. |
 | `pk` | The primary key field; `None` for a composite key or no key. |
-| `pk_fields` | The fields of a composite primary key, in order; `()` otherwise. |
+| `pk_fields` | The key conversion fields in order: `(pk,)` for a scalar key, all component fields for a composite key, or `()` without a primary key. |
 | `has_primary_key` / `has_composite_primary_key` | Whether the model has a primary key / a composite one. |
 | `fields_map` | `{name: Field}` of every field: data fields, relations (forward, backward, M2M) and the key columns of forward relations (`author_id`). |
 | `fields` | The names in `fields_map`. |
@@ -449,7 +542,7 @@ A field tells its own type through its attributes — `relation_type`, `encrypte
 ```python
 from hare.fields import RelationType
 
-for name, field in Book._meta.fields_map.items():
+for name, field in apps.get_binding(Book).fields_map.items():
     if field.relation_type is RelationType.MANY_TO_MANY:
         ...
 ```

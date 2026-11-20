@@ -5,6 +5,7 @@ from typing import Any
 from hare.sql.functions.coalesce import Coalesce
 from hare.sql.terms.functions.function import Function
 from hare.sql.terms.term import Term
+from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 
 class ArrayLength:
@@ -23,4 +24,6 @@ class ArrayLength:
         # array_length(field, 1) counts the rows of a nested array (cardinality() would count every
         # element across all dimensions), but is NULL for an empty array - cardinality() fills that
         # in as 0 while staying NULL for a NULL column, which must match no __len value at all.
-        return Coalesce(Function("array_length", term, 1), Function("cardinality", term))
+        return Coalesce(
+            Function("array_length", term, ValueWrapper(1, allow_parametrize=False)), Function("cardinality", term)
+        )

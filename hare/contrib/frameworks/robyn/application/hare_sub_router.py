@@ -30,8 +30,6 @@ class HareSubRouter(SubRouter):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        #: The handlers of the router's routes and of the routers it includes.
-        self.route_handlers: list[RouteHandler] = []
         # Robyn hands a route the exception handler of the router declaring it.
         self.exception(HareExceptionHandlers.handle)
 
@@ -41,10 +39,4 @@ class HareSubRouter(SubRouter):
         if RouteHandler.is_const_route(args, kwargs):
             return super().add_route(route_type, endpoint, handler, *args, **kwargs)
         route_handler = RouteHandler(handler, kwargs.get("response_model"), kwargs.get("status_code"))
-        self.route_handlers.append(route_handler)
         return super().add_route(route_type, endpoint, route_handler.build_function(), *args, **kwargs)
-
-    def include_router(self, router: SubRouter) -> None:
-        super().include_router(router)
-        if isinstance(router, HareSubRouter):
-            self.route_handlers.extend(router.route_handlers)

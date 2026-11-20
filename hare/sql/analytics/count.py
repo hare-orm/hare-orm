@@ -9,5 +9,7 @@ from hare.sql.terms.functions.window_frame_analytic_function import WindowFrameA
 class Count(WindowFrameAnalyticFunction):
     """``COUNT(term) OVER (...)`` - the window's count of the values that aren't NULL."""
 
+    structure_attributes = ()
+
     def __init__(self, term: Any, **kwargs: Any) -> None:
         super().__init__(AnalyticFunctionName.COUNT, term, **kwargs)

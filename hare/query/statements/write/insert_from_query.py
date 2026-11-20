@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import dataclasses
-from collections.abc import Generator, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Generator, Sequence
+from operator import itemgetter
+from typing import TYPE_CHECKING, Any
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import FieldError, QueryError, UnSupportedError
@@ -20,10 +20,15 @@ from hare.models.write.rules.tenant_write_rules import TenantWriteRules
 from hare.models.write.rules.written_target_checks import WrittenTargetChecks
 from hare.models.write.update.expression_assignment import ExpressionAssignment
 from hare.models.write.write_steps import WriteSteps
+from hare.query.execution.bound_write import BoundWrite
+from hare.query.execution.query_execution import QueryExecution
+from hare.query.execution.write_statements import WriteStatement
 from hare.query.expressions.expression import Expression
 from hare.query.expressions.value import Value
+from hare.query.key_columns import KeyColumns
 from hare.query.query_connection import QueryConnection
 from hare.query.statements.constants import INSERT_FROM_CONSTANT_PREFIX
+from hare.query.statements.select.combined.combined_derived_queries import CombinedDerivedQueries
 from hare.sql.terms.parameters.query_parameters import QueryParameters
 from hare.time import Timezone
 
@@ -32,13 +37,14 @@ if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.fields.field import Field
     from hare.instrumentation.capture.capture_needs import CaptureNeeds
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset.queryset import QuerySet
 
 
 class InsertFromQuery:
     """``Model.objects.insert_from(queryset, fields=[...])``: ``INSERT INTO <table> (<fields>) SELECT ...``
-    - the rows a queryset selects written into the model's table in one statement, never read into
-    Python. Awaits to the number of rows written.
+    - the selected rows written in one insert statement. Change capture can additionally read
+    source keys and written rows into Python. Awaits to the number of rows written.
 
     The fields not named get their database default; an ``auto_now``/``auto_now_add`` field the moment
     of the insert, and ``Meta.tenant_field`` the active tenant. A Python ``default=`` isn't computed.
@@ -68,13 +74,16 @@ class InsertFromQuery:
                 f"insert_from(fields=...) takes the names of the written fields, got "
                 f"{ValueDescriptions.get_shown_value(fields)}"
             )
+        from hare.query.queryset.pending_calls.calls_before_setup import CallsBeforeSetup
+
+        model_binding: ModelBinding = target._binding  # type: ignore[assignment]
+        source = CallsBeforeSetup.bind(source, target._context, model_binding.graph)
         self.target = target
         self.field_names = tuple(fields)
-        model = target.model
-        meta = model._meta
+        meta: ModelBinding = model_binding
         #: What the insert writes - the fields refused, the stamps of the fields not named.
         self._rules = RowWriteRules.get(
-            model,
+            model_binding,
             WriteType.INSERT,
             self.field_names,
             INSERT_FROM_METHOD_NAME,
@@ -93,7 +102,11 @@ class InsertFromQuery:
         self.written_fields = [
             meta.fields_map[
                 RowWriteRules.get_stored_field_names(
-                    model, [name], INSERT_FROM_METHOD_NAME, expands_generic_keys=False, single_column_relations=True
+                    model_binding,
+                    [name],
+                    INSERT_FROM_METHOD_NAME,
+                    expands_generic_keys=False,
+                    single_column_relations=True,
                 )[0]
             ]
             for name in self.field_names
@@ -116,23 +129,23 @@ class InsertFromQuery:
         Raises:
             QueryError: See the class.
         """
-        model = self.target.model
-        meta = model._meta
+        model_binding: ModelBinding = self.target._binding  # type: ignore[assignment]
+        meta = model_binding
         written = set(self.columns)
         constants: list[tuple[str, Field[Any], Any]] = [
             (meta.fields_db_projection[name], field, value)
             for name, field, value in self._rules.get_stamp_values(Timezone.now())
         ]
         TenantWriteRules.raise_if_source_tenants_unchecked(
-            model, written, self.target._visibility.all_tenants, INSERT_FROM_METHOD_NAME
+            model_binding, written, self.target._visibility.all_tenants, INSERT_FROM_METHOD_NAME
         )
         if (
             (tenant_field := meta.tenant_field) is not None
             and meta.fields_db_projection[tenant_field] not in written
-            and (not self.target._visibility.all_tenants or Tenancy.get_scope(model) is not None)
+            and (not self.target._visibility.all_tenants or Tenancy.get_scope(model_binding) is not None)
         ):
             values: dict[str, Any] = {}
-            TenantWriteRules.fill_new_values(model, values, "insert_from")
+            TenantWriteRules.fill_new_values(model_binding, values, "insert_from")
             constants.append(
                 (meta.fields_db_projection[tenant_field], meta.fields_map[tenant_field], values[tenant_field])
             )
@@ -142,9 +155,8 @@ class InsertFromQuery:
         self,
         connection: DatabaseClient,
         capture_needs: CaptureNeeds,
-        insert_sql: str,
+        command: WriteStatement,
         select_sql: str,
-        parameters: Sequence[Any],
         columns: Sequence[str],
     ) -> int | None:
         """Runs the insert into a model with ``Meta.change_capture`` on a database whose writes return
@@ -153,9 +165,8 @@ class InsertFromQuery:
         Args:
             connection: The connection of the insert.
             capture_needs: The model's needs.
-            insert_sql: The ``INSERT ... SELECT``.
+            command: The bound ``INSERT ... SELECT``, retaining sensitive parameters.
             select_sql: Its ``SELECT`` alone.
-            parameters: The parameters of both.
             columns: The columns written, in the order the source selects them.
 
         Returns:
@@ -165,36 +176,33 @@ class InsertFromQuery:
             UnSupportedError: The primary key isn't among the fields written.
         """
         model = self.target.model
-        meta = model._meta
-        key_columns = [meta.fields_db_projection[name] for name in meta.primary_key_attribute_names]
+        meta: ModelBinding = self.target._binding  # type: ignore[assignment]
+        primary_key_names = meta.primary_key_attribute_names
+        key_columns = [meta.fields_db_projection[name] for name in primary_key_names]
         if not all(column in columns for column in key_columns):
             raise UnSupportedError(
                 f"insert_from() into {model.__name__}, whose Meta.change_capture reads the rows written, writes no "
                 f"primary key on the {connection.dialect.name} database, which returns no rows of a write - name "
-                f"the key fields ({', '.join(meta.primary_key_attribute_names)}) among fields"
+                f"the key fields ({', '.join(primary_key_names)}) among fields"
             )
         positions = [columns.index(column) for column in key_columns]
-        key_fields = [meta.fields_map[name] for name in meta.primary_key_attribute_names]
+        key_fields = [meta.fields_map[name] for name in primary_key_names]
         types = connection.dialect.types
-        captured = CapturedWrite(model, capture_needs, connection, RowOperation.INSERT)
+        captured = CapturedWrite(meta, capture_needs, connection, RowOperation.INSERT)
         async with captured.transaction() as transaction_connection:
-            _selected, source_rows = await transaction_connection.execute(
-                select_sql, list(parameters), returns_rows=True
-            )
-            # A row by column name on some drivers - its values are in the order selected.
-            rows = [list(row.values()) if isinstance(row, Mapping) else row for row in source_rows]
-            key_values = [
-                [
-                    types.get_python_value(field, row[position])
-                    for field, position in zip(key_fields, positions, strict=True)
-                ]
-                for row in rows
-            ]
-            pks = list(dict.fromkeys(values[0] if len(values) == 1 else tuple(values) for values in key_values))
-            count = (await transaction_connection.execute(insert_sql, list(parameters), returns_rows=False))[0]
+            result = await transaction_connection._execute_built(select_sql, command.parameters, returns_rows=True)
+            pks = []
+            if result.rows:
+                column_names = result.column_names
+                layout = KeyColumns.get_read_layout(
+                    key_fields, (column_names[position] for position in positions), types
+                )
+                key_values = (layout.read(row) for row in result.rows)
+                pks = list(dict.fromkeys(values[0] if len(values) == 1 else values for values in key_values))
+            count = (await BoundWrite.execute_command(transaction_connection, command)).row_count
             await captured.capture_read({}, pks)
-        if count:
-            await WriteSteps.report(connection, model, RowOperation.INSERT, pks=pks)
+        if count != 0:
+            await WriteSteps.report(connection, meta, RowOperation.INSERT, pks=pks)
         return count
 
     def hide_sensitive_parameters(self, parameters: list[Any], columns: list[str]) -> list[Any]:
@@ -208,7 +216,7 @@ class InsertFromQuery:
         Returns:
             The parameters.
         """
-        meta = self.target.model._meta
+        meta: ModelBinding = self.target._binding  # type: ignore[assignment]
         if not parameters or not meta.sensitive_fields:
             return parameters
         # A relation's columns are its key fields'.
@@ -276,7 +284,7 @@ class InsertFromQuery:
                 return selects
         if sorted(positions) != list(range(len(selects))):
             return selects
-        return [select for _position, select in sorted(zip(positions, selects, strict=True), key=lambda pair: pair[0])]
+        return [select for _position, select in sorted(zip(positions, selects, strict=True), key=itemgetter(0))]
 
     @staticmethod
     def get_source_with_constants(source: QuerySet[Any, Any], constants: dict[str, Value]) -> QuerySet[Any, Any]:
@@ -291,20 +299,12 @@ class InsertFromQuery:
         Returns:
             The source.
         """
-        combination = source._combination
-        if combination is None:
+        if source._combination is None:
             return source._annotate(constants)
-        combined_source = source._clone()
-        combined_source._combination = dataclasses.replace(
-            combination,
-            branches=tuple(
-                InsertFromQuery.get_source_with_constants(branch, constants) for branch in combination.branches
-            ),
-        )
-        return combined_source
+        return CombinedDerivedQueries.get_changed_branches_queryset(source, lambda branch: branch._annotate(constants))
 
     def __await__(self) -> Generator[Any, None, int | None]:
-        return self._execute().__await__()
+        return QueryExecution.run_operation((self.target, self.source), self._execute).__await__()
 
     async def _execute(self) -> int | None:
         """Runs the ``INSERT ... SELECT`` and reports it.
@@ -312,10 +312,9 @@ class InsertFromQuery:
         Returns:
             The number of rows written.
         """
-        model = self.target.model
         execution_query = self.target._get_execution_query(for_write=True)
-        WrittenTargetChecks.raise_if_refused_calls(execution_query)
-        connection = execution_query._connection
+        WrittenTargetChecks.raise_if_refused_calls(execution_query, execution_query.dialect)
+        connection: DatabaseClient = execution_query._connection  # type: ignore[assignment]
         self.raise_if_literals_refused(self.source, connection.dialect)
         constant_columns = self.get_constant_columns()
         source = self.source
@@ -329,8 +328,9 @@ class InsertFromQuery:
                     for index, (_column, field, value) in enumerate(constant_columns)
                 },
             )
+        model_binding: ModelBinding = self.target._binding  # type: ignore[assignment]
         source_query = QueryConnection.get_bound_to(
-            source._get_compiler(), connection, model, "the source of insert_from()"
+            source, connection, model_binding, "the source of insert_from()", context=self.target._context
         )
         source_query._make_subquery()
         built_query = source_query.query
@@ -347,7 +347,7 @@ class InsertFromQuery:
             )
         select_sql, parameters = built_query.get_parameterized_sql()
         parameters = self.hide_sensitive_parameters(parameters, columns)
-        insert_query = connection.query_class.into(model._meta.basetable).columns(*columns)
+        insert_query = connection.query_class.into(model_binding.basetable).columns(*columns)
         insert_query._rows_source_sql = select_sql
         return await WriteSteps.get_whole_run(
             connection, self._insert(connection, insert_query, select_sql, parameters, columns)
@@ -358,7 +358,7 @@ class InsertFromQuery:
         connection: DatabaseClient,
         insert_query: Any,
         select_sql: str,
-        parameters: Sequence[Any],
+        parameters: list[Any],
         columns: list[str],
     ) -> int | None:
         """Runs the ``INSERT ... SELECT`` and reports it.
@@ -373,34 +373,31 @@ class InsertFromQuery:
         Returns:
             The number of rows written.
         """
-        model = self.target.model
-        capture_needs = model._meta.change_capture_needs
-        if (
-            capture_needs is not None
-            and capture_needs.captures(RowOperation.INSERT)
-            and not connection.features.supports_returning
-        ):
-            return await WriteSteps.run_whole(
-                connection,
-                self._insert_captured_by_reading(
-                    connection, capture_needs, insert_query.get_sql(), select_sql, parameters, columns
-                ),
-            )
-        if capture_needs is not None and capture_needs.captures(RowOperation.INSERT):
-            # The inserted rows' keys and captured fields, captured with them in one transaction.
+        model_binding: ModelBinding = self.target._binding  # type: ignore[assignment]
+        capture_needs = model_binding.change_capture_needs
+        if capture_needs is not None and not capture_needs.captures(RowOperation.INSERT):
+            capture_needs = None
+        returns_rows = capture_needs is not None and connection.features.supports_returning
+        if capture_needs is not None and returns_rows:
             insert_query = insert_query.returning(*capture_needs.columns)
-            captured = CapturedWrite(model, capture_needs, connection, RowOperation.INSERT)
+        command = WriteStatement(insert_query.get_sql(), parameters, returns_rows=returns_rows)
+        if capture_needs is not None and not returns_rows:
+            return await WriteSteps.get_whole_run(
+                connection,
+                self._insert_captured_by_reading(connection, capture_needs, command, select_sql, columns),
+            )
+        if capture_needs is not None:
+            # The inserted rows' keys and captured fields, captured with them in one transaction.
+            captured = CapturedWrite(model_binding, capture_needs, connection, RowOperation.INSERT)
             async with captured.transaction() as transaction_connection:
-                count, returned_rows = await transaction_connection.execute(
-                    insert_query.get_sql(), cast("list[Any]", parameters), returns_rows=True
-                )
+                count, returned_rows = await BoundWrite.execute_command(transaction_connection, command)
                 changes = await captured.capture_returned(returned_rows)
-            if count:
-                await WriteSteps.report(connection, model, RowOperation.INSERT, pks=[change.pk for change in changes])
+            if count != 0:
+                await WriteSteps.report(
+                    connection, model_binding, RowOperation.INSERT, pks=[change.pk for change in changes]
+                )
             return count
-        count = (await connection.execute(insert_query.get_sql(), cast("list[Any]", parameters), returns_rows=False))[
-            0
-        ]
-        if count:
-            await WriteSteps.report(connection, model, RowOperation.INSERT)
+        count = (await BoundWrite.execute_command(connection, command)).row_count
+        if count != 0:
+            await WriteSteps.report(connection, model_binding, RowOperation.INSERT)
         return count

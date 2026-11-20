@@ -3,6 +3,8 @@ from __future__ import annotations
 #: The attributes a write sets on each object whose row it wrote - that it is saved, and the connection it
 #: was written on - in this order.
 SAVED_OBJECT_ATTRIBUTE_NAMES = ["_saved_in_db", "_connection_alias"]
+#: The attribute marking an object whose generated primary key was given, not generated.
+CUSTOM_GENERATED_KEY_ATTRIBUTE_NAMES = ["_custom_generated_pk"]
 #: The writing method a save names in its messages.
 SAVE_METHOD_NAME = "save(update_fields=...)"
 #: The writing method a bulk update names in its messages.

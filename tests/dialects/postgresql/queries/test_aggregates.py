@@ -35,13 +35,13 @@ from hare.query.functions.datetime import Now
 from hare.transactions.transactions import Transactions
 from tests.dialects.postgresql.conftest import skip_if_not_postgres
 from tests.shared_models.typed_row_models import TypedRow, TypedRowNote
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 @pytest_asyncio.fixture(scope="module")
 async def aggregates_context() -> AsyncGenerator[Any]:
     skip_if_not_postgres()
-    db_url = os.environ["HARE_TEST_DB"].replace("\\{", "{").replace("\\}", "}")
-    db_url = db_url.format(uuid.uuid4().hex) if "{}" in db_url else db_url
+    db_url = DatabaseUnderTest.get_fresh_url(os.environ["HARE_TEST_DB"])
     async with hare_test_context(["tests.shared_models.typed_row_models"], db_url=db_url) as ctx:
         yield ctx
 

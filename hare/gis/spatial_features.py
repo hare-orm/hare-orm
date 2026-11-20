@@ -3,37 +3,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from hare.exceptions import UnSupportedError
-from hare.gis.constants import SPATIAL_LOOKUP_REQUIRED_FEATURE
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.query.expressions import ExpressionContext
 
 
 class SpatialFeatures:
-    """Checks a connection runs ``hare.gis``'s spatial SQL before a query is sent."""
-
-    @staticmethod
-    def raise_if_unsupported(
-        expression_context: ExpressionContext, name: str, feature: str = SPATIAL_LOOKUP_REQUIRED_FEATURE
-    ) -> None:
-        """Rejects a spatial function or aggregate on a connection without spatial SQL.
-
-        Args:
-            expression_context: The context the expression is resolved in.
-            name: The function or aggregate, named in the error.
-            feature: The ``Features`` flag it needs - ``supports_spatial``, or ``supports_geography`` for
-                a geography.
-
-        Raises:
-            UnSupportedError: The connection hasn't the flag.
-        """
-        connection = expression_context.connection
-        if connection is not None and not getattr(connection.features, feature):
-            raise UnSupportedError(
-                f"{name} can't run on the {connection.connection_alias!r} connection: it needs features.{feature}, "
-                "which the connection doesn't have"
-            )
+    """Check the spatial reference systems available to a connection."""
 
     @staticmethod
     def raise_if_unknown_reference_system(connection: DatabaseClient, name: str, srid: int) -> None:

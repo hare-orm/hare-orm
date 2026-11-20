@@ -5,12 +5,13 @@ import os
 import time
 import traceback
 from types import TracebackType
-from typing import ClassVar, cast
+from typing import ClassVar
 
 from hare.contrib.repeated_queries.constants import WARN_ACTION
 from hare.contrib.repeated_queries.repeated_query_collection import RepeatedQueryCollection
 from hare.contrib.repeated_queries.repeated_query_report import RepeatedQueryReport, ReportAction
 from hare.contrib.repeated_queries.shape_stats import ShapeStats
+from hare.core.constants import HARE_PACKAGE_DIRECTORY
 from hare.core.log import logger
 from hare.instrumentation.declarations import QueryExecuted
 from hare.instrumentation.observers.observers import Observers
@@ -33,8 +34,8 @@ class RepeatedQueryDetector:
 
     Args:
         threshold: How many queries of one shape within the window are repeated.
-        window_seconds: The window a shape is counted over - a shape below the threshold this long
-            after its first query starts counting fresh.
+        window_seconds: The fixed window starting at a shape's first query. Its first query
+            at or after the window expires starts a fresh count, even if a report was emitted.
         action: ``"warn"`` logs a warning; a callable gets each ``RepeatedQueryReport``.
     """
 
@@ -45,16 +46,12 @@ class RepeatedQueryDetector:
     )
 
     #: The hare package directory, normalized for comparison with traceback frame filenames.
-    library_directory: ClassVar[str] = os.path.normcase(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    )
+    library_directory: ClassVar[str] = os.path.normcase(HARE_PACKAGE_DIRECTORY)
 
     def __init__(
         self, *, threshold: int = 10, window_seconds: float = 1.0, action: ReportAction | str = WARN_ACTION
     ) -> None:
-        self.action: ReportAction = (
-            RepeatedQueryDetector.warn if action == WARN_ACTION else cast("ReportAction", action)
-        )
+        self.action: ReportAction = RepeatedQueryDetector.warn if action == WARN_ACTION else action  # type: ignore[assignment]
         self.threshold = threshold
         self.window_seconds = window_seconds
 

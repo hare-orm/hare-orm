@@ -37,6 +37,11 @@ def make_change_capture(payload: ChangePayload):
 
 
 META_OPTION_SAMPLES = (
+    MetaOptionSample(
+        "pydantic",
+        lambda: {"include": ("name",), "max_recursion": 1},
+        lambda: {"exclude": ("name",), "max_recursion": 2},
+    ),
     MetaOptionSample("app", lambda: "first_app", lambda: "second_app"),
     MetaOptionSample("table", lambda: "base_table", lambda: "override_table"),
     MetaOptionSample("managed", lambda: False, lambda: True),

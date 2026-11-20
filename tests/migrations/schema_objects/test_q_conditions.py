@@ -2,16 +2,18 @@
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.ddl.conditions.constraint_condition import ConstraintCondition
 from hare.ddl.constraints import CheckConstraint, UniqueConstraint
 from hare.ddl.indexes import PartialIndex
+from hare.declarations.declaration_value_serializer import DeclarationValueSerializer
+from hare.declarations.import_manager import ImportManager
 from hare.exceptions import ConfigurationError, IntegrityError, UnSupportedError
 from hare.fields.data.numeric import FloatField, IntField
 from hare.fields.data.temporal.date_field import DateField
 from hare.fields.data.text import CharField
 from hare.fields.relations.fields import ForeignKeyField
 from hare.migrations.operations import RemoveField, RenameField
-from hare.migrations.writer import ImportManager, MigrationWriter
 from hare.query.expressions import F, Q
 from tests.migrations.round_trips.test_round_trip_real_db import RoundTrip, build_live_state, build_model
 from tests.utils.database_under_test import DatabaseUnderTest
@@ -80,7 +82,7 @@ async def test_q_conditions_unapply(round_trip: RoundTrip) -> None:
     table = "q_stock_back"
     plain_model = build_stock_model(table)
     await round_trip.migrate_to(plain_model)
-    before = round_trip.tracked_state.clone()
+    before = round_trip.tracked_state
     conditioned_model = build_stock_model(table, **CONDITIONED_OPTIONS)
     operations = round_trip.get_pending_operations(conditioned_model)
     await round_trip.apply(operations)
@@ -112,7 +114,7 @@ def test_q_condition_round_trips_through_a_migration_file() -> None:
     condition = (~Q(qty__lt=0) | Q(price__gte=1.50, name__in=["a", "b"])) & Q(qty__gt=F("min_qty"))
     constraint = CheckConstraint(check=condition, name="stock_check")
     imports = ImportManager()
-    code = MigrationWriter.render_value(constraint, imports)
+    code = DeclarationValueSerializer.render_value(constraint, imports)
     namespace: dict = {}
     for statement in imports.render():
         exec(statement, namespace)  # noqa: S102 - the writer's own import lines
@@ -122,16 +124,16 @@ def test_q_condition_round_trips_through_a_migration_file() -> None:
 
 @pytest.mark.database_independent
 def test_q_condition_holding_an_expression_is_written_as_it() -> None:
-    from hare.classes.comparable_values import ComparableValues
+    from hare.declarations.declaration_values import DeclarationValues
     from hare.query.functions import Upper
 
     condition = Q(name=Upper("other"), low__lt=F("high") + 1)
     imports = ImportManager()
-    code = MigrationWriter.render_value(condition, imports)
+    code = DeclarationValueSerializer.render_value(condition, imports)
     namespace: dict = {}
     for statement in imports.render():
         exec(statement, namespace)  # noqa: S102 - the writer's own import lines
-    assert ComparableValues.are_equal(eval(code, namespace), condition)  # noqa: S307 - the writer's own rendered code
+    assert DeclarationValues.are_equal(eval(code, namespace), condition)  # noqa: S307 - the writer's own rendered code
 
 
 @pytest.mark.database_independent
@@ -182,7 +184,11 @@ def test_empty_condition_is_rejected(db) -> None:
     from tests.shared_models.testmodels import Tournament
 
     with pytest.raises(ConfigurationError, match="can't be empty"):
-        ConstraintCondition.get_sql(Q(), Tournament, Tournament._meta.connection)
+        ConstraintCondition.get_sql(
+            Q(),
+            HareContext.require_current().apps.get_binding(Tournament),
+            HareContext.require_current().apps.get_queryset(Tournament).get_connection(),
+        )
 
 
 @pytest.mark.asyncio
@@ -202,14 +208,10 @@ async def test_sqlite_condition_needing_a_hare_function_is_rejected(round_trip: 
 
 @pytest.mark.asyncio
 async def test_generated_schema_enforces_q_conditions_without_drift() -> None:
-    import os
-    import uuid
-
     from hare.contrib.test.isolated_contexts import hare_test_context
     from hare.migrations.drift import detect_drift_for_alias
 
-    raw_db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:").replace("\\{", "{").replace("\\}", "}")
-    db_url = raw_db_url.format(uuid.uuid4().hex) if "{}" in raw_db_url else raw_db_url
+    db_url = DatabaseUnderTest.get_fresh_url()
     async with hare_test_context(["tests.queries.filtering.q_condition_models"], db_url=db_url) as context:
         from tests.queries.filtering.q_condition_models import Batch
 

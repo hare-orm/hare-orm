@@ -6,6 +6,7 @@ values_list(), order_by(), group_by(), distinct(<fields>), F() and only()."""
 import pytest
 import pytest_asyncio
 
+from hare.core.hare_context import HareContext
 from hare.models.tenancy.tenancy import Tenancy
 from hare.query.expressions import F, Value
 from hare.query.functions import Count, Max
@@ -212,7 +213,12 @@ async def test_only(staff):
 
 @pytest.mark.asyncio
 async def test_distinct_on(staff):
-    if not RowPinEmployee._meta.connection.dialect.features.supports_distinct_on:
+    if (
+        not HareContext.require_current()
+        .apps.get_queryset(RowPinEmployee)
+        .get_connection()
+        .dialect.features.supports_distinct_on
+    ):
         pytest.skip("DISTINCT ON is PostgreSQL-only")
     rows = (
         await RowPinEmployee.objects.filter(department__isnull=False)

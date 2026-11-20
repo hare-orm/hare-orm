@@ -1,21 +1,24 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from hare.sql.builder_methods import BuilderMethods
 from hare.sql.terms.functions.function import Function
 from hare.sql.terms.term import Term
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
-    from typing import Self
-
-    from hare.sql.builder.tables.table import Table
-    from hare.sql.terms.node import TNode
 
 
 class Extract(Function):
     """A part of a date or time - written by the dialect's renderer."""
+
+    structure_attributes = (
+        "args",
+        "as_integer",
+        "date_part",
+        "is_time_of_day",
+        "use_local_zone_when_naive",
+        "zone_as_literal",
+        "zone_name",
+    )
+    has_repeatable_value = True
 
     requires_dialect_renderer = True
 
@@ -55,8 +58,7 @@ class Extract(Function):
             is_time_of_day: The term is a time of day - on a database storing one as text, the text
                 is read as a time first.
         """
-        super().__init__("EXTRACT", date_part, alias=alias)
-        self.field = term
+        super().__init__("EXTRACT", date_part, term, alias=alias)
         self.date_part = date_part
         self.zone_name = zone_name
         self.use_local_zone_when_naive = use_local_zone_when_naive
@@ -64,29 +66,7 @@ class Extract(Function):
         self.zone_as_literal = zone_as_literal
         self.is_time_of_day = is_time_of_day
 
-    def nodes_(self) -> Iterator[TNode]:
-        yield from super().nodes_()
-        yield from self.field.nodes_()
-
     @property
-    def is_aggregate(self) -> bool | None:  # type:ignore[override]
-        """Whether the extraction reads an aggregate - by the term it reads, kept apart from its
-        arguments: of a column it is grouped by, not taken for a constant."""
-        return Term.get_combined_is_aggregate([*(arg.is_aggregate for arg in self.args), self.field.is_aggregate])
-
-    @BuilderMethods.builder
-    def replace_table(self, current_table: Table | None, new_table: Table | None) -> Self:
-        """Replaces all occurrences of the specified table with the new table.
-
-        Useful when reusing fields across queries.
-
-        Args:
-            current_table: The table to be replaced.
-            new_table: The table to replace with.
-
-        Returns:
-            A copy of the term with the tables replaced.
-        """
-        self.args = [parameter.replace_table(current_table, new_table) for parameter in self.args]
-        self.field = self.field.replace_table(current_table, new_table)
-        return self
+    def field(self) -> Term:
+        """The extracted value, stored with the function's structural arguments."""
+        return self.args[1]

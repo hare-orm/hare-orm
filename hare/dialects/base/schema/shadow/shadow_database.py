@@ -5,8 +5,10 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Self
 
 if TYPE_CHECKING:
+    from hare.ddl.schema_objects.materialized_view import MaterializedView
     from hare.ddl.table_options import TableOptions
     from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.inspectdb.introspection.catalog_identities import CatalogIdentities
 
 
 class ShadowDatabase:
@@ -65,13 +67,12 @@ class ShadowDatabase:
         """
         return options
 
-    def replace_shadow_names(self, text: str) -> str:
-        """A text the shadow printed, its names of the shadow made the database's.
+    def get_shadow_materialized_view(self, view: MaterializedView) -> MaterializedView:
+        """Place a view's independent storage in the shadow; unchanged by default."""
+        return view
 
-        Args:
-            text: The text.
+    def get_catalog_identities(self) -> CatalogIdentities:
+        """Map the shadow's catalog references to logical identities; no mapping by default."""
+        from hare.inspectdb.introspection.catalog_identities import CatalogIdentities
 
-        Returns:
-            The text - itself by default.
-        """
-        return text
+        return CatalogIdentities({})

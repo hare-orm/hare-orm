@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import ConfigurationError
 from hare.fields.field import Field
@@ -12,10 +12,12 @@ from hare.inspectdb.introspection.table_info import TableInfo
 from hare.migrations.operations import CreateModel
 
 if TYPE_CHECKING:
+    from hare.core.apps import Apps
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.migrations.loading.graph.migration_key import MigrationKey
     from hare.migrations.migration import Migration
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class SwappableSettingCheck:
@@ -28,6 +30,7 @@ class SwappableSettingCheck:
         connection: The connection migrated.
         apps_config: The configuration of the apps migrated on it.
         disk_migrations: The migrations on disk, by key.
+        apps: The executor's live model registry, if one was supplied or captured.
     """
 
     def __init__(
@@ -35,10 +38,12 @@ class SwappableSettingCheck:
         connection: DatabaseClient,
         apps_config: Mapping[str, Any],
         disk_migrations: Mapping[MigrationKey, Migration],
+        apps: Apps | None,
     ) -> None:
         self.connection = connection
         self.apps_config = apps_config
         self.disk_migrations = disk_migrations
+        self.apps = apps
 
     async def check(self, applied: set[MigrationKey]) -> None:
         """Reads the tables of the live models declaring a swappable relation and compares their
@@ -50,40 +55,38 @@ class SwappableSettingCheck:
         Raises:
             ConfigurationError: Such a foreign key exists.
         """
-        if not applied or not self.has_swappable_relations():
+        live_apps = self.apps
+        if live_apps is None or not applied or not self.has_swappable_relations():
             return
-        from hare.core.hare_context import HareContext
         from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
 
-        live_context = HareContext.get_current()
-        live_apps = live_context.apps if live_context is not None else None
-        if live_apps is None:
-            return
         # None stands for the connection's default schema, where a model without Meta.schema lives.
         models_by_schema: dict[str | None, list[type[Model]]] = {}
         for app_label in self.apps_config:
             for model in live_apps.apps.get(app_label, {}).values():
-                if model._meta.managed is False or model._meta.swapped is not None:
+                binding = live_apps.get_binding(model)
+                if binding.managed is False or binding.swapped is not None:
                     continue
-                models_by_schema.setdefault(model._meta.schema, []).append(model)
+                models_by_schema.setdefault(binding.schema, []).append(model)
         mismatch_lines: list[str] = []
         for schema, models in models_by_schema.items():
             existing_tables = set(await DatabaseCatalog.get_table_names(self.connection, schema=schema))
-            models = [model for model in models if model._meta.db_table in existing_tables]
+            models = [model for model in models if live_apps.get_binding(model).db_table in existing_tables]
             if not models:
                 continue
             table_infos = await DatabaseCatalog.inspect_tables(
-                self.connection, [model._meta.db_table for model in models], schema=schema, verify_exists=False
+                self.connection, [live_apps.get_binding(model).db_table for model in models], schema=schema
             )
             for model, table_info in zip(models, table_infos, strict=True):
+                binding = live_apps.get_binding(model)
                 mismatch_lines.extend(
-                    f"{model._meta.full_name}.{column_name}: {detail}"
-                    for column_name, detail in self.get_foreign_key_mismatches(model._meta.fields_map, table_info)
+                    f"{binding.full_name}.{column_name}: {detail}"
+                    for column_name, detail in self.get_foreign_key_mismatches(binding.fields_map, table_info)
                 )
             through_relations = [
                 (model, field)
                 for model in models
-                for field in model._meta.fields_map.values()
+                for field in live_apps.get_binding(model).fields_map.values()
                 if isinstance(field, ManyToManyFieldInstance)
                 and isinstance(field.model_name, SwappableModelReference)
                 and field.through_model is None
@@ -95,16 +98,18 @@ class SwappableSettingCheck:
                     self.connection,
                     [field.through for _model, field in through_relations],
                     schema=schema,
-                    verify_exists=False,
                 )
                 for (model, field), through_info in zip(through_relations, through_infos, strict=True):
                     foreign_key_targets = {
                         column_name: foreign_key.target_table
                         for column_name, foreign_key in through_info.foreign_keys.items()
                     }
+                    binding = live_apps.get_binding(model)
                     mismatch_lines.extend(
-                        f"{model._meta.full_name}.{field.model_field_name} ({field.through}.{column_name}): {detail}"
-                        for column_name, detail in self.get_through_table_mismatches(model, field, foreign_key_targets)
+                        f"{binding.full_name}.{field.model_field_name} ({field.through}.{column_name}): {detail}"
+                        for column_name, detail in self.get_through_table_mismatches(
+                            binding, field, foreign_key_targets
+                        )
                     )
         if mismatch_lines:
             raise ConfigurationError(
@@ -116,7 +121,10 @@ class SwappableSettingCheck:
         for key, migration in self.disk_migrations.items():
             if key.app_label not in self.apps_config:
                 continue
-            for operation in migration.operations:
+            pending = list(migration.operations)
+            while pending:
+                operation = pending.pop()
+                pending.extend(operation.get_nested_operations())
                 fields = (
                     [field for _name, field in operation.fields]
                     if isinstance(operation, CreateModel)
@@ -146,7 +154,7 @@ class SwappableSettingCheck:
                 field.model_name, SwappableModelReference
             ):
                 continue
-            column_names = tuple(field.db_column_names)
+            column_names = field.db_column_names
             if len(column_names) == 1:
                 foreign_key = table_info.foreign_keys.get(column_names[0])
                 referenced_table = foreign_key.target_table if foreign_key is not None else None
@@ -166,13 +174,13 @@ class SwappableSettingCheck:
 
     @staticmethod
     def get_through_table_mismatches(
-        model: type[Model], field: ManyToManyFieldInstance[Any], foreign_key_targets: Mapping[str, str]
+        binding: ModelBinding, field: ManyToManyFieldInstance[Any], foreign_key_targets: Mapping[str, str]
     ) -> list[tuple[str, str]]:
         """Lists the foreign keys of a swappable many-to-many relation's automatic through table referencing
         another table than the model's own and the one of the model the setting points at now.
 
         Args:
-            model: The model declaring the relation.
+            binding: The model declaring the relation.
             field: The relation.
             foreign_key_targets: The table each foreign key column of the through table references.
 
@@ -182,14 +190,16 @@ class SwappableSettingCheck:
         related_model = getattr(field, "related_model", None)
         if related_model is None:
             return []
-        expected_tables = {model._meta.db_table, related_model._meta.db_table}
-        setting_name = cast("SwappableModelReference", field.model_name).setting
+        related_binding = binding.graph.get_binding(related_model)
+        expected_tables = {binding.db_table, related_binding.db_table}
+        setting_name = field.model_name.setting  # type: ignore[union-attr]
         return [
             (
                 column_name,
                 f'its foreign key references table "{target_table}", but the '
-                f'{setting_name} setting points at "{related_model._meta.full_name}" (table '
-                f'"{related_model._meta.db_table}") - the setting changed after the table was created; move the '
+                f'{setting_name} setting points at "{related_binding.full_name}" (table '
+                f'"{related_binding.db_table}") - the setting changed after the table was '
+                f"created; move the "
                 f"rows to the new model and repoint the foreign key with a migration of your own",
             )
             for column_name, target_table in foreign_key_targets.items()
@@ -211,11 +221,16 @@ class SwappableSettingCheck:
         if not isinstance(field, ForeignKeyFieldInstance) or not isinstance(field.model_name, SwappableModelReference):
             return None
         related_model = getattr(field, "related_model", None)
-        if related_model is None or referenced_table is None or referenced_table == related_model._meta.db_table:
+        if (
+            related_model is None
+            or referenced_table is None
+            or referenced_table == field.get_related_binding().db_table
+        ):
             return None
         return (
             f'its foreign key references table "{referenced_table}", but the {field.model_name.setting} setting '
-            f'points at "{related_model._meta.full_name}" (table "{related_model._meta.db_table}") - the setting '
+            f'points at "{field.get_related_binding().full_name}" (table "{field.get_related_binding().db_table}") - '
+            f"the setting "
             f"changed after the table was created; move the rows to the new model and repoint the foreign key "
             f"with a migration of your own"
         )

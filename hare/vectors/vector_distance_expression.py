@@ -4,8 +4,8 @@ from collections.abc import Sequence
 from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from hare.exceptions import UnSupportedError
 from hare.fields import Field, FloatField
+from hare.fields.generated_field import GeneratedField
 from hare.query.expressions import Expression, ExpressionContext, ExpressionResult
 from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
@@ -47,14 +47,10 @@ class VectorDistanceExpression(Expression):
         self.vector = vector
 
     @staticmethod
-    def get_vector_literal(
-        target_field: Field[Any] | None, dialect: Dialect, model: Any, vector: Sequence[float]
-    ) -> Any:
-        """The bound form of a query vector - converted the way the dialect stores the field compared
-        with when it is a ``VectorField``, else the way it stores a vector of that length.
+    def get_vector_literal(dialect: Dialect, model: Any, vector: Sequence[float]) -> Any:
+        """Convert a vector of this length when the target has no vector field.
 
         Args:
-            target_field: The field compared with.
             dialect: The dialect of the query's connection.
             model: The query's model.
             vector: The vector.
@@ -62,27 +58,10 @@ class VectorDistanceExpression(Expression):
         Returns:
             The bound value.
         """
-        vector_field = target_field if isinstance(target_field, VectorField) else VectorField(len(vector))
-        return dialect.types.get_db_value(vector_field, vector, model)
-
-    def raise_if_unsupported(self, expression_context: ExpressionContext) -> None:
-        """Rejects the distance on a connection without vector search.
-
-        Args:
-            expression_context: The context the expression is resolved in.
-
-        Raises:
-            UnSupportedError: The connection has no ``features.supports_vector_search``.
-        """
-        connection = expression_context.connection
-        if connection is not None and not getattr(connection.features, VECTOR_SEARCH_REQUIRED_FEATURE):
-            raise UnSupportedError(
-                f"{type(self).__name__} can't run on the {connection.connection_alias!r} connection: it needs "
-                f"features.{VECTOR_SEARCH_REQUIRED_FEATURE}, which the connection doesn't have"
-            )
+        return dialect.types.get_db_value(VectorField(len(vector)), vector, model)
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
-        self.raise_if_unsupported(expression_context)
+        expression_context.require_connection_feature(type(self).__name__, VECTOR_SEARCH_REQUIRED_FEATURE)
         field_result = ExpressionArguments.get_field_result(self, "field", self.field, expression_context)
         if self.vector is None:
             # The distance from no vector is NULL - a NULL operand, tested before a vector function
@@ -97,8 +76,14 @@ class VectorDistanceExpression(Expression):
     def _get_vector_operand(
         self, expression_context: ExpressionContext, target_field: Field[Any] | None
     ) -> ExpressionResult:
-        # Converted and validated through the target field when that is a VectorField.
-        encoder = partial(self.get_vector_literal, target_field, expression_context.dialect, expression_context.model)
+        # Converted and validated through the effective output of a generated column too.
+        if target_field is not None:
+            target_field = GeneratedField.get_effective_field(target_field)
+        encoder = (
+            expression_context.dialect.types.get_field_encoder(target_field, expression_context.model)
+            if isinstance(target_field, VectorField)
+            else partial(self.get_vector_literal, expression_context.dialect, expression_context.model)
+        )
         result = ExpressionArguments.get_result(
             self, "vector", self.vector, expression_context, encoder=encoder, binds_whole=True
         )

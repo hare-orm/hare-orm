@@ -11,10 +11,10 @@ from hare.dialects.postgresql.schema.constants import (
     POSTGRESQL_CLEAR_TABLES_PROBE_PART_TEMPLATE,
     POSTGRESQL_CLEAR_TABLES_PROBE_SEPARATOR,
 )
-from hare.models import Model
 
 if TYPE_CHECKING:
     from hare.dialects.postgresql.schema.postgresql_schema_editor import PostgresqlSchemaEditor
+    from hare.models.model_binding import ModelBinding
 
 
 class PostgresqlTableClearing(TableClearing):
@@ -70,11 +70,11 @@ class PostgresqlTableClearing(TableClearing):
 
     @classmethod
     def defer_cascade_foreign_keys(
-        cls, model: type[Model], connection: DatabaseClient
+        cls, binding: ModelBinding, connection: DatabaseClient
     ) -> AbstractAsyncContextManager[bool]:
         # Local import: the deferral walks hare's models, whose modules import this one.
         from hare.dialects.postgresql.schema.runtime_statements.postgresql_foreign_key_deferral import (
             PostgresqlForeignKeyDeferral,
         )
 
-        return PostgresqlForeignKeyDeferral.defer(model, connection)
+        return PostgresqlForeignKeyDeferral.defer(binding, connection)

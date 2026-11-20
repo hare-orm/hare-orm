@@ -7,7 +7,7 @@ from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
     from hare.sql import SqlContext
-    from hare.sql.terms.node import TNode
+    from hare.sql.terms.node import Node
 
 
 class UnnestRowValues(Term):
@@ -22,10 +22,8 @@ class UnnestRowValues(Term):
         super().__init__()
         self.column_arrays = column_arrays
 
-    def nodes_(self) -> Iterator[TNode]:
-        yield self  # type:ignore[misc]
-        for column_array in self.column_arrays:
-            yield from column_array.nodes_()
+    def get_children(self) -> Iterator[Node]:
+        yield from self.column_arrays
 
     def get_sql(self, sql_context: SqlContext) -> str:
         arrays_sql = ", ".join(column_array.get_sql(sql_context) for column_array in self.column_arrays)

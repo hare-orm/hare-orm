@@ -4,6 +4,7 @@ value saves; a relation sample's factory creates the related row too."""
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from tests.contracts.constants import SAMPLED_FIELD_NAME
 from tests.contracts.field_samples import FIELD_SAMPLES
 from tests.contracts.sample_database import SampleDatabase
@@ -41,4 +42,4 @@ async def test_a_factory_builds_creates_and_saves_the_value_of_a_field(contract_
             plain = await row_model.objects.get(pk=plain.pk)
             assert is_same_value(getattr(saved, sample.column_name), getattr(plain, sample.column_name)), value
         assert saved.pk == created.pk
-    assert SAMPLED_FIELD_NAME in row_model._meta.fields_map
+    assert SAMPLED_FIELD_NAME in HareContext.require_current().apps.get_binding(row_model).fields_map

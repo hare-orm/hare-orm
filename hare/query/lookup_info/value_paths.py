@@ -8,10 +8,9 @@ from hare.fields.encrypted.encrypted_json_field import EncryptedJSONField
 from hare.fields.field import Field
 from hare.fields.generated_field import GeneratedField
 from hare.query.filters.constants import (
-    CALENDAR_DATE_PART_LOOKUPS,
-    DATETIME_CAST_SEGMENTS,
-    DATETIME_DATE_PART_LOOKUPS,
-    TIME_OF_DAY_DATE_PART_LOOKUPS,
+    CALENDAR_DATE_PART_SEGMENTS,
+    DATETIME_DATE_PART_SEGMENTS,
+    TIME_OF_DAY_DATE_PART_SEGMENTS,
 )
 from hare.query.filters.lookups.field_transforms import FieldTransforms
 from hare.query.filters.lookups.json.json_filter_parser import JsonFilterParser
@@ -21,7 +20,7 @@ from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class ValuePaths:
@@ -29,24 +28,24 @@ class ValuePaths:
     a date, time or datetime - split into the field and the path, and the term reading it."""
 
     @staticmethod
-    def get_value_path_split(model: type[Model], name: str) -> tuple[str, Field[Any], list[str]] | None:
+    def get_value_path_split(binding: ModelBinding, name: str) -> tuple[str, Field[Any], list[str]] | None:
         """Splits a name reading a path inside a field's value - a JSON key path
         (``data__owner``) or an array/range transform (``tags__0``, ``during__startswith``),
         after any relations (``crates__tags__0``).
 
         Args:
-            model: The model the name starts at.
+            binding: The binding of the model the name starts at.
             name: The name.
 
         Returns:
             The field's own path, the field, and the path segments inside its value - or None
             when the name doesn't read inside a JSON, array or range field.
         """
-        lookup_path = LookupPath.parse(model, name)
+        lookup_path = LookupPath.parse(binding, name)
         if len(lookup_path.rest) < 2:
             return None
         field_name, *path_segments = lookup_path.rest
-        field = lookup_path.model._meta.fields_map.get(field_name)
+        field = lookup_path.binding.fields_map.get(field_name)
         if field is None:
             return None
         field_path = f"{lookup_path.prefix}{field_name}"
@@ -70,30 +69,30 @@ class ValuePaths:
         """
         source = GeneratedField.get_effective_field(field).date_function_source
         if source in {DateTruncSource.DATETIME, DateTruncSource.NAIVE_DATETIME}:
-            return DATETIME_CAST_SEGMENTS | frozenset(DATETIME_DATE_PART_LOOKUPS)
+            return DATETIME_DATE_PART_SEGMENTS
         if source == DateTruncSource.DATE:
-            return frozenset(CALENDAR_DATE_PART_LOOKUPS)
+            return CALENDAR_DATE_PART_SEGMENTS
         if source == DateTruncSource.TIME:
-            return frozenset(TIME_OF_DAY_DATE_PART_LOOKUPS)
+            return TIME_OF_DAY_DATE_PART_SEGMENTS
         return frozenset()
 
     @staticmethod
-    def get_date_part_split(model: type[Model], name: str) -> tuple[str, str] | None:
+    def get_date_part_split(binding: ModelBinding, name: str) -> tuple[str, str] | None:
         """Splits a name reading a part of a date, time or datetime field - ``created__year``,
         ``created__date``, ``starts__hour`` - after any relations (``tournament__created__month``),
         or of such a value inside a range or an array (``during__startswith__year``).
 
         Args:
-            model: The model the name starts at.
+            binding: The binding of the model the name starts at.
             name: The name.
 
         Returns:
             The path of the value and the part, or None when the name reads no such part.
         """
-        lookup_path = LookupPath.parse(model, name)
+        lookup_path = LookupPath.parse(binding, name)
         if len(lookup_path.rest) > 2:
             value_path, __, part = name.rpartition("__")
-            value_path_split = ValuePaths.get_value_path_split(model, value_path)
+            value_path_split = ValuePaths.get_value_path_split(binding, value_path)
             if value_path_split is None or isinstance(value_path_split[1], JSONField):
                 return None
             __, path_field, path_segments = value_path_split
@@ -102,8 +101,8 @@ class ValuePaths:
         if len(lookup_path.rest) != 2:
             return None
         field_name, part = lookup_path.rest
-        field = lookup_path.model._meta.fields_map.get(field_name)
-        if field is None or field_name in lookup_path.model._meta.fetch_fields:
+        field = lookup_path.binding.fields_map.get(field_name)
+        if field is None or field_name in lookup_path.binding.fetch_fields:
             return None
         if part not in ValuePaths.get_date_part_segments(field):
             return None

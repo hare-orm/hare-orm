@@ -6,6 +6,7 @@ import pytest
 import pytest_asyncio
 
 from hare import fields, prefetch_related_objects
+from hare.core.hare_context import HareContext
 from hare.exceptions import (
     FieldError,
     NoValuesFetched,
@@ -723,11 +724,9 @@ async def test_prefetch_reverse_relation_uses_related_models_own_router_connecti
 
 @pytest_asyncio.fixture
 async def m2m_prefetch_router():
-    """RoutedBook forward-declares the m2m field (the through table's owning side, per
-    ManyToManyRelation._through_table_db()) and is routed to "other"; RoutedTag stays on
-    "default". Covers _prefetch_m2m_relation()'s through-table lookup (must follow the OWNING
-    side's router decision, from either side of the relation) and its target-model query (must
-    follow the TARGET model's own router decision)."""
+    """The through-table read follows the model declaring the relation. The related rows follow the target model's
+    router in either direction.
+    """
 
     class RoutedTag(Model):
         id = fields.IntField(primary_key=True)
@@ -975,7 +974,14 @@ async def test_prefetch_of_a_missing_fk_target_keeps_the_fk_column(db):
 
     author = await Author.objects.create(name="gone")
     book = await BookNoConstraint.objects.create(name="book", author=author, rating=1.0)
-    await Author._meta.connection.execute_script(f"DELETE FROM {Author._meta.db_table} WHERE id = {author.pk}")
+    await (
+        HareContext.require_current()
+        .apps.get_queryset(Author)
+        .get_connection()
+        .execute_script(
+            f"DELETE FROM {HareContext.require_current().apps.get_binding(Author).db_table} WHERE id = {author.pk}"
+        )
+    )
 
     fetched = await BookNoConstraint.objects.get(pk=book.pk)
     await prefetch_related_objects([fetched], "author")
@@ -1062,7 +1068,7 @@ async def test_prefetch_m2m_batches_through_lookup_by_bind_param_ceiling(db, mon
     """The M2M through-table lookup binds one parameter per parent - it's split into several
     queries instead of exceeding the backend's bind-parameter ceiling."""
     from hare.contrib.test import capture_queries
-    from hare.query.relation_loading.prefetching import many_to_many_prefetch as many_to_many_prefetch_module
+    from hare.dialects.base.constants import PREFETCH_BIND_PARAMETERS_HEADROOM
 
     tournament = await Tournament.objects.create(name="t")
     team = await Team.objects.create(name="team")
@@ -1070,10 +1076,9 @@ async def test_prefetch_m2m_batches_through_lookup_by_bind_param_ceiling(db, mon
     for event in events[::2]:
         await event.participants.add(team)
     # Leaves room for five parent keys per through-table query.
+    connection = Event.get_connection(for_write=False)
     monkeypatch.setattr(
-        many_to_many_prefetch_module,
-        "PREFETCH_BIND_PARAMETERS_HEADROOM",
-        Event.get_connection(for_write=False).features.max_bind_parameters - 5,
+        connection, "features", connection.features.replace(max_bind_parameters=PREFETCH_BIND_PARAMETERS_HEADROOM + 5)
     )
 
     async with capture_queries() as counter:

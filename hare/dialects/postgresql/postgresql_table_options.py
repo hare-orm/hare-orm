@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Self
 
 from hare.ddl.table_options import TableOptions
@@ -13,7 +13,7 @@ from hare.exceptions import ConfigurationError
 if TYPE_CHECKING:
     from hare.dialects.base.features import Features
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclasses.dataclass(frozen=True)
@@ -51,7 +51,7 @@ class PostgresqlTableOptions(TableOptions):
         for name, value in self.storage_parameters.items():
             if not isinstance(name, str) or not POSTGRESQL_STORAGE_PARAMETER_NAME_PATTERN.fullmatch(name):
                 raise ConfigurationError(f"PostgresqlTableOptions: invalid storage parameter name {name!r}")
-            if not isinstance(value, bool | int | float | str):
+            if not isinstance(value, (bool, int, float, str)):
                 raise ConfigurationError(
                     f"PostgresqlTableOptions: storage parameter {name!r} must be a number, a boolean or a "
                     f"string, got {value!r}"
@@ -61,17 +61,18 @@ class PostgresqlTableOptions(TableOptions):
     def __hash__(self) -> int:
         return hash((self.tablespace, self.unlogged, tuple(self.storage_parameters.items()), self.partitioning))
 
-    def raise_if_unsupported(self, model: type[Model], features: Features) -> None:
+    def raise_if_unsupported(self, binding: ModelBinding, features: Features) -> None:
         """Rejects a partitioned table that is unlogged - PostgreSQL has no unlogged partitioned
         tables - and a partitioning that doesn't fit the model.
 
         Args:
-            model: The model.
+            binding: The model.
             features: The features of the connection the table is created on.
 
         Raises:
             ConfigurationError: The options don't fit the model.
         """
+        model = binding._model
         if self.partitioning is None:
             return
         if self.unlogged:
@@ -79,7 +80,7 @@ class PostgresqlTableOptions(TableOptions):
                 f"{model.__name__}: PostgresqlTableOptions can't be both unlogged and partitioned - PostgreSQL "
                 "has no unlogged partitioned tables"
             )
-        self.partitioning.raise_if_unsupported(model)
+        self.partitioning.raise_if_unsupported(binding)
 
     def get_partitions(self) -> dict[str, Any]:
         return self.partitioning.get_partitions() if self.partitioning is not None else {}
@@ -108,58 +109,45 @@ class PostgresqlTableOptions(TableOptions):
         return dataclasses.replace(self, partitioning=self.partitioning.with_partitions(partitions))
 
     @staticmethod
-    def get_storage_parameter_value_sql(value: bool | int | float | str) -> str:
-        """Returns a storage parameter's value as written in ``WITH (...)``/``SET (...)``.
-
-        Args:
-            value: The value.
-
-        Returns:
-            The SQL.
-        """
-        if isinstance(value, bool):
-            return "true" if value else "false"
-        if isinstance(value, str):
-            return "'" + value.replace("'", "''") + "'"
-        return repr(value)
-
-    def get_storage_parameters_sql(self, storage_parameters: Mapping[str, Any]) -> str:
+    def get_storage_parameters_sql(storage_parameters: Mapping[str, Any], editor: BaseSchemaEditor) -> str:
         """Returns storage parameters as the list inside ``WITH (...)``/``SET (...)``.
 
         Args:
             storage_parameters: The parameters.
+            editor: The schema editor whose dialect renders the values.
 
         Returns:
             The comma-separated ``name = value`` list.
         """
         return ", ".join(
-            f"{name} = {self.get_storage_parameter_value_sql(value)}" for name, value in storage_parameters.items()
+            f"{name} = {editor.client.dialect.literals.get_literal_sql(value)}"
+            for name, value in storage_parameters.items()
         )
 
     def get_create_prefix_sql(self) -> str:
         return "UNLOGGED " if self.unlogged else ""
 
-    def get_create_suffix_sql(self, model: type[Model], editor: BaseSchemaEditor) -> str:
+    def get_create_suffix_sql(self, binding: ModelBinding, editor: BaseSchemaEditor) -> str:
         quote = editor.quote
         if self.partitioning is not None:
             # A partitioned table holds no rows - its storage parameters go to its partitions.
-            sql = f" {self.partitioning.get_partition_by_sql(model, quote)}"
+            sql = f" {self.partitioning.get_partition_by_sql(binding, quote)}"
             return sql + (f" TABLESPACE {quote(self.tablespace)}" if self.tablespace else "")
-        return self.get_storage_sql(quote)
+        return self.get_storage_sql(editor)
 
-    def get_storage_sql(self, quote: Callable[[str], str]) -> str:
+    def get_storage_sql(self, editor: BaseSchemaEditor) -> str:
         """The storage parameters and tablespace of a table holding rows - a plain table, or each
         partition of a partitioned one.
 
         Args:
-            quote: Quotes an identifier.
+            editor: The schema editor whose dialect renders literals and identifiers.
 
         Returns:
             ``WITH (...)`` and ``TABLESPACE ...`` with a leading space, or an empty string.
         """
         sql = ""
         if self.storage_parameters:
-            sql += f" WITH ({self.get_storage_parameters_sql(self.storage_parameters)})"
+            sql += f" WITH ({self.get_storage_parameters_sql(self.storage_parameters, editor)})"
         if self.tablespace:
-            sql += f" TABLESPACE {quote(self.tablespace)}"
+            sql += f" TABLESPACE {editor.quote(self.tablespace)}"
         return sql

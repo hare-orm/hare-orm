@@ -30,10 +30,14 @@ class MigrationsConfig(ConfigSection):
     safety: MigrationSafetyConfig | None = None
 
     def __post_init__(self) -> None:
-        lock_timeout: Any = self.lock_timeout
+        MigrationsConfig.check_lock_timeout(self.lock_timeout)
+
+    @staticmethod
+    def check_lock_timeout(lock_timeout: Any) -> None:
+        """Check the lock timeout accepted by migration configuration and execution."""
         if lock_timeout is None:
             return
-        if isinstance(lock_timeout, bool) or not isinstance(lock_timeout, int | float):
+        if isinstance(lock_timeout, bool) or not isinstance(lock_timeout, (int, float)):
             raise ConfigurationError(
                 f'Config "migrations.lock_timeout" must be a number of seconds, got {lock_timeout!r}'
             )

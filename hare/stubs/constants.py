@@ -11,9 +11,5 @@ FILTERS_SUFFIX = "Filters"
 WRITES_SUFFIX = "Writes"
 UPDATES_SUFFIX = "Updates"
 QUERYSET_SUFFIX = "QuerySet"
-#: The model instance attribute holding its key value.
-PRIMARY_KEY_ATTRIBUTE_NAME = "pk"
-#: What separates the parts of a filter key.
-LOOKUP_SEPARATOR = "__"
 #: The first line of every stub ``hare stubs`` writes.
 STUB_HEADER = "# Written by `hare stubs` - run it again after changing the models."

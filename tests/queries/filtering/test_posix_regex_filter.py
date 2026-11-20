@@ -1,6 +1,4 @@
-import os
 import re
-import uuid
 from decimal import Decimal
 
 import pytest
@@ -248,8 +246,7 @@ async def test_case_insensitive_regex_uses_simple_case_variants(db):
 async def test_regex_reads_a_number_as_postgres_writes_it():
     """A float/decimal column's text for a regex is Postgres's own, as for ``__contains`` -
     SQLite would write ``2.0`` for a float Postgres writes as ``2``."""
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:").replace("\\{", "{").replace("\\}", "}")
-    db_url = db_url.format(uuid.uuid4().hex) if "{}" in db_url else db_url
+    db_url = DatabaseUnderTest.get_fresh_url()
     if DatabaseUnderTest.is_file_database(db_url):
         db_url += ("&" if "?" in db_url else "?") + "install_regexp_functions=True"
     async with hare_test_context(["tests.shared_models.typed_row_models"], db_url=db_url) as context:

@@ -109,11 +109,15 @@ async def test_an_expression_value_checked_after_the_write(db):
 @pytest.mark.parametrize("field_names", [("id",), ("id", "intnum"), ()])
 async def test_the_same_update_again_returns_the_new_rows(db, field_names):
     await create_int_rows()
-    for row_id in (1, 2, 1):
+    for row_id, written_value in ((1, 11), (2, 21), (1, 12)):
         rows = await IntFields.objects.filter(id=row_id).update(intnum=F("intnum") + 1).returning(*field_names)
         assert len(rows) == 1
         returned_id = rows[0].id if not field_names else rows[0]["id"]
         assert returned_id == row_id
+        if not field_names:
+            assert rows[0].intnum == written_value
+        elif "intnum" in field_names:
+            assert rows[0]["intnum"] == written_value
 
 
 @pytest.mark.asyncio
@@ -169,7 +173,7 @@ async def test_a_hard_delete_with_a_cascade_in_python(db):
     [("missing",), ("tournament__name",), ("events",), ("id", "id"), (5,)],
     ids=["unknown", "a path", "a reverse relation", "twice", "not a name"],
 )
-def test_a_wrong_field_is_refused(field_names):
+def test_a_wrong_field_is_refused(db, field_names):
     with pytest.raises(FieldError):
         Tournament.objects.filter(id=1).update(name="x").returning(*field_names)
     with pytest.raises(FieldError):

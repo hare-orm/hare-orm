@@ -5,12 +5,6 @@ from hare.migrations.operations import CreateModel
 from hare.migrations.state.state import State
 
 
-@pytest.fixture(scope="session", autouse=True)
-def initialize_tests():
-    # TODO merge these tests in main tests directory
-    return None
-
-
 @pytest.fixture
 def empty_state() -> State:
     return State()

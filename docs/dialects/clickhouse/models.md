@@ -34,6 +34,45 @@ class PageView(Model):
         ]
 ```
 
+## <a id="engine-arguments"></a>Engine arguments
+
+Use a bare name for an engine without arguments. With arguments, declare their meaning explicitly:
+
+```python
+from hare.dialects.clickhouse.clickhouse_engine import ClickhouseEngine
+from hare.query.expressions import F
+
+engine = ClickhouseEngine("ReplacingMergeTree", F("version"))
+replicated_engine = ClickhouseEngine(
+    "ReplicatedReplacingMergeTree",
+    F("version"),
+    replica_path="/tables/{uuid}/{shard}",
+    replica_name="{replica}",
+)
+sum_engine = ClickhouseEngine("SummingMergeTree", (F("amount"), F("quantity")))
+```
+
+Pass the declaration as `ClickhouseTableOptions(engine=engine)` or a materialized view's `engine`.
+`F` and other expressions bind to the model's actual column names and follow field renames. A Python
+tuple groups arguments into a SQL tuple. Strings are literals: `ClickhouseEngine("GraphiteMergeTree",
+"metrics_config")` names a configuration, not a column. Bare engine strings cannot contain SQL arguments.
+
+`replica_path` and `replica_name` are supplied together for Replicated/Shared engines. Omit both to use
+server defaults. Shadow creation isolates explicit paths. An implicit server path stays implicit and
+must contain `{uuid}` or `{database}` to identify the shadow. Rebuilding a table beside itself requires
+`{uuid}` in its explicit path or the actual server default.
+
+`RawSQLTerm` arguments remain unchanged. Declare their field dependencies with `read_fields=("field",)`;
+renaming that field updates the dependency, but raw SQL must be edited separately. `sql=RawSQLTerm(...)`
+preserves a complete engine clause, with `name` and `read_fields` describing it explicitly. A replicated
+opaque clause cannot be safely rebuilt or copied into a shadow database; use structured arguments.
+Catalog inspection reconstructs recognized engine arguments and preserves unsupported clauses as raw SQL.
+
+For a standalone `Distributed` engine, shadow creation also redirects its literal database argument
+to that database's shadow. The target database must be part of the schema state. A canonical
+`RawSQLTerm("currentDatabase()")` follows the shadow connection without rewriting. An opaque engine
+or an external target database is refused because its routing cannot be isolated safely.
+
 ## <a id="keys"></a>Keys
 
 A key the database generates — `IntField(primary_key=True)`, `BigIntField(primary_key=True)` — is taken
@@ -93,14 +132,19 @@ What follows from it:
 
 `ClickhouseTableOptions` in `Meta.table_options`:
 
+Collections such as `order_by`, `settings`, column options and `projections` accept lists as well as
+tuples; the declaration snapshots their contents. Projection declarations need the binding, SQL,
+column dependency and migration snapshot methods of `ClickhouseProjection`, without requiring
+inheritance from that class. The snapshot must be serializable as a migration declaration.
+
 | Option | Meaning |
 |---|---|
-| `engine` | The table engine with its arguments — `"MergeTree"`, `"ReplacingMergeTree(version)"`. Default `"MergeTree"`. The options of the `MergeTree` family below are refused with another engine. |
+| `engine` | A bare engine name or a `ClickhouseEngine` declaration with arguments. Default `"MergeTree"`. The options of the `MergeTree` family below are refused with another engine. |
 | `order_by` | What the rows are sorted by — field names and [expressions](#expressions), the primary key first; a foreign key or one-to-one relation by its name sorts by its key columns (`"team"` is `team_id`). Empty: the primary key, or `tuple()` for a model without one. A nullable field in it or in `partition_by` needs `settings=(("allow_nullable_key", 1),)` — else `ConfigurationError`. |
 | `sample_by` | The expression [`sample()`](query-modifiers.md#sample) reads a share of — one of `order_by`. The table's `PRIMARY KEY` then runs from the model's key through it. |
 | `partition_by` | The expression the rows are partitioned by — `Trunc("viewed_at", "month")`. |
 | `ttl` | The table's `TTL` — see [`ttl`](#ttl) |
-| `settings` | The table's `SETTINGS`, as `(name, value)` pairs — a value a string or an integer. |
+| `settings` | The table's `SETTINGS`, as `(name, value)` pairs — a string, integer or boolean value. Booleans are written as `1`/`0`. |
 | `column_codecs` | The compression of columns — `(field name, codecs)` pairs: `("payload", "ZSTD(3)")`, `("created", "Delta, ZSTD")`. |
 | `column_ttls` | How long columns keep their values — `(field name, expression)` pairs, the moment a value is reset to its default. Not of a key column. |
 | `projections` | The table's projections — see [Schema objects](schema-objects.md#projections). |
@@ -131,9 +175,10 @@ A model without these options is a `MergeTree` sorted by its primary key. The pr
 A migration changes what the server changes in place — `ttl`, `settings` (but `index_granularity` and
 `index_granularity_bytes`, set when the table is created), `column_codecs`, `column_ttls`, `projections`,
 `lightweight_updates` — with `ALTER TABLE`. Any other change (the engine, `order_by`, `sample_by`,
-`partition_by`, the distribution) remakes the table: a new table is created, the rows copied, the old one
-dropped and the new renamed, the views and dictionaries over it dropped and created again around it, its
-columns keeping their codecs and times to live. On a cluster a table holding rows of its own on each
+`partition_by`, the distribution) remakes the table: a staging table is created, rows are copied,
+dependent objects are dropped, and `EXCHANGE TABLES` exchanges the table names. The previous table is
+released only after the views, dictionaries and other declared objects have been recreated. Columns
+keep their codecs and times to live. On a cluster a table holding rows of its own on each
 server is refused there — only the rows of one server would be copied. A column of the table's keys (its
 primary key, `order_by`, `sample_by`, `partition_by`, sharding key — a field's name or an expression of
 hare), one a projection reads (its queryset's columns, a raw projection's `read_columns`), one a
@@ -145,6 +190,28 @@ column of its own keys is remade likewise when the key takes a new type; a colum
 gets a new type or nullability with the index dropped for the change and created again — the one index over
 every key column of a relation to a composite key too. `hare drift` compares the options with the server's, as
 the server formats them.
+
+Rebuilding a standalone `Distributed` table replaces only its routing definition; it does not copy
+remote rows back into the destination. Its remote tables must be migrated separately. Replacing a
+storage engine with a standalone router requires an explicit data migration. Before a rebuild reads
+or replaces a routing table (including a `distributed_over` companion), `SYSTEM FLUSH DISTRIBUTED`
+drains pending inserts on every server of the connection cluster, including replicated databases.
+A failed flush stops the plan before DDL. Keep writers stopped throughout the rebuild.
+
+Rebuilding requires an `Atomic`, `Replicated` or `Shared` database. The engine and cluster topology
+are checked before DDL. A `distributed_over` change reads the old logical table and replaces its old
+storage before renaming it to the new storage name and creating the new Distributed companion.
+An unrelated existing destination is rejected before DDL. Preparation failure or cancellation removes the
+acquired staging table
+while preserving the original and its dependent objects. After dependency removal begins, an error
+can leave those objects partially recreated. A failed or unacknowledged exchange retains both table
+names; a failure during finalization also retains the previous table under the staging name. Inspect
+the catalog and migration result before recovery. The plan does not blindly exchange back or delete
+either table on an uncertain result.
+
+Quiesce writes while copying and replacing a table. A single name exchange is atomic on its server;
+the copy, dependent objects, and execution across cluster hosts are not one transaction. Preview
+shows failure-only cleanup as comments and does not execute catalog checks.
 
 When a migration changes fields too, a changed `ttl`, column codec, column TTL or projection —
 expressions over columns — is removed before the fields change and set after them: a field made NOT NULL

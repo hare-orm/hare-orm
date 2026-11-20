@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import enum
 import zlib
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from operator import itemgetter
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.caching.cache import Cache
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.clickhouse.types.constants import (
     CLICKHOUSE_ENUM8_RANGE,
     CLICKHOUSE_ENUM16_RANGE,
@@ -25,10 +27,11 @@ if TYPE_CHECKING:
 
 class ClickhouseEnumTypes:
     """How ClickHouse stores enums - ``Enum8``/``Enum16`` of labels and their numbers. ClickHouse
-    keeps the numbers and reads the labels off the type, so a label keeps its number for good: an
-    ``IntEnumField``'s labels are its members' names, numbered by their values; a ``CharEnumField``'s
-    are its stored values, numbered from the label itself - a member added, removed or moved changes
-    no other label's number."""
+    keeps the numbers and reads the labels from the type. An ``IntEnumField``'s labels are its
+    members' names, numbered by their values. A ``CharEnumField``'s labels are its stored values,
+    numbered from checksums with collision resolution over sorted labels. Declaration order does
+    not affect those numbers; adding or removing a colliding label can change another label's number.
+    """
 
     #: (enum class,) -> the stored values by the labels the drivers read otherwise.
     DRIVER_LABELS: ClassVar[Cache[dict[str, str]]] = Cache(CLICKHOUSE_ENUM_DRIVER_LABELS_CACHE_SIZE)
@@ -38,7 +41,8 @@ class ClickhouseEnumTypes:
     @staticmethod
     def get_label_numbers(labels: list[str]) -> dict[str, int]:
         """The number of each label of a ``CharEnumField`` - from a checksum of the label, the next free
-        one after a taken one, the labels taken in their order.
+        one after a taken one, processing labels in sorted order. The current label set determines
+        collision resolution, so a membership change can renumber another label.
 
         Args:
             labels: The labels.
@@ -71,10 +75,14 @@ class ClickhouseEnumTypes:
         from hare.dialects.clickhouse.constants import CLICKHOUSE_DIALECT
 
         lowest, highest = CLICKHOUSE_ENUM8_RANGE
-        type_name = "Enum8" if all(lowest <= number <= highest for number in numbers_by_label.values()) else "Enum16"
+        type_name = (
+            ClickhouseTypeName.ENUM8
+            if all(lowest <= number <= highest for number in numbers_by_label.values())
+            else ClickhouseTypeName.ENUM16
+        )
         members_sql = ", ".join(
             f"{CLICKHOUSE_DIALECT.literals.get_literal_sql(label)} = {number}"
-            for label, number in sorted(numbers_by_label.items(), key=lambda item: item[1])
+            for label, number in sorted(numbers_by_label.items(), key=itemgetter(1))
         )
         return f"{type_name}({members_sql})"
 
@@ -109,7 +117,7 @@ class ClickhouseEnumTypes:
         Returns:
             The number, None for None.
         """
-        enum_field = cast("CharEnumFieldInstance", field)
+        enum_field: CharEnumFieldInstance = field  # type: ignore[assignment]
         stored_value = enum_field.to_db_value(value, instance)
         if stored_value is None:
             return None
@@ -125,8 +133,17 @@ class ClickhouseEnumTypes:
         Returns:
             The type.
         """
-        enum_field = cast("CharEnumFieldInstance", field)
+        enum_field: CharEnumFieldInstance = field  # type: ignore[assignment]
         return cls.get_enum_type(cls.get_char_enum_numbers(enum_field.enum_type))
+
+    @staticmethod
+    def get_char_enum_lookup_value(field: Field[Any], value: Any, instance: type[Model] | Model | None) -> Any:
+        """Compare the column's text label, retaining the field's lookup conversion hook.
+
+        Binary inserts use numeric enum codes; read expressions compare the label produced
+        by ``get_char_enum_text`` instead.
+        """
+        return field.to_lookup_value(value, instance)
 
     @classmethod
     def get_int_enum_column_type(cls, field: Field[Any]) -> str:
@@ -138,7 +155,7 @@ class ClickhouseEnumTypes:
         Returns:
             The type.
         """
-        enum_field = cast("IntEnumFieldInstance", field)
+        enum_field: IntEnumFieldInstance = field  # type: ignore[assignment]
         return cls.get_enum_type({member.name: int(member.value) for member in enum_field.enum_type})
 
     @staticmethod
@@ -169,9 +186,7 @@ class ClickhouseEnumTypes:
             The member, None for None.
         """
         if isinstance(value, str):
-            value = ClickhouseEnumTypes.get_driver_labels(cast("CharEnumFieldInstance", field).enum_type).get(
-                value, value
-            )
+            value = ClickhouseEnumTypes.get_driver_labels(field.enum_type).get(value, value)  # type: ignore[arg-type]
         return field.from_db_value(value)
 
     @classmethod
@@ -209,7 +224,7 @@ class ClickhouseEnumTypes:
         Returns:
             The label, None for None.
         """
-        enum_field = cast("IntEnumFieldInstance", field)
+        enum_field: IntEnumFieldInstance = field  # type: ignore[assignment]
         number = enum_field.to_db_value(value, instance)
         return None if number is None else enum_field.enum_type(number).name
 
@@ -224,7 +239,7 @@ class ClickhouseEnumTypes:
         Returns:
             The member, None for None.
         """
-        enum_field = cast("IntEnumFieldInstance", field)
+        enum_field: IntEnumFieldInstance = field  # type: ignore[assignment]
         if value is None:
             return None
         if isinstance(value, str):

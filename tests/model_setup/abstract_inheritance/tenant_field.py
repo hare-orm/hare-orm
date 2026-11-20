@@ -1,7 +1,7 @@
 """Companion models for tests/model_setup/abstract_inheritance/test_abstract_model_inheritance.py.
 
 Meta.tenant_field declared on an abstract base, inherited by two different concrete siblings -
-each concrete subclass must get its own correctly independent MetaInfo.tenant_field, and
+each concrete subclass must get its own correctly independent ModelBinding.tenant_field, and
 Tenancy.scope() must correctly scope BOTH siblings' default-manager queries simultaneously
 without cross-model interference."""
 

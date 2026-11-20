@@ -5,12 +5,14 @@ import warnings
 import pytest
 
 from hare import fields
-from hare.dialects.base.schema.tables.table_comments import TableComments
+from hare.declarations.declaration_value_serializer import DeclarationValueSerializer
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.exceptions import ConfigurationError
 from hare.fields.constants import DB_DEFAULT_NOT_SET
 from hare.time import UTC
 from hare.warnings import RedundantDbDefaultWarning
+from tests.utils.model_bindings import ModelBindings
+from tests.utils.schema_editor import TestSchemaEditor
 
 pytestmark = pytest.mark.database_independent
 
@@ -93,17 +95,12 @@ def test_db_default_and_default_coexist():
         # `default` there is silently thrown away, just like the db_default case, but this used to
         # have no warning at all.
         pytest.param({"primary_key": True, "default": 999}, "generated field", id="default_on_generated_field_warns"),
+        pytest.param({"default": 0, "db_default": 2}, None, id="falsy-default-and-db-default"),
     ],
 )
 def test_a_default_that_is_thrown_away_warns(options, message):
     with pytest.warns(RedundantDbDefaultWarning, match=message):
         fields.IntField(**options)
-
-
-def test_db_default_and_default_coexist_warns_even_with_falsy_default():
-    """default=0 is a real, explicitly-set default - not to be confused with "not set"."""
-    with pytest.warns(RedundantDbDefaultWarning):
-        fields.IntField(default=0, db_default=2)
 
 
 @pytest.mark.parametrize(
@@ -112,18 +109,13 @@ def test_db_default_and_default_coexist_warns_even_with_falsy_default():
         pytest.param({"db_default": 2}, id="db_default_alone_does_not_warn"),
         pytest.param({"default": 1}, id="default_alone_does_not_warn"),
         pytest.param({"primary_key": True}, id="generated_alone_does_not_warn"),
+        pytest.param({"primary_key": True, "generated": False, "default": 999}, id="non-generated-key-default"),
     ],
 )
 def test_a_default_alone_does_not_warn(options):
     with warnings.catch_warnings():
         warnings.simplefilter("error", RedundantDbDefaultWarning)
         fields.IntField(**options)
-
-
-def test_default_on_explicitly_non_generated_field_does_not_warn():
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", RedundantDbDefaultWarning)
-        fields.IntField(primary_key=True, generated=False, default=999)
 
 
 # ============================================================================
@@ -269,16 +261,10 @@ def test_schema_db_default(make_field, expected):
     assert sql == expected
 
 
-def test_schema_db_default_bytes_does_not_crash():
-    """encoders (hare/converters.py) has no entry for `bytes` - both the Postgres and SQLite
-    _escape_default_value() implementations used to call encoders.get(type(default))(default)
-    with no fallback for a missing encoder, so encoders.get(bytes) -> None -> None(default)
-    crashed with a bare TypeError, aborting schema generation entirely instead of just that one
-    field. Not asserting on the exact rendered SQL (repr() isn't a real bytea/blob literal) -
-    only that generating a default for a BinaryField no longer raises."""
-    f = fields.BinaryField(db_default=b"\x00\x01")
-    _get_sqlite_default_sql(f)
-    _get_postgres_default_sql(f)
+def test_schema_db_default_bytes_have_binary_literals():
+    field = fields.BinaryField(db_default=b"\x00\x01")
+    assert _get_sqlite_default_sql(field) == " DEFAULT X'0001'"
+    assert _get_postgres_default_sql(field) == r" DEFAULT '\x0001'::bytea"
 
 
 def test_schema_db_default_overrides_default():
@@ -356,23 +342,13 @@ def _make_model(model_name, table, **model_fields):
     attrs = dict(model_fields)
     meta = type("Meta", (), {"app": "models", "table": table})
     attrs["Meta"] = meta
-    return type(model_name, (Model,), attrs)
+    model = type(model_name, (Model,), attrs)
+    return ModelBindings.prepare(model).get_binding(model)
 
 
 def _make_test_editor():
     """Create a BaseSchemaEditor subclass with a FakeClient for testing."""
-    from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
     from tests.utils.fake_client import FakeClient
-
-    class TestSchemaEditorTableComments(TableComments):
-        def get_table_comment_sql(self, table, comment):
-            return ""
-
-        def get_column_comment_sql(self, table, column, comment):
-            return ""
-
-    class TestSchemaEditor(BaseSchemaEditor):
-        table_comments_class = TestSchemaEditorTableComments
 
     client = FakeClient("sql")
     editor = TestSchemaEditor(client)
@@ -396,7 +372,11 @@ async def test_alter_field_sql_set_default():
     )
 
     editor, client = _make_test_editor()
-    await editor.alter_field(OldModel, NewModel, "score")
+    await editor.alter_field(
+        OldModel,
+        NewModel,
+        "score",
+    )
 
     assert len(client.executed) == 1
     sql = client.executed[0]
@@ -421,7 +401,11 @@ async def test_alter_field_sql_drop_default():
     )
 
     editor, client = _make_test_editor()
-    await editor.alter_field(OldModel, NewModel, "score")
+    await editor.alter_field(
+        OldModel,
+        NewModel,
+        "score",
+    )
 
     assert len(client.executed) == 1
     sql = client.executed[0]
@@ -445,7 +429,11 @@ async def test_alter_field_sql_change_default():
     )
 
     editor, client = _make_test_editor()
-    await editor.alter_field(OldModel, NewModel, "score")
+    await editor.alter_field(
+        OldModel,
+        NewModel,
+        "score",
+    )
 
     assert len(client.executed) == 1
     sql = client.executed[0]
@@ -506,8 +494,8 @@ def test_sql_default_construction_and_get_sql():
     assert sd.get_sql(DialectRegistry.get_dialect("postgresql")) == "CURRENT_TIMESTAMP"
     assert SqlDefault("40 + 2").get_sql(DialectRegistry.get_dialect("sqlite")) == "(40 + 2)"
     assert SqlDefault("(1) + (2)").get_sql(DialectRegistry.get_dialect("sqlite")) == "((1) + (2))"
-    assert SqlDefault("(datetime('now'))").get_sql(DialectRegistry.get_dialect("sqlite")) == "(datetime('now'))"
-    assert SqlDefault("('(' || x)").get_sql(DialectRegistry.get_dialect("sqlite")) == "('(' || x)"
+    assert SqlDefault("(datetime('now'))").get_sql(DialectRegistry.get_dialect("sqlite")) == "((datetime('now')))"
+    assert SqlDefault("('(' || x)").get_sql(DialectRegistry.get_dialect("sqlite")) == "(('(' || x))"
     assert SqlDefault("-1.5").get_sql(DialectRegistry.get_dialect("sqlite")) == "-1.5"
     assert SqlDefault("'a''b'").get_sql(DialectRegistry.get_dialect("sqlite")) == "'a''b'"
 
@@ -658,7 +646,11 @@ async def test_alter_field_set_default_with_sql_default():
     )
 
     editor, client = _make_test_editor()
-    await editor.alter_field(OldModel, NewModel, "created")
+    await editor.alter_field(
+        OldModel,
+        NewModel,
+        "created",
+    )
 
     assert len(client.executed) == 1
     sql = client.executed[0]
@@ -684,7 +676,11 @@ async def test_alter_field_change_from_literal_to_sql_default():
     )
 
     editor, client = _make_test_editor()
-    await editor.alter_field(OldModel, NewModel, "score")
+    await editor.alter_field(
+        OldModel,
+        NewModel,
+        "score",
+    )
 
     assert len(client.executed) == 1
     sql = client.executed[0]
@@ -708,32 +704,32 @@ def test_deconstruct_with_now():
 
 
 def test_render_value_with_now():
-    """MigrationWriter.render_value() preserves Now() in migration files."""
+    """DeclarationValueSerializer.render_value() preserves Now() in migration files."""
+    from hare.declarations.import_manager import ImportManager
     from hare.fields.db_defaults import Now
-    from hare.migrations.writer import ImportManager, MigrationWriter
 
     imports = ImportManager()
     n = Now()
-    result = MigrationWriter.render_value(n, imports)
+    result = DeclarationValueSerializer.render_value(n, imports)
     assert result == "Now()"
     assert "Now" in str(imports)
 
 
 def test_render_value_with_sql_default():
-    """MigrationWriter.render_value() preserves SqlDefault in migration files."""
+    """DeclarationValueSerializer.render_value() preserves SqlDefault in migration files."""
+    from hare.declarations.import_manager import ImportManager
     from hare.fields.db_defaults import SqlDefault
-    from hare.migrations.writer import ImportManager, MigrationWriter
 
     imports = ImportManager()
     sd = SqlDefault("gen_random_uuid()")
-    result = MigrationWriter.render_value(sd, imports)
+    result = DeclarationValueSerializer.render_value(sd, imports)
     assert result == "SqlDefault('gen_random_uuid()')"
     assert "SqlDefault" in str(imports)
 
 
 def test_render_value_keeps_the_class_of_a_default_of_its_own():
+    from hare.declarations.import_manager import ImportManager
     from hare.fields.db_defaults import SqlDefault
-    from hare.migrations.writer import ImportManager, MigrationWriter
 
     class SevenDefault(SqlDefault):
         """Written by a dialect's renderer - its own SQL is empty."""
@@ -744,48 +740,48 @@ def test_render_value_keeps_the_class_of_a_default_of_its_own():
     SevenDefault.__module__ = "tests.fields.seven_defaults"
     SevenDefault.__qualname__ = "SevenDefault"
     imports = ImportManager()
-    assert MigrationWriter.render_value(SevenDefault(), imports) == "SevenDefault()"
+    assert DeclarationValueSerializer.render_value(SevenDefault(), imports) == "SevenDefault()"
     assert "SevenDefault" in imports.imports["tests.fields.seven_defaults"]
     # A class the migration can't import is written by its SQL.
     SevenDefault.__qualname__ = "test_render.<locals>.SevenDefault"
     imports = ImportManager()
-    assert MigrationWriter.render_value(SevenDefault(), imports) == "SqlDefault('')"
+    assert DeclarationValueSerializer.render_value(SevenDefault(), imports) == "SqlDefault('')"
 
 
 def test_render_value_random_hex():
-    """MigrationWriter.render_value() serializes RandomHex as RandomHex(), not as SqlDefault(...)."""
+    """DeclarationValueSerializer.render_value() serializes RandomHex as RandomHex(), not as SqlDefault(...)."""
+    from hare.declarations.import_manager import ImportManager
     from hare.fields.db_defaults import RandomHex
-    from hare.migrations.writer import ImportManager, MigrationWriter
 
     imports = ImportManager()
     rh = RandomHex()
-    result = MigrationWriter.render_value(rh, imports)
+    result = DeclarationValueSerializer.render_value(rh, imports)
     assert result == "RandomHex()"
     assert "hare.fields.db_defaults" in imports.imports
     assert "RandomHex" in imports.imports["hare.fields.db_defaults"]
 
 
 def test_render_value_sql_default_still_works():
-    """MigrationWriter.render_value() still serializes plain SqlDefault correctly (regression check)."""
+    """DeclarationValueSerializer.render_value() still serializes plain SqlDefault correctly (regression check)."""
+    from hare.declarations.import_manager import ImportManager
     from hare.fields.db_defaults import SqlDefault
-    from hare.migrations.writer import ImportManager, MigrationWriter
 
     imports = ImportManager()
     sd = SqlDefault("custom")
-    result = MigrationWriter.render_value(sd, imports)
+    result = DeclarationValueSerializer.render_value(sd, imports)
     assert result == "SqlDefault('custom')"
     assert "hare.fields.db_defaults" in imports.imports
     assert "SqlDefault" in imports.imports["hare.fields.db_defaults"]
 
 
 def test_render_value_now_still_works():
-    """MigrationWriter.render_value() still serializes Now correctly (regression check)."""
+    """DeclarationValueSerializer.render_value() still serializes Now correctly (regression check)."""
+    from hare.declarations.import_manager import ImportManager
     from hare.fields.db_defaults import Now
-    from hare.migrations.writer import ImportManager, MigrationWriter
 
     imports = ImportManager()
     n = Now()
-    result = MigrationWriter.render_value(n, imports)
+    result = DeclarationValueSerializer.render_value(n, imports)
     assert result == "Now()"
     assert "hare.fields.db_defaults" in imports.imports
     assert "Now" in imports.imports["hare.fields.db_defaults"]

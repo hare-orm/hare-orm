@@ -4,7 +4,6 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from hare.ddl.declared_names import DeclaredNames
-from hare.ddl.schema_objects.enum_type import EnumType
 from hare.migrations.operations.dependencies.operation_dependency import OperationDependency
 from hare.migrations.operations.enum_types.enum_type_operation import EnumTypeOperation
 from hare.migrations.operations.enums import DependencyType
@@ -37,28 +36,42 @@ class AlterEnumType(EnumTypeOperation):
         self.old_labels = self.get_checked_labels(old_labels, "AlterEnumType.old_labels")
         self.new_labels = self.get_checked_labels(new_labels, "AlterEnumType.new_labels")
 
-    def get_provided_dependencies(self, app_label: str) -> list[OperationDependency]:
+    def get_provided_dependencies(self, app_label: str, state: State) -> list[OperationDependency]:
         return [OperationDependency.of_enum_type(self.schema, self.name, DependencyType.CHANGED)]
+
+    def get_required_dependencies(self, app_label: str, state: State) -> list[OperationDependency]:
+        return [
+            *super().get_required_dependencies(app_label, state),
+            OperationDependency.of_enum_type(self.schema, self.name, DependencyType.CREATED),
+        ]
 
     def describe(self) -> str:
         return f"Alter ENUM type {self.get_type_label()}"
 
     def state_forward(self, app_label: str, state: State) -> None:
-        enum_type = EnumType(self.name, self.new_labels, self.schema)
-        state.enum_types[enum_type.key] = enum_type
+        self._record_type(app_label, state, self.new_labels)
 
     async def database_forward(
         self, app_label: str, old_state: State, new_state: State, state_editor: BaseSchemaEditor | None = None
     ) -> None:
-        if self._runs_enum_types(state_editor, f"altering the ENUM type {self.name}"):
-            await state_editor.enum_types.alter_enum_type(  # type: ignore[union-attr]
-                EnumType(self.name, self.old_labels, self.schema), EnumType(self.name, self.new_labels, self.schema)
-            )
+        await self._alter_type(app_label, old_state, state_editor, self.old_labels, self.new_labels)
 
     async def database_backward(
         self, app_label: str, old_state: State, new_state: State, state_editor: BaseSchemaEditor | None = None
     ) -> None:
-        if self._runs_enum_types(state_editor, f"altering the ENUM type {self.name}"):
-            await state_editor.enum_types.alter_enum_type(  # type: ignore[union-attr]
-                EnumType(self.name, self.new_labels, self.schema), EnumType(self.name, self.old_labels, self.schema)
+        await self._alter_type(app_label, old_state, state_editor, self.new_labels, self.old_labels)
+
+    async def _alter_type(
+        self,
+        app_label: str,
+        from_state: State,
+        editor: BaseSchemaEditor | None,
+        from_labels: tuple[str, ...],
+        to_labels: tuple[str, ...],
+    ) -> None:
+        if self._runs_enum_types(editor, f"altering the ENUM type {self.name}"):
+            await editor.enum_types.alter_enum_type(
+                self._make_type(from_labels),
+                self._make_type(to_labels),
+                shared_with=self.get_shared_types(app_label, from_state),
             )

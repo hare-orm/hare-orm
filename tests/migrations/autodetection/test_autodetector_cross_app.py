@@ -8,15 +8,16 @@ from typing import Any
 
 import pytest
 
-from hare import Hare, fields
+from hare import fields
 from hare.core.connections.connections import Connections
 from hare.fields.field import Field
-from hare.migrations.api import migrate
+from hare.migrations.api import MigrationSession
 from hare.migrations.autodetection.migration_autodetector import MigrationAutodetector
 from hare.migrations.autodetection.rename_questions import RenameQuestions
 from hare.migrations.operations import AddField, AlterField, CreateModel, RenameModel
 from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
+from tests.utils.project_sources import ProjectSources
 
 pytestmark = pytest.mark.sqlite_only
 
@@ -28,12 +29,8 @@ def write_app_package(tmp_path: Path, app_label: str) -> str:
     for module_name in [name for name in sys.modules if name == app_label or name.startswith(f"{app_label}.")]:
         del sys.modules[module_name]
     importlib.invalidate_caches()
-    package_dir = tmp_path / app_label
-    migrations_dir = package_dir / "migrations"
-    migrations_dir.mkdir(parents=True, exist_ok=True)
-    (package_dir / "__init__.py").write_text("", encoding="ascii")
-    (package_dir / "models.py").write_text("", encoding="ascii")
-    (migrations_dir / "__init__.py").write_text("", encoding="ascii")
+    sources = ProjectSources(tmp_path)
+    sources.prepare_migrations(sources.write_package(app_label))
     return f"{app_label}.migrations"
 
 
@@ -199,14 +196,12 @@ async def test_cross_app_model_rename_migrates_from_scratch_and_leaves_no_furthe
     ).changes():
         writer.write()
 
-    try:
-        await migrate(config=build_config(tmp_path, cross_app_rename_project))
+    async with MigrationSession(build_config(tmp_path, cross_app_rename_project)) as session:
+        await session.migrate()
 
         assert {"person", "shop"} <= await get_table_names()
         assert "owner" not in await get_table_names()
         assert await build_autodetector(apps, cross_app_rename_project).changes() == []
-    finally:
-        await Hare.close_connections()
 
 
 @pytest.mark.database_independent
@@ -354,10 +349,8 @@ async def test_cross_app_fk_cycle_migrates_from_scratch_and_leaves_no_further_ch
     for writer in await build_autodetector(apps, cyclic_fk_migration_modules).changes():
         writer.write()
 
-    try:
-        await migrate(config=build_config(tmp_path, cyclic_fk_migration_modules))
+    async with MigrationSession(build_config(tmp_path, cyclic_fk_migration_modules)) as session:
+        await session.migrate()
 
         assert {"shop", "owner"} <= await get_table_names()
         assert await build_autodetector(apps, cyclic_fk_migration_modules).changes() == []
-    finally:
-        await Hare.close_connections()

@@ -77,7 +77,12 @@ class ParameterDescriber:
             parameter_type=parameter_type,
             annotation=field_info.annotation,
             description=field_info.description,
-            default=None if required else field_info.get_default(call_default_factory=True, validated_data={}),
+            default=(
+                None
+                if required or field_info.default_factory is not None
+                else field_info.get_default(call_default_factory=False)
+            ),
+            has_default_factory=field_info.default_factory is not None,
             required=required,
             takes_many_values=ValueAnnotation.takes_many_values(field_info.annotation, field_info.metadata),
             in_path=any(isinstance(item, InPath) for item in field_info.metadata),
@@ -176,8 +181,8 @@ class ParameterDescriber:
                 pairs.setdefault(parameter_bounds.upper_parameter, []).append(parameter_bounds.lower_parameter)
         return {parameter: (side, tuple(pairs.get(parameter, ()))) for parameter, side in sides.items()}
 
-    @classmethod
-    def is_nullable(cls, lookup_info: LookupInfo) -> bool:
+    @staticmethod
+    def is_nullable(lookup_info: LookupInfo) -> bool:
         """Whether the value a filter compares can be missing.
 
         Args:
@@ -195,8 +200,8 @@ class ParameterDescriber:
                 return True
         return False
 
-    @classmethod
-    def describe_relation(cls, lookup_info: LookupInfo) -> RelationDescription | None:
+    @staticmethod
+    def describe_relation(lookup_info: LookupInfo) -> RelationDescription | None:
         """The last relation a filter crosses.
 
         Args:
@@ -209,19 +214,19 @@ class ParameterDescriber:
             return None
         relation = lookup_info.relations[-1]
         related_model = relation.related_model  # type: ignore[attr-defined]
-        related_meta = related_model._meta
-        key_fields = related_meta.pk_fields if related_meta.has_composite_primary_key else (related_meta.pk,)
+        related_meta = relation.get_related_binding()  # type: ignore[attr-defined]
+        key_fields = related_meta.pk_fields
         compared = lookup_info.field if isinstance(lookup_info.field, tuple) else (lookup_info.field,)
         return RelationDescription(
             path=LOOKUP_SEPARATOR.join(item.model_field_name for item in lookup_info.relations),
             model=related_model,
-            key_fields=tuple(related_meta.primary_key_attribute_names),
+            key_fields=related_meta.primary_key_attribute_names,
             to_many=relation.relation_type in TO_MANY_RELATION_TYPES,
-            compares_key=related_meta.has_primary_key and tuple(compared) == tuple(key_fields),
+            compares_key=related_meta.has_primary_key and tuple(compared) == key_fields,
         )
 
-    @classmethod
-    def get_choices(cls, annotation: Any) -> tuple[ParameterChoice, ...] | None:
+    @staticmethod
+    def get_choices(annotation: Any) -> tuple[ParameterChoice, ...] | None:
         """The members of the enum a parameter takes - itself, or the item of its list.
 
         Args:

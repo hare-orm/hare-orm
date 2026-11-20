@@ -45,7 +45,7 @@ class GenericTarget:
     @staticmethod
     def get_key_description(generic_field: GenericForeignKeyFieldInstance[Any], branch_name: str) -> str:
         """How the key of a branch's target is written - its key fields joined with commas."""
-        key_fields = generic_field.model._meta.fields_map[branch_name].to_field_instances  # type: ignore[attr-defined]
+        key_fields = generic_field._binding.fields_map[branch_name].to_field_instances  # type: ignore[attr-defined]
         return VALUE_SEPARATOR.join(key_field.model_field_name for key_field in key_fields)
 
     @staticmethod
@@ -70,7 +70,7 @@ class GenericTarget:
                 f"expected <type>{GENERIC_TARGET_SEPARATOR}<key>, the type one of "
                 f"{', '.join(generic_field.branch_names)} - got {value!r}"
             )
-        key_fields = generic_field.model._meta.fields_map[branch_name].to_field_instances  # type: ignore[attr-defined]
+        key_fields = generic_field._binding.fields_map[branch_name].to_field_instances  # type: ignore[attr-defined]
         key_parts = [KeyColumns.unescape(part) for part in key_text.split(VALUE_SEPARATOR)]
         if len(key_parts) != len(key_fields):
             raise ValueError(

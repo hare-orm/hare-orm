@@ -14,9 +14,7 @@ ASYNCPG_TOO_MANY_ARGUMENTS_MESSAGE = "the number of query arguments cannot excee
 #: How long to wait for the connection pool to close gracefully before terminating it.
 POOL_CLOSE_TIMEOUT_SECONDS = 10
 
-#: Types AsyncpgClient._asyncpg_bind_value() can identify as never duck-type-matching
-#: hare.dialects.postgresql.fields.ranges.Range (none of them can carry a lower_inc attribute) via a single
-#: type() membership check, skipping that check's 1-4 hasattr() calls for the common case.
+#: Exact scalar types AsyncpgParameters can bind without checking for a range's attributes.
 FAST_SCALAR_BIND_TYPES = frozenset(
     {bytes, str, int, float, bool, type(None), decimal.Decimal, datetime.datetime, datetime.date, datetime.time}
 )
@@ -31,36 +29,30 @@ PLAIN_BIND_TYPE_TUPLE = tuple(PLAIN_BIND_TYPES)
 POSTGRES_EPOCH = datetime.datetime(2000, 1, 1)
 POSTGRES_TIMESTAMP_INFINITY = 2**63 - 1
 POSTGRES_TIMESTAMP_NEGATIVE_INFINITY = -(2**63)
-#: The same origin of ``timestamptz``, a UTC moment.
-POSTGRES_EPOCH_UTC = POSTGRES_EPOCH.replace(tzinfo=datetime.UTC)
-#: Origin and infinities of Postgres's binary ``date`` - days since 2000-01-01.
-POSTGRES_EPOCH_DATE_ORDINAL = POSTGRES_EPOCH.toordinal()
-POSTGRES_DATE_INFINITY = 2**31 - 1
-POSTGRES_DATE_NEGATIVE_INFINITY = -(2**31)
-#: The sizes of a binary ``date`` and ``timestamptz``.
-POSTGRES_DATE_SIZE = 4
-POSTGRES_TIMESTAMP_SIZE = 8
 
-#: A naive datetime before this year may be one ``datetime.astimezone()`` can't convert (Windows).
+#: Only dates before this year can approach the datetime range's lower boundary.
 EPOCH_YEAR = 1970
 
-#: AsyncpgTransactionClient.stream()'s default `Connection.cursor(..., prefetch=...)`
-#: batch size when QuerySet.stream()'s own chunk_size argument is left unset (0) - matches
+#: AsyncpgTransactionClient.stream()'s default `Cursor.fetch(batch_size)` batch size
+#: when QuerySet.stream()'s chunk_size argument is left unset (0) - matches
 #: iterator()'s own default chunk_size, so the two methods behave similarly out of the box.
 DEFAULT_STREAM_PREFETCH = 1000
 
 #: Connection parameters only asyncpg.create_pool() accepts - left out of the dedicated
 #: asyncpg.connect() connection listen() opens, which rejects them with a TypeError.
 ASYNCPG_POOL_ONLY_PARAMETERS = frozenset(
-    {"min_size", "max_size", "max_queries", "max_inactive_connection_lifetime", "setup", "init", "reset", "connect"}
+    {
+        "init_size",
+        "min_size",
+        "max_size",
+        "max_queries",
+        "max_inactive_connection_lifetime",
+        "setup",
+        "init",
+        "reset",
+        "connect",
+    }
 )
-
-#: Sanity ceilings for asyncpg's own numeric connection parameters.
-ASYNCPG_MAX_QUERIES_LIMIT = 1_000_000_000
-ASYNCPG_MAX_LIFETIME_SECONDS = 86400.0
-ASYNCPG_MAX_CONNECT_TIMEOUT_SECONDS = 86400.0
-ASYNCPG_MAX_CACHEABLE_STATEMENT_SIZE = 2**30
-
 
 #: The root certificate setting of a DB_URL - asyncpg reads it only from a DSN, as ``sslrootcert``.
 ASYNCPG_ROOT_CERTIFICATE_SETTING = "ssl_root_cert"
@@ -68,24 +60,13 @@ ASYNCPG_ROOT_CERTIFICATE_SETTING = "ssl_root_cert"
 ASYNCPG_ROOT_CERTIFICATE_DSN_PREFIX = "postgresql://?"
 ASYNCPG_ROOT_CERTIFICATE_DSN_PARAMETER = "sslrootcert"
 
-#: The settings asyncpg's pool takes that hare checks before passing them on.
+#: The settings asyncpg's pool takes whose URL text hare parses before passing them on.
 ASYNCPG_CONNECTION_OPTIONS = ConnectionOptions(
-    ConnectionOption("max_queries", ConnectionOptionType.WHOLE_NUMBER, minimum=1, maximum=ASYNCPG_MAX_QUERIES_LIMIT),
-    ConnectionOption(
-        "max_cacheable_statement_size",
-        ConnectionOptionType.WHOLE_NUMBER,
-        minimum=0,
-        maximum=ASYNCPG_MAX_CACHEABLE_STATEMENT_SIZE,
-    ),
-    ConnectionOption(
-        "max_inactive_connection_lifetime", ConnectionOptionType.SECONDS, maximum=ASYNCPG_MAX_LIFETIME_SECONDS
-    ),
-    ConnectionOption(
-        "max_cached_statement_lifetime", ConnectionOptionType.SECONDS, maximum=ASYNCPG_MAX_LIFETIME_SECONDS
-    ),
-    ConnectionOption(
-        "timeout", ConnectionOptionType.SECONDS, positive=True, maximum=ASYNCPG_MAX_CONNECT_TIMEOUT_SECONDS
-    ),
+    ConnectionOption("max_queries", ConnectionOptionType.WHOLE_NUMBER),
+    ConnectionOption("max_cacheable_statement_size", ConnectionOptionType.WHOLE_NUMBER),
+    ConnectionOption("max_inactive_connection_lifetime", ConnectionOptionType.SECONDS),
+    ConnectionOption("max_cached_statement_lifetime", ConnectionOptionType.SECONDS),
+    ConnectionOption("timeout", ConnectionOptionType.SECONDS),
     ConnectionOption(ASYNCPG_ROOT_CERTIFICATE_SETTING, ConnectionOptionType.TEXT),
 )
 
@@ -110,12 +91,10 @@ POSTGRES_INTERVAL_DAYS_PER_MONTH = 30
 ASYNCPG_EXTENSION_TYPE_NAMES = ("citext", "ltree", "hstore")
 #: The extension types of ASYNCPG_EXTENSION_TYPE_NAMES the database has, with their schemas.
 ASYNCPG_EXTENSION_TYPES_SQL = (
-    "SELECT pg_type.typname, pg_namespace.nspname FROM pg_type "
+    "SELECT pg_type.typname, pg_namespace.nspname, pg_type.oid FROM pg_type "
     "JOIN pg_namespace ON pg_namespace.oid = pg_type.typnamespace "
     "WHERE pg_type.typname = ANY($1::text[]) AND pg_type.typtype = 'b'"
 )
-#: The word of a statement creating or dropping an extension - its types are looked up again after it.
-EXTENSION_STATEMENT_WORD = "EXTENSION"
 #: The version byte leading PostgreSQL's binary ``ltree``.
 LTREE_BINARY_VERSION = 1
 #: The length of a NULL value in PostgreSQL's binary ``hstore``.
@@ -131,7 +110,18 @@ TSVECTOR_MAX_POSITION = 16383
 TSVECTOR_WHITESPACE = frozenset(" \t\n\r\v\f")
 #: A position's weight letter in ``tsvector`` input -> the weight's bits; ``*`` is ``A``.
 TSVECTOR_WEIGHTS_BY_LETTER = {"a": 3, "A": 3, "*": 3, "b": 2, "B": 2, "c": 1, "C": 1, "d": 0, "D": 0}
-#: A weight's bits -> its letter in ``tsvector`` output; ``D`` is written as nothing.
-TSVECTOR_LETTERS_BY_WEIGHT = ("", "C", "B", "A")
 #: Where a ``tsvector`` position's weight starts in its 16 bits.
 TSVECTOR_WEIGHT_SHIFT = 14
+
+#: Stay below the server's result-column limit while preparing domain metadata.
+ASYNCPG_DOMAIN_TYPES_BATCH_SIZE = 256
+
+#: Accessible domain arrays let asyncpg prepare domain codecs used inside anonymous records.
+ASYNCPG_DOMAIN_TYPES_SQL = (
+    "SELECT n.nspname, t.typname, t.oid, t.typarray FROM pg_type t "
+    "JOIN pg_namespace n ON n.oid = t.typnamespace "
+    "WHERE t.typtype = 'd' AND t.typarray <> 0 "
+    "AND n.nspname <> 'pg_catalog' "
+    "AND NOT pg_is_other_temp_schema(n.oid) "
+    "AND has_schema_privilege(n.oid, 'USAGE') AND has_type_privilege(t.oid, 'USAGE')"
+)

@@ -19,8 +19,7 @@ from hare.fields.field import Field
 from hare.query.enums import Lookup, LookupValueShape
 
 if TYPE_CHECKING:
-    from hare.dialects.base.types.type_registry import TypeRegistry
-    from hare.models import Model
+    from hare.fields.data.containers.container_value_converters import ContainerValueConverters
     from hare.query.filters.lookups.field_lookup import FieldLookup
     from hare.sql.terms.term import Term
 
@@ -33,7 +32,8 @@ class ArrayField(ContainerField):
 
     ``tags__0`` reads an element (0-indexed, negative from the end), ``tags__0_2`` a slice,
     ``tags__len`` the length; ``__contains``, ``__contained_by``, ``__overlap``, ``__len`` and
-    ``__item=(index, value)`` compare it. A set is written sorted.
+    ``__item=(index, value)`` compare it. A set is sorted before element conversion, including
+    when a constructor or default supplies it; lists and tuples keep their order.
 
     Args:
         base_field: The field of the elements.
@@ -74,36 +74,45 @@ class ArrayField(ContainerField):
     def get_child_fields(self) -> tuple[Field[Any], ...]:
         return (self.base_field,)
 
+    def get_snapshot_comparison_value(self, value: Any) -> Any:
+        """Expose held document representations without encoding ordinary scalar values."""
+        if value is None:
+            return None
+        return [self.base_field.get_snapshot_comparison_value(element) for element in value]
+
     def get_held_steps(self) -> tuple[tuple[tuple[HeldValueStep, int | None], Field[Any]], ...]:
         return (((HeldValueStep.ELEMENT, None), self.base_field),)
 
-    def encode_value(
-        self, value: Any, instance: type[Model] | Model | None, types: TypeRegistry | None, path: str
-    ) -> Any:
-        if not isinstance(value, (list, tuple, set)):
-            # A value that can't be iterated raises ValidationError, not a TypeError.
-            raise ValidationError(f"{path}: expected a list/tuple/set, got {self.get_value_for_message(value)}")
-        if isinstance(value, set):
-            # A set has no stable order - stored sorted.
-            value = sorted(value)
-        return [
-            self.encode_child(self.base_field, element, instance, types, f"{path}[{index}]")
-            for index, element in enumerate(value)
-        ]
+    def _prepare_encoder(self, types: ContainerValueConverters | None) -> Callable[..., Any]:
+        encode = self.get_child_encoder(self.base_field, types)
 
-    def decode_value(self, value: Any, types: TypeRegistry | None) -> Any:
-        if isinstance(value, str):
-            # A str here is an undecoded value or a scalar passed for an array - iterating it would
-            # give a list of characters.
-            raise ValidationError(
-                f"{self.get_path()}: expected an array value from the database, got a string "
-                f"({self.get_value_for_message(value)})"
-            )
-        return [self.decode_child(self.base_field, element, types) for element in value]
+        def encode_value(value: Any, instance: Any, path: str) -> Any:
+            if not isinstance(value, (list, tuple, set)):
+                raise ValidationError(f"{path}: expected a list/tuple/set, got {self.get_value_for_message(value)}")
+            if isinstance(value, set):
+                value = sorted(value)
+            return [encode(element, instance, f"{path}[{index}]") for index, element in enumerate(value)]
+
+        return encode_value
+
+    def _prepare_decoder(self, types: ContainerValueConverters | None) -> Callable[[Any], Any]:
+        decode = self.get_child_decoder(self.base_field, types)
+
+        def decode_value(value: Any) -> Any:
+            if isinstance(value, str):
+                raise ValidationError(
+                    f"{self.get_path()}: expected an array value from the database, got a string "
+                    f"({self.get_value_for_message(value)})"
+                )
+            return [decode(element) for element in value]
+
+        return decode_value
 
     def normalize_value(self, value: Any, path: str) -> Any:
-        if not isinstance(value, (list, tuple, set)):
-            return value
+        if not isinstance(value, (list, tuple)):
+            if not isinstance(value, set):
+                return value
+            value = sorted(value)
         return [
             self.normalize_child(self.base_field, element, f"{path}[{index}]") for index, element in enumerate(value)
         ]
@@ -143,31 +152,4 @@ class ArrayField(ContainerField):
     def get_python_type(self) -> Any:
         # The element type, not the bare `list` of field_type - what a pydantic model generated from
         # the field accepts.
-        return list[self.get_child_python_type(self.base_field)]  # type: ignore[misc]
-
-    def get_read_codec_specification(
-        self, types: TypeRegistry, zone_name: str | None
-    ) -> tuple[str, dict[str, Any]] | None:
-        # Each element is read as the element field reads a value of an expression - the codec
-        # repeats decode_value() below, unless a subclass reads otherwise. An element held in a
-        # container of another shape is read by decode_value() itself.
-        field_class = type(self)
-        if (
-            not self.reads_values_by_types()
-            or field_class.decode_value is not ArrayField.decode_value
-            or field_class.normalize_value is not ArrayField.normalize_value
-            or (isinstance(self.base_field, ContainerField) and not isinstance(self.base_field, ArrayField))
-        ):
-            return None
-        # Imported here: the rows package imports the fields package.
-        from hare.query.rows.enums import ReadCodecType
-        from hare.query.rows.native.field_codecs import FieldCodecs
-
-        element_type, element_options = FieldCodecs.get_expression_read_specification(
-            self.base_field.model_field_name or self.model_field_name, self.base_field, types, zone_name
-        )
-        return ReadCodecType.ARRAY, {
-            "element_type": element_type,
-            "element_options": element_options,
-            "fallback": partial(self.get_python_value, types=types),
-        }
+        return list[self.base_field.get_annotation()]  # type: ignore[misc]

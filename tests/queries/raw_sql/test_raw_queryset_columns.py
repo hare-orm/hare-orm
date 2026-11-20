@@ -1,6 +1,7 @@
 import pytest
 import pytest_asyncio
 
+from hare.core.hare_context import HareContext
 from hare.exceptions import FieldError, QueryError
 from tests.shared_models.testmodels import Author, Book
 
@@ -16,7 +17,7 @@ async def library(db):
 
 @pytest.mark.asyncio
 async def test_raw_extra_columns_become_annotations(library):
-    book_table = Book._meta.db_table
+    book_table = HareContext.require_current().apps.get_binding(Book).db_table
     books = await Book.objects.raw(
         f'SELECT "b".*, "b"."rating" * 2 AS "doubled", \'x\' AS "tag" FROM "{book_table}" "b" ORDER BY "b"."id"'
     )
@@ -26,8 +27,8 @@ async def test_raw_extra_columns_become_annotations(library):
 @pytest.mark.asyncio
 async def test_raw_aggregate_column_becomes_an_annotation(library):
     first_author, second_author = library
-    author_table = Author._meta.db_table
-    book_table = Book._meta.db_table
+    author_table = HareContext.require_current().apps.get_binding(Author).db_table
+    book_table = HareContext.require_current().apps.get_binding(Book).db_table
     authors = await Author.objects.raw(
         f'SELECT "a".*, COUNT("b"."id") AS "book_count" FROM "{author_table}" "a" '
         f'LEFT JOIN "{book_table}" "b" ON "b"."author_id" = "a"."id" GROUP BY "a"."id", "a"."name" ORDER BY "a"."id"'
@@ -41,26 +42,33 @@ async def test_raw_aggregate_column_becomes_an_annotation(library):
 @pytest.mark.asyncio
 async def test_raw_without_the_primary_key_raises(library):
     with pytest.raises(FieldError, match="primary key"):
-        await Book.objects.raw(f'SELECT "name" FROM "{Book._meta.db_table}"')
+        await Book.objects.raw(f'SELECT "name" FROM "{HareContext.require_current().apps.get_binding(Book).db_table}"')
 
 
 @pytest.mark.asyncio
 async def test_raw_with_a_duplicate_column_raises(library):
     with pytest.raises(QueryError, match="more than once"):
         await Book.objects.raw(
-            f'SELECT "b".*, "a"."id", "a"."name" FROM "{Book._meta.db_table}" "b" '
-            f'JOIN "{Author._meta.db_table}" "a" ON "a"."id" = "b"."author_id"'
+            f'SELECT "b".*, "a"."id", "a"."name" FROM '
+            f'"{HareContext.require_current().apps.get_binding(Book).db_table}" "b" '
+            f'JOIN "{HareContext.require_current().apps.get_binding(Author).db_table}" "a" ON "a"."id" = '
+            f'"b"."author_id"'
         )
 
 
 @pytest.mark.asyncio
 async def test_raw_with_no_rows_or_no_result_set(library):
-    assert await Book.objects.raw(f'SELECT * FROM "{Book._meta.db_table}" WHERE "id" < 0') == []
+    assert (
+        await Book.objects.raw(
+            f'SELECT * FROM "{HareContext.require_current().apps.get_binding(Book).db_table}" WHERE "id" < 0'
+        )
+        == []
+    )
 
 
 @pytest.mark.asyncio
 async def test_raw_with_parameters_that_are_no_list_or_no_sql_raises(library):
-    book_table = Book._meta.db_table
+    book_table = HareContext.require_current().apps.get_binding(Book).db_table
     await Book.objects.raw(f'SELECT * FROM "{book_table}" WHERE "name" = %s', ["A"])
     for parameters in (5, "A", None, {"name": "A"}):
         with pytest.raises(QueryError, match="as a list"):

@@ -24,13 +24,12 @@ import pytest
 from hare import fields
 from hare.ddl import RawSQLTerm
 from hare.ddl.constraints import CheckConstraint, ExclusionConstraint, UniqueConstraint
-from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-from hare.dialects.base.schema.tables.table_comments import TableComments
 from hare.dialects.postgresql.schema.postgresql_schema_editor import PostgresqlSchemaEditor
 from hare.dialects.sqlite.schema.sqlite_schema_editor import SqliteSchemaEditor
 from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
 from tests.utils.fake_client import FakeClient
+from tests.utils.schema_editor import TestSchemaEditor
 
 pytestmark = pytest.mark.database_independent
 
@@ -40,23 +39,12 @@ ADVERSARIAL_IDENTIFIER = 'evil"; DROP TABLE users; --'
 ADVERSARIAL_IDENTIFIER_QUOTED = '"evil""; DROP TABLE users; --"'
 
 
-class SqlSchemaEditorTableComments(TableComments):
-    def get_table_comment_sql(self, table: str, comment: str) -> str:
-        return ""
-
-    def get_column_comment_sql(self, table: str, column: str, comment: str) -> str:
-        return ""
-
-
-class SqlSchemaEditor(BaseSchemaEditor):
-    table_comments_class = SqlSchemaEditorTableComments
-
-
-def init_apps(*models: type[Model]) -> None:
+def init_apps(*models: type[Model]) -> StateApps:
     apps = StateApps()
     for model in models:
         apps.register_model("models", model)
     apps.init_relations()
+    return apps
 
 
 # ---------------------------------------------------------------------------
@@ -77,11 +65,11 @@ async def test_create_model_quotes_adversarial_source_field() -> None:
             table = "widget"
             app = "models"
 
-    init_apps(Widget)
+    apps = init_apps(Widget)
     client = FakeClient("sql")
-    editor = SqlSchemaEditor(client)
+    editor = TestSchemaEditor(client)
 
-    await editor.create_model(Widget)
+    await editor.create_model(apps.get_binding(Widget))
 
     sql = client.executed[0]
     assert ADVERSARIAL_IDENTIFIER_QUOTED in sql
@@ -90,30 +78,7 @@ async def test_create_model_quotes_adversarial_source_field() -> None:
 
 @pytest.mark.asyncio
 async def test_add_field_quotes_adversarial_source_field() -> None:
-    class Widget(Model):
-        id = fields.IntField(primary_key=True)
 
-        class Meta:
-            table = "widget"
-            app = "models"
-
-    Widget._meta.fields_map["price"] = fields.IntField(source_field=ADVERSARIAL_IDENTIFIER)
-    Widget._meta.fields_map["price"].model_field_name = "price"
-    Widget._meta.fields_db_projection["price"] = ADVERSARIAL_IDENTIFIER
-    init_apps(Widget)
-
-    client = FakeClient("sql")
-    editor = SqlSchemaEditor(client)
-
-    await editor.add_field(Widget, Widget, "price")
-
-    sql = client.executed[0]
-    assert ADVERSARIAL_IDENTIFIER_QUOTED in sql
-    assert sql.count('"') % 2 == 0
-
-
-@pytest.mark.asyncio
-async def test_remove_field_quotes_adversarial_source_field() -> None:
     class Widget(Model):
         id = fields.IntField(primary_key=True)
         price = fields.IntField(source_field=ADVERSARIAL_IDENTIFIER)
@@ -122,11 +87,36 @@ async def test_remove_field_quotes_adversarial_source_field() -> None:
             table = "widget"
             app = "models"
 
-    init_apps(Widget)
-    client = FakeClient("sql")
-    editor = SqlSchemaEditor(client)
+    apps = init_apps(Widget)
 
-    await editor.remove_field(Widget, Widget, Widget._meta.fields_map["price"])
+    client = FakeClient("sql")
+    editor = TestSchemaEditor(client)
+
+    await editor.add_field(apps.get_binding(Widget), apps.get_binding(Widget), "price")
+
+    sql = client.executed[0]
+    assert ADVERSARIAL_IDENTIFIER_QUOTED in sql
+    assert sql.count('"') % 2 == 0
+
+
+@pytest.mark.asyncio
+async def test_remove_field_quotes_adversarial_source_field() -> None:
+
+    class Widget(Model):
+        id = fields.IntField(primary_key=True)
+        price = fields.IntField(source_field=ADVERSARIAL_IDENTIFIER)
+
+        class Meta:
+            table = "widget"
+            app = "models"
+
+    apps = init_apps(Widget)
+    client = FakeClient("sql")
+    editor = TestSchemaEditor(client)
+
+    await editor.remove_field(
+        apps.get_binding(Widget), apps.get_binding(Widget), apps.get_binding(Widget).fields_map["price"]
+    )
 
     sql = client.executed[0]
     assert ADVERSARIAL_IDENTIFIER_QUOTED in sql
@@ -135,6 +125,7 @@ async def test_remove_field_quotes_adversarial_source_field() -> None:
 
 @pytest.mark.asyncio
 async def test_alter_field_rename_quotes_adversarial_old_and_new_source_field() -> None:
+
     class Widget(Model):
         id = fields.IntField(primary_key=True)
         price = fields.IntField(source_field=ADVERSARIAL_IDENTIFIER)
@@ -151,12 +142,16 @@ async def test_alter_field_rename_quotes_adversarial_old_and_new_source_field() 
             table = "widget"
             app = "models"
 
-    init_apps(Widget)
-    init_apps(WidgetRenamed)
+    apps_1 = init_apps(Widget)
+    apps_2 = init_apps(WidgetRenamed)
     client = FakeClient("sql")
-    editor = SqlSchemaEditor(client)
+    editor = TestSchemaEditor(client)
 
-    await editor.alter_column(WidgetRenamed, Widget._meta.fields_map["price"], WidgetRenamed._meta.fields_map["price"])
+    await editor.alter_column(
+        apps_2.get_binding(WidgetRenamed),
+        apps_1.get_binding(Widget).fields_map["price"],
+        apps_2.get_binding(WidgetRenamed).fields_map["price"],
+    )
 
     sql = "\n".join(client.executed)
     assert ADVERSARIAL_IDENTIFIER_QUOTED in sql
@@ -185,11 +180,11 @@ async def test_fk_field_quotes_adversarial_target_source_field() -> None:
             table = "membership"
             app = "models"
 
-    init_apps(Team, Membership)
+    apps = init_apps(Team, Membership)
     client = FakeClient("sql")
-    editor = SqlSchemaEditor(client)
+    editor = TestSchemaEditor(client)
 
-    await editor.create_model(Membership)
+    await editor.create_model(apps.get_binding(Membership))
 
     sql = client.executed[0]
     assert ADVERSARIAL_IDENTIFIER_QUOTED in sql
@@ -209,11 +204,11 @@ async def test_create_model_adversarial_source_field_executes_on_real_sqlite() -
             table = "widget"
             app = "models"
 
-    init_apps(Widget)
+    apps = init_apps(Widget)
     client = FakeClient("sqlite")
     editor = SqliteSchemaEditor(client, collect_sql=True)
 
-    await editor.create_model(Widget)
+    await editor.create_model(apps.get_binding(Widget))
 
     conn = sqlite3.connect(":memory:")
     try:
@@ -253,11 +248,11 @@ async def test_m2m_field_quotes_adversarial_forward_and_backward_keys() -> None:
             table = "widget"
             app = "models"
 
-    init_apps(Tag, Widget)
+    apps = init_apps(Tag, Widget)
     client = FakeClient("sql")
-    editor = SqlSchemaEditor(client)
+    editor = TestSchemaEditor(client)
 
-    await editor.add_field(Widget, Widget, "tags")
+    await editor.add_field(apps.get_binding(Widget), apps.get_binding(Widget), "tags")
 
     sql = client.executed[0]
     assert ADVERSARIAL_IDENTIFIER_QUOTED in sql
@@ -267,6 +262,7 @@ async def test_m2m_field_quotes_adversarial_forward_and_backward_keys() -> None:
 
 @pytest.mark.asyncio
 async def test_m2m_field_adversarial_keys_executes_on_real_sqlite() -> None:
+
     class Tag(Model):
         id = fields.IntField(primary_key=True)
 
@@ -287,12 +283,12 @@ async def test_m2m_field_adversarial_keys_executes_on_real_sqlite() -> None:
             table = "widget"
             app = "models"
 
-    init_apps(Tag, Widget)
+    apps = init_apps(Tag, Widget)
     client = FakeClient("sqlite")
     editor = SqliteSchemaEditor(client, collect_sql=True)
 
-    await editor.create_model(Tag)
-    await editor.create_model(Widget)
+    await editor.create_model(apps.get_binding(Tag))
+    await editor.create_model(apps.get_binding(Widget))
 
     conn = sqlite3.connect(":memory:")
     try:
@@ -312,7 +308,9 @@ async def test_m2m_field_adversarial_keys_executes_on_real_sqlite() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _product_model() -> type[Model]:
+def _product_model(*, constraints: tuple[CheckConstraint, ...] = ()) -> type[Model]:
+    declared_constraints = constraints
+
     class Product(Model):
         id = fields.IntField(primary_key=True)
         price = fields.IntField()
@@ -320,6 +318,7 @@ def _product_model() -> type[Model]:
         class Meta:
             table = "product"
             app = "models"
+            constraints = declared_constraints
 
     return Product
 
@@ -328,12 +327,12 @@ def _product_model() -> type[Model]:
 @pytest.mark.asyncio
 async def test_a_check_constraint_quotes_an_adversarial_name(method_name) -> None:
     Product = _product_model()
-    init_apps(Product)
+    apps = init_apps(Product)
     client = FakeClient("sql")
-    editor = SqlSchemaEditor(client)
+    editor = TestSchemaEditor(client)
 
     constraint = CheckConstraint(check=RawSQLTerm("price > 0"), name=ADVERSARIAL_IDENTIFIER)
-    await getattr(editor, method_name)(Product, constraint)
+    await getattr(editor, method_name)(apps.get_binding(Product), constraint)
 
     sql = client.executed[0]
     assert ADVERSARIAL_IDENTIFIER_QUOTED in sql
@@ -342,13 +341,14 @@ async def test_a_check_constraint_quotes_an_adversarial_name(method_name) -> Non
 
 @pytest.mark.asyncio
 async def test_add_check_constraint_adversarial_name_executes_on_real_sqlite() -> None:
-    Product = _product_model()
-    Product._meta.constraints = [CheckConstraint(check=RawSQLTerm("price > 0"), name=ADVERSARIAL_IDENTIFIER)]
-    init_apps(Product)
+    Product = _product_model(
+        constraints=(CheckConstraint(check=RawSQLTerm("price > 0"), name=ADVERSARIAL_IDENTIFIER),)
+    )
+    apps = init_apps(Product)
     client = FakeClient("sqlite")
     editor = SqliteSchemaEditor(client, collect_sql=True)
 
-    await editor.create_model(Product)
+    await editor.create_model(apps.get_binding(Product))
 
     conn = sqlite3.connect(":memory:")
     try:
@@ -364,12 +364,12 @@ async def test_add_check_constraint_adversarial_name_executes_on_real_sqlite() -
 @pytest.mark.asyncio
 async def test_add_unique_constraint_quotes_adversarial_explicit_name() -> None:
     Product = _product_model()
-    init_apps(Product)
+    apps = init_apps(Product)
     client = FakeClient("sql")
-    editor = SqlSchemaEditor(client)
+    editor = TestSchemaEditor(client)
 
     constraint = UniqueConstraint(fields=("price",), name=ADVERSARIAL_IDENTIFIER)
-    await editor.add_constraint(Product, constraint)
+    await editor.add_constraint(apps.get_binding(Product), constraint)
 
     sql = client.executed[0]
     assert ADVERSARIAL_IDENTIFIER_QUOTED in sql
@@ -379,12 +379,12 @@ async def test_add_unique_constraint_quotes_adversarial_explicit_name() -> None:
 @pytest.mark.asyncio
 async def test_add_exclusion_constraint_quotes_adversarial_name() -> None:
     Product = _product_model()
-    init_apps(Product)
+    apps = init_apps(Product)
     client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
 
     constraint = ExclusionConstraint(name=ADVERSARIAL_IDENTIFIER, expressions=(("price", "="),))
-    await editor.add_constraint(Product, constraint)
+    await editor.add_constraint(apps.get_binding(Product), constraint)
 
     sql = client.executed[0]
     assert ADVERSARIAL_IDENTIFIER_QUOTED in sql
@@ -394,13 +394,13 @@ async def test_add_exclusion_constraint_quotes_adversarial_name() -> None:
 @pytest.mark.asyncio
 async def test_rename_constraint_quotes_adversarial_old_and_new_name() -> None:
     Product = _product_model()
-    init_apps(Product)
+    apps = init_apps(Product)
     client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
 
     old = CheckConstraint(check=RawSQLTerm("price > 0"), name=ADVERSARIAL_IDENTIFIER)
     new = CheckConstraint(check=RawSQLTerm("price > 0"), name='renamed_evil"name')
-    await editor.rename_constraint(Product, old, new)
+    await editor.rename_constraint(apps.get_binding(Product), old, new)
 
     sql = client.executed[0]
     assert ADVERSARIAL_IDENTIFIER_QUOTED in sql

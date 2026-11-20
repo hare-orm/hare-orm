@@ -23,7 +23,7 @@ class SchemaObjectDeclarations:
         declaration_class: type[Any],
         excluded_class: type[Any] | None = None,
     ) -> tuple[Any, ...]:
-        """Reads and checks a ``Meta`` list of declared database objects - views, functions,
+        """Reads and checks a ``Meta`` iterable of declared database objects - views, functions,
         sequences, policies, grants.
 
         Args:
@@ -36,8 +36,8 @@ class SchemaObjectDeclarations:
             The entries.
 
         Raises:
-            ConfigurationError: The option isn't a list or tuple, an entry is of another class, or
-                two entries share a name (two grants are the same).
+            ConfigurationError: An entry is of another class, or two entries share a name
+                (two grants are the same).
         """
         declared = getattr(meta, option, ())
         names: set[str] = set()

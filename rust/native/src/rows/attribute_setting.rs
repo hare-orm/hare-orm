@@ -1,6 +1,5 @@
 //! Setting attributes of many instances in one call - what `object.__setattr__` does for each.
 
-use pyo3::exceptions::PyAttributeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 
@@ -39,15 +38,10 @@ pub fn set_missing_attribute_values(
     if names.len() != values.len() {
         return Err(pyo3::exceptions::PyValueError::new_err("names and values differ in length"));
     }
-    let py = instances.py();
     for instance in instances.try_iter()? {
         let instance = instance?;
         for (name, value) in names.iter().zip(&values) {
-            let holds_value = match instance.getattr(name) {
-                Ok(current) => !current.is_none(),
-                Err(error) if error.is_instance_of::<PyAttributeError>(py) => false,
-                Err(error) => return Err(error),
-            };
+            let holds_value = instance.getattr_opt(name)?.is_some_and(|current| !current.is_none());
             if !holds_value {
                 generic_set_attribute(&instance, name, value)?;
             }
@@ -70,7 +64,6 @@ pub fn stamp_attribute_values(
     value: &Bound<'_, PyAny>,
     missing: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
-    let py = instances.py();
     for instance in instances.try_iter()? {
         let instance = instance?;
         capture_instance_values(old_values, &instance, &saved_names, missing)?;
@@ -78,15 +71,42 @@ pub fn stamp_attribute_values(
             generic_set_attribute(&instance, name, value)?;
         }
         for name in &unset_names {
-            let holds_value = match instance.getattr(name) {
-                Ok(current) => !current.is_none(),
-                Err(error) if error.is_instance_of::<PyAttributeError>(py) => false,
-                Err(error) => return Err(error),
-            };
+            let holds_value = instance.getattr_opt(name)?.is_some_and(|current| !current.is_none());
             if !holds_value {
                 generic_set_attribute(&instance, name, value)?;
             }
         }
+    }
+    Ok(())
+}
+
+/// Copies a query's slots to its clone through `getattr`/`setattr` - a custom setter of the target runs;
+/// a slot the source never set is skipped, so it stays unset on the target too. Each of `plain_names`
+/// is copied as it is; each `(name, factory)` of `container_slots` gets a copy of its container
+/// (`.copy()`), or a new empty one from `factory` when it is empty.
+#[pyfunction]
+pub fn copy_slot_values(
+    source: &Bound<'_, PyAny>,
+    target: &Bound<'_, PyAny>,
+    plain_names: &Bound<'_, pyo3::types::PyTuple>,
+    container_slots: &Bound<'_, pyo3::types::PyTuple>,
+) -> PyResult<()> {
+    let py = source.py();
+    for name in plain_names.iter() {
+        let name = name.cast_into::<PyString>()?;
+        let Some(value) = source.getattr_opt(&name)? else {
+            continue;
+        };
+        target.setattr(&name, value)?;
+    }
+    for slot in container_slots.iter() {
+        let (name, factory): (Bound<'_, PyString>, Bound<'_, PyAny>) = slot.extract()?;
+        let Some(value) = source.getattr_opt(&name)? else {
+            continue;
+        };
+        let copied =
+            if value.is_truthy()? { value.call_method0(pyo3::intern!(py, "copy"))? } else { factory.call0()? };
+        target.setattr(&name, copied)?;
     }
     Ok(())
 }

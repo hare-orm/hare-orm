@@ -8,6 +8,7 @@ import pytest_asyncio
 from hare import Hare, fields
 from hare.contrib.test import requires_features
 from hare.core.apps.model_connection_checks import ModelConnectionChecks
+from hare.core.hare_context import HareContext
 from hare.core.registries import Registries
 from hare.exceptions import ConfigurationError, UnSupportedError
 from hare.models import Model
@@ -29,11 +30,13 @@ from tests.shared_models.testmodels import (
 def restrict_features(db, monkeypatch):
     """Turns features off for the dialect of the test connection and the connection itself - the
     SQL renders from the dialect's, the writes check the connection's."""
-    connection = Tournament._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Tournament).get_connection()
 
     def restrict(**overrides):
         monkeypatch.setattr(connection.dialect, "features", connection.dialect.features.replace(**overrides))
         monkeypatch.setattr(connection, "features", connection.features.replace(**overrides))
+        root = HareContext.require_current().connections.get_main(connection.connection_alias)
+        monkeypatch.setattr(root, "features", root.features.replace(**overrides))
         Registries.changed()
 
     yield restrict
@@ -92,14 +95,20 @@ async def test_a_cascade_needing_an_update_writes_nothing_without_row_updates(re
 async def test_a_model_with_a_generated_key_is_refused_without_generated_keys(restrict_features):
     restrict_features(supports_generated_keys=False)
     with pytest.raises(ConfigurationError, match=r'"models.Tournament.id" is a primary key the database generates'):
-        ModelConnectionChecks.check_model_writes(Tournament)
-    ModelConnectionChecks.check_model_writes(UUIDPkModel)
+        ModelConnectionChecks.check_model_writes(
+            HareContext.require_current().apps.get_binding(Tournament),
+            HareContext.require_current().apps.get_queryset(Tournament).get_connection(),
+        )
+    ModelConnectionChecks.check_model_writes(
+        HareContext.require_current().apps.get_binding(UUIDPkModel),
+        HareContext.require_current().apps.get_queryset(UUIDPkModel).get_connection(),
+    )
     # Binding the models again binds Tournament too.
     with pytest.raises(ConfigurationError, match="generates no keys"):
         Hare.register_live_models(
             [type("LiveUuidRow", (Model,), {"__module__": __name__, "id": fields.UUIDField(primary_key=True)})],
             "restricted",
-            connection_alias=Tournament._meta.default_connection,
+            connection_alias=HareContext.require_current().apps.get_binding(Tournament).default_connection,
         )
 
 
@@ -107,8 +116,14 @@ async def test_a_model_with_a_generated_key_is_refused_without_generated_keys(re
 async def test_a_soft_deleted_model_is_refused_without_row_updates(restrict_features):
     restrict_features(supports_row_updates=False)
     with pytest.raises(ConfigurationError, match=r"'models.SoftDeleteParent' is soft-deleted"):
-        ModelConnectionChecks.check_model_writes(SoftDeleteParent)
-    ModelConnectionChecks.check_model_writes(UUIDPkModel)
+        ModelConnectionChecks.check_model_writes(
+            HareContext.require_current().apps.get_binding(SoftDeleteParent),
+            HareContext.require_current().apps.get_queryset(SoftDeleteParent).get_connection(),
+        )
+    ModelConnectionChecks.check_model_writes(
+        HareContext.require_current().apps.get_binding(UUIDPkModel),
+        HareContext.require_current().apps.get_queryset(UUIDPkModel).get_connection(),
+    )
 
 
 @pytest_asyncio.fixture
@@ -175,7 +190,7 @@ async def test_a_subquery_correlated_otherwise_is_refused_before_sql(calendar, r
 
 @pytest.mark.asyncio
 async def test_a_delete_is_written_by_the_dialects_hook(db, monkeypatch):
-    clauses = Tournament._meta.connection.dialect.clauses
+    clauses = HareContext.require_current().apps.get_queryset(Tournament).get_connection().dialect.clauses
     written = []
     write_delete_sql = clauses.get_delete_sql
 

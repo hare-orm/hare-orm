@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from hare.models.model_binding import ModelBinding
+
 from hare.ddl.enums import RowLevelSecurity
 from hare.ddl.security.policy import Policy
 from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
 from hare.exceptions import UnSupportedError
-from hare.models import Model
 
 
 class RowLevelSecurityPolicies(SchemaEditorPart):
@@ -15,14 +19,14 @@ class RowLevelSecurityPolicies(SchemaEditorPart):
 
     def get_row_level_security_sqls(
         self,
-        model: type[Model],
+        binding: ModelBinding,
         old_setting: RowLevelSecurity | None,
         new_setting: RowLevelSecurity | None,
     ) -> list[str]:
         """The statements turning a table's row level security from one setting to another.
 
         Args:
-            model: The model.
+            binding: The model.
             old_setting: The setting as it is - None for off.
             new_setting: The setting as it becomes - None for off.
 
@@ -33,18 +37,18 @@ class RowLevelSecurityPolicies(SchemaEditorPart):
 
     async def alter_row_level_security(
         self,
-        model: type[Model],
+        binding: ModelBinding,
         old_setting: RowLevelSecurity | None,
         new_setting: RowLevelSecurity | None,
     ) -> None:
         """Turns a table's row level security from one setting to another."""
-        await self.editor.run_sqls(self.get_row_level_security_sqls(model, old_setting, new_setting))
+        await self.editor.run_sqls(self.get_row_level_security_sqls(binding, old_setting, new_setting))
 
-    def get_policy_create_sqls(self, model: type[Model], policy: Policy, safe: bool = False) -> list[str]:
+    def get_policy_create_sqls(self, binding: ModelBinding, policy: Policy, safe: bool = False) -> list[str]:
         """The statements creating a row level security policy on a model's table.
 
         Args:
-            model: The model declaring it.
+            binding: The model declaring it.
             policy: The policy.
             safe: Replace a policy of the same name.
 
@@ -53,11 +57,11 @@ class RowLevelSecurityPolicies(SchemaEditorPart):
         """
         raise self.get_unsupported_error("Row level security policies")
 
-    async def create_policy(self, model: type[Model], policy: Policy) -> None:
+    async def create_policy(self, binding: ModelBinding, policy: Policy) -> None:
         """Creates a row level security policy on a model's table."""
-        await self.editor.run_sqls(self.get_policy_create_sqls(model, policy))
+        await self.editor.run_sqls(self.get_policy_create_sqls(binding, policy))
 
-    async def drop_policy(self, model: type[Model], policy: Policy) -> None:
+    async def drop_policy(self, binding: ModelBinding, policy: Policy) -> None:
         """Drops a row level security policy of a model's table.
 
         Raises:
@@ -65,7 +69,7 @@ class RowLevelSecurityPolicies(SchemaEditorPart):
         """
         raise self.get_unsupported_error("Row level security policies")
 
-    async def alter_policy(self, model: type[Model], old_policy: Policy, new_policy: Policy) -> None:
+    async def alter_policy(self, binding: ModelBinding, old_policy: Policy, new_policy: Policy) -> None:
         """Changes a row level security policy of a model's table in place.
 
         Raises:
@@ -73,7 +77,7 @@ class RowLevelSecurityPolicies(SchemaEditorPart):
         """
         raise self.get_unsupported_error("Row level security policies")
 
-    async def rename_policy(self, model: type[Model], old_policy: Policy, new_policy: Policy) -> None:
+    async def rename_policy(self, binding: ModelBinding, old_policy: Policy, new_policy: Policy) -> None:
         """Renames a row level security policy of a model's table.
 
         Raises:

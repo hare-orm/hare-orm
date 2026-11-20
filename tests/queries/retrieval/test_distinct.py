@@ -301,7 +301,7 @@ async def test_distinct_on_annotate_by_model(db):
     await Tournament.objects.create(name="1", desc="b")
     await Tournament.objects.create(name="2", desc="c")
     tournaments = await Tournament.objects.annotate(count_name=Count("name")).distinct("name").order_by("name")
-    assert [1, 1] == [tournaments[0].count_name, tournaments[0].count_name]
+    assert [(row.name, row.count_name) for row in tournaments] == [("1", 1), ("2", 1)]
 
 
 @test.requires_features(supports_distinct_on=True)
@@ -505,9 +505,11 @@ async def test_distinct_on_unknown_field_raises_field_error_before_the_ordering_
 async def test_distinct_on_unknown_field_raises_field_error_before_the_ordering_check_on_every_database(db):
     """An unknown name is the same FieldError where DISTINCT ON is emulated - not a mismatch with
     the ordering, as on PostgreSQL."""
-    with pytest.raises(FieldError, match="Unknown field no_such_field for model Tournament"):
+    with pytest.raises(FieldError, match="Unknown field 'no_such_field': Tournament has no field 'no_such_field'"):
         await Tournament.objects.all().order_by("name").distinct("no_such_field")
-    with pytest.raises(FieldError, match="Unknown field no_such_field for model Tournament"):
+    with pytest.raises(
+        FieldError, match="Unknown field 'tournament__no_such_field': Tournament has no field 'no_such_field'"
+    ):
         await Event.objects.all().order_by("name").distinct("tournament__no_such_field")
     await Tournament.objects.create(id=1, name="first")
     annotated = Tournament.objects.annotate(doubled=F("id") * 2).order_by("doubled").distinct("doubled")

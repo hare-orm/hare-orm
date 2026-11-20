@@ -5,12 +5,13 @@ from typing import TYPE_CHECKING, Any
 from hare.exceptions import QueryError
 from hare.query.expressions import Expression, ExpressionContext
 from hare.query.expressions.f import F
-from hare.sql import JoinType
+from hare.query.statements.building.query_joins import QueryJoins
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.dialect import Dialect
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.expressions.conditions.q import Q
     from hare.query.expressions.conditions.query_modifier import QueryModifier
     from hare.query.expressions.expression_result import ExpressionResult, TableCriterionTuple
@@ -42,6 +43,12 @@ class QuerySetExtensionQuery:
     def model(self) -> type[Model]:
         """The query's model."""
         return self.query.model
+
+    @property
+    def binding(self) -> ModelBinding:
+        """The structural model binding retained by the query."""
+        model_binding: ModelBinding = self.query._binding  # type: ignore[assignment]
+        return model_binding
 
     @property
     def connection(self) -> DatabaseClient:
@@ -86,8 +93,10 @@ class QuerySetExtensionQuery:
             The context.
         """
         query = self.query
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
         return ExpressionContext(
-            model=query.model,
+            binding=model_binding,
+            application_context=query._context,
             dialect=query.dialect,
             connection=query._connection,
             table=query._effective_basetable(),
@@ -138,9 +147,6 @@ class QuerySetExtensionQuery:
             The builder with them.
         """
         query = self.query
-        for table, criterion in joins:
-            if table not in query._joined_tables_set:
-                builder = builder.join(table, how=JoinType.LEFT_OUTER).on(criterion)
-                query._joined_tables.append(table)
-                query._joined_tables_set.add(table)
+        for join in joins:
+            builder = QueryJoins.with_join(builder, query._joined_tables, join)
         return builder

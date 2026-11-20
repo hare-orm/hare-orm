@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import AsyncGenerator, Iterable
+from collections.abc import AsyncGenerator, Generator, Iterable
 from typing import Any
 
-from hare.cli.config_locator import ConfigLocator
+from hare.cli.constants import MIGRATION_GRAPH_ERRORS
 from hare.cli.context.cli_context import CLIContext
 from hare.cli.exceptions import CLIError, CLIUsageError
 from hare.core.config import AppConfig, HareConfig
-from hare.core.config.config_secrets import ConfigSecrets
 from hare.core.constants import DEFAULT_CONNECTION_NAME
 from hare.core.hare_context import HareContext
 from hare.exceptions import (
@@ -16,6 +15,8 @@ from hare.exceptions import (
     DatabaseError,
     DBConnectionError,
 )
+from hare.migrations.api.migration_request_parser import MigrationRequestParser
+from hare.migrations.exceptions import UnknownMigrationError
 
 
 class CommandContext:
@@ -69,45 +70,86 @@ class CommandContext:
             raise CLIError(f"Database operation failed: {error}") from None
 
     @staticmethod
+    @contextlib.contextmanager
+    def migration_graph_error_boundary(*, unknown_is_usage: bool = False) -> Generator[None]:
+        """Report migration graph failures, optionally treating an unknown target as a usage error."""
+        try:
+            yield
+        except MIGRATION_GRAPH_ERRORS as error:
+            if unknown_is_usage and isinstance(error, UnknownMigrationError):
+                raise CLIUsageError(str(error)) from None
+            raise CLIError(str(error)) from None
+
+    @staticmethod
     def load_config(cli_context: CLIContext) -> HareConfig:
-        """The hare configuration of the command - from its option, the environment or ``pyproject.toml``.
+        """The invocation's configuration, shared by discovery and command execution.
+
+        The reference comes from its option, the environment or ``pyproject.toml``. A loaded
+        config is retained on the immutable CLI context so one-pass model declarations are
+        consumed once, without a process-wide cache or changes to the original config mapping.
 
         Returns:
             HareConfig: Validated configuration object
         """
-        config_value = cli_context.config or ConfigLocator.locate()
-        if not config_value:
-            raise CLIUsageError(
-                "You must specify HARE_ORM in option or env, or pyproject.toml [tool.hare]",
-            )
+        return cli_context._loaded_config
+
+    @staticmethod
+    def get_connection_alias(config: HareConfig, connection_alias: str | None) -> str:
+        """Select an explicit nonempty alias, otherwise the first configured connection.
+
+        Args:
+            config: The loaded command configuration.
+            connection_alias: The requested alias, or None/empty for the first connection.
+
+        Returns:
+            The configured alias, preserving configuration insertion order for the default.
+
+        Raises:
+            CLIUsageError: A requested nonempty alias is not configured.
+        """
+        if connection_alias:
+            CommandContext.check_connection_alias(config, connection_alias)
+            return connection_alias
+        return next(iter(config.connections))
+
+    @staticmethod
+    def check_connection_alias(config: HareConfig, connection_alias: str) -> None:
+        """Require an explicitly selected connection to exist in the loaded configuration."""
+        if connection_alias not in config.connections:
+            raise CLIUsageError(f"Unknown connection alias: {connection_alias}")
+
+    @staticmethod
+    def get_app_config(config: HareConfig, app_label: str) -> AppConfig:
+        """Return the configured app or report an unknown CLI label."""
         try:
-            return HareConfig.load(config_value)
-        except ConfigurationError as error:
-            shown_value = (
-                ConfigSecrets.mask_url_secrets(config_value) if isinstance(config_value, str) else config_value
-            )
-            raise CLIError(f"Invalid Hare ORM configuration {shown_value!r}: {error}") from None
+            return config.apps[app_label]
+        except KeyError:
+            raise CLIUsageError(f"Unknown app label {app_label}") from None
+
+    @staticmethod
+    def check_app_labels(config: HareConfig, app_labels: Iterable[str]) -> None:
+        """Refuse the first unknown app label in command-line order."""
+        for app_label in app_labels:
+            CommandContext.get_app_config(config, app_label)
 
     @staticmethod
     def select_apps(config: HareConfig, app_labels: Iterable[str] | None) -> dict[str, AppConfig]:
         """Select specific apps from config, or all if no labels specified."""
         if not config.apps:
             raise CLIError("No apps configured in HARE_ORM")
-        if not app_labels:
+        if app_labels is None:
             return dict(config.apps)
         selected: dict[str, AppConfig] = {}
         for label in app_labels:
-            if label not in config.apps:
-                raise CLIUsageError(f"Unknown app label {label}")
-            selected[label] = config.apps[label]
-        return selected
+            selected[label] = CommandContext.get_app_config(config, label)
+        return selected or dict(config.apps)
 
     @staticmethod
     def group_apps_by_connection(
         apps_config: dict[str, dict[str, Any]],
     ) -> dict[str, dict[str, dict[str, Any]]]:
-        apps_by_connection: dict[str, dict[str, dict[str, Any]]] = {}
-        for label, app_config in apps_config.items():
-            connection_alias = app_config.get("default_connection", DEFAULT_CONNECTION_NAME)
-            apps_by_connection.setdefault(connection_alias, {})[label] = app_config
-        return apps_by_connection
+        return MigrationRequestParser.group_selected_apps_by_connection(
+            configured_apps=apps_config,
+            selected_apps=tuple(apps_config),
+            default_connection_name=DEFAULT_CONNECTION_NAME,
+        )

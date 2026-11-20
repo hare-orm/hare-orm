@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar
 
 from hare.dialects.clickhouse.functions.aggregates.parametric_aggregate import ParametricAggregate
 from hare.dialects.clickhouse.functions.aggregates.quantile import Quantile
@@ -56,6 +56,6 @@ class Quantiles(ParametricAggregate):
         quantile_field = (
             field_object
             if self.exact
-            else cast("Field[Any]", NumericTyping.get_quotient_output_field(field_object, expression_context.dialect))
+            else NumericTyping.get_quotient_output_field(field_object, expression_context.dialect)
         )
-        return ArrayField(base_field=quantile_field)
+        return ArrayField(base_field=quantile_field)  # type: ignore[arg-type]

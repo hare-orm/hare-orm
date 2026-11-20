@@ -1,15 +1,19 @@
 from __future__ import annotations
 
-import asyncio
-from typing import Any
+from functools import partial
+from typing import TYPE_CHECKING, Any
 
+from hare.contrib.outbox.brokers.kafka_connection import KafkaConnection
+from hare.contrib.outbox.outbox_release import OutboxRelease
 from hare.contrib.outbox.wakeups.constants import (
     DEFAULT_WAKEUP_CHANNEL,
     KAFKA_WAKEUP_RETENTION_MILLISECONDS,
-    WAKEUP_TOPIC_SEPARATOR,
 )
 from hare.contrib.outbox.wakeups.outbox_wakeup import OutboxWakeup
 from hare.contrib.package_checks import PackageChecks
+
+if TYPE_CHECKING:
+    from hare.dialects.base.client.database_client import DatabaseClient
 
 try:
     import aiokafka
@@ -52,52 +56,34 @@ class KafkaWakeup(OutboxWakeup):
         self.topic = topic
         self.create_topic = create_topic
         self.replication_factor = replication_factor
-        self.producer: Any = None
-        self.producer_lock = asyncio.Lock()
-
-    async def get_producer(self) -> Any:
-        """The producer of the signals, started on first use.
-
-        Returns:
-            The ``AIOKafkaProducer``.
-        """
-        async with self.producer_lock:
-            if self.producer is None:
-                producer = self.aiokafka.AIOKafkaProducer(bootstrap_servers=self.bootstrap_servers)
-                try:
-                    await producer.start()
-                except BaseException:
-                    # A producer that didn't start still holds its client - stopped, the next use starts anew.
-                    await producer.stop()
-                    raise
-                self.producer = producer
-            return self.producer
+        self.broker_connection = KafkaConnection(
+            partial(self.aiokafka.AIOKafkaProducer, bootstrap_servers=bootstrap_servers)
+        )
 
     async def signal(self, topics: frozenset[str]) -> None:
-        producer = await self.get_producer()
-        await producer.send_and_wait(self.topic, WAKEUP_TOPIC_SEPARATOR.join(sorted(topics)).encode())
+        producer = await self.broker_connection.get_producer()
+        await producer.send_and_wait(self.topic, self.encode_topics(topics))
 
     async def ensure_topic(self) -> None:
         """Creates the topic of the signals unless it exists."""
         admin = self.aiokafka.admin.AIOKafkaAdminClient(bootstrap_servers=self.bootstrap_servers)
-        try:
-            await admin.start()
-            await admin.create_topics(
-                [
-                    self.aiokafka.admin.NewTopic(
-                        name=self.topic,
-                        num_partitions=1,
-                        replication_factor=self.replication_factor,
-                        topic_configs={"retention.ms": str(KAFKA_WAKEUP_RETENTION_MILLISECONDS)},
-                    )
-                ]
-            )
-        except self.aiokafka.errors.TopicAlreadyExistsError:
-            pass
-        finally:
-            await admin.close()
+        async with OutboxRelease(lambda: admin.close):
+            try:
+                await admin.start()
+                await admin.create_topics(
+                    [
+                        self.aiokafka.admin.NewTopic(
+                            name=self.topic,
+                            num_partitions=1,
+                            replication_factor=self.replication_factor,
+                            topic_configs={"retention.ms": str(KAFKA_WAKEUP_RETENTION_MILLISECONDS)},
+                        )
+                    ]
+                )
+            except self.aiokafka.errors.TopicAlreadyExistsError:
+                pass
 
-    async def listen(self, connection_alias: str) -> None:
+    async def listen(self, connection: str | DatabaseClient) -> None:
         if self.create_topic:
             await self.ensure_topic()
         consumer = self.aiokafka.AIOKafkaConsumer(
@@ -107,17 +93,11 @@ class KafkaWakeup(OutboxWakeup):
             auto_offset_reset="latest",
             enable_auto_commit=False,
         )
-        try:
+        async with OutboxRelease(lambda: consumer.stop):
             await consumer.start()
             async for message in consumer:
-                text = (message.value or b"").decode()
-                self.dispatch(frozenset(topic for topic in text.split(WAKEUP_TOPIC_SEPARATOR) if topic))
-        finally:
-            await consumer.stop()
+                self.dispatch_payload(message.value)
         raise ConnectionError("the Kafka consumer stopped")
 
     async def close(self) -> None:
-        async with self.producer_lock:
-            if self.producer is not None:
-                producer, self.producer = self.producer, None
-                await producer.stop()
+        await self.broker_connection.close()

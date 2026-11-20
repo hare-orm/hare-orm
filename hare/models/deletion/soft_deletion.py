@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import QueryError
 from hare.fields.constants import ROLLBACK_RESTORE_UNSET
 from hare.models.deletion.cascade.related_rows import RelatedRows
 from hare.models.instances.dirty_fields import DirtyFields
-from hare.models.instances.instance_saving import InstanceSaving
-from hare.models.write.instance_writer import InstanceWriter
 from hare.models.write.rollback_restores import RollbackRestores
 from hare.models.write.rules.enums import WriteType
 from hare.time import Timezone
@@ -26,19 +24,22 @@ class SoftDeletion:
 
     @staticmethod
     async def is_already_soft_deleted(obj: Model, connection: DatabaseClient | None) -> bool:
-        """Whether this obj's row is already soft-deleted - read from the database when a
-        ``.only()``/``.defer()`` query left ``Meta.soft_delete_field`` unloaded.
+        """Check the database before skipping a delete as already done.
+
+        A locally stored deletion time may belong to a row that has since been restored.
 
         Args:
             obj: The model obj.
-            connection: Connection to read through when the field isn't loaded.
+            connection: The connection of the delete or its preview.
         """
-        soft_delete_field = obj._meta.soft_delete_field
+        soft_delete_field = obj._binding.soft_delete_field
         if not soft_delete_field:
             return False
-        if hasattr(obj, soft_delete_field):
-            return getattr(obj, soft_delete_field) is not None
-        return obj.pk in await RelatedRows.get_soft_deleted_pks(type(obj), [obj.pk], connection)
+        if getattr(obj, soft_delete_field, ROLLBACK_RESTORE_UNSET) is None:
+            return False
+        return obj.pk in await RelatedRows.get_soft_deleted_pks(
+            obj._binding, [obj.pk], connection, source_model=type(obj)
+        )
 
     @staticmethod
     async def write_soft_delete_field(
@@ -70,15 +71,16 @@ class SoftDeletion:
                 concurrently.
             IntegrityError: The row doesn't exist.
         """
-        soft_delete_field = cast("str", obj._meta.soft_delete_field)
-        had_soft_delete_value = hasattr(obj, soft_delete_field)
-        old_soft_delete_value = getattr(obj, soft_delete_field) if had_soft_delete_value else None
-        SoftDeletion.set_soft_delete_field(obj, value)
-        writer = InstanceWriter(obj.__class__, connection)
-        optimistic_lock_field = obj._meta.optimistic_lock_field
+        from hare.models.instances.instance_saving import InstanceSaving
+        from hare.models.write.instance_writer import InstanceWriter
+
+        soft_delete_field: str = obj._binding.soft_delete_field  # type: ignore[assignment]
+        previous = SoftDeletion._replace_soft_delete_value(obj, soft_delete_field, value)
+        writer = InstanceWriter(obj._binding, connection)
+        optimistic_lock_field = obj._binding.optimistic_lock_field
         old_version = getattr(obj, optimistic_lock_field) if optimistic_lock_field else None
         try:
-            rows = await writer.execute_update(
+            outcome = await writer.execute_update(
                 obj,
                 update_fields=[soft_delete_field],
                 apply_active_tenant_scope_guard=apply_active_tenant_scope_guard,
@@ -86,21 +88,16 @@ class SoftDeletion:
                 write_type=WriteType.SOFT_DELETE,
             )
         except BaseException:
-            SoftDeletion.restore_soft_delete_field(obj, had_soft_delete_value, old_soft_delete_value)
+            SoftDeletion.restore_soft_delete_field(obj, previous)
             raise
-        if rows == 0:
-            SoftDeletion.restore_soft_delete_field(obj, had_soft_delete_value, old_soft_delete_value)
+        if not outcome.may_have_written:
+            SoftDeletion.restore_soft_delete_field(obj, previous)
             if only_live_row:
                 return False
             await InstanceSaving.raise_for_unmatched_update(
                 obj, connection, old_version, f"Can't {action} object that doesn't exist. PK: {obj.pk}"
             )
-        RollbackRestores.register_rollback_restore(
-            obj,
-            connection,
-            soft_delete_field,
-            old_soft_delete_value if had_soft_delete_value else ROLLBACK_RESTORE_UNSET,
-        )
+        RollbackRestores.register_rollback_restore(obj, connection, soft_delete_field, previous)
         DirtyFields.sync_dirty_snapshot_fields(
             obj, writer.get_update_rules([soft_delete_field], WriteType.SOFT_DELETE).get_updated_names(), connection
         )
@@ -147,41 +144,34 @@ class SoftDeletion:
             connection: Connection of the running transaction.
             value: The row's soft-delete value.
         """
-        soft_delete_field = cast("str", obj._meta.soft_delete_field)
-        had_soft_delete_value = hasattr(obj, soft_delete_field)
-        old_soft_delete_value = getattr(obj, soft_delete_field) if had_soft_delete_value else None
-        SoftDeletion.set_soft_delete_field(obj, value)
-        RollbackRestores.register_rollback_restore(
-            obj,
-            connection,
-            soft_delete_field,
-            old_soft_delete_value if had_soft_delete_value else ROLLBACK_RESTORE_UNSET,
-        )
+        soft_delete_field: str = obj._binding.soft_delete_field  # type: ignore[assignment]
+        previous = SoftDeletion._replace_soft_delete_value(obj, soft_delete_field, value)
+        RollbackRestores.register_rollback_restore(obj, connection, soft_delete_field, previous)
         DirtyFields.sync_dirty_snapshot_fields(obj, [soft_delete_field], connection)
+
+    @staticmethod
+    def _replace_soft_delete_value(obj: Model, field_name: str, value: datetime.datetime | None) -> Any:
+        """Set the guarded field and capture its previous value, including an unloaded field."""
+        previous = getattr(obj, field_name, ROLLBACK_RESTORE_UNSET)
+        SoftDeletion.set_soft_delete_field(obj, value)
+        return previous
 
     @staticmethod
     def set_soft_delete_field(obj: Model, value: datetime.datetime | None) -> None:
         _setattr = object.__setattr__
         _setattr(obj, "_allow_soft_delete_write", True)
         try:
-            setattr(obj, cast("str", obj._meta.soft_delete_field), value)
+            setattr(obj, obj._binding.soft_delete_field, value)  # type: ignore[arg-type]
         finally:
             _setattr(obj, "_allow_soft_delete_write", False)
 
     @staticmethod
-    def restore_soft_delete_field(obj: Model, had_value: bool, old_value: datetime.datetime | None) -> None:
-        """Puts ``Meta.soft_delete_field`` back after a failed delete()/restore() - to its previous
-        value, or to not loaded at all.
-
-        Args:
-            obj: The model obj.
-            had_value: Whether the field was loaded before.
-            old_value: Its value before.
-        """
-        if had_value:
-            SoftDeletion.set_soft_delete_field(obj, old_value)
+    def restore_soft_delete_field(obj: Model, previous: Any) -> None:
+        """Restore the previous soft-delete value or unload the field again."""
+        if previous is ROLLBACK_RESTORE_UNSET:
+            object.__delattr__(obj, obj._binding.soft_delete_field)  # type: ignore[arg-type]
         else:
-            object.__delattr__(obj, cast("str", obj._meta.soft_delete_field))
+            SoftDeletion.set_soft_delete_field(obj, previous)
 
     @staticmethod
     def check_soft_delete_write_allowed(obj: Model, key: str) -> None:
@@ -196,8 +186,8 @@ class SoftDeletion:
             QueryError: If ``key`` is the soft-delete field of an already persisted obj.
         """
         if (
-            obj._meta.soft_delete_field is not None
-            and key == obj._meta.soft_delete_field
+            obj._binding.soft_delete_field is not None
+            and key == obj._binding.soft_delete_field
             and getattr(obj, "_saved_in_db", False)
             and not obj._allow_soft_delete_write
         ):

@@ -1,6 +1,16 @@
 from __future__ import annotations
 
-from enum import StrEnum
+from enum import Enum, StrEnum
+
+
+class ParameterDefault(Enum):
+    """A missing HTTP value, kept distinct from an explicitly supplied ``None``.
+
+    Framework adapters use this serializable singleton instead of evaluating a
+    user factory when building signatures. RequestQuery omits it before validation.
+    """
+
+    MISSING = None
 
 
 class DeletedRows(StrEnum):

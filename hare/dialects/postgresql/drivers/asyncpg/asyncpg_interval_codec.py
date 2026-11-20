@@ -15,8 +15,9 @@ from hare.fields.data.temporal.time_delta_field import TimeDeltaField
 class AsyncpgIntervalCodec:
     """The ``interval`` codec every asyncpg connection gets - asyncpg's own conversion, a year of 365
     days and a month of 30, computed without its overflow: asyncpg reads an interval of more than
-    about 5.9 million years as a wrong ``timedelta``. hare's own queries read no interval - a
-    duration is a number of microseconds - so only raw SQL decodes through it."""
+    about 5.9 million years as a wrong ``timedelta``. Both raw SQL and ORM ``IntervalField`` values
+    decode through it. ``TimeDeltaField`` instead stores an integer number of microseconds and
+    does not use this codec for its column values."""
 
     @staticmethod
     def encode(value: datetime.timedelta) -> tuple[int, int, int]:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from hare.ddl.constants import FUNCTION_LANGUAGE_PATTERN
 from hare.ddl.constraints.check_constraint import CheckConstraint
 from hare.ddl.constraints.exclusion_constraint import ExclusionConstraint
 from hare.ddl.enums import ExclusionConstraintUsing, TriggerForEach, TriggerTiming
@@ -13,12 +14,12 @@ from hare.dialects.postgresql.constants import (
     EXCLUSION_RAW_EXPRESSION_RE,
     POSTGRES_CHECK_CONSTRAINT_DEF_RE,
     POSTGRES_FUNCTION_BODY_WRAPPER_RE,
-    POSTGRES_FUNCTIONDEF_RE,
     POSTGRES_TRIGGERDEF_RE,
     POSTGRES_VARCHAR_IN_LIST_ITEM_RE,
     POSTGRES_VARCHAR_IN_LIST_RE,
     POSTGRESQL_DEFAULT_TRIGGER_LANGUAGE,
 )
+from hare.inspectdb.introspection.catalog_sql import CatalogSql
 from hare.inspectdb.introspection.schema_introspector import SchemaIntrospector
 from hare.sql.order import Order
 
@@ -56,7 +57,7 @@ class PostgresqlDefinitions:
         using = match.group("using")
         if using not in set(ExclusionConstraintUsing):
             return None
-        terms = SchemaIntrospector.split_top_level_terms(match.group("expressions"))
+        terms = CatalogSql.split_terms(match.group("expressions"))
         parsed_expressions: list[tuple[str | RawSQLTerm, str]] = []
         for term in terms:
             term_match = EXCLUSION_EXPRESSION_RE.match(term.strip())
@@ -70,15 +71,19 @@ class PostgresqlDefinitions:
         if not parsed_expressions:
             return None
         expressions = tuple(parsed_expressions)
-        include = tuple(
-            column.strip().strip('"') for column in (match.group("include") or "").split(",") if column.strip()
-        )
+        included_columns = []
+        if include_sql := match.group("include"):
+            for term in CatalogSql.split_terms(include_sql):
+                column = CatalogSql.get_identifier(term)
+                if column is None:
+                    return None
+                included_columns.append(column)
         return ExclusionConstraint(
             name=name,
             expressions=expressions,
             using=ExclusionConstraintUsing(using),
             condition=RawSQLTerm(match.group("condition")) if match.group("condition") else None,
-            include=include,
+            include=tuple(included_columns),
             deferrable=match.group("deferrable") is not None,
             initially_deferred=match.group("initially") == "DEFERRED",
         )
@@ -120,16 +125,29 @@ class PostgresqlDefinitions:
         return f"{match.group('column')} IN ({', '.join(f"'{value}'" for value in values)})"
 
     @staticmethod
-    def parse_trigger(name: str, trigger_def: str, function_def: str) -> Trigger | None:
-        """Rebuilds a ``Trigger`` from ``pg_get_triggerdef()``/``pg_get_functiondef()``, a constraint
-        trigger's deferrability included.
+    def parse_trigger(name: str, trigger_def: str, body: str, language: str, library: str | None) -> Trigger | None:
+        """Rebuilds a ``Trigger`` from its canonical definition and catalog function attributes.
+
+        Args:
+            name: The trigger name.
+            trigger_def: PostgreSQL's canonical trigger definition.
+            body: The function source from ``pg_proc.prosrc``.
+            language: The function's catalog language name.
+            library: A shared library from ``pg_proc.probin``, None for a source body.
 
         Returns:
-            The trigger, None when either text has another shape.
+            The trigger, including constraint deferrability, or None for an unsupported trigger
+            definition, an unrepresentable language name, or a C/shared-library function whose
+            symbol is not a source body.
         """
+        if language == "c" or library is not None:
+            return None
+        # Trigger DDL writes LANGUAGE as an unquoted identifier. Keep names requiring quoting
+        # diagnostic rather than folding a case-sensitive catalog name or emitting invalid SQL.
+        if language != language.lower() or not FUNCTION_LANGUAGE_PATTERN.fullmatch(language):
+            return None
         trigger_match = POSTGRES_TRIGGERDEF_RE.match(trigger_def.strip())
-        function_match = POSTGRES_FUNCTIONDEF_RE.search(function_def)
-        if not trigger_match or not function_match:
+        if not trigger_match:
             return None
         if trigger_match.group("from_table") is not None:
             # A constraint trigger's FROM other_table clause has no Trigger field to hold it -
@@ -137,7 +155,7 @@ class PostgresqlDefinitions:
             # faithful (if incomplete) one, so this falls back to an unparsed-trigger comment.
             return None
         when = trigger_match.group("when")
-        raw_body = function_match.group("body").strip()
+        raw_body = body.strip()
         wrapper_match = POSTGRES_FUNCTION_BODY_WRAPPER_RE.match(raw_body)
         body = wrapper_match.group("inner").strip() if wrapper_match else raw_body
         # pg_get_triggerdef() prints NOT DEFERRABLE for a constraint trigger that isn't deferrable.
@@ -153,11 +171,7 @@ class PostgresqlDefinitions:
             timing=TriggerTiming(trigger_match.group("timing").upper()),
             for_each=TriggerForEach(trigger_match.group("for_each").upper()),
             when=RawSQLTerm(when.strip()) if when else None,
-            language=(
-                None
-                if function_match.group("language").lower() == POSTGRESQL_DEFAULT_TRIGGER_LANGUAGE
-                else function_match.group("language").lower()
-            ),
+            language=None if language == POSTGRESQL_DEFAULT_TRIGGER_LANGUAGE else language,
             deferrable=deferrable,
             initially_deferred=initially_deferred,
         )

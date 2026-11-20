@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import argparse
+
+from tests.matrix.matrix_catalog import MatrixCatalog
+
 
 class MatrixPorts:
     """The host port of each matrix server, made of its version's digits - the Makefile's ``*_matrix_up``
@@ -53,3 +57,47 @@ class MatrixPorts:
         """The port of a broker: ``prefix`` (16 Redis, 15 RabbitMQ, 19 Kafka), then its version."""
         major, minor = cls.split_version(broker_version)
         return int(f"{prefix}{major}{minor:02d}")
+
+    @classmethod
+    def get_clickhouse_ports(cls, version: str) -> tuple[int, int, int, int, int]:
+        """Cluster TCP, standalone HTTP and TCP, cluster HTTP, and standalone Keeper."""
+        return (
+            cls.get_clickhouse_port(version, "clickhouse-driver", True),
+            cls.get_clickhouse_port(version, "clickhouse-connect", False),
+            cls.get_clickhouse_port(version, "clickhouse-driver", False),
+            cls.get_clickhouse_port(version, "clickhouse-connect", True),
+            cls.get_clickhouse_keeper_port(version),
+        )
+
+    @classmethod
+    def main(cls) -> None:
+        """Print the host ports needed by Make and CI before test dependencies are installed."""
+        parser = argparse.ArgumentParser(description="Read the host ports of a test matrix profile.")
+        parser.add_argument("--csv", action="store_true", help="Separate multiple ports with commas.")
+        commands = parser.add_subparsers(dest="server", required=True)
+        commands.add_parser("postgres").add_argument("version")
+        pgbouncer = commands.add_parser("pgbouncer")
+        pgbouncer.add_argument("version")
+        pgbouncer.add_argument("postgres_version")
+        commands.add_parser("clickhouse").add_argument("version")
+        broker = commands.add_parser("broker")
+        broker.add_argument("broker", choices=tuple(MatrixCatalog.get("brokers")))
+        broker.add_argument("version")
+        args = parser.parse_args()
+        if args.server == "postgres":
+            ports = (cls.get_postgres_port(args.version),)
+        elif args.server == "pgbouncer":
+            ports = (
+                cls.get_pgbouncer_port(args.version, args.postgres_version),
+                cls.get_postgres_port(args.postgres_version),
+            )
+        elif args.server == "clickhouse":
+            ports = cls.get_clickhouse_ports(args.version)
+        else:
+            prefix = MatrixCatalog.get(f"brokers.{args.broker}.port_prefix")
+            ports = (cls.get_broker_port(prefix, args.version),)
+        print(("," if args.csv else " ").join(str(port) for port in ports))
+
+
+if __name__ == "__main__":
+    MatrixPorts.main()

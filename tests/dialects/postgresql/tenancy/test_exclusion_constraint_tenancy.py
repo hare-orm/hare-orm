@@ -8,7 +8,6 @@ future change can't silently make the two constraint types disagree.
 """
 
 import datetime as dt
-import os
 import sys
 import types
 
@@ -60,7 +59,7 @@ async def test_exclusion_constraint_without_tenant_column_collides_across_tenant
     module.Booking = Booking  # type: ignore[attr-defined]
     sys.modules[MODULE_NAME] = module
 
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:").replace("\\{", "{").replace("\\}", "}")
+    db_url = DatabaseUnderTest.normalize_url_template(DatabaseUnderTest.get_url())
     # The models' range fields exist on PostgreSQL alone - another database refuses them when bound.
     if DatabaseUnderTest.get_dialect(db_url).name != "postgresql":
         pytest.skip("Capability dialect != postgres")
@@ -133,7 +132,7 @@ async def test_exclusion_constraint_with_tenant_column_isolates_tenants():
     module.BookingScoped = BookingScoped  # type: ignore[attr-defined]
     sys.modules[MODULE_NAME] = module
 
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:").replace("\\{", "{").replace("\\}", "}")
+    db_url = DatabaseUnderTest.normalize_url_template(DatabaseUnderTest.get_url())
     # The models' range fields exist on PostgreSQL alone - another database refuses them when bound.
     if DatabaseUnderTest.get_dialect(db_url).name != "postgresql":
         pytest.skip("Capability dialect != postgres")

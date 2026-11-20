@@ -3,6 +3,7 @@ commits - never for a write that was rolled back."""
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import Iterator
 from typing import Any
@@ -63,6 +64,21 @@ async def test_saving_a_row(db_isolated, changes):
         ("Tournament", "update", (1,), {"desc"}),
     ]
     assert {event.connection_alias for event in changes} == {CONNECTION}
+
+
+@requires_features(supports_transactions=True)
+@pytest.mark.asyncio
+async def test_an_observer_cancelled_internally_leaves_commit_and_other_observers_usable(db_isolated):
+    def cancelled(event):
+        raise asyncio.CancelledError
+
+    events = []
+    with Observers.observing(RowsChanged, cancelled), Observers.observing(RowsChanged, events.append):
+        async with Transactions.atomic():
+            await Tournament.objects.bulk_create([Tournament(id=1, name="Spring"), Tournament(id=2, name="Summer")])
+
+    assert described(events) == [("Tournament", "insert", (1, 2), None)]
+    assert await Tournament.objects.order_by("id").values_list("name", flat=True) == ["Spring", "Summer"]
 
 
 @pytest.mark.asyncio
@@ -139,7 +155,9 @@ async def test_many_to_many_add_names_each_row_linked_once(db_isolated, changes)
     await event.participants.add(hares)
     await event.participants.add(hares, foxes, foxes)
     # ON CONFLICT DO NOTHING doesn't tell which pairs it skipped - some added names no row.
-    skips_conflicts = Event._meta.connection.features.supports_unique_constraints
+    skips_conflicts = (
+        HareContext.require_current().apps.get_queryset(Event).get_connection().features.supports_unique_constraints
+    )
     assert described(changes) == [
         ("Event", "update", (1,), {"participants"}),
         ("Team", "update", (1,), {"events"}),
@@ -322,7 +340,9 @@ def listener_of_models() -> Iterator[list[RowsChanged]]:
 @pytest.mark.asyncio
 async def test_a_listener_of_some_models_hears_only_them(db_isolated, listener_of_models):
     listener = Observers.observe(RowsChanged, listener_of_models.append, models=[Event])
-    assert ChangeEvents.is_observed(Event) and not ChangeEvents.is_observed(Tournament)
+    assert ChangeEvents.is_observed(
+        HareContext.require_current().apps.get_binding(Event)
+    ) and not ChangeEvents.is_observed(HareContext.require_current().apps.get_binding(Tournament))
     tournament = await Tournament.objects.create(id=1, name="Spring")
     await Event.objects.create(event_id=1, name="Final", tournament=tournament)
     assert described(listener_of_models) == [("Event", "insert", (1,), None)]
@@ -340,16 +360,22 @@ async def test_a_listener_of_some_models_hears_only_them(db_isolated, listener_o
 
 @pytest.mark.asyncio
 async def test_a_listener_of_a_model_label_hears_that_model(db_isolated, listener_of_models):
-    label = Event._meta.full_name
+    label = HareContext.require_current().apps.get_binding(Event).full_name
     Observers.observe(RowsChanged, listener_of_models.append, models=[label])
-    assert ChangeEvents.is_observed(Event) and not ChangeEvents.is_observed(Tournament)
+    assert ChangeEvents.is_observed(
+        HareContext.require_current().apps.get_binding(Event)
+    ) and not ChangeEvents.is_observed(HareContext.require_current().apps.get_binding(Tournament))
     tournament = await Tournament.objects.create(id=1, name="Spring")
     await Event.objects.create(event_id=1, name="Final", tournament=tournament)
     assert described(listener_of_models) == [("Event", "insert", (1,), None)]
     Observers.unobserve(RowsChanged, listener_of_models.append, models=[label])
     assert listener_of_models.append not in get_rows_changed_observers()
     with pytest.raises(ConfigurationError, match="No model with name 'Missing'"):
-        Observers.observe(RowsChanged, listener_of_models.append, models=[f"{Event._meta.app}.Missing"])
+        HareContext.require_current().observe(
+            RowsChanged,
+            listener_of_models.append,
+            models=[f"{HareContext.require_current().apps.get_binding(Event).app}.Missing"],
+        )
 
 
 @pytest.mark.database_independent
@@ -357,10 +383,13 @@ async def test_a_listener_of_a_model_label_hears_that_model(db_isolated, listene
 async def test_a_label_observed_before_the_models_are_bound_is_looked_up_as_they_are(listener_of_models):
     async with HareContext() as context:
         Observers.observe(RowsChanged, listener_of_models.append, models=["models.Missing"])
+        await context.init(
+            HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": ["tests.shared_models.testmodels"]}),
+            connect=False,
+        )
         with pytest.raises(ConfigurationError, match="No model with name 'Missing'"):
-            await context.init(
-                HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": ["tests.shared_models.testmodels"]})
-            )
+            context.observe(RowsChanged, listener_of_models.append, models=["models.Missing"])
+        assert listener_of_models == []
 
 
 @pytest.mark.asyncio
@@ -411,9 +440,7 @@ async def test_a_bulk_update_failing_in_a_later_batch_reports_only_the_batches_i
     db_isolated, changes, monkeypatch
 ):
     """The failed batch's object and the ones after it, whose rows weren't written, were reported too."""
-    tournaments = [
-        await Tournament.objects.create(id=tournament_id, name=f"t{tournament_id}") for tournament_id in (1, 2, 3, 4)
-    ]
+    objects = [await VersionedThing.objects.create(id=item_id, name=f"t{item_id}") for item_id in (1, 2, 3, 4)]
     changes.clear()
     connection_type = type(Connections.get(CONNECTION))
     execute = connection_type.execute
@@ -428,13 +455,19 @@ async def test_a_bulk_update_failing_in_a_later_batch_reports_only_the_batches_i
         return await execute(self, sql, *args, **kwargs)
 
     monkeypatch.setattr(connection_type, "execute", execute_failing_on_the_third_update)
-    for tournament in tournaments:
-        tournament.name = tournament.name.upper()
+    for obj in objects:
+        obj.name = obj.name.upper()
     with pytest.raises(RuntimeError, match="third batch"):
-        await Tournament.objects.bulk_update(tournaments, fields=["name"], batch_size=1)
+        await VersionedThing.objects.bulk_update(objects, fields=["name"], batch_size=1)
     monkeypatch.undo()
-    assert await Tournament.objects.order_by("id").values_list("name", flat=True) == ["T1", "T2", "t3", "t4"]
-    assert described(changes) == [("Tournament", "update", (1, 2), {"name"})]
+    assert await VersionedThing.objects.order_by("id").values_list("name", "version") == [
+        ("T1", 1),
+        ("T2", 1),
+        ("t3", 0),
+        ("t4", 0),
+    ]
+    assert [obj.version for obj in objects] == [1, 1, 0, 0]
+    assert described(changes) == [("VersionedThing", "update", (1, 2), {"name"})]
 
 
 @pytest.mark.asyncio

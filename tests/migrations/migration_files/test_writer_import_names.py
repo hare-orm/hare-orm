@@ -13,7 +13,10 @@ from hare import fields
 from hare.ddl.constraints import UniqueConstraint
 from hare.ddl.indexes import Index, OrderedIndexKey
 from hare.ddl.raw_sql_term import RawSQLTerm
-from hare.migrations.writer import ImportManager, MigrationWriter
+from hare.declarations.declaration_value_serializer import DeclarationValueSerializer
+from hare.declarations.import_manager import ImportManager
+from hare.migrations.operations import RunSQL
+from hare.migrations.writer import MigrationWriter
 from hare.sql.order import Order
 
 pytestmark = pytest.mark.database_independent
@@ -23,6 +26,39 @@ class Outer:
     class Inner:
         def deconstruct(self):
             return f"{__name__}.Outer.Inner", [], {}
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("explicit_path", [False, True])
+def test_custom_operation_keeps_its_import_path_and_builtin_name(monkeypatch, nested, explicit_path):
+    module = types.ModuleType("custom_migration_operations")
+    source = "from hare.migrations.operations import RunSQL as BaseRunSQL\nclass RunSQL(BaseRunSQL):\n"
+    source += (
+        "    def deconstruct(self):\n        return __name__ + '.RunSQL', [], {'sql': self.sql}\n"
+        if explicit_path
+        else "    pass\n"
+    )
+    exec(compile(source, "custom_operations", "exec", dont_inherit=True), module.__dict__)  # noqa: S102
+    exec(
+        "from hare.migrations.operations import SeparateDatabaseAndState as BaseSeparate\n"
+        "class SeparateDatabaseAndState(BaseSeparate):\n    pass\n",
+        module.__dict__,
+    )  # noqa: S102
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    custom = module.RunSQL(sql=["SELECT 1", "SELECT 2"])
+    declarations = [RunSQL("SELECT 3"), custom]
+    if nested:
+        declarations = [module.SeparateDatabaseAndState(database_operations=declarations)]
+    source = MigrationWriter("0001_custom", "books", declarations).as_string()
+    namespace = {}
+    exec(compile(source, "generated_migration", "exec", dont_inherit=True), namespace)  # noqa: S102
+    restored = namespace["Migration"].operations
+    if nested:
+        assert type(restored[0]) is module.SeparateDatabaseAndState
+        restored = restored[0].database_operations
+    assert type(restored[0]) is RunSQL
+    assert type(restored[1]) is module.RunSQL
+    assert restored[1].sql == custom.sql
 
 
 @pytest.mark.parametrize("reverse", [False, True])
@@ -48,7 +84,7 @@ def test_custom_names_do_not_shadow_other_imports(monkeypatch, name, value, reve
     function = getattr(module, name)
     values = (value, function) if reverse else (function, value)
     imports = ImportManager()
-    expression = MigrationWriter.render_value(values, imports)
+    expression = DeclarationValueSerializer.render_value(values, imports)
     namespace = {}
     exec("\n".join(imports.render()), namespace)  # noqa: S102
     rebuilt = eval(expression, namespace)  # noqa: S307
@@ -67,8 +103,10 @@ def test_grouped_and_regular_imports_share_their_reference(reverse):
     imports = ImportManager()
     key = OrderedIndexKey(RawSQLTerm("id"), Order.DESC)
     renderers = (
-        lambda: MigrationWriter.render_call("hare.ddl.indexes.OrderedIndexKey", [key.term, key.order], {}, imports),
-        lambda: MigrationWriter.render_value(key, imports),
+        lambda: DeclarationValueSerializer.render_call(
+            "hare.ddl.indexes.OrderedIndexKey", [key.term, key.order], {}, imports
+        ),
+        lambda: DeclarationValueSerializer.render_value(key, imports),
     )
     expressions = [renderer() for renderer in (reversed(renderers) if reverse else renderers)]
     namespace = {}
@@ -102,8 +140,8 @@ def test_dotted_modules_keep_their_reference_when_the_root_is_taken(monkeypatch)
 
 def test_deconstructed_nested_class_is_imported_through_its_module():
     imports = ImportManager()
-    expression = MigrationWriter.render_value(Outer.Inner(), imports)
+    expression = DeclarationValueSerializer.render_value(Outer.Inner(), imports)
     namespace = {}
     exec("\n".join(imports.render()), namespace)  # noqa: S102
     assert isinstance(eval(expression, namespace), Outer.Inner)  # noqa: S307
-    assert MigrationWriter.get_callable(f"{__name__}.Outer.Inner") is Outer.Inner
+    assert DeclarationValueSerializer.get_callable(f"{__name__}.Outer.Inner") is Outer.Inner

@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+from string import ascii_lowercase, ascii_uppercase
+
+#: PostgreSQL's scanner whitespace excludes vertical tabs and Unicode separators.
+SEARCH_PATH_WHITESPACE = " \t\n\r\f"
+
+#: Identifier folding for multibyte database encodings leaves non-ASCII letters intact.
+SEARCH_PATH_CASE_TRANSLATION = str.maketrans(ascii_uppercase, ascii_lowercase)
+
 #: libpq ``sslmode`` values, all accepted by asyncpg's ``ssl`` connect argument.
 POSTGRES_SSL_MODES = frozenset({"disable", "allow", "prefer", "require", "verify-ca", "verify-full"})
 

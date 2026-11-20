@@ -11,7 +11,9 @@ class PostgresqlFeatures(Features):
     parts.
 
     Attributes:
+        explain_options: The server's supported ``EXPLAIN`` options, upper-case.
         supports_partitioned_exclusion_constraints: A partitioned table takes an exclusion constraint.
     """
 
     supports_partitioned_exclusion_constraints: bool = False
+    explain_options: frozenset[str] = frozenset()

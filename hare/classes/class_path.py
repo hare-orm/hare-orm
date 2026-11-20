@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import keyword
 import sys
+from types import ModuleType
 from typing import Any
 
 from hare.classes.constants import DECLARATIONS_MODULE_NAME
@@ -38,13 +40,30 @@ class ClassPath:
         return module_name
 
     @staticmethod
-    def get(class_: type) -> str:
-        """The dotted path of a class.
+    def is_importable_name(name: str) -> bool:
+        """Whether the dotted name can be written in a Python import."""
+        return all(part.isidentifier() and not keyword.iskeyword(part) for part in name.split("."))
+
+    @staticmethod
+    def has_module_identity(module: ModuleType | None, named: type) -> bool:
+        """Whether the module holds this object at its qualified name."""
+        found: Any = module
+        for part in named.__qualname__.split("."):
+            found = getattr(found, part, None)
+            if found is None:
+                return False
+        return found is named
+
+    @staticmethod
+    def get(class_: Any) -> str:
+        """The dotted path of a class or named function.
 
         Args:
-            class_: The class.
+            class_: The class or function.
 
         Returns:
             ``module.Name``.
         """
-        return f"{ClassPath.get_module_name(class_)}.{class_.__qualname__}"
+        module_name = ClassPath.get_module_name(class_)
+        name = class_.__qualname__ if module_name == class_.__module__ else class_.__name__
+        return f"{module_name}.{name}"

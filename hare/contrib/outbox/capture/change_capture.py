@@ -4,7 +4,7 @@ import copy
 import hashlib
 import inspect
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Self, cast
+from typing import TYPE_CHECKING, Any, Self
 
 from hare.contrib.outbox.capture.change_extension import ChangeExtension
 from hare.contrib.outbox.capture.constants import (
@@ -23,7 +23,6 @@ from hare.contrib.outbox.outbox_event import OutboxEvent
 from hare.exceptions import ConfigurationError, ValidationError
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
-from hare.fields.relations.fields.one_to_one_field_instance import OneToOneFieldInstance
 from hare.instrumentation.capture.change_sink import ChangeSink
 from hare.instrumentation.change_events import ChangeEvents
 from hare.instrumentation.enums import ChangePayload, RowOperation
@@ -34,6 +33,7 @@ if TYPE_CHECKING:
     from hare.fields.relations.swappable_model_reference import SwappableModelReference
     from hare.instrumentation.capture.captured_change import CapturedChange
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 #: A topic or ordering key: a template, or a function of the change.
 KeyDeclaration = str | Callable[["CapturedChange"], str | None]
@@ -105,8 +105,8 @@ class ChangeCapture(ChangeSink):
         if extend is not None and extend_many is not None:
             raise ConfigurationError("ChangeCapture takes extend or extend_many, not both")
         #: The outbox model as it was given - a label is found as the registry links the models.
+        self._outbox_binding: ModelBinding | None = None
         self.outbox_reference = outbox
-        self._outbox: type[OutboxEvent] | None = outbox if isinstance(outbox, type) else None
         self.operations: frozenset[RowOperation] = self.get_checked_option("operations", operations)
         self.payload: ChangePayload = self.get_checked_option("payload", payload)
         self.fields: tuple[str, ...] | None = self.get_checked_option("fields", fields)
@@ -181,29 +181,21 @@ class ChangeCapture(ChangeSink):
 
     @property
     def outbox(self) -> type[OutboxEvent]:
-        """The outbox model - a label given found in the registry, else in the current context.
-
-        Raises:
-            ConfigurationError: The label names no model.
-        """
-        if self._outbox is None:
-            # Local import: the context imports the models, which import this module.
-            from hare.core.hare_context import HareContext
-
-            self._outbox = cast("type[OutboxEvent]", HareContext.require_current().get_model(self.outbox_reference))
-        return self._outbox
+        """The configured target class, prepared by the same registry as the captured model."""
+        if self._outbox_binding is None:
+            raise ConfigurationError("ChangeCapture must be linked to a model graph before use")
+        return self._outbox_binding._model  # type: ignore[return-value]
 
     def link_models(self, apps: Apps) -> None:
-        if not isinstance(self.outbox_reference, type):
-            self._outbox = cast("type[OutboxEvent]", apps.get_model(self.outbox_reference))
+        self._outbox_binding = apps.get_binding(self.outbox_reference)
 
-    def get_field_names(self, model: type[Model]) -> tuple[str, ...]:
-        meta = model._meta
-        if self.outbox._meta.abstract:
+    def get_field_names(self, binding: ModelBinding) -> tuple[str, ...]:
+        model = binding._model
+        if self._outbox_binding.abstract:  # type: ignore[union-attr]
             raise ConfigurationError(f"{model.__name__}: ChangeCapture outbox {self.outbox.__name__} is abstract")
-        if model is self.outbox or self.outbox._meta.change_capture is not None:
+        if model is self.outbox or self._outbox_binding.change_capture is not None:  # type: ignore[union-attr]
             raise ConfigurationError(f"{model.__name__}: an outbox model can't capture changes itself")
-        if self.payload is ChangePayload.BEFORE_AND_AFTER and not meta.track_dirty_fields:
+        if self.payload is ChangePayload.BEFORE_AND_AFTER and not binding.track_dirty_fields:
             raise ConfigurationError(
                 f"{model.__name__}: ChangeCapture(payload=BEFORE_AND_AFTER) needs Meta.track_dirty_fields = True - "
                 "a saved instance's values before the write come from its snapshot"
@@ -217,27 +209,27 @@ class ChangeCapture(ChangeSink):
                         f"{model.__name__}: ChangeCapture {template_name} {template!r} isn't a template of the "
                         f"known names: {error}"
                     ) from None
-        projection = meta.fields_db_projection
+        projection = binding.fields_db_projection
         if self.fields is not None:
             names: list[str] = []
             for name in self.fields:
-                names.extend(self.get_source_names(model, name))
+                names.extend(self.get_source_names(binding, name))
             return tuple(dict.fromkeys(names))
-        excluded = {source_name for name in self.exclude for source_name in self.get_source_names(model, name)}
+        excluded = {source_name for name in self.exclude for source_name in self.get_source_names(binding, name)}
         return tuple(
             name
             for name in projection
             if name not in excluded
-            and not meta.fields_map[name].sensitive
-            and not isinstance(meta.fields_map[name], EncryptedFieldBase)
+            and not binding.fields_map[name].sensitive
+            and not isinstance(binding.fields_map[name], EncryptedFieldBase)
         )
 
     @staticmethod
-    def get_source_names(model: type[Model], name: str) -> tuple[str, ...]:
+    def get_source_names(binding: ModelBinding, name: str) -> tuple[str, ...]:
         """The fields written in the model's table a named field is held by.
 
         Args:
-            model: The model.
+            binding: The model.
             name: A field written in its table, or a forward relation.
 
         Returns:
@@ -246,11 +238,11 @@ class ChangeCapture(ChangeSink):
         Raises:
             ConfigurationError: The name is neither.
         """
-        meta = model._meta
-        field = meta.fields_map.get(name)
-        if isinstance(field, (ForeignKeyFieldInstance, OneToOneFieldInstance)):
-            return tuple(field.source_fields)
-        if name in meta.fields_db_projection:
+        model = binding._model
+        field = binding.fields_map.get(name)
+        if isinstance(field, ForeignKeyFieldInstance):
+            return field.source_fields
+        if name in binding.fields_db_projection:
             return (name,)
         raise ConfigurationError(
             f"{model.__name__}: ChangeCapture names {name!r} - not a field written in the model's table"
@@ -260,33 +252,33 @@ class ChangeCapture(ChangeSink):
         return (self.outbox,)
 
     @staticmethod
-    def get_template_values(model: type[Model], change: CapturedChange) -> dict[str, Any]:
+    def get_template_values(binding: ModelBinding, change: CapturedChange) -> dict[str, Any]:
         """The values a topic or ordering key template reads.
 
         Args:
-            model: The model.
+            binding: The model.
             change: The change.
 
         Returns:
             The values by name.
         """
-        meta = model._meta
+        model = binding._model
         pk = change.pk
         return {
-            "app": (meta.app or "").lower(),
+            "app": (binding.app or "").lower(),
             "model": model.__name__.lower(),
-            "table": meta.db_table,
+            "table": binding.db_table,
             "operation": CHANGE_OPERATION_NAMES[change.operation],
-            "label": f"{meta.app}.{model.__name__}",
+            "label": f"{binding.app}.{model.__name__}",
             "pk": ":".join(str(part) for part in pk) if isinstance(pk, tuple) else str(pk),
         }
 
-    def get_key(self, declaration: KeyDeclaration | None, model: type[Model], change: CapturedChange) -> str | None:
+    def get_key(self, declaration: KeyDeclaration | None, binding: ModelBinding, change: CapturedChange) -> str | None:
         """A topic or ordering key of a change.
 
         Args:
             declaration: The template or function.
-            model: The model.
+            binding: The model.
             change: The change.
 
         Returns:
@@ -295,7 +287,7 @@ class ChangeCapture(ChangeSink):
         if declaration is None:
             return None
         if isinstance(declaration, str):
-            return self.get_shortened_key(declaration.format(**self.get_template_values(model, change)))
+            return self.get_shortened_key(declaration.format(**self.get_template_values(binding, change)))
         return declaration(change)
 
     @staticmethod
@@ -315,38 +307,38 @@ class ChangeCapture(ChangeSink):
         digest = hashlib.sha256(key.encode()).hexdigest()
         return f"{key[: OUTBOX_KEY_MAX_LENGTH - len(digest) - 1]}#{digest}"
 
-    def get_envelope(self, model: type[Model], change: CapturedChange) -> dict[str, Any]:
+    def get_envelope(self, binding: ModelBinding, change: CapturedChange) -> dict[str, Any]:
         """The payload of a change's event.
 
         Args:
-            model: The model.
+            binding: The model.
             change: The change.
 
         Returns:
             The envelope.
         """
-        meta = model._meta
+        model = binding._model
         pk = change.pk
         envelope: dict[str, Any] = {
-            "model": f"{meta.app}.{model.__name__}",
+            "model": f"{binding.app}.{model.__name__}",
             "operation": CHANGE_OPERATION_NAMES[change.operation],
-            "pk": dict(zip(meta.primary_key_attribute_names, pk, strict=True)) if isinstance(pk, tuple) else pk,
+            "pk": dict(zip(binding.primary_key_attribute_names, pk, strict=True)) if isinstance(pk, tuple) else pk,
             "changed": list(change.changed) if change.changed is not None else None,
         }
         if self.payload is not ChangePayload.KEYS:
-            envelope["before"] = ChangeCapture.get_row_values(model, change.before)
-            envelope["after"] = ChangeCapture.get_row_values(model, change.after)
+            envelope["before"] = ChangeCapture.get_row_values(binding, change.before)
+            envelope["after"] = ChangeCapture.get_row_values(binding, change.after)
         envelope["occurred_at"] = change.occurred_at
         return envelope
 
     @staticmethod
-    def get_row_values(model: type[Model], values: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    def get_row_values(binding: ModelBinding, values: Mapping[str, Any] | None) -> dict[str, Any] | None:
         """A captured row's values as its event holds them - each in its field's JSON form
         (``Field.get_json_value()``): a geometry as GeoJSON, a range as its mapping, a float JSON has no
         number for as its text, at any depth of a container.
 
         Args:
-            model: The row's model.
+            binding: The row's model.
             values: The row's values by field name, None when not captured.
 
         Returns:
@@ -357,15 +349,14 @@ class ChangeCapture(ChangeSink):
         """
         if values is None:
             return None
-        fields_map = model._meta.fields_map
+        fields_map = binding.fields_map
         return {name: fields_map[name].get_json_value(value) for name, value in values.items()}
 
-    async def get_extensions(self, model: type[Model], changes: list[CapturedChange]) -> list[ChangeExtension | None]:
+    async def get_extensions(self, changes: list[CapturedChange]) -> list[ChangeExtension | None]:
         """What ``extend`` - once per change - or ``extend_many`` - once per write - adds to the changes'
         events.
 
         Args:
-            model: The model.
             changes: The changes of one write statement.
 
         Returns:
@@ -376,7 +367,7 @@ class ChangeCapture(ChangeSink):
                 extend_many gives another number of extensions than changes.
         """
         if self.extend_many is None:
-            return [await self.get_extension(model, change) for change in changes]
+            return [await self.get_extension(change) for change in changes]
         extensions = self.extend_many(changes)
         if inspect.isawaitable(extensions):
             extensions = await extensions
@@ -385,11 +376,10 @@ class ChangeCapture(ChangeSink):
             raise ValidationError(f"extend_many gave {len(extension_list)} extensions for {len(changes)} changes")
         return [ChangeCapture.check_extension(extension) for extension in extension_list]
 
-    async def get_extension(self, model: type[Model], change: CapturedChange) -> ChangeExtension | None:
+    async def get_extension(self, change: CapturedChange) -> ChangeExtension | None:
         """What ``extend`` adds to a change's event.
 
         Args:
-            model: The model.
             change: The change.
 
         Returns:
@@ -432,10 +422,11 @@ class ChangeCapture(ChangeSink):
             raise ValidationError(f"ChangeExtension.extra_field_values can't set {', '.join(managed_names)}")
         return extension
 
-    def check_connection(self, connection: DatabaseClient) -> None:
+    def check_connection(self, binding: ModelBinding, connection: DatabaseClient) -> None:
         """Refuses a write whose events the outbox can't take on its connection - before the write runs.
 
         Args:
+            binding: The binding of the model whose changes will be published.
             connection: The connection of the write.
 
         Raises:
@@ -444,16 +435,16 @@ class ChangeCapture(ChangeSink):
         """
         outbox = self.outbox
         outbox.raise_if_wakeup_unsupported(connection)
-        if outbox._meta.checks_tenant_client:
+        if self._outbox_binding.checks_tenant_client:  # type: ignore[union-attr]
             # The events go on the connection of the captured write - checked as the outbox's own query is.
-            outbox._meta.check_tenant_client(connection)
+            self._outbox_binding.check_tenant_client(connection)  # type: ignore[union-attr]
 
-    async def write(self, connection: DatabaseClient, model: type[Model], changes: list[CapturedChange]) -> None:
+    async def write(self, connection: DatabaseClient, binding: ModelBinding, changes: list[CapturedChange]) -> None:
         """Writes an outbox event of each change, in the transaction of the write.
 
         Args:
             connection: The connection of the write.
-            model: The model whose rows changed.
+            binding: The model whose rows changed.
             changes: The changes.
 
         Raises:
@@ -462,11 +453,16 @@ class ChangeCapture(ChangeSink):
                 empty text.
         """
         outbox = self.outbox
-        tenant_field = outbox._meta.tenant_field
+        outbox_binding = self._outbox_binding
+        from hare.core.hare_context import HareContext
+        from hare.models.instances.instance_initialization import InstanceInitialization
+
+        context = HareContext.require_current()
+        tenant_field = outbox_binding.tenant_field  # type: ignore[union-attr]
         events: list[OutboxEvent] = []
-        extensions = await self.get_extensions(model, changes)
+        extensions = await self.get_extensions(changes)
         for change, extension in zip(changes, extensions, strict=True):
-            payload = self.get_envelope(model, change)
+            payload = self.get_envelope(binding, change)
             headers: dict[str, Any] = {}
             field_values: dict[str, Any] = {}
             if extension is not None:
@@ -475,15 +471,24 @@ class ChangeCapture(ChangeSink):
                 field_values.update(extension.extra_field_values or {})
             if tenant_field and tenant_field not in field_values and change.tenant is not None:
                 field_values[tenant_field] = change.tenant
-            topic = self.get_key(self.topic, model, change)
-            ordering_key = self.get_key(self.ordering_key, model, change)
+            topic = self.get_key(self.topic, binding, change)
+            ordering_key = self.get_key(self.ordering_key, binding, change)
             OutboxEvent.validate_keys(topic, None, ordering_key)
             events.append(
-                outbox(topic=topic, payload=payload, ordering_key=ordering_key, headers=headers, **field_values)
+                InstanceInitialization.new(  # type: ignore[arg-type]
+                    self._outbox_binding,  # type: ignore[arg-type]
+                    context,
+                    topic=topic,
+                    payload=payload,
+                    ordering_key=ordering_key,
+                    headers=headers,
+                    **field_values,
+                )
             )
         # Each event carries the tenant of its row - a write of rows of several tenants (a cascade, an
         # all_tenants() update) writes them all.
-        manager = outbox.objects.all_tenants() if tenant_field else outbox.objects.all()
+        manager = outbox_binding.manager.get_bound_queryset(self._outbox_binding, context)  # type: ignore[arg-type, union-attr]
+        manager = manager.all_tenants() if tenant_field else manager.all()
         # The events are rows of the outbox's model, not of the captured write - reported of their own,
         # a delete reported as a whole too.
         with ChangeEvents.reporting_separately():

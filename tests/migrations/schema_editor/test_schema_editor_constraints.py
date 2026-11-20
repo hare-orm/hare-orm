@@ -2,44 +2,23 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, Mock
+
 import pytest
 
 from hare import fields
 from hare.ddl.constraints import CheckConstraint, ExclusionConstraint, UniqueConstraint
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-from hare.dialects.base.schema.tables.table_comments import TableComments
 from hare.dialects.postgresql.schema.postgresql_schema_editor import PostgresqlSchemaEditor
 from hare.dialects.sqlite.schema.sqlite_schema_editor import SqliteSchemaEditor
 from hare.exceptions import ConfigurationError, UnSupportedError
-from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
-from tests.utils.fake_client import FakeClient, MockIntrospectionClient
+from tests.utils.fake_client import FakeClient
+from tests.utils.model_bindings import ModelBindings
+from tests.utils.schema_editor import TestSchemaEditor
 
 pytestmark = pytest.mark.database_independent
-
-
-class TestSchemaEditorTableComments(TableComments):
-    __test__ = False
-
-    def get_table_comment_sql(self, table: str, comment: str) -> str:
-        return ""
-
-    def get_column_comment_sql(self, table: str, column: str, comment: str) -> str:
-        return ""
-
-
-class TestSchemaEditor(BaseSchemaEditor):
-    __test__ = False
-
-    table_comments_class = TestSchemaEditorTableComments
-
-
-def init_apps(*models: type[Model]) -> None:
-    apps = StateApps()
-    for model in models:
-        apps.register_model("models", model)
-    apps.init_relations()
 
 
 # ---------------------------------------------------------------------------
@@ -66,7 +45,7 @@ class Membership(Model):
         app = "models"
 
 
-init_apps(Team, Membership)
+relation_apps = ModelBindings.prepare(Team, Membership)
 
 
 @pytest.mark.asyncio
@@ -86,7 +65,7 @@ async def test_remove_constraint_drops_the_name_hare_gave_it(
     editor_cls: type[BaseSchemaEditor], dialect: str, expected_sql: str
 ) -> None:
     """remove_constraint drops the constraint under its generated name - the catalog is never read,
-    so a name the database holds otherwise changes nothing."""
+    so an attempted catalog query fails instead of supplying a guessed constraint name."""
 
     class Widget(Model):
         id = fields.IntField(primary_key=True)
@@ -96,10 +75,12 @@ async def test_remove_constraint_drops_the_name_hare_gave_it(
             table = "widget"
             app = "models"
 
-    client = MockIntrospectionClient(dialect, constraint_names=[{"conname": "legacy_auto_name"}])
+    prepared_apps = ModelBindings.prepare(Widget)
+
+    client = FakeClient(dialect)
     editor = editor_cls(client)
 
-    await editor.remove_constraint(Widget, UniqueConstraint(fields=("email",)))
+    await editor.remove_constraint(prepared_apps.get_binding(Widget), UniqueConstraint(fields=("email",)))
 
     assert client.executed == [expected_sql]
 
@@ -147,7 +128,7 @@ async def test_add_constraint_resolves_fk_fields(
     editor = editor_cls(client)
 
     constraint = UniqueConstraint(fields=("team", "user_email"))
-    await editor.add_constraint(Membership, constraint)
+    await editor.add_constraint(relation_apps.get_binding(Membership), constraint)
 
     assert len(client.executed) == 1
     assert client.executed[0] == expected_sql
@@ -160,7 +141,7 @@ async def test_add_constraint_idempotent_for_resolved_names() -> None:
     editor = TestSchemaEditor(client)
 
     constraint = UniqueConstraint(fields=("team_id", "user_email"))
-    await editor.add_constraint(Membership, constraint)
+    await editor.add_constraint(relation_apps.get_binding(Membership), constraint)
 
     assert len(client.executed) == 1
     assert client.executed[0] == (
@@ -175,7 +156,9 @@ async def test_remove_constraint_resolves_fk_fields() -> None:
     client = FakeClient("postgresql")
     editor = PostgresqlSchemaEditor(client)
 
-    await editor.remove_constraint(Membership, UniqueConstraint(fields=("team", "user_email")))
+    await editor.remove_constraint(
+        relation_apps.get_binding(Membership), UniqueConstraint(fields=("team", "user_email"))
+    )
 
     assert client.executed == ['ALTER TABLE "membership" DROP CONSTRAINT "uid_membership_team_id_01af112d7f49"']
 
@@ -188,7 +171,7 @@ async def test_rename_constraint_resolves_fk_fields() -> None:
 
     old_constraint = UniqueConstraint(fields=("team", "user_email"), name="old_name")
     new_constraint = UniqueConstraint(fields=("team", "user_email"), name="new_name")
-    await editor.rename_constraint(Membership, old_constraint, new_constraint)
+    await editor.rename_constraint(relation_apps.get_binding(Membership), old_constraint, new_constraint)
 
     assert len(client.executed) == 1
     assert client.executed[0] == 'ALTER TABLE "membership" RENAME CONSTRAINT "old_name" TO "new_name"'
@@ -234,11 +217,13 @@ async def test_add_check_constraint_generates_sql(
             table = "product"
             app = "models"
 
+    prepared_apps = ModelBindings.prepare(Product)
+
     client = FakeClient(**client_kwargs)
     editor = editor_cls(client)
 
     constraint = CheckConstraint(check=RawSQLTerm("price > 0"), name="ck_price")
-    await editor.add_constraint(Product, constraint)
+    await editor.add_constraint(prepared_apps.get_binding(Product), constraint)
 
     assert len(client.executed) == 1
     assert client.executed[0] == expected_sql
@@ -256,18 +241,20 @@ async def test_remove_check_constraint_generates_sql() -> None:
             table = "product"
             app = "models"
 
+    prepared_apps = ModelBindings.prepare(Product)
+
     client = FakeClient("sql")
     editor = TestSchemaEditor(client)
 
     constraint = CheckConstraint(check=RawSQLTerm("price > 0"), name="ck_price")
-    await editor.remove_constraint(Product, constraint)
+    await editor.remove_constraint(prepared_apps.get_binding(Product), constraint)
 
     assert len(client.executed) == 1
     assert client.executed[0] == 'ALTER TABLE "product" DROP CONSTRAINT "ck_price"'
 
 
 @pytest.mark.asyncio
-async def test_sqlite_add_check_constraint_rebuilds_table() -> None:
+async def test_sqlite_add_check_constraint_rebuilds_table(monkeypatch) -> None:
     """SQLite adds CHECK constraints by rebuilding the table."""
 
     class Product(Model):
@@ -279,34 +266,45 @@ async def test_sqlite_add_check_constraint_rebuilds_table() -> None:
             app = "models"
             constraints = [CheckConstraint(check=RawSQLTerm("price > 0"), name="ck_price")]
 
+    prepared_apps = ModelBindings.prepare(Product)
+
     client = FakeClient("sqlite")
     editor = SqliteSchemaEditor(client)
+    statements = Mock()
+    for method in ("execute", "execute_script"):
+        observer = AsyncMock(wraps=getattr(client, method))
+        statements.attach_mock(observer, method)
+        monkeypatch.setattr(client, method, observer)
 
     constraint = CheckConstraint(check=RawSQLTerm("price > 0"), name="ck_price")
-    await editor.add_constraint(Product, constraint)
+    await editor.add_constraint(prepared_apps.get_binding(Product), constraint)
 
-    assert len(client.executed) == 8
-    assert client.executed[0] == (
-        'CREATE TABLE "new__product" ('
+    assert len(client.executed) == 6
+    staging_table = client.executed[0].split('"')[1]
+    assert staging_table.startswith("new__product ")
+    assert " ".join(client.executed[0].split()) == (
+        f'CREATE TABLE "{staging_table}" ( '
         '"id" INTEGER CONSTRAINT "pk_product_id_e67c4fd63155" PRIMARY KEY AUTOINCREMENT NOT NULL, '
         '"price" REAL NOT NULL, '
-        'CONSTRAINT "ck_price" CHECK (price > 0))'
+        'CONSTRAINT "ck_price" CHECK (price > 0) );'
     )
-    assert client.executed[1] == (
-        'INSERT INTO "new__product" ("id", "price")\n'
-        '                SELECT "id", "price"\n'
-        '                FROM "product"'
+    assert " ".join(client.executed[1].split()) == (
+        f'INSERT INTO "{staging_table}" ("id", "price") SELECT "id", "price" FROM "product"'
     )
     # The AUTOINCREMENT counter goes on from the replaced table's.
-    assert client.executed[2].startswith("UPDATE sqlite_sequence SET seq")
-    assert client.executed[3].startswith("INSERT INTO sqlite_sequence")
+    assert client.executed[2].startswith('UPDATE "sqlite_sequence" SET seq')
+    assert client.executed[3].startswith('INSERT INTO "sqlite_sequence"')
     assert client.executed[4] == 'DROP TABLE "product"'
     # A view naming the table would fail the modern rename while the table is briefly missing.
-    assert client.executed[5:] == [
-        "PRAGMA legacy_alter_table = ON",
-        'ALTER TABLE "new__product" RENAME TO "product"',
-        "PRAGMA legacy_alter_table = OFF",
+    assert client.executed[5] == f'ALTER TABLE "{staging_table}" RENAME TO "product"'
+    assert [(method, arguments[0]) for method, arguments, _ in statements.mock_calls] == [
+        *(("execute_script", sql) for sql in client.executed[:5]),
+        ("execute", "PRAGMA legacy_alter_table"),
+        ("execute", "PRAGMA legacy_alter_table = ON"),
+        ("execute_script", client.executed[5]),
+        ("execute", "PRAGMA legacy_alter_table = 0"),
     ]
+    assert client.legacy_alter_table == 0
 
 
 # ---------------------------------------------------------------------------
@@ -327,11 +325,13 @@ async def test_postgres_add_constraint_with_condition_generates_partial_index() 
             table = "user"
             app = "models"
 
+    prepared_apps = ModelBindings.prepare(User)
+
     client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
 
     constraint = UniqueConstraint(fields=("email",), name="uq_active_email", condition=RawSQLTerm("is_active = true"))
-    await editor.add_constraint(User, constraint)
+    await editor.add_constraint(prepared_apps.get_binding(User), constraint)
 
     assert len(client.executed) == 1
     assert client.executed[0] == 'CREATE UNIQUE INDEX "uq_active_email" ON "user" ("email") WHERE is_active = true;'
@@ -353,12 +353,14 @@ async def test_postgres_rename_constraint_with_condition_renames_the_index() -> 
             table = "user"
             app = "models"
 
+    prepared_apps = ModelBindings.prepare(User)
+
     client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
 
     old_constraint = UniqueConstraint(fields=("email",), name="uq_old", condition=RawSQLTerm("is_active = true"))
     new_constraint = UniqueConstraint(fields=("email",), name="uq_new", condition=RawSQLTerm("is_active = true"))
-    await editor.rename_constraint(User, old_constraint, new_constraint)
+    await editor.rename_constraint(prepared_apps.get_binding(User), old_constraint, new_constraint)
 
     assert len(client.executed) == 1
     assert client.executed[0] == 'ALTER INDEX "uq_old" RENAME TO "uq_new"'
@@ -379,12 +381,14 @@ async def test_base_add_constraint_with_condition_raises() -> None:
             table = "user"
             app = "models"
 
+    prepared_apps = ModelBindings.prepare(User)
+
     client = FakeClient("sql")
     editor = TestSchemaEditor(client)
 
     constraint = UniqueConstraint(fields=("email",), name="uq_active_email", condition=RawSQLTerm("is_active = true"))
     with pytest.raises(UnSupportedError, match="Partial unique indexes"):
-        await editor.add_constraint(User, constraint)
+        await editor.add_constraint(prepared_apps.get_binding(User), constraint)
     assert len(client.executed) == 0
 
 
@@ -402,7 +406,7 @@ def _employee_model() -> type[Model]:
             table = "employee"
             app = "models"
 
-    return Employee
+    return ModelBindings.prepare(Employee).get_binding(Employee)
 
 
 @pytest.mark.asyncio
@@ -484,6 +488,8 @@ async def test_postgres_add_constraint_deferrable_with_condition_raises() -> Non
             table = "user"
             app = "models"
 
+    prepared_apps = ModelBindings.prepare(User)
+
     client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
 
@@ -494,7 +500,7 @@ async def test_postgres_add_constraint_deferrable_with_condition_raises() -> Non
         deferrable=True,
     )
     with pytest.raises(ConfigurationError, match="deferrable"):
-        await editor.add_constraint(User, constraint)
+        await editor.add_constraint(prepared_apps.get_binding(User), constraint)
     assert len(client.executed) == 0
 
 
@@ -512,7 +518,7 @@ def _order_model() -> type[Model]:
             table = "order"
             app = "models"
 
-    return Order
+    return ModelBindings.prepare(Order).get_binding(Order)
 
 
 @pytest.mark.parametrize(

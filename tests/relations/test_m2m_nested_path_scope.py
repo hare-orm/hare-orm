@@ -5,6 +5,7 @@ matches ``__isnull=True`` nor adds a NULL row to values()/order_by()/annotate().
 import pytest
 import pytest_asyncio
 
+from hare.core.hare_context import HareContext
 from hare.models.tenancy.tenancy import Tenancy
 from hare.query.expressions import F
 from hare.query.functions import Count
@@ -127,8 +128,8 @@ async def wiki_pages(db) -> None:
     with Tenancy.scope(2):
         await TenantWikiPage.objects.create(id=2, title="other-home", company_id=2)
         await TenantWikiPage.objects.create(id=4, title="other-faq", company_id=2)
-    see_also_field = TenantWikiPage._meta.fields_map["see_also"]
-    connection = TenantWikiPage._meta.connection
+    see_also_field = HareContext.require_current().apps.get_binding(TenantWikiPage).fields_map["see_also"]
+    connection = HareContext.require_current().apps.get_queryset(TenantWikiPage).get_connection()
     for page_id, see_also_id in ((1, 2), (1, 3), (3, 5), (4, 1)):
         await connection.execute(
             f'INSERT INTO "{see_also_field.through}" '
@@ -174,10 +175,15 @@ async def test_nested_m2m_ignores_links_to_manager_hidden_rows(db):
     active_tag = await ActiveAuthorTag.objects.create(name="active", is_active=True)
     inactive_tag = await ActiveAuthorTag.objects.create(name="inactive", is_active=False)
     await book.tags.add(active_tag)
-    tags_field = TenantActiveAuthorBook._meta.fields_map["tags"]
-    await TenantActiveAuthorBook._meta.connection.execute(
-        f'INSERT INTO "{tags_field.through}" ("{tags_field.backward_key}", "{tags_field.forward_key}") '
-        f"VALUES ({book.pk}, {inactive_tag.pk})"
+    tags_field = HareContext.require_current().apps.get_binding(TenantActiveAuthorBook).fields_map["tags"]
+    await (
+        HareContext.require_current()
+        .apps.get_queryset(TenantActiveAuthorBook)
+        .get_connection()
+        .execute(
+            f'INSERT INTO "{tags_field.through}" ("{tags_field.backward_key}", "{tags_field.forward_key}") '
+            f"VALUES ({book.pk}, {inactive_tag.pk})"
+        )
     )
     assert await TenantActiveAuthorBook.objects.filter(tags__id__isnull=True).count() == 0
     assert await TenantActiveAuthorBook.objects.all().values_list("tags__name", flat=True) == ["active"]

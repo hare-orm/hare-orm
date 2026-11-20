@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
+from hare.contrib.outbox.brokers.kafka_connection import KafkaConnection
+from hare.contrib.outbox.deliveries.delivery_result import DeliveryResult
 from hare.contrib.outbox.deliveries.outbox_delivery import OutboxDelivery
 from hare.contrib.package_checks import PackageChecks
 from hare.exceptions import ConfigurationError
@@ -42,29 +45,10 @@ class KafkaDelivery(OutboxDelivery):
         PackageChecks.require_package(self.aiokafka, "KafkaDelivery", "aiokafka", "kafka")
         if (bootstrap_servers is None) == (producer is None):
             raise ConfigurationError("KafkaDelivery takes either bootstrap_servers or producer")
-        self.bootstrap_servers = bootstrap_servers
         self.topic = topic
-        self.owns_producer = producer is None
-        self.producer: Any = producer
-        self.producer_lock = asyncio.Lock()
-
-    async def get_producer(self) -> Any:
-        """The producer, started on first use.
-
-        Returns:
-            The ``AIOKafkaProducer``.
-        """
-        async with self.producer_lock:
-            if self.producer is None:
-                producer = self.aiokafka.AIOKafkaProducer(bootstrap_servers=self.bootstrap_servers, acks="all")
-                try:
-                    await producer.start()
-                except BaseException:
-                    # A producer that didn't start still holds its client - stopped, the next use starts anew.
-                    await producer.stop()
-                    raise
-                self.producer = producer
-            return self.producer
+        self.broker_connection = KafkaConnection(
+            partial(self.aiokafka.AIOKafkaProducer, bootstrap_servers=bootstrap_servers, acks="all"), producer
+        )
 
     async def send(self, producer: Any, event: OutboxEvent) -> Any:
         """Hands an event to the producer.
@@ -84,12 +68,18 @@ class KafkaDelivery(OutboxDelivery):
         )
 
     async def deliver(self, event: OutboxEvent) -> None:
-        await (await self.send(await self.get_producer(), event))
+        await (await self.send(await self.broker_connection.get_producer(), event))
+
+    @staticmethod
+    def _observe_confirmation(confirmation: asyncio.Future[Any]) -> None:
+        """Retrieve the delivery failure even when the caller has stopped waiting."""
+        if not confirmation.cancelled():
+            confirmation.exception()
 
     async def deliver_batch(
         self, events: Sequence[OutboxEvent], *, concurrency: int, timeout_seconds: float
-    ) -> list[BaseException | None]:
-        producer = await self.get_producer()
+    ) -> list[DeliveryResult]:
+        producer = await self.broker_connection.get_producer()
         # An event the producer refuses at once (too large, not serializable) fails alone.
         outcomes: list[BaseException | None] = [None] * len(events)
         confirmations: dict[int, asyncio.Future[Any]] = {}
@@ -97,7 +87,9 @@ class KafkaDelivery(OutboxDelivery):
         async def send_all() -> None:
             for position, event in enumerate(events):
                 try:
-                    confirmations[position] = await self.send(producer, event)
+                    confirmation = await self.send(producer, event)
+                    confirmation.add_done_callback(self._observe_confirmation)
+                    confirmations[position] = confirmation
                 except Exception as error:
                     outcomes[position] = error
             if confirmations:
@@ -118,10 +110,7 @@ class KafkaDelivery(OutboxDelivery):
                 outcomes[position] = timeout_error
             else:
                 outcomes[position] = confirmation.exception()
-        return outcomes
+        return [DeliveryResult(event.id, outcome) for event, outcome in zip(events, outcomes, strict=True)]
 
     async def close(self) -> None:
-        async with self.producer_lock:
-            if self.owns_producer and self.producer is not None:
-                producer, self.producer = self.producer, None
-                await producer.stop()
+        await self.broker_connection.close()

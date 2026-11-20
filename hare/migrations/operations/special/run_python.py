@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable
+from copy import copy
 from typing import TYPE_CHECKING, Any
 
 from hare.migrations.operations.hare_operation import HareOperation
@@ -13,7 +14,11 @@ if TYPE_CHECKING:
 
 
 class RunPython(HareOperation):
-    """Runs a function on the migration's models and schema editor.
+    """Run a callback with this operation's historical registry and exact schema client.
+
+    Data queries start with ``apps.get_queryset("app.Model", using=schema_editor.client)``.
+    A historical Python class's manager selects the active application registry instead;
+    it does not carry the state registry that returned the class.
 
     Args:
         code: Called with the state's apps and the schema editor when the migration is applied.
@@ -26,7 +31,6 @@ class RunPython(HareOperation):
     """
 
     reduces_to_sql = False
-    backward_reads_state_reached = False
 
     def __init__(
         self,
@@ -44,11 +48,12 @@ class RunPython(HareOperation):
         self.tenant_schema = tenant_schema
         self.reversible = reverse_code is not None
 
+    def snapshot(self) -> RunPython:
+        """Retain callable objects and bound methods without copying their external resources."""
+        return copy(self)
+
     def describe(self) -> str:
         return "Run Python code"
-
-    def state_forward(self, app_label: str, state: State) -> None:
-        return None
 
     async def database_forward(
         self,

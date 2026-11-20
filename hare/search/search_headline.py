@@ -5,50 +5,61 @@ from typing import ClassVar
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import ConfigurationError
 from hare.query.expressions import Expression, ExpressionContext, ExpressionResult
+from hare.query.expressions.structure.enums import ArgumentRole
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
-from hare.search.constants import (
-    SEARCH_HEADLINE_MAX_COUNT,
-    SEARCH_HEADLINE_MAX_MARKER_LENGTH,
-    TEXT_SEARCH_CONFIGURATIONS_REQUIRED_FEATURE,
-)
 from hare.search.query.search_query import SearchQuery
-from hare.search.search_features import SearchFeatures
 from hare.search.types import ConfigInput, HeadlineExpressionInput, HeadlineOptionValue, QueryInput
 from hare.sql.terms.term import Term
 
 
 class SearchHeadline(Expression):
     """A text with the words a full-text search matches marked, for an annotation - any text, or with
-    ``features.supports_full_text_index`` a field of the model's ``FullTextIndex``; with ``max_words``
+    an indexed-text implementation a field of the model's full-text index; with ``max_words``
     the fragment of at most that many words matching best. A row the query doesn't match gets what the
     database's own function gives it.
 
-    Example: ``Article.objects.annotate(excerpt=SearchHeadline("body", "hare orm", max_words=20))``
+    Example::
+
+        Article.objects.annotate(
+            excerpt=SearchHeadline(
+                "body",
+                "hare orm",
+                max_words=20,
+                start_sel="<b>",
+                stop_sel="</b>",
+                fragment_delimiter=" ... ",
+            )
+        )
 
     Args:
-        expression: The field whose text is marked, or (with
-            ``features.supports_text_search_configurations``) an expression giving it.
+        expression: The field whose text is marked, or an expression supported by the
+            dialect's text-search compiler.
         query: The search text (``SearchType.PLAIN``) or a ``SearchQuery``.
         config: The text search configuration (``"english"``).
-        start_sel: The text before a matched word - ``<b>`` by default.
-        stop_sel: The text after it - ``</b>`` by default.
+        start_sel: The text before a matched word. Defaults and whether an explicit value is
+            required depend on the text-search implementation; see the full-text search guide.
+        stop_sel: The text after it, with the same implementation-specific requirements.
         max_words: The most words of a fragment.
         min_words: The fewest words of a fragment.
         short_word: Words this short or shorter are dropped at a fragment's ends.
         highlight_all: Mark the whole text instead of fragments of it.
         max_fragments: The most fragments.
-        fragment_delimiter: The text between fragments - `` ... `` by default.
+        fragment_delimiter: The text between fragments. The implementation may require
+            an explicit value when ``max_words`` is set.
 
-        ``config``, ``min_words``, ``short_word``, ``highlight_all`` and ``max_fragments`` need
-        ``features.supports_text_search_configurations``.
+        ``config`` requires ``features.supports_text_search_configurations``.
+        Each supplied headline option requires its ``headline_<name>`` operation in
+        ``features.text_search_operations``, independently of configuration support.
 
     Raises:
         ConfigurationError: An argument of the wrong type or out of range.
     """
 
-    #: The arguments that need ``features.supports_text_search_configurations``.
-    configuration_option_names = ("min_words", "short_word", "highlight_all", "max_fragments")
+    structure = ExpressionStructure(
+        positions=((0, ArgumentRole.FIELD),), keywords=(("expression", ArgumentRole.FIELD),)
+    )
 
     #: The source text, the query and the configuration, bound; the options are written into the SQL
     #: text.
@@ -108,14 +119,14 @@ class SearchHeadline(Expression):
             The text, None when not given.
 
         Raises:
-            ConfigurationError: The value isn't text of at most 1000 characters without a NUL.
+            ConfigurationError: The value isn't text without a NUL.
         """
         if value is None:
             return None
-        if not isinstance(value, str) or len(value) > SEARCH_HEADLINE_MAX_MARKER_LENGTH or "\x00" in value:
+        if not isinstance(value, str) or "\x00" in value:
             raise ConfigurationError(
-                f"SearchHeadline {argument_name} must be text of at most {SEARCH_HEADLINE_MAX_MARKER_LENGTH} "
-                f"characters, got {ValueDescriptions.get_shown_value(value)}"
+                f"SearchHeadline {argument_name} must be text without a NUL, "
+                f"got {ValueDescriptions.get_shown_value(value)}"
             )
         return value
 
@@ -132,13 +143,13 @@ class SearchHeadline(Expression):
             The count, None when not given.
 
         Raises:
-            ConfigurationError: The value isn't an int from ``minimum`` to 100000.
+            ConfigurationError: The value isn't an int of at least ``minimum``, or is a bool.
         """
         if value is None:
             return None
-        if type(value) is not int or not minimum <= value <= SEARCH_HEADLINE_MAX_COUNT:
+        if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
             raise ConfigurationError(
-                f"SearchHeadline {argument_name} must be an int from {minimum} to {SEARCH_HEADLINE_MAX_COUNT}, "
+                f"SearchHeadline {argument_name} must be an int of at least {minimum}, "
                 f"got {ValueDescriptions.get_shown_value(value)}"
             )
         return value
@@ -170,15 +181,4 @@ class SearchHeadline(Expression):
         return tuple(self.get_options().items())
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
-        if self.config is not None:
-            SearchFeatures.raise_if_unsupported(
-                expression_context, "SearchHeadline(config=...)", TEXT_SEARCH_CONFIGURATIONS_REQUIRED_FEATURE
-            )
-        for option_name in self.configuration_option_names:
-            if getattr(self, option_name) is not None:
-                SearchFeatures.raise_if_unsupported(
-                    expression_context,
-                    f"SearchHeadline({option_name}=...)",
-                    TEXT_SEARCH_CONFIGURATIONS_REQUIRED_FEATURE,
-                )
         return expression_context.dialect.text_search.get_headline_result(self, expression_context)

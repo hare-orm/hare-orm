@@ -44,7 +44,6 @@ class ActiveRecordOrm:
             self.window, self.rank = Window, Rank
             self.in_transaction = Transactions.atomic
             self.coalesce = functions.Coalesce
-            self.supports_window = self.supports_exists = self.supports_chunked_iteration = True
         elif target.distribution == "tortoise-orm":
             import tortoise
             import tortoise.fields
@@ -59,7 +58,6 @@ class ActiveRecordOrm:
             self.case, self.when, self.q, self.f = Case, When, Q, F
             self.in_transaction = in_transaction
             self.coalesce = functions.Coalesce
-            self.supports_window = self.supports_exists = self.supports_chunked_iteration = False
         else:
             import yara_orm
 
@@ -70,7 +68,7 @@ class ActiveRecordOrm:
             self.case, self.when, self.q, self.f = yara_orm.Case, yara_orm.When, yara_orm.Q, yara_orm.F
             self.in_transaction = yara_orm.in_transaction
             self.coalesce = yara_orm.functions.Coalesce
-            self.supports_window = self.supports_exists = self.supports_chunked_iteration = False
+        self.supports_window = self.supports_exists = self.supports_chunked_iteration = self.is_hare
 
     def get_queries(self, model: Any) -> Any:
         """Where a model's queries start, as the ORM's documentation writes them: hare's manager

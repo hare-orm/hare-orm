@@ -1,5 +1,4 @@
 import asyncio
-import os
 import sys
 import types
 import uuid
@@ -10,6 +9,8 @@ import pytest_asyncio
 from hare import fields
 from hare.contrib import test as hare_test
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
+from hare.ddl.constraints import UniqueConstraint
 from hare.dialects.postgresql.enums import PostgresqlDialectName
 from hare.exceptions import (
     IntegrityError,
@@ -699,14 +700,7 @@ async def file_db(tmp_path):
     connection per task, needed for the concurrent race test below to have two independent
     connections actually racing at the DB level, not two calls sharing one connection's
     transaction state (which asyncpg outright forbids two concurrent operations on)."""
-    from hare.contrib.test.isolated_contexts import hare_test_context
-
-    db_url = os.getenv("HARE_TEST_DB")
-    if not db_url or DatabaseUnderTest.is_file_database(db_url):
-        scheme = (db_url or DatabaseUnderTest.DEFAULT_URL).split("://", 1)[0]
-        db_path = tmp_path / "tenancy_race_test.sqlite"
-        db_url = f"{scheme}:///{db_path}?synchronous=OFF"
-    async with hare_test_context(["tests.shared_models.testmodels"], db_url=db_url, connection_label="models") as ctx:
+    async with DatabaseUnderTest.open_persistent_model_context(tmp_path / "tenancy_race_test.sqlite") as ctx:
         yield ctx
 
 
@@ -738,6 +732,51 @@ async def test_get_or_create_concurrent_race_on_same_key_no_duplicate(file_db):
 
         matches = await TenantScopedWidget.objects.filter(name="race")
         assert len(matches) == 1
+
+
+@hare_test.requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+async def test_normalized_upsert_race_keeps_other_tenants_and_returns_one_key(file_db):
+    class Contact(Model):
+        tenant = fields.IntField()
+        email = fields.EmailField()
+        label = fields.TextField()
+
+        class Meta:
+            tenant_field = "tenant"
+            table = "racing_contact"
+            constraints = [UniqueConstraint(fields=("tenant", "email"))]
+
+    file_db.register_live_models([Contact], "models", connection_alias="models")
+    await file_db.generate_schemas(safe=True)
+    with Tenancy.scope(2):
+        await Contact.objects.create(email="Ann@example.com", label="other tenant")
+
+    barrier = asyncio.Barrier(2)
+    calls = []
+
+    async def attempt(email, label):
+        async def get_label():
+            calls.append(label)
+            await barrier.wait()
+            return label
+
+        async with Transactions.autonomous() as client:
+            with Tenancy.scope(1):
+                return await Contact.objects.using(client).get_or_create(email=email, defaults={"label": get_label})
+
+    async with asyncio.timeout(20):
+        outcomes = await asyncio.gather(attempt("Ann@EXAMPLE.COM", "first"), attempt("Ann@example.com", "second"))
+    assert sorted(created for _, created in outcomes) == [False, True]
+    assert outcomes[0][0].pk == outcomes[1][0].pk
+    winner = next(obj for obj, created in outcomes if created)
+    assert [obj.label for obj, _ in outcomes] == [winner.label, winner.label]
+    assert sorted(calls) == ["first", "second"]
+    connection = file_db.get_connection("models")
+    assert await connection.execute_dicts("SELECT tenant, email, label FROM racing_contact ORDER BY tenant") == [
+        {"tenant": 1, "email": "Ann@example.com", "label": winner.label},
+        {"tenant": 2, "email": "Ann@example.com", "label": "other tenant"},
+    ]
 
 
 @pytest.mark.asyncio
@@ -1188,7 +1227,7 @@ async def cascade_tenant_models():
     setattr(module, "CTChildCascade", CTChildCascade)  # noqa: B010
     sys.modules[CASCADE_TENANT_MODULE_NAME] = module
 
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+    db_url = DatabaseUnderTest.get_url()
     try:
         async with MultiDatabaseTestContext.open(
             db_url,
@@ -1607,7 +1646,9 @@ async def test_soft_delete_cascade_clears_m2m_links_of_another_tenants_row(db):
     with Tenancy.scope(first_org):
         preview = await parent.delete_preview()
         assert preview.can_delete
-        assert preview.many_to_many_through == {UuidTenantDoc._meta.fields_map["labels"].through: 1}
+        assert preview.many_to_many_through == {
+            HareContext.require_current().apps.get_binding(UuidTenantDoc).fields_map["labels"].through: 1
+        }
         await parent.delete()
     with Tenancy.scope(second_org):
         assert await UuidTenantDoc.objects.only_deleted().values_list("title", flat=True) == ["child"]
@@ -1726,7 +1767,7 @@ async def test_forward_isnull_treats_a_target_of_another_tenant_as_no_target(db)
 async def test_tenant_field_naming_the_foreign_key_uses_its_column(db):
     """Meta.tenant_field = "company" (the relation, not company_id) used to fail at runtime with a
     raw KeyError - it now means the relation's own key column."""
-    assert TenantFkNamedOrder._meta.tenant_field == "company_id"
+    assert HareContext.require_current().apps.get_binding(TenantFkNamedOrder).tenant_field == "company_id"
     first_company = await TenantFkCompany.objects.create(id=1, name="first")
     second_company = await TenantFkCompany.objects.create(id=2, name="second")
 
@@ -1798,9 +1839,10 @@ async def test_bare_m2m_exclude_ignores_links_to_another_tenants_rows(topic_link
 @pytest.mark.asyncio
 async def test_bare_m2m_filter_ignores_links_to_soft_deleted_rows(topic_linked_to_two_tenants):
     topic, own_article, _ = topic_linked_to_two_tenants
-    connection = TenantArticle._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(TenantArticle).get_connection()
     await connection.execute(
-        f'UPDATE "{TenantArticle._meta.db_table}" SET "deleted_at" = CURRENT_TIMESTAMP WHERE "id" = {own_article.pk}'
+        f'UPDATE "{HareContext.require_current().apps.get_binding(TenantArticle).db_table}" SET "deleted_at" = '
+        f'CURRENT_TIMESTAMP WHERE "id" = {own_article.pk}'
     )
     with Tenancy.scope(1):
         assert await SharedTopic.objects.filter(articles=own_article.pk).count() == 0

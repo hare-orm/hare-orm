@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeVar, overload
 from uuid import UUID
 
 from hare.exceptions import ValidationError
 from hare.fields.data.constants import UUID_VERSION_DEFAULTS
 from hare.fields.field import Field
 from hare.fields.validators.formats.uuid_version_validator import UUIDVersionValidator
+from hare.native.native_modules import NativeModules
 
 if TYPE_CHECKING:
     from hare.models import Model
@@ -24,6 +26,9 @@ class UUIDField(Field[TUuid]):
     """
 
     field_type = UUID
+    #: Shared UUID text conversion from ``rust.native.rows``.
+    native_rows: ClassVar[Any] = NativeModules.rows
+    accepted_value_types = (str,)
 
     SQL_TYPE = "CHAR(36)"
 
@@ -59,7 +64,7 @@ class UUIDField(Field[TUuid]):
         self.validate(value)
         if value is None:
             return None
-        return str(value)
+        return UUIDField.native_rows.write_uuid_text(value)
 
     def to_db_uuid(self, value: Any, instance: type[Model] | Model) -> UUID | None:
         """The value written as the UUID itself - for a dialect whose driver writes one, where
@@ -79,6 +84,9 @@ class UUIDField(Field[TUuid]):
         self.validate(value)
         return value
 
+    def get_assign_normalized_types(self) -> frozenset[type]:
+        return self._get_unchanged_assign_types(UUIDField.to_python, self.field_type)
+
     def to_python(self, value: Any) -> UUID | None:
         if value is None or type(value) is UUID:
             return value
@@ -96,4 +104,11 @@ class UUIDField(Field[TUuid]):
         except ValueError as error:
             # UUID(...) raises a bare ValueError for malformed input - wrapped so it fails the
             # same catchable-ValidationError way every other field validation failure does.
-            raise ValidationError(f"{self.model_field_name}: {error}")
+            validation_error = self.get_validation_error(error, value)
+        raise validation_error
+
+    def get_unchanged_write_types(self, converter: Callable[..., Any] | None) -> tuple[type, ...] | None:
+        # Only a UUID-valued column keeps a UUID unchanged; text conversion uses to_db_value().
+        if converter is UUIDField.to_db_uuid and type(self).to_db_uuid is UUIDField.to_db_uuid:
+            return (UUID,)
+        return None

@@ -3,6 +3,7 @@
 from tests.contracts.writes.observers.auto_now_observer import AutoNowObserver
 from tests.contracts.writes.observers.change_capture_observer import ChangeCaptureObserver
 from tests.contracts.writes.observers.encryption_observer import EncryptionObserver
+from tests.contracts.writes.observers.generated_field_observer import GeneratedFieldObserver
 from tests.contracts.writes.observers.optimistic_lock_observer import OptimisticLockObserver
 from tests.contracts.writes.observers.rows_changed_observer import RowsChangedObserver
 from tests.contracts.writes.observers.tenant_scope_observer import TenantScopeObserver
@@ -16,4 +17,5 @@ WRITE_OBSERVERS = (
     OptimisticLockObserver,
     TenantScopeObserver,
     EncryptionObserver,
+    GeneratedFieldObserver,
 )

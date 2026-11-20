@@ -7,8 +7,7 @@ import pytest
 from hare.contrib.pydantic import pydantic_model_creator
 from tests.shared_models.testmodels import NoFetchDefaultModel
 from tests.shared_models.testmodels_postgres import DefaultModel
-
-REQUIRES = ("pydantic",)
+from tests.utils.model_bindings import ModelBindings
 
 
 class TestPydanticDbDefault:
@@ -17,7 +16,7 @@ class TestPydanticDbDefault:
         PydanticNoFetch = pydantic_model_creator(NoFetchDefaultModel)
 
         instance = await NoFetchDefaultModel.objects.create()
-        conn = instance._meta.connection
+        conn = instance.get_connection()
 
         if not conn.features.supports_returning:
             # Without RETURNING, unfetched db_default fields are DatabaseDefault sentinels
@@ -38,7 +37,9 @@ class TestPydanticDbDefault:
         NOT required by ``Field.required`` - the ORM lets .create() omit it and has the DB fill
         it in. The generated pydantic schema must agree, or a create-payload validated against
         it would wrongly reject an omitted db_default field."""
-        PydanticDefault = pydantic_model_creator(DefaultModel, name="DefaultModelSchemaTest")
+        PydanticDefault = pydantic_model_creator(
+            DefaultModel, apps=ModelBindings.prepare(DefaultModel), name="DefaultModelSchemaTest"
+        )
         schema = PydanticDefault.model_json_schema()
 
         for field_name in (

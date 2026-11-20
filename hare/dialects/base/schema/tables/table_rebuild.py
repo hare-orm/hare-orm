@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from copy import copy
 from typing import Any
 
-from hare.ddl.conditions.field_condition import FieldCondition
-from hare.ddl.constraints.check_constraint import CheckConstraint
-from hare.ddl.constraints.unique_constraint import UniqueConstraint
-from hare.ddl.indexes.index import Index
+from hare.ddl.table_options import TableOptions
 from hare.dialects.base.schema.data.referencing_key_columns import ReferencingKeyColumns
+from hare.dialects.base.schema.plans.column_copy import ColumnCopy
+from hare.dialects.base.schema.plans.enums import SchemaEffect
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
+from hare.dialects.base.schema.plans.schema_statement import SchemaStatement
+from hare.dialects.base.schema.plans.schema_step import SchemaStep
+from hare.dialects.base.schema.plans.table_rows_copy import TableRowsCopy
 from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
 from hare.fields.field import Field
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
-from hare.models import Model
+from hare.models.model_binding import ModelBinding
+from hare.sql.identifiers import Identifiers
 
 
 class TableRebuild(SchemaEditorPart):
@@ -35,23 +40,42 @@ class TableRebuild(SchemaEditorPart):
         """
         return quoted_column
 
-    async def replace_table(
+    def get_replace_plan(
         self, table_name: str, rebuilt_table_name: str, schema: str | None, fields: Iterable[Field[Any]]
-    ) -> None:
-        """Drops a table and renames its rebuilt copy into its place.
-
-        Args:
-            table_name: The table being replaced.
-            rebuilt_table_name: The already filled copy taking its place.
-            schema: The tables' schema.
-            fields: The fields of the rebuilt table's columns.
-        """
-        qualified_table = self.editor.qualify_table_name(table_name, schema)
-        await self.editor.run_sql(f"DROP TABLE {qualified_table}")
-        rebuilt_table = self.editor.qualify_table_name(rebuilt_table_name, schema)
-        await self.editor.run_sql(
-            self.editor.RENAME_TABLE_TEMPLATE.format(old_table=rebuilt_table, new_table=self.editor.quote(table_name))
+    ) -> SchemaChangePlan:
+        """Prepare the replacement commands without dropping or renaming a table."""
+        qualified_table = self.editor.get_schema_table_sql(table_name, schema)
+        return SchemaChangePlan(
+            (
+                SchemaStatement(f"DROP TABLE {qualified_table}", frozenset({SchemaEffect.REPLACE_TABLE})),
+                SchemaStatement(self.editor.get_table_rename_sql(rebuilt_table_name, table_name, schema)),
+            )
         )
+
+    @staticmethod
+    def get_rebuilt_table_name(table_name: str) -> str:
+        """Choose the staging name once when compiling a rebuild plan."""
+        return Identifiers.get_temporary_name(f"new__{table_name}")
+
+    def get_copy_source_table(self, binding: ModelBinding) -> str:
+        """Read rows from the old declaration, before applying any storage-name change."""
+        return self.editor.get_storage_table_name(binding)
+
+    def get_before_replace_plan(self, old_binding: ModelBinding, new_binding: ModelBinding) -> SchemaChangePlan:
+        """Prepare dependent objects for replacement after the row copy succeeds."""
+        return SchemaChangePlan(())
+
+    def get_staging_plan(
+        self, binding: ModelBinding, rebuilt_table_name: str, preparation: SchemaChangePlan
+    ) -> SchemaChangePlan:
+        """Scope preparation after CREATE has acquired the replacement table."""
+        return preparation
+
+    def get_rebuild_finalization_plan(
+        self, old_binding: ModelBinding, new_binding: ModelBinding, rebuilt_table_name: str
+    ) -> SchemaChangePlan:
+        """Finish dialect-specific objects and release any retained previous table."""
+        return SchemaChangePlan(())
 
     @staticmethod
     def get_remake_column_name(field: Field[Any]) -> str:
@@ -64,74 +88,47 @@ class TableRebuild(SchemaEditorPart):
             The column name - for a single-column FK/O2O its key column, since the relation
             field's own source_field names the shadow attribute rather than the column.
         """
-        if isinstance(field, ForeignKeyFieldInstance) and len(field.db_column_names) == 1:
-            return field.db_column_names[0]
+        if isinstance(field, ForeignKeyFieldInstance) and len(column_names := field.db_column_names) == 1:
+            return column_names[0]
         return field.source_field or field.model_field_name
 
-    @staticmethod
-    def constraint_references_field(constraint: Any, field: Field[Any]) -> bool:
-        """True if a Meta.constraints entry names ``field`` among its own fields - a
-        UniqueConstraint by its fields, a CheckConstraint whose condition is a Q by the fields
-        the condition reads, a relation by one of its key columns' fields too. A CheckConstraint of
-        raw SQL (``RawSQLTerm``) can't be read for field names."""
-        field_names = {field.model_field_name, *getattr(field, "source_fields", ())}
-        if isinstance(constraint, CheckConstraint) and isinstance(constraint.check, FieldCondition):
-            return not field_names.isdisjoint(constraint.check.get_referenced_field_names())
-        return isinstance(constraint, UniqueConstraint) and not field_names.isdisjoint(constraint.fields)
+    def get_copy_plan(
+        self, binding: ModelBinding, new_table_name: str, source_sql: str, columns: tuple[ColumnCopy, ...]
+    ) -> SchemaChangePlan:
+        """Prepare a row copy; dialects may wrap it in a temporary-resource scope."""
+        copy = TableRowsCopy(
+            binding,
+            self.editor.qualify_table_name(new_table_name, binding.schema),
+            source_sql,
+            columns,
+        )
+        if any(column.clock_field is not None for column in columns):
+            return SchemaChangePlan((copy,))
+        effects = {SchemaEffect.REWRITE_ROWS}
+        if any(column.default_sql is not None for column in columns):
+            effects.add(SchemaEffect.BACKFILL_ROWS)
+        return SchemaChangePlan((SchemaStatement(copy.get_sql(self.editor), frozenset(effects)),))
 
-    @staticmethod
-    def index_references_field(index: Index, field: Field[Any]) -> bool:
-        """True if a Meta.indexes entry keys on ``field`` - by its name, or for a relation by one of
-        its key columns' fields. An expression index can't be read for field names.
-
-        Args:
-            index: The index.
-            field: The field.
-
-        Returns:
-            Whether the index lists the field.
-        """
-        field_names = {field.model_field_name, *getattr(field, "source_fields", ())}
-        return any(name.removeprefix("-") in field_names for name in index.fields)
-
-    async def copy_table_rows(
-        self, model: type[Model], new_table_name: str, old_table_name: str, column_mapping: dict[str, str]
-    ) -> None:
-        """Copies the rows of a table being rebuilt into its new copy.
-
-        Args:
-            model: The model rendered from the state the table is rebuilt to.
-            new_table_name: The copy, empty.
-            old_table_name: The table holding the rows.
-            column_mapping: The SQL each column of the copy takes its value from, by the column's name.
-        """
-        schema = model._meta.schema
-        columns_sql = ", ".join(self.editor.quote(column) for column in column_mapping)
-        insert_sql = f"""INSERT INTO {self.editor.qualify_table_name(new_table_name, schema)} ({columns_sql})
-                SELECT {", ".join(column_mapping.values())}
-                FROM {self.editor.qualify_table_name(old_table_name, schema)}"""  # nosec B608
-        await self.editor.run_sql(insert_sql)
-
-    def get_column_mapping(
+    def get_copy_columns(
         self,
-        old_model: type[Model],
-        new_model: type[Model],
+        old_binding: ModelBinding,
+        new_binding: ModelBinding,
         altered_fields: Sequence[tuple[Field[Any], Field[Any]]] = (),
-    ) -> dict[str, str]:
+    ) -> tuple[ColumnCopy, ...]:
         """What each column of the rebuilt table is filled from: the column of the field of the same
         name in the old table - converted to its new type, its default where it turns NOT NULL - else
         the field's default, NULL without one. A generated column takes no value.
 
         Args:
-            old_model: The model the table matches now.
-            new_model: The model the table is rebuilt to.
+            old_binding: The binding of the model the table matches now.
+            new_binding: The binding of the model the table is rebuilt to.
             altered_fields: (old, new) fields paired otherwise than by name - a renamed field.
 
         Returns:
-            The SQL of each column's value, by the column.
+            Prepared source expressions and defaults, with clocks deferred until execution.
         """
-        old_meta = old_model._meta
-        new_meta = new_model._meta
+        old_meta = old_binding
+        new_meta = new_binding
         old_field_by_new_name: dict[str, Field[Any]] = {}
         for old_field, new_field in altered_fields:
             old_field_by_new_name[new_field.model_field_name] = old_field
@@ -141,127 +138,115 @@ class TableRebuild(SchemaEditorPart):
                     if old_key in old_meta.fields_map:
                         old_field_by_new_name.setdefault(new_key, old_meta.fields_map[old_key])
         column_definitions = self.editor.column_definitions
-        column_mapping: dict[str, str] = {}
+        columns: list[ColumnCopy] = []
         for field_name, column in new_meta.fields_db_projection.items():
             new_field = new_meta.fields_map[field_name]
-            if column_definitions.get_non_pk_generated_field_sql(new_model, new_field, column) is not None:
+            if column_definitions.get_non_pk_generated_field_sql(new_binding, new_field, column) is not None:
                 continue
             # A paired field is the column it names; one matched by name only when the old table has it.
             source_field = old_field_by_new_name.get(field_name)
             if source_field is None and field_name in old_meta.fields_db_projection:
                 source_field = old_meta.fields_map[field_name]
-            if source_field is None:
-                default_value = self.editor.column_backfill.field_backfill_sql_literal(new_field, new_model)
-                column_mapping[column] = default_value if default_value is not None else "NULL"
-                continue
-            old_column = self.get_remake_column_name(source_field)
-            copied_value_sql = self.get_remake_value_conversion_sql(
-                source_field, new_field, self.editor.quote(old_column)
-            )
-            default_value = (
-                self.editor.column_backfill.field_backfill_sql_literal(new_field, new_model)
-                if source_field.null and not new_field.null
-                else None
-            )
-            column_mapping[column] = (
-                f"COALESCE({copied_value_sql}, {default_value})" if default_value is not None else copied_value_sql
-            )
-        return column_mapping
+            source_sql = None
+            if source_field is not None:
+                source_sql = self.get_remake_value_conversion_sql(
+                    source_field, new_field, self.editor.quote(self.get_remake_column_name(source_field))
+                )
+            needs_default = source_field is None or (source_field.null and not new_field.null)
+            clock_field = None
+            default_sql = None
+            if needs_default:
+                backfill = self.editor.column_backfill
+                if (
+                    new_field.default is None
+                    and not new_field.has_db_default()
+                    and backfill.is_auto_now_field(new_field)
+                ):
+                    clock_field = copy(new_field)
+                else:
+                    default_sql = backfill.field_backfill_sql_literal(new_field, new_binding)
+            columns.append(ColumnCopy(self.editor.quote(column), source_sql, default_sql, clock_field))
+        return tuple(columns)
 
-    async def remake_table(
+    def get_rebuild_plan(
         self,
-        old_model: type[Model],
-        new_model: type[Model],
+        old_binding: ModelBinding,
+        new_binding: ModelBinding,
         altered_fields: Sequence[tuple[Field[Any], Field[Any]]] = (),
-    ) -> None:
-        """Rebuilds a table into the one a model declares: creates it under a temporary name from the new
-        model - with the same definitions ``CREATE TABLE`` gives it - copies the rows into it, puts it in
-        place of the old one, then creates the objects that went with the old table from the new model: its
-        indexes, the constraints the database keeps as objects of their own, its triggers. The alteration
-        strategy of a database whose ALTER TABLE can't make a change in place.
+    ) -> SchemaChangePlan:
+        """Compile creation, copying, replacement and dependent objects before any DDL.
+
+        Unsupported declarations and rebuild defaults fail during preparation. The
+        plan retains the final before/after declarations, while the replacement's
+        temporary name is confined to its prepared commands.
 
         Args:
-            old_model: The model the table matches now.
-            new_model: The model the table is rebuilt to.
-            altered_fields: (old, new) fields paired otherwise than by name - a renamed field.
+            old_binding: The binding of the model the table matches now.
+            new_binding: The binding of the model the table is rebuilt to, including its dependent objects.
+            altered_fields: Old and new fields paired otherwise than by name, such as a renamed field.
         """
-        table_options = new_model._meta.get_table_options(self.editor.client.dialect)
+        table_options = new_binding.get_table_options(self.editor.client.dialect)
         if table_options is not None:
-            table_options.raise_if_unsupported(new_model, self.editor.client.features)
-        # The table storing the rows is the one rebuilt.
-        db_table = (
-            table_options.get_storage_table_name(new_model._meta.db_table)
-            if table_options
-            else new_model._meta.db_table
-        )
-        new_table_name = f"new__{db_table}"
-        schema = new_model._meta.schema
-        table_definitions, constraint_statements, _references, _deferred = (
-            self.editor.table_creation.get_table_definitions(new_model)
-        )
-        qualified_new = self.editor.qualify_table_name(new_table_name, schema)
-        create_sql = (
-            f"CREATE {table_options.get_create_prefix_sql() if table_options else ''}TABLE {qualified_new} "
-            f"({self.get_body_comment_sql(new_model, qualified_new)}{', '.join(table_definitions)})"
-            f"{table_options.get_create_suffix_sql(new_model, self.editor) if table_options else ''}"
-        )
-        await self.editor.run_sql(create_sql)
+            table_options.raise_if_unsupported(new_binding, self.editor.client.features)
+        db_table = TableOptions.get_effective_storage_table_name(new_binding.db_table, table_options)
+        old_db_table = self.editor.get_storage_table_name(old_binding)
+        new_table_name = self.get_rebuilt_table_name(db_table)
+        schema = new_binding.schema
+        definition = self.editor.table_creation.get_definition(new_binding, storage_table_name=new_table_name)
+        steps: list[SchemaStep] = [SchemaStatement(definition.get_create_sql(self.editor.TABLE_CREATE_TEMPLATE))]
+        preparation: list[SchemaStep] = []
         if table_options is not None:
-            for statement in table_options.get_after_create_sqls(new_model, qualified_new, self.editor):
-                await self.editor.run_sql(statement)
-
-        column_mapping = self.get_column_mapping(old_model, new_model, altered_fields)
-        if column_mapping:
-            await self.copy_table_rows(new_model, new_table_name, db_table, column_mapping)
-
-        await self.replace_table(
-            db_table,
-            new_table_name,
-            schema,
-            [new_model._meta.fields_map[field_name] for field_name in new_model._meta.fields_db_projection],
+            preparation.extend(
+                SchemaStatement(sql)
+                for sql in table_options.get_after_create_sqls(new_binding, new_table_name, self.editor)
+            )
+        columns = self.get_copy_columns(old_binding, new_binding, altered_fields)
+        if columns:
+            preparation.extend(
+                self.get_copy_plan(
+                    new_binding,
+                    new_table_name,
+                    self.editor.qualify_table_name(self.get_copy_source_table(old_binding), old_binding.schema),
+                    columns,
+                ).steps
+            )
+        steps.extend(self.get_staging_plan(new_binding, new_table_name, SchemaChangePlan(tuple(preparation))).steps)
+        steps.extend(self.get_before_replace_plan(old_binding, new_binding).steps)
+        steps.extend(
+            self.get_replace_plan(
+                old_db_table,
+                new_table_name,
+                schema,
+                [new_binding.fields_map[name] for name in new_binding.fields_db_projection],
+            ).steps
         )
+        if old_db_table != db_table:
+            steps.append(SchemaStatement(self.editor.get_table_rename_sql(old_db_table, db_table, schema)))
         if table_options is not None:
-            for statement in table_options.get_companion_table_sqls(new_model, self.editor, replaces=True):
-                await self.editor.run_sql(statement)
-        # Triggers, indexes and the constraints kept as objects went with the old table.
-        for trigger in new_model._meta.triggers:
-            await self.editor.trigger_statements.add_trigger(new_model, trigger)
-        await self.editor.run_sqls(self.editor.table_creation.get_model_index_sqls(new_model))
-        await self.editor.run_sqls(constraint_statements)
+            steps.extend(
+                SchemaStatement(sql)
+                for sql in table_options.get_companion_table_sqls(new_binding, self.editor, replaces=True)
+            )
+        steps.extend(
+            SchemaStatement(sql)
+            for trigger in new_binding.triggers
+            for sql in self.editor.trigger_statements.get_trigger_create_sqls(new_binding, trigger)
+        )
+        steps.extend(SchemaStatement(sql) for sql in self.editor.table_creation.get_model_index_sqls(new_binding))
+        steps.extend(SchemaStatement(sql) for sql in definition.constraints)
+        steps.extend(self.get_rebuild_finalization_plan(old_binding, new_binding, new_table_name).steps)
+        return SchemaChangePlan(
+            tuple(steps),
+            before=self.editor.table_creation.get_definition(old_binding),
+            after=self.editor.table_creation.get_definition(new_binding),
+        )
 
-    async def remake_for_referencing_key_columns(self, referencing: ReferencingKeyColumns) -> bool:
-        """Remakes a table whose relation key columns take the new type of the key they reference,
-        where the database can't change them in place - none by default.
+    def get_referencing_key_rebuild_plan(self, referencing: ReferencingKeyColumns) -> SchemaChangePlan | None:
+        """Choose a full rebuild when a referencing key cannot be altered in place."""
+        return None
 
-        Args:
-            referencing: The relation key columns, with their new types.
-
-        Returns:
-            Whether the table was remade, its key columns of the new type.
-        """
-        return False
-
-    async def remake_for_column_change(self, model: type[Model], old_field: Field[Any], new_field: Field[Any]) -> bool:
-        """Remakes the table for a column change the database can't make in place - none by default.
-
-        Args:
-            model: The model rendered from the state the table changes to.
-            old_field: The field before the change.
-            new_field: The field after it.
-
-        Returns:
-            Whether the table was remade, the change made with it.
-        """
-        return False
-
-    def get_body_comment_sql(self, model: type[Model], qualified_table: str) -> str:
-        """The comment the rebuilt table's ``CREATE TABLE`` holds inside its parentheses.
-
-        Args:
-            model: The model.
-            qualified_table: The rebuilt table's quoted name.
-
-        Returns:
-            The comment's SQL - none by default.
-        """
-        return ""
+    def get_column_change_rebuild_plan(
+        self, binding: ModelBinding, old_field: Field[Any], new_field: Field[Any]
+    ) -> SchemaChangePlan | None:
+        """Select a prepared rebuild when a column change cannot be made in place."""
+        return None

@@ -32,18 +32,19 @@ class SearchIndexLanguages:
         index = json.loads(index_path.read_text(encoding="utf-8"))
         for locale in SearchIndexLanguages.get_translated_locales(config):
             prefix = f"{locale}/"
-            translated_documents = [document for document in index["docs"] if document["location"].startswith(prefix)]
+            base_documents = []
+            translated_documents = []
+            for document in index["docs"]:
+                location = document["location"]
+                if location.startswith(prefix):
+                    translated_documents.append({**document, "location": location.removeprefix(prefix)})
+                else:
+                    base_documents.append(document)
             if not translated_documents:
                 # A language's own build, before the i18n plugin merges the indexes - or one already split.
                 continue
-            index["docs"] = [document for document in index["docs"] if not document["location"].startswith(prefix)]
-            translated_index = {
-                **index,
-                "docs": [
-                    {**document, "location": document["location"].removeprefix(prefix)}
-                    for document in translated_documents
-                ],
-            }
+            index["docs"] = base_documents
+            translated_index = {**index, "docs": translated_documents}
             translated_index_path = site_directory / locale / SEARCH_INDEX_PATH
             translated_index_path.parent.mkdir(parents=True, exist_ok=True)
             translated_index_path.write_text(json.dumps(translated_index, ensure_ascii=False), encoding="utf-8")

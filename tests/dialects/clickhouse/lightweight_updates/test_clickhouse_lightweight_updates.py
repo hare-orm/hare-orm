@@ -5,10 +5,11 @@ them (``update()``, ``save()``, ``bulk_update()``); the option is turned on and 
 import pytest
 
 from hare import fields
+from hare.core.hare_context import HareContext
 from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
+from hare.exceptions import QueryError
 from hare.migrations.drift import detect_drift
 from hare.migrations.operations import AlterModelOptions, CreateModel, DeleteModel
-from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state import State
 from tests.dialects.clickhouse.lightweight_updates.models import Ledger
 from tests.utils.operations import apply_operations
@@ -26,7 +27,7 @@ async def get_update_statements(connection, table):
 
 @pytest.mark.asyncio
 async def test_a_table_declaring_lightweight_updates_is_changed_by_them(clickhouse_lightweight_updates_db):
-    connection = Ledger._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Ledger).get_connection()
     await Ledger.objects.bulk_create(
         [Ledger(id=number, owner="ab"[number % 2], balance=number) for number in range(6)]
     )
@@ -47,16 +48,16 @@ async def test_a_table_declaring_lightweight_updates_is_changed_by_them(clickhou
     )
     assert "enable_block_number_column = 1, enable_block_offset_column = 1" in table["engine_full"]
     # A key keeps its values.
-    with pytest.raises(Exception, match="Cannot set .id. via .update"):
+    with pytest.raises(QueryError, match="Cannot set .id. via .update"):
         await Ledger.objects.filter(id=1).update(id=10)
 
 
 @pytest.mark.asyncio
 async def test_lightweight_updates_are_turned_on_and_off_in_place(clickhouse_lightweight_updates_db):
-    connection = Ledger._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Ledger).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -78,7 +79,7 @@ async def test_lightweight_updates_are_turned_on_and_off_in_place(clickhouse_lig
         uuid, enabled = await get_table()
         assert not enabled
         for lightweight_updates in (True, False):
-            await apply_operations(
+            state = await apply_operations(
                 "models",
                 state,
                 AlterModelOptions(
@@ -98,9 +99,8 @@ async def test_lightweight_updates_are_turned_on_and_off_in_place(clickhouse_lig
 
 @pytest.mark.asyncio
 async def test_drift_reads_the_option_back(clickhouse_lightweight_updates_db):
-    connection = Ledger._meta.connection
-    state = State()
-    state.models[("models", "Ledger")] = ModelState.make_from_model("models", Ledger)
+    connection = HareContext.require_current().apps.get_queryset(Ledger).get_connection()
+    state = State.from_models([Ledger], app_label="models")
     drift = await detect_drift(connection, state, ["models"])
     assert [operation for operation in drift.operations if isinstance(operation, AlterModelOptions)] == []
     await connection.execute_script(

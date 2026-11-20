@@ -1,11 +1,20 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import QueryError, UnSupportedError
 from hare.fields.relations.relation_values import RelationValues
+from hare.native.native_modules import NativeModules
+from hare.query.constants import (
+    PRIMARY_KEY_ALIAS,
+    PRIMARY_KEY_IN_FILTER,
+    PRIMARY_KEY_NOT_FILTER,
+    PRIMARY_KEY_NOT_IN_FILTER,
+    RELATED_PRIMARY_KEY_SUFFIX,
+)
+from hare.query.rows.row_layout import RowLayout
 from hare.sql.builder.tables.table import Table
 from hare.sql.terms.criteria.criterion import Criterion
 from hare.sql.terms.term import Term
@@ -14,8 +23,9 @@ from hare.sql.terms.values.row_value_list import RowValueList
 
 if TYPE_CHECKING:
     from hare.dialects.base.types.type_registry import TypeRegistry
+    from hare.fields.field import Field
     from hare.models import Model
-    from hare.models.meta_info import MetaInfo
+    from hare.models.model_binding import ModelBinding
     from hare.query.expressions.conditions.q import Q
 
 
@@ -24,7 +34,7 @@ class KeyColumns:
     the row values comparing them."""
 
     @staticmethod
-    def get_source_columns(meta: MetaInfo) -> tuple[str, ...]:
+    def get_source_columns(meta: ModelBinding) -> tuple[str, ...]:
         """The model's own real DB column(s) backing its primary key, in PK order - a single
         ``db_pk_column`` for a plain PK, one column per component for a composite one."""
         if meta.has_composite_primary_key:
@@ -35,7 +45,7 @@ class KeyColumns:
         return (meta.db_pk_column,)
 
     @classmethod
-    def get_row_correlation(cls, meta: MetaInfo, inner_table: Table, outer_table: Table) -> Criterion:
+    def get_row_correlation(cls, meta: ModelBinding, inner_table: Table, outer_table: Table) -> Criterion:
         """Matches a row of ``inner_table`` - a second reference to the model's table - with the
         outer query's row: by primary key, or, for a model without one, by every column, NULLs
         matching NULLs. Rows equal in every column are indistinguishable, so a condition holds
@@ -58,10 +68,10 @@ class KeyColumns:
         for column in sorted(meta.db_fields):
             column_matches = inner_table[column].is_distinct_from(outer_table[column]).negate()
             correlation = column_matches if correlation is None else correlation & column_matches
-        return cast("Criterion", correlation)
+        return correlation  # type: ignore[return-value]
 
     @staticmethod
-    def get_db_values(meta: MetaInfo, instance: Model, types: TypeRegistry) -> tuple[Any, ...]:
+    def get_db_values(meta: ModelBinding, instance: Model, types: TypeRegistry) -> tuple[Any, ...]:
         """``instance``'s primary key as bound for its columns, always as a tuple - a single
         element for a plain PK, one per component for a composite one.
 
@@ -79,6 +89,98 @@ class KeyColumns:
                 for field, name in zip(meta.pk_fields, meta.primary_key_attribute_names, strict=True)
             )
         return (types.get_db_value(meta.pk, instance.pk, instance),)
+
+    @staticmethod
+    def get_instance_writers(
+        meta: ModelBinding, types: TypeRegistry
+    ) -> tuple[tuple[str, Callable[[Any, Any], Any]], ...]:
+        """Prepare key columns once, retaining scalar pk access and composite component order."""
+        if meta.has_composite_primary_key:
+            return tuple(
+                (name, types.get_db_writer(field))
+                for name, field in zip(meta.primary_key_attribute_names, meta.pk_fields, strict=True)
+            )
+        return ((PRIMARY_KEY_ALIAS, types.get_db_writer(meta.pk)),)
+
+    @staticmethod
+    def get_db_rows(meta: ModelBinding, instances: Iterable[Model], types: TypeRegistry) -> list[tuple[Any, ...]]:
+        """Write instance keys in row order, preparing each column once for this operation.
+
+        Each writer receives the actual instance. Scalar keys retain the model's ``pk`` access;
+        composite keys retain the declared component attributes and their order.
+        """
+        writers = KeyColumns.get_instance_writers(meta, types)
+        return [tuple(values) for values in NativeModules.rows.serialize_instances(instances, writers)]
+
+    @staticmethod
+    def write_rows(
+        fields: Sequence[Field[Any]],
+        rows: Iterable[Sequence[Any]],
+        types: TypeRegistry,
+        instance: type[Model] | Model | None,
+    ) -> list[tuple[Any, ...]]:
+        """Write raw key tuples through one prepared column layout, without reordering checks."""
+        writers = tuple(types.get_db_writer(field) for field in fields)
+        return [tuple(write(value, instance) for write, value in zip(writers, row, strict=True)) for row in rows]
+
+    @staticmethod
+    def transfer_rows(
+        fields: Sequence[Field[Any]],
+        columns: Sequence[str],
+        rows: Iterable[Any],
+        source_types: TypeRegistry,
+        target_types: TypeRegistry,
+        instance: type[Model] | Model | None,
+    ) -> list[tuple[Any, ...]]:
+        """Read stored keys on their source and write them for their destination.
+
+        NULL filtering and visibility belong to the caller. Only fixed column metadata is
+        prepared here; connections and row values are not retained beyond the operation.
+        """
+        transfer = KeyColumns.get_transfer_encoder(fields, columns, source_types, target_types)
+        return [transfer(row, instance) for row in rows]
+
+    @staticmethod
+    def get_transfer_encoder(
+        fields: Sequence[Field[Any]],
+        columns: Sequence[str],
+        source_types: TypeRegistry,
+        target_types: TypeRegistry,
+    ) -> Callable[[Any, Any], tuple[Any, ...]]:
+        """Prepare key transfer for callers interleaving it with other row-local work."""
+        conversions = tuple(
+            (column, source_types.get_python_reader(field), target_types.get_db_writer(field))
+            for field, column in zip(fields, columns, strict=True)
+        )
+        return lambda row, instance: tuple(write(read(row[column]), instance) for column, read, write in conversions)
+
+    @staticmethod
+    def normalize_values(
+        fields: Sequence[Field[Any]],
+        values: Sequence[Any],
+        types: TypeRegistry,
+        instance: type[Model] | Model | None,
+    ) -> tuple[Any, ...]:
+        """Return decoded values after storage conversion, without matching or hashing policy."""
+        conversions = tuple((types.get_db_writer(field), types.get_python_reader(field)) for field in fields)
+        return tuple(read(write(value, instance)) for (write, read), value in zip(conversions, values, strict=True))
+
+    @staticmethod
+    def get_read_layout(fields: Sequence[Field[Any]], columns: Iterable[str | int], types: TypeRegistry) -> RowLayout:
+        """Bind key columns to their readers in column order."""
+        return RowLayout(
+            tuple((column, types.get_python_reader(field)) for field, column in zip(fields, columns, strict=True))
+        )
+
+    @staticmethod
+    def read_rows(
+        fields: Sequence[Field[Any]],
+        columns: Sequence[str | int],
+        rows: Iterable[Any],
+        types: TypeRegistry,
+    ) -> list[tuple[Any, ...]]:
+        """Decode key columns without collapsing all-NULL composite keys or changing row order."""
+        return KeyColumns.get_read_layout(fields, columns, types).read_many(rows)
 
     @staticmethod
     def row_is_in(columns: Sequence[Term], value_rows: Sequence[Sequence[Any]]) -> Criterion:
@@ -110,14 +212,14 @@ class KeyColumns:
         return Tuple(*left_columns) == Tuple(*right_columns)
 
     @staticmethod
-    def get_primary_key_name(model: type[Model], annotations: Mapping[str, Any], name: str) -> str:
+    def get_primary_key_name(binding: ModelBinding, annotations: Mapping[str, Any], name: str) -> str:
         """A name starting with an alias of a composite key as the same path through that key.
 
         An alias of ``pk``, a relation or ``relation__pk`` retains the key's individual columns
         when used by a filter, ordering or selection.
 
         Args:
-            model: The queried model.
+            binding: The queried model.
             annotations: The query's annotations.
             name: A filter key, an ordering or a selected name.
 
@@ -135,19 +237,19 @@ class KeyColumns:
             return name
         from hare.query.queryset.concrete_field_paths import ConcreteFieldPaths
 
-        if len(ConcreteFieldPaths.get_paths(model, annotation.name)) <= 1:
+        if len(ConcreteFieldPaths.get_paths(binding, annotation.name)) <= 1:
             return name
         return f"{annotation.name}{separator}{rest}"
 
     @staticmethod
-    def get_primary_key_q(model: type[Model], key: str, value: Any) -> Q | None:
+    def get_primary_key_q(binding: ModelBinding, key: str, value: Any) -> Q | None:
         """``pk=``/``pk__in=`` of a model with a composite primary key - ``pk`` as comparisons of
         the key's fields, ``pk__in`` checked and kept as one kwarg, which ``Q`` resolves into one
         row-value membership check (or ``(a, b) IN (SELECT ...)`` for a query); ``pk__not=``/
         ``pk__not_in=`` as their negation.
 
         Args:
-            model: The filtered model.
+            binding: The filtered model.
             key: The filter kwarg.
             value: Its value.
 
@@ -158,7 +260,7 @@ class KeyColumns:
             QueryError: A key value isn't a tuple of the key's length.
             UnSupportedError: ``pk__in`` is given no list, tuple or set.
         """
-        primary_key_attribute = model._meta.primary_key_attribute
+        primary_key_attribute = binding.primary_key_attribute
         if not isinstance(primary_key_attribute, tuple) or not primary_key_attribute:
             return None
         # Local imports: the query package imports this module.
@@ -168,11 +270,13 @@ class KeyColumns:
         from hare.query.expressions.subqueries.subquery import Subquery
         from hare.query.queryset.query_specification import QuerySpecification
 
-        if key in {"pk__not", "pk__not_in"}:
+        if key in {PRIMARY_KEY_NOT_FILTER, PRIMARY_KEY_NOT_IN_FILTER}:
             # The key's columns are never NULL - the negation is the plain NOT of the comparison.
-            positive_q = KeyColumns.get_primary_key_q(model, "pk" if key == "pk__not" else "pk__in", value)
+            positive_q = KeyColumns.get_primary_key_q(
+                binding, PRIMARY_KEY_ALIAS if key == PRIMARY_KEY_NOT_FILTER else PRIMARY_KEY_IN_FILTER, value
+            )
             return None if positive_q is None else ~positive_q
-        if key == "pk":
+        if key == PRIMARY_KEY_ALIAS:
             return KeyColumns.get_comparison_q(
                 key,
                 primary_key_attribute,
@@ -180,9 +284,8 @@ class KeyColumns:
                 Lookup.EXACT,
                 value,
                 accepts_instances=False,
-                reads_outer_references=True,
             )
-        if key != "pk__in":
+        if key != PRIMARY_KEY_IN_FILTER:
             return None
         if isinstance(value, (QuerySpecification, Subquery, KeyRowsQuery)):
             return Q(pk__in=value)
@@ -237,11 +340,11 @@ class KeyColumns:
 
         if accepts_instances and isinstance(item, Model):
             if instance_key_names is not None:
-                return tuple(RelationValues.get_relation_key_values(item, instance_key_names, f"Filter '{label}'"))
+                return RelationValues.get_relation_key_values(item, instance_key_names, f"Filter '{label}'")
             item = item.pk
         elif reads_outer_references and isinstance(item, OuterReference):
-            if item.field == "pk" or item.field.endswith("__pk"):
-                path_prefix = item.field.removesuffix("pk")
+            if item.field == PRIMARY_KEY_ALIAS or item.field.endswith(RELATED_PRIMARY_KEY_SUFFIX):
+                path_prefix = item.field.removesuffix(PRIMARY_KEY_ALIAS)
                 return tuple(OuterReference(f"{path_prefix}{key_name}") for key_name in key_names)
             return tuple(OuterReference(f"{item.field}_{key_name}") for key_name in key_names)
         if not isinstance(item, tuple) or len(item) != len(key_names):
@@ -262,7 +365,6 @@ class KeyColumns:
         *,
         accepts_instances: bool = True,
         instance_key_names: Sequence[str] | None = None,
-        reads_outer_references: bool = False,
     ) -> Q:
         """A comparison of a key over several fields, as comparisons of the fields - ``(a, b) =
         (x, y)`` is ``a = x AND b = y``, ``(a, b) <> (x, y)`` is ``a <> x OR b <> y``; a list is
@@ -276,7 +378,6 @@ class KeyColumns:
             value: A key value, or a list of them for ``in``/``not_in``.
             accepts_instances: Whether a model instance names its key.
             instance_key_names: The instance's fields holding the key - its primary key when None.
-            reads_outer_references: Whether an ``OuterReference`` names the outer row's key.
 
         Returns:
             The filter.
@@ -295,7 +396,7 @@ class KeyColumns:
                 item,
                 accepts_instances=accepts_instances,
                 instance_key_names=instance_key_names,
-                reads_outer_references=reads_outer_references,
+                reads_outer_references=True,
             )
 
         def get_equal_q(item: Any) -> Q:

@@ -2,14 +2,9 @@ from __future__ import annotations
 
 import urllib.parse
 
+from hare.core.connections.messages import CONNECTION_RELEASE_FAILED
 from hare.dialects.clickhouse.keeper.clickhouse_migration_lock import ClickhouseMigrationLock
-from hare.dialects.clickhouse.keeper.constants import (
-    KEEPER_NO_ERROR,
-    KEEPER_NO_NODE_ERROR,
-    KEEPER_NOT_EMPTY_ERROR,
-)
 from hare.dialects.clickhouse.keeper.keeper_session import KeeperSession
-from hare.exceptions import OperationalError
 
 
 class ClickhouseDatabaseKeeperNodes:
@@ -23,7 +18,7 @@ class ClickhouseDatabaseKeeperNodes:
         Args:
             addresses: The hosts and ports of the Keeper servers.
             database: The database deleted.
-            connect_timeout: Seconds a server may take to open the session.
+            connect_timeout: Seconds allowed to establish a Keeper session.
         """
         self.addresses = addresses
         self.database = database
@@ -62,22 +57,15 @@ class ClickhouseDatabaseKeeperNodes:
             if series_keeper_path:
                 for node_name in await session.get_children(series_keeper_path):
                     if self.is_series_of_database(node_name):
-                        await self.delete_node(session, f"{series_keeper_path}/{node_name}")
-            await self.delete_node(session, self.migration_locks_path)
-        finally:
+                        await session.delete(f"{series_keeper_path}/{node_name}")
+            await session.delete(self.migration_locks_path)
+        except BaseException as error:
+            try:
+                await session.close()
+            except BaseException as release_error:
+                if release_error is error:
+                    raise
+                raise BaseExceptionGroup(CONNECTION_RELEASE_FAILED, [error, release_error]) from None
+            raise
+        else:
             await session.close()
-
-    @staticmethod
-    async def delete_node(session: KeeperSession, path: str) -> None:
-        """Deletes a node - one already gone, or with children, is left.
-
-        Args:
-            session: The session.
-            path: The node's path.
-
-        Raises:
-            OperationalError: Keeper refused the deletion.
-        """
-        error_code = await session.delete(path)
-        if error_code not in {KEEPER_NO_ERROR, KEEPER_NO_NODE_ERROR, KEEPER_NOT_EMPTY_ERROR}:
-            raise OperationalError(f"ClickHouse Keeper refused to delete {path!r}: error {error_code}")

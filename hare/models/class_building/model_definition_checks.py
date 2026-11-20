@@ -1,17 +1,14 @@
 from __future__ import annotations
 
 import difflib
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.ddl.conditions.constraint_condition import ConstraintCondition
 from hare.ddl.conditions.tenant_condition import TenantCondition
-from hare.ddl.constraints.check_constraint import CheckConstraint
-from hare.ddl.constraints.exclusion_constraint import ExclusionConstraint
 from hare.ddl.constraints.unique_constraint import UniqueConstraint
 from hare.ddl.enums import TriggerTiming
 from hare.ddl.expressions.declared_expressions import DeclaredExpressions
 from hare.ddl.indexes.index import Index
-from hare.ddl.indexes.partial_index import PartialIndex
 from hare.dialects.base.constants import SQL_DIALECT
 from hare.dialects.base.literals.constants import SQL_NULL_BYTE
 from hare.exceptions import ConfigurationError, UnSupportedError
@@ -31,12 +28,13 @@ from hare.models.class_building.constants import (
 )
 from hare.models.class_building.extension_model_options import ExtensionModelOptions
 from hare.models.enums import ModelOption
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.expressions import Expression
 from hare.sql.constants import IDENTIFIER_LENGTH_LIMIT
 
 if TYPE_CHECKING:
-    from hare.models.meta_info import MetaInfo
     from hare.models.model import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class ModelDefinitionChecks:
@@ -120,7 +118,7 @@ class ModelDefinitionChecks:
                 raise ConfigurationError(f"Meta.extensions entries are each the name of an extension, got {entry!r}")
 
     @staticmethod
-    def raise_if_relation_names_repeat(meta: MetaInfo) -> None:
+    def raise_if_relation_names_repeat(meta: type[Model.Meta]) -> None:
         """Refuses a view, materialized view, dictionary and sequence of one name - one namespace
         holds them.
 
@@ -131,7 +129,12 @@ class ModelDefinitionChecks:
             ConfigurationError: Two of them share a name.
         """
         names: set[str] = set()
-        for schema_object in (*meta.views, *meta.materialized_views, *meta.dictionaries, *meta.sequences):
+        for schema_object in (
+            *getattr(meta, ModelOption.VIEWS, ()),
+            *getattr(meta, ModelOption.MATERIALIZED_VIEWS, ()),
+            *getattr(meta, ModelOption.DICTIONARIES, ()),
+            *getattr(meta, ModelOption.SEQUENCES, ()),
+        ):
             if schema_object.name in names:
                 raise ConfigurationError(
                     "Meta declares a view, materialized view, dictionary or sequence named "
@@ -140,7 +143,7 @@ class ModelDefinitionChecks:
             names.add(schema_object.name)
 
     @staticmethod
-    def validate_identifiers(meta: MetaInfo) -> None:
+    def validate_identifiers(meta: ModelBinding) -> None:
         """Rejects a table, column, index or constraint name the schema can't hold: an empty one, one
         with a null byte, and one a database would silently truncate - two such names can end up the
         same identifier, and the schema never matches the model.
@@ -195,7 +198,7 @@ class ModelDefinitionChecks:
                 )
 
     @staticmethod
-    def validate_triggers_fire_on_a_table(meta: MetaInfo) -> None:
+    def validate_triggers_fire_on_a_table(meta: ModelBinding) -> None:
         """Rejects an ``INSTEAD OF`` trigger of a model whose table migrations create - the
         database fires one on a view only.
 
@@ -215,7 +218,7 @@ class ModelDefinitionChecks:
                 )
 
     @staticmethod
-    def validate_distinct_columns(meta: MetaInfo) -> None:
+    def validate_distinct_columns(meta: ModelBinding) -> None:
         """Rejects two fields that map to the same database column.
 
         Args:
@@ -236,7 +239,7 @@ class ModelDefinitionChecks:
                 )
 
     @staticmethod
-    def validate_soft_delete_field(meta: MetaInfo) -> None:
+    def validate_soft_delete_field(meta: ModelBinding) -> None:
         """Checks ``Meta.soft_delete_field``: a ``DatetimeField(null=True)`` of the model, and given when
         ``Meta.soft_delete_hard_cascade`` is.
 
@@ -264,7 +267,7 @@ class ModelDefinitionChecks:
             )
 
     @staticmethod
-    def validate_tenant_field(meta: MetaInfo) -> None:
+    def validate_tenant_field(meta: ModelBinding) -> None:
         """Checks ``Meta.tenant_field`` and turns a forward FK/O2O relation name into its own
         key column (``company`` -> ``company_id``).
 
@@ -283,13 +286,14 @@ class ModelDefinitionChecks:
                 f"Meta.tenant_field {meta.tenant_field!r} is not a field on {meta._model.__name__}"
             )
         if meta.tenant_field in meta.foreign_key_fields or meta.tenant_field in meta.one_to_one_fields:
-            relation_field = cast("ForeignKeyFieldInstance[Any]", field)
-            if len(relation_field.source_fields) != 1:
+            relation_field: ForeignKeyFieldInstance[Any] = field  # type: ignore[assignment]
+            source_fields = relation_field.source_fields
+            if len(source_fields) != 1:
                 raise ConfigurationError(
                     f"Meta.tenant_field {meta.tenant_field!r} on {meta._model.__name__} is a relation with a "
-                    f"composite key {relation_field.source_fields} - name a single column field instead"
+                    f"composite key {source_fields} - name a single column field instead"
                 )
-            meta.tenant_field = relation_field.source_fields[0]
+            meta.tenant_field = source_fields[0]
             return
         if meta.tenant_field not in meta.fields_db_projection:
             raise ConfigurationError(
@@ -298,7 +302,7 @@ class ModelDefinitionChecks:
             )
 
     @staticmethod
-    def validate_schema(meta: MetaInfo) -> None:
+    def validate_schema(meta: ModelBinding) -> None:
         """Checks ``Meta.schema``: None for the connection's own schema, else the name of one.
 
         Args:
@@ -313,7 +317,7 @@ class ModelDefinitionChecks:
             )
 
     @staticmethod
-    def validate_tenant_schema(meta: MetaInfo) -> None:
+    def validate_tenant_schema(meta: ModelBinding) -> None:
         """Checks ``Meta.tenant_schema``: not given with ``Meta.schema``, and no relation of a shared
         model reaches a model whose table is in each tenant's schema.
 
@@ -332,12 +336,12 @@ class ModelDefinitionChecks:
         if meta.tenant_schema:
             return
         for field_name in (*meta.foreign_key_fields, *meta.one_to_one_fields, *meta.many_to_many_fields):
-            relation_field = cast("ForeignKeyFieldInstance[Any]", meta.fields_map[field_name])
+            relation_field: ForeignKeyFieldInstance[Any] = meta.fields_map[field_name]  # type: ignore[assignment]
             if getattr(relation_field, "_generated", False):
                 continue
             # A relation to a swapped model has no target model.
             related_model = relation_field.related_model
-            if related_model is not None and related_model._meta.tenant_schema:
+            if related_model is not None and relation_field.get_related_binding().tenant_schema:
                 raise ConfigurationError(
                     f'"{meta._model.__name__}.{field_name}" relates a model of the shared schema to '
                     f"{related_model.__name__!r}, whose table is in each tenant's schema - "
@@ -345,7 +349,7 @@ class ModelDefinitionChecks:
                 )
 
     @staticmethod
-    def validate_policies_have_row_level_security(meta: MetaInfo) -> None:
+    def validate_policies_have_row_level_security(meta: ModelBinding) -> None:
         """Refuses policies on a table whose row level security is off - the database keeps them
         without applying any.
 
@@ -363,7 +367,7 @@ class ModelDefinitionChecks:
             )
 
     @staticmethod
-    def validate_tenant_row_level_security(meta: MetaInfo) -> None:
+    def validate_tenant_row_level_security(meta: ModelBinding) -> None:
         """Finds a ``TenantCondition`` policy, which needs ``Meta.tenant_field``, and sets
         ``checks_tenant_client``.
 
@@ -386,7 +390,7 @@ class ModelDefinitionChecks:
         meta.checks_tenant_client = meta.tenant_schema or meta.tenant_row_level_security
 
     @staticmethod
-    def validate_field_names(meta: MetaInfo) -> None:
+    def validate_field_names(meta: ModelBinding) -> None:
         """Refuses a field or reverse relation name holding the lookup separator - a filter key would
         split it into a path.
 
@@ -412,19 +416,23 @@ class ModelDefinitionChecks:
                 )
 
     @staticmethod
-    def validate_primary_key_values(meta: MetaInfo) -> None:
-        """Refuses a primary key holding a container value - an array, a map, a tuple, nested rows or a
-        JSON document: the ORM keeps the rows it reads, prefetches and writes by their key, which needs a
-        value equal to itself in a set, and compares keys with ``__in``, which a container takes none of.
+    def validate_primary_key_values(meta: ModelBinding) -> None:
+        """Refuses missing primary-key columns and columns holding container values.
+
+        An array, map, tuple, nested rows or JSON document can't be a key: the ORM keeps the rows it
+        reads, prefetches and writes by their key, which needs a value equal to itself in a set,
+        and compares keys with ``__in``, which a container takes none of.
 
         Args:
             meta: The model's meta.
 
         Raises:
-            ConfigurationError: A field of the primary key holds a container value.
+            ConfigurationError: A primary-key field is missing or holds a container value.
         """
         for name in meta.primary_key_attribute_names:
             field = meta.fields_map.get(name)
+            if field is None:
+                raise ConfigurationError(f"{meta._model.__name__} primary key names unknown field {name!r}")
             if isinstance(field, (ContainerField, JSONField)):
                 raise ConfigurationError(
                     f"{meta._model.__name__}.{name} ({type(field).__name__}) can't be part of the primary key - "
@@ -433,7 +441,7 @@ class ModelDefinitionChecks:
                 )
 
     @staticmethod
-    def validate_latest_by_fields(meta: MetaInfo) -> None:
+    def validate_latest_by_fields(meta: ModelBinding) -> None:
         """Refuses a ``Meta.get_latest_by`` name that is not a field of the model.
 
         Args:
@@ -445,7 +453,7 @@ class ModelDefinitionChecks:
         unknown_names = [
             name
             for name in meta.get_latest_by
-            if name.removeprefix("-").partition(LOOKUP_SEPARATOR)[0] not in {*meta.fields_map, "pk"}
+            if name.removeprefix("-").partition(LOOKUP_SEPARATOR)[0] not in {*meta.fields_map, PRIMARY_KEY_ALIAS}
         ]
         if unknown_names:
             raise ConfigurationError(
@@ -453,7 +461,7 @@ class ModelDefinitionChecks:
             )
 
     @staticmethod
-    def validate_optimistic_lock_field(meta: MetaInfo) -> None:
+    def validate_optimistic_lock_field(meta: ModelBinding) -> None:
         """Checks ``Meta.optimistic_lock_field``: a non-nullable ``IntField`` of the model, outside its
         primary key and not generated by the database - every save bumps it in place.
 
@@ -490,7 +498,7 @@ class ModelDefinitionChecks:
             )
 
     @staticmethod
-    def check_index_expressions(meta: MetaInfo) -> None:
+    def check_index_expressions(meta: ModelBinding) -> None:
         """Builds the expressions of every ``Index`` of ``Meta.indexes``, so that one naming what the model
         lacks is refused when the model is defined, not when its schema is written.
 
@@ -502,10 +510,10 @@ class ModelDefinitionChecks:
         """
         for index in meta.indexes:
             if isinstance(index, Index):
-                index.get_expressions(meta._model)
+                index.get_key_terms(meta, index.get_expression_dialect())
 
     @staticmethod
-    def validate_unnamed_indexes_are_distinct(meta: MetaInfo) -> None:
+    def validate_unnamed_indexes_are_distinct(meta: ModelBinding) -> None:
         """Two unnamed indexes over the same keys, of the same type and options, get the same
         generated name - the second fails schema creation with a raw "already exists" error.
 
@@ -517,20 +525,21 @@ class ModelDefinitionChecks:
         """
         name_sources: set[tuple[Any, ...]] = set()
         for entry in meta.indexes:
-            index = entry if isinstance(entry, Index) else Index(fields=tuple(entry))
+            index = Index.from_declaration(entry)
             if index.name:
                 continue
-            name_source = (index.unique, tuple(index.field_names), index.get_name_parts())
+            key_names = index.get_key_names(meta)
+            name_source = (index.unique, tuple(key_names), index.get_name_parts())
             if name_source in name_sources:
                 raise ConfigurationError(
                     f"Model {meta._model.__name__}: Meta.indexes declares the same unnamed index over "
-                    f"{list(index.field_names)!r} twice - they get the same generated name. Remove the "
+                    f"{key_names!r} twice - they get the same generated name. Remove the "
                     "redundant one, or give one of them a name."
                 )
             name_sources.add(name_source)
 
     @staticmethod
-    def validate_index_fields(meta: MetaInfo) -> None:
+    def validate_index_fields(meta: ModelBinding) -> None:
         """Checks the fields ``Meta.indexes`` and the unique constraints of ``Meta.constraints`` name.
 
         Args:
@@ -543,7 +552,7 @@ class ModelDefinitionChecks:
         ModelDefinitionChecks.validate_unique_constraint_fields(meta)
 
     @staticmethod
-    def validate_index_entries(meta: MetaInfo) -> None:
+    def validate_index_entries(meta: ModelBinding) -> None:
         """Checks every entry of ``Meta.indexes`` - a list of field names or an ``Index``: each field
         is one of the model, with a column of its table (not a ``ManyToManyField``), indexable by a plain
         index unless the index has an access method of its own, and each ``include`` name a stored field.
@@ -584,7 +593,7 @@ class ModelDefinitionChecks:
                     )
 
     @staticmethod
-    def is_stored_field(meta: MetaInfo, field_name: str) -> bool:
+    def is_stored_field(meta: ModelBinding, field_name: str) -> bool:
         """Whether a name an index's or a constraint's ``include`` gives stands for columns of the table - a
         field with a column, or a forward relation standing for its key columns.
 
@@ -602,7 +611,7 @@ class ModelDefinitionChecks:
         )
 
     @staticmethod
-    def validate_unique_constraint_fields(meta: MetaInfo) -> None:
+    def validate_unique_constraint_fields(meta: ModelBinding) -> None:
         """Checks the fields of every ``UniqueConstraint`` of ``Meta.constraints``: each is an indexable
         field with a column of the table, each ``include`` name a stored field, and the condition reads
         only the model's columns.
@@ -642,7 +651,7 @@ class ModelDefinitionChecks:
                     )
 
     @staticmethod
-    def validate_declarations_read_model_columns(meta: MetaInfo) -> None:
+    def validate_declarations_read_model_columns(meta: ModelBinding) -> None:
         """Refuses a condition of a constraint, an index or a policy, and an expression of a generated field,
         reading another model's columns - when the model is defined, alike on every database, not when a
         migration of it is applied: the DDL of a table reads its own columns only.
@@ -654,14 +663,7 @@ class ModelDefinitionChecks:
             ConfigurationError: A declaration reads another model's column, an aggregate or an expression
                 in a condition.
         """
-        model = meta._model
-        conditions: list[Any] = []
-        for constraint in meta.constraints:
-            if isinstance(constraint, (UniqueConstraint, ExclusionConstraint)):
-                conditions.append(constraint.condition)
-            elif isinstance(constraint, CheckConstraint):
-                conditions.append(constraint.check)
-        conditions.extend(index.condition for index in meta.indexes if isinstance(index, PartialIndex))
+        conditions = ConstraintCondition.get_table_conditions(meta)
         for policy in meta.policies:
             conditions.extend(
                 condition
@@ -669,17 +671,17 @@ class ModelDefinitionChecks:
                 if not isinstance(condition, TenantCondition)
             )
         for condition in conditions:
-            ConstraintCondition.raise_if_reads_other_columns(condition, model)
+            ConstraintCondition.raise_if_reads_other_columns(condition, meta)
         for field in meta.fields_map.values():
             if isinstance(field, GeneratedField) and isinstance(field.expression, Expression):
                 try:
-                    DeclaredExpressions.get_term(field.expression, model, SQL_DIALECT)
+                    DeclaredExpressions.get_term(field.expression, meta, SQL_DIALECT)
                 except UnSupportedError:
                     # What a dialect can't write is refused by its DDL.
                     continue
 
     @staticmethod
-    def validate_declared_names_are_distinct(meta: MetaInfo) -> None:
+    def validate_declared_names_are_distinct(meta: ModelBinding) -> None:
         """Refuses two constraints or indexes of a model declared under one name - the database
         refuses the second when the schema is made, or keeps both.
 
@@ -702,7 +704,7 @@ class ModelDefinitionChecks:
             names.add(name)
 
     @staticmethod
-    def validate_unique_indexes_do_not_collide_with_constraints(meta: MetaInfo) -> None:
+    def validate_unique_indexes_do_not_collide_with_constraints(meta: ModelBinding) -> None:
         """Rejects an ``Index(unique=True)`` and a ``UniqueConstraint`` over the same set of fields and
         the same condition - two physical objects enforcing one rule. The field order doesn't matter;
         a different condition is a different rule.
@@ -727,7 +729,7 @@ class ModelDefinitionChecks:
                 )
 
     @staticmethod
-    def validate_unnamed_unique_constraints_are_distinct(meta: MetaInfo) -> None:
+    def validate_unnamed_unique_constraints_are_distinct(meta: ModelBinding) -> None:
         """Two unnamed ``UniqueConstraint``s on the same fields, in the same order, get the same
         generated name - the second fails schema creation with a raw "already exists" error.
 

@@ -3,10 +3,12 @@ from __future__ import annotations
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
+from hare.core.extensions.declarations import TransformRegistration
 from hare.dialects.postgresql.fields.citext_field import CitextField
 from hare.dialects.postgresql.lookups.constants import UNACCENT_EXTENSION, UNACCENT_PATH_SEGMENT
 from hare.fields.data.text.char_field import CharField
 from hare.fields.data.text.text_field import TextField
+from hare.fields.registrations.registered_transform import RegisteredTransform
 from hare.sql.terms.functions.function import Function
 
 if TYPE_CHECKING:
@@ -31,9 +33,16 @@ class UnaccentTransform:
         return partial(Function, "unaccent"), field
 
     @classmethod
-    def register(cls) -> None:
-        """Adds the ``unaccent`` path segment to hare's text fields."""
-        for field_class in (CharField, TextField, CitextField):
-            field_class.register_transform(
-                UNACCENT_PATH_SEGMENT, cls.get_transform, required_extension=UNACCENT_EXTENSION
+    def get_registrations(cls) -> tuple[TransformRegistration, ...]:
+        """Declare the path segment on text fields without modifying their classes."""
+        return tuple(
+            TransformRegistration(
+                field_class,
+                UNACCENT_PATH_SEGMENT,
+                RegisteredTransform(
+                    cls.get_transform,
+                    UNACCENT_EXTENSION,
+                ),
             )
+            for field_class in (CharField, TextField, CitextField)
+        )

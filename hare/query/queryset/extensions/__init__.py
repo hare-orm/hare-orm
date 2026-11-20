@@ -3,7 +3,9 @@ database - without hare's core knowing them."""
 
 from __future__ import annotations
 
+from hare.query.queryset.extensions.enums import ExtensionPhase
 from hare.query.queryset.extensions.query_set_extension_query import QuerySetExtensionQuery
+from hare.query.queryset.extensions.query_set_extension_result import QuerySetExtensionResult
 from hare.query.queryset.extensions.query_set_extensions import QuerySetExtensions
 
-__all__ = ["QuerySetExtensionQuery", "QuerySetExtensions"]
+__all__ = ["ExtensionPhase", "QuerySetExtensionQuery", "QuerySetExtensionResult", "QuerySetExtensions"]

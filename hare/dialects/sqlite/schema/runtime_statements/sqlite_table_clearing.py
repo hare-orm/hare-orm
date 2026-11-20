@@ -6,10 +6,11 @@ from typing import TYPE_CHECKING
 
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.dialects.base.schema.runtime_statements.table_clearing import TableClearing
-from hare.models import Model
+from hare.dialects.sqlite.client.sqlite_pragma_scope import SqlitePragmaScope
 
 if TYPE_CHECKING:
     from hare.dialects.sqlite.schema.sqlite_schema_editor import SqliteSchemaEditor
+    from hare.models.model_binding import ModelBinding
 
 
 class SqliteTableClearing(TableClearing):
@@ -23,17 +24,14 @@ class SqliteTableClearing(TableClearing):
     async def clear_tables(cls, connection: DatabaseClient, quoted_tables: Sequence[str]) -> None:
         # Foreign keys are switched off meanwhile - a self-referencing or circular relation has no
         # delete order that satisfies them.
-        await connection.execute_script("PRAGMA foreign_keys = OFF")
-        try:
+        async with SqlitePragmaScope.run(connection, "foreign_keys", "OFF"):
             await super().clear_tables(connection, quoted_tables)
-        finally:
-            await connection.execute_script("PRAGMA foreign_keys = ON")
 
     @classmethod
     def defer_cascade_foreign_keys(
-        cls, model: type[Model], connection: DatabaseClient
+        cls, binding: ModelBinding, connection: DatabaseClient
     ) -> AbstractAsyncContextManager[bool]:
         # Local import: the deferral walks hare's models, whose modules import this one.
         from hare.dialects.sqlite.schema.runtime_statements.sqlite_foreign_key_deferral import SqliteForeignKeyDeferral
 
-        return SqliteForeignKeyDeferral.defer(model, connection)
+        return SqliteForeignKeyDeferral.defer(binding, connection)

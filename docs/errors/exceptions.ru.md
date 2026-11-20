@@ -37,8 +37,8 @@ HareError(Exception)
 несколько собственных исключений). Дерево разделяет два вида ошибок:
 
 - **Неверный вызов** — `QueryError`, `FieldError`, `ConfigurationError`, `ValidationError`,
-  `UnSupportedError`, `NoValuesFetched`, `IncompleteInstanceError`: их поднимает сам hare, до того как
-  что-либо уйдёт в базу.
+  `UnSupportedError`, `NoValuesFetched`, `IncompleteInstanceError`: их поднимает сам hare. Проверка
+  возможностей может читать сервер перед отказом в неподдерживаемом действии.
 - **Отказала база** — `DatabaseError` и его подклассы: то, о чём сообщил драйвер подключения, и проверки
   целостности, которые hare выполняет вместо базы (`PROTECT`, `RESTRICT`, оптимистическая блокировка).
 
@@ -46,9 +46,10 @@ HareError(Exception)
 — `AttributeError`, `DBConnectionError` — `ConnectionError`: обычный
 `except ValueError:`/`except LookupError:`, написанный без знания о hare, их перехватывает.
 
-Ошибка, о которой сообщила база (`IntegrityError`, `OperationalError`, `DBConnectionError` и т. п.), на
-любой базе создаётся из исключения самого драйвера: оно лежит в `__cause__` (и в `args[0]`) и в
-PostgreSQL содержит `sqlstate`, `constraint_name`, `table_name` и другие сведения сервера.
+Ошибка базы (`IntegrityError`, `OperationalError`, `DBConnectionError` и т. п.) обычно сохраняет
+исключение драйвера в `__cause__`, в том числе сведения PostgreSQL: `sqlstate`, `constraint_name`,
+`table_name`. Ошибки с чувствительными значениями очищаются: исходное исключение драйвера удаляется
+из цепочки причин, а представление его аргументов не является стабильным API.
 
 | Исключение | Когда возникает |
 |---|---|
@@ -126,9 +127,10 @@ PostgreSQL содержит `sqlstate`, `constraint_name`, `table_name` и др�
 или уровень изоляции, двухфазную фиксацию, тип поля, ограничение, параметр индекса или тип триггера,
 `.explain(output_format=...)` в SQLite (простой `.explain()` там тоже работает, через
 `EXPLAIN QUERY PLAN`), или сервер старше того, с которым работает диалект. Её же даёт оператор фильтра,
-получивший аргумент другого вида: `__year=` не `int`, `__isnull=` не `bool`, `__in=` не список, `has_key=`
-не текст; значение, которое нельзя привести к типу поля, — это `ValidationError`. Бросается до отправки
-чего-либо. Ошибка в самом объявлении, на любой базе, — это `ConfigurationError`.
+получивший аргумент другого вида: `__year=` не `int`, `__isnull=` не `bool`, скаляр или текст для
+`__in=`; значение, которое нельзя привести к типу поля, — это `ValidationError`. Неподдерживаемое
+действие отклоняется до его выполнения, но проверка возможностей может читать сервер. Ошибка в самом
+объявлении, на любой базе, — это `ConfigurationError`.
 
 ## <a id="package-exceptions"></a>Исключения других пакетов
 
@@ -142,8 +144,8 @@ PostgreSQL содержит `sqlstate`, `constraint_name`, `table_name` и др�
 | `hare.sql.exceptions` | `HareSqlException` (`QueryError`) и его `QueryException`, `GroupingException`, `CaseException`, `JoinException`, `SetOperationException`, `FunctionException`: команда, которую сборщик SQL не может составить. |
 | `hare.dialects.sqlite.exceptions` | `SqliteTriggerRecursionLimitError` (`CascadeDepthLimitError`). |
 
-Пакеты contrib, которые отвечают на запросы или доставляют события, бросают вместо этого исключения типов
-стандартной библиотеки, чтобы окружающий код обрабатывал их, ничего не зная о hare:
+Некоторые исключения contrib наследуют типы стандартной библиотеки, чтобы окружающий код мог
+обрабатывать их без знания hare. Другие, включая `ApiGetterError`, остаются подклассами `HareError`:
 
 | Модуль | Исключения |
 |---|---|

@@ -5,7 +5,8 @@ Functions only PostgreSQL runs, from `hare.dialects.postgresql.functions`; they 
 Full-text search is [`hare.search`](../search-and-geodata/full-text-search.md).
 
 ```python
-from hare.dialects.postgresql.functions import StringAgg, Subpath, TransactionNow
+from hare.dialects.postgresql.functions import ArraySubquery, StringAgg, Subpath, TransactionNow
+from hare.query.expressions import OuterReference
 from hare.query.functions import ArrayAgg, ArrayItem
 ```
 
@@ -13,8 +14,6 @@ from hare.query.functions import ArrayAgg, ArrayItem
 
 | Function | SQL |
 |---|---|
-| `STDistance(field, point)` | `ST_DISTANCE(...)` |
-| `STDWithin(field, point, radius_m)` | `ST_DWITHIN(...)` — `radius_m` is a finite number of zero or more or an expression, else `ValidationError` |
 | `ArrayAgg(field, distinct=False, _filter=None, order_by=())` | `ARRAY_AGG(...)` — each element decoded through the field; hare's own aggregate of `hare.query.functions`, `groupArray` on ClickHouse |
 | `StringAgg(field, delimiter, distinct=False, _filter=None, order_by=())` | `STRING_AGG(CAST(field AS TEXT), ...)` — `delimiter` is text or an expression; another value raises `QueryError` |
 | `JSONBAgg(field, distinct=False, _filter=None, order_by=())` | `JSONB_AGG(...)` — each element decoded through the field |
@@ -34,7 +33,6 @@ from hare.query.functions import ArrayAgg, ArrayItem
 | `ArrayItem(field, index)` | `field[index + 1]` (0-indexed) — decoded through the array's `base_field`; on a nested array, a whole row (`[[1, 2], [3, 4]]` → `[1, 2]`) |
 
 ```python
-await Store.objects.annotate(distance_m=STDistance("location", (55.75, 37.62))).order_by("distance_m")
 
 await Book.objects.all().annotate(tag_names=ArrayAgg("tags__name")).group_by("id")
 

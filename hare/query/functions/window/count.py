@@ -35,7 +35,7 @@ class Count(FieldWindowFunction):
         """
         field = self.field
         if isinstance(field, str) and field not in expression_context.annotations:
-            component_paths = ConcreteFieldPaths.get_paths(expression_context.model, field)
+            component_paths = ConcreteFieldPaths.get_paths(expression_context.binding, field)
             if len(component_paths) > 1:
                 counted = copy(self)
                 counted.field = component_paths[0]
@@ -49,6 +49,7 @@ class Count(FieldWindowFunction):
 
         Args:
             field_object: The counted field.
+            expression_context: SQL context for the expression, including its query, binding and connection.
 
         Returns:
             None - the driver already returns a plain int.

@@ -6,13 +6,17 @@ from __future__ import annotations
 from hare.migrations.api.checkmigrations import checkmigrations
 from hare.migrations.api.makemigrations import makemigrations
 from hare.migrations.api.migrate import migrate
+from hare.migrations.api.migration_session import MigrationSession
 from hare.migrations.api.plan import plan
 from hare.migrations.api.sqlmigrate import sqlmigrate
 from hare.migrations.api.squashmigrations import squashmigrations
+from hare.migrations.execution.connection_migration_plan import ConnectionMigrationPlan
 from hare.migrations.making.migration_changes import MigrationChanges
 from hare.migrations.making.squashed_migration import SquashedMigration
 
 __all__ = [
+    "ConnectionMigrationPlan",
+    "MigrationSession",
     "MigrationChanges",
     "SquashedMigration",
     "checkmigrations",

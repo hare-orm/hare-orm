@@ -3,8 +3,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from hare.dialects.base.clauses.enums import JoinType
 from hare.sql.builder_methods import BuilderMethods
-from hare.sql.enums import JoinType
 from hare.sql.sql_context import SqlContext
 
 if TYPE_CHECKING:
@@ -44,12 +44,12 @@ class Join:
         )
         return f"{prefix}{dialect.clauses.get_join_keyword_sql(how)} {item_sql}"
 
-    def validate(self, _from: Sequence[Table], _joins: Sequence[Table]) -> None:
+    def validate(self, _from: Sequence[Selectable], _joins: Sequence[Join]) -> None:
         """Checks the join against the tables of the query - nothing for a join without a condition.
 
         Args:
             _from: The tables of the query's ``FROM``.
-            _joins: The tables of its joins.
+            _joins: The existing joins.
         """
         pass
 

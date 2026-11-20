@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.caching.cache import Cache
+from hare.core.caching.cache_bucket import CacheBucket
 from hare.core.caching.model_cache import ModelCache
 from hare.exceptions import QueryError
 from hare.query.scopes.tenants.all_tenants import AllTenants
@@ -11,8 +12,8 @@ from hare.query.scopes.tenants.tenant_values import TenantValues
 
 if TYPE_CHECKING:
     from hare.core.apps.declarations import ModelReference
-    from hare.core.hare_context import HareContext
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class ModelTenants:
@@ -25,6 +26,8 @@ class ModelTenants:
     Args:
         scopes: Each model's tenant value, ``Tenancy.any_of(...)`` or ``Tenancy.ALL`` - a model given by
             its class, its ``"app.Model"`` label or a ``swappable()`` setting.
+        fallback: A captured scope used for models not matched here. Internal maintenance can
+            override one model without dropping the caller's other row or schema scopes.
 
     Raises:
         QueryError: A key isn't a model with ``Meta.tenant_field`` or ``Meta.tenant_schema``, an entry
@@ -33,25 +36,22 @@ class ModelTenants:
         ConfigurationError: A label names no model of the current context.
     """
 
-    __slots__ = ("scopes", "schema_tenants", "policy_tenants")
+    __slots__ = ("scopes", "schema_tenants", "policy_tenants", "fallback")
 
     #: Connection results depend on every registered model, including models added after the scope.
-    schema_tenant_cache: ClassVar[Cache[Any]] = Cache(
-        holds_sql=False, keyed_by_model=False, depends_on_other_models=True
-    )
-    policy_tenant_cache: ClassVar[Cache[Any]] = Cache(
-        holds_sql=False, keyed_by_model=False, depends_on_other_models=True
-    )
+    schema_tenant_cache: ClassVar[Cache[Any]] = Cache(depends_on_other_models=True)
+    policy_tenant_cache: ClassVar[Cache[dict[str, Any]]] = Cache(depends_on_other_models=True)
 
-    def __init__(self, scopes: Mapping[ModelReference, Any]) -> None:
+    def __init__(self, scopes: Mapping[ModelReference, Any], *, fallback: Any = None) -> None:
         self.scopes: dict[type[Model], Any] = {}
+        self.fallback = fallback
         #: The tenant schema by context and connection alias; an alias alone doesn't identify a registry.
-        self.schema_tenants: dict[tuple[HareContext | None, str], Any] | None = None
+        self.schema_tenants: CacheBucket[Any] | None = None
         #: Each ``TenantCondition`` table's tenants, by context and connection alias.
-        self.policy_tenants: dict[tuple[HareContext | None, str], dict[str, Any]] | None = None
+        self.policy_tenants: CacheBucket[dict[str, Any]] | None = None
         for reference, scope in scopes.items():
             model = ModelTenants.get_model(reference)
-            meta = getattr(model, "_meta", None)
+            meta = getattr(model, "_declaration", None)
             if not isinstance(model, type) or meta is None or not (meta.tenant_field or meta.tenant_schema):
                 raise QueryError(
                     f"Tenancy.scope(): {model!r} is not a model with Meta.tenant_field or Meta.tenant_schema"
@@ -93,45 +93,50 @@ class ModelTenants:
 
     @staticmethod
     @ModelCache.fact()
-    def get_tenant_bases(model: type[Model]) -> tuple[type[Model], ...]:
+    def get_tenant_bases(binding: ModelBinding) -> tuple[type[Model], ...]:
         """The base classes of ``model`` that are models with the same ``Meta.tenant_field`` - of a
         ``Meta.tenant_schema`` model without one, with ``Meta.tenant_schema`` - nearest first: a scope
         given for one of them is the model's too."""
-        meta = model._meta
-        if meta.tenant_field is None:
+        model = binding._model
+        if binding.tenant_field is None:
             return tuple(
-                cast("type[Model]", base_class)
+                base_class
                 for base_class in model.__mro__[1:]
-                if hasattr(base_class, "_meta") and base_class._meta.tenant_schema
+                if hasattr(base_class, "_declaration") and base_class._declaration.tenant_schema
             )
         return tuple(
-            cast("type[Model]", base_class)
+            base_class
             for base_class in model.__mro__[1:]
-            if hasattr(base_class, "_meta") and base_class._meta.tenant_field == meta.tenant_field
+            if hasattr(base_class, "_declaration") and base_class._declaration.tenant_field == binding.tenant_field
         )
 
-    def get_for_model(self, model: type[Model]) -> Any:
+    def get_for_model(self, binding: ModelBinding) -> Any:
         """The scope of one model.
 
         Args:
-            model: The model.
+            binding: The model.
 
         Returns:
             A tenant value, a ``TenantValues``, ``Tenancy.ALL``, or None when the scope names
-            neither the model nor a base class of it with the same ``Meta.tenant_field``.
+            neither the model nor a base class of it with the same ``Meta.tenant_field`` and
+            its fallback supplies no value.
         """
+        model = binding._model
         scopes = self.scopes
         if model in scopes:
             return scopes[model]
-        tenant_bases = ModelTenants.get_tenant_bases(model)
+        tenant_bases = ModelTenants.get_tenant_bases(binding)
         for base_class in tenant_bases:
             if base_class in scopes:
                 return scopes[base_class]
         for candidate in (model, *tenant_bases):
             for scoped_model, scope in scopes.items():
-                if scoped_model._meta.full_name == candidate._meta.full_name:
+                if (
+                    scoped_model.__name__ == candidate.__name__
+                    and scoped_model._declaration.app == candidate._declaration.app
+                ):
                     return scope
-        return None
+        return self.fallback.get_for_model(binding) if isinstance(self.fallback, ModelTenants) else self.fallback
 
     def get_schema_tenant(self, connection_alias: str) -> Any:
         """The tenant whose schema a connection works in under the scope - the one value the scope gives
@@ -153,18 +158,19 @@ class ModelTenants:
         # Local import: the context imports the query package.
         from hare.core.hare_context import HareContext
 
-        key = (HareContext.get_current(), connection_alias)
+        apps = HareContext.require_current().require_apps()
+        key = (apps.binding_graph, connection_alias)
         schema_tenants = self.schema_tenants
         if schema_tenants is None:
             schema_tenants = self.schema_tenants = self.schema_tenant_cache.new_shared_bucket()
         if key in schema_tenants:
             return schema_tenants[key]
         tenants: dict[Any, list[str]] = {}
-        for model in ModelTenants.get_context_models():
-            meta = model._meta
+        for model in list(apps.get_models_iterable()):
+            meta = apps.get_binding(model)
             if not meta.tenant_schema or meta.abstract or meta.default_connection != connection_alias:
                 continue
-            tenant = self.get_for_model(model)
+            tenant = self.get_for_model(meta)
             if tenant is not None:
                 # Integers and their text name the same schema (1 and "1" both select tenant_1).
                 schema_tenant = str(tenant) if type(tenant) is int else tenant
@@ -196,7 +202,8 @@ class ModelTenants:
         # Local import: the context imports the query package.
         from hare.core.hare_context import HareContext
 
-        key = (HareContext.get_current(), connection_alias)
+        apps = HareContext.require_current().require_apps()
+        key = (apps.binding_graph, connection_alias)
         connection_tenants = self.policy_tenants
         if connection_tenants is None:
             connection_tenants = self.policy_tenants = self.policy_tenant_cache.new_shared_bucket()
@@ -206,36 +213,22 @@ class ModelTenants:
             from hare.ddl.conditions.tenant_condition import TenantCondition
 
             policy_tenants = {}
-            for model in ModelTenants.get_context_models():
-                meta = model._meta
+            for model in list(apps.get_models_iterable()):
+                meta = apps.get_binding(model)
                 if not meta.tenant_row_level_security or meta.abstract or meta.default_connection != connection_alias:
                     continue
-                tenant = self.get_for_model(model)
+                tenant = self.get_for_model(meta)
                 if tenant is not None:
-                    policy_tenants[TenantCondition.get_table_key(model)] = tenant
+                    policy_tenants[TenantCondition.get_table_key(meta)] = tenant
             connection_tenants[key] = policy_tenants
         return policy_tenants
 
-    @staticmethod
-    def get_context_models() -> list[type[Model]]:
-        """The models of the current context.
-
-        Returns:
-            The models; none outside a context.
-        """
-        # Local import: the context imports the query package.
-        from hare.core.hare_context import HareContext
-
-        context = HareContext.get_current()
-        apps = None if context is None else context.apps
-        return [] if apps is None else list(apps.get_models_iterable())
-
     def __eq__(self, other: object) -> bool:
         # A scope of the same entries is the same scope - entered again inside a transaction begun in it.
-        return type(other) is ModelTenants and other.scopes == self.scopes
+        return type(other) is ModelTenants and other.scopes == self.scopes and other.fallback == self.fallback
 
     def __hash__(self) -> int:
-        return hash(frozenset(self.scopes.items()))
+        return hash((frozenset(self.scopes.items()), self.fallback))
 
     def __repr__(self) -> str:
         entries = ", ".join(f"{model.__name__}: {scope!r}" for model, scope in self.scopes.items())

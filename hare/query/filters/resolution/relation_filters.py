@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import QueryError
 from hare.fields.relations.fields.backward_foreign_key_relation import BackwardForeignKeyRelation
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.fields.relations.fields.relational_field import RelationalField
 from hare.fields.relations.relation_values import RelationValues
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.enums import Lookup, LookupTarget
 from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import AggregatedMultiValuedPaths
 from hare.query.expressions.conditions.query_modifier import QueryModifier
@@ -28,6 +29,7 @@ from hare.sql.terms.term import Term
 from hare.sql.terms.tuple import Tuple
 
 if TYPE_CHECKING:
+    from hare.core.hare_context import HareContext
     from hare.models import Model
     from hare.query.expressions.conditions.q import Q
     from hare.query.filters.lookups.field_lookup import FieldLookup
@@ -80,7 +82,7 @@ class RelationFilters:
             QueryError: An aggregate over the same to-many relation would see only one of
                 several JOINs, or an extra condition reads a further relation.
         """
-        related_field = cast("RelationalField[Model]", expression_context.model._meta.fields_map[related_field_name])
+        related_field: RelationalField[Model] = expression_context.binding.fields_map[related_field_name]  # type: ignore[assignment]
         full_path = RelationFilters.get_relation_path(expression_context, related_field_name)
         # The first generation to touch a to-many path takes the unsuffixed alias; only a later,
         # different generation gets a JOIN of its own.
@@ -98,7 +100,7 @@ class RelationFilters:
                 # An aggregate that crossed this relation reads only one of the JOINs, while the
                 # WHERE spans both - its value would be wrong, so this raises.
                 aggregated_paths = expression_context.aggregated_multi_valued_paths
-                if aggregated_paths and full_path in aggregated_paths:
+                if aggregated_paths is not None and full_path in aggregated_paths.paths:
                     raise QueryError(
                         f"Combining an aggregate (Count/Sum/Avg/...) over {full_path!r} with two or "
                         "more separate .filter()/.exclude() calls on that same to-many relation produces an "
@@ -126,6 +128,7 @@ class RelationFilters:
             dialect=expression_context.dialect,
             connection=expression_context.connection,
             through_only=through_only,
+            application_context=expression_context.application_context,
         )
         return related_field, full_path, required_joins
 
@@ -162,7 +165,7 @@ class RelationFilters:
         )
         modifier = nested_condition.get_result(
             ExpressionContext(
-                model=related_field.related_model,
+                binding=related_field.get_related_binding(),
                 dialect=expression_context.dialect,
                 connection=expression_context.connection,
                 table=required_joins[-1][0],
@@ -180,10 +183,12 @@ class RelationFilters:
                 aggregated_multi_valued_paths=expression_context.aggregated_multi_valued_paths,
                 multi_valued_join_generations=expression_context.multi_valued_join_generations,
                 visibility=expression_context.visibility,
+                application_context=expression_context.application_context,
             )
         )
+        related_model = related_field.related_model
         modifier = RelationFilters.get_missing_row_guarded(
-            modifier, expression_context, related_field.related_model, required_joins[-1][0], forwarded_fields, value
+            modifier, expression_context, related_model, required_joins[-1][0], forwarded_fields, value
         )
         reference: RelatedValueReference | None = None
         if nested_references is not None and len(nested_references) == 1:
@@ -192,7 +197,7 @@ class RelationFilters:
                 # A multi-hop filter - converted for the model at its far end.
                 reference = nested_reference
             elif nested_reference is not None:
-                reference = RelatedValueReference(nested_reference, related_field.related_model)
+                reference = RelatedValueReference(nested_reference, related_model)
         return QueryModifier(joins=required_joins) & modifier, reference
 
     @staticmethod
@@ -221,7 +226,7 @@ class RelationFilters:
             The filter - for a missing row, true when it tests the field for NULL, false otherwise.
         """
         field_name, __, lookup = forwarded_fields.partition("__")
-        meta = related_model._meta
+        meta = expression_context.binding.graph.get_binding(related_model)
         field = meta.fields_map.get(field_name)
         if (
             field is None
@@ -253,7 +258,7 @@ class RelationFilters:
         value: Any,
         table: Table,
         join_table: Table | None,
-    ) -> tuple[Criterion, TableCriterionTuple, Callable[..., Any], Any]:
+    ) -> tuple[Criterion, TableCriterionTuple, Callable[..., Any] | None, Callable[..., Any], Any]:
         """Builds the criterion of a lookup on a many-to-many or backward relation itself - the
         related rows' key compared on the through table or the related table, joined by the key
         columns (a row of them for a composite key).
@@ -266,37 +271,37 @@ class RelationFilters:
             join_table: The through or related table, when it is joined already.
 
         Returns:
-            The criterion, the join, the operator and the converted value.
+            The criterion, the join, the encoder actually used (None for a SQL term), the operator
+            and the converted value.
         """
         model = expression_context.model
         relation = lookup_info.relations[-1]
-        field_lookup = cast("FieldLookup", lookup_info.field_lookup)
+        field_lookup: FieldLookup = lookup_info.field_lookup  # type: ignore[assignment]
         compared_term: Term
         if isinstance(relation, ManyToManyFieldInstance):
             related_table = (
                 join_table if join_table is not None else Table(relation.through, schema=relation.through_schema)
             )
-            left_columns = KeyColumns.get_source_columns(model._meta)
+            left_columns = KeyColumns.get_source_columns(expression_context.binding)
             right_columns = relation.backward_keys
             compared_term = (
                 Tuple(*[related_table[column] for column in relation.forward_keys])
-                if relation.related_model._meta.pk is None
+                if relation.get_related_binding().pk is None
                 else related_table[relation.forward_key]
             )
         else:
-            backward_relation = cast("BackwardForeignKeyRelation[Model]", relation)
-            owner_meta = backward_relation.related_model._meta
+            backward_relation: BackwardForeignKeyRelation[Model] = relation  # type: ignore[assignment]
+            owner_meta = backward_relation.get_related_binding()
             related_table = (
                 join_table
                 if join_table is not None
-                else RelationFilters.get_filter_join_table(
-                    model, backward_relation.model_field_name, table, Table(owner_meta.db_table)
+                else Table(owner_meta.db_table).as_(
+                    Identifiers.get_within_limit(
+                        f"{table.get_table_name()}__{backward_relation.model_field_name}__direct"
+                    )
                 )
             )
-            left_columns = tuple(
-                target_field.source_field or target_field.model_field_name
-                for target_field in backward_relation.to_field_instances
-            )
+            left_columns = backward_relation.to_column_names
             right_columns = backward_relation.relation_source_fields
             # A LEFT JOIN that found no row nulls every joined column, so a model without a
             # primary key is tested by its key column to this row - never NULL in a joined row.
@@ -311,11 +316,16 @@ class RelationFilters:
                 [table[column] for column in left_columns], [related_table[column] for column in right_columns]
             ),
         )
-        if field_lookup.value_encoder is not None and not isinstance(value, Term):
-            # A value that is a SQL term (OuterReference/Subquery/F()) is compared as it is.
-            value = field_lookup.value_encoder(value, model, relation, expression_context.dialect)
-        operator = expression_context.dialect.filter_operators.get_operator(field_lookup)
-        return operator(compared_term, value), join, operator, value
+        value_encoder = None
+        if not isinstance(value, Term):
+            # SQL terms compare as given; plain values use the same encoder selection as other lookups.
+            value_encoder = field_lookup.get_value_encoder(relation, expression_context.dialect)
+            if value_encoder is not None:
+                value = value_encoder(value, model, relation, expression_context.dialect)
+        operator = expression_context.dialect.filter_operators.get_operator(
+            field_lookup, expression_context.connection
+        )
+        return operator(compared_term, value), join, value_encoder, operator, value
 
     @staticmethod
     def get_related_instance_key_value(key: str, field_object: RelationalField[Model], obj: Model) -> Any:
@@ -342,13 +352,16 @@ class RelationFilters:
         return key_value
 
     @staticmethod
-    def get_forward_relation_lookup_value(key: str, field_object: RelationalField[Model], value: Any) -> Any:
+    def get_forward_relation_lookup_value(
+        key: str, field_object: RelationalField[Model], value: Any, *, application_context: HareContext | None = None
+    ) -> Any:
         """Converts related-model instances in a relation lookup's value into their key values.
 
         Args:
             key: The filter kwarg name.
             field_object: The forward FK/O2O field.
             value: The lookup value - an instance, a key value, a list of either, or a queryset.
+            application_context: The application context used to bind values and check model routing.
 
         Returns:
             The value with every instance replaced by its ``to_field`` value, and a queryset of the
@@ -360,8 +373,11 @@ class RelationFilters:
         from hare.models import Model
         from hare.query.queryset import QuerySet
         from hare.query.queryset.combination.queryset_combination import QuerySetCombination
-        from hare.query.statements.select.combined_query import CombinedQuery
 
+        if isinstance(value, QuerySet):
+            from hare.query.queryset.pending_calls.calls_before_setup import CallsBeforeSetup
+
+            value = CallsBeforeSetup.bind(value, application_context, field_object.get_binding().model_binding.graph)  # type: ignore[union-attr]
         to_field_name = field_object.to_field_instance.model_field_name
         related_model = field_object.related_model
 
@@ -376,7 +392,7 @@ class RelationFilters:
             and value.model is related_model
         ):
             if value._combination is not None:
-                return cast("CombinedQuery", value._get_compiler())._get_field_values_query(to_field_name)
+                return value._get_compiler()._get_field_values_query(to_field_name)  # type: ignore[attr-defined]
             value._build_conditions_for_copies()
             field_values_query = value._get_field_values_query(to_field_name)
             # Made again for each build - its values come from the queryset.
@@ -405,7 +421,6 @@ class RelationFilters:
         """
         from hare.query.scopes.row_scopes import RowScopes
 
-        model = expression_context.model
         relation_name, _, lookup = key.partition("__")
         if lookup == Lookup.EXACT:
             if value is not None:
@@ -415,27 +430,29 @@ class RelationFilters:
             is_empty = value if lookup == Lookup.ISNULL else not value
         else:
             return None
-        if relation_name not in model._meta.foreign_key_fields and relation_name not in model._meta.one_to_one_fields:
+        model_binding = expression_context.binding
+        if (
+            relation_name not in model_binding.foreign_key_fields
+            and relation_name not in model_binding.one_to_one_fields
+        ):
             return None
-        relation_field = cast("RelationalField[Model]", model._meta.fields_map[relation_name])
-        related_model = relation_field.related_model
-        related_meta = related_model._meta
+        relation_field: RelationalField[Model] = model_binding.fields_map[relation_name]  # type: ignore[assignment]
+        related_meta = relation_field.get_related_binding()
         table = expression_context.table
         related_table = related_meta.basetable.as_(
             Identifiers.get_within_limit(f"{table.get_table_name()}__{relation_name}__live")
         )
-        visible_target_criterion = RowScopes.of(related_model).get_criterion(
+        visible_target_criterion = RowScopes.of(related_meta).get_criterion(
             related_table,
             visibility=expression_context.visibility,
             dialect=expression_context.dialect,
             connection=expression_context.connection,
+            application_context=expression_context.application_context,
         )
         if visible_target_criterion is None:
             return None
         # One column per key component - a composite key is null exactly when every column is.
-        source_columns = [
-            table[model._meta.fields_db_projection[source_field]] for source_field in relation_field.source_fields
-        ]
+        source_columns = [table[column] for column in relation_field.db_column_names]
         target_columns = [
             related_table[related_meta.fields_db_projection[to_field_instance.model_field_name]]
             for to_field_instance in relation_field.to_field_instances
@@ -471,43 +488,24 @@ class RelationFilters:
         key = lookup_info.key
         compared_lookup_info = lookup_info
         filter_value: Any = value
-        meta = expression_context.model._meta
+        meta = expression_context.binding
         if lookup_info.target == LookupTarget.RELATION and len(lookup_info.relations) == 1:
-            relation = cast("RelationalField[Model]", lookup_info.relations[0])
-            if (
-                relation.model_field_name in meta.foreign_key_fields
-                or relation.model_field_name in meta.one_to_one_fields
-            ):
+            relation: RelationalField[Model] = lookup_info.relations[0]  # type: ignore[assignment]
+            relation_name = relation.model_field_name
+            if relation_name in meta.foreign_key_fields or relation_name in meta.one_to_one_fields:
                 from hare.models import Model
 
-                source_field_name = cast("str", relation.source_field)
+                source_field_name: str = relation.source_field  # type: ignore[assignment]
                 compared_lookup_info = meta._get_lookup_info(
                     f"{source_field_name}__{lookup_info.lookup}" if lookup_info.lookup else source_field_name
                 )
                 if lookup_info.lookup:
-                    filter_value = RelationFilters.get_forward_relation_lookup_value(key, relation, value)
+                    filter_value = RelationFilters.get_forward_relation_lookup_value(
+                        key, relation, value, application_context=expression_context.application_context
+                    )
                 elif isinstance(value, Model):
                     filter_value = RelationFilters.get_related_instance_key_value(key, relation, value)
             else:
                 # A to-many relation compares the related rows' primary key - an instance names its own.
-                filter_value = getattr(value, "pk", value)
+                filter_value = getattr(value, PRIMARY_KEY_ALIAS, value)
         return compared_lookup_info, filter_value
-
-    @staticmethod
-    def get_filter_join_table(model: type[Model], key: str, table: Table, filter_table: Table) -> Table:
-        """Aliases the joined table of a backward FK/O2O lookup, so a self-referential relation
-        (or a chain whose base table is the related table) can tell the two occurrences apart.
-
-        Args:
-            model: The model the lookup key is resolved against.
-            key: The lookup key, e.g. ``team_members__isnull``.
-            table: The table `model` is currently read through.
-            filter_table: The unaliased related table registered for the lookup.
-
-        Returns:
-            The aliased table for a backward relation, `filter_table` unchanged otherwise.
-        """
-        relation_name = key.partition("__")[0]
-        if not isinstance(model._meta.fields_map.get(relation_name), BackwardForeignKeyRelation):
-            return filter_table
-        return filter_table.as_(Identifiers.get_within_limit(f"{table.get_table_name()}__{relation_name}__direct"))

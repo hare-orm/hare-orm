@@ -3,7 +3,6 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any, ClassVar
 
-from hare.dialects.postgresql.enums import RangeBoundType
 from hare.dialects.postgresql.fields.ranges.range_field import RangeField
 from hare.exceptions import ValidationError
 from hare.fields import Field
@@ -17,15 +16,13 @@ class IntRangeField(RangeField):
     SQL_TYPE = "int4range"
     ELEMENT_SQL_TYPE = "integer"
 
-    #: Shared field a bound is read through - of the element type, so a value past it is refused as the
-    #: field refuses it; the statement plans hold output fields weakly.
+    #: Shared field used to read integer bounds and enforce their element-type limits.
     BOUND_FIELD: ClassVar[IntField[Any]] = IntField()
 
     def get_bound_field(self) -> Field[Any]:
         return self.BOUND_FIELD
 
     DISCRETE_STEP = 1
-    NATIVE_BOUND_TYPE = RangeBoundType.INTEGER
     #: The values a bound holds - those of the element type.
     BOUND_RANGE: tuple[int, int] = (INT32_MIN, INT32_MAX)
 
@@ -41,7 +38,7 @@ class IntRangeField(RangeField):
             raise ValidationError(
                 f"{self.model_field_name}: range bound {self.get_value_for_message(value)} is not a whole number"
             )
-        if not isinstance(value, int) or isinstance(value, bool):
+        if not isinstance(value, int):
             validation_error = None
             try:
                 value = int(value)

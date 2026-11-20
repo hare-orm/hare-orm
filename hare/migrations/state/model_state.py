@@ -1,23 +1,29 @@
 from __future__ import annotations
 
-from copy import copy
+from collections.abc import Iterable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.core.apps.relation_linking import RelationLinking
-from hare.ddl.indexes.index import Index
+from hare.ddl.schema_requirements import SchemaRequirements
+from hare.dialects.base.dialect import Dialect
 from hare.fields.composite_primary_key import CompositePrimaryKey
 from hare.fields.constants import FOREIGN_KEY_COLUMN_SUFFIX
 from hare.fields.field import Field
 from hare.fields.relations.fields.backward_foreign_key_relation import BackwardForeignKeyRelation
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
-from hare.migrations.state.constants import TRACKED_MODEL_STATE_ATTRIBUTES
-from hare.migrations.state.state_apps import StateApps
-from hare.migrations.state.state_change_journal import StateChangeJournal
-from hare.migrations.state.tracked_dict import TrackedDict
+from hare.migrations.constants import MODEL_OPTIONS_OUTSIDE_MIGRATION_STATE, RELATION_FIELDS
 from hare.models import Model
+from hare.models.class_building.generic_foreign_keys import GenericForeignKeys
 from hare.models.enums import ModelOption
+from hare.sql.identifiers import Identifiers
+
+if TYPE_CHECKING:
+    from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.migrations.operations.fields.field_like import FieldLike
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclass
@@ -35,18 +41,55 @@ class ModelState:
     pk_field_name: str | tuple[str, ...]
     fields: dict[str, Field[Any]]
 
-    def __setattr__(self, name: str, value: Any) -> None:
-        if name in TRACKED_MODEL_STATE_ATTRIBUTES:
-            if isinstance(value, TrackedDict) and value.owner is None:
-                value.owner = self
-            elif not isinstance(value, TrackedDict) or value.owner is not self:
-                value = TrackedDict(value, owner=self)
-        # Set up once the last field is - a change of a model state built already is recorded.
-        if "fields" in self.__dict__:
-            journal = StateChangeJournal.recording.get()
-            if journal is not None:
-                journal.record_change(self, None)
-        object.__setattr__(self, name, value)
+    @property
+    def db_table(self) -> str:
+        """The recorded physical table name, or the default for a bare declaration."""
+        return self.table or self.get_default_table_name(self.name)
+
+    @staticmethod
+    def get_default_table_name(model_name: str) -> str:
+        return Identifiers.get_within_limit(model_name.lower())
+
+    @staticmethod
+    def is_table_explicit(options: Mapping[str, Any]) -> bool:
+        explicit = options.get(ModelOption.TABLE_IS_EXPLICIT)
+        return bool(options.get(ModelOption.TABLE)) if explicit is None else explicit
+
+    @classmethod
+    def record_table_option(cls, options: dict[str, Any], model_name: str, table: str | None) -> str:
+        """Store the physical name together with the explicit naming decision."""
+        name = cls.get_default_table_name(model_name) if table is None else table
+        options[ModelOption.TABLE] = name
+        options[ModelOption.TABLE_IS_EXPLICIT] = table is not None
+        return name
+
+    def get_required_extensions(self, dialects: Iterable[Dialect]) -> set[str]:
+        """Read extension requirements from declarations without rendering historical models.
+
+        The DDL layer collects requirements for both live models and migration state;
+        this adapter supplies state options without coupling schema creation to the
+        migration autodetector.
+        """
+        return self.get_declared_extensions(self.fields, self.options, dialects)
+
+    @staticmethod
+    def get_declared_extensions(
+        fields: Mapping[str, Field[Any]], options: Mapping[str, Any], dialects: Iterable[Dialect]
+    ) -> set[str]:
+        """Map migration declarations to the schema extension requirements."""
+        primary_key_attribute = options.get(ModelOption.PRIMARY_KEY_ATTRIBUTE)
+        return SchemaRequirements.get_extensions(
+            dialects,
+            declared_extensions=options.get(ModelOption.EXTENSIONS, ()),
+            fields_by_name=fields,
+            indexes=options.get(ModelOption.INDEXES, ()),
+            constraints=options.get(ModelOption.CONSTRAINTS, ()),
+            primary_key_without_overlaps=(
+                primary_key_attribute
+                if options.get(ModelOption.PK_WITHOUT_OVERLAPS) and isinstance(primary_key_attribute, tuple)
+                else None
+            ),
+        )
 
     def clone(self) -> ModelState:
         """A copy of the state - its options and fields copied."""
@@ -56,11 +99,21 @@ class ModelState:
             table=self.table,
             abstract=self.abstract,
             description=self.description,
-            options=TrackedDict(self.options),
+            options=deepcopy(dict(self.options)),
             bases=self.bases,
             pk_field_name=self.pk_field_name,
-            fields=TrackedDict({name: copy(field) for name, field in self.fields.items()}),
+            fields=self.snapshot_fields(self.fields),
         )
+
+    @staticmethod
+    def snapshot_fields(fields: dict[str, Field[Any]]) -> dict[str, Field[Any]]:
+        """Publish named declarations without references to rendered model bindings."""
+        result = {}
+        for name, field in fields.items():
+            declaration = field.snapshot()
+            declaration.model_field_name = name
+            result[name] = declaration
+        return result
 
     def get_option_list(self, key: ModelOption) -> list[Any]:
         """Returns a list-valued model option as a fresh list (``options`` stores it as a tuple)."""
@@ -101,93 +154,139 @@ class ModelState:
             return field.source_field or f"{field_name}{FOREIGN_KEY_COLUMN_SUFFIX}"
         return field.source_field or field_name
 
-    def render(self, apps: StateApps, *, deepcopy_fields: bool = True) -> type[Model]:
-        """The model class of the state, registered in the state's apps.
-
-        Args:
-            apps: The apps of the state.
-            deepcopy_fields: Whether the fields are copied first - the state keeps its own.
+    def render(self) -> type[Model]:
+        """Build the model class; the caller registers it in the state's apps.
 
         Returns:
             The model.
         """
-        meta_class = type("Meta", (), self.options)
+        return self.build_model(self.name, self.bases, self.fields, self.options)
 
-        if deepcopy_fields:
-            attributes: dict[str, Any] = {name: copy(field) for name, field in self.fields.items()}
-        else:
-            attributes = dict(self.fields)
+    @staticmethod
+    def build_model(
+        name: str, bases: tuple[type, ...], fields: Mapping[str, FieldLike], options: dict[str, Any]
+    ) -> type[Model]:
+        """Build a historical model from declarations without registering it in an app.
+
+        Publication snapshots fields before binding them. Historical markers disable
+        source comments and restore composite primary keys from the stored options.
+        """
+        meta_class = type("Meta", (), options)
+
+        # Model publication snapshots these declarations before binding them.
+        attributes: dict[str, Any] = dict(fields)
         attributes["Meta"] = meta_class
         attributes["_no_comments"] = True
         attributes["__migration_state__"] = True
 
         # A composite primary key's fields don't carry primary_key=True - its marker is put back, or
         # the metaclass would add an "id".
-        primary_key_attribute = self.options.get(ModelOption.PRIMARY_KEY_ATTRIBUTE)
-        if isinstance(primary_key_attribute, tuple):
+        primary_key_attribute = options.get(ModelOption.PRIMARY_KEY_ATTRIBUTE)
+        if isinstance(primary_key_attribute, tuple) and primary_key_attribute:
             attributes["__migration_composite_pk__"] = CompositePrimaryKey(
-                *primary_key_attribute, without_overlaps=self.options.get(ModelOption.PK_WITHOUT_OVERLAPS, False)
+                *primary_key_attribute, without_overlaps=options.get(ModelOption.PK_WITHOUT_OVERLAPS, False)
             )
 
-        model = type(self.name, self.bases, attributes)
-        return cast("type[Model]", model)
+        model = type(name, bases, attributes)
+        return model
 
     @staticmethod
-    def get_declared_pk_field_name(model: type[Model]) -> str | tuple[str, ...]:
-        """The model's primary key as declared field name(s).
-
-        A OneToOneField(primary_key=True) moves ``Meta.primary_key_attribute`` onto its key column's
-        shadow field once relations are initialized; the declared relation field is named instead.
-
-        Args:
-            model: The model class.
-
-        Returns:
-            The primary key field name, or a tuple of names for a composite primary key.
-        """
-        primary_key_attribute = model._meta.primary_key_attribute
-        if isinstance(primary_key_attribute, tuple):
-            # A relation component is named once, by the relation - its key columns take its place.
-            declared_names: list[str] = []
-            for name in primary_key_attribute:
-                relation_field = getattr(model._meta.fields_map.get(name), "reference", None)
-                declared_name = name if relation_field is None else relation_field.model_field_name
-                if not declared_names or declared_names[-1] != declared_name:
-                    declared_names.append(declared_name)
-            return tuple(declared_names)
-        relation_field = getattr(model._meta.fields_map.get(primary_key_attribute), "reference", None)
-        if relation_field is not None and relation_field.model_field_name in model._meta.fields_map:
-            return relation_field.model_field_name
-        return primary_key_attribute
+    def get_declared_pk_field_name(binding: ModelBinding) -> str | tuple[str, ...]:
+        """Preserve the exact logical or explicit-column key declared before relation linking."""
+        return binding.declaration.primary_key_attribute
 
     @classmethod
-    def make_from_model(cls, app_label: str, model: type[Model], *, with_schema_objects: bool = True) -> ModelState:
+    def make_from_declaration(cls, app_label: str, model: type[Model]) -> ModelState:
+        """Capture a migration declaration without preparing runtime fields or compiling SQL.
+
+        Explicit source queries were already frozen by their declaration objects. Offline
+        ModelQuery declarations remain structural until an editor supplies compilation resources.
+        """
+        declaration = model._declaration
+        meta = declaration.meta
+        values: dict[str, Any] = {
+            option: getattr(meta, option)
+            for option in ModelOption
+            if option not in MODEL_OPTIONS_OUTSIDE_MIGRATION_STATE and hasattr(meta, option)
+        }
+        options = cls.get_set_options(values)
+        options[ModelOption.APP] = app_label
+        options[ModelOption.PRIMARY_KEY_ATTRIBUTE] = declaration.primary_key_attribute
+        if not declaration.primary_key_attribute:
+            options[ModelOption.PRIMARY_KEY] = None
+        if getattr(meta, ModelOption.MANAGED, True) is False:
+            options[ModelOption.MANAGED] = False
+        else:
+            options.pop(ModelOption.MANAGED, None)
+        table = getattr(meta, ModelOption.TABLE, "")
+        if table:
+            options[ModelOption.TABLE_IS_EXPLICIT] = cls.is_table_explicit(values)
+        if declaration.table_description:
+            options[ModelOption.TABLE_DESCRIPTION] = declaration.table_description
+        if declaration.pk_without_overlaps:
+            options[ModelOption.PK_WITHOUT_OVERLAPS] = True
+        generics = {
+            name: field
+            for name, field in declaration.generic_foreign_key_fields.items()
+            if field.branch_names and not declaration.abstract
+        }
+        if generics:
+            constraints, indexes = GenericForeignKeys.get_schema_entries(
+                tuple(options.get(ModelOption.CONSTRAINTS, ())), tuple(options.get(ModelOption.INDEXES, ())), generics
+            )
+            if constraints:
+                options[ModelOption.CONSTRAINTS] = constraints
+            if indexes:
+                options[ModelOption.INDEXES] = indexes
+        return cls(
+            name=model.__name__,
+            app=app_label,
+            table=table,
+            abstract=declaration.abstract,
+            description=declaration.table_description,
+            options=deepcopy(options),
+            bases=cls.get_state_bases(model),
+            pk_field_name=declaration.primary_key_attribute,
+            fields=cls.snapshot_fields(dict(declaration.fields_map)),
+        )
+
+    @classmethod
+    def make_from_binding(
+        cls,
+        app_label: str,
+        binding: ModelBinding,
+        *,
+        with_schema_objects: bool = True,
+        client: DatabaseClient | None = None,
+    ) -> ModelState:
         """The state of a live model.
 
         Args:
             app_label: The app the model belongs to.
-            model: The model class.
+            binding: The model class.
             with_schema_objects: Whether the state lists the objects the model declares beside its indexes -
                 a view's query is built into SQL for it, which needs the connections.
+            client: The client used when a declaration needs to compile an embedded query.
 
         Returns:
             The state.
         """
-        fields = cls.get_state_fields(model)
-        declared_pk_field_name = cls.get_declared_pk_field_name(model)
+        model = binding._model
+        fields = cls.get_state_fields(binding)
+        declared_pk_field_name = cls.get_declared_pk_field_name(binding)
         options = {
-            **cls.get_table_options(model),
-            **(cls.get_schema_object_options(model) if with_schema_objects else {}),
-            **cls.get_index_options(model, fields),
-            **cls.get_row_options(model, declared_pk_field_name),
+            **cls.get_table_options(binding),
+            **(cls.get_schema_object_options(binding, client) if with_schema_objects else {}),
+            **cls.get_index_options(binding),
+            **cls.get_row_options(binding, declared_pk_field_name, client),
         }
         return cls(
             app=app_label,
             name=model.__name__,
-            table=model._meta.db_table,
-            abstract=model._meta.abstract,
-            description=model._meta.table_description,
-            options=options,
+            table=binding.db_table,
+            abstract=binding.abstract,
+            description=binding.table_description,
+            options=deepcopy(options),
             pk_field_name=declared_pk_field_name,
             bases=cls.get_state_bases(model),
             fields=fields,
@@ -207,41 +306,65 @@ class ModelState:
         """
         bases: list[type] = []
         for base in model.__bases__:
-            is_abstract_model = base is not Model and issubclass(base, Model) and base._meta.abstract
+            is_abstract_model = base is not Model and issubclass(base, Model) and base._declaration.abstract
             for state_base in cls.get_state_bases(base) if is_abstract_model else (base,):
                 if state_base not in bases:
                     bases.append(state_base)
         return tuple(bases)
 
     @staticmethod
-    def get_state_fields(model: type[Model]) -> dict[str, Field[Any]]:
+    def get_state_fields(binding: ModelBinding) -> dict[str, Field[Any]]:
         """The fields a model declares itself - without the reverse sides of relations, generated
         many-to-many fields and the shadow fields of relation key columns.
 
         Args:
-            model: The model class.
+            binding: The model class.
 
         Returns:
-            Copies of the fields by name.
+            Unbound copies by name, preserving effective relation DDL settings
+            without carrying the rendered model's target/key bindings.
         """
         fields: dict[str, Field[Any]] = {}
-        for name, field in model._meta.fields_map.items():
+        for name, field in binding.fields_map.items():
             if isinstance(field, BackwardForeignKeyRelation):
                 continue
             if isinstance(field, ManyToManyFieldInstance) and field._generated:
                 continue
             if getattr(field, "reference", None) is not None:
                 continue
-            state_field = copy(field)
-            if isinstance(state_field, ForeignKeyFieldInstance) and len(state_field.db_column_names) == 1:
-                # Relation initialization repoints source_field at the shadow attribute name -
-                # the state records the real column so a rendered model maps to it again.
-                state_field.source_field = state_field.db_column_names[0]
+            state_field = field.snapshot()
+            state_field.model_field_name = name
+            if binding._inited and isinstance(field, RELATION_FIELDS) and isinstance(field.model_name, type):
+                target = field.get_related_binding()
+                state_field.model_name = f"{target.app}.{target._model.__name__}"  # type: ignore[attr-defined]
+            if binding._inited and isinstance(field, ManyToManyFieldInstance):
+                through = field.get_through_binding()
+                if through is not None:
+                    state_field.through_model = f"{through.app}.{through._model.__name__}"  # type: ignore[attr-defined]
+                    state_field.declared_through = state_field.through_model  # type: ignore[attr-defined]
+            if isinstance(field, ForeignKeyFieldInstance):
+                relation: ForeignKeyFieldInstance[Any] = state_field  # type: ignore[assignment]
+                # Record the effective schema, including M2M delete rules and indexes
+                # covered by another declaration, without retaining the model binding.
+                relation.on_delete = field.on_delete
+                relation.index = field.index
+                relation.to_field = field.to_field
+                db_column_names = field.db_column_names
+                if len(db_column_names) == 1:
+                    relation.source_field = db_column_names[0]
+            elif isinstance(field, ManyToManyFieldInstance):
+                many_to_many: ManyToManyFieldInstance[Any] = state_field  # type: ignore[assignment]
+                many_to_many.on_delete = field.on_delete
+                if field.through_model is None and (through_name := field.through):
+                    # Freeze an automatic table's name as migration DDL; declared
+                    # through-model references and composite key prefixes stay intact.
+                    many_to_many.declared_through = through_name
+                    many_to_many.through = through_name
             fields[name] = state_field
         return fields
 
     @staticmethod
-    def get_set_options(values_by_option: dict[ModelOption, Any]) -> dict[str, Any]:
+    def get_set_options(values_by_option: Mapping[str, Any]) -> dict[str, Any]:
         """The options that are set.
 
         Args:
@@ -253,128 +376,124 @@ class ModelState:
         return {option: value for option, value in values_by_option.items() if value}
 
     @staticmethod
-    def get_table_options(model: type[Model]) -> dict[str, Any]:
+    def get_table_options(binding: ModelBinding) -> dict[str, Any]:
         """The options naming a model's table.
 
         Args:
-            model: The model class.
+            binding: The model class.
 
         Returns:
             The options that are set.
         """
-        meta = model._meta
-        options = ModelState.get_set_options({ModelOption.ABSTRACT: meta.abstract, ModelOption.TABLE: meta.db_table})
-        if meta.db_table:
-            # Recorded whenever there is a table - RenameModel tells explicit, not explicit, and
-            # recorded before the option existed apart.
-            options[ModelOption.TABLE_IS_EXPLICIT] = meta.table_is_explicit
-        options.update(ModelState.get_set_options({ModelOption.SCHEMA: meta.schema, ModelOption.APP: meta.app}))
+        options = ModelState.get_set_options(
+            {ModelOption.ABSTRACT: binding.abstract, ModelOption.TABLE: binding.db_table}
+        )
+        if binding.db_table:
+            # The physical name alone cannot tell RenameModel whether the table follows the class name.
+            options[ModelOption.TABLE_IS_EXPLICIT] = binding.table_is_explicit
+        options.update(ModelState.get_set_options({ModelOption.SCHEMA: binding.schema, ModelOption.APP: binding.app}))
         return options
 
     @staticmethod
-    def get_schema_object_options(model: type[Model]) -> dict[str, Any]:
+    def get_schema_object_options(binding: ModelBinding, client: DatabaseClient | None = None) -> dict[str, Any]:
         """The options listing the schema objects a model declares besides its indexes.
 
         Args:
-            model: The model class.
+            binding: The model class.
+            client: The client used when a declaration needs to compile an embedded query.
 
         Returns:
             The options that are set.
         """
-        meta = model._meta
         options = ModelState.get_set_options(
             {
                 # A one-to-one relation's own uniqueness goes with the relation.
                 ModelOption.CONSTRAINTS: tuple(
                     constraint
-                    for constraint in meta.constraints
-                    if not RelationLinking.is_relation_uniqueness(model, constraint)
+                    for constraint in binding.constraints
+                    if RelationLinking.get_unique_relation_name(binding, constraint) is None
                 ),
-                ModelOption.TRIGGERS: meta.triggers,
+                ModelOption.TRIGGERS: binding.triggers,
                 # A view's queryset is kept as its SQL - a migration file writes it so.
-                ModelOption.VIEWS: tuple(view.with_sql_query() for view in meta.views),
-                ModelOption.MATERIALIZED_VIEWS: tuple(view.with_sql_query() for view in meta.materialized_views),
-                ModelOption.DICTIONARIES: meta.dictionaries,
-                ModelOption.FUNCTIONS: meta.functions,
-                ModelOption.SEQUENCES: meta.sequences,
-                ModelOption.POLICIES: meta.policies,
-                ModelOption.GRANTS: meta.grants,
+                ModelOption.VIEWS: tuple(view.with_sql_query(client) for view in binding.views),
+                ModelOption.MATERIALIZED_VIEWS: tuple(
+                    view.with_sql_query(client) for view in binding.materialized_views
+                ),
+                ModelOption.DICTIONARIES: binding.dictionaries,
+                ModelOption.FUNCTIONS: binding.functions,
+                ModelOption.SEQUENCES: binding.sequences,
+                ModelOption.POLICIES: binding.policies,
+                ModelOption.GRANTS: binding.grants,
             }
         )
-        if meta.row_level_security is not None:
-            options[ModelOption.ROW_LEVEL_SECURITY] = meta.row_level_security
-        return options
-
-    @classmethod
-    def get_index_options(cls, model: type[Model], fields: dict[str, Field[Any]]) -> dict[str, Any]:
-        """The options listing a model's indexes and the extensions it declares (``Meta.extensions``).
-
-        Args:
-            model: The model class.
-            fields: The fields of the model's state.
-
-        Returns:
-            The options that are set.
-        """
-        meta = model._meta
-        options: dict[str, Any] = {}
-        if meta.indexes:
-            # A migration operation's model has no relations bound - its foreign keys have no columns yet; its
-            # indexes are resolved once the state renders the models (StateRendering).
-            resolves_expressions = not getattr(model, "__migration_state__", False)
-            for index in meta.indexes:
-                if resolves_expressions and isinstance(index, Index) and index.expressions:
-                    # State diffing only sees ModelState snapshots, with no model class to resolve
-                    # an index's expressions against - resolved here, while the model exists.
-                    index.get_expressions(model)
-            options[ModelOption.INDEXES] = meta.indexes
-        if meta.extensions:
-            options[ModelOption.EXTENSIONS] = tuple(sorted(meta.extensions))
+        if binding.row_level_security is not None:
+            options[ModelOption.ROW_LEVEL_SECURITY] = binding.row_level_security
         return options
 
     @staticmethod
-    def get_row_options(model: type[Model], declared_pk_field_name: str | tuple[str, ...]) -> dict[str, Any]:
-        """The options about a model's key and the way its rows are written.
+    def get_index_options(binding: ModelBinding) -> dict[str, Any]:
+        """The options listing a model's indexes and the extensions it declares (``Meta.extensions``).
 
         Args:
-            model: The model class.
-            declared_pk_field_name: The primary key as declared field name(s).
+            binding: The model class.
 
         Returns:
             The options that are set.
         """
-        meta = model._meta
+        options: dict[str, Any] = {}
+        if binding.indexes:
+            options[ModelOption.INDEXES] = binding.indexes
+        if binding.extensions:
+            options[ModelOption.EXTENSIONS] = tuple(sorted(binding.extensions))
+        return options
+
+    @staticmethod
+    def get_row_options(
+        binding: ModelBinding, declared_pk_field_name: str | tuple[str, ...], client: DatabaseClient | None = None
+    ) -> dict[str, Any]:
+        """The options about a model's key and the way its rows are written.
+
+        Args:
+            binding: The model class.
+            declared_pk_field_name: The primary key as declared field name(s).
+            client: The client used when a declaration needs to compile an embedded query.
+
+        Returns:
+            The options that are set.
+        """
         options = ModelState.get_set_options(
             {
                 ModelOption.PRIMARY_KEY_ATTRIBUTE: declared_pk_field_name,
-                ModelOption.TENANT_SCHEMA: bool(meta.tenant_schema),
-                ModelOption.PK_WITHOUT_OVERLAPS: bool(meta.pk_without_overlaps),
+                ModelOption.TENANT_SCHEMA: bool(binding.tenant_schema),
+                ModelOption.PK_WITHOUT_OVERLAPS: bool(binding.pk_without_overlaps),
             }
         )
-        if not meta.has_primary_key:
+        if not binding.has_primary_key:
             # Rendered back, a model state without it would get an added "id".
             options[ModelOption.PRIMARY_KEY] = None
         options.update(
             ModelState.get_set_options(
                 {
-                    ModelOption.TABLE_DESCRIPTION: meta.table_description,
+                    ModelOption.TABLE_DESCRIPTION: binding.table_description,
                     # A queryset the options hold is kept as its SQL - a migration file writes it so.
-                    ModelOption.TABLE_OPTIONS: tuple(entry.with_sql_queries(model) for entry in meta.table_options),
+                    ModelOption.TABLE_OPTIONS: tuple(
+                        entry.with_sql_queries(binding, client) for entry in binding.table_options
+                    ),
                     # A model rendered from state (apps.get_model() in RunPython) keeps its tenant,
                     # soft-delete and optimistic lock fields.
                     # As declared - a relation's name, not the key column it stands for in the meta: the
                     # state follows the relation field through a rename or a change to a plain field.
-                    ModelOption.TENANT_FIELD: getattr(meta.meta, ModelOption.TENANT_FIELD, None),
-                    ModelOption.SOFT_DELETE_FIELD: meta.soft_delete_field,
-                    ModelOption.SOFT_DELETE_HARD_CASCADE: bool(meta.soft_delete_hard_cascade),
-                    ModelOption.OPTIMISTIC_LOCK_FIELD: meta.optimistic_lock_field,
+                    ModelOption.TENANT_FIELD: getattr(binding.meta, ModelOption.TENANT_FIELD, None),
+                    ModelOption.SOFT_DELETE_FIELD: binding.soft_delete_field,
+                    ModelOption.SOFT_DELETE_HARD_CASCADE: bool(binding.soft_delete_hard_cascade),
+                    ModelOption.OPTIMISTIC_LOCK_FIELD: binding.optimistic_lock_field,
                 }
             )
         )
         # Only False is recorded - a model whose table the migrations stop managing stays in the
         # migration state with it, so no operation of it touches the table.
-        if meta.managed is False:
+        if binding.managed is False:
             options[ModelOption.MANAGED] = False
-        if meta.swappable:
-            options[ModelOption.SWAPPABLE] = meta.swappable
+        if binding.swappable:
+            options[ModelOption.SWAPPABLE] = binding.swappable
         return options

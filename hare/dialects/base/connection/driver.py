@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import abc
 import urllib.parse as urlparse
-import uuid
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from hare.core.extensions.declarations import ExtensionContribution
 from hare.dialects.base.connection.connection_options import ConnectionOptions
 from hare.exceptions import ConfigurationError
 
@@ -42,6 +42,11 @@ class Driver(abc.ABC):
     strict_query_parameters: bool = False
     url_has_userinfo: bool = True
 
+    @classmethod
+    def get_contribution(cls) -> ExtensionContribution:
+        """Factory for a driver's entry point; importing its module changes no registry."""
+        return ExtensionContribution(drivers=(cls(),))
+
     @abc.abstractmethod
     def get_client_class(self, credentials: dict[str, Any]) -> type[DatabaseClient]:
         """The client class for a connection.
@@ -57,7 +62,7 @@ class Driver(abc.ABC):
     @abc.abstractmethod
     def get_client_classes(self) -> tuple[type[DatabaseClient], ...]:
         """Every client class the driver's connections run on - each connection client and its
-        transaction client - for instrumentation to wrap their query-executing methods.
+        transaction client - for driver capability inspection and contract checks.
 
         Returns:
             The classes; empty where the driver can't be loaded (its native extension isn't
@@ -91,23 +96,11 @@ class Driver(abc.ABC):
         """
         return urlparse.unquote(url.path[1:]) or None
 
-    def get_testing_path(self, path: str, reuse_databases: bool) -> tuple[str, dict[str, Any]]:
-        """The path a test run connects to, a ``{}`` placeholder filled with a fresh name.
-
-        Args:
-            path: The DB_URL path.
-            reuse_databases: Whether a placeholder is filled with a reusable test database.
-
-        Returns:
-            The path and any credentials it adds.
-        """
-        return path.format(uuid.uuid4().hex), {}
-
     def get_query_credentials(self, query_values: dict[str, str]) -> dict[str, Any]:
         """The credentials a DB_URL's query parameters give.
 
         Args:
-            query_values: The query parameters by name; the ones handled here are removed.
+            query_values: The query parameters by name; a driver may consume the entries it handles.
 
         Returns:
             The credentials.

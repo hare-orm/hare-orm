@@ -4,8 +4,8 @@ ValidationError naming the field - the parsing of the database's own text form n
 import pytest
 
 from hare.dialects.postgresql.fields.hstore import HStoreField
-from hare.dialects.postgresql.fields.postgis_field import PostGISField
 from hare.exceptions import ValidationError
+from hare.gis import Point, PointField
 from hare.vectors import VectorField
 
 pytestmark = pytest.mark.database_independent
@@ -23,10 +23,7 @@ def named(field, name):
             (HStoreField, "attributes", value, "attributes: expected a dict")
             for value in (["x"], 5, {"x"}, '"a"=>"1"')
         ],
-        *[
-            (PostGISField, "location", value, r"location: expected a \(latitude, longitude\) tuple")
-            for value in (5, {"lat": 1})
-        ],
+        *[(PointField, "location", value, "location") for value in (5, {"lat": 1})],
     ],
 )
 def test_a_value_of_the_wrong_shape_is_refused(make_field, field_name, value, message):
@@ -34,13 +31,15 @@ def test_a_value_of_the_wrong_shape_is_refused(make_field, field_name, value, me
         named(make_field(), field_name).to_python(value)
 
 
-def test_postgis_holds_a_point_assigned_as_a_list_as_a_tuple():
-    assert named(PostGISField(), "location").to_python([55.75, 37.62]) == (55.75, 37.62)
+def test_point_field_reads_geo_json_coordinates():
+    assert named(PointField(), "location").to_python({"type": "Point", "coordinates": [37.62, 55.75]}) == Point(
+        37.62, 55.75, srid=4326
+    )
 
 
-def test_postgis_refuses_text_that_isnt_a_point():
+def test_point_field_refuses_text_that_is_not_a_geometry():
     with pytest.raises(ValidationError, match="location"):
-        named(PostGISField(), "location").to_python("not hex")
+        named(PointField(), "location").to_python("not a geometry")
 
 
 def test_vector_refuses_a_value_that_isnt_a_list():

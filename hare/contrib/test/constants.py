@@ -5,6 +5,9 @@ import uuid
 #: Database URL of a fresh in-memory database, with no server.
 MEMORY_DATABASE = "sqlite+aiosqlite://:memory:"
 
+#: pytest-xdist's worker id, absent without -n; scopes file and reusable server test databases.
+ENV_PYTEST_XDIST_WORKER = "PYTEST_XDIST_WORKER"
+
 #: Environment variable switching hare_test_context()'s reusable test databases of a server on
 #: ("1"/"true") or off ("0"/"false") when its reuse_databases argument is left as None.
 REUSE_DATABASES_ENVIRONMENT_VARIABLE = "HARE_TEST_REUSE_DATABASES"
@@ -13,6 +16,5 @@ REUSE_DATABASES_ENVIRONMENT_VARIABLE = "HARE_TEST_REUSE_DATABASES"
 REUSE_DATABASES_ENABLED_VALUES = frozenset({"1", "true"})
 REUSE_DATABASES_DISABLED_VALUES = frozenset({"0", "false"})
 
-#: Namespace of the uuid5 ids filling a reusable test database name's "{}" placeholder - the id
-#: of a slot depends only on its number and the pytest-xdist worker, never on randomness.
+#: Namespace for slot ids derived from the run namespace, process, worker and slot number.
 REUSABLE_DATABASE_SLOT_NAMESPACE = uuid.UUID("5f0a8f64-3c1e-4b8a-9d7e-2b6c1f4e9a31")

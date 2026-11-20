@@ -1,21 +1,17 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any
 
 from hare.fields.field import Field
 from hare.query.key_columns import KeyColumns
 from hare.query.queryset.relations.many_to_many.many_to_many_scope_checks import ManyToManyScopeChecks
 from hare.query.queryset.relations.many_to_many.through_rows import ThroughRows
-from hare.query.rows.enums import WriteCodecType
-from hare.query.rows.native.enums import FieldBucket
 from hare.sql.builder.tables.table import Table
-
-TModel = TypeVar("TModel", bound="Model")
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset.relations.many_to_many_relation import ManyToManyRelation
 
 
@@ -41,9 +37,9 @@ class LinkedKeys:
             )
         ) is not None:
             query = query.where(visible_target_criterion)
-        _, rows = await connection.execute(*ThroughRows.get_statement(relation, query))
-        related_meta = relation.model._meta
-        related_pk_fields = related_meta.pk_fields if related_meta.has_composite_primary_key else (related_meta.pk,)
+        _, rows = await connection._execute_built(*ThroughRows.get_statement(relation, query, connection))
+        related_meta: ModelBinding = relation._binding
+        related_pk_fields = related_meta.pk_fields
         types = connection.dialect.types
         forward_keys = relation.field.forward_keys
         if LinkedKeys.keys_read_as_stored(related_pk_fields, connection):
@@ -52,19 +48,16 @@ class LinkedKeys:
                 for row in rows
                 if None not in (values := tuple(row[column_name] for column_name in forward_keys))
             )
-        linked_pk_values: list[tuple[Any, ...]] = []
-        for row in rows:
-            if any(row[column_name] is None for column_name in relation.field.forward_keys):
-                continue
-            # Read as the field reads it, then written back - a dialect storing a value otherwise
-            # (a UUID in 16 bytes) returns the stored form.
-            linked_pk_values.append(
-                tuple(
-                    types.get_db_value(pk_field, types.get_python_value(pk_field, row[column_name]), relation.model)
-                    for pk_field, column_name in zip(related_pk_fields, relation.field.forward_keys, strict=True)
-                )
+        return frozenset(
+            KeyColumns.transfer_rows(
+                related_pk_fields,
+                forward_keys,
+                (row for row in rows if all(row[column] is not None for column in forward_keys)),
+                types,
+                types,
+                relation.model,
             )
-        return frozenset(linked_pk_values)
+        )
 
     @staticmethod
     def keys_read_as_stored(key_fields: Sequence[Field[Any]], connection: DatabaseClient) -> bool:
@@ -78,42 +71,46 @@ class LinkedKeys:
         Returns:
             True when no key field converts its values.
         """
-        # Local import: the row codecs import the models, which import this module.
-        from hare.query.rows.native.field_codecs import FieldCodecs
-        from hare.query.rows.native.hydration_layout import HydrationLayout
-
         types = connection.dialect.types
         return all(
-            HydrationLayout.get_field_reading(field, types, connection.native_python_types)[0] == FieldBucket.NATIVE
-            and FieldCodecs.get_write_specification(field, types, None)[0] == WriteCodecType.SCALAR
+            types.get_native_reader(field, connection.native_python_types) is None
+            and types.get_native_key_type(field) is not None
             for field in key_fields
         )
 
     @staticmethod
-    def get_links_query(relation: ManyToManyRelation[Any], connection: DatabaseClient, through_table: Table) -> Any:
+    def get_links_query(
+        relation: ManyToManyRelation[Any],
+        connection: DatabaseClient,
+        through_table: Table,
+        *,
+        backward_key_values: tuple[Any, ...] | None = None,
+    ) -> Any:
         """The query of the related keys of the instance's live links.
 
         Args:
             relation: The many-to-many relation of an instance.
             connection: Connection the through table is read on.
             through_table: The through table.
+            backward_key_values: Already encoded owner keys, or None to encode them here.
 
         Returns:
             The query, selecting the related key columns.
         """
         backward_columns = [through_table[column_name] for column_name in relation.field.backward_keys]
-        backward_key_values = KeyColumns.get_db_values(
-            type(relation.instance)._meta, relation.instance, connection.dialect.types
-        )
+        if backward_key_values is None:
+            backward_key_values = KeyColumns.get_db_values(
+                relation.instance._binding, relation.instance, connection.dialect.types
+            )
         query = (
             connection.query_class.from_(through_table)
             .where(KeyColumns.row_equality(backward_columns, backward_key_values))
             .select(*relation.field.forward_keys)
         )
-        through_model = relation.field.through_model_class
-        soft_delete_field = through_model._meta.soft_delete_field if through_model is not None else None
-        if through_model is not None and soft_delete_field is not None:
-            soft_delete_column = through_model._meta.fields_map[soft_delete_field].source_field or soft_delete_field
+        through_binding = relation.field.get_through_binding()
+        soft_delete_field = through_binding.soft_delete_field if through_binding is not None else None
+        if through_binding is not None and soft_delete_field is not None:
+            soft_delete_column = through_binding.fields_map[soft_delete_field].source_field or soft_delete_field
             query = query.where(through_table[soft_delete_column].isnull())
         return query
 
@@ -131,17 +128,17 @@ class LinkedKeys:
         connection = ThroughRows.through_table_connection(relation, for_write=False)
         through_table = Table(relation.field.through, schema=relation.field.through_schema)
         query = LinkedKeys.get_links_query(relation, connection, through_table)
-        _, rows = await connection.execute(*ThroughRows.get_statement(relation, query))
-        related_meta = relation.model._meta
-        related_pk_fields = related_meta.pk_fields if related_meta.has_composite_primary_key else (related_meta.pk,)
+        _, rows = await connection._execute_built(*ThroughRows.get_statement(relation, query, connection))
+        related_meta: ModelBinding = relation._binding
+        related_pk_fields = related_meta.pk_fields
+        forward_keys = relation.field.forward_keys
         types = connection.dialect.types
-        keys: list[Any] = []
-        for row in rows:
-            if any(row[column_name] is None for column_name in relation.field.forward_keys):
-                continue
-            key = tuple(
-                types.get_python_value(pk_field, row[column_name])
-                for pk_field, column_name in zip(related_pk_fields, relation.field.forward_keys, strict=True)
+        return [
+            key if len(key) > 1 else key[0]
+            for key in KeyColumns.read_rows(
+                related_pk_fields,
+                forward_keys,
+                (row for row in rows if all(row[column] is not None for column in forward_keys)),
+                types,
             )
-            keys.append(key if len(key) > 1 else key[0])
-        return keys
+        ]

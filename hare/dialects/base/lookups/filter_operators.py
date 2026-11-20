@@ -2,11 +2,16 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
+
+from hare.classes.deferred_import import DeferredImport
+from hare.core.extensions.snapshot_mapping import SnapshotMapping
 
 if TYPE_CHECKING:
+    from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.dialect import Dialect
     from hare.fields.field import Field
+    from hare.query.filters.lookups.dialect_implemented_operators import DialectImplementedOperators
     from hare.query.filters.lookups.field_lookup import FieldLookup
     from hare.query.lookup_info.lookup_info import LookupInfo
     from hare.sql.terms.criteria.criterion import Criterion
@@ -17,6 +22,13 @@ class FilterOperators:
     """The operators a dialect runs lookups with - a lookup's own operator, or the dialect's
     replacement for it."""
 
+    #: ``DialectImplementedOperators`` - imported at its first read, as its module imports this one.
+    dialect_implemented_operators: ClassVar[DeferredImport[type[DialectImplementedOperators]]] = DeferredImport(
+        "hare.query.filters.lookups.dialect_implemented_operators", "DialectImplementedOperators"
+    )
+    #: ``Field`` - imported at its first read, as its module imports this one.
+    field_class: ClassVar[DeferredImport[type[Field[Any]]]] = DeferredImport("hare.fields.field", "Field")
+
     def __init__(self, dialect: Dialect, overrides: dict[Callable[..., Any], Callable[..., Any]]) -> None:
         """
         Args:
@@ -24,7 +36,7 @@ class FilterOperators:
             overrides: The dialect's replacement of each lookup operator it replaces.
         """
         self.dialect = dialect
-        self.overrides = overrides
+        self.overrides = SnapshotMapping(overrides)
         #: The operators of the dialect's variants (``Dialect.variants``) - a registration is repeated there.
         self.mirrors: list[FilterOperators] = []
 
@@ -37,13 +49,7 @@ class FilterOperators:
             implementation: What runs in its place on this dialect - the operator itself when it builds the
                 dialect's SQL already.
         """
-        # Local import: the registries import the dialects package.
-        from hare.core.registries import Registries
-
-        self.overrides[operator] = implementation
-        for mirror in self.mirrors:
-            mirror.register_operator(operator, implementation)
-        Registries.changed()
+        self.overrides.register(operator, implementation, tuple(mirror.overrides for mirror in self.mirrors))
 
     def get_overridden_operator(
         self, operator: Callable[..., Any], field_lookup: FieldLookup | None
@@ -69,20 +75,18 @@ class FilterOperators:
         Returns:
             True when the lookup's operator runs on this dialect.
         """
-        # Local import: the filters package imports the dialects package.
-        from hare.query.filters.lookups.dialect_implemented_operators import DialectImplementedOperators
-
         operator = field_lookup.operator
         return (
-            not DialectImplementedOperators.is_marked(operator)
+            not FilterOperators.dialect_implemented_operators.is_marked(operator)
             or self.get_overridden_operator(operator, field_lookup) is not None
         )
 
-    def get_operator(self, field_lookup: FieldLookup) -> Callable[..., Any]:
+    def get_operator(self, field_lookup: FieldLookup, connection: DatabaseClient | None = None) -> Callable[..., Any]:
         """The operator a lookup runs on this dialect, with the lookup's text function applied.
 
         Args:
             field_lookup: The lookup.
+            connection: The client whose dialect and parameter rules apply to the lookup.
 
         Returns:
             The operator.
@@ -97,6 +101,8 @@ class FilterOperators:
         columns: Sequence[Term],
         value_rows: Sequence[Sequence[Any]],
         array_element_fields: Sequence[Field[Any] | None] | None = None,
+        *,
+        connection: DatabaseClient | None = None,
     ) -> Criterion:
         """``columns IN value_rows`` through the dialect's ``__in`` operator, so a long list binds
         as few parameters as the dialect allows.
@@ -105,6 +111,7 @@ class FilterOperators:
             columns: The compared columns, one per value in each row.
             value_rows: The DB-ready value rows.
             array_element_fields: Per column, its field, or None to type it by its values.
+            connection: The client whose dialect and parameter rules apply to the lookup.
 
         Returns:
             The criterion.
@@ -118,13 +125,13 @@ class FilterOperators:
             single_column_lookup = FieldLookup(
                 Lookups.is_in, array_element_field=array_element_fields[0] if array_element_fields else None
             )
-            in_operator = self.get_overridden_operator(Lookups.is_in, single_column_lookup) or Lookups.is_in
+            in_operator = self.get_operator(single_column_lookup, connection)
             return in_operator(columns[0], [row[0] for row in value_rows])
         row_lookup = FieldLookup(
             Lookups.row_is_in,
             array_element_fields=None if array_element_fields is None else tuple(array_element_fields),
         )
-        row_operator = self.get_overridden_operator(Lookups.row_is_in, row_lookup) or Lookups.row_is_in
+        row_operator = self.get_operator(row_lookup, connection)
         return row_operator(Tuple(*columns), [tuple(row) for row in value_rows])
 
     def get_unsupported_reason(self, lookup_info: LookupInfo) -> str | None:
@@ -147,20 +154,17 @@ class FilterOperators:
         Returns:
             False when a field takes its column type from the dialect and this one gives none.
         """
-        # Local import: the fields package imports the dialects package.
-        from hare.fields.field import Field
-
         return all(
             field_object.exists_on(self.dialect)
             for field_object in (lookup_info.field, lookup_info.value_field)
-            if isinstance(field_object, Field)
+            if isinstance(field_object, FilterOperators.field_class)
         )
 
     def supports_lookup(self, lookup_info: LookupInfo) -> bool:
         """Whether a query on this dialect can run a lookup.
 
         Args:
-            lookup_info: The lookup, as ``Model._meta.get_lookup_info()`` describes it.
+            lookup_info: The lookup, as ``ModelBinding.get_lookup_info()`` describes it.
 
         Returns:
             True when the field and the lookup exist on this dialect, the dialect implements the

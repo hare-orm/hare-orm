@@ -1,9 +1,12 @@
 import pytest
 
 from hare import fields
+from hare.core.hare_context import HareContext
 from hare.exceptions import IntegrityError, ValidationError
 from hare.query.expressions import F
 from tests.shared_models import testmodels, testmodels_postgres
+
+pytestmark = pytest.mark.usefixtures("model_conversion_context")
 
 
 @pytest.mark.parametrize(
@@ -86,7 +89,7 @@ async def test_a_missing_required_value_is_refused(db, model_class, exception_cl
 def test_to_db_value_wraps_a_value_it_cannot_convert(model_class, field_name, value):
     """A value a field cannot convert raises the framework's own catchable ValidationError, not the
     bare TypeError/AttributeError/parse error of the conversion step."""
-    field = model_class._meta.fields_map[field_name]
+    field = HareContext.require_current().apps.get_binding(model_class).fields_map[field_name]
     with pytest.raises(ValidationError):
         field.to_db_value(value, model_class)
 
@@ -277,6 +280,6 @@ async def test_an_f_expression_update_adds_to_the_value(db, model_class, field_n
 def test_from_db_value_wraps_a_value_it_cannot_read(model_class, field_name, value, message):
     """A stored value a field cannot read raises the framework's own catchable ValidationError,
     not a bare TypeError/ValueError/UnicodeDecodeError."""
-    field = model_class._meta.fields_map[field_name]
+    field = HareContext.require_current().apps.get_binding(model_class).fields_map[field_name]
     with pytest.raises(ValidationError, match=message):
         field.from_db_value(value)

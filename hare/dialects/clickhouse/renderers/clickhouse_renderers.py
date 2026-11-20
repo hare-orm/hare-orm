@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.renderers.checked_term_renderers import CheckedTermRenderers
 from hare.dialects.clickhouse.constants import CLICKHOUSE_NEVER_NULLABLE_TYPE_PREFIXES
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.clickhouse.fields.constants import UINT64_RANGE
 from hare.dialects.clickhouse.renderers.clickhouse_aggregate_renderers import ClickhouseAggregateRenderers
 from hare.dialects.clickhouse.renderers.clickhouse_assigned_enum_number import ClickhouseAssignedEnumNumber
@@ -24,7 +25,6 @@ from hare.dialects.clickhouse.renderers.constants import (
 )
 from hare.dialects.clickhouse.spatial.clickhouse_spatial_renderers import ClickhouseSpatialRenderers
 from hare.dialects.clickhouse.types.clickhouse_type_names import ClickhouseTypeNames
-from hare.dialects.clickhouse.types.constants import CLICKHOUSE_JSON_COLUMN_TYPE
 from hare.exceptions import UnSupportedError
 from hare.fields.data.constants import INT64_MIN
 from hare.sql import functions
@@ -88,7 +88,7 @@ class ClickhouseRenderers(CheckedTermRenderers):
         # would be the whole partition - the ordering is by a key putting a NULL where it sorts.
         order = order or Order.ASC
         null_key = "inf" if order.puts_nulls_first(sorts_nulls_first=False) != order.is_ascending else "-inf"
-        direction = "ASC" if order.is_ascending else "DESC"
+        direction = Order.build(order.is_ascending)
         return f"{CLICKHOUSE_VALUE_RANGE_KEY_TEMPLATE.format(term_sql, null_key)} {direction}"
 
     def get_json_path_comparand(
@@ -103,7 +103,7 @@ class ClickhouseRenderers(CheckedTermRenderers):
         from hare.dialects.clickhouse.lookups.declarations import ClickhouseJsonNullText
         from hare.sql.terms.values.value_wrapper import ValueWrapper
 
-        if value is None and column_type == CLICKHOUSE_JSON_COLUMN_TYPE:
+        if value is None and column_type == ClickhouseTypeName.JSON:
             # A JSON column keeps no null - a path holding one reads as a missing path, NULL.
             return None if as_parameter else ClickhouseJsonNullText(ValueWrapper(encode_json_text(value)))
         json_text = encode_json_text(value)

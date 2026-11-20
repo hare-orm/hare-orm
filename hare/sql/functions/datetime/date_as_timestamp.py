@@ -10,6 +10,9 @@ class DateAsTimestamp(Function):
     timestamp; a naive one's wall-clock midnight (a column holding an instant holds a naive value as
     one in the machine's local zone)."""
 
+    structure_attributes = ("zone_name",)
+    has_repeatable_value = True
+
     requires_dialect_renderer = True
 
     def __init__(self, term: Any, zone_name: str | None, alias: str | None = None) -> None:

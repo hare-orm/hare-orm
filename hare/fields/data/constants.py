@@ -75,19 +75,10 @@ INT_LOOKUP_LITERAL_CAST_SQL_TYPE = {
     Decimal: SqlTypes.NUMERIC,
 }
 
-#: The integer range orjson serializes - a JSONField value holding an int outside it is encoded by
-#: the standard library instead, which writes any int exactly.
-ORJSON_INTEGER_MIN = -(2**63)
-
-ORJSON_INTEGER_MAX = 2**64 - 1
-
-#: bytes.translate() table turning every ASCII digit into b"1" and every other byte into b"0".
-JSON_DIGIT_MARKER_TABLE = bytes(ord("1") if ord("0") <= byte <= ord("9") else ord("0") for byte in range(256))
-
 #: The codes rust.native.rows.check_json_storable() returns for a JSONField value: an int outside
-#: the ORJSON_INTEGER_MIN..ORJSON_INTEGER_MAX range, a NaN/infinite float, a
-#: list or dict holding itself, containers nested deeper than JSON_MAXIMUM_NESTING (0 - storable as
-#: it is - has no name of its own).
+#: the range orjson serializes (-2**63..2**64-1 - encoded by the standard library instead, which writes
+#: any int exactly), a NaN/infinite float, a list or dict holding itself, containers nested deeper
+#: than JSON_MAXIMUM_NESTING (0 - storable as it is - has no name of its own).
 JSON_LONG_INTEGER_PROBLEM = 1
 
 JSON_NON_FINITE_FLOAT_PROBLEM = 3
@@ -99,11 +90,6 @@ JSON_NESTED_TOO_DEEPLY_PROBLEM = 5
 #: The most lists, tuples and dicts a JSONField value nests inside each other - orjson's limit for
 #: lists and dicts; a deeper tuple overflows its stack and ends the process.
 JSON_MAXIMUM_NESTING = 254
-
-#: The count of containers JSONField.check_storable_value() walks in Python before it looks for a
-#: container holding itself - such a value never ends the walk, so it gets there; a smaller one pays
-#: one count per container.
-JSON_CIRCULAR_REFERENCE_CHECK_CONTAINERS = 10_000
 
 #: The message of a JSON value holding itself - it has no end to write.
 JSON_CIRCULAR_REFERENCE_MESSAGE = "the value holds itself (a circular reference), which JSON can't store"
@@ -135,3 +121,7 @@ END_OF_DAY_HOUR_TEXT = "24"
 
 #: The default of a UUIDField primary key by the field's version - none for another version.
 UUID_VERSION_DEFAULTS: dict[int | None, Callable[[], UUID]] = {None: uuid4, 4: uuid4, 7: Uuid7.new}
+
+#: The built-in types of a JSON value - never a pydantic model instance, so JSONField.prepare_value()
+#: checks them without asking pydantic.
+JSON_PLAIN_PYTHON_VALUE_TYPES = frozenset({dict, list, str, bytes, int, float, bool, tuple})

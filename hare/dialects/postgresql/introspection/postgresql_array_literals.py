@@ -15,8 +15,8 @@ class PostgresqlArrayLiterals:
     """PostgreSQL's array literals (``{1,2,"a b"}``) - a column default or an option PostgreSQL prints as
     one - read as lists of Python values."""
 
-    @classmethod
-    def read_array_literal(cls, text: str, position: int, element_type: str) -> tuple[list[Any], int]:
+    @staticmethod
+    def read_array_literal(text: str, position: int, element_type: str) -> tuple[list[Any], int]:
         """Reads the array literal at ``position``.
 
         Returns:

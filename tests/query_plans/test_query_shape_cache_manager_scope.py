@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from hare.contrib import test
+from hare.core.hare_context import HareContext
 from hare.models.tenancy.tenancy import Tenancy
 from hare.query.expressions import F, OuterReference, Subquery
 from hare.query.functions import Count, Max
@@ -15,9 +16,9 @@ from hare.query.plans.statement.statement_plans import StatementPlans
 from tests.shared_models.testmodels import (
     OptionalOwnerScopedSecret,
     OwnerScopedLabel,
-    OwnerScopedManager,
     OwnerScopedPlayer,
     OwnerScopedRoster,
+    OwnerScopedRows,
     OwnerScopedSecret,
     OwnerScopedSecretRef,
     OwnerScopedTeam,
@@ -27,11 +28,11 @@ from tests.shared_models.testmodels import (
 
 @contextmanager
 def _owner(owner: str | None):
-    token = OwnerScopedManager.current_owner.set(owner)
+    token = OwnerScopedRows.current_owner.set(owner)
     try:
         yield
     finally:
-        OwnerScopedManager.current_owner.reset(token)
+        OwnerScopedRows.current_owner.reset(token)
 
 
 async def _create_secrets() -> None:
@@ -56,7 +57,7 @@ async def _assert_alternating_owners(
 
 
 def _nulls_sort_first(model: Any) -> bool:
-    return model._meta.connection.dialect.name != "postgresql"
+    return HareContext.require_current().apps.get_queryset(model).get_connection().dialect.name != "postgresql"
 
 
 @pytest.mark.asyncio
@@ -309,4 +310,4 @@ async def test_direct_query_on_runtime_scoped_model_stays_cached_and_correct(db)
         lambda: OwnerScopedSecret.objects.all().values_list("text", flat=True),
         {"alice": ["ALICE-SECRET"], "bob": ["BOB-SECRET"]},
     )
-    assert len(StatementPlans.plans) >= 1
+    assert StatementPlans.plans.entry_count >= 1

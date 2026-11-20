@@ -17,6 +17,9 @@ class Mod(Function):
             then uses its integer ``%`` operator.
     """
 
+    structure_attributes = ("integer",)
+    has_repeatable_value = True
+
     def __init__(self, term: Term, modulus: Any, alias: str | None = None, *, integer: bool = False) -> None:
         super().__init__("MOD", term, modulus, alias=alias)
         self.integer = integer

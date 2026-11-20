@@ -8,15 +8,16 @@
 
 ```bash
 make test_clickhouse_up      # ClickHouse 25.8 - HTTP на порту 8124, собственный протокол на 9124
-make test_clickhouse         # tests/dialects/clickhouse на обоих драйверах
+make test_clickhouse         # тесты диалекта, контракты и выбранные тесты полей на обоих драйверах
 ```
 
 Сервер сам служит себе ClickHouse Keeper — порт 9182 на хосте — и работает с
 `allow_experimental_transactions` (`tests/docker/clickhouse`): тесты подключаются с
 `keeper_hosts=127.0.0.1:9182`, поэтому серии ключей тестовой базы удаляются вместе с ней, тесты транзакций —
 ещё и с `transactions=true`, а генерируемые ключи берутся из его серий. `make test_clickhouse` запускает
-`tests/dialects/clickhouse/` со своими моделями — общим тестовым моделям остального набора нужны ограничения
-уникальности и внешние ключи, которых ClickHouse не держит.
+`tests/dialects/clickhouse/`, `tests/contracts/` и тесты упорядоченных значений, текстовых операторов
+IP-адресов и их зон из `tests/fields/value_types/`. Они используют подходящие модели; общим моделям
+остального набора нужны ограничения уникальности и внешние ключи, которых ClickHouse не держит.
 
 ## <a id="cluster"></a>Кластер
 

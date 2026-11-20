@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from hare.core.caching.caches import Caches
-from hare.models import Model
+from hare.sql import Query, Table
 from hare.sql.identifiers import Identifiers
 
 if TYPE_CHECKING:
@@ -17,23 +16,19 @@ class TableNames:
     @staticmethod
     def assign_generated_table_names(apps: Apps) -> None:
         """Gives every model without ``Meta.table`` its name from this registry's
-        ``table_name_generator`` (else the lower-cased class name) - on every init. Names derived
-        from the table when relations were first set up (an automatic through table, a default
-        ``related_name``) keep their first value.
+        ``table_name_generator`` (else the lower-cased class name). Derived relation and
+        through-table names are prepared in the same graph; existing graphs stay unchanged.
 
         Args:
             apps: The registry.
         """
-        renamed_models: list[type[Model]] = []
         for app in apps.apps.values():
             for model in app.values():
-                meta = model._meta
-                if meta.db_table and meta.db_table != meta.generated_db_table:
-                    continue
-                generated_table = Identifiers.get_within_limit(apps.get_generated_table_name(model))
-                if meta.db_table and generated_table != meta.db_table:
-                    renamed_models.append(model)
-                meta.db_table = generated_table
-                meta.generated_db_table = generated_table
-        if renamed_models:
-            Caches.forget_model_caches(renamed_models)
+                meta = apps.get_binding(model)
+                if not (meta.db_table and meta.db_table != meta.generated_db_table):
+                    generated_table = Identifiers.get_within_limit(apps.get_generated_table_name(model))
+                    meta.db_table = generated_table
+                    meta.generated_db_table = generated_table
+                meta.basetable = Table(meta.db_table, schema=meta.schema)
+                meta.basequery = Query.from_(meta.basetable)
+                meta.basequery_all_fields = meta.basequery.select(*meta.db_fields)

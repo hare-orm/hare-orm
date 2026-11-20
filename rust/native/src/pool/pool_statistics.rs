@@ -26,6 +26,11 @@ impl PoolStatistics {
         Self { counters: Arc::new(PoolCounters::new(capacity)) }
     }
 
+    /// One callback per completed measurement, separate from bounded health samples.
+    fn set_recorder(&self, recorder: Option<Py<PyAny>>) {
+        *self.counters.recorder.lock().unwrap_or_else(PoisonError::into_inner) = recorder.map(Arc::new);
+    }
+
     /// Counts a wait for a connection measured in Python - a transaction slot of the Python client.
     fn add_wait(&self, seconds: f64) {
         // A wait too long for a Duration counts as the longest one - NaN as none.
@@ -35,6 +40,11 @@ impl PoolStatistics {
     /// Counts a wait for a connection that ran out, noticed in Python.
     fn add_timeout(&self) {
         self.counters.add_timeout();
+    }
+
+    /// Counts a completed connect measured by a Python-side adapter.
+    fn add_connect(&self, seconds: f64) {
+        self.counters.add_connect(Duration::try_from_secs_f64(seconds.max(0.0)).unwrap_or(Duration::MAX));
     }
 
     /// Counts a failure to open a pool, noticed in Python - its connects run before the pool exists.

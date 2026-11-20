@@ -5,14 +5,13 @@ condition thousands of levels deep."""
 
 from __future__ import annotations
 
-import os
-
 import pytest
 import pytest_asyncio
 
-from hare.contrib.test import RollbackIsolation, hare_test_context
+from hare.contrib.test import RollbackIsolation
 from hare.query.expressions import Q
 from tests.composite_primary_keys.composite_key_list_models import CompositeIntKeyEntry, CompositeKeyReference
+from tests.utils.database_under_test import DatabaseUnderTest
 
 MODULES = ["tests.composite_primary_keys.composite_key_list_models"]
 ENTRY_COUNT = 1500
@@ -20,12 +19,7 @@ ENTRY_COUNT = 1500
 
 @pytest_asyncio.fixture(scope="module")
 async def references_db_module():
-    async with hare_test_context(
-        MODULES,
-        db_url=os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:"),
-        app_label="models",
-        connection_label="models",
-    ) as context:
+    async with DatabaseUnderTest.open_model_context(MODULES) as context:
         entries = [CompositeIntKeyEntry(first=number, second=number % 7) for number in range(ENTRY_COUNT)]
         await CompositeIntKeyEntry.objects.bulk_create(entries)
         await CompositeKeyReference.objects.bulk_create(

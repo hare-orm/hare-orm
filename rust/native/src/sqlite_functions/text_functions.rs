@@ -190,7 +190,7 @@ impl TextFunctions {
         let right = match count.cmp(&0) {
             Ordering::Greater => text.slice((size - count).max(0), size),
             Ordering::Equal => "",
-            Ordering::Less => text.slice(-count, size),
+            Ordering::Less => text.slice(count.saturating_neg(), size),
         };
         Ok(Self::text(py, right))
     }

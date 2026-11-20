@@ -38,6 +38,19 @@ async def test_a_model_reaches_a_sensitive_field_asked_after_another_model_of_it
             [SensitiveTop, SensitiveMiddle, SensitivePartner, SensitiveEnd], app_label="sensitive_cycle"
         )
 
-        assert SensitiveFilterKeys.reaches_sensitive_fields(SensitiveTop) is True
-        assert SensitiveFilterKeys.reaches_sensitive_fields(SensitivePartner) is True
-        assert SensitiveFilterKeys.reads_sensitive_values(SensitivePartner, "middle__b_ends__secret") is True
+        assert (
+            SensitiveFilterKeys.reaches_sensitive_fields(HareContext.require_current().apps.get_binding(SensitiveTop))
+            is True
+        )
+        assert (
+            SensitiveFilterKeys.reaches_sensitive_fields(
+                HareContext.require_current().apps.get_binding(SensitivePartner)
+            )
+            is True
+        )
+        assert (
+            SensitiveFilterKeys.reads_sensitive_values(
+                HareContext.require_current().apps.get_binding(SensitivePartner), "middle__b_ends__secret"
+            )
+            is True
+        )

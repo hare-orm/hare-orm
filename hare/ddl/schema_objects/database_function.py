@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 from hare.classes.class_path import ClassPath
 from hare.classes.value_descriptions import ValueDescriptions
@@ -52,7 +52,7 @@ class DatabaseFunction(NamedSchemaObject):
             )
         if not isinstance(self.body.sql, str) or not self.body.sql.strip():
             raise ConfigurationError(f"DatabaseFunction {self.name!r}: the body can't be empty")
-        if isinstance(cast("object", self.arguments), str) or not all(
+        if isinstance(self.arguments, str) or not all(  # type: ignore[unreachable]
             isinstance(argument, str) and argument.strip() for argument in self.arguments
         ):
             raise ConfigurationError(
@@ -71,6 +71,10 @@ class DatabaseFunction(NamedSchemaObject):
                 f"DatabaseFunction {self.name!r}: volatility must be one of {', '.join(FunctionVolatility)}, "
                 f"got {self.volatility!r}"
             )
+
+    def can_replace_in_place(self, other: "DatabaseFunction") -> bool:
+        """Whether the complete argument declarations and the return type stay the same."""
+        return self.arguments == other.arguments and self.returns == other.returns
 
     def deconstruct(self) -> tuple[str, list[Any], dict[str, Any]]:
         """The declaration as a migration writes it.

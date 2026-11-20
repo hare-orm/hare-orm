@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from hare.fields.data.containers.container_field import ContainerField
+from hare.dialects.clickhouse.constants import CLICKHOUSE_NEVER_NULLABLE_TYPE_PREFIXES
 from hare.sql.terms.containers import (
     ArrayContainedByTerm,
     ArrayContainsTerm,
@@ -99,9 +99,11 @@ class ClickhouseContainerRenderers:
         (array_sql,) = cls.get_argument_sqls(term, sql_context)
         position = term.index + 1 if term.index >= 0 else term.index
         element_sql = f"arrayElement({array_sql},{position})"
-        if isinstance(term.element_field, ContainerField):
-            # A container is never NULL - past either end it is the empty one.
-            return element_sql
+        if term.element_field is not None:
+            column_type = term.element_field.get_column_type(sql_context.dialect)
+            if column_type.startswith(CLICKHOUSE_NEVER_NULLABLE_TYPE_PREFIXES):
+                # Nonnullable results retain the server's default, including geometry tuples/arrays.
+                return element_sql
         # arrayElement() is the type's default past either end - NULL there, as on the other databases.
         return f"if(length({array_sql})>={abs(position)},{element_sql},NULL)"
 
@@ -110,8 +112,8 @@ class ClickhouseContainerRenderers:
         (array_sql,) = cls.get_argument_sqls(term, sql_context)
         return f"arraySlice({array_sql},{term.start + 1},{max(term.end - term.start, 0)})"
 
-    @classmethod
-    def render_map_value(cls, term: MapValueTerm, sql_context: SqlContext) -> str:
+    @staticmethod
+    def render_map_value(term: MapValueTerm, sql_context: SqlContext) -> str:
         """``map[key]`` - the key bound as ClickHouse's types write it (an enum by its number, which a
         map of enum keys takes where it takes no label)."""
         map_sql = Function.get_arg_sql(term.args[0], sql_context)

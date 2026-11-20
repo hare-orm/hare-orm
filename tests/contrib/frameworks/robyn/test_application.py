@@ -6,10 +6,9 @@ from typing import Annotated, Any
 from urllib.parse import parse_qsl, urlsplit
 
 import pytest
-from pydantic import BaseModel, ConfigDict
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 from robyn import Request, Response
 from robyn.robyn import HttpMethod, QueryParams
-from robyn.testing import TestClient
 
 from hare import Hare
 from hare.contrib.frameworks import PageSchema, RequestTransaction
@@ -18,6 +17,7 @@ from hare.contrib.request_query import (
     FilterField,
     InPath,
     KeyColumns,
+    NoFilter,
     OffsetPagination,
     OrderingConfig,
     Page,
@@ -27,8 +27,7 @@ from hare.contrib.request_query import (
 from hare.query.enums import Lookup
 from tests.contrib.frameworks.models import Chapter, Writer
 from tests.contrib.frameworks.queries import NamedWriterQuery
-
-REQUIRES = ("robyn",)
+from tests.contrib.frameworks.robyn.started_test_client import StartedTestClient
 
 pytestmark = pytest.mark.sqlite_only
 
@@ -38,17 +37,8 @@ CONFIG = {
 }
 
 
-class HareTestClient(TestClient):
-    """Robyn's test client, starting and stopping the application as its server would, and
-    taking a list of values for a repeated query parameter."""
-
-    def __enter__(self) -> "HareTestClient":
-        self._loop.run_until_complete(self.app.start_hare())
-        return self
-
-    def __exit__(self, *args: Any) -> None:
-        self._loop.run_until_complete(self.app.stop_hare())
-        super().__exit__(*args)
+class HareTestClient(StartedTestClient):
+    """A running Robyn client that accepts a list of values for a repeated query parameter."""
 
     def _build_request(self, method: str, path: str, query_params: dict[str, Any] | None = None, **kwargs: Any):
         request = super()._build_request(method, path, **kwargs)
@@ -190,6 +180,43 @@ def names(client: HareTestClient) -> list[str]:
         writer_names.extend(page_names)
 
 
+@pytest.mark.parametrize("alias_type", ["field", "validation", "choices", "name-only"])
+def test_openapi_and_requests_use_the_validation_parameter_alias(alias_type):
+    field_options = (
+        {"alias": "public-token", "serialization_alias": "output-token"}
+        if alias_type in {"field", "name-only"}
+        else {"validation_alias": "public-token"}
+        if alias_type == "validation"
+        else {"validation_alias": AliasChoices("public-token", "other-token")}
+    )
+
+    class AliasedQuery(RequestQuery[Writer]):
+        model_config = ConfigDict(validate_by_alias=alias_type != "name-only", validate_by_name=True)
+        token: Annotated[int, NoFilter()] = Field(**field_options)
+
+        class Meta:
+            queryset = Writer.objects.all()
+            pagination = None
+
+    app = build_app()
+
+    @app.get("/aliased")
+    async def aliased(query: AliasedQuery) -> dict[str, int]:
+        return {"token": query.token}
+
+    app._add_openapi_routes()
+    parameters = app.openapi.openapi_spec["paths"]["/aliased"]["get"]["parameters"]
+    expected_name = "token" if alias_type == "name-only" else "public-token"
+    assert [(parameter["name"], parameter["required"]) for parameter in parameters] == [(expected_name, True)]
+    assert parameters[0]["schema"]["type"] == "integer"
+    with HareTestClient(app) as client:
+        response = client.get("/aliased", query_params={expected_name: "7"})
+        assert (response.status_code, response.json()) == (200, {"token": 7})
+        if alias_type == "choices":
+            response = client.get("/aliased", query_params={"other-token": "8"})
+            assert (response.status_code, response.json()) == (200, {"token": 8})
+
+
 def test_the_context_is_open_around_the_apps_own_handlers():
     events: list[str] = []
     with HareTestClient(build_app(events=events)) as client:
@@ -323,9 +350,10 @@ def test_an_error_of_the_whole_query_is_answered_with_422():
 
 
 def test_a_request_query_built_for_a_model_is_a_handlers_parameter():
-    Hare.bind_models(config=CONFIG)
+    apps = Hare.bind_models(config=CONFIG)
     built_writer_query = RequestQuery.for_model(
         Writer,
+        apps=apps,
         filters=(FilterField("name", lookups=(Lookup.IN,)),),
         ordering=OrderingConfig(default=("name",)),
     )

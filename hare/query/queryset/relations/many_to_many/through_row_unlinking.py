@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from itertools import chain
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from hare.core.connections.connections import Connections
 from hare.core.routing.written_connections import WrittenConnections
 from hare.instrumentation.capture.captured_write import CapturedWrite
 from hare.instrumentation.capture.change_capturing import ChangeCapturing
@@ -13,7 +12,10 @@ from hare.models.write.rules.constants import REMOVE_METHOD_NAME
 from hare.models.write.rules.enums import WriteType
 from hare.models.write.rules.row_write_rules import RowWriteRules
 from hare.models.write.write_steps import WriteSteps
+from hare.query.execution.bound_write import BoundWrite
+from hare.query.execution.write_statements import WriteStatement
 from hare.query.key_columns import KeyColumns
+from hare.query.key_comparison import KeyComparison
 from hare.query.queryset.relations.many_to_many.linked_keys import LinkedKeys
 from hare.query.queryset.relations.many_to_many.many_to_many_members import ManyToManyMembers
 from hare.query.queryset.relations.many_to_many.many_to_many_scope_checks import ManyToManyScopeChecks
@@ -21,8 +23,6 @@ from hare.query.queryset.relations.many_to_many.through_row_inserting import Thr
 from hare.query.queryset.relations.many_to_many.through_rows import ThroughRows
 from hare.query.scopes.row_visibility import RowVisibility
 from hare.sql.builder.tables.table import Table
-from hare.sql.terms.tuple import Tuple
-from hare.sql.terms.values.row_value_list import RowValueList
 from hare.time import Timezone
 
 TModel = TypeVar("TModel", bound="Model")
@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset.relations.many_to_many_relation import ManyToManyRelation
     from hare.sql.terms.criteria.criterion import Criterion
 
@@ -51,8 +52,8 @@ class ThroughRowUnlinking:
         visibility: RowVisibility = RowVisibility.DEFAULT,
     ) -> None:
         """Removes the through rows linking ``relation.instance`` to ``instances`` (all of them for
-        ``None``) and reports the change (``ChangeEvents``) - shared by ``remove()``/``clear()``/
-        ``set()`` and the ``on_delete=CASCADE`` cascade of a deleted owner.
+        ``None``) and reports the change (``ChangeEvents``) - shared by ``remove()``, ``clear()``
+        and ``set()``.
 
         Args:
             relation: The many-to-many relation of an instance.
@@ -62,9 +63,9 @@ class ThroughRowUnlinking:
             forward_pk_values: See ``ThroughRowUnlinking.unlink()``.
             visibility: See ``ThroughRowUnlinking.unlink()``.
         """
-        through_model = relation.field.through_model_class
-        connection = Connections.get_client(using) or ThroughRows.through_table_connection(relation, for_write=True)
-        if through_model is not None and through_model._meta.change_capture_needs is not None:
+        through_binding = relation.field.get_through_binding()
+        connection = ThroughRows.through_table_connection(relation, for_write=True, using=using)
+        if through_binding is not None and through_binding.change_capture_needs is not None:
             # The links' captured changes are written with them.
             async with ChangeCapturing.transaction(connection) as transaction_connection:
                 await WriteSteps.get_whole_run(
@@ -114,15 +115,23 @@ class ThroughRowUnlinking:
             forward_pk_values: See ``ThroughRowUnlinking.unlink()``.
             visibility: See ``ThroughRowUnlinking.unlink()``.
         """
+        ManyToManyMembers.validate_owner_saved(relation)
+        if instances:
+            ManyToManyMembers.validate_related_instances(relation, instances)
         related_instances = list(instances) if instances else None
         if related_instances and ChangeEvents.is_observed():
             # Only the instances linked before are reported - removing an unlinked one changes nothing.
             linked_pk_values = await LinkedKeys.get_linked_pk_values(relation, connection)
-            related_meta = type(related_instances[0])._meta
+            related_meta = related_instances[0]._binding
+            keys = KeyColumns.get_db_rows(related_meta, related_instances, connection.dialect.types)
+            read_key = await KeyComparison.get_key_reader(
+                connection, related_meta.pk_fields, chain(linked_pk_values, keys)
+            )
+            linked_keys = (
+                linked_pk_values if read_key is KeyComparison.unchanged else frozenset(map(read_key, linked_pk_values))
+            )
             related_instances = [
-                instance
-                for instance in related_instances
-                if KeyColumns.get_db_values(related_meta, instance, connection.dialect.types) in linked_pk_values
+                instance for instance, key in zip(related_instances, keys, strict=True) if read_key(key) in linked_keys
             ]
         unlinked_count = await ThroughRowUnlinking.unlink(
             relation,
@@ -153,8 +162,8 @@ class ThroughRowUnlinking:
             relation: The many-to-many relation of an instance.
             instances: The related instances to unlink, or ``None`` to unlink every one.
             using: Connection to use instead of the through table's own.
-            check_tenant_scope: ``False`` for a cascade, which follows the through rows of a row
-                it is deleting regardless of the active tenant scope, and for ``clear(all_tenants=True)``.
+            check_tenant_scope: Whether to enforce the active tenant scope; disabled by
+                ``clear(all_tenants=True)``.
             forward_pk_values: DB-ready primary key values of the related rows to unlink, in
                 place of ``instances``.
             visibility: Which related rows the related model's default scope shows when unlinking
@@ -167,9 +176,9 @@ class ThroughRowUnlinking:
         ManyToManyMembers.validate_owner_saved(relation)
         if instances:
             ManyToManyMembers.validate_related_instances(relation, instances)
-        connection = Connections.get_client(using) or ThroughRows.through_table_connection(relation, for_write=True)
+        connection = ThroughRows.through_table_connection(relation, for_write=True, using=using)
         if WrittenConnections.is_recording:
-            WrittenConnections.record(connection.connection_alias)
+            WrittenConnections.record(connection)
         relation._reset_cache_on_rollback(connection)
         # Holding instances of another tenant doesn't let remove() unlink them - checked as add() checks.
         if check_tenant_scope:
@@ -179,22 +188,23 @@ class ThroughRowUnlinking:
         through_table = Table(relation.field.through, schema=relation.field.through_schema)
         backward_columns = [through_table[column] for column in relation.field.backward_keys]
         backward_key_values = KeyColumns.get_db_values(
-            type(relation.instance)._meta, relation.instance, connection.dialect.types
+            relation.instance._binding, relation.instance, connection.dialect.types
         )
 
         condition = KeyColumns.row_equality(backward_columns, backward_key_values)
         if instances:
-            related_meta = type(instances[0])._meta
-            forward_pk_values = [
-                KeyColumns.get_db_values(related_meta, instance, connection.dialect.types) for instance in instances
-            ]
+            related_meta: ModelBinding = instances[0]._binding
+            forward_pk_values = KeyColumns.get_db_rows(related_meta, instances, connection.dialect.types)
         if forward_pk_values:
             forward_columns = [through_table[column] for column in relation.field.forward_keys]
             condition &= (
                 KeyColumns.row_equality(forward_columns, forward_pk_values[0])
                 if len(forward_pk_values) == 1
                 else connection.dialect.filter_operators.get_row_membership_criterion(
-                    forward_columns, forward_pk_values, ManyToManyMembers.get_forward_key_fields(relation)
+                    forward_columns,
+                    forward_pk_values,
+                    relation._binding.pk_fields,
+                    connection=connection,
                 )
             )
         if (check_tenant_scope or visibility.all_tenants) and not instances:
@@ -206,20 +216,24 @@ class ThroughRowUnlinking:
             )
             if visible_target_criterion is not None:
                 condition &= visible_target_criterion
-        through_model = relation.field.through_model_class
-        soft_delete_field = through_model._meta.soft_delete_field if through_model is not None else None
-        capture_needs = through_model._meta.change_capture_needs if through_model is not None else None
+        through_binding = relation.field.get_through_binding()
+        soft_delete_field = through_binding.soft_delete_field if through_binding is not None else None
+        capture_needs = through_binding.change_capture_needs if through_binding is not None else None
         # A through model with Meta.soft_delete_field is soft-deleted, like any other model.
         operation = RowOperation.UPDATE if soft_delete_field is not None else RowOperation.DELETE
-        if through_model is not None and soft_delete_field is not None:
+        if through_binding is not None and soft_delete_field is not None:
             # Only live rows - a row soft-deleted before keeps its deletion time.
-            condition &= through_table[through_model._meta.fields_db_projection[soft_delete_field]].isnull()
+            condition &= through_table[through_binding.fields_db_projection[soft_delete_field]].isnull()
         now = Timezone.now()
-        if through_model is None or capture_needs is None or not capture_needs.captures(operation):
+        if through_binding is None or capture_needs is None or not capture_needs.captures(operation):
             query = ThroughRowUnlinking.get_unlink_statement(connection, relation, through_table, condition, now)
-            return (await connection.execute(*ThroughRows.get_statement(relation, query)))[0]
+            command = WriteStatement(
+                *ThroughRows.get_statement(relation, query, connection),
+                recovery=connection.get_write_recovery(through_table),
+            )
+            return (await BoundWrite.execute_command(connection, command)).row_count
         captured = CapturedWrite(
-            through_model,
+            through_binding,
             capture_needs,
             connection,
             operation,
@@ -232,18 +246,25 @@ class ThroughRowUnlinking:
         before_by_pk = None
         if operation is RowOperation.UPDATE and capture_needs.reads_before:
             before_query = connection.query_class.from_(through_table).where(condition).select(*capture_needs.columns)
-            _, before_rows = await connection.execute(*ThroughRows.get_statement(relation, before_query))
+            _, before_rows = await connection._execute_built(
+                *ThroughRows.get_statement(relation, before_query, connection)
+            )
             types = connection.dialect.types
-            before_by_pk = {
-                ChangeCapturing.get_row_key(through_model, capture_needs, types, dict(row))[0]: (
-                    ChangeCapturing.get_row_values(through_model, capture_needs, types, dict(row))
-                )
-                for row in before_rows
-            }
+            before_by_pk = {}
+            key_layout = ChangeCapturing.get_key_layout(through_binding, capture_needs, types)
+            values_layout = ChangeCapturing.get_row_layout(through_binding, capture_needs.field_names, types)
+            for row in map(dict, before_rows):
+                pk, _tenant = ChangeCapturing.get_row_key(capture_needs, row, key_layout)
+                before_by_pk[pk] = ChangeCapturing.get_row_values(capture_needs, row, values_layout)
         query = ThroughRowUnlinking.get_unlink_statement(
             connection, relation, through_table, condition, now
         ).returning(*capture_needs.columns)
-        count, returned_rows = await connection.execute(*ThroughRows.get_statement(relation, query), returns_rows=True)
+        command = WriteStatement(
+            *ThroughRows.get_statement(relation, query, connection),
+            returns_rows=True,
+            recovery=connection.get_write_recovery(through_table),
+        )
+        count, returned_rows = await BoundWrite.execute_command(connection, command)
         await captured.capture_returned(returned_rows, before_by_pk=before_by_pk)
         return count
 
@@ -269,25 +290,31 @@ class ThroughRowUnlinking:
         Returns:
             The statement.
         """
-        through_model = relation.field.through_model_class
-        soft_delete_field = through_model._meta.soft_delete_field if through_model is not None else None
-        if through_model is None or soft_delete_field is None:
+        through_binding = relation.field.get_through_binding()
+        soft_delete_field = through_binding.soft_delete_field if through_binding is not None else None
+        if through_binding is None or soft_delete_field is None:
             return connection.query_class.from_(through_table).where(condition).delete()
-        meta = through_model._meta
-        soft_delete_model_field = meta.fields_map[soft_delete_field]
-        soft_delete_column = meta.fields_db_projection[soft_delete_field]
+        soft_delete_model_field = through_binding.fields_map[soft_delete_field]
+        soft_delete_column = through_binding.fields_db_projection[soft_delete_field]
         types = connection.dialect.types
         query = (
             connection.query_class.update(through_table)
             .where(condition)
             .set(soft_delete_column, types.get_db_value(soft_delete_model_field, now, None))
         )
-        rules = RowWriteRules.get(through_model, WriteType.SOFT_DELETE, [soft_delete_field], REMOVE_METHOD_NAME)
+        rules = RowWriteRules.get(
+            through_binding,
+            WriteType.SOFT_DELETE,
+            [soft_delete_field],
+            REMOVE_METHOD_NAME,
+        )
         if (version_field := rules.version_field_name) is not None:
-            version_column = meta.fields_db_projection[version_field]
+            version_column = through_binding.fields_db_projection[version_field]
             query = query.set(version_column, through_table[version_column] + 1)
         for field_name, field_object, value in rules.get_stamp_values(now):
-            query = query.set(meta.fields_db_projection[field_name], types.get_db_value(field_object, value, None))
+            query = query.set(
+                through_binding.fields_db_projection[field_name], types.get_db_value(field_object, value, None)
+            )
         return query
 
     @staticmethod
@@ -313,20 +340,23 @@ class ThroughRowUnlinking:
             count of written rows.
         """
         connection = captured.connection
-        meta = captured.model._meta
+        meta = captured._binding
         key_columns = [through_table[meta.fields_db_projection[name]] for name in meta.primary_key_attribute_names]
         key_query = connection.query_class.from_(through_table).where(condition).select(*key_columns)
-        _, key_rows = await connection.execute(*ThroughRows.get_statement(relation, key_query))
-        # A row by column name on some drivers - its values are in the order selected.
-        rows = [tuple(row.values()) if isinstance(row, Mapping) else tuple(row) for row in key_rows]
+        _, key_rows = await connection._execute_built(*ThroughRows.get_statement(relation, key_query, connection))
+        rows = [tuple(row[column.name] for column in key_columns) for row in key_rows]
         if not rows:
             return 0
-        pks = ThroughRowInserting.get_row_keys(captured.model, key_columns, rows, connection.dialect.types)
+        pks = ThroughRowInserting.get_row_keys(captured._binding, key_columns, rows, connection.dialect.types)
         read_before = await captured.read(pks, lock=True)
-        key_condition = Tuple(*key_columns).isin(RowValueList(*[Tuple(*row) for row in rows]))
+        key_condition = KeyColumns.row_is_in(key_columns, rows)
         query = ThroughRowUnlinking.get_unlink_statement(
             connection, relation, through_table, condition & key_condition, now
         )
-        count = (await connection.execute(*ThroughRows.get_statement(relation, query)))[0]
+        command = WriteStatement(
+            *ThroughRows.get_statement(relation, query, connection),
+            recovery=connection.get_write_recovery(through_table),
+        )
+        count = (await BoundWrite.execute_command(connection, command)).row_count
         await captured.capture_read(read_before, pks)
         return count
