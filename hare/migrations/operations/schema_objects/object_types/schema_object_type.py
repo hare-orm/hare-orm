@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from hare.classes.comparable_values import ComparableValues
+from hare.declarations.declaration_values import DeclarationValues
 from hare.migrations.exceptions import IncompatibleStateError
 
 if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
     from hare.migrations.state.model_state import ModelState
-    from hare.models import Model
+    from hare.migrations.state.state import State
     from hare.models.enums import ModelOption
+    from hare.models.model_binding import ModelBinding
 
 
 class SchemaObjectType:
@@ -31,6 +33,11 @@ class SchemaObjectType:
     #: The type's name in the message refusing it - plural.
     plural_noun: ClassVar[str] = ""
 
+    @staticmethod
+    def get_referenced_field_names(schema_object: Any) -> frozenset[str]:
+        """Structured local field inputs; opaque declarations expose none by default."""
+        return frozenset()
+
     @classmethod
     def raise_if_unsupported(cls, editor: BaseSchemaEditor) -> None:
         """Refuses the type on a database without it, before any SQL is sent.
@@ -45,7 +52,7 @@ class SchemaObjectType:
             editor.raise_if_unsupported(cls.feature, cls.plural_noun)
 
     @classmethod
-    def raise_if_object_unsupported(cls, editor: BaseSchemaEditor, model: type[Model], schema_object: Any) -> None:
+    def raise_if_object_unsupported(cls, editor: BaseSchemaEditor, model: ModelBinding, schema_object: Any) -> None:
         """Refuses one object the database can't hold, before any SQL of the migration is sent -
         the type's own refusal by default.
 
@@ -101,7 +108,7 @@ class SchemaObjectType:
         if name is not None:
             return cls.get_name(entry) == name
         entry_object = cls.as_schema_object(entry)
-        return cls.get_name(entry_object) is None and ComparableValues.are_equal(entry_object, schema_object)
+        return cls.get_name(entry_object) is None and DeclarationValues.are_equal(entry_object, schema_object)
 
     @classmethod
     def get_name(cls, schema_object: Any) -> str | None:
@@ -112,7 +119,7 @@ class SchemaObjectType:
     def find(
         cls,
         model_state: ModelState,
-        get_model: Callable[[], type[Model]],
+        get_model: Callable[[], ModelBinding],
         *,
         name: str | None = None,
         fields: list[str] | None = None,
@@ -141,7 +148,7 @@ class SchemaObjectType:
     def find_for_rename(
         cls,
         model_state: ModelState,
-        get_model: Callable[[], type[Model]],
+        get_model: Callable[[], ModelBinding],
         *,
         name: str | None,
         fields: list[str] | None,
@@ -163,9 +170,11 @@ class SchemaObjectType:
         return cls.find(model_state, get_model, name=name, fields=fields)
 
     @classmethod
-    def get_state_entry(cls, schema_object: Any) -> Any:
+    def get_state_entry(cls, schema_object: Any, *, state: State, app_label: str, model_name: str) -> Any:
         """An object as the migration state keeps it - the object itself by default."""
-        return schema_object
+        from hare.fields.declaration_snapshot import DeclarationSnapshot
+
+        return DeclarationSnapshot.copy_values({"entry": schema_object}, {})["entry"]
 
     @classmethod
     def as_schema_object(cls, entry: Any) -> Any:
@@ -175,10 +184,10 @@ class SchemaObjectType:
     @classmethod
     def renamed(cls, schema_object: Any, new_name: str) -> Any:
         """A copy of the object under another name."""
-        raise NotImplementedError
+        return replace(schema_object, name=new_name)
 
     @classmethod
-    async def add(cls, editor: BaseSchemaEditor, model: type[Model], schema_object: Any, **options: Any) -> None:
+    async def add(cls, editor: BaseSchemaEditor, model: ModelBinding, schema_object: Any, **options: Any) -> None:
         """Creates the object in the database.
 
         Args:
@@ -193,8 +202,8 @@ class SchemaObjectType:
     async def remove(
         cls,
         editor: BaseSchemaEditor,
-        model: type[Model],
-        remaining_model: type[Model],
+        model: ModelBinding,
+        remaining_model: ModelBinding,
         schema_object: Any,
         **options: Any,
     ) -> None:
@@ -204,13 +213,14 @@ class SchemaObjectType:
         Args:
             editor: The schema editor.
             model: The model.
+            remaining_model: The model as it remains after the object is dropped, when available.
             schema_object: The object.
             options: The type's options of the operation.
         """
         raise NotImplementedError
 
     @classmethod
-    async def rename(cls, editor: BaseSchemaEditor, model: type[Model], old_object: Any, new_object: Any) -> None:
+    async def rename(cls, editor: BaseSchemaEditor, model: ModelBinding, old_object: Any, new_object: Any) -> None:
         """Renames the object in the database.
 
         Args:
@@ -222,7 +232,7 @@ class SchemaObjectType:
         raise NotImplementedError
 
     @classmethod
-    async def alter(cls, editor: BaseSchemaEditor, model: type[Model], old_object: Any, new_object: Any) -> None:
+    async def alter(cls, editor: BaseSchemaEditor, model: ModelBinding, old_object: Any, new_object: Any) -> None:
         """Changes the object in the database in place.
 
         Args:

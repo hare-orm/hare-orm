@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from hare.fields.relations.fields.backward_foreign_key_relation import BackwardForeignKeyRelation
     from hare.fields.relations.fields.declarations import BackwardOneToOneRelation
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 #: A row: its model and primary key.
 RowKey = tuple["type[Model]", Any]
@@ -33,7 +34,7 @@ class DeletionPlan:
             by the relation's own condition, per backward relation the target values it matches.
     """
 
-    root_model: type[Model]
+    root_binding: ModelBinding
     root_pks: list[Any]
     waves: list[dict[type[Model], dict[Any, DeletionAction | None]]] = field(default_factory=list)
     roots_reached_again: set[Any] = field(default_factory=set)
@@ -41,6 +42,11 @@ class DeletionPlan:
     rows_without_key: list[tuple[BackwardForeignKeyRelation[Any] | BackwardOneToOneRelation[Any], list[Any]]] = field(
         default_factory=list
     )
+
+    @property
+    def root_model(self) -> type[Model]:
+        """The root's Python class; structural traversal uses root_binding.graph."""
+        return self.root_binding._model
 
     def iterate_rows(self) -> Iterator[tuple[type[Model], Any, DeletionAction | None]]:
         """Every reached row, wave by wave.
@@ -64,31 +70,13 @@ class DeletionPlan:
         """
         return frozenset((model, pk) for model, pk, action in self.iterate_rows() if not actions or action in actions)
 
-    def get_pks_by_model(self, *actions: DeletionAction | None) -> dict[type[Model], list[Any]]:
-        """The rows the delete does one of ``actions`` to - every row without ``actions`` - by
-        model, in wave order.
-
-        Args:
-            actions: The actions.
-
-        Returns:
-            The primary keys by model.
-        """
+    def get_pks_by_model(
+        self, *actions: DeletionAction | None, include_roots: bool = True
+    ) -> dict[type[Model], list[Any]]:
+        """Group the selected rows by model in wave order."""
+        excluded = None if include_roots else {(self.root_model, pk) for pk in self.root_pks}
         pks_by_model: dict[type[Model], list[Any]] = {}
         for model, pk, action in self.iterate_rows():
-            if not actions or action in actions:
-                pks_by_model.setdefault(model, []).append(pk)
-        return pks_by_model
-
-    def get_descendant_pks_by_model(self) -> dict[type[Model], list[Any]]:
-        """Every reached row but the root rows, by model.
-
-        Returns:
-            The primary keys by model.
-        """
-        root_keys = {(self.root_model, pk) for pk in self.root_pks}
-        pks_by_model: dict[type[Model], list[Any]] = {}
-        for model, pk, _action in self.iterate_rows():
-            if (model, pk) not in root_keys:
+            if (not actions or action in actions) and (excluded is None or (model, pk) not in excluded):
                 pks_by_model.setdefault(model, []).append(pk)
         return pks_by_model

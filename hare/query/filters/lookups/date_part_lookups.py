@@ -11,6 +11,7 @@ from hare.exceptions import (
     UnSupportedError,
     ValidationError,
 )
+from hare.fields.data.temporal.temporal_values import TemporalValues
 from hare.query.enums import Lookup, LookupValueShape
 from hare.query.expressions.constants import INTEGER_LITERAL_RANGE
 from hare.query.filters.lookups.constants import DATE_PART_COMPARISON_LOOKUPS
@@ -24,7 +25,7 @@ from hare.sql.terms.term import Term
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
 from hare.query.filters.lookups.lookups import Lookups
-from hare.time import Timezone
+from hare.time.zone_settings import ZoneSettings
 
 
 class DatePartLookups:
@@ -39,8 +40,8 @@ class DatePartLookups:
         Returns:
             ``(zone name under use_timezone, whether a naive value is read in the local zone)``.
         """
-        use_timezone = Timezone.get_use_timezone()
-        zone_name = Timezone.name() if is_datetime_field and use_timezone else None
+        use_timezone = ZoneSettings.get_use_timezone()
+        zone_name = ZoneSettings.name() if is_datetime_field and use_timezone else None
         return zone_name, is_datetime_field and not use_timezone
 
     @classmethod
@@ -141,7 +142,7 @@ class DatePartLookups:
         """
         if isinstance(value, str):
             try:
-                value = datetime.time.fromisoformat(value)
+                value = TemporalValues.parse_iso_time(value)
             except ValueError:
                 pass
         if isinstance(value, datetime.time):
@@ -261,14 +262,12 @@ class DatePartLookups:
         Raises:
             UnSupportedError: ``value`` isn't an int.
         """
-        value = DatePartLookups.get_part_value(date_part, value)
-        use_timezone = Timezone.get_use_timezone()
-        zone_name = Timezone.name() if is_datetime_field and use_timezone else None
-        # A naive datetime term is read in the machine's local zone where the column holds an
-        # instant; a dialect storing the wall-clock digits ignores it.
-        use_local_zone_when_naive = is_datetime_field and not use_timezone
-        return Extract(date_part, term, zone_name=zone_name, use_local_zone_when_naive=use_local_zone_when_naive).eq(
-            value
+        return DatePartLookups.compare_part(
+            date_part,
+            operator.eq,
+            term,
+            DatePartLookups.get_part_value(date_part, value),
+            is_datetime_field=is_datetime_field,
         )
 
     # The date part lookups of a value with no zone of its own (a JSON scalar) - no zone conversion.

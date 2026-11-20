@@ -7,8 +7,14 @@ from hare import fields
 from hare.dialects.postgresql.schema.postgresql_schema_editor import PostgresqlSchemaEditor
 from hare.models import Model
 from tests.utils.fake_client import FakeClient
+from tests.utils.model_bindings import ModelBindings
 
 pytestmark = pytest.mark.database_independent
+
+
+@pytest.fixture
+def binding():
+    return ModelBindings.prepare(CommentedWidget).get_binding(CommentedWidget)
 
 
 class CommentedWidget(Model):
@@ -28,11 +34,11 @@ def get_comment_statements(sql: str) -> list[str]:
     return [line for line in sql.splitlines() if line.startswith("COMMENT ON")]
 
 
-def test_create_table_returns_one_comment_statement_per_table_and_commented_column():
+def test_create_table_returns_one_comment_statement_per_table_and_commented_column(binding):
     editor = PostgresqlSchemaEditor(FakeClient("postgresql", inline_comment=False))
 
-    first_sql = editor.table_creation.get_model_sql_data(CommentedWidget).table_sql
-    second_sql = editor.table_creation.get_model_sql_data(CommentedWidget).table_sql
+    first_sql = editor.table_creation.get_model_sql_data(binding).table_sql
+    second_sql = editor.table_creation.get_model_sql_data(binding).table_sql
 
     assert get_comment_statements(first_sql) == [
         "COMMENT ON TABLE \"commented_widget\" IS 'a widget';",
@@ -42,11 +48,11 @@ def test_create_table_returns_one_comment_statement_per_table_and_commented_colu
 
 
 @pytest.mark.asyncio
-async def test_an_added_column_gets_its_comment_statement():
+async def test_an_added_column_gets_its_comment_statement(binding):
     client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
 
-    await editor.add_field(CommentedWidget, CommentedWidget, "name")
+    await editor.add_field(binding, binding, "name")
 
     assert get_comment_statements("\n".join(client.executed)) == [
         'COMMENT ON COLUMN "commented_widget"."name" IS \'the name\';'

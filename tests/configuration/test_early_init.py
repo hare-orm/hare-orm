@@ -47,51 +47,30 @@ class Event(Model):
 @pytest.mark.asyncio
 async def test_early_init():
     from hare.contrib.pydantic import pydantic_model_creator
+    from hare.core.apps.model_binding_graph import ModelBindingGraph
 
-    Event_TooEarly = pydantic_model_creator(Event)
-    assert Event_TooEarly.model_json_schema() == {
-        "title": "Event",
-        "type": "object",
-        "description": "The Event model docstring.<br/><br/>This is multiline docs.",
-        "properties": {
-            "id": {
-                "title": "Id",
-                "type": "integer",
-                "maximum": 2147483647,
-                "minimum": -2147483648,
-            },
-            "name": {
-                "title": "Name",
-                "type": "string",
-                "description": "The Event NAME<br/>It's pretty important",
-                "maxLength": 255,
-            },
-            "created_at": {
-                "title": "Created At",
-                "type": "string",
-                "format": "date-time",
-                "readOnly": True,
-                "default": None,
-            },
-        },
-        "required": ["id", "name"],
-        "additionalProperties": False,
-    }
+    declaration_graph = ModelBindingGraph()
+    from hare.core.apps.apps import Apps
+    from hare.core.connections.connection_handler import ConnectionHandler
+    from hare.exceptions import ConfigurationError
+
+    with pytest.raises(ConfigurationError, match="not registered"):
+        pydantic_model_creator(Event, apps=Apps({}, ConnectionHandler()))
     # Not bound yet: the relation is declared, its target not resolved.
-    assert Event._meta.app is None
-    assert Event._meta.foreign_key_fields == {"tournament"}
-    assert Event._meta.fields_map["tournament"].deconstruct()[2] == {
+    assert Event._declaration.app is None
+    assert declaration_graph.include(Event).foreign_key_fields == {"tournament"}
+    assert declaration_graph.include(Event).fields_map["tournament"].deconstruct()[2] == {
         "model_name": "models.Tournament",
         "related_name": "events",
         "null": True,
         "db_index": True,
     }
 
-    Hare.bind_models(
+    apps = Hare.bind_models(
         HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": ["tests.configuration.test_early_init"]})
     )
 
-    Event_Pydantic = pydantic_model_creator(Event)
+    Event_Pydantic = pydantic_model_creator(Event, apps=apps)
     schema = Event_Pydantic.model_json_schema()
     # Extract the dynamic hash from $defs key
     tournament_def_key = [k for k in schema.get("$defs", {}) if k.startswith("Tournament_")][0]
@@ -157,11 +136,11 @@ async def test_early_init():
         "type": "object",
     }
     # Bound: the relation resolved to its model and key column.
-    assert Event._meta.full_name == "models.Event"
-    assert Event._meta.foreign_key_fields == {"tournament"}
-    assert Event._meta.fields_map["tournament"].related_model is Tournament
-    assert Event._meta.fields_map["tournament"].source_field == "tournament_id"
-    assert Tournament._meta.backward_foreign_key_fields == {"events"}
+    assert apps.get_binding(Event).full_name == "models.Event"
+    assert apps.get_binding(Event).foreign_key_fields == {"tournament"}
+    assert apps.get_binding(Event).fields_map["tournament"].related_model is Tournament
+    assert apps.get_binding(Event).fields_map["tournament"].source_field == "tournament_id"
+    assert apps.get_binding(Tournament).backward_foreign_key_fields == {"events"}
 
 
 @pytest.mark.parametrize(
@@ -242,7 +221,7 @@ async def test_early_init():
             "    return original_entry_points(*args, **kwargs)\n"
             "importlib.metadata.entry_points = counting_entry_points\n"
             "from hare import Hare, fields\n"
-            "from hare.dialects.dialect_registry import DialectRegistry\n"
+            "from hare.dialects.dialect_registry import DialectRegistry\nfrom hare.core.registries import Registries\n"
             "import hare.dialects.dialect_registry as registry_module\n"
             "registry_module.entry_points = counting_entry_points\n"
             "from hare.models import Model\n"
@@ -258,7 +237,7 @@ async def test_early_init():
             "    await Hare.close_connections()\n"
             "asyncio.run(main())\n"
             "print(sorted(name for name in sys.modules if name.startswith('hare.dialects.postgresql')))\n"
-            "print(len(scans), sorted(str(name) for name in DialectRegistry.dialects_by_name))\n",
+            "print(len(scans), sorted(str(name) for name in Registries.snapshot.dialects))\n",
             ["[]", "0 ['sqlite']"],
             id="init_loads_only_the_driver_its_connection_uses",
         ),
@@ -268,7 +247,7 @@ async def test_early_init():
         pytest.param(
             "import asyncio, sys\n"
             "from hare import Hare, fields\n"
-            "from hare.dialects.dialect_registry import DialectRegistry\n"
+            "from hare.dialects.dialect_registry import DialectRegistry\nfrom hare.core.registries import Registries\n"
             "from hare.models import Model\n"
             "class Plain(Model):\n"
             "    id = fields.IntField(primary_key=True)\n"
@@ -280,7 +259,7 @@ async def test_early_init():
             "asyncio.run(main())\n"
             "prefixes = ('hare.dialects.sqlite', 'sqlite3', 'getpass')\n"
             "print(sorted(name for name in sys.modules if name.startswith(prefixes)))\n"
-            "print(sorted(str(name) for name in DialectRegistry.dialects_by_name))\n",
+            "print(sorted(str(name) for name in Registries.snapshot.dialects))\n",
             ["[]", "['postgresql']"],
             id="init_on_postgresql_loads_nothing_of_sqlite",
         ),
@@ -289,10 +268,10 @@ async def test_early_init():
         # to validate the default timezone - a few milliseconds of every start.
         pytest.param(
             "import sys\n"
-            "from hare.dialects.dialect_registry import DialectRegistry\n"
-            "from hare.time.timezone import Timezone\n"
+            "from hare.dialects.dialect_registry import DialectRegistry\nfrom hare.core.registries import Registries\n"
+            "from hare.time.zone_names import ZoneNames\n"
             "DialectRegistry.load_builtin_dialects()\n"
-            "Timezone.validate('UTC')\n"
+            "ZoneNames.validate('UTC')\n"
             "print('sqlite3' in sys.modules, 'importlib.resources' in sys.modules)\n",
             ["False False"],
             id="loading_the_builtin_dialects_imports_no_sqlite3_and_no_zone_data",
@@ -359,7 +338,7 @@ def test_a_step_loads_nothing_it_does_not_use(script, expected_lines):
 
 def test_dialects_are_listed_in_builtin_order_whichever_registered_first():
     script = (
-        "from hare.dialects.dialect_registry import DialectRegistry\n"
+        "from hare.dialects.dialect_registry import DialectRegistry\nfrom hare.core.registries import Registries\n"
         "DialectRegistry.get_dialect('postgresql')\n"
         "print([str(dialect.name) for dialect in DialectRegistry.get_dialects()][:3])\n"
     )
@@ -371,9 +350,13 @@ def test_dialects_are_listed_in_builtin_order_whichever_registered_first():
 
 
 def test_sqlite_client_reads_the_bind_parameter_limit():
+    import sqlite3
+    from contextlib import closing
+
     from hare.dialects.sqlite.drivers.aiosqlite.client import AiosqliteClient
 
-    assert AiosqliteClient.features.max_bind_parameters == AiosqliteClient.read_max_bind_parameters()
+    with closing(sqlite3.connect(":memory:")) as probe:
+        assert AiosqliteClient.features.max_bind_parameters == probe.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
     assert AiosqliteClient.features.max_bind_parameters >= 999
 
 
@@ -404,10 +387,10 @@ def test_clickhouse_engines_are_found_without_reading_installed_packages(engine)
         "    scans.append(kwargs)\n"
         "    return original_entry_points(*args, **kwargs)\n"
         "importlib.metadata.entry_points = counting_entry_points\n"
-        "from hare.dialects.dialect_registry import DialectRegistry\n"
+        "from hare.dialects.dialect_registry import DialectRegistry\nfrom hare.core.registries import Registries\n"
         f"driver = DialectRegistry.get_driver({engine!r})\n"
         "print(driver.name, driver.dialect.name, len(scans))\n"
-        "print(sorted(str(name) for name in DialectRegistry.dialects_by_name))\n"
+        "print(sorted(str(name) for name in Registries.snapshot.dialects))\n"
     )
     completed = subprocess.run(
         [sys.executable, "-c", script], capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120

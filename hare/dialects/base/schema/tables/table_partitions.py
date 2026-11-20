@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from hare.models.model_binding import ModelBinding
+
 from typing import Any
 
-from hare.ddl.table_options import TableOptions
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
 from hare.exceptions import UnSupportedError
-from hare.models import Model
 
 
 class TablePartitions(SchemaEditorPart):
@@ -14,26 +18,20 @@ class TablePartitions(SchemaEditorPart):
 
     __slots__ = ()
 
-    async def alter_table_options(
-        self, model: type[Model], old_options: TableOptions | None, new_options: TableOptions | None
-    ) -> None:
-        """Applies a change of the table's ``Meta.table_options`` for this dialect - by rebuilding
-        the table with the new options, which a dialect whose ALTER TABLE can change them in place
-        overrides.
+    async def alter_table_options(self, old_binding: ModelBinding, new_binding: ModelBinding) -> None:
+        """Execute a prepared transition between both physical table declarations."""
+        await self.get_alter_table_options_plan(old_binding, new_binding).execute(self.editor)
 
-        Args:
-            model: The model rendered with its new options.
-            old_options: The dialect's previous options, None for none.
-            new_options: The dialect's new options, None for none.
-        """
-        await self.editor.table_rebuild.remake_table(model, model)
+    def get_alter_table_options_plan(self, old_binding: ModelBinding, new_binding: ModelBinding) -> SchemaChangePlan:
+        """Rebuild by default; dialects may compile supported in-place changes."""
+        return self.editor.table_rebuild.get_rebuild_plan(old_binding, new_binding)
 
-    def get_partition_create_sqls(self, model: type[Model], safe: bool) -> list[str]:
+    def get_partition_create_sqls(self, binding: ModelBinding, safe: bool) -> list[str]:
         """The statements creating the partitions of a model's table, run right after its
         ``CREATE TABLE`` - none on a dialect without partitioned tables.
 
         Args:
-            model: The model.
+            binding: The model.
             safe: Whether each partition is created only when it doesn't exist yet.
 
         Returns:
@@ -41,23 +39,19 @@ class TablePartitions(SchemaEditorPart):
         """
         return []
 
-    def get_partition_table_names(self, model: type[Model]) -> list[str]:
-        """The tables the partitions of a model's table are - none on a dialect whose partitions
-        are no tables of their own, and for a table without partitions.
+    def get_partition_locations(self, binding: ModelBinding) -> dict[str, tuple[str | None, str]]:
+        """The physical (schema, table) of each named partition."""
+        return {}
 
-        Args:
-            model: The model.
+    async def rename_partition(self, binding: ModelBinding, partition: Any, replacement: Any) -> None:
+        """Change the physical identity of a partition without changing its bound."""
+        raise UnSupportedError(f"The {self.editor.client.dialect.name} dialect can't rename a partition")
 
-        Returns:
-            The table names, without their schema.
-        """
-        return []
-
-    async def add_partition(self, model: type[Model], partition: Any) -> None:
+    async def add_partition(self, binding: ModelBinding, partition: Any) -> None:
         """Adds a partition to a model's table (``TableOptions.get_partitions()``).
 
         Args:
-            model: The model rendered with the partition.
+            binding: The model rendered with the partition.
             partition: The partition.
 
         Raises:
@@ -65,11 +59,11 @@ class TablePartitions(SchemaEditorPart):
         """
         raise UnSupportedError(f"The {self.editor.client.dialect.name} dialect can't add a partition to a table")
 
-    async def remove_partition(self, model: type[Model], partition: Any) -> None:
+    async def remove_partition(self, binding: ModelBinding, partition: Any) -> None:
         """Removes a partition of a model's table with its rows.
 
         Args:
-            model: The model.
+            binding: The model.
             partition: The partition.
 
         Raises:

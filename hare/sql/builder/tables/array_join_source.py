@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar
 
+from hare.dialects.base.clauses.enums import JoinType
 from hare.sql.builder.tables.selectable import Selectable
-from hare.sql.enums import JoinType
 
 if TYPE_CHECKING:
     from hare.sql.sql_context import SqlContext
@@ -25,7 +25,6 @@ class ArrayJoinSource(Selectable):
     def __init__(self, name: str, array: Term, *, left: bool) -> None:
         super().__init__(name)
         self.array = array
-        self.left = left
         self.join_type = JoinType.LEFT_ARRAY if left else JoinType.ARRAY
 
     def __eq__(self, other: object) -> bool:

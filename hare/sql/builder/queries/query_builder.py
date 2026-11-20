@@ -4,20 +4,26 @@ import builtins
 import itertools
 from collections.abc import Iterable
 from copy import copy
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.classes.deferred_import import DeferredImport
+from hare.dialects.base.clauses.enums import JoinType
 from hare.exceptions import UnSupportedError
 from hare.sql.builder.joins.join import Join
 from hare.sql.builder.joins.joiner import Joiner
+from hare.sql.builder.queries.query import Query
 from hare.sql.builder.queries.query_sql_rendering import QuerySqlRendering
 from hare.sql.builder.tables.aliased_query import AliasedQuery
 from hare.sql.builder.tables.cte import Cte
+from hare.sql.builder.tables.declarations import SourceBinding
 from hare.sql.builder.tables.selectable import Selectable
 from hare.sql.builder.tables.table import Table
 from hare.sql.builder_methods import BuilderMethods
 from hare.sql.constants import QUERY_WITHOUT_INSERT_MESSAGE
-from hare.sql.enums import JoinType, SetOperation
+from hare.sql.enums import SetOperation
 from hare.sql.exceptions import JoinException, QueryException
+from hare.sql.identifiers import Identifiers
 from hare.sql.order import Order
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms.arithmetic_expression import ArithmeticExpression
@@ -26,6 +32,7 @@ from hare.sql.terms.criteria.empty_criterion import EmptyCriterion
 from hare.sql.terms.field import Field
 from hare.sql.terms.functions.function import Function
 from hare.sql.terms.parameters.parameterizer import Parameterizer
+from hare.sql.terms.qualified_outer_field import QualifiedOuterField
 from hare.sql.terms.star import Star
 from hare.sql.terms.term import Term
 from hare.sql.terms.values.value_wrapper import ValueWrapper
@@ -33,16 +40,20 @@ from hare.sql.terms.values.value_wrapper import ValueWrapper
 if TYPE_CHECKING:
     from typing import Self
 
+    from hare.sql.builder.queries.correlated_subqueries import CorrelatedSubqueries
     from hare.sql.builder.queries.set_operation_query import SetOperationQuery
-from hare.sql.builder.queries.pagination_sql import PaginationSql
-from hare.sql.builder.queries.query import Query
 
 
-class QueryBuilder(PaginationSql, Selectable, Term):
+class QueryBuilder(Selectable, Term):
     """
     Query Builder is the main class in hare.sql which stores the state of a query and offers functions which allow the
     state to be branched immutably.
     """
+
+    #: ``CorrelatedSubqueries`` - imported at its first read, as its module imports this one.
+    correlated_subqueries: ClassVar[DeferredImport[type[CorrelatedSubqueries]]] = DeferredImport(
+        "hare.sql.builder.queries.correlated_subqueries", "CorrelatedSubqueries"
+    )
 
     #: The mutable containers a builder method may change in place. A copy shares them with its
     #: source until _mutable() gives it its own on the first change.
@@ -85,7 +96,7 @@ class QueryBuilder(PaginationSql, Selectable, Term):
         self._delete_from = False
 
         self._with: list[Cte] = []
-        self._selects: list[Field | Function] = []
+        self._selects: list[Term] = []
         self._columns: list[Field] = []
         self._values: list[list[Term]] = []
         self._default_values = False
@@ -145,10 +156,10 @@ class QueryBuilder(PaginationSql, Selectable, Term):
         self._return_star = False
 
     def __copy__(self) -> Self:
-        newone = type(self).__new__(type(self))
-        newone.__dict__.update(self.__dict__)
-        # Every such container starts shared with self.
-        newone._shared_containers = type(self).COPY_ON_WRITE_ATTRIBUTES
+        newone = self._copy_state()
+        newone.source_binding = SourceBinding()
+        # Both builders must detach a container before changing their shared state.
+        self._shared_containers = newone._shared_containers = type(self).COPY_ON_WRITE_ATTRIBUTES
         return newone
 
     def _mutable(self, name: str) -> Any:
@@ -263,11 +274,11 @@ class QueryBuilder(PaginationSql, Selectable, Term):
         return query
 
     @BuilderMethods.builder
-    def from_(self, selectable: Selectable | Query | str) -> Self:
+    def from_(self, selectable: Selectable | str) -> Self:
         """Adds a table to the query's ``FROM`` - each call adds one more.
 
         Args:
-            selectable: A ``Table``, ``Query``, or ``str``. When a ``str`` is passed, a table
+            selectable: A ``Selectable`` such as a table or query builder, or ``str``. For a string, a table
                 with the name matching the ``str`` value is used.
 
         Returns:
@@ -276,16 +287,13 @@ class QueryBuilder(PaginationSql, Selectable, Term):
         # Imported here: the modules import each other.
         from hare.sql.builder.queries.set_operation_query import SetOperationQuery
 
-        self._mutable("_from").append(Table(selectable) if isinstance(selectable, str) else selectable)
-
+        if isinstance(selectable, str):
+            selectable = Table(selectable)
         if isinstance(selectable, (QueryBuilder, SetOperationQuery)) and selectable.alias is None:
-            sub_query_count = selectable._subquery_count if isinstance(selectable, QueryBuilder) else 0
-            sub_query_count = max(self._subquery_count, sub_query_count)
-            selectable.alias = f"sq{sub_query_count}"
-            self._subquery_count = sub_query_count + 1
+            selectable = self._tag_subquery(selectable)
+        self._mutable("_from").append(selectable)
         return self
 
-    @BuilderMethods.builder
     def replace_table(self, current_table: Table | None, new_table: Table | None) -> Self:
         """Replaces all occurrences of the specified table with the new table.
 
@@ -298,35 +306,59 @@ class QueryBuilder(PaginationSql, Selectable, Term):
         Returns:
             A copy of the query with the tables replaced.
         """
-        self._from = [
-            new_table if table == current_table else table  # type:ignore[misc]
+        query = self._copy_preserving_source() if self.immutable else self
+        query._from = [
+            new_table if table == current_table else table.replace_table(current_table, new_table)  # type:ignore[misc]
             for table in self._from
         ]
         if self._insert_table == current_table:
-            self._insert_table = new_table
+            query._insert_table = new_table
         if self._update_table == current_table:
-            self._update_table = new_table
+            query._update_table = new_table
 
-        self._with = [alias_query.replace_table(current_table, new_table) for alias_query in self._with]
-        self._selects = [select.replace_table(current_table, new_table) for select in self._selects]
-        self._columns = [column.replace_table(current_table, new_table) for column in self._columns]
-        self._values = [
+        query._with = [alias_query.replace_table(current_table, new_table) for alias_query in self._with]
+        query._selects = [select.replace_table(current_table, new_table) for select in self._selects]
+        query._columns = [column.replace_table(current_table, new_table) for column in self._columns]
+        query._distinct_on = [term.replace_table(current_table, new_table) for term in self._distinct_on]
+        query._returns = [term.replace_table(current_table, new_table) for term in self._returns]
+        query._updates = [
+            (field.replace_table(current_table, new_table), value.replace_table(current_table, new_table))
+            for field, value in self._updates
+        ]
+        query._values = [
             [value.replace_table(current_table, new_table) for value in value_list] for value_list in self._values
         ]
 
-        self._wheres = self._wheres.replace_table(current_table, new_table) if self._wheres else None
-        self._groupbys = [groupby.replace_table(current_table, new_table) for groupby in self._groupbys]
-        self._havings = self._havings.replace_table(current_table, new_table) if self._havings else None
-        self._orderbys = [
+        query._wheres = self._wheres.replace_table(current_table, new_table) if self._wheres else None
+        query._groupbys = [groupby.replace_table(current_table, new_table) for groupby in self._groupbys]
+        query._havings = self._havings.replace_table(current_table, new_table) if self._havings else None
+        query._orderbys = [
             (orderby[0].replace_table(current_table, new_table), orderby[1]) for orderby in self._orderbys
         ]
-        self._joins = [join.replace_table(current_table, new_table) for join in self._joins]
+        query._joins = [join.replace_table(current_table, new_table) for join in self._joins]
+        query._on_conflict_fields = [
+            field.replace_table(current_table, new_table) if isinstance(field, Term) else field
+            for field in self._on_conflict_fields
+        ]
+        query._on_conflict_do_updates = [
+            (
+                field.replace_table(current_table, new_table),
+                value.replace_table(current_table, new_table) if value is not None else None,
+            )
+            for field, value in self._on_conflict_do_updates
+        ]
+        if self._on_conflict_wheres is not None:
+            query._on_conflict_wheres = self._on_conflict_wheres.replace_table(current_table, new_table)
+        if self._on_conflict_do_update_wheres is not None:
+            query._on_conflict_do_update_wheres = self._on_conflict_do_update_wheres.replace_table(
+                current_table, new_table
+            )
 
         if current_table in self._select_star_tables:
-            select_star_tables = self._mutable("_select_star_tables")
+            select_star_tables = query._mutable("_select_star_tables")
             select_star_tables.remove(current_table)
-            select_star_tables.add(cast("Table", new_table))
-        return self
+            select_star_tables.add(new_table)
+        return query
 
     @BuilderMethods.builder
     def with_(self, selectable: Selectable, name: str, *terms: Term) -> Self:
@@ -372,11 +404,9 @@ class QueryBuilder(PaginationSql, Selectable, Term):
             elif isinstance(term, str):
                 self._select_field_str(term)
             elif isinstance(term, (Function, ArithmeticExpression)):
-                self._select_other(term)  # type:ignore[arg-type]
+                self._select_other(term)
             else:
-                self._select_other(
-                    self.wrap_constant(term, wrapper_class=self._wrapper_class)  # type:ignore[arg-type]
-                )
+                self._select_other(self.wrap_constant(term, wrapper_class=self._wrapper_class))
         return self
 
     @BuilderMethods.builder
@@ -590,19 +620,19 @@ class QueryBuilder(PaginationSql, Selectable, Term):
         self._returns = [returning for returning in self._returns if not hasattr(returning, "table")]
         self._return_star = True
 
-    def _return_field(self, term: str | Field) -> None:
+    def _return_field(self, term: Field) -> None:
         if self._return_star:
             # Do not add select terms after a star is selected
             return
 
-        self._validate_returning_term(term)  # type:ignore[arg-type]
+        self._validate_returning_term(term)
 
         if isinstance(term, Star):
             self._set_returns_for_star()
 
         self._mutable("_returns").append(term)
 
-    def _return_field_str(self, term: str | Field) -> None:
+    def _return_field_str(self, term: str) -> None:
         if term == "*":
             self._set_returns_for_star()
             self._mutable("_returns").append(Star())
@@ -617,7 +647,7 @@ class QueryBuilder(PaginationSql, Selectable, Term):
             table = self._from[0]
         else:
             raise QueryException("Returning can't be used in this query")
-        self._return_field(Field(term, table=table))  # type:ignore[arg-type]
+        self._return_field(Field(term, table=table))
 
     def _return_other(self, function: Term) -> None:
         self._validate_returning_term(function)
@@ -683,8 +713,7 @@ class QueryBuilder(PaginationSql, Selectable, Term):
             if isinstance(term, str):
                 term = Field(term, table=self._from[0])
             elif isinstance(term, int):
-                field = Field(str(term), table=self._from[0])
-                term = field.wrap_constant(term)
+                term = self.wrap_constant(term)
 
             self._mutable("_groupbys").append(term)
         return self
@@ -720,7 +749,7 @@ class QueryBuilder(PaginationSql, Selectable, Term):
 
         if isinstance(item, QueryBuilder):
             if item.alias is None:
-                self._tag_subquery(item)
+                item = self._tag_subquery(item)
             return Joiner(self, item, how, type_label="subquery")
 
         if isinstance(item, AliasedQuery):
@@ -733,12 +762,12 @@ class QueryBuilder(PaginationSql, Selectable, Term):
 
     @BuilderMethods.builder
     def limit(self, limit: int) -> Self:
-        self._limit = cast("ValueWrapper", self.wrap_constant(limit))
+        self._limit = self.wrap_constant(limit)  # type: ignore[assignment]
         return self
 
     @BuilderMethods.builder
     def offset(self, offset: int) -> Self:
-        self._offset = cast("ValueWrapper", self.wrap_constant(offset))
+        self._offset = self.wrap_constant(offset)  # type: ignore[assignment]
         return self
 
     @BuilderMethods.builder
@@ -746,28 +775,28 @@ class QueryBuilder(PaginationSql, Selectable, Term):
         # Imported here: the modules import each other.
         from hare.sql.builder.queries.set_operation_query import SetOperationQuery
 
-        return SetOperationQuery(self, other, SetOperation.UNION, wrapper_class=self._wrapper_class)
+        return SetOperationQuery(self, other, SetOperation.UNION)
 
     @BuilderMethods.builder
     def union_all(self, other: Self) -> SetOperationQuery:
         # Imported here: the modules import each other.
         from hare.sql.builder.queries.set_operation_query import SetOperationQuery
 
-        return SetOperationQuery(self, other, SetOperation.UNION_ALL, wrapper_class=self._wrapper_class)
+        return SetOperationQuery(self, other, SetOperation.UNION_ALL)
 
     @BuilderMethods.builder
     def intersect(self, other: Self) -> SetOperationQuery:
         # Imported here: the modules import each other.
         from hare.sql.builder.queries.set_operation_query import SetOperationQuery
 
-        return SetOperationQuery(self, other, SetOperation.INTERSECT, wrapper_class=self._wrapper_class)
+        return SetOperationQuery(self, other, SetOperation.INTERSECT)
 
     @BuilderMethods.builder
     def except_of(self, other: Self) -> SetOperationQuery:
         # Imported here: the modules import each other.
         from hare.sql.builder.queries.set_operation_query import SetOperationQuery
 
-        return SetOperationQuery(self, other, SetOperation.EXCEPT_OF, wrapper_class=self._wrapper_class)
+        return SetOperationQuery(self, other, SetOperation.EXCEPT_OF)
 
     @BuilderMethods.builder
     def set(self, field: Field | str, value: Any) -> Self:
@@ -785,9 +814,9 @@ class QueryBuilder(PaginationSql, Selectable, Term):
     @BuilderMethods.builder
     def slice(self, slice: slice) -> Self:
         if slice.start is not None:
-            self._offset = cast("ValueWrapper", self.wrap_constant(slice.start))
+            self._offset = self.wrap_constant(slice.start)  # type: ignore[assignment]
         if slice.stop is not None:
-            self._limit = cast("ValueWrapper", self.wrap_constant(slice.stop))
+            self._limit = self.wrap_constant(slice.stop)  # type: ignore[assignment]
         return self
 
     def __getitem__(self, item: Any) -> Self | Field:  # type:ignore[override]
@@ -819,12 +848,12 @@ class QueryBuilder(PaginationSql, Selectable, Term):
             self._selects = [
                 select for select in self._selects if not hasattr(select, "table") or term.table != select.table
             ]
-            self._mutable("_select_star_tables").add(cast("Table", term.table))
+            self._mutable("_select_star_tables").add(term.table)
 
         self._mutable("_selects").append(term)
 
-    def _select_other(self, function: Function) -> None:
-        self._mutable("_selects").append(function)
+    def _select_other(self, term: Term) -> None:
+        self._mutable("_selects").append(term)
 
     def fields_(self) -> list[Field]:  # type:ignore[override]
         # Don't return anything here. Subqueries have their own fields.
@@ -878,9 +907,14 @@ class QueryBuilder(PaginationSql, Selectable, Term):
                 return False
         return True
 
-    def _tag_subquery(self, subquery: Self) -> None:
-        subquery.alias = f"sq{self._subquery_count}"
-        self._subquery_count += 1
+    def _tag_subquery(self, subquery: Selectable) -> Selectable:
+        """Allocate a local alias without changing the shared source declaration."""
+        tagged = subquery._copy_preserving_source()
+        nested_count = subquery._subquery_count if isinstance(subquery, QueryBuilder) else 0
+        number = max(self._subquery_count, nested_count)
+        tagged.alias = f"sq{number}"
+        self._subquery_count = number + 1
+        return tagged
 
     def _validate_terms_and_append(self, *terms: Any) -> None:
         """
@@ -902,13 +936,13 @@ class QueryBuilder(PaginationSql, Selectable, Term):
         return self.__str__()
 
     def __eq__(self, other: Any) -> bool:  # type:ignore[override]
-        return isinstance(other, QueryBuilder) and self.alias == other.alias
+        return isinstance(other, QueryBuilder) and self.source_binding is other.source_binding
 
     def __ne__(self, other: Any) -> bool:  # type:ignore[override]
         return not self.__eq__(other)
 
     def __hash__(self) -> int:
-        return hash(self.alias) + sum(hash(clause) for clause in self._from)
+        return hash(self.source_binding)
 
     def _sql_context_with_namespace(self, sql_context: SqlContext) -> SqlContext:
         has_joins = bool(self._joins)
@@ -917,7 +951,14 @@ class QueryBuilder(PaginationSql, Selectable, Term):
         has_reference_to_foreign_table = self._foreign_table
         has_update_from = self._update_table and self._from
 
+        aliases = dict(sql_context.source_aliases)
+        aliases.update(
+            (source.source_binding, source.alias)
+            for source in (*self._from, *(join.item for join in self._joins))
+            if source.alias is not None
+        )
         return sql_context.copy(
+            source_aliases=MappingProxyType(aliases),
             with_namespace=any(
                 [
                     has_joins,
@@ -926,10 +967,10 @@ class QueryBuilder(PaginationSql, Selectable, Term):
                     has_reference_to_foreign_table,
                     has_update_from,
                 ]
-            )
+            ),
         )
 
-    def get_read_columns(self) -> builtins.set[tuple[str, str]]:
+    def get_read_columns(self, visible_ctes: frozenset[str] = frozenset()) -> builtins.set[tuple[str, str]]:
         """The columns the query reads, by the tables they belong to - those of its subqueries, joins
         and CTEs too; a column of a subquery's own result isn't one.
 
@@ -938,7 +979,6 @@ class QueryBuilder(PaginationSql, Selectable, Term):
         """
         terms: list[Any] = [
             *self._from,
-            *(cte.query for cte in self._with),
             *self._selects,
             *self._distinct_on,
             self._wheres,
@@ -949,15 +989,31 @@ class QueryBuilder(PaginationSql, Selectable, Term):
         for join in self._joins:
             terms.append(join.item)
             terms.append(getattr(join, "criterion", None))
-        return QueryBuilder.get_read_columns_of_terms(terms, self)
+        return QueryBuilder.get_statement_read_columns(terms, self, visible_ctes)
 
     @staticmethod
-    def get_read_columns_of_terms(terms: Iterable[Any], query: Any) -> builtins.set[tuple[str, str]]:
+    def get_statement_read_columns(
+        terms: Iterable[Any], query: QueryBuilder | SetOperationQuery, visible_ctes: frozenset[str]
+    ) -> builtins.set[tuple[str, str]]:
+        """Read the statement and its WITH clauses in their own table-name scopes."""
+        local_ctes = visible_ctes.union(cte.alias for cte in query._with)
+        columns = QueryBuilder.get_read_columns_of_terms(terms, query, local_ctes)
+        cte_scope = local_ctes if QuerySqlRendering.is_recursive_with(query._with) else visible_ctes
+        for cte in query._with:
+            columns.update(QueryBuilder.get_read_columns_of_terms((cte.query,), query, cte_scope))
+            cte_scope = cte_scope.union((cte.alias,))
+        return columns
+
+    @staticmethod
+    def get_read_columns_of_terms(
+        terms: Iterable[Any], query: Any, visible_ctes: frozenset[str]
+    ) -> builtins.set[tuple[str, str]]:
         """The columns the terms of a query read - a nested query's own read columns included.
 
         Args:
             terms: The terms - None ones are skipped.
             query: The query the terms belong to - not entered again.
+            visible_ctes: Local names hiding unqualified physical tables in this scope.
 
         Returns:
             ``(table, column)`` of each column.
@@ -971,11 +1027,18 @@ class QueryBuilder(PaginationSql, Selectable, Term):
                 continue
             for node in term.nodes_():
                 if node is not query and isinstance(node, (QueryBuilder, SetOperationQuery)):
-                    read_columns |= node.get_read_columns()
+                    read_columns |= node.get_read_columns(visible_ctes)
                 elif isinstance(node, AliasedQuery) and node.query is not None:
-                    read_columns |= QueryBuilder.get_read_columns_of_terms([node.query], query)
-                elif isinstance(node, Field) and isinstance(node.table, Table):
-                    read_columns.add((node.table.get_name_without_alias(), node.name))
+                    read_columns |= QueryBuilder.get_read_columns_of_terms((node.query,), query, visible_ctes)
+                elif getattr(type(node), "holds_nested_query", False):
+                    nested = getattr(node, "get_nested_query")()
+                    if nested is not None:
+                        read_columns |= nested.get_read_columns(visible_ctes)
+                elif isinstance(node, (Field, QualifiedOuterField)) and isinstance(node.table, Table):
+                    column = node.column if isinstance(node, QualifiedOuterField) else node.name
+                    schema, table = node.table.get_schema_name(), node.table.get_name_without_alias()
+                    if schema is not None or table not in visible_ctes:
+                        read_columns.add((Identifiers.get_qualified_name(schema, table), column))
         return read_columns
 
     def get_sql(self, sql_context: SqlContext | None = None) -> str:
@@ -986,36 +1049,28 @@ class QueryBuilder(PaginationSql, Selectable, Term):
         sql_context = sql_context.dialect.clauses.get_statement_context(
             self, self._sql_context_with_namespace(sql_context)
         )
-        features = sql_context.dialect.features
-        if not sql_context.subquery and (
-            not features.supports_correlated_subqueries or not features.supports_ordered_correlated_subqueries
-        ):
-            # Local import: the check reads queries built by this module.
-            from hare.sql.builder.queries.correlated_subqueries import CorrelatedSubqueries
-
-            CorrelatedSubqueries.check_statement(self, sql_context)
+        features = sql_context.effective_features
+        if not sql_context.subquery:
+            QueryBuilder.correlated_subqueries.check_statement(self, sql_context)
         if (
             (self._orderbys or self._wheres is not None)
-            and not features.orders_by_correlated_subqueries
+            and (features.rewrites_correlated_order_by or features.correlated_select_requires_unfiltered_source)
             and features.supports_correlated_subqueries
             and not self._update_table
             and not self._delete_from
             and not self._insert_table
         ):
-            # Local import: the module reads queries built by this one.
-            from hare.sql.builder.queries.correlated_subqueries import CorrelatedSubqueries
-
-            if CorrelatedSubqueries.needs_derived_table(self):
-                return CorrelatedSubqueries.get_derived_table_sql(self, sql_context)
+            if QueryBuilder.correlated_subqueries.needs_derived_table(self, sql_context):
+                return QueryBuilder.correlated_subqueries.get_derived_table_sql(self, sql_context)
 
         if self._update_table:
-            if not sql_context.dialect.features.supports_row_updates:
+            if not sql_context.effective_features.supports_row_updates:
                 raise UnSupportedError(
                     f"The {sql_context.dialect.name} database doesn't update stored rows - no UPDATE runs there"
                 )
             querystring = sql_context.dialect.clauses.get_update_sql(self, sql_context)
         elif self._delete_from:
-            if not sql_context.dialect.features.supports_row_deletes:
+            if not sql_context.effective_features.supports_row_deletes:
                 raise UnSupportedError(
                     f"The {sql_context.dialect.name} database doesn't delete stored rows - no DELETE runs there"
                 )
@@ -1051,41 +1106,3 @@ class QueryBuilder(PaginationSql, Selectable, Term):
             self.get_sql(sql_context),
             sql_context.parameterizer.values,  # type: ignore[union-attr]
         )
-
-    def _orderby_sql(
-        self,
-        sql_context: SqlContext,
-        # builtins.set - QueryBuilder.set() shadows the builtin name in this class body.
-        selected_aliases: builtins.set[str | None] | None = None,
-        grouped_sql_by_term_id: dict[int, str] | None = None,
-    ) -> str:
-        """Renders the ORDER BY clause. A term selected under an alias is ordered by the alias when
-        ``orderby_alias`` is set.
-
-        Args:
-            sql_context: The rendering state of the statement.
-            selected_aliases: The selected aliases, when the caller already has them.
-            grouped_sql_by_term_id: The SQL ``QuerySqlRendering.group_sql()`` rendered - an ORDER BY of the same term
-                reuses it, so both carry the same parameters; a database matches the two textually.
-        """
-        clauses = []
-        if selected_aliases is None:
-            selected_aliases = {select_term.alias for select_term in self._selects}
-        # A Subquery/Exists term renders its own parentheses only in subquery context.
-        term_context = sql_context.copy(subquery=True)
-        grouped_sql_by_term_id = (
-            grouped_sql_by_term_id if sql_context.dialect.features.matches_ordering_to_grouping_by_sql else None
-        )
-        for field, directionality in self._orderbys:
-            if sql_context.orderby_alias and field.alias and field.alias in selected_aliases:
-                term = sql_context.quote_alias(field.alias)
-            elif grouped_sql_by_term_id and field.alias is None and id(field) in grouped_sql_by_term_id:
-                term = grouped_sql_by_term_id[id(field)]
-            else:
-                term = field.get_sql(term_context)
-
-            clauses.append(
-                sql_context.dialect.renderers.get_ordering_clause_sql(field, term, directionality, sql_context)
-            )
-
-        return f" ORDER BY {','.join(clauses)}"

@@ -1,8 +1,5 @@
-import os
-
 import pytest
 
-from hare import Connections
 from hare.contrib.test import requires_features
 from hare.dialects.postgresql.search import Lexeme
 from hare.exceptions import ConfigurationError, QueryError
@@ -15,22 +12,7 @@ from tests.dialects.postgresql.models_tsvector import (
     TSVectorNumberEntry,
 )
 from tests.shared_models.testmodels import TextFields
-
-
-def skip_if_not_postgres():
-    """Skip test if not running against PostgreSQL."""
-    db_url = os.getenv("HARE_TEST_DB", "")
-    # Strip a "+driver" scheme suffix (postgresql+asyncpg://, postgresql://) before comparing -
-    # see hare/backends/base/config_generator.py's own handling of that same suffix.
-    scheme = db_url.split(":", 1)[0].split("+", 1)[0]
-    if scheme not in {"postgres", "postgresql", "asyncpg", "psycopg"}:
-        pytest.skip("Postgres-only test.")
-
-
-def assert_sql(db, sql: str, expected_psycopg: str, expected_asyncpg: str) -> None:
-    """Assert SQL matches the expected asyncpg output (the only postgres driver left)."""
-    assert sql == expected_asyncpg
-
+from tests.utils.statement_plan_checks import StatementPlanChecks
 
 # =============================================================================
 # TestPostgresSearchExpressions - uses standard testmodels (test.TestCase equivalent)
@@ -41,16 +23,10 @@ def assert_sql(db, sql: str, expected_psycopg: str, expected_asyncpg: str) -> No
 @pytest.mark.asyncio
 async def test_search_vector(db_postgres):
     """Test SearchVector expression."""
-    db = Connections.get("models")
     sql = TextFields.objects.all().annotate(search=SearchVector("text")).values("search").sql()
     # Wrapped in COALESCE(..., '') even for a single field - Postgres `TO_TSVECTOR(NULL)` is
     # itself NULL, so a NULL-valued field would otherwise make the whole row unsearchable.
-    assert_sql(
-        db,
-        sql,
-        'SELECT TO_TSVECTOR(COALESCE("text",%s)) "search" FROM "textfields"',
-        'SELECT TO_TSVECTOR(COALESCE("text",$1)) "search" FROM "textfields"',
-    )
+    assert sql == ('SELECT TO_TSVECTOR(COALESCE("text",$1)) "search" FROM "textfields"')
 
 
 @requires_features(dialect="postgresql")
@@ -62,18 +38,14 @@ async def test_search_vector_config_weight(db_postgres):
     setweight(tsvector, "char")'s second argument is Postgres's internal "char" type, which
     asyncpg can't bind a plain str parameter as (see test_search_vector_weight_executes_on_both_
     drivers below for the live crash this avoids)."""
-    db = Connections.get("models")
     sql = (
         TextFields.objects.all()
         .annotate(search=SearchVector("text", config="english", weight="A"))
         .values("search")
         .sql()
     )
-    assert_sql(
-        db,
-        sql,
-        'SELECT SETWEIGHT(TO_TSVECTOR(%s,COALESCE("text",%s)),\'A\') "search" FROM "textfields"',
-        'SELECT SETWEIGHT(TO_TSVECTOR($1,COALESCE("text",$2)),\'A\') "search" FROM "textfields"',
+    assert sql == (
+        'SELECT SETWEIGHT(TO_TSVECTOR(CAST($1 AS regconfig),COALESCE("text",$2)),\'A\') "search" FROM "textfields"'
     )
 
 
@@ -100,37 +72,20 @@ async def test_search_vector_weight_executes_on_both_drivers(db_postgres):
 @pytest.mark.asyncio
 async def test_search_query_types(db_postgres):
     """Test SearchQuery with different search types."""
-    db = Connections.get("models")
     sql = TextFields.objects.all().annotate(query=SearchQuery("fat", search_type="phrase")).values("query").sql()
-    assert_sql(
-        db,
-        sql,
-        'SELECT PHRASETO_TSQUERY(%s) "query" FROM "textfields"',
-        'SELECT PHRASETO_TSQUERY($1) "query" FROM "textfields"',
-    )
+    assert sql == ('SELECT PHRASETO_TSQUERY($1) "query" FROM "textfields"')
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_search_query_combine_and_invert(db_postgres):
     """Test SearchQuery combine and invert operations."""
-    db = Connections.get("models")
     query = SearchQuery("fat") & SearchQuery("rat")
     sql = TextFields.objects.all().annotate(query=query).values("query").sql()
-    assert_sql(
-        db,
-        sql,
-        'SELECT (PLAINTO_TSQUERY(%s) && PLAINTO_TSQUERY(%s)) "query" FROM "textfields"',
-        'SELECT (PLAINTO_TSQUERY($1) && PLAINTO_TSQUERY($2)) "query" FROM "textfields"',
-    )
+    assert sql == ('SELECT (PLAINTO_TSQUERY($1) && PLAINTO_TSQUERY($2)) "query" FROM "textfields"')
 
     sql = TextFields.objects.all().annotate(query=SearchQuery("fat", invert=True)).values("query").sql()
-    assert_sql(
-        db,
-        sql,
-        'SELECT !!(PLAINTO_TSQUERY(%s)) "query" FROM "textfields"',
-        'SELECT !!(PLAINTO_TSQUERY($1)) "query" FROM "textfields"',
-    )
+    assert sql == ('SELECT !!(PLAINTO_TSQUERY($1)) "query" FROM "textfields"')
 
 
 @requires_features(dialect="postgresql")
@@ -139,49 +94,31 @@ async def test_combined_search_query_invert(db_postgres):
     """~ on a CombinedSearchQuery (the result of combining two SearchQuery instances with |/&)
     used to raise TypeError - only the bare SearchQuery it's built from had its own
     __invert__, CombinedSearchQuery itself had none at all."""
-    db = Connections.get("models")
     query = ~(SearchQuery("fat") & SearchQuery("rat"))
     sql = TextFields.objects.all().annotate(query=query).values("query").sql()
-    assert_sql(
-        db,
-        sql,
-        'SELECT !!((PLAINTO_TSQUERY(%s) && PLAINTO_TSQUERY(%s))) "query" FROM "textfields"',
-        'SELECT !!((PLAINTO_TSQUERY($1) && PLAINTO_TSQUERY($2))) "query" FROM "textfields"',
-    )
+    assert sql == ('SELECT !!((PLAINTO_TSQUERY($1) && PLAINTO_TSQUERY($2))) "query" FROM "textfields"')
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_search_query_lexeme(db_postgres):
     """Test SearchQuery with Lexeme."""
-    db = Connections.get("models")
     lexeme_query = SearchQuery(Lexeme("fat") & Lexeme("rat"))
     sql = TextFields.objects.all().annotate(query=lexeme_query).values("query").sql()
-    assert_sql(
-        db,
-        sql,
-        'SELECT TO_TSQUERY(%s) "query" FROM "textfields"',
-        'SELECT TO_TSQUERY($1) "query" FROM "textfields"',
-    )
+    assert sql == ('SELECT TO_TSQUERY($1) "query" FROM "textfields"')
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_search_rank(db_postgres):
     """Test SearchRank expression."""
-    db = Connections.get("models")
     sql = (
         TextFields.objects.all()
         .annotate(rank=SearchRank(SearchVector("text"), SearchQuery("fat")))
         .values("rank")
         .sql()
     )
-    assert_sql(
-        db,
-        sql,
-        'SELECT TS_RANK(TO_TSVECTOR(COALESCE("text",%s)),PLAINTO_TSQUERY(%s)) "rank" FROM "textfields"',
-        'SELECT TS_RANK(TO_TSVECTOR(COALESCE("text",$1)),PLAINTO_TSQUERY($2)) "rank" FROM "textfields"',
-    )
+    assert sql == ('SELECT TS_RANK(TO_TSVECTOR(COALESCE("text",$1)),PLAINTO_TSQUERY($2)) "rank" FROM "textfields"')
 
 
 @requires_features(dialect="postgresql")
@@ -278,7 +215,6 @@ async def test_search_lookup_on_a_generated_field_wrapped_tsvector(db_tsvector):
 @pytest.mark.asyncio
 async def test_search_headline(db_postgres):
     """Test SearchHeadline expression."""
-    db = Connections.get("models")
     sql = (
         TextFields.objects.all()
         .annotate(
@@ -292,40 +228,23 @@ async def test_search_headline(db_postgres):
         .values("headline")
         .sql()
     )
-    assert_sql(
-        db,
-        sql,
-        'SELECT TS_HEADLINE("text",PLAINTO_TSQUERY(%s),%s) "headline" FROM "textfields"',
-        'SELECT TS_HEADLINE("text",PLAINTO_TSQUERY($1),$2) "headline" FROM "textfields"',
-    )
+    assert sql == ('SELECT TS_HEADLINE("text",PLAINTO_TSQUERY($1),$2) "headline" FROM "textfields"')
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_search_lookup_text(db_postgres):
     """Test search lookup on text field."""
-    db = Connections.get("models")
     sql = TextFields.objects.filter(text__search="fat").values("id").sql()
-    assert_sql(
-        db,
-        sql,
-        'SELECT "id" "id" FROM "textfields" WHERE TO_TSVECTOR("text") @@ PLAINTO_TSQUERY(%s)',
-        'SELECT "id" "id" FROM "textfields" WHERE TO_TSVECTOR("text") @@ PLAINTO_TSQUERY($1)',
-    )
+    assert sql == ('SELECT "id" "id" FROM "textfields" WHERE TO_TSVECTOR("text") @@ PLAINTO_TSQUERY($1)')
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_search_lookup_text_searchquery(db_postgres):
     """Test search lookup with SearchQuery on text field."""
-    db = Connections.get("models")
     sql = TextFields.objects.filter(text__search=SearchQuery("fat", search_type="raw")).values("id").sql()
-    assert_sql(
-        db,
-        sql,
-        'SELECT "id" "id" FROM "textfields" WHERE TO_TSVECTOR("text") @@ TO_TSQUERY(%s)',
-        'SELECT "id" "id" FROM "textfields" WHERE TO_TSVECTOR("text") @@ TO_TSQUERY($1)',
-    )
+    assert sql == ('SELECT "id" "id" FROM "textfields" WHERE TO_TSVECTOR("text") @@ TO_TSQUERY($1)')
 
 
 # =============================================================================
@@ -335,7 +254,7 @@ async def test_search_lookup_text_searchquery(db_postgres):
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
-async def test_search_lookup_tsvector(db_search):
+async def test_search_lookup_tsvector(db_tsvector):
     """Test search lookup on TSVector field.
 
     TSVectorEntry.search_vector is configured with config="english" - the search lookup must
@@ -343,30 +262,16 @@ async def test_search_lookup_tsvector(db_search):
     stops matching (the query text gets parsed under Postgres's session default_text_search_config
     instead of the config the stored vector was actually built with).
     """
-    skip_if_not_postgres()
-    db = Connections.get("models")
     sql = TSVectorEntry.objects.filter(search_vector__search="fat").values("id").sql()
-    assert_sql(
-        db,
-        sql,
-        'SELECT "id" "id" FROM "tsvector_entry" WHERE "search_vector" @@ PLAINTO_TSQUERY(%s,%s)',
-        'SELECT "id" "id" FROM "tsvector_entry" WHERE "search_vector" @@ PLAINTO_TSQUERY($1,$2)',
-    )
+    assert sql == ('SELECT "id" "id" FROM "tsvector_entry" WHERE "search_vector" @@ PLAINTO_TSQUERY($1,$2)')
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
-async def test_search_lookup_tsvector_searchquery(db_search):
+async def test_search_lookup_tsvector_searchquery(db_tsvector):
     """Test search lookup with SearchQuery on TSVector field."""
-    skip_if_not_postgres()
-    db = Connections.get("models")
     sql = TSVectorEntry.objects.filter(search_vector__search=SearchQuery("fat", search_type="raw")).values("id").sql()
-    assert_sql(
-        db,
-        sql,
-        'SELECT "id" "id" FROM "tsvector_entry" WHERE "search_vector" @@ TO_TSQUERY(%s)',
-        'SELECT "id" "id" FROM "tsvector_entry" WHERE "search_vector" @@ TO_TSQUERY($1)',
-    )
+    assert sql == ('SELECT "id" "id" FROM "tsvector_entry" WHERE "search_vector" @@ TO_TSQUERY($1)')
 
 
 @requires_features(dialect="postgresql")
@@ -374,7 +279,6 @@ async def test_search_lookup_tsvector_searchquery(db_search):
 async def test_search_vector_casts_a_non_text_source_to_text(db_tsvector):
     """COALESCE(<int column>, '') can't be typed - a non-text SearchVector source (and a generated
     TSVectorField's non-text source column) is cast to text first."""
-    skip_if_not_postgres()
     await TSVectorNumberEntry.objects.create(id=1, title="cat", number=42, data={"key": "value"})
 
     vectors = await TSVectorNumberEntry.objects.annotate(
@@ -394,7 +298,6 @@ async def test_search_vector_casts_a_non_text_source_to_text(db_tsvector):
 async def test_search_lookup_vectorizes_the_column_with_the_query_config(db_tsvector):
     """field__search=SearchQuery(..., config=X) on a text column vectorized the column with the
     session's default config, so a stemmed non-default-language query never matched."""
-    skip_if_not_postgres()
     await TSVectorEntry.objects.create(id=1, title="Кошки бегают")
     await TSVectorEntry.objects.create(id=2, title="Собаки лают")
 
@@ -403,9 +306,26 @@ async def test_search_lookup_vectorizes_the_column_with_the_query_config(db_tsve
     )
 
     assert await queryset == [1]
-    assert 'TO_TSVECTOR($1,"title")' in queryset.sql() or 'TO_TSVECTOR(%s,"title")' in queryset.sql()
+    assert (
+        'TO_TSVECTOR(CAST($1 AS regconfig),"title")' in queryset.sql()
+        or 'TO_TSVECTOR(CAST(%s AS regconfig),"title")' in queryset.sql()
+    )
     combined = SearchQuery("кошка", config="russian") | SearchQuery("собака", config="russian")
     assert sorted(await TSVectorEntry.objects.filter(title__search=combined).values_list("id", flat=True)) == [1, 2]
+    async with TSVectorEntry.get_connection()._in_transaction() as connection:
+        await connection.execute("SET LOCAL default_text_search_config = 'english'")
+        for right_config, expected in [("russian", [1, 2]), ("english", [2]), ("russian", [1, 2])]:
+            query = SearchQuery("кошка", config="russian") | SearchQuery("собаки", config=right_config)
+            rows = (
+                await TSVectorEntry.objects.using(connection).filter(title__search=query).values_list("id", flat=True)
+            )
+            with StatementPlanChecks.full_build():
+                uncached = (
+                    await TSVectorEntry.objects.using(connection)
+                    .filter(title__search=query)
+                    .values_list("id", flat=True)
+                )
+            assert sorted(rows) == expected == sorted(uncached), (right_config, rows, uncached)
     inverted = ~SearchQuery("кошка", config="russian")
     assert await TSVectorEntry.objects.filter(title__search=inverted).values_list("id", flat=True) == [2]
 
@@ -414,7 +334,6 @@ async def test_search_lookup_vectorizes_the_column_with_the_query_config(db_tsve
 @pytest.mark.asyncio
 async def test_lexeme_escapes_a_backslash(db_tsvector):
     """A backslash in a Lexeme escaped the closing quote of the raw tsquery, a syntax error."""
-    skip_if_not_postgres()
     assert Lexeme("x\\")._as_tsquery() == "'x\\\\'"
     assert Lexeme("it's\\")._as_tsquery() == "'it''s\\\\'"
     await TSVectorEntry.objects.create(id=1, title="x")
@@ -432,7 +351,6 @@ async def test_search_vector_weight_expression_executes_on_both_drivers(db_tsvec
     """A weight= Expression was bound as a "char" parameter, which asyncpg can't encode from a str."""
     from hare.query.expressions import Value
 
-    skip_if_not_postgres()
     await TSVectorEntry.objects.create(id=1, title="cat")
 
     vectors = await TSVectorEntry.objects.annotate(
@@ -446,7 +364,6 @@ async def test_search_vector_weight_expression_executes_on_both_drivers(db_tsvec
 @pytest.mark.asyncio
 async def test_search_query_annotation_reads_as_tsquery_text(db_tsvector):
     """rust_pg returned an annotated tsquery as its binary wire bytes."""
-    skip_if_not_postgres()
     await TSVectorEntry.objects.create(id=1, title="cat")
 
     row = await TSVectorEntry.objects.annotate(

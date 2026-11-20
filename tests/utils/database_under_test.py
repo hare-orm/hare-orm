@@ -1,7 +1,12 @@
 """The database the test suite runs on - HARE_TEST_DB - described by its driver and dialect rather
 than by the text of its URL."""
 
+from __future__ import annotations
+
 import os
+import uuid
+from contextlib import AbstractAsyncContextManager
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -11,6 +16,12 @@ from hare.dialects.base.dialect import Dialect
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.dialects.sqlite.sqlite_dialect import SqliteDialect
 from hare.fields.data.numeric.decimal_field import DecimalField
+from tests.utils.constants import CLICKHOUSE_PROFILE_SKIP_REASON
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from hare.core.hare_context import HareContext
 
 
 class DatabaseUnderTest:
@@ -22,6 +33,66 @@ class DatabaseUnderTest:
     def get_url(cls) -> str:
         """The configured DB_URL, SQLite in memory when none is."""
         return os.getenv("HARE_TEST_DB", cls.DEFAULT_URL)
+
+    @classmethod
+    def open_model_context(
+        cls, modules: list[str], *, db_url: str | None = None, generate_schemas: bool = True
+    ) -> AbstractAsyncContextManager[HareContext]:
+        """Open an isolated context whose models use the test database's ``models`` alias."""
+        from hare.contrib.test import hare_test_context
+
+        return hare_test_context(
+            modules,
+            db_url=cls.get_url() if db_url is None else db_url,
+            connection_label="models",
+            _generate_schemas=generate_schemas,
+        )
+
+    @staticmethod
+    def get_sqlite_file_url(path: Path, *, scheme: str = "sqlite+aiosqlite") -> str:
+        """The URL of a test SQLite file with synchronous writes disabled."""
+        return f"{scheme}:///{path}?synchronous=OFF"
+
+    @classmethod
+    def open_file_model_context(
+        cls, path: Path, *, scheme: str = "sqlite+aiosqlite"
+    ) -> AbstractAsyncContextManager[HareContext]:
+        """Open the shared test models on an explicit SQLite file."""
+        return cls.open_model_context(
+            ["tests.shared_models.testmodels"], db_url=cls.get_sqlite_file_url(path, scheme=scheme)
+        )
+
+    @classmethod
+    def open_persistent_model_context(cls, path: Path) -> AbstractAsyncContextManager[HareContext]:
+        """Open the shared test models on the test server or on a temporary SQLite file."""
+        url = cls.get_url()
+        if not url or cls.is_file_database(url):
+            scheme = (url or cls.DEFAULT_URL).split("://", 1)[0]
+            return cls.open_file_model_context(path, scheme=scheme)
+        return cls.open_model_context(["tests.shared_models.testmodels"], db_url=url)
+
+    @staticmethod
+    def normalize_url_template(url: str) -> str:
+        """Read the Makefile's escaped placeholders as ordinary braces."""
+        return url.replace("\\{", "{").replace("\\}", "}")
+
+    @classmethod
+    def get_postgresql_url_template(cls) -> str | None:
+        """The configured test URL with unescaped placeholders, when it uses PostgreSQL."""
+        url = cls.get_url()
+        if cls.get_dialect(url).name != "postgresql":
+            return None
+        return cls.normalize_url_template(url)
+
+    @classmethod
+    def get_fresh_url(cls, url: str | None = None) -> str:
+        """Expand an optional database-name placeholder for an isolated test context.
+
+        Use the supplied URL or read HARE_TEST_DB, accepting the Makefile's escaped braces. URLs
+        without a placeholder keep their value; a template receives a fresh UUID.
+        """
+        raw_db_url = cls.normalize_url_template(cls.get_url() if url is None else url)
+        return raw_db_url.format(uuid.uuid4().hex) if "{}" in raw_db_url else raw_db_url
 
     @classmethod
     def get_url_with_options(cls, options: str, url: str | None = None) -> str:
@@ -61,7 +132,7 @@ class DatabaseUnderTest:
         """Whether the connection goes through a transaction pooler (``transaction_pooling``) - its
         server sessions are lent out a transaction at a time, so what a test pins on one session
         (a backend's pid, a database setting new sessions pick up) doesn't hold."""
-        credentials = DbUrlConfigGenerator.expand(url or cls.get_url(), testing=False)["credentials"]
+        credentials = DbUrlConfigGenerator.expand(url or cls.get_url())["credentials"]
         return str(credentials.get("transaction_pooling", "")).lower() in ("true", "1")
 
     @staticmethod
@@ -101,6 +172,16 @@ class DatabaseUnderTest:
         hare refuses such a connection."""
         if cls.pools_server_sessions() and await cls.get_postgresql_server_version() < (18,):
             pytest.skip("PostgreSQL before 18 doesn't tell a transaction pooler its search path")
+
+    @staticmethod
+    def skip_unless_clickhouse(
+        database_url: str | None = None, *, reason: str = CLICKHOUSE_PROFILE_SKIP_REASON
+    ) -> None:
+        """Skip outside a ClickHouse profile, preserving a supplied URL snapshot and diagnostic."""
+        if database_url is None:
+            database_url = os.getenv("HARE_TEST_DB", "")
+        if not database_url.startswith("clickhouse"):
+            pytest.skip(reason)
 
     @staticmethod
     def get_engine_name(dialect: Dialect) -> str:

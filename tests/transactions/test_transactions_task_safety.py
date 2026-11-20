@@ -10,6 +10,7 @@ import pytest
 
 from hare.contrib.test import requires_features
 from hare.core.connections.connections import Connections
+from hare.core.hare_context import HareContext
 from hare.dialects.base.client.transaction_lifecycle.transaction_ending import TransactionEnding
 from hare.exceptions import DBConnectionError, TransactionManagementError
 from hare.instrumentation.declarations import QueryExecuted, TransactionEvent
@@ -27,7 +28,7 @@ class Boom(Exception):
 
 
 def _is_sqlite() -> bool:
-    return Tournament._meta.connection.dialect.name == "sqlite"
+    return HareContext.require_current().apps.get_queryset(Tournament).get_connection().dialect.name == "sqlite"
 
 
 def _slow_query_sql(seconds: float) -> str:
@@ -187,7 +188,7 @@ async def test_statement_started_after_commit_began_is_refused(db_truncate):
             sibling = asyncio.ensure_future(connection.execute(_slow_query_sql(0.3)))
             await _wait_until(lambda: bool(connection._savepoint_lock._open_spans))
             commit = asyncio.ensure_future(connection.commit())
-            await _wait_until(lambda: connection._ending)
+            await _wait_until(lambda: connection.transaction_state.ending)
             with pytest.raises(TransactionManagementError, match="being committed or rolled back"):
                 await Tournament.objects.create(name="too late")
             await commit

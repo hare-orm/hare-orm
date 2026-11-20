@@ -2,29 +2,28 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Iterable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Self
 
-from hare.classes.comparable_values import ComparableValues
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.core.caching.cache import Cache
 from hare.ddl.constants import FIXED_FIELDS_WRITTEN_MESSAGE
+from hare.ddl.declared_names import DeclaredNames
 from hare.ddl.expressions.declared_expressions import DeclaredExpressions
 from hare.ddl.expressions.expression_field_renaming import ExpressionFieldRenaming
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.ddl.table_options import TableOptions
+from hare.declarations.declaration_values import DeclarationValues
+from hare.dialects.clickhouse.clickhouse_engine import ClickhouseEngine
 from hare.dialects.clickhouse.cluster.constants import (
-    CLICKHOUSE_DISTRIBUTED_ENGINE_TEMPLATE,
     CLICKHOUSE_DISTRIBUTED_TABLE_TEMPLATE,
 )
-from hare.dialects.clickhouse.introspection.clickhouse_sql_parts import ClickhouseSqlParts
 from hare.dialects.clickhouse.introspection.constants import CLICKHOUSE_CURRENT_DATABASE_SQL_FUNCTION
-from hare.dialects.clickhouse.query.constants import CLICKHOUSE_ENGINE_PREFIXES, CLICKHOUSE_FINAL_ENGINES
+from hare.dialects.clickhouse.query.constants import CLICKHOUSE_FINAL_ENGINES
 from hare.dialects.clickhouse.schema.constants import (
     CLICKHOUSE_ALLOW_NULLABLE_KEY_SETTING,
     CLICKHOUSE_CODEC_PATTERN,
     CLICKHOUSE_LIGHTWEIGHT_UPDATE_SETTING_VALUE,
     CLICKHOUSE_LIGHTWEIGHT_UPDATE_SETTINGS,
-    CLICKHOUSE_MERGE_TREE_ENGINE_SUFFIX,
     CLICKHOUSE_MERGE_TREE_OPTIONS,
     CLICKHOUSE_PROJECTION_REBUILD_MODE,
     CLICKHOUSE_PROJECTION_REBUILD_SETTINGS,
@@ -34,13 +33,15 @@ from hare.dialects.clickhouse.types.clickhouse_type_names import ClickhouseTypeN
 from hare.dialects.clickhouse.types.constants import CLICKHOUSE_UNSIGNED_TYPE_PREFIX
 from hare.exceptions import ConfigurationError, QueryError, UnSupportedError
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
+from hare.query.expressions import F
+from hare.query.expressions.structure.expression_traversal import ExpressionTraversal
 
 if TYPE_CHECKING:
+    from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.dialect import Dialect
     from hare.dialects.base.features import Features
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-    from hare.models import Model
-    from hare.models.meta_info import MetaInfo
+    from hare.models.model_binding import ModelBinding
     from hare.query.expressions import Expression
     from hare.query.queryset.queryset import QuerySet
 
@@ -61,8 +62,8 @@ class ClickhouseTableOptions(TableOptions):
     or ``RawSQLTerm`` of raw SQL, written as it is, its columns not read out of it.
 
     Attributes:
-        engine: The table engine, with its arguments - ``"MergeTree"``,
-            ``"ReplacingMergeTree(version)"``.
+        engine: A bare engine name or ``ClickhouseEngine`` with explicit arguments, such as
+            ``ClickhouseEngine("ReplacingMergeTree", F("version"))``.
         order_by: What the rows are sorted by - field names and expressions (``Trunc("viewed_at",
             "day")``, ``RawSQLTerm("intHash32(id)")`` the key of a sample); empty for the primary key, or for
             no sort (``tuple()``) without one. A primary key must be the beginning of it.
@@ -73,7 +74,7 @@ class ClickhouseTableOptions(TableOptions):
         ttl: The table's ``TTL`` - an expression of the moment a row is deleted
             (``F("viewed_at") + timedelta(days=30)``), or ``RawSQLTerm`` of a whole clause with another
             action; None for none.
-        settings: The table's ``SETTINGS``, by name.
+        settings: The table's ``SETTINGS``, as name/value pairs; values are strings, integers or bools.
         column_codecs: The compression of columns - ``(field name, codecs)`` pairs, the codecs as
             ``CODEC(...)`` takes them (``"ZSTD(3)"``, ``"Delta, ZSTD"``).
         column_ttls: How long columns keep their values - ``(field name, expression)`` pairs, the
@@ -90,29 +91,31 @@ class ClickhouseTableOptions(TableOptions):
     """
 
     #: The fields of the columns ClickHouse doesn't update in place, by the options - ``get_fixed_field_names()``.
-    fixed_field_names: ClassVar[Cache[Any]] = Cache(holds_sql=False, keyed_by_model=False)
+    fixed_field_names: ClassVar[Cache[Any]] = Cache()
 
-    engine: str = "MergeTree"
-    order_by: tuple[str | Expression | RawSQLTerm, ...] = ()
+    engine: str | ClickhouseEngine = ClickhouseEngine("MergeTree")
+    order_by: Sequence[str | Expression | RawSQLTerm] = ()
     sample_by: str | Expression | RawSQLTerm | None = None
     partition_by: str | Expression | RawSQLTerm | None = None
     ttl: str | Expression | RawSQLTerm | None = None
-    settings: tuple[tuple[str, str | int], ...] = ()
-    column_codecs: tuple[tuple[str, str], ...] = ()
-    column_ttls: tuple[tuple[str, str | Expression | RawSQLTerm], ...] = ()
-    projections: tuple[ClickhouseProjection, ...] = ()
+    settings: Sequence[tuple[str, str | int]] = ()
+    column_codecs: Sequence[tuple[str, str]] = ()
+    column_ttls: Sequence[tuple[str, str | Expression | RawSQLTerm]] = ()
+    projections: Sequence[ClickhouseProjection] = ()
     distributed_over: str | None = None
     sharding_key: str | Expression | RawSQLTerm | None = None
     lightweight_updates: bool = False
 
     def __post_init__(self) -> None:
-        if not isinstance(self.engine, str) or not self.engine.strip():
-            raise ConfigurationError(f"ClickhouseTableOptions.engine must be a non-empty string, got {self.engine!r}")
-        if not isinstance(self.order_by, tuple) or not all(
-            DeclaredExpressions.is_declared_expression(key) for key in self.order_by
-        ):
+        object.__setattr__(self, "engine", self.get_engine())
+        for option_name in ("order_by", "settings", "column_codecs", "column_ttls", "projections"):
+            value = self.get_option_items(getattr(self, option_name), option_name)
+            if option_name in {"settings", "column_codecs", "column_ttls"}:
+                value = tuple(self.get_option_items(entry, option_name) for entry in value)
+            object.__setattr__(self, option_name, value)
+        if not all(DeclaredExpressions.is_declared_expression(key) for key in self.order_by):
             raise ConfigurationError(
-                "ClickhouseTableOptions.order_by must be a tuple of field names, expressions of hare and "
+                "ClickhouseTableOptions.order_by takes field names, expressions of hare and "
                 f"RawSQLTerm(...) expressions, got {ValueDescriptions.get_shown_value(self.order_by)}"
             )
         if self.sample_by is not None and self.get_order_by_position(self.sample_by) is None:
@@ -137,59 +140,75 @@ class ClickhouseTableOptions(TableOptions):
                     f"ClickhouseTableOptions.{option_name} takes a field name, an expression of hare or "
                     f"RawSQLTerm(...) of a non-empty SQL expression, got {ValueDescriptions.get_shown_value(value)}"
                 )
-        if not isinstance(self.settings, tuple) or not all(
-            isinstance(setting, tuple)
-            and len(setting) == 2
+        if not all(
+            len(setting) == 2
             and isinstance(setting[0], str)
             and setting[0].isidentifier()
-            and isinstance(setting[1], str | int)
-            and not isinstance(setting[1], bool)
+            and isinstance(setting[1], (str, int))
             for setting in self.settings
         ):
             raise ConfigurationError(
-                "ClickhouseTableOptions.settings must be a tuple of (name, value) pairs, a value a string or "
-                f"an integer, got {self.settings!r}"
+                "ClickhouseTableOptions.settings takes (name, value) pairs, a value a string, "
+                f"an integer or a bool, got {self.settings!r}"
             )
-        if not isinstance(self.column_codecs, tuple) or not all(
-            isinstance(entry, tuple)
-            and len(entry) == 2
+        if not all(
+            len(entry) == 2
             and isinstance(entry[0], str)
             and isinstance(entry[1], str)
             and CLICKHOUSE_CODEC_PATTERN.fullmatch(entry[1])
             for entry in self.column_codecs
         ):
             raise ConfigurationError(
-                "ClickhouseTableOptions.column_codecs must be a tuple of (field name, codecs) pairs, the codecs "
+                "ClickhouseTableOptions.column_codecs takes (field name, codecs) pairs, the codecs "
                 'as CODEC(...) takes them - "ZSTD(3)", "Delta, ZSTD" - got '
                 f"{ValueDescriptions.get_shown_value(self.column_codecs)}"
             )
-        if not isinstance(self.column_ttls, tuple) or not all(
-            isinstance(entry, tuple)
-            and len(entry) == 2
-            and isinstance(entry[0], str)
-            and DeclaredExpressions.is_declared_expression(entry[1])
+        if not all(
+            len(entry) == 2 and isinstance(entry[0], str) and DeclaredExpressions.is_declared_expression(entry[1])
             for entry in self.column_ttls
         ):
             raise ConfigurationError(
-                "ClickhouseTableOptions.column_ttls must be a tuple of (field name, expression) pairs, got "
-                f"{self.column_ttls!r}"
+                f"ClickhouseTableOptions.column_ttls takes (field name, expression) pairs, got {self.column_ttls!r}"
             )
-        projection_names = [getattr(projection, "name", None) for projection in self.projections]
-        if (
-            not isinstance(self.projections, tuple)
-            or not all(isinstance(projection, ClickhouseProjection) for projection in self.projections)
-            or len(set(projection_names)) != len(projection_names)
-        ):
+        for projection in self.projections:
+            DeclaredNames.raise_if_not_name(
+                getattr(projection, "name", None), "ClickhouseTableOptions.projections.name"
+            )
+            if not all(
+                callable(getattr(projection, method, None))
+                for method in ("for_binding", "with_sql_query", "get_definition_sql", "get_read_columns")
+            ):
+                raise ConfigurationError(
+                    "ClickhouseTableOptions.projections takes declarations that bind to a model, render SQL, "
+                    "describe read columns and snapshot for migrations"
+                )
+        projection_names = [projection.name for projection in self.projections]
+        if len(set(projection_names)) != len(projection_names):
             raise ConfigurationError(
-                "ClickhouseTableOptions.projections must be a tuple of ClickhouseProjection(...) of distinct "
+                "ClickhouseTableOptions.projections takes declarations of distinct "
                 f"names, got {ValueDescriptions.get_shown_value(self.projections)}"
             )
 
-    def raise_if_unsupported(self, model: type[Model], features: Features) -> None:
+    @staticmethod
+    def get_option_items(value: Iterable[Any], option_name: str) -> tuple[Any, ...]:
+        """Snapshot a collection without requiring a particular Python container type.
+
+        A string is a scalar declaration, not a collection of names or a name/value pair.
+        """
+        if isinstance(value, (str, bytes)):
+            raise ConfigurationError(f"ClickhouseTableOptions.{option_name} takes a collection, got {value!r}")
+        try:
+            return tuple(value)
+        except TypeError as error:
+            raise ConfigurationError(
+                f"ClickhouseTableOptions.{option_name} takes a collection, got {value!r}"
+            ) from error
+
+    def raise_if_unsupported(self, binding: ModelBinding, features: Features) -> None:
         """Rejects a sort that doesn't begin with the primary key, or names no field of the model.
 
         Args:
-            model: The model.
+            binding: The model.
             features: The features of the connection.
 
         Raises:
@@ -200,12 +219,12 @@ class ClickhouseTableOptions(TableOptions):
                 names the model's table itself; ``order_by`` or ``partition_by`` reads a nullable field without
                 the ``allow_nullable_key`` setting.
         """
-        meta = model._meta
+        model = binding._model
         # The Distributed table and the local one would be one table - created as the local one alone.
-        if self.distributed_over == meta.db_table:
+        if self.distributed_over == binding.db_table:
             raise ConfigurationError(
                 f"{model.__name__}: ClickhouseTableOptions.distributed_over names the model's table "
-                f"{meta.db_table!r} - name the local table another way"
+                f"{binding.db_table!r} - name the local table another way"
             )
         # A text names a field in each of these - one of no field met the DDL as a KeyError.
         for option_name, keys in (
@@ -216,7 +235,7 @@ class ClickhouseTableOptions(TableOptions):
             ("sharding_key", (self.sharding_key,)),
             ("column_ttls", tuple(ttl for _, ttl in self.column_ttls)),
         ):
-            unknown = [key for key in keys if isinstance(key, str) and key not in meta.fields_db_projection]
+            unknown = [key for key in keys if isinstance(key, str) and key not in binding.fields_db_projection]
             if unknown:
                 raise ConfigurationError(
                     f"{model.__name__}: ClickhouseTableOptions.{option_name} names no field {unknown}"
@@ -224,7 +243,7 @@ class ClickhouseTableOptions(TableOptions):
         computed_on_read = [
             name
             for name in self.order_by
-            if isinstance(name, str) and getattr(meta.fields_map[name], "stored", True) is False
+            if isinstance(name, str) and getattr(binding.fields_map[name], "stored", True) is False
         ]
         if computed_on_read:
             raise ConfigurationError(
@@ -235,7 +254,7 @@ class ClickhouseTableOptions(TableOptions):
             # Local import: the dialect module imports this one.
             from hare.dialects.clickhouse.constants import CLICKHOUSE_DIALECT
 
-            sample_field = meta.fields_map[self.sample_by]
+            sample_field = binding.fields_map[self.sample_by]
             sample_column_type = ClickhouseTypeNames.get_server_type(sample_field.get_column_type(CLICKHOUSE_DIALECT))
             if sample_field.null or not sample_column_type.startswith(CLICKHOUSE_UNSIGNED_TYPE_PREFIX):
                 raise ConfigurationError(
@@ -243,14 +262,14 @@ class ClickhouseTableOptions(TableOptions):
                     f"{'Nullable ' if sample_field.null else ''}{sample_column_type} - ClickHouse samples rows by an "
                     "unsigned integer that holds no NULL (a UInt field, or RawSQLTerm('intHash32(...)'))"
                 )
-        self.raise_if_nullable_key(model)
+        self.raise_if_nullable_key(binding)
         column_option_names = [name for name, _ in (*self.column_codecs, *self.column_ttls)]
-        unknown_columns = [name for name in column_option_names if name not in meta.fields_db_projection]
+        unknown_columns = [name for name in column_option_names if name not in binding.fields_db_projection]
         if unknown_columns:
             raise ConfigurationError(
                 f"{model.__name__}: ClickhouseTableOptions.column_codecs/column_ttls name no field {unknown_columns}"
             )
-        key_names = {*meta.primary_key_attribute_names, *(name for name in self.order_by if isinstance(name, str))}
+        key_names = {*binding.primary_key_attribute_names, *(name for name in self.order_by if isinstance(name, str))}
         expiring_keys = [name for name, _ in self.column_ttls if name in key_names]
         if expiring_keys:
             raise ConfigurationError(
@@ -268,33 +287,34 @@ class ClickhouseTableOptions(TableOptions):
                     f"{model.__name__}: ClickhouseTableOptions.{', '.join(merge_tree_options)} are options of "
                     f"an engine of the MergeTree family, not of {self.get_engine_name()}"
                 )
-        if self.order_by and meta.has_primary_key:
-            pk_names = list(meta.primary_key_attribute_names)
+        if self.order_by and binding.has_primary_key:
+            pk_names = list(binding.primary_key_attribute_names)
             if list(self.order_by[: len(pk_names)]) != pk_names:
                 raise ConfigurationError(
                     f"{model.__name__}: ClickhouseTableOptions.order_by must begin with the primary key {pk_names}"
                 )
 
-    def raise_if_nullable_key(self, model: type[Model]) -> None:
+    def raise_if_nullable_key(self, binding: ModelBinding) -> None:
         """Refuses a key reading a nullable field - ClickHouse refuses a sorting or a partition key over one
         unless the table's settings allow it, and a sharding key over one always.
 
         Args:
-            model: The model.
+            binding: The model.
 
         Raises:
             ConfigurationError: ``order_by`` or ``partition_by`` reads a nullable field without the
                 ``allow_nullable_key`` setting, or ``sharding_key`` reads one.
         """
-        nullable_sharding_names = self.get_nullable_field_names(model, (self.sharding_key,))
+        model = binding._model
+        nullable_sharding_names = self.get_nullable_field_names(binding, (self.sharding_key,))
         if nullable_sharding_names:
             raise ConfigurationError(
                 f"{model.__name__}: ClickhouseTableOptions.sharding_key reads the nullable fields "
                 f"{nullable_sharding_names} - ClickHouse shards rows by an integer that holds no NULL"
             )
-        if str(dict(self.settings).get(CLICKHOUSE_ALLOW_NULLABLE_KEY_SETTING, 0)) == "1":
+        if dict(self.settings).get(CLICKHOUSE_ALLOW_NULLABLE_KEY_SETTING, 0) in (1, "1"):
             return
-        nullable_key_names = self.get_nullable_field_names(model, (*self.order_by, self.partition_by))
+        nullable_key_names = self.get_nullable_field_names(binding, (*self.order_by, self.partition_by))
         if nullable_key_names:
             raise ConfigurationError(
                 f"{model.__name__}: ClickhouseTableOptions.order_by/partition_by read the nullable fields "
@@ -303,11 +323,11 @@ class ClickhouseTableOptions(TableOptions):
             )
 
     @staticmethod
-    def get_nullable_field_names(model: type[Model], keys: Iterable[Any]) -> list[str]:
+    def get_nullable_field_names(binding: ModelBinding, keys: Iterable[Any]) -> list[str]:
         """The nullable fields keys read - a raw SQL key's columns aren't read out of it.
 
         Args:
-            model: The model.
+            binding: The model.
             keys: Field names, expressions of hare and ``RawSQLTerm``s; None for no key.
 
         Returns:
@@ -316,33 +336,34 @@ class ClickhouseTableOptions(TableOptions):
         # Local import: the dialect module imports this one.
         from hare.dialects.clickhouse.constants import CLICKHOUSE_DIALECT
 
-        meta = model._meta
         key_column_names: set[str] = set()
         for key in keys:
             if key is not None:
-                key_column_names |= DeclaredExpressions.get_column_names(key, model, CLICKHOUSE_DIALECT) or set()
+                key_column_names |= DeclaredExpressions.get_column_names(key, binding, CLICKHOUSE_DIALECT) or set()
         return [
             field_name
-            for field_name, column_name in meta.fields_db_projection.items()
-            if column_name in key_column_names and meta.fields_map[field_name].null
+            for field_name, column_name in binding.fields_db_projection.items()
+            if column_name in key_column_names and binding.fields_map[field_name].null
         ]
 
     def with_field_names(self, column_to_field_name: Mapping[str, str]) -> Self:
+        def get_field_reference(value: Any) -> Any:
+            if isinstance(value, str):
+                return column_to_field_name.get(value, value)
+            if type(value) is F:
+                return column_to_field_name.get(value.name, value.name)
+            return ExpressionTraversal.map_fields(
+                value, lambda reference: column_to_field_name.get(reference.path, reference.path)
+            )
+
         return dataclasses.replace(
             self,
-            order_by=tuple(
-                column_to_field_name.get(key, key) if isinstance(key, str) else key for key in self.order_by
-            ),
-            sample_by=column_to_field_name.get(self.sample_by, self.sample_by)
-            if isinstance(self.sample_by, str)
-            else self.sample_by,
-            partition_by=column_to_field_name.get(self.partition_by, self.partition_by)
-            if isinstance(self.partition_by, str)
-            else self.partition_by,
-            ttl=column_to_field_name.get(self.ttl, self.ttl) if isinstance(self.ttl, str) else self.ttl,
-            sharding_key=column_to_field_name.get(self.sharding_key, self.sharding_key)
-            if isinstance(self.sharding_key, str)
-            else self.sharding_key,
+            engine=self.get_engine().with_field_names(column_to_field_name),
+            order_by=tuple(get_field_reference(key) for key in self.order_by),
+            sample_by=get_field_reference(self.sample_by),
+            partition_by=get_field_reference(self.partition_by),
+            ttl=get_field_reference(self.ttl),
+            sharding_key=get_field_reference(self.sharding_key),
             column_codecs=tuple((column_to_field_name.get(name, name), codecs) for name, codecs in self.column_codecs),
             column_ttls=tuple((column_to_field_name.get(name, name), ttl) for name, ttl in self.column_ttls),
         )
@@ -356,6 +377,7 @@ class ClickhouseTableOptions(TableOptions):
 
         return dataclasses.replace(
             renamed,
+            engine=renamed.get_engine().with_renamed_field(old_name, new_name),
             order_by=tuple(get_renamed(key) for key in renamed.order_by),
             sample_by=get_renamed(renamed.sample_by),
             partition_by=get_renamed(renamed.partition_by),
@@ -374,18 +396,18 @@ class ClickhouseTableOptions(TableOptions):
             Its position, None when ``order_by`` doesn't hold it.
         """
         for position, order_key in enumerate(self.order_by):
-            if ComparableValues.are_equal(order_key, key):
+            if DeclarationValues.are_equal(order_key, key):
                 return position
         return None
 
     def get_distributed_engine_sql(
-        self, model: type[Model], editor: BaseSchemaEditor, cluster_name: str, local_table: str
+        self, binding: ModelBinding, editor: BaseSchemaEditor, cluster_name: str, local_table: str
     ) -> str:
         """The ``Distributed`` engine spreading the rows of a local table of the model's database over the
         connection's cluster.
 
         Args:
-            model: The model.
+            binding: The model.
             editor: The schema editor.
             cluster_name: The cluster's name.
             local_table: The local table.
@@ -393,44 +415,35 @@ class ClickhouseTableOptions(TableOptions):
         Returns:
             The engine - naming ``currentDatabase()`` for a model of the connection's database.
         """
-        literals = editor.client.dialect.literals
-        schema = model._meta.schema
-        return CLICKHOUSE_DISTRIBUTED_ENGINE_TEMPLATE.format(
-            cluster=cluster_name,
-            database=CLICKHOUSE_CURRENT_DATABASE_SQL_FUNCTION
-            if schema is None
-            else literals.get_string_literal_sql(schema),
-            table=literals.get_string_literal_sql(local_table),
-            sharding_key=self.get_sharding_key_sql(model, editor),
-        )
+        return self.get_distributed_engine(binding, cluster_name, local_table).get_sql(binding, editor.client.dialect)
 
-    def get_sharding_key_sql(self, model: type[Model], editor: BaseSchemaEditor) -> str:
-        """The argument a ``Distributed`` engine takes the sharding key by.
+    def get_distributed_engine(self, binding: ModelBinding, cluster_name: str, local_table: str) -> ClickhouseEngine:
+        """Declare cluster/database/table literals separately from the optional sharding expression."""
+        schema = binding.schema
+        arguments: list[Any] = [
+            cluster_name,
+            RawSQLTerm(CLICKHOUSE_CURRENT_DATABASE_SQL_FUNCTION) if schema is None else schema,
+            local_table,
+        ]
+        if self.sharding_key is not None:
+            from hare.query.expressions import F
 
-        Args:
-            model: The model.
-            editor: The schema editor of the connection the DDL runs on.
+            arguments.append(F(self.sharding_key) if isinstance(self.sharding_key, str) else self.sharding_key)
+        return ClickhouseEngine("Distributed", *arguments)
 
-        Returns:
-            ``, <key>``; empty for a table of no sharding key.
-        """
-        if self.sharding_key is None:
-            return ""
-        return f", {self.get_expression_sql(model, self.sharding_key, editor)}"
-
-    def with_sql_queries(self, model: type[Model]) -> Self:
+    def with_sql_queries(self, binding: ModelBinding, client: DatabaseClient | None = None) -> Self:
         if not self.projections:
             return self
         return dataclasses.replace(
-            self, projections=tuple(projection.with_sql_query(model) for projection in self.projections)
+            self, projections=tuple(projection.with_sql_query(binding, client) for projection in self.projections)
         )
 
-    def with_relation_keys(self, meta: MetaInfo) -> Self:
+    def with_relation_keys(self, meta: ModelBinding) -> Self:
         # A ModelQuery() of a projection is a queryset of the model just built.
         options = self
         if self.projections:
             options = dataclasses.replace(
-                options, projections=tuple(projection.for_model(meta._model) for projection in self.projections)
+                options, projections=tuple(projection.for_binding(meta) for projection in self.projections)
             )
         # A foreign key or a one-to-one relation sorts by its key fields.
         relations = [meta.fields_map.get(key) if isinstance(key, str) else None for key in self.order_by]
@@ -445,18 +458,18 @@ class ClickhouseTableOptions(TableOptions):
         return dataclasses.replace(options, order_by=tuple(order_by))
 
     @classmethod
-    def get_for_model(cls, model: type[Model] | None, dialect: Dialect) -> Self:
+    def get_for_model(cls, binding: ModelBinding | None, dialect: Dialect) -> Self:
         """The ClickHouse options of a model's table.
 
         Args:
-            model: The model, None for a table of no model.
+            binding: The model, None for a table of no model.
             dialect: The dialect.
 
         Returns:
             The declared options - the defaults for a table of no model, and for a model declaring
             none.
         """
-        return cls.get_of_dialect(() if model is None else model._meta.table_options, dialect)
+        return cls.get_of_dialect(() if binding is None else binding.table_options, dialect)
 
     @classmethod
     def get_of_dialect(cls, table_options: Sequence[TableOptions], dialect: Dialect) -> Self:
@@ -475,12 +488,15 @@ class ClickhouseTableOptions(TableOptions):
     def get_storage_table_name(self, table_name: str) -> str:
         return table_name if self.distributed_over is None else self.distributed_over
 
-    def get_companion_table_sqls(self, model: type[Model], editor: BaseSchemaEditor, *, replaces: bool) -> list[str]:
+    def get_companion_table_sqls(
+        self, binding: ModelBinding, editor: BaseSchemaEditor, *, replaces: bool
+    ) -> list[str]:
         """The ``Distributed`` table of a model stored in local tables over a cluster.
 
         Raises:
             ConfigurationError: The connection names no cluster.
         """
+        model = binding._model
         if self.distributed_over is None:
             return []
         client = editor.client
@@ -490,25 +506,24 @@ class ClickhouseTableOptions(TableOptions):
                 f"{model.__name__}: ClickhouseTableOptions.distributed_over needs a connection to a cluster - "
                 "its cluster=... setting"
             )
-        meta = model._meta
         literals = client.dialect.literals
-        engine_sql = self.get_distributed_engine_sql(model, editor, cluster.name, self.distributed_over)
+        engine_sql = self.get_distributed_engine_sql(binding, editor, cluster.name, self.distributed_over)
         return [
             CLICKHOUSE_DISTRIBUTED_TABLE_TEMPLATE.format(
                 or_replace="OR REPLACE " if replaces else "",
                 exists="" if replaces else "IF NOT EXISTS ",
-                table=literals.qualify_table_name(meta.db_table, meta.schema),
-                local_table=literals.qualify_table_name(self.distributed_over, meta.schema),
+                table=editor.get_schema_table_sql(binding.db_table, binding.schema),
+                local_table=literals.qualify_table_name(self.distributed_over, binding.schema),
                 engine=engine_sql,
             )
         ]
 
     @staticmethod
-    def get_expression_sql(model: type[Model], expression: Any, editor: BaseSchemaEditor) -> str:
+    def get_expression_sql(binding: ModelBinding, expression: Any, editor: BaseSchemaEditor) -> str:
         """A key or a time to live of the options in the SQL text.
 
         Args:
-            model: The model.
+            binding: The model.
             expression: A field name, an expression of hare or a ``RawSQLTerm``.
             editor: The schema editor of the connection the DDL runs on.
 
@@ -516,17 +531,17 @@ class ClickhouseTableOptions(TableOptions):
             The field's column, quoted; an expression of hare in the connection's SQL; raw SQL as written.
         """
         if isinstance(expression, str):
-            return editor.quote(model._meta.fields_db_projection[expression])
-        return DeclaredExpressions.get_sql(expression, model, editor.client.dialect)
+            return editor.quote(binding.fields_db_projection[expression])
+        return DeclaredExpressions.get_sql(expression, binding, editor.client.dialect)
 
-    def get_column_clauses_sql(self, model: type[Model], field_name: str, editor: BaseSchemaEditor) -> str:
+    def get_column_clauses_sql(self, binding: ModelBinding, field_name: str, editor: BaseSchemaEditor) -> str:
         clauses_sql = ""
         for codec_field_name, codecs in self.column_codecs:
             if codec_field_name == field_name:
                 clauses_sql += f" CODEC({codecs})"
         for ttl_field_name, ttl in self.column_ttls:
             if ttl_field_name == field_name:
-                clauses_sql += f" TTL {self.get_expression_sql(model, ttl, editor)}"
+                clauses_sql += f" TTL {self.get_expression_sql(binding, ttl, editor)}"
         return clauses_sql
 
     def get_projection_settings_sql(self) -> str:
@@ -545,35 +560,35 @@ class ClickhouseTableOptions(TableOptions):
             f"{name} = {mode_sql}" for name in CLICKHOUSE_PROJECTION_REBUILD_SETTINGS if name not in declared_settings
         )
 
-    def get_after_create_sqls(self, model: type[Model], table_sql: str, editor: BaseSchemaEditor) -> list[str]:
+    def get_after_create_sqls(self, binding: ModelBinding, table_name: str, editor: BaseSchemaEditor) -> list[str]:
+        table_sql = editor.get_schema_table_sql(table_name, binding.schema)
         statements = []
         # First: an engine dropping rows on merges takes a projection only with them.
         if settings_sql := self.get_projection_settings_sql():
             statements.append(f"ALTER TABLE {table_sql} MODIFY SETTING {settings_sql};")
         statements.extend(
-            f"ALTER TABLE {table_sql} ADD PROJECTION {projection.get_definition_sql(model, editor)};"
+            f"ALTER TABLE {table_sql} ADD PROJECTION {projection.get_definition_sql(binding, editor)};"
             for projection in self.projections
         )
         return statements
 
-    def get_create_suffix_sql(self, model: type[Model], editor: BaseSchemaEditor) -> str:
-        meta = model._meta
-        sql = f" ENGINE = {self.engine}"
+    def get_create_suffix_sql(self, binding: ModelBinding, editor: BaseSchemaEditor) -> str:
+        sql = f" ENGINE = {self.get_engine().get_sql(binding, editor.client.dialect)}"
         if not self.is_merge_tree():
             # An engine of no sort, partitions or time to live - Memory, Log, Join, ...
             return sql
         if self.partition_by is not None:
-            sql += f" PARTITION BY {self.get_expression_sql(model, self.partition_by, editor)}"
+            sql += f" PARTITION BY {self.get_expression_sql(binding, self.partition_by, editor)}"
         if self.order_by:
-            sql += f" ORDER BY ({', '.join(self.get_expression_sql(model, key, editor) for key in self.order_by)})"
-        elif not meta.has_primary_key:
+            sql += f" ORDER BY ({', '.join(self.get_expression_sql(binding, key, editor) for key in self.order_by)})"
+        elif not binding.has_primary_key:
             sql += " ORDER BY tuple()"
-        if primary_key_sqls := self.get_primary_key_sqls(model, editor):
+        if primary_key_sqls := self.get_primary_key_sqls(binding, editor):
             sql += f" PRIMARY KEY ({', '.join(primary_key_sqls)})"
         if self.sample_by is not None:
-            sql += f" SAMPLE BY {self.get_expression_sql(model, self.sample_by, editor)}"
+            sql += f" SAMPLE BY {self.get_expression_sql(binding, self.sample_by, editor)}"
         if self.ttl is not None:
-            sql += f" TTL {self.get_expression_sql(model, self.ttl, editor)}"
+            sql += f" TTL {self.get_expression_sql(binding, self.ttl, editor)}"
         if settings := self.get_table_settings():
             sql += " SETTINGS " + ", ".join(f"{name} = {self.get_setting_sql(value)}" for name, value in settings)
         return sql
@@ -594,22 +609,21 @@ class ClickhouseTableOptions(TableOptions):
             )
         return settings
 
-    def get_primary_key_sqls(self, model: type[Model], editor: BaseSchemaEditor) -> list[str]:
+    def get_primary_key_sqls(self, binding: ModelBinding, editor: BaseSchemaEditor) -> list[str]:
         """The SQL of the keys of the table's ``PRIMARY KEY`` - see ``get_primary_key_keys()``.
 
         Args:
-            model: The model.
+            binding: The model.
             editor: The schema editor of the connection the DDL runs on.
 
         Returns:
             The keys' SQL, empty for a model without a primary key.
         """
-        meta = model._meta
-        if not meta.has_primary_key:
+        if not binding.has_primary_key:
             return []
         return [
-            self.get_expression_sql(model, key, editor)
-            for key in self.get_primary_key_keys(meta.primary_key_attribute_names)
+            self.get_expression_sql(binding, key, editor)
+            for key in self.get_primary_key_keys(binding.primary_key_attribute_names)
         ]
 
     def get_primary_key_keys(self, primary_key_field_names: Sequence[str]) -> list[str | Expression | RawSQLTerm]:
@@ -625,19 +639,20 @@ class ClickhouseTableOptions(TableOptions):
         """
         keys: list[str | Expression | RawSQLTerm] = list(primary_key_field_names)
         sample_position = None if self.sample_by is None else self.get_order_by_position(self.sample_by)
-        if sample_position is not None and not any(ComparableValues.are_equal(key, self.sample_by) for key in keys):
+        if sample_position is not None and not any(DeclarationValues.are_equal(key, self.sample_by) for key in keys):
             keys = list(self.order_by[: sample_position + 1])
         return keys
 
-    def raise_if_unsampled(self, model: type[Model]) -> None:
+    def raise_if_unsampled(self, binding: ModelBinding) -> None:
         """Rejects a sample of a table declaring no key to sample its rows by.
 
         Args:
-            model: The model.
+            binding: The model.
 
         Raises:
             QueryError: ``sample_by`` isn't set.
         """
+        model = binding._model
         if self.sample_by is None:
             raise QueryError(
                 f"{model.__name__}.objects.sample() needs ClickhouseTableOptions(sample_by=RawSQLTerm(...)) - "
@@ -651,14 +666,14 @@ class ClickhouseTableOptions(TableOptions):
         Returns:
             Whether it is.
         """
-        return self.get_engine_name().endswith(CLICKHOUSE_MERGE_TREE_ENGINE_SUFFIX)
+        return self.get_engine().is_merge_tree()
 
     def with_row_versions_merged(self, queryset: QuerySet[Any]) -> QuerySet[Any]:
         # A key repeats among the versions of its row until a merge - read with FINAL.
         if not self.keeps_row_versions():
             return queryset
         # A method the dialect adds to QuerySet.
-        return cast("QuerySet[Any]", queryset.final())  # type: ignore[attr-defined]
+        return queryset.final()  # type: ignore[attr-defined]
 
     def keeps_row_versions(self) -> bool:
         """Whether the engine keeps several versions of a row its merges and ``FINAL`` merge into one -
@@ -667,10 +682,7 @@ class ClickhouseTableOptions(TableOptions):
         Returns:
             Whether it does.
         """
-        family_name = self.get_engine_name()
-        for prefix in CLICKHOUSE_ENGINE_PREFIXES:
-            family_name = family_name.removeprefix(prefix)
-        return family_name in CLICKHOUSE_FINAL_ENGINES
+        return self.get_engine().get_family() in CLICKHOUSE_FINAL_ENGINES
 
     def get_options_during_field_changes(self, old_options: TableOptions | None) -> Self:
         # A time to live, a column's codec or a projection reads columns - one that changes is
@@ -680,11 +692,13 @@ class ClickhouseTableOptions(TableOptions):
         old = old_options if isinstance(old_options, ClickhouseTableOptions) else ClickhouseTableOptions()
 
         def is_kept(value: Any, old_values: Sequence[Any]) -> bool:
-            return any(ComparableValues.are_equal(value, old_value) for old_value in old_values)
+            return any(DeclarationValues.are_equal(value, old_value) for old_value in old_values)
 
         def get_kept_key(option_name: str) -> Any:
             value = getattr(self, option_name)
-            return value if ComparableValues.are_equal(value, getattr(old, option_name)) else getattr(old, option_name)
+            return (
+                value if DeclarationValues.are_equal(value, getattr(old, option_name)) else getattr(old, option_name)
+            )
 
         return dataclasses.replace(
             self,
@@ -693,19 +707,19 @@ class ClickhouseTableOptions(TableOptions):
             sample_by=get_kept_key("sample_by"),
             partition_by=get_kept_key("partition_by"),
             sharding_key=get_kept_key("sharding_key"),
-            ttl=self.ttl if ComparableValues.are_equal(self.ttl, old.ttl) else None,
+            ttl=self.ttl if DeclarationValues.are_equal(self.ttl, old.ttl) else None,
             column_ttls=tuple(item for item in self.column_ttls if is_kept(item, old.column_ttls)),
             column_codecs=tuple(item for item in self.column_codecs if item in old.column_codecs),
             projections=tuple(projection for projection in self.projections if is_kept(projection, old.projections)),
         )
 
-    def get_key_column_names(self, model: type[Model], dialect: Dialect) -> frozenset[str]:
+    def get_key_column_names(self, binding: ModelBinding, dialect: Dialect) -> frozenset[str]:
         """The columns the table's keys (``order_by``, ``sample_by``, ``partition_by``, ``sharding_key``)
         and its engine's arguments (a version, a sign) read - a raw SQL key's columns aren't read out of it,
         the server refuses a change of one.
 
         Args:
-            model: The model.
+            binding: The model.
             dialect: The connection's dialect.
 
         Returns:
@@ -715,62 +729,58 @@ class ClickhouseTableOptions(TableOptions):
         for key in (*self.order_by, self.sample_by, self.partition_by, self.sharding_key):
             if key is None or isinstance(key, RawSQLTerm):
                 continue
-            column_names |= DeclaredExpressions.get_column_names(key, model, dialect) or set()
-        for argument in ClickhouseTypeNames.get_type_parts(self.engine)[1]:
-            identifier = ClickhouseSqlParts.get_identifier(argument.strip())
-            if identifier is not None:
-                column_names.add(identifier)
+            column_names |= DeclaredExpressions.get_column_names(key, binding, dialect) or set()
+        column_names.update(self.get_engine().get_column_names(binding, dialect))
         return frozenset(column_names)
 
-    def get_fixed_field_names(self, model: type[Model]) -> frozenset[str]:
+    def get_fixed_field_names(self, binding: ModelBinding) -> frozenset[str]:
         """The fields of the columns ClickHouse doesn't update in place - those its keys read
         (``get_key_column_names()``).
 
         Args:
-            model: The model.
+            binding: The model.
 
         Returns:
             The field names, the primary key's own left out.
         """
-        bucket = ClickhouseTableOptions.fixed_field_names.get_model_bucket(model)
+        bucket = ClickhouseTableOptions.fixed_field_names.get_bucket(binding)
         fixed_field_names = bucket.get(id(self))
         if fixed_field_names is not None:
             return fixed_field_names
         # Local import: the dialect module imports this one.
         from hare.dialects.clickhouse.constants import CLICKHOUSE_DIALECT
 
-        meta = model._meta
-        key_column_names = self.get_key_column_names(model, CLICKHOUSE_DIALECT)
+        key_column_names = self.get_key_column_names(binding, CLICKHOUSE_DIALECT)
         fixed_field_names = frozenset(
             field_name
-            for field_name, column in meta.fields_db_projection.items()
-            if field_name not in meta.primary_key_attribute_names and column in key_column_names
+            for field_name, column in binding.fields_db_projection.items()
+            if field_name not in binding.primary_key_attribute_names and column in key_column_names
         )
         bucket[id(self)] = fixed_field_names
         return fixed_field_names
 
-    def raise_if_fixed_fields_written(self, model: type[Model], field_names: Iterable[str]) -> None:
+    def raise_if_fixed_fields_written(self, binding: ModelBinding, field_names: Iterable[str]) -> None:
         """Refuses an update writing a field of a key column - a part of a composite primary key too:
         the sorting key begins with the primary key. A primary key of one field is refused by every
         update itself.
 
         Args:
-            model: The model.
+            binding: The model.
             field_names: The fields written.
 
         Raises:
             UnSupportedError: A field is a column of the table's keys.
         """
+        model = binding._model
         field_names = list(field_names)
-        super().raise_if_fixed_fields_written(model, field_names)
-        meta = model._meta
-        key_names = frozenset(meta.primary_key_attribute_names)
+        super().raise_if_fixed_fields_written(binding, field_names)
+        key_names = frozenset(binding.primary_key_attribute_names)
         if len(key_names) < 2:
             return
         written_key_names = [
             name
             for name in field_names
-            if (field := meta.fields_map.get(name)) is not None
+            if (field := binding.fields_map.get(name)) is not None
             and not key_names.isdisjoint(getattr(field, "source_fields", None) or (name,))
         ]
         if written_key_names:
@@ -782,9 +792,13 @@ class ClickhouseTableOptions(TableOptions):
         """The engine's name, without its arguments.
 
         Returns:
-            The name - ``"ReplacingMergeTree"`` of ``"ReplacingMergeTree(version)"``.
+            The declared engine name.
         """
-        return self.engine.partition("(")[0].strip()
+        return self.get_engine().name
+
+    def get_engine(self) -> ClickhouseEngine:
+        """Return the structured declaration; a bare name is a no-argument engine."""
+        return ClickhouseEngine(self.engine) if isinstance(self.engine, str) else self.engine
 
     @staticmethod
     def get_setting_sql(value: Any) -> str:
@@ -797,10 +811,10 @@ class ClickhouseTableOptions(TableOptions):
             The literal.
         """
         # Local import: the constants build the dialect, which declares these options.
-        from hare.dialects.clickhouse.constants import CLICKHOUSE_STRING_ESCAPES
+        from hare.dialects.clickhouse.constants import CLICKHOUSE_DIALECT
 
         if isinstance(value, bool):
             return "1" if value else "0"
-        if isinstance(value, int | float):
+        if isinstance(value, (int, float)):
             return repr(value)
-        return "'" + value.translate(CLICKHOUSE_STRING_ESCAPES) + "'"
+        return CLICKHOUSE_DIALECT.literals.get_string_literal_sql(value)

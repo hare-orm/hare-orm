@@ -4,13 +4,16 @@ registered with Hare.register_live_model() and exercised with real CRUD."""
 
 import contextlib
 from collections.abc import Generator
+from decimal import Decimal
 from typing import Any
 
 import pytest
 
 from hare import Hare, fields
 from hare.contrib.test import requires_features
+from hare.core.apps.model_binding_graph import ModelBindingGraph
 from hare.core.connections.connections import Connections
+from hare.core.hare_context import HareContext
 from hare.ddl.constraints import UniqueConstraint
 from hare.ddl.indexes import Index
 from hare.ddl.raw_sql_term import RawSQLTerm
@@ -19,8 +22,16 @@ from hare.exceptions import ConfigurationError, IntegrityError
 from hare.fields.db_defaults import SqlDefault
 from hare.fields.relations.fields import ForeignKeyFieldInstance, OneToOneFieldInstance
 from hare.inspectdb import ModelFactory, SchemaInspector
+from hare.inspectdb.enums import CatalogDiagnosticCode
+from hare.inspectdb.generation.inspected_model_builder import InspectedModelBuilder
 from hare.inspectdb.generation.model_naming import ModelNaming
+from hare.inspectdb.introspection.column_info import ColumnInfo
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
+from hare.inspectdb.introspection.table_info import TableInfo
+from hare.migrations import Migration, MigrationRunner
+from hare.migrations.operations import CreateModel
+from hare.migrations.state.state import State
+from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
 from hare.models.class_building.model_definition_checks import ModelDefinitionChecks
 from tests.utils.model_source_generator import ModelSourceGenerator
@@ -28,10 +39,236 @@ from tests.utils.model_source_generator import ModelSourceGenerator
 BUILD_MODES = ["source", "factory"]
 
 
-@pytest.fixture
-def connection(db):
-    alias = next(iter(Connections.current().db_config))
-    return Connections.get(alias)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("build_mode", BUILD_MODES)
+@pytest.mark.parametrize("layout", ["collision", "reserved", "relation-shadow"])
+async def test_reconstructed_foreign_keys_use_the_allocated_target_storage_attribute(connection, build_mode, layout):
+    declaration_graph = ModelBindingGraph()
+    column = "save" if layout == "reserved" else "code_key"
+    extra = ', "code-key" INTEGER NOT NULL UNIQUE' if layout == "collision" else ""
+    reference = " REFERENCES allocated_root(id)" if layout == "relation-shadow" else ""
+    scripts = [
+        "CREATE TABLE allocated_root (id INTEGER PRIMARY KEY)",
+        f"CREATE TABLE allocated_parent (id INTEGER PRIMARY KEY{extra}, "
+        f'"{column}" INTEGER NOT NULL UNIQUE{reference})',
+        "CREATE TABLE allocated_child (id INTEGER PRIMARY KEY, "
+        f'parent_id INTEGER REFERENCES allocated_parent("{column}"))',
+        "INSERT INTO allocated_root VALUES (21),(31)",
+        "INSERT INTO allocated_parent VALUES (1,11,21),(2,21,31)"
+        if layout == "collision"
+        else "INSERT INTO allocated_parent VALUES (1,21),(2,31)",
+        "INSERT INTO allocated_child VALUES (3,21)",
+    ]
+    await recreate_tables(connection, ["allocated_child", "allocated_parent", "allocated_root"], scripts)
+    models = await build_models(connection, ["allocated_root", "allocated_parent", "allocated_child"], build_mode)
+    parent_class, child_class = models["allocated_parent"], models["allocated_child"]
+    with registered_live_models(models):
+        child = await child_class.objects.select_related("parent").get(id=3)
+        assert child.parent.pk == 1
+        target_attribute = (
+            HareContext.require_current().apps.get_binding(parent_class).fields_db_projection_reverse[column]
+        )
+        assert (
+            HareContext.require_current().apps.get_binding(child_class).fields_map["parent"].to_field
+            == target_attribute
+        )
+        assert (await parent_class.objects.get(pk=1)).pk == 1
+    module_source = await SchemaInspector.inspect(connection, tables=["allocated_child"])
+    namespace: dict[str, Any] = {"__name__": "tests.generated_single_table"}
+    exec(compile(module_source, "<generated>", "exec"), namespace)  # noqa: S102
+    assert "AllocatedParent" not in namespace
+    assert declaration_graph.include(namespace["AllocatedChild"]).fields_map["parent"].to_field == target_attribute
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("build_mode", BUILD_MODES)
+async def test_reconstructed_reverse_names_share_the_target_attribute_namespace(connection, build_mode):
+    await recreate_tables(
+        connection,
+        ['"child rows"', '"child__rows"', "reverse_target"],
+        [
+            "CREATE TABLE reverse_target (id INTEGER PRIMARY KEY, child_rows_parent_set INTEGER)",
+            'CREATE TABLE "child rows" (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES reverse_target(id))',
+            'CREATE TABLE "child__rows" (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES reverse_target(id))',
+            "INSERT INTO reverse_target VALUES (1,99)",
+            'INSERT INTO "child rows" VALUES (2,1)',
+            'INSERT INTO "child__rows" VALUES (3,1)',
+        ],
+    )
+    models = await build_models(connection, ["reverse_target", "child rows", "child__rows"], build_mode)
+    with registered_live_models(models):
+        parent = await models["reverse_target"].objects.get(pk=1)
+        assert parent.child_rows_parent_set == 99
+        reverse_names = [
+            HareContext.require_current().apps.get_binding(models[table]).fields_map["parent"].related_name
+            for table in ("child rows", "child__rows")
+        ]
+        assert len(set(reverse_names)) == 2
+        assert "child_rows_parent_set" not in reverse_names
+        for expected, name in zip((2, 3), reverse_names, strict=True):
+            assert [child.pk for child in await getattr(parent, name)] == [expected]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("build_mode", BUILD_MODES)
+@pytest.mark.parametrize("composite", (False, True))
+async def test_a_reconstructed_class_named_model_keeps_its_declared_primary_key(connection, build_mode, composite):
+    declaration_graph = ModelBindingGraph()
+    columns = (
+        "region BIGINT NOT NULL, natural_key BIGINT NOT NULL, amount BIGINT NOT NULL, PRIMARY KEY(region, natural_key)"
+        if composite
+        else "natural_key BIGINT PRIMARY KEY NOT NULL, amount BIGINT NOT NULL"
+    )
+    await recreate_tables(connection, ['"model"'], [f'CREATE TABLE "model" ({columns})'])
+    values = "3,7,42" if composite else "7,42"
+    await connection.execute_script(f'INSERT INTO "model" VALUES ({values})')
+    models = await build_models(connection, ["model"], build_mode)
+    model = models["model"]
+    expected_key = (3, 7) if composite else 7
+    assert model.__name__ == "Model"
+    assert declaration_graph.include(model).primary_key_attribute == (
+        ("region", "natural_key") if composite else "natural_key"
+    )
+    with registered_live_models(models):
+        obj = await model.objects.get(pk=expected_key)
+        assert (obj.pk, obj.amount) == (expected_key, 42)
+        obj.amount = 43
+        await obj.save()
+        assert (await model.objects.get(pk=expected_key)).amount == 43
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("build_mode", BUILD_MODES)
+@pytest.mark.parametrize(
+    ("default_sql", "expected"),
+    [
+        ("0.123456789012345678", Decimal("0.123456789012345678")),
+        ("-0.123456789012345678", Decimal("-0.123456789012345678")),
+        ("123.456::numeric(8,2)", Decimal("123.46")),
+    ],
+)
+async def test_reconstructed_numeric_defaults_replay_without_float_rounding(
+    connection, build_mode, default_sql, expected
+):
+    source_table = "numeric_default_source"
+    target_table = "numeric_default_replayed"
+    await recreate_tables(
+        connection,
+        [target_table, source_table],
+        [f'CREATE TABLE {source_table} ("Value Column" numeric(30,18) DEFAULT {default_sql})'],
+    )
+    await connection.execute_script(f"INSERT INTO {source_table} DEFAULT VALUES")
+    assert await connection.execute_dicts(f'SELECT "Value Column" AS value FROM {source_table}') == [
+        {"value": expected}
+    ]
+    models = await build_models(connection, [source_table], build_mode)
+    with registered_live_models(models):
+        snapshot = State.from_models(models.values(), default_connections={"live": connection.connection_alias})
+        declaration = next(iter(snapshot.models.values()))
+        migration = Migration(
+            "replay_numeric_default",
+            "live",
+            operations=[
+                CreateModel(
+                    declaration.name,
+                    list(declaration.fields.items()),
+                    options={**declaration.options, "table": target_table, "managed": True},
+                )
+            ],
+        )
+        await MigrationRunner(connection).apply(
+            migration, State(default_connections={"live": connection.connection_alias})
+        )
+    await connection.execute_script(f"INSERT INTO {target_table} DEFAULT VALUES")
+    assert await connection.execute_dicts(f'SELECT "Value Column" AS value FROM {target_table}') == [
+        {"value": expected}
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("build_mode", BUILD_MODES)
+@pytest.mark.parametrize(
+    "key_columns",
+    [
+        ("owner_region", "owner_code"),
+        ("owner_code", "owner_region"),
+        ("owner_region", "owner_code", "number"),
+        ("owner_code", "owner_region", "number"),
+        ("owner_region", "number", "owner_code"),
+        ("owner_code", "number", "owner_region"),
+    ],
+)
+async def test_reconstruction_preserves_primary_key_order_across_relation_columns(connection, build_mode, key_columns):
+    await recreate_tables(
+        connection,
+        ["key_order_item", "key_order_target"],
+        [
+            "CREATE TABLE key_order_target (region INT NOT NULL, code INT NOT NULL, PRIMARY KEY(region, code))",
+            "CREATE TABLE key_order_item (owner_region INT NOT NULL, number INT NOT NULL, owner_code INT NOT NULL, "
+            f"label TEXT NOT NULL, PRIMARY KEY({', '.join(key_columns)}), "
+            "FOREIGN KEY(owner_region, owner_code) REFERENCES key_order_target(region, code))",
+        ],
+    )
+    models = await build_models(connection, ["key_order_target", "key_order_item"], build_mode)
+    with registered_live_models(models):
+        target, item = models.values()
+        owner = await target.objects.create(region=10, code=20)
+        created = await item.objects.create(owner=owner, number=30, label="first")
+        values = {"owner_region": 10, "owner_code": 20, "number": 30}
+        expected = tuple(values[name] for name in key_columns)
+        assert HareContext.require_current().apps.get_binding(item).primary_key_attribute == key_columns
+        assert created.pk == expected
+        snapshot = State.from_models(models.values(), default_connections={"live": connection.connection_alias})
+        historical_apps = snapshot.clone().apps
+        historical = historical_apps.get_model(f"live.{item.__name__}")
+        assert snapshot.clone().apps.get_binding(f"live.{item.__name__}").primary_key_attribute == key_columns
+        assert (await historical_apps.get_queryset(historical).get(pk=expected)).pk == expected
+        row = await item.objects.get(pk=expected)
+        assert row.pk == expected
+        row.label = "updated"
+        await row.save(update_fields=["label"])
+        assert await item.objects.filter(pk=expected).values_list("label", flat=True) == ["updated"]
+        assert await item.objects.filter(pk=expected).delete() == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("build_mode", BUILD_MODES)
+@pytest.mark.parametrize("prefix", ["refresh_from_db", "owner_", "team__member", "owner"])
+async def test_reconstruction_keeps_columns_when_a_composite_relation_name_is_unusable(connection, build_mode, prefix):
+    target = "prefix_target"
+    child = "prefix_child"
+    region, code = f"{prefix}_region", f"{prefix}_code"
+    await recreate_tables(
+        connection,
+        [child, target],
+        [
+            f"CREATE TABLE {target} (region INT NOT NULL, code INT NOT NULL, PRIMARY KEY(region, code))",
+            f"CREATE TABLE {child} (number INT PRIMARY KEY, {region} INT NOT NULL, {code} INT NOT NULL, "
+            f"UNIQUE({region}, {code}), FOREIGN KEY({region}, {code}) REFERENCES {target}(region, code))",
+        ],
+    )
+    await connection.execute(f"INSERT INTO {target} VALUES (10, 20), (10, 21)")
+    await connection.execute(f"INSERT INTO {child} VALUES (30, 10, 20)")
+
+    table_info = await DatabaseCatalog.inspect_table(connection, child)
+    assert bool(table_info.composite_foreign_keys) is (prefix == "owner")
+    assert any(diagnostic.code == CatalogDiagnosticCode.FOREIGN_KEY for diagnostic in table_info.diagnostics) is (
+        prefix != "owner"
+    )
+    models = await build_models(connection, [target, child], build_mode)
+    with registered_live_models(models):
+        item = models[child]
+        binding = HareContext.require_current().apps.get_binding(item)
+        row = await item.objects.get(pk=30)
+        key_attributes = tuple(binding.fields_db_projection_reverse[name] for name in (region, code))
+        assert tuple(getattr(row, name) for name in key_attributes) == (10, 20)
+        await connection.execute(f"UPDATE {child} SET {code} = 21 WHERE number = 30")
+        await row.refresh_from_db()
+        assert tuple(getattr(row, name) for name in key_attributes) == (10, 21)
+        if prefix == "owner":
+            loaded = await item.objects.select_related("owner").get(pk=30)
+            assert loaded.owner.pk == (10, 21)
 
 
 async def recreate_tables(connection, drop_order: list[str], create_statements: list[str]) -> None:
@@ -46,12 +283,17 @@ async def recreate_tables(connection, drop_order: list[str], create_statements: 
 async def build_models(connection, table_names: list[str], build_mode: str) -> dict[str, type[Model]]:
     dialect = connection.dialect.name
     models: dict[str, type[Model]] = {}
-    for table_name in table_names:
-        table_info = await DatabaseCatalog.inspect_table(connection, table_name)
+    tables = tuple([await DatabaseCatalog.inspect_table(connection, table_name) for table_name in table_names])
+    for table_info in tables:
+        table_name = table_info.name
         if build_mode == "factory":
-            models[table_name] = ModelFactory.from_table_info(table_info, dialect, app_label="live")
+            models[table_name] = ModelFactory.from_table_info(
+                table_info, dialect, app_label="live", target_tables=tables
+            )
             continue
-        source = ModelSourceGenerator.generate_model_source(table_info, dialect, app_label="live")
+        source = ModelSourceGenerator.generate_model_source(
+            table_info, dialect, app_label="live", target_tables=tables
+        )
         namespace: dict[str, Any] = {"__name__": "tests.generated_reconstructed_module"}
         exec(compile(source, "<generated>", "exec"), namespace)  # noqa: S102 - test-only, own generated code
         models[table_name] = namespace[ModelNaming.get_class_name(table_name)]
@@ -82,6 +324,51 @@ async def generated_source(connection, table_name: str) -> str:
 # FK column without an "_id" suffix, several FKs to one target
 
 
+@pytest.mark.parametrize("build_mode", BUILD_MODES)
+@pytest.mark.parametrize("table_name", ["child rows", "9child", "clas", "child__rows", "дочерняя"])
+@pytest.mark.parametrize("unique", [False, True])
+@pytest.mark.asyncio
+async def test_reconstructed_reverse_relations_have_usable_attribute_names(connection, build_mode, table_name, unique):
+    quote = connection.dialect.literals.quote_identifier
+    child_table = quote(table_name)
+    await recreate_tables(
+        connection,
+        [child_table, "reverse_name_parent"],
+        [
+            "CREATE TABLE reverse_name_parent (id INTEGER PRIMARY KEY)",
+            f"CREATE TABLE {child_table} (id INTEGER PRIMARY KEY, "
+            f"parent_id INTEGER NOT NULL {'UNIQUE ' if unique else ''}REFERENCES reverse_name_parent(id))",
+        ],
+    )
+    await connection.execute_script(
+        f"INSERT INTO reverse_name_parent VALUES (1); INSERT INTO {child_table} VALUES (2, 1)"
+    )
+    models = await build_models(connection, ["reverse_name_parent", table_name], build_mode)
+    parent_class, child_class = models.values()
+    expected_name = (
+        "дочерняяs"
+        if table_name == "дочерняя"
+        else {
+            "child rows": "child_rows_parent_set",
+            "9child": "field_9child_parent_set",
+            "clas": "clas_parent_set",
+            "child__rows": "child_rows_parent_set",
+        }[table_name]
+    )
+    with registered_live_models(models):
+        child = await child_class.objects.select_related("parent").get(id=2)
+        parent = child.parent
+        assert parent.pk == 1
+        assert isinstance(parent, parent_class)
+        backward = await getattr(parent, expected_name)
+        assert (backward.pk if unique else [obj.pk for obj in backward]) == (2 if unique else [2])
+        prefetched = await parent_class.objects.prefetch_related(expected_name)
+        assert [obj.pk for obj in prefetched] == [1]
+        assert await connection.execute_dicts(f"SELECT id, parent_id FROM {child_table}") == [
+            {"id": 2, "parent_id": 1}
+        ]
+
+
 async def create_owner_and_child_tables(connection) -> None:
     await recreate_tables(
         connection,
@@ -100,14 +387,16 @@ async def create_owner_and_child_tables(connection) -> None:
 @pytest.mark.parametrize("build_mode", BUILD_MODES)
 @pytest.mark.asyncio
 async def test_fk_column_without_id_suffix_and_repeated_targets_work(db, connection, build_mode):
+    declaration_graph = ModelBindingGraph()
     await create_owner_and_child_tables(connection)
     models = await build_models(connection, ["ix_owner", "ix_child"], build_mode)
     owner_class, child_class = models["ix_owner"], models["ix_child"]
 
-    owner_code_field = child_class._meta.fields_map["owner_code_fk"]
+    owner_code_field = declaration_graph.include(child_class).fields_map["owner_code_fk"]
     assert owner_code_field.source_field == "owner_code"
     assert {
-        name: child_class._meta.fields_map[name].related_name for name in ("owner", "owner_code_fk", "left", "right")
+        name: declaration_graph.include(child_class).fields_map[name].related_name
+        for name in ("owner", "owner_code_fk", "left", "right")
     } == {
         "owner": "ix_child_owner_set",
         "owner_code_fk": "ix_child_owner_code_fk_set",
@@ -144,6 +433,7 @@ async def test_fk_column_without_id_suffix_and_repeated_targets_work(db, connect
 @pytest.mark.parametrize("build_mode", BUILD_MODES)
 @pytest.mark.asyncio
 async def test_fk_primary_key_column_becomes_working_one_to_one_field(db, connection, build_mode):
+    declaration_graph = ModelBindingGraph()
     await recreate_tables(
         connection,
         ["ix_profile", "ix_account"],
@@ -157,8 +447,8 @@ async def test_fk_primary_key_column_becomes_working_one_to_one_field(db, connec
     assert "fields.OneToOneField('models.IxAccount', on_delete=OnDelete.NO_ACTION, primary_key=True)" in source
     models = await build_models(connection, ["ix_account", "ix_profile"], build_mode)
     account_class, profile_class = models["ix_account"], models["ix_profile"]
-    assert isinstance(profile_class._meta.fields_map["account"], OneToOneFieldInstance)
-    assert profile_class._meta.primary_key_attribute == "account"
+    assert isinstance(declaration_graph.include(profile_class).fields_map["account"], OneToOneFieldInstance)
+    assert declaration_graph.include(profile_class).primary_key_attribute == "account"
 
     with registered_live_models(models):
         account = await account_class.objects.create(id=7)
@@ -190,6 +480,7 @@ def test_foreign_key_field_primary_key_is_rejected():
 @pytest.mark.parametrize("build_mode", BUILD_MODES)
 @pytest.mark.asyncio
 async def test_indexed_and_unique_text_columns_keep_their_indexes(db, connection, build_mode):
+    declaration_graph = ModelBindingGraph()
     await recreate_tables(
         connection,
         ["ix_text"],
@@ -202,19 +493,22 @@ async def test_indexed_and_unique_text_columns_keep_their_indexes(db, connection
     models = await build_models(connection, ["ix_text"], build_mode)
     text_class = models["ix_text"]
     # A named index is kept under its name; one the database named itself becomes db_index=True.
-    assert text_class._meta.fields_map["note"].index or any(
-        isinstance(index, Index) and tuple(index.fields) == ("note",) for index in text_class._meta.indexes
+    assert declaration_graph.include(text_class).fields_map["note"].index or any(
+        isinstance(index, Index) and tuple(index.fields) == ("note",)
+        for index in declaration_graph.include(text_class).indexes
     )
-    assert text_class._meta.fields_map["body"].unique
+    assert declaration_graph.include(text_class).fields_map["body"].unique
     assert [
         tuple(constraint.fields)
-        for constraint in text_class._meta.constraints
+        for constraint in declaration_graph.include(text_class).constraints
         if isinstance(constraint, UniqueConstraint)
     ] == [("a", "tag")]
 
     # The reconstructed model's own DDL recreates every index and unique constraint.
     schema_generator = connection.dialect.schema_editor_class(connection)
-    table_sql = schema_generator.table_creation.get_model_sql_data(text_class).get_table_creation_sql()
+    table_sql = schema_generator.table_creation.get_model_sql_data(
+        declaration_graph.include(text_class)
+    ).get_table_creation_sql()
     await connection.execute_script("DROP TABLE ix_text")
     await connection.execute_script(table_sql)
     table_info = await DatabaseCatalog.inspect_table(connection, "ix_text")
@@ -234,6 +528,8 @@ async def test_indexed_and_unique_text_columns_keep_their_indexes(db, connection
 
 @pytest.mark.database_independent
 def test_text_field_accepts_indexes_but_encrypted_text_field_does_not():
+    declaration_graph = ModelBindingGraph()
+
     class TextFieldIndexed(Model):
         id = fields.IntField(primary_key=True)
         note = fields.TextField(db_index=True)
@@ -244,8 +540,8 @@ def test_text_field_accepts_indexes_but_encrypted_text_field_does_not():
             abstract = True
             constraints = (UniqueConstraint(fields=("note", "tag")),)
 
-    assert TextFieldIndexed._meta.fields_map["body"].unique
-    assert TextFieldIndexed._meta.fields_map["note"].index
+    assert declaration_graph.include(TextFieldIndexed).fields_map["body"].unique
+    assert declaration_graph.include(TextFieldIndexed).fields_map["note"].index
     with pytest.raises(ConfigurationError, match="can't be indexed"):
         fields.EncryptedTextField(unique=True)
     with pytest.raises(ConfigurationError, match="can't be indexed"):
@@ -259,6 +555,7 @@ def test_text_field_accepts_indexes_but_encrypted_text_field_does_not():
 @pytest.mark.parametrize("build_mode", BUILD_MODES)
 @pytest.mark.asyncio
 async def test_partial_unique_index_keeps_its_condition(db, connection, build_mode):
+    declaration_graph = ModelBindingGraph()
     await recreate_tables(
         connection,
         ["ix_partial"],
@@ -276,9 +573,9 @@ async def test_partial_unique_index_keeps_its_condition(db, connection, build_mo
     # UniqueConstraint(condition=...), the predicate kept as the database has it.
     models = await build_models(connection, ["ix_partial"], build_mode)
     partial_class = models["ix_partial"]
-    assert not partial_class._meta.fields_map["code"].unique
-    assert not partial_class._meta.indexes
-    [constraint] = partial_class._meta.constraints
+    assert not declaration_graph.include(partial_class).fields_map["code"].unique
+    assert not declaration_graph.include(partial_class).indexes
+    [constraint] = declaration_graph.include(partial_class).constraints
     assert isinstance(constraint, UniqueConstraint)
     assert (tuple(constraint.fields), constraint.name, constraint.condition) == (
         ("code",),
@@ -320,6 +617,7 @@ async def test_partial_index_with_unparsed_condition_keeps_it_as_raw_sql(db, con
 @pytest.mark.parametrize("build_mode", BUILD_MODES)
 @pytest.mark.asyncio
 async def test_expression_index_is_reconstructed(db, connection, build_mode):
+    declaration_graph = ModelBindingGraph()
     await recreate_tables(
         connection,
         ["ix_expression"],
@@ -330,12 +628,12 @@ async def test_expression_index_is_reconstructed(db, connection, build_mode):
     )
     models = await build_models(connection, ["ix_expression"], build_mode)
     expression_class = models["ix_expression"]
-    [index] = expression_class._meta.indexes
+    [index] = declaration_graph.include(expression_class).indexes
     assert type(index) is Index
-    [expression] = index.expressions
-    assert isinstance(expression, RawSQLTerm)
+    [expression] = index.declared_expressions
     # Postgres canonicalizes the term text ("lower((note)::text)").
-    assert expression.sql.startswith("lower(") and "note" in expression.sql
+    expression_sql = expression.get_sql(connection.sql_context)
+    assert expression_sql.startswith("lower(") and "note" in expression_sql
     assert "TODO" not in await generated_source(connection, "ix_expression")
 
     with registered_live_models(models):
@@ -355,9 +653,9 @@ async def test_sqlite_expression_index_with_sort_order_is_reconstructed_with_it(
         ],
     )
     table_info = await DatabaseCatalog.inspect_table(connection, "ix_expression_desc")
-    assert table_info.unparsed_indexes == []
+    assert table_info.get_diagnostics(CatalogDiagnosticCode.INDEX) == []
     source = await generated_source(connection, "ix_expression_desc")
-    assert "OrderedIndexKey(RawSQLTerm('lower(note)'), Order.DESC_NULLS_FIRST)" in source
+    assert "CatalogIndexKey(RawSQLTerm('lower(note) DESC'), Order.DESC)" in source
     assert "TODO" not in source
 
 
@@ -379,7 +677,7 @@ async def test_composite_foreign_key_is_reconstructed(db, connection, build_mode
         ],
     )
     table_info = await DatabaseCatalog.inspect_table(connection, "ix_line")
-    assert table_info.unparsed_foreign_keys == []
+    assert table_info.get_diagnostics(CatalogDiagnosticCode.FOREIGN_KEY) == []
     [composite_fk] = table_info.composite_foreign_keys
     assert (composite_fk.field_name, composite_fk.columns) == ("part", ("part_a", "part_b"))
 
@@ -430,6 +728,7 @@ async def test_unique_composite_foreign_key_is_reconstructed_as_one_to_one(db, c
 @pytest.mark.parametrize("build_mode", BUILD_MODES)
 @pytest.mark.asyncio
 async def test_postgres_identity_columns_are_never_written(db, connection, build_mode):
+    declaration_graph = ModelBindingGraph()
     await recreate_tables(
         connection,
         ["ix_identity"],
@@ -446,8 +745,8 @@ async def test_postgres_identity_columns_are_never_written(db, connection, build
 
     models = await build_models(connection, ["ix_identity"], build_mode)
     identity_class = models["ix_identity"]
-    assert identity_class._meta.fields_map["seq"].generated
-    assert isinstance(identity_class._meta.fields_map["counter"], fields.BigIntField)
+    assert declaration_graph.include(identity_class).fields_map["seq"].generated
+    assert isinstance(declaration_graph.include(identity_class).fields_map["counter"], fields.BigIntField)
 
     with registered_live_models(models):
         first = await identity_class.objects.create(name="a")
@@ -529,6 +828,7 @@ def test_parse_db_default_turns_cast_numeric_literals_into_numbers(raw_default, 
 @pytest.mark.parametrize("build_mode", BUILD_MODES)
 @pytest.mark.asyncio
 async def test_a_unique_binary_column_keeps_its_index(db, connection, build_mode):
+    declaration_graph = ModelBindingGraph()
     binary_type = "BYTEA" if connection.dialect.name == "postgresql" else "BLOB"
     await recreate_tables(
         connection,
@@ -543,9 +843,11 @@ async def test_a_unique_binary_column_keeps_its_index(db, connection, build_mode
 
     models = await build_models(connection, ["ix_binary"], build_mode)
     binary_class = models["ix_binary"]
-    assert binary_class._meta.fields_map["digest"].unique
+    assert declaration_graph.include(binary_class).fields_map["digest"].unique
     assert [
-        constraint.fields for constraint in binary_class._meta.constraints if isinstance(constraint, UniqueConstraint)
+        constraint.fields
+        for constraint in declaration_graph.include(binary_class).constraints
+        if isinstance(constraint, UniqueConstraint)
     ] == [("a", "blob_part")]
     with registered_live_models(models):
         await binary_class.objects.create(id=1, digest=b"\x01", a=1, blob_part=b"\x02")
@@ -556,6 +858,7 @@ async def test_a_unique_binary_column_keeps_its_index(db, connection, build_mode
 @pytest.mark.parametrize("build_mode", BUILD_MODES)
 @pytest.mark.asyncio
 async def test_gin_index_over_json_column_is_kept(db, connection, build_mode):
+    declaration_graph = ModelBindingGraph()
     await recreate_tables(
         connection,
         ["ix_gin_json"],
@@ -566,7 +869,7 @@ async def test_gin_index_over_json_column_is_kept(db, connection, build_mode):
     )
     models = await build_models(connection, ["ix_gin_json"], build_mode)
     json_class = models["ix_gin_json"]
-    [index] = json_class._meta.indexes
+    [index] = declaration_graph.include(json_class).indexes
     assert (index.INDEX_TYPE, index.fields) == ("GIN", ["payload"])
     with registered_live_models(models):
         await json_class.objects.create(id=1, payload={"k": [1]})
@@ -575,10 +878,11 @@ async def test_gin_index_over_json_column_is_kept(db, connection, build_mode):
 
 @pytest.mark.database_independent
 def test_non_btree_index_over_non_indexable_field_passes_validation():
+    declaration_graph = ModelBindingGraph()
     from hare.dialects.postgresql.indexes import GinIndex
     from tests.shared_models.testmodels import JSONFields
 
-    meta = JSONFields._meta
+    meta = declaration_graph.include(JSONFields)
     original = meta.indexes
     meta.indexes = (GinIndex(fields=("data",)),)
     try:
@@ -598,6 +902,7 @@ def test_non_btree_index_over_non_indexable_field_passes_validation():
 async def test_generated_names_never_shadow_the_modules_imports(db, connection):
     """A column "fields" shadowed `fields` for the rest of the class body, and a table "model"
     rebound the module-level `Model` every later class derives from - the module didn't import."""
+    declaration_graph = ModelBindingGraph()
     await recreate_tables(
         connection,
         ["ix_shadow_usr", "model", "ix_shadow_doc"],
@@ -612,19 +917,61 @@ async def test_generated_names_never_shadow_the_modules_imports(db, connection):
     namespace: dict[str, Any] = {"__name__": "tests.generated_shadowing_module"}
     exec(compile(source, "<generated>", "exec"), namespace)  # noqa: S102 - test-only, own generated code
 
-    assert namespace["Model"] is Model
-    model_class = namespace["Model_"]
-    assert model_class._meta.db_table == "model"
-    assert "fields.ForeignKeyField('models.Model_'" in source
-    doc_fields_map = namespace["IxShadowDoc"]._meta.fields_map
-    assert doc_fields_map["fields_field"].source_field == "fields"
+    assert namespace["Model2"] is Model
+    model_class = namespace["Model"]
+    apps = StateApps()
+    for name in ("Model", "IxShadowDoc", "IxShadowUsr"):
+        apps.register_model("models", namespace[name])
+    apps.init_relations()
+    assert apps.get_binding(model_class).db_table == "model"
+    assert "fields2.ForeignKeyField('models.Model'" in source
+    doc_fields_map = declaration_graph.include(namespace["IxShadowDoc"]).fields_map
+    assert "fields" in doc_fields_map
     assert "after" in doc_fields_map
-    usr_fields_map = namespace["IxShadowUsr"]._meta.fields_map
-    assert usr_fields_map["OnDelete_field"].source_field == "OnDelete"
+    usr_fields_map = declaration_graph.include(namespace["IxShadowUsr"]).fields_map
+    assert "OnDelete" in usr_fields_map
     assert usr_fields_map["m_fk"].on_delete == "NO ACTION"
     await connection.execute_script("DROP TABLE ix_shadow_usr")
     await connection.execute_script("DROP TABLE model")
     await connection.execute_script("DROP TABLE ix_shadow_doc")
+
+
+@pytest.mark.database_independent
+def test_module_allocates_import_aliases_without_rebuilding_declarations(monkeypatch):
+    declaration_graph = ModelBindingGraph()
+    tables = [
+        TableInfo(
+            name,
+            columns=[
+                ColumnInfo("id", "INTEGER", False, True, False),
+                ColumnInfo("fields", "TEXT", True, False, False),
+                ColumnInfo("OnDelete", "INTEGER", True, False, False),
+            ],
+        )
+        for name in ("model", "fields")
+    ]
+    built = []
+    original = InspectedModelBuilder.build
+
+    def build(builder):
+        built.append(builder.table.name)
+        return original(builder)
+
+    monkeypatch.setattr(InspectedModelBuilder, "build", build)
+    source = SchemaInspector.render_module(tables, "sqlite")
+    assert built == ["model", "fields"]
+    namespace = {"__name__": "tests.generated_import_aliases"}
+    exec(compile(source, "<generated>", "exec"), namespace)  # noqa: S102 - generated declaration roundtrip
+    apps = StateApps()
+    for name in ("Model", "Fields"):
+        apps.register_model("models", namespace[name])
+    apps.init_relations()
+    assert apps.get_binding(namespace["Model"]).db_table == "model"
+    assert apps.get_binding(namespace["Fields"]).db_table == "fields"
+    assert "fields" in declaration_graph.include(namespace["Model"]).fields_map
+    assert "OnDelete" in declaration_graph.include(namespace["Fields"]).fields_map
+    assert source == SchemaInspector.render_module(tables, "sqlite")
+    assert built == ["model", "fields", "model", "fields"]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -637,6 +984,7 @@ async def test_generated_names_never_shadow_the_modules_imports(db, connection):
 async def test_sqlite_expression_default_keeps_its_parentheses(db, connection, build_mode):
     """SQLite reports `DEFAULT (datetime('now'))` as "datetime('now')" - rendered back without
     the parentheses it is invalid DDL."""
+    declaration_graph = ModelBindingGraph()
     await recreate_tables(
         connection,
         ["ix_expression_default"],
@@ -647,11 +995,13 @@ async def test_sqlite_expression_default_keeps_its_parentheses(db, connection, b
     )
     models = await build_models(connection, ["ix_expression_default"], build_mode)
     default_class = models["ix_expression_default"]
-    assert default_class._meta.fields_map["created"].db_default == SqlDefault("(datetime('now'))")
-    assert default_class._meta.fields_map["code"].db_default == "x"
+    assert declaration_graph.include(default_class).fields_map["created"].db_default == SqlDefault("(datetime('now'))")
+    assert declaration_graph.include(default_class).fields_map["code"].db_default == "x"
 
     schema_generator = connection.dialect.schema_editor_class(connection)
-    table_sql = schema_generator.table_creation.get_model_sql_data(default_class).get_table_creation_sql()
+    table_sql = schema_generator.table_creation.get_model_sql_data(
+        declaration_graph.include(default_class)
+    ).get_table_creation_sql()
     await connection.execute_script("DROP TABLE ix_expression_default")
     await connection.execute_script(table_sql)
     await connection.execute_script("INSERT INTO ix_expression_default (id) VALUES (1)")
@@ -668,6 +1018,7 @@ async def test_sqlite_expression_default_keeps_its_parentheses(db, connection, b
 async def test_json_column_default_is_the_document_not_a_string(db, connection, build_mode):
     """DEFAULT '{}'::jsonb came back as JSONField(db_default='{}') - stored again as the JSON
     string "{}" instead of an empty object."""
+    declaration_graph = ModelBindingGraph()
     json_type = "JSONB" if connection.dialect.name == "postgresql" else "JSON"
     await recreate_tables(
         connection,
@@ -679,11 +1030,13 @@ async def test_json_column_default_is_the_document_not_a_string(db, connection, 
     )
     models = await build_models(connection, ["ix_json_default"], build_mode)
     json_class = models["ix_json_default"]
-    assert json_class._meta.fields_map["meta"].db_default == {}
-    assert json_class._meta.fields_map["items"].db_default == [1, 2]
+    assert declaration_graph.include(json_class).fields_map["meta"].db_default == {}
+    assert declaration_graph.include(json_class).fields_map["items"].db_default == [1, 2]
 
     schema_generator = connection.dialect.schema_editor_class(connection)
-    table_sql = schema_generator.table_creation.get_model_sql_data(json_class).get_table_creation_sql()
+    table_sql = schema_generator.table_creation.get_model_sql_data(
+        declaration_graph.include(json_class)
+    ).get_table_creation_sql()
     await connection.execute_script("DROP TABLE ix_json_default")
     await connection.execute_script(table_sql)
     with registered_live_models(models):
@@ -702,6 +1055,7 @@ async def test_json_column_default_is_the_document_not_a_string(db, connection, 
 async def test_unique_foreign_key_column_becomes_one_to_one_field(db, connection, build_mode):
     """A single-column UNIQUE FK was rendered as ForeignKeyField(unique=True), whose DDL never
     carried the UNIQUE constraint."""
+    declaration_graph = ModelBindingGraph()
     await recreate_tables(
         connection,
         ["ix_unique_fk_source", "ix_unique_fk_target"],
@@ -716,11 +1070,13 @@ async def test_unique_foreign_key_column_becomes_one_to_one_field(db, connection
     assert "unique=True" not in source
     models = await build_models(connection, ["ix_unique_fk_target", "ix_unique_fk_source"], build_mode)
     target_class, source_class = models["ix_unique_fk_target"], models["ix_unique_fk_source"]
-    assert isinstance(source_class._meta.fields_map["target"], OneToOneFieldInstance)
+    assert isinstance(declaration_graph.include(source_class).fields_map["target"], OneToOneFieldInstance)
 
     with registered_live_models(models):
         schema_generator = connection.dialect.schema_editor_class(connection)
-        table_sql = schema_generator.table_creation.get_model_sql_data(source_class).get_table_creation_sql()
+        table_sql = schema_generator.table_creation.get_model_sql_data(
+            HareContext.require_current().apps.get_binding(source_class)
+        ).get_table_creation_sql()
         await connection.execute_script("DROP TABLE ix_unique_fk_source")
         await connection.execute_script(table_sql)
         table_info = await DatabaseCatalog.inspect_table(connection, "ix_unique_fk_source")

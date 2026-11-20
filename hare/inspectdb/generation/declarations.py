@@ -4,8 +4,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from hare.core.apps import Apps
     from hare.dialects.base.dialect import Dialect
     from hare.fields.field import Field
+    from hare.inspectdb.introspection.table_info import TableInfo
+    from hare.models import Model
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,13 +19,17 @@ class ModelGenerationOptions:
         dialect: The dialect the table was read from.
         app_label: The app label relations are qualified with.
         foreign_key_target_overrides: Per target table, the ``"<app>.<Class>"`` a relation points at.
-        skip_many_to_many_through_tables: Whether a ManyToManyField through table gets a note instead
-            of a class.
+        skip_many_to_many_through_tables: Whether a table with a possible many-to-many junction
+            shape gets a note instead of a class; its constraints still need review.
         class_name: The class name - ``ModelNaming.get_class_name()`` by default.
         connection_dialect: The dialect of the connection the table was read on - a field's column
             type may depend on its driver; the dialect's own by default.
         many_to_many_fields: The many-to-many fields of through tables of the run the model gets -
             preferred attribute name and field each.
+        target_tables: Related table declarations needed to map physical target columns
+            to their allocated Python attributes.
+        target_models: Existing target classes, keyed by their full model references.
+        field_names_by_column: Existing field names to keep for physical columns.
     """
 
     dialect: str
@@ -32,3 +39,7 @@ class ModelGenerationOptions:
     class_name: str | None = None
     connection_dialect: Dialect | None = None
     many_to_many_fields: tuple[tuple[str, Field[Any]], ...] = ()
+    target_tables: tuple[TableInfo, ...] = ()
+    target_models: dict[str, type[Model]] | None = None
+    apps: Apps | None = None
+    field_names_by_column: dict[str, str] | None = None

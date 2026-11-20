@@ -62,10 +62,9 @@ class TermPlanDescriptions:
             return None
         sql, wrappers = bound
         values = [wrapper.value for wrapper in wrappers]
-        nodes: list[Term] = list(term.nodes_())
-        node_types = tuple([type(node) for node in nodes])
+        node_types = tuple(map(type, term.nodes_()))
         return PlanDescription(
-            (Term, sql, node_types, tuple([type(value) for value in values])),
+            (Term, sql, node_types, tuple(map(type, values))),
             values,
             [PlanOrigins.get_value_origin(wrapper, "value") for wrapper in wrappers] if PlanOrigins.records else None,
         )

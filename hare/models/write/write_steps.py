@@ -5,12 +5,15 @@ import contextvars
 from collections.abc import Coroutine, Iterable, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
+from hare.core.resource_completion import ResourceCompletion
+from hare.core.routing.written_connections import WrittenConnections
 from hare.instrumentation.change_events import ChangeEvents
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.instrumentation.enums import RowOperation
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 TResult = TypeVar("TResult")
 
@@ -54,21 +57,19 @@ class WriteSteps:
         if connection.features.supports_transactions or WriteSteps.IN_WHOLE_RUN.get():
             return await write
         context = contextvars.copy_context()
+        previous_writes = context.get(WrittenConnections.current)
         context.run(WriteSteps.IN_WHOLE_RUN.set, True)
         task = asyncio.get_running_loop().create_task(write, context=context)
         try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            await asyncio.wait([task])
-            if not task.cancelled():
-                # Read, so it isn't logged as never retrieved - the caller's cancel is what is raised.
-                task.exception()
-            raise
+            return await ResourceCompletion.wait(task)
+        finally:
+            if task.done() and WrittenConnections.is_recording:
+                WrittenConnections.publish_from_context(context, previous_writes)
 
     @staticmethod
     async def report(
         connection: DatabaseClient,
-        model: type[Model],
+        binding: ModelBinding,
         operation: RowOperation,
         *,
         instances: Sequence[Model] | None = None,
@@ -79,20 +80,25 @@ class WriteSteps:
 
         Args:
             connection: The connection the write ran on.
-            model: The model.
+            binding: The model.
             operation: The operation.
             instances: The written instances - their primary keys name the rows.
             pks: The primary keys of the rows, instead of ``instances``.
             fields: The fields written, None when not known.
         """
-        if not ChangeEvents.is_observed(model):
+        if not ChangeEvents.is_observed(binding):
             return
         if instances is not None:
             if not instances:
                 return
-            pks = (
-                [instance.pk for instance in instances]
-                if model._meta.has_primary_key and all(instance.pk is not None for instance in instances)
-                else None
-            )
-        await ChangeEvents.report(connection, model, operation, pks=pks, fields=fields)
+            pks = None
+            if binding.has_primary_key:
+                primary_keys: list[Any] = []
+                for instance in instances:
+                    primary_key = instance.pk
+                    if primary_key is None:
+                        break
+                    primary_keys.append(primary_key)
+                else:
+                    pks = primary_keys
+        await ChangeEvents.report(connection, binding, operation, pks=pks, fields=fields)

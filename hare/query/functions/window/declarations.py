@@ -79,7 +79,7 @@ LastValue = DeclaredSubclass.make(
     Always evaluated over the whole partition (an explicit ``ROWS BETWEEN UNBOUNDED PRECEDING AND
     UNBOUNDED FOLLOWING`` frame), not just the rows up to the current one - SQL's own default frame when
     ``order_by`` is set (``RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW``) would otherwise make
-    this always equal the CURRENT row's value instead of the partition's actual last row.""",
+    this read the last peer of the current row instead of the partition's actual last row.""",
     function_name=AnalyticFunctionName.LAST_VALUE,
     analytic_class=WindowFrameAnalyticFunction,
     accepts_encrypted_field=True,

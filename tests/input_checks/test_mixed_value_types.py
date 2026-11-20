@@ -9,6 +9,7 @@ from decimal import Decimal
 import pytest
 
 from hare import fields
+from hare.core.hare_context import HareContext
 from hare.exceptions import FieldError
 from hare.query.expressions import F, Value, Window
 from hare.query.functions import (
@@ -179,7 +180,11 @@ async def test_a_text_lookup_reads_a_boolean_as_its_databases_text(db):
     """PostgreSQL's true/false, SQLite's 1/0."""
     await BooleanFields.objects.create(id=1, boolean=True)
     await BooleanFields.objects.create(id=2, boolean=False)
-    true_text, false_text = ("1", "0") if BooleanFields._meta.connection.dialect.name == "sqlite" else ("t", "fal")
+    true_text, false_text = (
+        ("1", "0")
+        if HareContext.require_current().apps.get_queryset(BooleanFields).get_connection().dialect.name == "sqlite"
+        else ("t", "fal")
+    )
     assert await BooleanFields.objects.filter(boolean__icontains=true_text).values_list("id", flat=True) == [1]
     assert await BooleanFields.objects.filter(boolean__startswith=false_text).values_list("id", flat=True) == [2]
 

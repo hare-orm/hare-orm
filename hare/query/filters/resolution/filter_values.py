@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Callable, Iterable
-from functools import partial
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.classes.deferred_import import DeferredImport
 from hare.exceptions import QueryError, UnSupportedError
 from hare.fields.data.temporal.date_field import DateField
 from hare.fields.data.temporal.datetime_field import DatetimeField
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
 from hare.fields.field import Field
 from hare.fields.generated_field import GeneratedField
-from hare.query.constants import PLAN_CACHE_MISS
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.expressions.constants import (
     LIST_LOOKUP_SUFFIXES,
     VALUE_COMPARISON_LOOKUPS,
@@ -19,9 +19,10 @@ from hare.query.expressions.constants import (
 from hare.query.expressions.expression import Expression
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import TableCriterionTuple
+from hare.query.expressions.structure.expression_traversal import ExpressionTraversal
 from hare.query.expressions.subqueries.subquery import Subquery
 from hare.query.expressions.value import Value
-from hare.query.expressions.value_references.array_value_reference import ArrayValueReference
+from hare.query.expressions.value_references.container_value_reference import ContainerValueReference
 from hare.query.expressions.value_references.encoded_value_reference import EncodedValueReference
 from hare.query.expressions.value_references.like_value_reference import LikeValueReference
 from hare.query.expressions.value_references.list_parameter_value_reference import ListParameterValueReference
@@ -31,27 +32,41 @@ from hare.query.expressions.value_references.range_value_reference import RangeV
 from hare.query.expressions.value_references.scalar_value_reference import ScalarValueReference
 from hare.query.expressions.value_references.value_reference_types import FilterValueReference, RecordedValueReferences
 from hare.query.filters import Like, ValueEncoders
+from hare.query.filters.lookups.containers.container_value_encoders import ContainerValueEncoders
 from hare.query.filters.lookups.lookups import Lookups
 from hare.query.filters.resolution.composite_key_filters import CompositeKeyFilters
 from hare.sql.functions.datetime.date_as_timestamp import DateAsTimestamp
 from hare.sql.functions.datetime.timestamp_comparand import TimestampComparand
 from hare.sql.terms.array import Array
+from hare.sql.terms.containers.container_literal import ContainerLiteral
 from hare.sql.terms.criteria.basic_criterion import BasicCriterion
 from hare.sql.terms.criteria.between_criterion import BetweenCriterion
 from hare.sql.terms.criteria.contains_criterion import ContainsCriterion
 from hare.sql.terms.criteria.criterion import Criterion
-from hare.sql.terms.functions.function import Function
 from hare.sql.terms.parameters.list_parameter import ListParameter
 from hare.sql.terms.parameters.parameterized_value_wrapper import ParameterizedValueWrapper
 from hare.sql.terms.term import Term
 from hare.sql.terms.tuple import Tuple
 from hare.sql.terms.values.value_wrapper import ValueWrapper
-from hare.time import Timezone
+from hare.time.zone_settings import ZoneSettings
+
+if TYPE_CHECKING:
+    from hare.query.queryset import QuerySet
+    from hare.query.statements import AwaitableQuery
 
 
 class FilterValues:
     """The value a filter compares with: converted by the field, bound as a parameter or written into
     the SQL, a subquery or an expression resolved, a date compared with a timestamp."""
+
+    #: ``QuerySet`` - imported at its first read, as its module imports this one.
+    query_set_class: ClassVar[DeferredImport[type[QuerySet[Any, Any]]]] = DeferredImport(
+        "hare.query.queryset", "QuerySet"
+    )
+    #: ``AwaitableQuery`` - imported at its first read, as its module imports this one.
+    awaitable_query_class: ClassVar[DeferredImport[type[AwaitableQuery[Any]]]] = DeferredImport(
+        "hare.query.statements", "AwaitableQuery"
+    )
 
     @staticmethod
     def get_value_reference(
@@ -90,34 +105,41 @@ class FilterValues:
             # bound as another lookup is.
             if range_reference is not None or isinstance(criterion, BetweenCriterion):
                 return range_reference
-        if isinstance(criterion, Like) and isinstance(operator, partial):
+        if isinstance(criterion, Like):
             like_reference = FilterValues.get_like_value_reference(
-                criterion, operator, cache_reference_field, value_encoder
+                criterion, encoded_value, cache_reference_field, value_encoder
             )
             if like_reference is not None:
                 return like_reference
+        if (
+            value_encoder is ContainerValueEncoders.encode_container
+            and isinstance(encoded_value, ContainerLiteral)
+            and any(node is encoded_value for node in criterion.nodes_())
+        ):
+            return ContainerValueReference(encoded_value.value_wrapper, cache_reference_field)
         if isinstance(criterion, BasicCriterion):
-            # An encoder returning a whole array literal: the encoder's result must be the right
-            # operand itself - the Array node is then replaced as a whole.
             right = criterion.right
-            if (
-                right is encoded_value
-                and isinstance(right, Function)
-                and len(right.args) == 1
-                and isinstance(right.args[0], Array)
-            ):
-                return ArrayValueReference(right.args[0], cache_reference_field, value_encoder)
             # Another encoded lookup ending as a plain comparison: the ValueWrapper must hold the
             # encoder's result itself, not a piece derived from it.
             if not isinstance(criterion, Like) and isinstance(right, ValueWrapper) and right.value is encoded_value:
                 return EncodedValueReference(right, cache_reference_field, value_encoder)
+            if value_encoder is ValueEncoders.encode_json and isinstance(right, ValueWrapper):
+                if isinstance(encoded_value, dict) and len(encoded_value) == 1:
+                    item_key, item = next(iter(encoded_value.items()))
+                    if right.value is item:
+                        return EncodedValueReference(right, cache_reference_field, value_encoder, item_key)
+            if isinstance(right, Array) and isinstance(encoded_value, list):
+                if len(right.original_value) == len(encoded_value) and all(
+                    actual is expected for actual, expected in zip(right.original_value, encoded_value, strict=True)
+                ):
+                    return EncodedValueReference(right, cache_reference_field, value_encoder)
         if not isinstance(value, (list, tuple, set)):
             # The encoded value as an argument of a function in the criterion (``UPPER(?)`` of
             # ``__iexact``, the text query of ``__search``, a JSON containment test): one parameter
             # holds the encoder's result itself.
-            value_wrappers = [node for node in criterion.find_(ValueWrapper) if node.value is encoded_value]
-            if len(value_wrappers) == 1:
-                return EncodedValueReference(value_wrappers[0], cache_reference_field, value_encoder)
+            value_wrapper = FilterValues.get_unique_value_wrapper(criterion, encoded_value)
+            if value_wrapper is not None:
+                return EncodedValueReference(value_wrapper, cache_reference_field, value_encoder)
             return None
         return FilterValues.get_list_value_reference(
             expression_context, criterion, encoded_value, cache_reference_field, value_encoder
@@ -146,10 +168,16 @@ class FilterValues:
             return ScalarValueReference(criterion.right, cache_reference_field)
         # The converted value as an argument of a function in the criterion (a JSON containment
         # test): one parameter holds it.
-        value_wrappers = [node for node in criterion.find_(ValueWrapper) if node.value is encoded_value]
-        if not isinstance(value, (list, tuple, set)) and len(value_wrappers) == 1:
-            return ScalarValueReference(value_wrappers[0], cache_reference_field)
+        value_wrapper = FilterValues.get_unique_value_wrapper(criterion, encoded_value)
+        if not isinstance(value, (list, tuple, set)) and value_wrapper is not None:
+            return ScalarValueReference(value_wrapper, cache_reference_field)
         return None
+
+    @staticmethod
+    def get_unique_value_wrapper(term: Term, value: Any) -> ValueWrapper | None:
+        """The only wrapper in the term holding this exact value, if there is one."""
+        wrappers = [node for node in term.find_(ValueWrapper) if node.value is value]
+        return wrappers[0] if len(wrappers) == 1 else None
 
     @staticmethod
     def get_range_value_reference(
@@ -198,43 +226,25 @@ class FilterValues:
     @staticmethod
     def get_like_value_reference(
         criterion: Like,
-        operator: partial[Any],
+        encoded_value: Any,
         cache_reference_field: Field[Any],
         value_encoder: Callable[..., Any],
     ) -> LikeValueReference | None:
-        """The reference of a LIKE lookup's pattern. The prefix and suffix flags are read off the
-        partial the criterion was built with; a case-insensitive pattern sits inside UPPER(...) -
-        the innermost ValueWrapper is referenced either way.
+        """Use the source and wildcard settings declared while the pattern was built.
 
-        Args:
-            criterion: The filter's criterion.
-            operator: The operator that built it.
-            cache_reference_field: The field the value was converted by.
-            value_encoder: The lookup's value encoder.
-
-        Returns:
-            The reference, None when the pattern isn't where a reference can rebind it.
+        SQL wrapping for case conversion does not change the parameter source.
+        The pattern must come directly from this lookup's encoded value, not a nested
+        member or a derived value. Otherwise the plan cannot bind that source.
         """
-        case_insensitive = operator.keywords.get("case_insensitive")
-        right = criterion.right
-        pattern_wrapper: ValueWrapper | None = None
-        if case_insensitive is False and isinstance(right, ValueWrapper):
-            pattern_wrapper = right
-        elif (
-            case_insensitive is True
-            and isinstance(right, Function)
-            and len(right.args) == 1
-            and isinstance(right.args[0], ValueWrapper)
-        ):
-            pattern_wrapper = right.args[0]
-        if pattern_wrapper is None:
+        parameter = criterion.pattern_parameter
+        if parameter is None or parameter.value is not encoded_value:
             return None
         return LikeValueReference(
-            pattern_wrapper,
+            parameter.source,
             cache_reference_field,
             value_encoder,
-            operator.keywords["prefix"],
-            operator.keywords["suffix"],
+            parameter.prefix,
+            parameter.suffix,
         )
 
     @staticmethod
@@ -258,20 +268,34 @@ class FilterValues:
             The reference, None when the list isn't where a reference can rebind it.
         """
         # A list the dialect binds as one parameter - any length binds through it.
-        list_parameters = [node for node in criterion.find_(Term) if isinstance(node, ListParameter)]
+        list_parameters = criterion.find_(ListParameter)
         if len(list_parameters) == 1:
             return ListParameterValueReference(list_parameters[0], cache_reference_field, value_encoder)
         # __in/__not_in: one ContainsCriterion in the tree, alone or ORed with a NULL check. A None
         # in the list isn't bound - the plan key holds whether there is one. The container must be a
-        # literal Tuple of values, not a subquery. Other encoded lookups keep no plan.
+        # literal Tuple of values, not a subquery.
         contains_nodes = criterion.find_(ContainsCriterion)
         if len(contains_nodes) != 1 or not isinstance(contains_nodes[0].container, Tuple):
-            return None
+            if not isinstance(encoded_value, (list, tuple, set)):
+                return None
+            # Some list lookups distribute their items across several predicates.
+            # Bind only an unambiguous occurrence of each original encoded item.
+            encoded_items = [item for item in encoded_value if item is not None]
+            identities = {id(item) for item in encoded_items}
+            if len(identities) != len(encoded_items):
+                return None
+            wrappers = {id(node): node for node in criterion.find_(ValueWrapper) if id(node.value) in identities}
+            by_value = {id(node.value): node for node in wrappers.values()}
+            if len(wrappers) != len(encoded_items) or by_value.keys() != identities:
+                return None
+            return ListValueReference(
+                Tuple(*(by_value[id(item)] for item in encoded_items)), cache_reference_field, value_encoder
+            )
         container = contains_nodes[0].container
         container_values = container.values
         if not all(isinstance(container_value, ParameterizedValueWrapper) for container_value in container_values):
             return None
-        parameterized_values = cast("list[ParameterizedValueWrapper]", container_values)
+        parameterized_values: list[ParameterizedValueWrapper] = container_values  # type: ignore[assignment]
         # Identity again: the Tuple must wrap the encoded list's own elements.
         if not isinstance(encoded_value, (list, tuple, set)):
             return None
@@ -310,19 +334,21 @@ class FilterValues:
         value_field: Field[Any] | None = None
         if isinstance(value, Subquery) and expression_context.filter_value_is_built:
             value.raise_if_selects_more_columns(
-                key, CompositeKeyFilters.get_filter_column_count(expression_context.model, key)
+                key, CompositeKeyFilters.get_filter_column_count(expression_context.binding, key)
             )
             return value, [], value.get_output_field()
-        filter_value = FilterValues.get_subquery_filter_value(value, expression_context.value_wrapper_references)
+        filter_value = FilterValues.get_subquery_filter_value(
+            value, expression_context.value_wrapper_references, expression_context=expression_context
+        )
         filter_value_joins: list[TableCriterionTuple] = []
         if isinstance(filter_value, Subquery):
             filter_value.raise_if_selects_more_columns(
-                key, CompositeKeyFilters.get_filter_column_count(expression_context.model, key)
+                key, CompositeKeyFilters.get_filter_column_count(expression_context.binding, key)
             )
         if isinstance(filter_value, Expression):
             expression_result = filter_value.get_result(expression_context)
             EncryptedFieldBase.raise_if_compared_to_expression(
-                expression_context.model,
+                expression_context.binding,
                 key,
                 expression_result.output_field,
             )
@@ -350,7 +376,10 @@ class FilterValues:
 
     @staticmethod
     def get_subquery_filter_value(
-        filter_value: Any, value_wrapper_references: RecordedValueReferences | None = None
+        filter_value: Any,
+        value_wrapper_references: RecordedValueReferences | None = None,
+        *,
+        expression_context: ExpressionContext | None = None,
     ) -> Any:
         """A query passed as a filter value, as the subquery the filter compares with
         (``field__in=Other.objects.filter(...)``). A bare queryset is narrowed to its model's
@@ -359,54 +388,50 @@ class FilterValues:
         Args:
             filter_value: The filter value.
             value_wrapper_references: The references being recorded, None when no plan is.
+            expression_context: SQL context for the expression, including its query, binding and connection.
 
         Returns:
             A ``Subquery``, the built SELECT of a set operation's primary key, or ``filter_value``
             unchanged.
         """
-        # Deferred import: hare.query.queryset itself imports from this module at module level
-        # (Q/Expression/...), so a direct import here would be circular.
-        from hare.query.queryset import QuerySet
-        from hare.query.statements import AwaitableQuery
+        if expression_context is not None:
+            from hare.query.queryset.pending_calls.calls_before_setup import CallsBeforeSetup
 
+            if isinstance(filter_value, (FilterValues.query_set_class, FilterValues.awaitable_query_class)):
+                filter_value = CallsBeforeSetup.bind(
+                    filter_value, expression_context.application_context, expression_context.binding.graph
+                )
+            elif isinstance(filter_value, Subquery):
+                original = filter_value
+                filter_value = copy.copy(original)
+                filter_value._plan_origin = original
+                filter_value.source_query = CallsBeforeSetup.bind(
+                    original.source_query, expression_context.application_context, expression_context.binding.graph
+                )
+                filter_value._query = None
+                filter_value._built_query = None
         if type(filter_value) is Subquery:
             source = filter_value.source_query
-            if isinstance(source, QuerySet) and source._selection is None:
-                narrowed = FilterValues.get_subquery_filter_value(source, value_wrapper_references)
+            if isinstance(source, FilterValues.query_set_class) and source._selection is None:
+                narrowed = FilterValues.get_subquery_filter_value(
+                    source, value_wrapper_references, expression_context=expression_context
+                )
                 if isinstance(narrowed, Subquery):
                     narrowed.shares_outer_scope = filter_value.shares_outer_scope
                 return narrowed
-        if not isinstance(filter_value, (QuerySet, AwaitableQuery)):
+        if not isinstance(filter_value, (FilterValues.query_set_class, FilterValues.awaitable_query_class)):
             return filter_value
         # Imported only for a query value - an ordinary filter value loads no set-operation module.
         from hare.query.statements.select.combined_query import CombinedQuery
 
-        if isinstance(filter_value, QuerySet):
+        if isinstance(filter_value, FilterValues.query_set_class):
             # The values it selects, else its primary key - or the rows it combines.
             filter_value = filter_value._get_filter_value_compiler()
         if isinstance(filter_value, CombinedQuery) and not filter_value._combines_values:
-            return filter_value._get_field_values_query("pk", value_wrapper_references)
-        if isinstance(filter_value, AwaitableQuery):
+            return filter_value._get_field_values_query(PRIMARY_KEY_ALIAS, value_wrapper_references)
+        if isinstance(filter_value, FilterValues.awaitable_query_class):
             return Subquery(filter_value._get_filter_value_query())
         return filter_value
-
-    @staticmethod
-    def get_converted_term_parameter(parameter_converter: Callable[[Any], Any], value: Any) -> Any:
-        """The one parameter of the term a value of a filter on an annotation converts into.
-
-        Args:
-            parameter_converter: The conversion.
-            value: The value.
-
-        Returns:
-            The parameter's value; ``PLAN_CACHE_MISS`` - of no type a plan binds - when the value
-            converts into anything else.
-        """
-        term = parameter_converter(value)
-        if not isinstance(term, Term):
-            return PLAN_CACHE_MISS
-        value_wrappers = term.find_(ValueWrapper)
-        return value_wrappers[0].value if len(value_wrappers) == 1 else PLAN_CACHE_MISS
 
     @staticmethod
     def get_date_timestamp_comparand(
@@ -425,12 +450,12 @@ class FilterValues:
             The term - a date promoted, a timestamp marked for the date column to be promoted.
         """
         field_name, __, lookup = key.partition("__")
-        field_object = expression_context.model._meta.fields_map.get(field_name)
+        field_object = expression_context.binding.fields_map.get(field_name)
         if lookup not in VALUE_COMPARISON_LOOKUPS or field_object is None or value_field is None:
             return term
         filtered_field = GeneratedField.get_effective_field(field_object)
         compared_field = GeneratedField.get_effective_field(value_field)
-        zone_name = Timezone.get_aware_zone_name()
+        zone_name = ZoneSettings.get_aware_zone_name()
         if isinstance(filtered_field, DatetimeField) and isinstance(compared_field, DateField):
             return DateAsTimestamp(term, zone_name)
         if isinstance(filtered_field, DateField) and isinstance(compared_field, DatetimeField):
@@ -447,8 +472,7 @@ class FilterValues:
         Returns:
             True for a field whose ``holds_container_value`` is set.
         """
-        effective_field = field.output_field if isinstance(field, GeneratedField) else field
-        return effective_field is not None and effective_field.holds_container_value
+        return field is not None and GeneratedField.get_effective_field(field).holds_container_value
 
     @staticmethod
     def get_literal_value(value: Any) -> Any:
@@ -467,28 +491,85 @@ class FilterValues:
         return value.value
 
     @staticmethod
+    def get_captured_filter_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Capture keywords of a filter call through the shared literal contract."""
+        return {key: FilterValues.get_captured_filter_value(key, value) for key, value in kwargs.items()}
+
+    @staticmethod
+    def get_captured_filter_value(key: str, value: Any) -> Any:
+        """Capture a keyword or Q literal at its call boundary, before deferred compilation.
+
+        Unwrap ordinary Value literals before copying containers or consuming membership
+        iterables. Value(None), expression literals and Value subclasses retain their
+        existing expression semantics. All callers use the same capture order.
+        """
+        return FilterValues.get_list_lookup_value(
+            key, FilterValues.get_detached_value(FilterValues.get_literal_value(value))
+        )
+
+    @staticmethod
     def get_detached_value(value: Any, *, written: bool = False) -> Any:
-        """A filter or update value as it is at the call - copied, so the caller changing it before the
-        query runs changes no query: a dict (a JSON document) whole, a list or set of values shallow.
+        """Capture a value before deferred execution. Copy written containers and dictionaries
+        deeply, and membership lists and sets shallowly.
 
         Args:
             value: The value given.
-            written: Whether the value is written (``update()``) - a list is then copied whole too, a JSON
-                array holding documents.
+            written: Whether the value is written, including a literal wrapped in ``Value``.
 
         Returns:
-            The copy of a dict, list or set; any other value itself.
+            An independent snapshot where the value can change after the call.
         """
-        value_type = type(value)
-        if value_type is dict or (written and value_type is list):
+        if written and isinstance(value, Expression) and type(value) is not Value:
+            return ExpressionTraversal.map_values(
+                value, lambda literal: FilterValues._get_detached_literal(literal, written=True)
+            )
+        return FilterValues._get_detached_literal(value, written=written)
+
+    @staticmethod
+    def _get_detached_literal(value: Any, *, written: bool) -> Any:
+        if written and type(value) is Value:
+            literal = FilterValues.get_detached_value(value.value, written=True)
+            return value if literal is value.value else Value(literal)
+        if isinstance(value, memoryview):
+            return memoryview(value.tobytes())
+        if isinstance(value, dict) or (written and isinstance(value, (list, tuple, set, frozenset, bytearray))):
             try:
-                return copy.deepcopy(value)
+                try:
+                    return copy.deepcopy(value)
+                except TypeError:
+                    memo = FilterValues.get_buffer_copies(value)
+                    if not memo:
+                        raise
+                    return copy.deepcopy(value, memo)
             except RecursionError:
                 # Nested deeper than a copy reaches - deeper than JSON holds: the field refuses it as it is.
                 return value
-        if value_type is list or value_type is set:
-            return value_type(value)
+        if isinstance(value, list):
+            return list(value)
+        if isinstance(value, set):
+            return set(iter(value))
         return value
+
+    @staticmethod
+    def get_buffer_copies(value: Any) -> dict[int, Any]:
+        """Supply independent buffers for the container leaves deepcopy cannot copy."""
+        seen: set[int] = set()
+        copies: dict[int, Any] = {}
+        pending = [value]
+        while pending:
+            item = pending.pop()
+            identity = id(item)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            if isinstance(item, memoryview):
+                copies[identity] = memoryview(item.tobytes())
+            elif isinstance(item, dict):
+                pending.extend(item)
+                pending.extend(item.values())
+            elif isinstance(item, (list, tuple, set, frozenset)):
+                pending.extend(item)
+        return copies
 
     @staticmethod
     def get_list_lookup_value(key: str, value: Any) -> Any:

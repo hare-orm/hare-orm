@@ -58,19 +58,17 @@ class ReversibleRoundTrip(RoundTrip):
         super().__init__(connection)
         self.history: list[tuple[Migration, State]] = []
 
-    async def apply(self, operations: list[HareOperation]) -> None:
-        self.migration_count += 1
-        migration = Migration(name=f"{self.migration_count:04d}_step", app_label=APP_LABEL)
-        migration.operations = list(operations)
-        state_before = self.tracked_state.clone()
+    async def apply(self, operations: list[HareOperation]) -> Migration:
+        state_before = self.tracked_state
         async with self.editor.constraint_checking_disabled():
-            self.tracked_state = await migration.apply(self.tracked_state, dry_run=False, schema_editor=self.editor)
+            migration = await super().apply(operations)
         self.history.append((migration, state_before))
+        return migration
 
     async def roll_back(self) -> None:
         migration, state_before = self.history.pop()
         async with self.editor.constraint_checking_disabled():
-            await migration.unapply(state_before.clone(), schema_editor=self.editor)
+            await migration.unapply(state_before, schema_editor=self.editor)
         self.tracked_state = state_before
 
     async def query(self, sql: str) -> list[dict[str, Any]]:
@@ -463,7 +461,7 @@ async def test_backfill_column_converts_values_with_the_field(reversible_round_t
     assert len(rows) == 1
     payload = rows[0]["payload"]
     assert (json.loads(payload) if isinstance(payload, str) else payload) == {"a": 1}
-    token_field = model._meta.fields_map["token"]
+    token_field = round_trip.tracked_state.apps.get_binding("models.Record").fields_map["token"]
     assert round_trip.connection.dialect.types.get_python_value(token_field, rows[0]["token"]) == token
     assert rows[0]["duration"] == 90_000_000
 

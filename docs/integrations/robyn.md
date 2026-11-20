@@ -3,6 +3,9 @@
 `hare.contrib.frameworks.robyn` connects hare to a [Robyn](https://robyn.tech) application. Install it
 with the `robyn` extra (Robyn 0.88, pydantic).
 
+The Robyn 0.88 integration needs Python 3.12–3.14: that Robyn version has no
+Python 3.15 wheel. Core support for Python 3.15 does not remove this restriction.
+
 ```python
 from pydantic import BaseModel, ConfigDict
 
@@ -39,7 +42,8 @@ class HareRobyn(Robyn):
         file_object: str,
         *,
         hare_config: Mapping[str, Any] | HareConfig | str,
-        atomic_requests: bool | Sequence[str] = False,
+        hare_context: HareContext | None = None,
+        atomic_requests: bool | Iterable[str] = False,
         openapi: OpenAPI | None = None,
         health_routes: HealthRoutes | None = None,
         **kwargs: Any,
@@ -51,8 +55,9 @@ and `kwargs` what `Robyn()` takes.
 
 - **The `HareContext`.** The models are bound when the application is created; the context opens when a
   worker process starts — before the application's own `startup_handler` — and closes when it stops,
-  after its own `shutdown_handler`. The context is the global fallback, so every request sees it. On
-  shutdown `Hare.close_connections()` also waits for the background observers still running.
+  after its own `shutdown_handler`. Routes, middleware, authentication and WebSocket callbacks
+  activate this application's context. On
+  shutdown `HareContext.close_connections()` also waits for the background observers still running.
 - **Request queries are checked at startup.** `RequestQuery.check_declarations()` runs once the models
   are set up: a wrong [request query](request-queries.md) stops the process from starting.
 - **Request queries for handlers** and their parameters in the OpenAPI schema — see below.
@@ -108,6 +113,10 @@ whole address for a page's `next` and `previous`. A value the query refuses is a
 The OpenAPI schema (`HareOpenAPI`, the application's by default) lists each parameter of the query — a
 query parameter, a path parameter for one marked `InPath()` — with its type, limits, enum and
 description.
+
+Parameter names follow Pydantic's validation aliases and model configuration. `AliasChoices`
+documents the first accepted input name; its alternatives remain accepted by request parsing.
+A serialization alias does not rename an input parameter.
 
 ## <a id="responses"></a>Responses
 
@@ -168,3 +177,8 @@ Robyn's `TestClient` runs the application in an event loop of its own — with h
 `hare_app_transactional_db`: the application takes the test's context, its writes commit, and every table
 is emptied when the test ends — see [Application tests](../testing/setup.md#application-tests). It needs a
 server database or a SQLite file.
+
+An explicitly supplied `hare_context` is borrowed: the integration neither initializes nor closes it.
+The caller controls its lifetime. Without it, the application creates and closes a separate context.
+Application startup does not set a process-global fallback. Pass a test fixture explicitly as
+`hare_context=hare_app_db` or `hare_context=hare_app_transactional_db`.

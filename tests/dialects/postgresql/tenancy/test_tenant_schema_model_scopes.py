@@ -9,6 +9,7 @@ import os
 import pytest
 
 from hare.contrib.test import hare_test_context
+from hare.core.hare_context import HareContext
 from hare.exceptions import QueryError
 from hare.models.tenancy.tenancy import Tenancy
 from hare.models.tenancy.tenant_schemas import TenantSchemas
@@ -76,7 +77,7 @@ async def test_queries_run_in_the_schema_the_scope_gives_the_tenant_schema_model
         await create_tenants()
         shop = await ScopeShop.objects.get(id=1)
         with Tenancy.scope({ScopeNote: "acme", ScopeTask: "acme", ScopeOrder: 1}):
-            assert Tenancy.get_scope(ScopeNote) == "acme"
+            assert Tenancy.get_scope(HareContext.require_current().apps.get_binding(ScopeNote)) == "acme"
             note = await ScopeNote.objects.create(id=1, text="acme note", shop=shop)
             await ScopeNote.objects.bulk_create([ScopeNote(id=2, text="second"), ScopeNote(id=3, text="third")])
             await ScopeTask.objects.create(id=1, note=note)
@@ -102,7 +103,7 @@ async def test_a_base_class_entry_is_its_tenant_schema_subclasses():
     async with tenant_context():
         await create_tenants()
         with Tenancy.scope({ScopeTenantBase: "beta"}):
-            assert Tenancy.get_scope(ScopeMemo) == "beta"
+            assert Tenancy.get_scope(HareContext.require_current().apps.get_binding(ScopeMemo)) == "beta"
             await ScopeMemo.objects.create(id=1, text="beta memo")
         with Tenancy.scope("beta"):
             assert await ScopeMemo.objects.values_list("text", flat=True) == ["beta memo"]
@@ -133,7 +134,7 @@ async def test_a_tenant_schema_model_takes_one_tenant():
                 with Tenancy.scope({ScopeNote: scope}):
                     pass
         with Tenancy.scope({ScopeNote: Tenancy.any_of("acme")}):
-            assert Tenancy.get_scope(ScopeNote) == "acme"
+            assert Tenancy.get_scope(HareContext.require_current().apps.get_binding(ScopeNote)) == "acme"
         with Tenancy.scope({ScopeNote: "acme", ScopeTask: "beta"}):
             with pytest.raises(QueryError, match="different tenants"):
                 await ScopeNote.objects.count()

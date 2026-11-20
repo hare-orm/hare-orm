@@ -9,6 +9,9 @@ from hare.sql.terms.functions.function import Function
 class Date(Function):
     """The date of a term - ISO SQL's ``CAST(term AS DATE)``."""
 
+    structure_attributes = ()
+    has_repeatable_value = True
+
     def __init__(self, term: Any, alias: str | None = None) -> None:
         super().__init__("DATE", term, alias=alias)
 

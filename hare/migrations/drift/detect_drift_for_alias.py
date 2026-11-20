@@ -7,9 +7,8 @@ from hare.core.apps import Apps
 from hare.core.constants import DEFAULT_CONNECTION_NAME
 from hare.exceptions import ConfigurationError
 from hare.migrations.autodetection.migration_autodetector import MigrationAutodetector
-from hare.migrations.drift.detect_drift import detect_drift
 from hare.migrations.drift.drift_result import DriftResult
-from hare.migrations.state.model_state import ModelState
+from hare.migrations.drift.shadow.shadow_drift import ShadowDrift
 
 
 async def detect_drift_for_alias(
@@ -53,7 +52,7 @@ async def detect_drift_for_alias(
         label
         for label, models in apps.items()
         if label not in apps_config
-        and any(model._meta.default_connection == connection_alias for model in models.values())
+        and any(apps.get_binding(model).default_connection == connection_alias for model in models.values())
     ]
     if app_labels is None:
         target_labels = labels_on_alias
@@ -65,23 +64,29 @@ async def detect_drift_for_alias(
     if not target_labels:
         raise ConfigurationError(f"No app uses connection {connection_alias!r}")
 
+    bindings_on_connection = {
+        (app_label, model_name): model_binding
+        for app_label, models in apps.items()
+        for model_name, model in models.items()
+        if (model_binding := apps.get_binding(model)).default_connection in (None, connection_alias)
+    }
     new_state = MigrationAutodetector(apps, apps_config).current_state()
-    # A runtime-registered model can share an app label with models bound to another
-    # connection - only the ones on `connection_alias` belong to this check. A swapped model has no table.
-    for app_label, model_name in list(new_state.models):
-        if app_label not in target_labels:
-            continue
-        if new_state.is_swapped_model(app_label, model_name):
-            del new_state.models[(app_label, model_name)]
-            continue
-        model_connection = apps[app_label][model_name]._meta.default_connection
-        if model_connection is not None and model_connection != connection_alias:
-            del new_state.models[(app_label, model_name)]
+    for key in list(new_state.models):
+        if key[0] in target_labels and (new_state.is_swapped_model(*key) or key not in bindings_on_connection):
+            del new_state.models[key]
     unmanaged_model_states = [
-        ModelState.make_from_model(app_label, model)
+        new_state.environment.get_model_state(app_label, binding)
         for app_label in target_labels
-        for model in apps.apps.get(app_label, {}).values()
-        if model._meta.managed is False and model._meta.default_connection in (connection_alias, None)
+        for model_name in apps.apps.get(app_label, {})
+        if (binding := bindings_on_connection.get((app_label, model_name))) is not None and binding.managed is False
     ]
     connection = apps._connections.get(connection_alias)
-    return await detect_drift(connection, new_state, target_labels, schema, unmanaged_model_states, journal_tables)
+    return await ShadowDrift(
+        connection,
+        new_state,
+        target_labels,
+        schema,
+        unmanaged_model_states,
+        journal_tables,
+        connection_model_keys=bindings_on_connection,
+    ).detect()

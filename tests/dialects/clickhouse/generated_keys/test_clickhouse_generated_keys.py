@@ -8,9 +8,9 @@ import os
 import pytest
 
 from hare.contrib.test import hare_test_context
+from hare.core.hare_context import HareContext
 from hare.exceptions import ValidationError
 from hare.migrations.operations import SynchronizeKeySeries
-from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state import State
 from hare.models.write.generated_keys import GeneratedKeys
 from tests.dialects.clickhouse.generated_keys.models import Badge, BadgeAward, Holder, Ticket
@@ -18,7 +18,7 @@ from tests.dialects.clickhouse.generated_keys.models import Badge, BadgeAward, H
 
 @pytest.mark.asyncio
 async def test_keys_are_taken_from_the_series(clickhouse_generated_keys_db):
-    connection = Ticket._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Ticket).get_connection()
     first = await Ticket.objects.create(subject="a")
     second = Ticket(subject="b")
     await second.save()
@@ -35,7 +35,7 @@ async def test_keys_are_taken_from_the_series(clickhouse_generated_keys_db):
     # A process moves the series past the table's keys before taking its first keys; a migration does
     # it whenever it runs.
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
-    state = State(models={("models", "Ticket"): ModelState.make_from_model("models", Ticket)})
+    state = State.from_models([Ticket], app_label="models")
     await SynchronizeKeySeries("Ticket").database_forward("models", state, state, editor)
     assert (await Ticket.objects.create(subject="next")).pk == own_key + 1
 
@@ -57,20 +57,23 @@ async def test_each_database_of_the_server_has_a_separate_series(clickhouse_gene
 
 @pytest.mark.asyncio
 async def test_a_key_beyond_the_field_is_refused(clickhouse_generated_keys_db):
-    connection = Ticket._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Ticket).get_connection()
     await Badge.objects.create(id=2**15 - 1, label="last")
-    await connection.synchronize_key_series(Badge)
-    with pytest.raises(ValidationError, match="of the series"):
+    await connection.synchronize_key_series(clickhouse_generated_keys_db.apps.get_binding(Badge))
+    with pytest.raises(ValidationError) as expected:
+        HareContext.require_current().apps.get_binding(Badge).pk.validate(2**15)
+    with pytest.raises(ValidationError) as raised:
         await Badge.objects.create(label="beyond")
+    assert str(raised.value) == str(expected.value)
     assert await Badge.objects.count() == 1
 
 
 @pytest.mark.asyncio
 async def test_a_database_generating_keys_as_it_writes_takes_none_before(clickhouse_generated_keys_db, monkeypatch):
-    connection = Ticket._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Ticket).get_connection()
     monkeypatch.setattr(connection, "features", connection.features.replace(takes_keys_before_insert=False))
     ticket = Ticket(subject="kept")
-    await GeneratedKeys.assign(Ticket, connection, [ticket])
+    await GeneratedKeys.assign(HareContext.require_current().apps.get_binding(Ticket), connection, [ticket])
     assert ticket.pk is None
 
 

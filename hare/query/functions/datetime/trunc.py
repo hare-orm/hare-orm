@@ -17,14 +17,18 @@ from hare.query.plans.enums import PlanPartType
 from hare.sql.enums import DateTruncSource, TruncType
 from hare.sql.functions.datetime.date_trunc import DateTrunc
 from hare.sql.terms.term import Term
-from hare.time import Timezone
+from hare.time.system_zone import SystemZone
+from hare.time.zone_names import ZoneNames
+from hare.time.zone_settings import ZoneSettings
 
 
 class Trunc(Function):
     """A date, time or datetime truncated to ``type`` - a datetime in the current zone
-    (``Timezone.override()``, else Hare's configured one) or in ``tzinfo``, coming back as the
+    (``ZoneSettings.override()``, else Hare's configured one) or in ``tzinfo``, coming back as the
     moment it starts: ``Trunc("created_at", "month", tzinfo="Europe/Moscow")``. ``week`` starts on
-    Monday; ``date``/``time`` take a datetime's date or time of day."""
+    Monday; ``date``/``time`` take a datetime's date or time of day. Hour truncation at time-zone
+    transitions with a fractional-hour offset change follows the dialect's temporal semantics;
+    the returned instant need not have local minute zero."""
 
     #: Its options are part of the key (``get_plan_options()``).
     plan_parts: ClassVar[DeclaredPlanParts] = (
@@ -66,9 +70,9 @@ class Trunc(Function):
         known_types = [str(member) for member in TruncType]
         if trunc_type_name not in known_types:
             raise FieldError(f"Trunc() type must be one of {', '.join(known_types)}, got {trunc_type_name!r}")
-        super().__init__(field)  # type: ignore[arg-type]
+        super().__init__(field)
         self.truncation = TruncType(str(trunc_type_name))
-        self.zone_name = None if tzinfo is None else Timezone.get_zone_name(tzinfo)
+        self.zone_name = None if tzinfo is None else ZoneNames.get_zone_name(tzinfo)
 
     def get_plan_options(self) -> tuple[Any, ...]:
         return (self.truncation, self.zone_name)
@@ -84,11 +88,9 @@ class Trunc(Function):
         """
         is_calendar_type = self.truncation in self.CALENDAR_TYPES
         if (source == DateTruncSource.DATE and not is_calendar_type) or (
-            source == DateTruncSource.TIME and is_calendar_type and self.truncation != TruncType.TIME
+            source == DateTruncSource.TIME and is_calendar_type
         ):
             raise FieldError(f"{type(self).__name__}() can't truncate a {source.value} to {self.truncation.value!r}")
-        if source == DateTruncSource.TIME and self.truncation == TruncType.DATE:
-            raise FieldError(f"{type(self).__name__}() can't take the date of a time")
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
         result = super().get_result(expression_context)
@@ -100,10 +102,9 @@ class Trunc(Function):
             trunc_term.source = source
             if source == DateTruncSource.DATETIME:
                 trunc_term.zone_name = self.zone_name or (
-                    Timezone.name() if Timezone.get_use_timezone() else Timezone.get_local_zone_name()
+                    ZoneSettings.name() if ZoneSettings.get_use_timezone() else SystemZone.get_local_zone_name()
                 )
         output_field = self._get_truncated_output_field(source_field, source)
-        self.field_object = output_field
         return ExpressionResult(term=trunc_term, joins=result.joins, output_field=output_field)
 
     def _get_truncated_output_field(self, source_field: Field[Any], source: DateTruncSource) -> Field[Any]:

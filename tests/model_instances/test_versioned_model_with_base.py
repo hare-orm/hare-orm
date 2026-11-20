@@ -7,6 +7,7 @@ import pytest
 
 from hare import fields
 from hare.contrib.versioning import VersionedModel
+from hare.core.apps.model_binding_graph import ModelBindingGraph
 from hare.exceptions import ConfigurationError
 from hare.models import Model
 
@@ -21,6 +22,8 @@ class ProjectBase(Model):
 
 
 def test_versioned_model_first_keys_the_rows_by_id_and_version():
+    declaration_graph = ModelBindingGraph()
+
     class VersionedFirst(VersionedModel, ProjectBase):
         title = fields.CharField(max_length=10)
 
@@ -30,8 +33,8 @@ def test_versioned_model_first_keys_the_rows_by_id_and_version():
     class Article(VersionedFirst):
         pass
 
-    assert [field.model_field_name for field in Article._meta.pk_fields] == ["id", "version"]
-    assert Article._meta.fields_map["id"].version == 7
+    assert [field.model_field_name for field in declaration_graph.include(Article).pk_fields] == ["id", "version"]
+    assert declaration_graph.include(Article).fields_map["id"].version == 7
 
 
 def test_the_base_first_is_refused_with_the_order_to_write():

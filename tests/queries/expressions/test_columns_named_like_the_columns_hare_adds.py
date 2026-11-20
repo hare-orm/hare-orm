@@ -8,7 +8,7 @@ import pytest
 import pytest_asyncio
 
 from hare.contrib.test import RollbackIsolation, requires_features
-from hare.contrib.test.isolated_contexts import hare_test_context
+from hare.core.hare_context import HareContext
 from hare.instrumentation import Observers, RowsChanged
 from hare.query.expressions import F, Value
 from hare.query.hare_column_names import HareColumnNames
@@ -23,12 +23,7 @@ from tests.utils.database_under_test import DatabaseUnderTest
 
 @pytest_asyncio.fixture(scope="module")
 async def spaced_columns_module() -> AsyncIterator[Any]:
-    async with hare_test_context(
-        modules=["tests.queries.expressions.models_hare_column_names"],
-        db_url=DatabaseUnderTest.get_url(),
-        app_label="models",
-        connection_label="models",
-    ) as context:
+    async with DatabaseUnderTest.open_model_context(["tests.queries.expressions.models_hare_column_names"]) as context:
         yield context
 
 
@@ -41,12 +36,7 @@ async def spaced_columns_db(spaced_columns_module: Any) -> AsyncIterator[Any]:
 @pytest_asyncio.fixture(scope="function")
 async def spaced_columns_committed_db() -> AsyncIterator[Any]:
     """A context of its own, its writes committed - the observers hear a write once it commits."""
-    async with hare_test_context(
-        modules=["tests.queries.expressions.models_hare_column_names"],
-        db_url=DatabaseUnderTest.get_url(),
-        app_label="models",
-        connection_label="models",
-    ) as context:
+    async with DatabaseUnderTest.open_model_context(["tests.queries.expressions.models_hare_column_names"]) as context:
         yield context
 
 
@@ -55,11 +45,8 @@ async def locked_db() -> AsyncIterator[Any]:
     """The model with an optimistic lock - on a database reporting the rows a write changed."""
     if not DatabaseUnderTest.get_dialect().features.reports_written_row_count:
         pytest.skip("an optimistic lock needs the count of the rows a write changed")
-    async with hare_test_context(
-        modules=["tests.queries.expressions.models_hare_column_names_locked"],
-        db_url=DatabaseUnderTest.get_url(),
-        app_label="models",
-        connection_label="models",
+    async with DatabaseUnderTest.open_model_context(
+        ["tests.queries.expressions.models_hare_column_names_locked"]
     ) as context:
         yield context
 
@@ -69,15 +56,33 @@ async def create_rows() -> None:
     await SpacedColumns.objects.create(id=2, app="second", model_name="m2", window=20, ordering=1, parent_id=1)
 
 
-def test_a_name_of_hare_s_a_column_holds_is_the_next_free_one():
-    assert HareColumnNames.get_free_name("hare app", [SpacedColumns]) == "hare app 2"
-    assert HareColumnNames.get_free_name("hare app", [SpacedColumns], ["hare app 2"]) == "hare app 3"
-    assert HareColumnNames.get_free_name("hare model 2", [SpacedColumns]) == "hare model 2"
-    old_value_names = HareColumnNames.get_old_value_names(SpacedColumns)
+def test_a_name_of_hare_s_a_column_holds_is_the_next_free_one(spaced_columns_db):
+    assert (
+        HareColumnNames.get_free_name("hare app", [HareContext.require_current().apps.get_binding(SpacedColumns)])
+        == "hare app 2"
+    )
+    assert (
+        HareColumnNames.get_free_name(
+            "hare app", [HareContext.require_current().apps.get_binding(SpacedColumns)], ["hare app 2"]
+        )
+        == "hare app 3"
+    )
+    assert (
+        HareColumnNames.get_free_name("hare model 2", [HareContext.require_current().apps.get_binding(SpacedColumns)])
+        == "hare model 2"
+    )
+    old_value_names = HareColumnNames.get_old_value_names(
+        HareContext.require_current().apps.get_binding(SpacedColumns)
+    )
     assert old_value_names["hare depth"] == "hare old hare depth 2"
     assert len(set(old_value_names.values())) == len(old_value_names)
     # Told apart regardless of letter case - SQLite reads "HARE DEPTH" as "hare depth".
-    assert HareColumnNames.get_free_name("hare depth", [UpperCaseDepthNode]) == "hare depth 3"
+    assert (
+        HareColumnNames.get_free_name(
+            "hare depth", [HareContext.require_current().apps.get_binding(UpperCaseDepthNode)]
+        )
+        == "hare depth 3"
+    )
 
 
 @pytest.mark.asyncio

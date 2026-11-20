@@ -61,7 +61,7 @@ class EncryptionObserver(WriteObserver):
             rows = await connection.execute_dicts(
                 f"SELECT {literals.quote_identifier('id')} AS id, {literals.quote_identifier('amount')} AS amount, "
                 f"{literals.quote_identifier('amount_blind_index')} AS amount_blind_index "
-                f"FROM {literals.quote_identifier(model._meta.db_table)}"
+                f"FROM {literals.quote_identifier(scenario.context.apps.get_binding(model).db_table)}"
             )
             stored[role.value] = {row["id"]: (row["amount"], row["amount_blind_index"]) for row in rows}
         return stored

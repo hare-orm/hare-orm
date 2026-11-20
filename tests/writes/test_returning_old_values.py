@@ -7,6 +7,7 @@ import pytest
 
 from hare.contrib.test import requires_features
 from hare.core.connections.connections import Connections
+from hare.core.hare_context import HareContext
 from hare.exceptions import FieldError, UnSupportedError
 from hare.query.expressions import F
 from hare.query.hare_column_names import HareColumnNames
@@ -68,6 +69,7 @@ async def test_a_server_without_old_values_refuses_them(db, monkeypatch):
 
 
 @pytest.mark.database_independent
+@pytest.mark.usefixtures("model_conversion_context")
 def test_wrong_old_values_are_refused():
     query = IntFields.objects.filter(id=1).update(intnum=1)
     with pytest.raises(FieldError, match="name the fields returned as written too"):
@@ -79,8 +81,11 @@ def test_wrong_old_values_are_refused():
 
 
 @pytest.mark.database_independent
+@pytest.mark.usefixtures("model_conversion_context")
 def test_the_old_values_of_long_columns_come_under_names_within_the_limit():
-    old_value_names = HareColumnNames.get_old_value_names(LongColumnNames)
+    old_value_names = HareColumnNames.get_old_value_names(
+        HareContext.require_current().apps.get_binding(LongColumnNames)
+    )
     assert all(len(name.encode()) <= IDENTIFIER_LENGTH_LIMIT for name in old_value_names.values())
     assert len(set(old_value_names.values())) == len(old_value_names)
 

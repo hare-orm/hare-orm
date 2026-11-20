@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from typing import Annotated
 
 import pytest
+from pydantic import TypeAdapter, ValidationError
 
 from hare.contrib.request_query import (
     CursorPagination,
@@ -251,7 +252,7 @@ async def test_a_class_without_a_queryset_only_serves_as_a_base(library):
         class Meta:
             queryset = Book.objects.all()
 
-    assert "declares no Meta.queryset" in declaration_error(BaseBookQuery)
+    assert "Meta.queryset is required" in declaration_error(BaseBookQuery)
     assert ConcreteBookQuery in BaseBookQuery.get_concrete_subclasses()
     assert BaseBookQuery not in RequestQuery.get_concrete_subclasses()
     assert sorted(book.title for book in await ConcreteBookQuery(author=1).fetch()) == ["Alpha", "Beta"]
@@ -334,8 +335,11 @@ def test_options_check_their_values():
         OffsetPagination(default_limit=0)
     with pytest.raises(ConfigurationError, match="default_limit <= max_limit"):
         OffsetPagination(default_limit=50, max_limit=10)
-    with pytest.raises(ConfigurationError, match="max_limit <= 100000"):
-        CursorPagination(max_limit=1_000_000)
+    pagination = CursorPagination(max_limit=1_000_000)
+    limit = TypeAdapter(pagination.get_parameter_fields()[0].annotation)
+    assert limit.validate_python("1000000") == 1_000_000
+    with pytest.raises(ValidationError):
+        limit.validate_python("1000001")
     with pytest.raises(ConfigurationError, match="must be an int"):
         OffsetPagination(default_limit=True)
     with pytest.raises(ConfigurationError, match="without a direction"):
@@ -424,7 +428,7 @@ async def test_meta_collections_accept_compatible_filter_objects(library, contai
             api_getter = container([ApiValueMapping(set_key="display_title", key="title")])
 
     declaration = BookQuery.get_declaration()
-    assert BookQuery.model_fields["title"].description == "The exact title"
+    assert BookQuery.prepare_parameters().model_fields["title"].description == "The exact title"
     assert len(declaration.api_mappings) == 1
     objs = await BookQuery(title="Alpha").fetch()
     assert [obj.title for obj in objs] == ["Alpha"]

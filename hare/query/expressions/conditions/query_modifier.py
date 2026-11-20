@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from hare.query.expressions.expression_result import TableCriterionTuple
+from hare.sql.terms.criteria.basic_criterion import BasicCriterion
 from hare.sql.terms.criteria.criterion import Criterion
 from hare.sql.terms.criteria.empty_criterion import EmptyCriterion
 
@@ -65,7 +66,9 @@ class QueryModifier:
         """
         while len(modifiers) > 1:
             modifiers = [
-                combine(*modifiers[position : position + 2]) if position + 1 < len(modifiers) else modifiers[position]
+                combine(modifiers[position], modifiers[position + 1])
+                if position + 1 < len(modifiers)
+                else modifiers[position]
                 for position in range(0, len(modifiers), 2)
             ]
         return modifiers[0] if modifiers else QueryModifier()
@@ -73,16 +76,16 @@ class QueryModifier:
     def _and_criterion(self) -> Criterion:
         return QueryModifier._and(self.where_criterion, self.having_criterion)
 
+    def get_expression_criterion(self) -> Criterion:
+        """Combine WHERE and HAVING as a scalar condition; an empty condition is true."""
+        return self._and_criterion() or BasicCriterion.always_true()
+
     def __or__(self, other: QueryModifier) -> QueryModifier:
         where_criterion = having_criterion = None
         if self.having_criterion or other.having_criterion:
             having_criterion = QueryModifier._or(self._and_criterion(), other._and_criterion())
         else:
-            where_criterion = (
-                (self.where_criterion | other.where_criterion)
-                if self.where_criterion and other.where_criterion
-                else (self.where_criterion or other.where_criterion)
-            )
+            where_criterion = QueryModifier._or(self.where_criterion, other.where_criterion)
         return self.__class__(
             where_criterion,
             self.joins + other.joins,

@@ -14,6 +14,22 @@ class ModelNaming:
     """Python names of the models and fields inspectdb generates."""
 
     @staticmethod
+    def allocate_attribute_name(
+        preferred_name: str, used_names: set[str], reserved_names: set[str] | frozenset[str]
+    ) -> str:
+        """Reserve one identifier without shadowing a declared or inherited attribute."""
+        attribute_name = preferred_name
+        while attribute_name in reserved_names:
+            attribute_name = f"{attribute_name}_field"
+        if attribute_name in used_names:
+            suffix = 2
+            while f"{attribute_name}_{suffix}" in used_names or f"{attribute_name}_{suffix}" in reserved_names:
+                suffix += 1
+            attribute_name = f"{attribute_name}_{suffix}"
+        used_names.add(attribute_name)
+        return attribute_name
+
+    @staticmethod
     def get_safe_identifier(name: str, *, digit_prefix: str) -> str:
         """``name`` made a usable identifier: an illegal character becomes an underscore (letters of
         any script stay), a leading digit gets ``digit_prefix``, a keyword gets a trailing

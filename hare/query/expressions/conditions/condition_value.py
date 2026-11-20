@@ -13,7 +13,6 @@ from hare.query.expressions.subqueries.exists import Exists
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 from hare.sql.terms.bracket import Bracket
-from hare.sql.terms.criteria.basic_criterion import BasicCriterion
 
 
 class ConditionValue(Expression):
@@ -55,7 +54,7 @@ class ConditionValue(Expression):
         modifier: QueryModifier = self.condition.get_result(
             dataclasses.replace(expression_context, window_function_filter_allowed=True)
         )
-        criterion = modifier._and_criterion() or BasicCriterion.always_true()
+        criterion = modifier.get_expression_criterion()
         # In parentheses: compared with a value (filter(is_open=True)) the condition stays one operand.
         return ExpressionResult(
             term=Bracket(criterion), joins=list(modifier.joins), output_field=ConditionValue.OUTPUT_FIELD

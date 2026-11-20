@@ -3,12 +3,13 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from hare.ddl.enums import SchemaPartType
 from hare.dialects.base.connection.connection_option import ConnectionOption
 from hare.dialects.base.connection.connection_options import ConnectionOptions
 from hare.dialects.clickhouse.clickhouse_dialect import ClickhouseDialect
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.clickhouse.indexes.constants import CLICKHOUSE_BLOOM_FILTER_FALSE_POSITIVE
 from hare.dialects.enums import ConnectionOptionType
-from hare.inspectdb.introspection.enums import SchemaPartType
 
 #: The port of ClickHouse's HTTP interface.
 CLICKHOUSE_DEFAULT_HTTP_PORT = 8123
@@ -30,10 +31,10 @@ CLICKHOUSE_INTEGER_LITERAL_RANGE = (-(2**63), 2**63 - 1)
 #: The integer types wider than 64 bits and the numbers each holds - a literal beyond
 #: ``CLICKHOUSE_INTEGER_LITERAL_RANGE`` is read from its text as the first one holding it.
 CLICKHOUSE_WIDE_INTEGER_TYPES = (
-    ("Int128", -(2**127), 2**127 - 1),
-    ("UInt128", 0, 2**128 - 1),
-    ("Int256", -(2**255), 2**255 - 1),
-    ("UInt256", 0, 2**256 - 1),
+    (ClickhouseTypeName.INT128, -(2**127), 2**127 - 1),
+    (ClickhouseTypeName.UINT128, 0, 2**128 - 1),
+    (ClickhouseTypeName.INT256, -(2**255), 2**255 - 1),
+    (ClickhouseTypeName.UINT256, 0, 2**256 - 1),
 )
 #: The first and the last year a ``Date32`` column and a ``DateTime64`` column store, whole - the
 #: server turns a value outside them into the nearest one without an error, so hare refuses it.
@@ -112,24 +113,21 @@ CLICKHOUSE_TYPE_MAP: list[tuple[str, str, dict[str, Any]]] = [
 CLICKHOUSE_SINGLE_VARIANT_TYPE_TEMPLATE = "Variant({0})"
 #: The beginning of a ``Variant`` column's type.
 CLICKHOUSE_VARIANT_TYPE_PREFIX = "Variant("
-#: The wrappers of a column type that change no field - a nullable column and a dictionary-encoded one.
-CLICKHOUSE_TYPE_WRAPPERS = ("Nullable(", "LowCardinality(")
-#: The column types that are never ``Nullable`` - a container's NULL is written as an empty one (a
-#: geometry's too, but a point's, which has none), a ``Variant`` and a ``Dynamic`` column hold NULL
-#: themselves.
+#: The column types that are never wrapped in ``Nullable``. Container and geometry fields use
+#: nonnullable storage; ``Variant`` and ``Dynamic`` represent NULL in their own format.
 CLICKHOUSE_NEVER_NULLABLE_TYPE_PREFIXES = (
     "Array(",
     "Map(",
     "Tuple(",
     "Nested(",
     "Variant(",
-    "Dynamic",
-    "Point",
-    "Ring",
-    "LineString",
-    "MultiLineString",
-    "Polygon",
-    "MultiPolygon",
+    ClickhouseTypeName.DYNAMIC,
+    ClickhouseTypeName.POINT,
+    ClickhouseTypeName.RING,
+    ClickhouseTypeName.LINE_STRING,
+    ClickhouseTypeName.MULTI_LINE_STRING,
+    ClickhouseTypeName.POLYGON,
+    ClickhouseTypeName.MULTI_POLYGON,
 )
 #: The name of the connection's database - the namespace of its tables.
 CLICKHOUSE_CURRENT_DATABASE_SQL = "SELECT currentDatabase() AS name"
@@ -197,10 +195,10 @@ CLICKHOUSE_INDEXES_SQL = (
 #: The settings of a ClickHouse connection beyond its address and credentials.
 CLICKHOUSE_CONNECTION_OPTIONS = ConnectionOptions(
     ConnectionOption("secure", ConnectionOptionType.BOOLEAN),
-    ConnectionOption("native_port", ConnectionOptionType.WHOLE_NUMBER, minimum=1, maximum=65535),
+    ConnectionOption("native_port", ConnectionOptionType.WHOLE_NUMBER),
     ConnectionOption("compress", ConnectionOptionType.BOOLEAN),
-    ConnectionOption("connect_timeout", ConnectionOptionType.SECONDS, positive=True, maximum=3600),
-    ConnectionOption("send_receive_timeout", ConnectionOptionType.SECONDS, positive=True, maximum=86400),
+    ConnectionOption("connect_timeout", ConnectionOptionType.SECONDS),
+    ConnectionOption("send_receive_timeout", ConnectionOptionType.SECONDS),
     ConnectionOption("cluster", ConnectionOptionType.TEXT),
     ConnectionOption("async_insert", ConnectionOptionType.BOOLEAN),
     ConnectionOption("wait_for_async_insert", ConnectionOptionType.BOOLEAN),

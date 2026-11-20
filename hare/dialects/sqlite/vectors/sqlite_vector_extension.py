@@ -9,6 +9,7 @@ from typing import Any, ClassVar
 
 import aiosqlite
 
+from hare.dialects.sqlite.connection.sqlite_extension_loading import SqliteExtensionLoading
 from hare.dialects.sqlite.constants import (
     SQLITE_VECTOR_EXTENSION_OPTION,
     SQLITE_VECTOR_NEGATIVE_INNER_PRODUCT_FUNCTION_NAME,
@@ -46,11 +47,7 @@ class SqliteVectorExtension:
             raise ConfigurationError(
                 f"{option_name}=True needs the sqlite-vec package - install {SQLITE_VECTOR_EXTENSION_PACKAGE}"
             )
-        if not hasattr(sqlite3.Connection, "enable_load_extension"):
-            raise ConfigurationError(
-                f"{option_name}=True needs a Python whose sqlite3 module loads extensions - this one was built "
-                "without them (SQLITE_OMIT_LOAD_EXTENSION)"
-            )
+        SqliteExtensionLoading.raise_if_unavailable(option_name)
 
     @classmethod
     def load(cls, raw_connection: sqlite3.Connection) -> None:
@@ -59,11 +56,8 @@ class SqliteVectorExtension:
         Args:
             raw_connection: The sqlite3 connection.
         """
-        raw_connection.enable_load_extension(True)
-        try:
+        with SqliteExtensionLoading.enabled(raw_connection):
             raw_connection.load_extension(cls.sqlite_vec_module.loadable_path())
-        finally:
-            raw_connection.enable_load_extension(False)
 
     @classmethod
     async def install(cls, connection: aiosqlite.Connection) -> None:

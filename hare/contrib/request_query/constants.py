@@ -5,8 +5,8 @@ from hare.query.enums import Lookup
 #: The inner class a request query declares its options in.
 META_CLASS_NAME = "Meta"
 
-#: The key a request query class's checked declaration is kept under in the class's bucket.
-DECLARATION_BUCKET_KEY = "declaration"
+#: The key of the completed parameter schema and checked declaration in the class's bucket.
+GENERATION_BUCKET_KEY = "generation"
 
 #: The key a request query class's options that add parameters are kept under in the class's bucket.
 REQUEST_OPTIONS_BUCKET_KEY = "request_options"
@@ -66,10 +66,6 @@ META_OPTION_MEMBERS = {
 #: The annotation ``count_by()`` counts the rows of each value into - named so no model field
 #: collides with it.
 ROW_COUNT_ANNOTATION = "request_query_row_count"
-
-#: The SQL counting the rows of a group - every dialect has it, and it counts a model without a
-#: primary key too.
-ROW_COUNT_SQL = "COUNT(*)"
 
 #: The generic containers a list-shaped value may be annotated with.
 LIST_CONTAINERS = (list, set, frozenset, tuple)

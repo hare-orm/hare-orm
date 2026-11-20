@@ -2,6 +2,7 @@ import uuid
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.exceptions import (
     QueryError,
 )
@@ -18,7 +19,7 @@ def _ancestors_cte(root_id: int):
     """Builds a `WITH RECURSIVE ancestors AS (...)` body walking Category.parent_id upward from
     root_id - using the model's own dialect-correct query_class (not the dialect-generic
     hare.sql.Query directly), matching with_cte()'s own documented convention."""
-    query_cls = Category._meta.connection.query_class
+    query_cls = HareContext.require_current().apps.get_queryset(Category).get_connection().query_class
     category = Table("category")
     ancestors = Table("ancestors")
     base = query_cls.from_(category).select(category.id, category.parent_id).where(category.id == root_id)
@@ -41,7 +42,7 @@ async def test_with_cte_basic_attachment(db):
     await Category.objects.create(name="root")
     other = await Category.objects.create(name="other")
 
-    query_cls = Category._meta.connection.query_class
+    query_cls = HareContext.require_current().apps.get_queryset(Category).get_connection().query_class
     category = Table("category")
     only_root = query_cls.from_(category).select(category.id).where(category.name == "root")
 
@@ -74,11 +75,7 @@ async def test_with_cte_body_prefetch_related_raises_configuration_error(db):
 
 @pytest.mark.asyncio
 async def test_with_cte_body_select_related_raises_configuration_error(db):
-    """Same guard, .select_related() side - select_related() on a CTE body doesn't blow up the
-    same way (the joined columns DO make it into the compiled SQL, just under an internal alias
-    convention no caller is expected to know), but it's still a loading strategy nobody asked for
-    that can never resolve through the normal Model._init_from_db() path - reject it the same way
-    as prefetch_related() rather than silently succeeding on an undocumented alias."""
+    """A CTE body refuses select_related(), which is a model-loading operation on the outer query."""
     author = await Author.objects.create(name="Tolkien")
     await Book.objects.create(name="LOTR", author=author, rating=5)
 
@@ -94,7 +91,7 @@ async def test_with_cte_name_cannot_break_out_of_the_with_clause(db):
     this exact payload replaced the whole SELECT/FROM and returned rows from an unrelated table."""
     await Category.objects.create(name="root")
 
-    query_cls = Category._meta.connection.query_class
+    query_cls = HareContext.require_current().apps.get_queryset(Category).get_connection().query_class
     category = Table("category")
     inner = query_cls.from_(category).select(category.id)
 
@@ -216,7 +213,7 @@ async def test_with_cte_propagates_to_union_single_branch(db):
     await Category.objects.create(name="root")
     other = await Category.objects.create(name="other")
 
-    query_cls = Category._meta.connection.query_class
+    query_cls = HareContext.require_current().apps.get_queryset(Category).get_connection().query_class
     category = Table("category")
     only_root = query_cls.from_(category).select(category.id).where(category.name == "root")
 
@@ -235,7 +232,7 @@ async def test_with_cte_propagates_to_union_both_branches(db):
     await Category.objects.create(name="other_root")
     await Category.objects.create(name="unrelated")
 
-    query_cls = Category._meta.connection.query_class
+    query_cls = HareContext.require_current().apps.get_queryset(Category).get_connection().query_class
     category = Table("category")
     only_root = query_cls.from_(category).select(category.id).where(category.name == "root")
     only_other_root = query_cls.from_(category).select(category.id).where(category.name == "other_root")
@@ -255,7 +252,7 @@ async def test_with_cte_union_same_name_different_body_raises_configuration_erro
     await Category.objects.create(name="root")
     await Category.objects.create(name="other_root")
 
-    query_cls = Category._meta.connection.query_class
+    query_cls = HareContext.require_current().apps.get_queryset(Category).get_connection().query_class
     category = Table("category")
     only_root = query_cls.from_(category).select(category.id).where(category.name == "root")
     only_other_root = query_cls.from_(category).select(category.id).where(category.name == "other_root")
@@ -280,7 +277,7 @@ async def test_with_cte_propagates_to_union_count(db):
     await Category.objects.create(name="root")
     other = await Category.objects.create(name="other")
 
-    query_cls = Category._meta.connection.query_class
+    query_cls = HareContext.require_current().apps.get_queryset(Category).get_connection().query_class
     category = Table("category")
     only_root = query_cls.from_(category).select(category.id).where(category.name == "root")
 
@@ -342,7 +339,7 @@ async def test_rawsql_in_lookup_is_parenthesized(db):
     await Category.objects.create(name="root")
     await Category.objects.create(name="other")
 
-    query_cls = Category._meta.connection.query_class
+    query_cls = HareContext.require_current().apps.get_queryset(Category).get_connection().query_class
     category = Table("category")
     only_root = query_cls.from_(category).select(category.id).where(category.name == "root")
 
@@ -358,13 +355,18 @@ def _chain_ancestors_cte(leaf_id: int, *, apply_ambient_scope: bool):
     """Same shape as _ancestors_cte() above, but walking SoftDeleteSelfReferentialChain.parent_id
     - apply_ambient_scope controls whether RowScopes.get_criterion() gets folded
     into the base case/recursive step, to directly compare the buggy and fixed behavior."""
-    query_cls = SoftDeleteSelfReferentialChain._meta.connection.query_class
+    query_cls = (
+        HareContext.require_current().apps.get_queryset(SoftDeleteSelfReferentialChain).get_connection().query_class
+    )
     chain = Table("softdeleteselfreferentialchain")
     ancestors = Table("ancestors")
     scope = (
-        RowScopes.of(SoftDeleteSelfReferentialChain).get_criterion(
+        RowScopes.of(HareContext.require_current().apps.get_binding(SoftDeleteSelfReferentialChain)).get_criterion(
             chain,
-            dialect=SoftDeleteSelfReferentialChain._meta.connection.dialect,
+            dialect=HareContext.require_current()
+            .apps.get_queryset(SoftDeleteSelfReferentialChain)
+            .get_connection()
+            .dialect,
             connection=None,
         )
         if apply_ambient_scope
@@ -402,11 +404,18 @@ async def test_with_cte_recursive_step_respects_soft_delete_ambient_scope(db):
     # mutating soft_delete_field directly via .update()/.save()). query_cls, not hare.sql.Query
     # directly, for the same dialect-correct-placeholder reasoning _chain_ancestors_cte() itself
     # already documents.
-    query_cls = SoftDeleteSelfReferentialChain._meta.connection.query_class
+    query_cls = (
+        HareContext.require_current().apps.get_queryset(SoftDeleteSelfReferentialChain).get_connection().query_class
+    )
     chain = Table("softdeleteselfreferentialchain")
     soft_delete_middle = query_cls.update(chain).set(chain.deleted_at, Timezone.now()).where(chain.id == middle.pk)
     sql, params = soft_delete_middle.get_parameterized_sql()
-    await SoftDeleteSelfReferentialChain._meta.connection.execute(sql, params)
+    await (
+        HareContext.require_current()
+        .apps.get_queryset(SoftDeleteSelfReferentialChain)
+        .get_connection()
+        .execute(sql, params)
+    )
 
     unfixed = (
         await SoftDeleteSelfReferentialChain.objects.all()
@@ -456,11 +465,13 @@ async def test_ambient_scope_raw_criterion_encodes_a_uuid_tenant_through_the_fie
     with Tenancy.scope(org):
         root = await UuidTenantDoc.objects.create(title="root")
         leaf = await UuidTenantDoc.objects.create(title="leaf", parent=root)
-        query_cls = UuidTenantDoc._meta.connection.query_class
+        query_cls = HareContext.require_current().apps.get_queryset(UuidTenantDoc).get_connection().query_class
         doc = Table("uuidtenantdoc")
         ancestors = Table("ancestors")
-        scope = RowScopes.of(UuidTenantDoc).get_criterion(
-            doc, dialect=UuidTenantDoc._meta.connection.dialect, connection=None
+        scope = RowScopes.of(HareContext.require_current().apps.get_binding(UuidTenantDoc)).get_criterion(
+            doc,
+            dialect=HareContext.require_current().apps.get_queryset(UuidTenantDoc).get_connection().dialect,
+            connection=None,
         )
         base = query_cls.from_(doc).select(doc.id, doc.parent_id).where((doc.id == leaf.pk) & scope)
         step = (

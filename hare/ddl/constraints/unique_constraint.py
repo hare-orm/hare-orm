@@ -6,13 +6,14 @@ from typing import TYPE_CHECKING, Any
 
 from hare.classes.class_path import ClassPath
 from hare.ddl.conditions.constraint_condition import ConstraintCondition
+from hare.ddl.declared_names import DeclaredNames
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.exceptions import ConfigurationError, UnSupportedError
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.dialects.base.features import Features
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.expressions import Q
 
 
@@ -22,7 +23,7 @@ class UniqueConstraint:
     ``fields`` to check per tenant.
 
     Args:
-        deferrable: Check at transaction end (or after ``SET CONSTRAINTS ... DEFERRED``) - needs
+        deferrable: Allow postponing the check with ``SET CONSTRAINTS ... DEFERRED`` - needs
             ``Features.supports_deferrable_constraints``.
         initially_deferred: Only with ``deferrable=True`` - every transaction starts deferred.
         include: Fields stored in the index as non-key columns - left out where the dialect has
@@ -51,8 +52,7 @@ class UniqueConstraint:
     without_overlaps: bool = False
 
     def __post_init__(self) -> None:
-        if self.name is not None and (not isinstance(self.name, str) or not self.name):
-            raise ConfigurationError(f"UniqueConstraint.name takes a name or None, got {self.name!r}")
+        DeclaredNames.raise_if_not_name(self.name, "UniqueConstraint.name", optional=True)
         if not self.fields:
             raise ConfigurationError("UniqueConstraint.fields names no field - a unique constraint needs one or more")
         if len(set(self.fields)) != len(self.fields):
@@ -73,24 +73,20 @@ class UniqueConstraint:
         object.__setattr__(self, "fields", tuple(self.fields))
         object.__setattr__(self, "include", tuple(self.include))
 
-    def raise_if_unsupported(self, features: Features, dialect: Dialect) -> None:
-        """Rejects what the database can't enforce.
-
-        Args:
-            features: The features of the connection the DDL runs on.
-            dialect: The dialect of the database the DDL runs on.
-
-        Raises:
-            UnSupportedError: ``nulls_distinct`` is set on a database without
-                ``NULLS [NOT] DISTINCT`` (``Features.supports_nulls_distinct``).
-        """
+    def get_unsupported_option(self, features: Features) -> str | None:
+        """Return the first declared option this connection cannot enforce."""
         if self.nulls_distinct is not None and not features.supports_nulls_distinct:
-            raise UnSupportedError(
-                f"UniqueConstraint.nulls_distinct is not supported by the {dialect} server of this connection"
-            )
+            return "nulls_distinct"
         if self.without_overlaps and not features.supports_without_overlaps:
+            return "without_overlaps"
+        return None
+
+    def raise_if_unsupported(self, features: Features, dialect: Dialect) -> None:
+        """Rejects what the database can't enforce."""
+        option = self.get_unsupported_option(features)
+        if option is not None:
             raise UnSupportedError(
-                f"UniqueConstraint.without_overlaps is not supported by the {dialect} server of this connection"
+                f"UniqueConstraint.{option} is not supported by the {dialect} server of this connection"
             )
 
     def get_nulls_sql(self, dialect: Dialect) -> str:
@@ -106,12 +102,12 @@ class UniqueConstraint:
             return ""
         return dialect.schema_editor_class.constraint_statements_class.get_nulls_distinct_sql(self.nulls_distinct)
 
-    def get_include_sql(self, model: type[Model], dialect: Dialect, quote: Callable[[str], str]) -> str:
+    def get_include_sql(self, binding: ModelBinding, dialect: Dialect, quote: Callable[[str], str]) -> str:
         """The clause of the non-key columns - none where the dialect has no non-key index
         columns, as they only make the index cover more queries.
 
         Args:
-            model: The constrained model.
+            binding: The constrained model.
             dialect: The dialect of the database the DDL runs on.
             quote: Quotes an identifier.
 
@@ -121,7 +117,7 @@ class UniqueConstraint:
         if not self.include:
             return ""
         return dialect.schema_editor_class.index_statements_class.get_index_include_sql(
-            [quote(column) for column in model._meta.get_column_names(self.include)]
+            [quote(column) for column in binding.get_column_names(self.include)]
         )
 
     def deconstruct(self) -> tuple[str, list[Any], dict[str, Any]]:

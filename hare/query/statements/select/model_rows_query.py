@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Callable, Iterable, Sequence
+from collections.abc import AsyncGenerator, Callable, Coroutine, Iterable, Sequence
 from operator import attrgetter
-from typing import TYPE_CHECKING, Any, ClassVar, Self, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Self, TypeVar
 
+from hare.dialects.base.results.statement_result import StatementResult
 from hare.exceptions import QueryError
 from hare.fields.field import Field as ModelField
 from hare.query.constants import PLAN_CACHE_MISS
@@ -17,27 +18,30 @@ from hare.query.plans.statement.statement_plan import StatementPlan
 from hare.query.plans.statement.statement_plan_descriptions import StatementPlanDescriptions
 from hare.query.plans.statement.statement_plans import StatementPlans
 from hare.query.queryset.extensions.query_set_extensions import QuerySetExtensions
-from hare.query.queryset.query_specification import QuerySpecification
 from hare.query.queryset.row_multiplication import RowMultiplication
-from hare.query.queryset.single_rows.get_exceptions import GetExceptions
 from hare.query.queryset.specification_copying import SpecificationCopying
+from hare.query.relation_loading.prefetching.prefetch_request import PrefetchRequest
+from hare.query.rows.model_rows.model_rows import ModelRows
 from hare.query.statements.building.keyset_bounds import KeysetBounds
 from hare.query.statements.building.query_joins import QueryJoins
 from hare.query.statements.building.query_ordering import QueryOrdering
 from hare.query.statements.constants import ITERATOR_CURSOR_ANNOTATION_PREFIX
+from hare.query.statements.projections.derived_projection import DerivedProjection
 from hare.query.statements.select.model_rows.instance_hydration import InstanceHydration
 from hare.query.statements.select.model_rows.model_rows_plan_descriptions import ModelRowsPlanDescriptions
 from hare.query.statements.select.model_rows.only_defer_fields import OnlyDeferFields
 from hare.query.statements.select.model_rows.select_related_joins import SelectRelatedJoins
 from hare.query.statements.select.select_query import SelectQuery
 from hare.sql import Order
-from hare.sql.terms.field import Field
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
+    from hare.query.plans.statement.declarations import CallPlanHit
     from hare.query.queryset.queryset import QuerySet
     from hare.query.rows.native.hydration_layout import HydrationEntry
+    from hare.query.statements.projections.declarations import ProjectionAliases, SelectedOutputColumn
     from hare.sql import Table
     from hare.sql.terms.term import Term
 
@@ -48,6 +52,9 @@ class ModelRowsQuery(SelectQuery[TModel]):
     """Builds and runs the SQL of a queryset returning model instances - made from the queryset
     for one build."""
 
+    #: The reader used by built statements and by plans kept under their call signatures.
+    rows_reader_class: ClassVar[type[ModelRows]] = ModelRows
+
     __slots__ = (
         "_source_queryset",
         "_base_selects",
@@ -56,6 +63,8 @@ class ModelRowsQuery(SelectQuery[TModel]):
         "_decode_plan",
         "_decode_plan_is_partial",
         "_decode_plan_key",
+        "_result_column_aliases",
+        "_source_column_names",
     )
 
     #: The short key of a plain query - one selecting every column of its model with only filters,
@@ -69,7 +78,7 @@ class ModelRowsQuery(SelectQuery[TModel]):
         ("_limit", PlanKeyForm.BOUND_INTO_ANOTHER),
         ("_offset", PlanKeyForm.BOUND_INTO_ANOTHER),
         ("_is_none", PlanKeyForm.VALUE),
-        ("_q_objects", PlanKeyForm.CONDITIONS),
+        (ModelRowsPlanDescriptions.get_conditions_plan_description, PlanKeyForm.DESCRIBED),
         (StatementPlanDescriptions.get_ctes_plan_description, PlanKeyForm.DESCRIBED),
         (StatementPlanDescriptions.get_extension_calls_plan_description, PlanKeyForm.DESCRIBED),
         (StatementPlanDescriptions.get_zone_structure, PlanKeyForm.METHOD),
@@ -96,12 +105,6 @@ class ModelRowsQuery(SelectQuery[TModel]):
         (StatementPlanDescriptions.get_extension_calls_plan_description, PlanKeyForm.DESCRIBED),
         *StatementPlanDescriptions.EXPRESSION_TERMS_SLOTS,
     )
-
-    #: Slots a copy made to run once (_get_execution_query()) gets its own shallow copy of.
-    mutable_clone_slots: ClassVar[dict[str, str]] = QuerySpecification.MUTABLE_SPECIFICATION_SLOTS | {
-        "_joined_tables": "[]",
-        "_joined_tables_set": "set()",
-    }
 
     def __init__(self, source_queryset: QuerySet[TModel, Any]) -> None:
         """
@@ -130,31 +133,47 @@ class ModelRowsQuery(SelectQuery[TModel]):
         # count() and aggregate() are.
         return []
 
-    async def _execute(self) -> list[TModel]:
-        InstanceHydration.check_no_annotation_field_collision(self)
-        instance_list: list[TModel] = await InstanceHydration.get_model_rows_reader(self).fetch(  # type: ignore[assignment]
-            *self._get_parameterized_sql(), InstanceHydration.get_prefetch_request(self)
+    @staticmethod
+    def read_call_plan(
+        queryset: QuerySet[Any, Any], connection: DatabaseClient, hit: CallPlanHit
+    ) -> Coroutine[Any, Any, Any]:
+        """Reads the instances of a queryset on the plan of its calls - through the reader kept with
+        the statement plan (``result_reading``). The queryset supplies the prefetch and row count.
+
+        Args:
+            queryset: The queryset.
+            connection: This execution's connection.
+            hit: The plan found (``StatementPlanRuns.find_call_plan()``).
+
+        Returns:
+            The read of the instances, or of the one instance of a single-row queryset.
+        """
+        prefetch_map = queryset._get_effective_prefetch_map()
+        prefetch = PrefetchRequest.from_query(
+            queryset, prefetch_map, queryset._prefetch_queries, visibility=hit.visibility
         )
-        if self._single:
-            if len(instance_list) == 1:
-                return instance_list[0]  # type: ignore[return-value]
-            if not instance_list:
-                if self._raise_does_not_exist:
-                    GetExceptions.raise_object_does_not_exist(self)
-                return None  # type: ignore[return-value]
-            GetExceptions.raise_multiple_objects_returned(self)
-        if self._reverse_result_order:
-            return instance_list[::-1]
-        return instance_list
+        reader: ModelRows = hit.plan.result_reading
+        return reader.fetch(connection, hit.sql, hit.parameters, prefetch, retry_read=True, specification=queryset)
+
+    def _execute(self, statement: tuple[str, list[Any]]) -> Coroutine[Any, Any, Any]:
+        InstanceHydration.check_no_annotation_field_collision(self)
+        return InstanceHydration.get_model_rows_reader(self, reader_class=self.rows_reader_class).fetch(
+            self._connection,
+            *statement,
+            PrefetchRequest.from_query(self, self._prefetch_map, self._prefetch_queries),
+            retry_read=self.is_read_only,
+            specification=self,
+        )
 
     # --- paging and streaming -------------------------------------------------------------------
 
     def _get_default_iteration_orderings(self) -> list[tuple[str, Order]]:
         """``Meta.ordering``, else the primary key - the order an unordered slice takes its rows
         in."""
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
         return list(self._apply_default_ordering(self._orderings)) or [
             (primary_key_attribute_name, Order.ASC)
-            for primary_key_attribute_name in self.model._meta.primary_key_attribute_names
+            for primary_key_attribute_name in model_binding.primary_key_attribute_names
         ]
 
     def _get_iterated_query(self) -> Self:
@@ -185,7 +204,7 @@ class ModelRowsQuery(SelectQuery[TModel]):
         if not ordering_is_unique:
             orderings += [
                 (primary_key_attribute_name, Order.ASC)
-                for primary_key_attribute_name in self.model._meta.primary_key_attribute_names
+                for primary_key_attribute_name in self._binding.primary_key_attribute_names  # type: ignore[union-attr]
                 if primary_key_attribute_name not in ordering_field_names
             ]
         if rows_repeat:
@@ -196,7 +215,7 @@ class ModelRowsQuery(SelectQuery[TModel]):
                 if annotation_name not in ordering_field_names
             ]
         self._orderings = orderings
-        if rows_repeat or (not ordering_is_unique and not self.model._meta.has_primary_key):
+        if rows_repeat or (not ordering_is_unique and not self._binding.has_primary_key):  # type: ignore[union-attr]
             return None
         return self._get_keyset_readers()
 
@@ -211,25 +230,29 @@ class ModelRowsQuery(SelectQuery[TModel]):
             window function or an extension call changing which rows come (``limit_by()``): a keyset
             condition would change the rows they pick from.
         """
-        direct_fields = self.model._meta.direct_fields
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        direct_fields = model_binding.direct_fields
         if (
             not all(field_name in direct_fields for field_name, _order in self._orderings)
             or RowMultiplication.reads_window_function(self)
             or (self._extension_calls and QuerySetExtensions.changes_rows(self))
         ):
             return None
-        fields_map = self.model._meta.fields_map
+        fields_map = model_binding.fields_map
         for field_name, _order in self._orderings:
             if not KeysetBounds.compares_by_order(fields_map[field_name]):
                 return None
         loaded_field_names = set(OnlyDeferFields.get_effective_fields_for_select(self))
         readers: list[Callable[[Any], Any]] = []
+        annotations = None
         for index, (field_name, _order) in enumerate(self._orderings):
             if not loaded_field_names or field_name in loaded_field_names:
                 readers.append(attrgetter(field_name))
                 continue
             annotation_name = f"{ITERATOR_CURSOR_ANNOTATION_PREFIX}{index}"
-            self._annotations = {**self._annotations, annotation_name: F(field_name)}
+            if annotations is None:
+                annotations = self._annotations = dict(self._annotations)
+            annotations[annotation_name] = F(field_name)
             readers.append(attrgetter(annotation_name))
         return readers
 
@@ -257,10 +280,11 @@ class ModelRowsQuery(SelectQuery[TModel]):
             )
         InstanceHydration.check_no_annotation_field_collision(self)
 
-    def _stream_batches(self, connection: DatabaseClient, chunk_size: int) -> AsyncGenerator[list[Any]]:
-        return cast(
-            "AsyncGenerator[list[Any]]",
-            InstanceHydration.get_model_rows_reader(self).stream_batches(*self._get_parameterized_sql(), chunk_size),
+    def _stream_batches(
+        self, connection: DatabaseClient, chunk_size: int, statement: tuple[str, list[Any]]
+    ) -> AsyncGenerator[list[Any]]:
+        return InstanceHydration.get_model_rows_reader(self).stream_batches(
+            connection, *statement, chunk_size, context=self._context
         )
 
     # Declared for the type checker - the local assignments would infer narrower types.
@@ -301,6 +325,9 @@ class ModelRowsQuery(SelectQuery[TModel]):
         effective ``.only()``/``.defer()`` fields and the selected columns (``_base_selects``, None
         for every column).
         """
+        self._result_column_aliases: dict[str, str] | None = None
+        self._source_column_names: tuple[str | None, ...] = ()
+        InstanceHydration.check_no_annotation_field_collision(self)
         self._select_related_positions = []
         self._apply_lazy_relation_defaults()
         # .defer() is resolved here, not in defer() itself, so that every .select_related(...) path
@@ -331,14 +358,19 @@ class ModelRowsQuery(SelectQuery[TModel]):
             # EXACTLY the base model's own columns, annotations/joins are only added later.
             base_selects = tuple(self.query._selects)
             # The same columns-key component of the decode plans' own key.
-            self._decode_plan_key = tuple(term.name if isinstance(term, Field) else None for term in base_selects)
+            self._decode_plan_key = InstanceHydration.get_selects_key(base_selects)
         else:
             # select all fields - the same column names basequery_all_fields selects.
-            self._decode_plan_key = InstanceHydration.get_all_fields_selects_key(self.model)
+            self._decode_plan_key = InstanceHydration.get_all_fields_selects_key(self._binding)  # type: ignore[arg-type]
         self._base_selects = base_selects
 
     def _get_plan(self) -> tuple[PlanDescription | None, StatementPlan | None]:
         return ModelRowsPlanDescriptions.get_queryset_plan_description(self)
+
+    def _get_build_plan_description(self) -> PlanDescription | None:
+        return ModelRowsPlanDescriptions.describe_queryset(
+            self, plain=ModelRowsPlanDescriptions.has_plain_query_state(self)
+        )
 
     def _describe_plain_statement(self, built_into_another: bool) -> PlanDescription | None:
         """Describes the statement of a plain query from ``plain_plan_slots`` (``QueryKeyCompiler``).
@@ -351,28 +383,19 @@ class ModelRowsQuery(SelectQuery[TModel]):
         """
         raise NotImplementedError
 
-    def _get_plan_key(self, description: PlanDescription) -> tuple[Any, ...]:
-        # Kept among the model's own plans.
-        return (self.model, *description.structure)
-
-    def _prepare_call_signature_run(self) -> None:
-        # The relations loaded by default (a lazy="select" relation is prefetched); the row layout
-        # the build works out is the plan's, restored from it.
-        self._apply_lazy_relation_defaults()
-
-    def _restore_from_plan(self, plan: StatementPlan) -> None:
-        self._decode_plan = plan.decode_plan
-        self._decode_plan_is_partial = plan.decode_plan_is_partial
-        # Reading the rows needs the layout of the joined relations on every hit.
-        self._select_related_positions = list(plan.select_related_positions)
-
-    def _get_plan_record(self) -> dict[str, Any]:
-        return {
-            "decode_plan": self._decode_plan,
-            "decode_plan_is_partial": self._decode_plan_is_partial,
-            "select_related_positions": tuple(self._select_related_positions),
-            "decode_plan_key": self._decode_plan_key,
-        }
+    def _prepare_plan_reading(self) -> ModelRows:
+        reader = InstanceHydration.get_model_rows_reader(self, reader_class=self.rows_reader_class)
+        if self.features.supports_positional_rows:
+            names = self._get_result_column_names()
+            if names:
+                reader.prepared_columns = reader.get_columns(
+                    self._connection, StatementResult(0, [], column_names=names)
+                )
+                reader.prepared_result = reader.get_result_layout(
+                    reader.prepared_columns,
+                    reader.get_annotation_layout(self._connection, names) if reader.annotations else (),
+                )
+        return reader
 
     def _select_columns(self) -> None:
         if self._base_selects is None:
@@ -381,8 +404,8 @@ class ModelRowsQuery(SelectQuery[TModel]):
             self._select_related_positions.append(
                 (
                     self.model,
-                    len(self.model._meta.db_fields),
-                    self.model._meta.basetable,
+                    len(self._binding.db_fields),  # type: ignore[union-attr]
+                    self._binding.basetable,  # type: ignore[union-attr]
                     self.model,
                     (None,),
                 )
@@ -392,9 +415,10 @@ class ModelRowsQuery(SelectQuery[TModel]):
             self._base_selects = tuple(self.query._selects)
 
     def _apply_ordering(self) -> None:
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
         QueryOrdering.get_ordering(
             self,
-            self.model,
+            model_binding,
             self._effective_basetable(),
             self._orderings,
             self._annotations,
@@ -414,16 +438,52 @@ class ModelRowsQuery(SelectQuery[TModel]):
         decode_plan_key = (
             self.model,
             self.dialect,
-            # See plan_key's own comment above on why the connection alias itself (not
-            # just its dialect) must be part of this key too.
+            # Independent clients can share an alias and dialect but return different native types.
             self._connection.connection_alias if self._connection is not None else None,
+            self._connection.native_python_types if self._connection is not None else None,
             self._decode_plan_key,
             len(self._select_related_positions),
         )
-        decode_plan = StatementPlans.decode_plans.get(decode_plan_key, PLAN_CACHE_MISS)
+        bucket = StatementPlans.decode_plans.get_bucket(self._binding)
+        decode_plan = bucket.get(decode_plan_key, PLAN_CACHE_MISS)
         if decode_plan is PLAN_CACHE_MISS:
-            decode_plan = StatementPlans.decode_plans[decode_plan_key] = InstanceHydration.build_decode_plan(
-                self, cast("tuple[Term, ...]", self._base_selects)
-            )
+            decode_plan = bucket[decode_plan_key] = InstanceHydration.build_decode_plan(self, self._base_selects)  # type: ignore[arg-type]
         self._decode_plan = decode_plan
         self._decode_plan_is_partial = bool(self._effective_fields_for_select)
+
+    def _prepare_output_columns(self) -> ProjectionAliases:
+        projection = super()._prepare_output_columns()
+        self._source_column_names = projection.source_names
+        return projection
+
+    def _get_output_columns(self) -> list[SelectedOutputColumn]:
+        """Every actual row cell; None public identity denotes an internal SQL-only cell.
+
+        Model identity comes from existing hydration buckets and exact physical column
+        metadata. Annotation cells may sit between early partial relations and later joins.
+        """
+        base = self._base_selects or ()
+        model_cells = [
+            (model, tuple(path)[1:])
+            for model, count, _table, _parent, path in self._select_related_positions
+            for _ in range(count)
+        ]
+        annotations = tuple(name for name in self._annotations if name not in self._alias_keys)
+        model_position = 0
+        columns: list[SelectedOutputColumn] = []
+        for position, term in enumerate(self.query._selects):
+            alias = DerivedProjection.get_output_name(term)
+            if len(base) <= position < len(base) + len(annotations):
+                name = annotations[position - len(base)]
+                columns.append((name, name, alias, self._annotation_output_fields.get(name)))
+            elif model_position < len(model_cells):
+                model, path = model_cells[model_position]
+                source = base[position] if position < len(base) else term
+                model_binding = self._binding.graph.get_binding(model)  # type: ignore[union-attr]
+                name = model_binding.fields_db_projection_reverse[source.name]  # type: ignore[attr-defined]
+                public_name = "__".join((*path, name))  # type: ignore[arg-type]
+                columns.append((public_name, public_name, alias, model_binding.fields_map[name]))
+                model_position += 1
+            else:
+                columns.append((None, None, alias, None))
+        return columns

@@ -5,19 +5,18 @@ from typing import TYPE_CHECKING
 from hare.migrations.operations.models.delete_model import DeleteModel
 from hare.migrations.operations.models.table_renaming_operation import TableRenamingOperation
 from hare.migrations.operations.operation import Operation
+from hare.migrations.operations.operation_rewrite import OperationRewrite
+from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state import State
-from hare.models.enums import ModelOption
 
 if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
 
 
 class AlterModelTable(TableRenamingOperation):
-    """Changes only the table name (``Meta.table``) - the model's name stays. ``RenameModel`` changes
-    the name.
-    """
+    """Change ``Meta.table``. Passing ``None`` takes the table name from the model's name again."""
 
-    def __init__(self, name: str, table: str) -> None:
+    def __init__(self, name: str, table: str | None) -> None:
         self.name = name
         self.table = table
 
@@ -25,11 +24,11 @@ class AlterModelTable(TableRenamingOperation):
         """The model whose table is renamed."""
         return frozenset({self.get_model_label(self.name, app_label)})
 
-    def reduce(self, other: Operation, app_label: str) -> list[Operation] | bool:
+    def get_rewrite(self, other: Operation, app_label: str) -> OperationRewrite | None:
         """A later table name or deletion of the same model takes this one's place."""
         if isinstance(other, (AlterModelTable, DeleteModel)) and self.is_same_model_name(self.name, other.name):
-            return [other]
-        return super().reduce(other, app_label)
+            return OperationRewrite((other,))
+        return super().get_rewrite(other, app_label)
 
     def get_table_model_names(self) -> tuple[str, ...]:
         return (self.name,)
@@ -39,10 +38,7 @@ class AlterModelTable(TableRenamingOperation):
 
     def state_forward(self, app_label: str, state: State) -> None:
         model_state = self.get_model_state(state, app_label, self.name)
-        model_state.table = self.table
-        model_state.options[ModelOption.TABLE] = self.table
-        # A later RenameModel keeps an explicit table and renames one derived from the class name.
-        model_state.options[ModelOption.TABLE_IS_EXPLICIT] = self.table != self.name.lower()
+        model_state.table = ModelState.record_table_option(model_state.options, model_state.name, self.table)
         state.mark_models_changed([(app_label, self.name)])
 
     async def database_forward(

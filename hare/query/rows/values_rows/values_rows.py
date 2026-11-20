@@ -1,16 +1,21 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+import contextlib
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.core.caching.cache import Cache
+from hare.dialects.base.results.statement_result import StatementResult
+from hare.native.native_modules import NativeModules
 from hare.query.enums import RowShape
-from hare.query.rows.native.hydrate_accelerator import HydrateAccelerator
+from hare.query.execution.query_execution import QueryExecution
+from hare.query.queryset.single_rows.get_exceptions import GetExceptions
+from hare.query.rows.row_layout import RowLayout
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.dialects.base.results.statement_result import StatementResult
-    from hare.models import Model
-    from hare.query.rows.values_rows.value_field import ValueField
+    from hare.query.queryset.query_specification import QuerySpecification
 
 #: A selected column's alias (or its position in a driver row) with the function decoding its
 #: value, None when the raw value is used as-is.
@@ -27,6 +32,9 @@ class ValuesRows:
     #: Whether a column is selected under its output key rather than its position - a row is then
     #: read by key, and an annotation the row doesn't name is left out of the SELECT list.
     keyed_by_output_name: ClassVar[bool] = False
+    row_class: type[tuple[Any, ...]] | None = None
+    #: Layouts follow this reader's lifetime and are invalidated with SQL plans.
+    layouts: ClassVar[Cache[tuple[Sequence[ColumnConverter], RowLayout]]] = Cache()
 
     def __init__(self, output_names: tuple[str, ...], output_column_aliases: Sequence[tuple[str, ...]]) -> None:
         """
@@ -38,6 +46,17 @@ class ValuesRows:
         self.output_names = output_names
         self.output_column_aliases = output_column_aliases
         self.has_composite_outputs = any(len(column_aliases) > 1 for column_aliases in output_column_aliases)
+        self.layout_bucket = self.layouts.new_shared_bucket()
+
+    def get_composite_output_aliases(self, sql_aliases: Mapping[str, str] | None = None) -> dict[str, tuple[str, ...]]:
+        """Give each composite output's SQL columns in component order."""
+        if not self.has_composite_outputs:
+            return {}
+        return {
+            name: tuple(sql_aliases.get(alias, alias) for alias in aliases) if sql_aliases else aliases
+            for name, aliases in zip(self.output_names, self.output_column_aliases, strict=True)
+            if len(aliases) > 1
+        }
 
     @classmethod
     def get_column_aliases(cls, output_name: str, first_column_index: int, column_count: int) -> tuple[str, ...]:
@@ -53,114 +72,132 @@ class ValuesRows:
         """
         raise NotImplementedError()
 
-    @staticmethod
-    def get_composite_key_value(component_values: Sequence[Any]) -> tuple[Any, ...] | None:
-        """A composite key read back from its columns - None when every column is NULL (a null
-        foreign key, or no related row).
-
-        Args:
-            component_values: The key's column values, in key order.
-
-        Returns:
-            The key tuple, or None.
-        """
-        if all(component_value is None for component_value in component_values):
-            return None
-        return tuple(component_values)
-
-    async def fetch(
+    async def read(
         self,
+        specification: QuerySpecification[Any],
         connection: DatabaseClient,
         sql: str,
         parameters: list[Any],
-        column_converters: list[ColumnConverter],
-        model: type[Model] | None = None,
-        value_fields: tuple[ValueField, ...] | None = None,
-    ) -> list[Any]:
-        """Runs a statement selecting the columns and builds the rows.
+        column_converters: Sequence[ColumnConverter],
+        *,
+        retry_read: bool = False,
+        layout: RowLayout | None = None,
+    ) -> Any:
+        """Runs a query and reads its rows - the one road of a read of values, on a plan found by its
+        calls or on a query just built - with the query's read checks (``QueryExecution.check_read_lock()``,
+        ``raise_read_error()``).
 
         Args:
-            connection: The connection.
-            sql: The SQL.
+            specification: The query read.
+            connection: The connection it reads on.
+            sql: The statement.
             parameters: Its parameters.
-            column_converters: Each column's alias and decoder.
-            model: The queried model.
-            value_fields: What each column is read as - the rows are then built in one
-                ``rust.native.rows`` call where the driver's rows are read by position.
+            column_converters: How each selected column is read.
+            retry_read: Whether a lost connection may retry the read.
+            layout: A prepared layout for the result columns, when the plan already supplies one.
 
         Returns:
-            The rows.
+            The rows - or the one row of a single-row query.
         """
-        raise NotImplementedError()
-
-    def read_with_accelerator(
-        self, reader: Any, rows: Sequence[Any], column_converters: list[ColumnConverter]
-    ) -> list[Any]:
-        """The rows of positional driver rows whose columns are the selected ones in order, built by
-        a ``rust.native.rows.ValuesReader``.
-
-        Args:
-            reader: The reader of the selected columns.
-            rows: The driver rows.
-            column_converters: Each column's alias and decoder.
-
-        Returns:
-            The rows.
-        """
-        raise NotImplementedError()
+        QueryExecution.check_read_lock(specification, connection)
+        try:
+            result = await QueryExecution.fetch_rows(connection, sql, parameters, retry_read=retry_read)
+            rows = self.convert_batch(connection, result, column_converters, layout=layout)
+        except Exception as error:
+            QueryExecution.raise_read_error(connection, error)
+            raise
+        return GetExceptions.single_or_list_result(specification, rows)
 
     def convert_batch(
         self,
         connection: DatabaseClient,
         result: StatementResult,
-        column_converters: list[ColumnConverter],
-        model: type[Model] | None = None,
-        value_fields: tuple[ValueField, ...] | None = None,
+        column_converters: Sequence[ColumnConverter],
+        *,
+        layout: RowLayout | None = None,
     ) -> list[Any]:
-        """The rows of a batch of driver rows - in one ``rust.native.rows`` call when the value
-        fields are known and the rows are read by position, else one at a time.
+        """Decode one batch, selecting column positions once for the whole batch."""
+        if not result.rows:
+            return []
+        if layout is None:
+            layout = self.get_result_layout(connection, result, column_converters)
+        return NativeModules.rows.read_values_batch(
+            result.rows, layout.native_layout, self.plan_shape, self.output_names, self.row_class
+        )
 
-        Args:
-            connection: The connection the rows were read on.
-            result: The driver rows, at least one, with their column names.
-            column_converters: Each column's alias and decoder.
-            model: The queried model.
-            value_fields: What each column is read as.
+    async def stream_batches(
+        self,
+        connection: DatabaseClient,
+        sql: str,
+        parameters: list[Any],
+        column_converters: Sequence[ColumnConverter],
+        chunk_size: int,
+    ) -> AsyncGenerator[list[Any]]:
+        """Stream through one decoder bound to the first nonempty batch's column metadata.
 
-        Returns:
-            The rows.
+        All batches belong to the same driver result. Closing or failing the consumer
+        closes the underlying cursor, including when no nonempty batch was received.
         """
-        rows = result.rows
-        if not connection.features.supports_positional_rows:
-            return [self.convert(dict(row), column_converters) for row in rows]
-        column_names = result.column_names
-        if (
-            model is not None
-            and value_fields is not None
-            and HydrateAccelerator.module is not None
-            and not self.has_composite_outputs
-            and list(column_names) == [alias for alias, _function in column_converters]
-        ):
-            return HydrateAccelerator.run_or_fall_back(
-                lambda: self.read_with_accelerator(
-                    HydrateAccelerator.get_values_reader(model, value_fields, connection), rows, column_converters
-                ),
-                lambda: [self.convert(dict(zip(column_names, row, strict=True)), column_converters) for row in rows],
-            )
-        # Rows read by position may read by position alone.
-        return [self.convert(dict(zip(column_names, row, strict=True)), column_converters) for row in rows]
+        layout = None
+        async with contextlib.aclosing(
+            connection._stream_built_batches(sql, parameters, chunk_size=chunk_size)
+        ) as batches:
+            async for rows in batches:
+                if not rows:
+                    yield []
+                    continue
+                if layout is None:
+                    layout = self.get_layout(
+                        column_converters,
+                        StatementResult.get_row_column_names(rows)
+                        if connection.features.supports_positional_rows
+                        else None,
+                    )
+                yield NativeModules.rows.read_values_batch(
+                    rows, layout.native_layout, self.plan_shape, self.output_names, self.row_class
+                )
 
-    def convert(self, row: dict[str, Any], column_converters: list[ColumnConverter]) -> Any:
-        """Builds one row from a fetched row.
+    def get_result_layout(
+        self, connection: DatabaseClient, result: StatementResult, column_converters: Sequence[ColumnConverter]
+    ) -> RowLayout:
+        """Bind selected columns against one driver result's metadata."""
+        return self.get_layout(
+            column_converters,
+            result.column_names if connection.features.supports_positional_rows else None,
+        )
 
-        Args:
-            row: The fetched row, by column alias.
-            column_converters: Each column's alias and decoder.
+    def get_result_reader(self, layout: RowLayout) -> Callable[[Any], Any]:
+        """Bind the reader of an additional row to the batch's layout."""
+        return partial(
+            NativeModules.rows.read_values_row,
+            layout=layout.native_layout,
+            row_type=self.plan_shape,
+            names=self.output_names,
+            row_class=self.row_class,
+        )
 
-        Returns:
-            The row.
+    def get_layout(
+        self,
+        column_converters: Sequence[ColumnConverter],
+        column_names: Sequence[str] | None = None,
+    ) -> RowLayout:
+        """Bind aliases once per plan conversion and column order, including composite groups.
+
+        Retaining the converter list alongside its identity prevents identity reuse and
+        permits callable readers that are unhashable. Only column metadata is retained.
         """
-        raise NotImplementedError()
+        layout_key = (id(column_converters), None if column_names is None else tuple(column_names))
+        cached = self.layout_bucket.get(layout_key)
+        if cached is not None:
+            return cached[1]
+        columns = tuple(
+            (column_names.index(alias) if column_names is not None else alias, converter)
+            for alias, converter in column_converters
+        )
+        groups = tuple(len(aliases) for aliases in self.output_column_aliases) if self.has_composite_outputs else ()
+        layout = RowLayout(columns, groups)
+        self.layout_bucket[layout_key] = (column_converters, layout)
+        return layout
 
     def get_reader(self, position: int, alias: str) -> Callable[[Any], Any]:
         """Reads the value of a selected column off one row.

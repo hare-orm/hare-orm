@@ -38,7 +38,7 @@ class ApiValuePaths:
         if isinstance(value, RelatedQuerySet):
             return list(value.related_objects) if value._fetched else None
         # A relation not loaded, or one of an empty key - nothing on the other side.
-        if isinstance(value, QuerySet | NoneAwaitableType):
+        if isinstance(value, (QuerySet, NoneAwaitableType)):
             return None
         return value
 

@@ -11,8 +11,8 @@ CONTRIB_MODEL_CASES = (
     ContribModelCase(
         "encrypted_with_blind_index", ContribModels.make_encrypted_with_blind_index, requires=("encryption",)
     ),
-    ContribModelCase("gis", ContribModels.make_gis_model, needs_constraints=False),
-    ContribModelCase("vector", ContribModels.make_vector_model, needs_constraints=False),
+    ContribModelCase("gis", ContribModels.make_gis_model),
+    ContribModelCase("vector", ContribModels.make_vector_model),
     ContribModelCase("generic_foreign_key", ContribModels.make_generic_foreign_key_models),
     ContribModelCase("composite_primary_key", ContribModels.make_composite_key_model),
     ContribModelCase("many_to_many_through", ContribModels.make_many_to_many_through_models),

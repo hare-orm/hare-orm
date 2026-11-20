@@ -1,7 +1,6 @@
 """JSONObject, and paths into a JSON field or annotation in values()/values_list()/order_by()/F()."""
 
 import datetime
-import os
 import uuid
 from collections.abc import AsyncGenerator
 from decimal import Decimal
@@ -12,6 +11,7 @@ import pytest_asyncio
 
 from hare.contrib.test.databases.model_truncation import truncate_all_models
 from hare.contrib.test.isolated_contexts import hare_test_context
+from hare.core.hare_context import HareContext
 from hare.exceptions import FieldError, QueryError
 from hare.query.expressions import F, Q, Value
 from hare.query.functions import Count, JSONArray, JSONObject, Sum, Upper
@@ -20,15 +20,10 @@ from tests.utils.database_under_test import DatabaseUnderTest
 from tests.utils.sqlite_float_text import SqliteFloatText
 
 
-def get_test_db_url() -> str:
-    raw_db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:").replace("\\{", "{").replace("\\}", "}")
-    return raw_db_url.format(uuid.uuid4().hex) if "{}" in raw_db_url else raw_db_url
-
-
 @pytest_asyncio.fixture(scope="module")
 async def json_object_context() -> AsyncGenerator[Any]:
     async with hare_test_context(
-        ["tests.shared_models.typed_row_models"], db_url=get_test_db_url(), use_timezone=True
+        ["tests.shared_models.typed_row_models"], db_url=DatabaseUnderTest.get_fresh_url(), use_timezone=True
     ) as ctx:
         yield ctx
 
@@ -96,7 +91,7 @@ COLUMNS = (
 
 
 def is_sqlite() -> bool:
-    return TypedRow._meta.connection.dialect.name == "sqlite"
+    return HareContext.require_current().apps.get_queryset(TypedRow).get_connection().dialect.name == "sqlite"
 
 
 async def get_objects(expression: Any) -> list[Any]:
@@ -150,11 +145,10 @@ async def test_json_object_writes_every_type(rows):
 
 @pytest.mark.asyncio
 async def test_json_object_writes_a_float_as_its_database_does(rows):
-    """PostgreSQL writes a double's shortest digits, SQLite 15 significant digits before 3.53 and 17
-    from 3.53 on."""
+    """JSON objects use their database's number format, independently of text casts."""
     ratios = [value["ratio"] for value in await get_objects(JSONObject(ratio="ratio"))]
     if is_sqlite():
-        assert ratios == [1.5, 1e20, 2.0, float(SqliteFloatText.get(0.1 + 0.2)), 1e-07]
+        assert ratios == [1.5, 1e20, 2.0, float(SqliteFloatText.get_json(0.1 + 0.2)), 1e-07]
     else:
         assert ratios == [1.5, 10**20, 2, 0.30000000000000004, 1e-07]
 
@@ -439,7 +433,10 @@ async def test_values_path_into_non_json_field_raises(rows):
 @pytest.mark.parametrize("zone", ["UTC", "Asia/Tokyo"])
 async def test_json_object_naive_timestamp_is_its_wall_clock(zone):
     async with hare_test_context(
-        ["tests.shared_models.typed_row_models"], db_url=get_test_db_url(), use_timezone=False, timezone=zone
+        ["tests.shared_models.typed_row_models"],
+        db_url=DatabaseUnderTest.get_fresh_url(),
+        use_timezone=False,
+        timezone=zone,
     ):
         await TypedRow.objects.create(id=1, at=datetime.datetime(2020, 1, 2, 1, 4, 5, 250000))
         value = await TypedRow.objects.annotate(value=JSONObject(at="at")).values_list("value", flat=True)
@@ -479,10 +476,10 @@ async def get_ids(queryset: Any) -> list[int]:
 @pytest.mark.parametrize("column", COLUMNS)
 async def test_json_path_compares_with_its_typed_column(rows, column):
     """The value a JSONObject wrote from a column compares equal to the column itself, both ways -
-    except a float SQLite before 3.53 wrote to 15 significant digits."""
+    except when SQLite's JSON representation rounds a floating-point value."""
     queryset = TypedRow.objects.annotate(written=JSONObject(**{column: column}))
     expected = [row.id for row in rows if getattr(row, column) is not None]
-    cut = [4] if column == "ratio" and is_sqlite() and not SqliteFloatText.keeps_every_digit() else []
+    cut = [4] if column == "ratio" and is_sqlite() and float(SqliteFloatText.get_json(0.1 + 0.2)) != 0.1 + 0.2 else []
     expected = [row_id for row_id in expected if row_id not in cut]
     assert await get_ids(queryset.filter(**{f"written__{column}": F(column)})) == expected
     assert await get_ids(queryset.filter(**{f"written__{column}__gte": F(column)})) == expected

@@ -1,5 +1,5 @@
-"""The PostgreSQL drivers: one engine name and DB_URL scheme each, and a clean error when the
-rust.pg extension isn't built."""
+"""The PostgreSQL drivers: one engine name and DB_URL scheme each, and a clean error where the native
+module has no driver."""
 
 import subprocess
 import sys
@@ -13,16 +13,18 @@ from hare.dialects.postgresql.constants import POSTGRESQL_DIALECT
 pytestmark = pytest.mark.database_independent
 
 
-def test_rust_pg_driver_raises_configuration_error_when_the_extension_is_missing() -> None:
-    """`import rust.pg` succeeds against the crate's source directory even when the extension
-    isn't built (rust/ is a namespace package), so the client module guards it itself. Run in a
-    fresh process so nothing imported the real rust.pg first."""
+def test_rust_pg_driver_raises_configuration_error_without_the_native_driver() -> None:
+    """A native module built without the driver - on Windows, where it has no ``pg`` and ``pool`` - makes
+    the native engine name the asyncpg one instead. Run in a fresh process so nothing imported the real
+    driver first."""
     script = textwrap.dedent(
         """
         import sys
-        from unittest import mock
 
-        sys.modules["rust.native"] = mock.MagicMock(spec=[])
+        import rust.native
+
+        for name in ("rust.native.pg", "rust.native.pool"):
+            sys.modules[name] = None
 
         from hare.dialects.dialect_registry import DialectRegistry
         from hare.exceptions import ConfigurationError
@@ -30,7 +32,7 @@ def test_rust_pg_driver_raises_configuration_error_when_the_extension_is_missing
         try:
             DialectRegistry.get_driver("postgresql").get_client_class({})
         except ConfigurationError as exc:
-            assert "rust.native extension" in str(exc), str(exc)
+            assert "postgresql+asyncpg" in str(exc), str(exc)
         else:
             raise AssertionError("get_client_class did not raise ConfigurationError")
         print("OK")

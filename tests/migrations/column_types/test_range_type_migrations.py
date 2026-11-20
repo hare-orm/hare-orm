@@ -71,7 +71,7 @@ async def test_a_range_column_changes_its_range_type(db_simple):
         history=fields.ArrayField(BigIntRangeField(), null=True),
     )
     initial = make_migration("0001_initial", *OperationGenerator(empty, narrow).generate())
-    state = await initial.apply(empty.clone(), schema_editor=get_editor())
+    state = await initial.apply(empty, schema_editor=get_editor())
     try:
         await connection.execute_script(
             f"INSERT INTO {TABLE} (id, span, spans, history) VALUES "
@@ -83,7 +83,7 @@ async def test_a_range_column_changes_its_range_type(db_simple):
         assert await get_types() == ["_int8range", "int8range", "int8multirange"]
         assert await get_values() == values
         to_decimal = make_migration("0003_decimal", *OperationGenerator(wide, decimal).generate())
-        await to_decimal.apply(state.clone(), schema_editor=get_editor())
+        await to_decimal.apply(state, schema_editor=get_editor())
         assert await get_values() == values
         await to_decimal.unapply(state, schema_editor=get_editor())
         await widen.unapply(narrow, schema_editor=get_editor())

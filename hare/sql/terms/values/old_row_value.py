@@ -17,6 +17,8 @@ class OldRowValue(Term):
         alias: The name the value is returned under.
     """
 
+    structure_attributes = ("column_name",)
+
     def __init__(self, column_name: str, alias: str | None = None) -> None:
         super().__init__(alias)
         self.column_name = column_name

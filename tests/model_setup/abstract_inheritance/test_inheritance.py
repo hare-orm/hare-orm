@@ -7,7 +7,7 @@ from tests.shared_models.testmodels import MyAbstractBaseModel, MyDerivedModel, 
 async def test_basic(db):
     """Test basic model inheritance with abstract base model."""
     model = MyDerivedModel(name="test")
-    assert hasattr(MyAbstractBaseModel(), "name")
+    assert "name" in MyAbstractBaseModel._declaration.fields_map
     assert hasattr(model, "created_at")
     assert hasattr(model, "modified_at")
     assert hasattr(model, "name")
@@ -24,8 +24,8 @@ def test_sibling_concrete_models_do_not_share_field_instances():
     fields_map - field.model = new_class (set right after class creation) then silently
     repointed the FIRST sibling's fields onto the SECOND sibling's class."""
     for field_name in ("id", "name", "created_at", "modified_at"):
-        derived_field = MyDerivedModel._meta.fields_map[field_name]
-        other_field = MyOtherDerivedModel._meta.fields_map[field_name]
+        derived_field = MyDerivedModel._declaration.fields_map[field_name]
+        other_field = MyOtherDerivedModel._declaration.fields_map[field_name]
         assert derived_field is not other_field
         assert derived_field.model is MyDerivedModel
         assert other_field.model is MyOtherDerivedModel

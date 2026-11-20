@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field as dataclass_field
 
 from hare.migrations.drift.column_mismatch import ColumnMismatch
+from hare.migrations.drift.object_mismatch import ObjectMismatch
 from hare.migrations.operations import HareOperation
 
 
@@ -10,13 +11,26 @@ from hare.migrations.operations import HareOperation
 class DriftResult:
     """The result of comparing a live database schema against the current models."""
 
-    operations: list[HareOperation]
+    operations_by_app: dict[str, list[HareOperation]]
     untracked_tables: list[str]
     untracked_columns: list[tuple[str, str, str, str]]
     #: Columns no operation reconciles - a primary key the table declares otherwise than the model,
     #: and a foreign key of a ``swappable()`` relation still referencing the table it named before.
     mismatched_columns: list[ColumnMismatch] = dataclass_field(default_factory=list)
+    #: Differences retained even when no migration operation can represent them.
+    mismatched_objects: list[ObjectMismatch] = dataclass_field(default_factory=list)
+
+    @property
+    def operations(self) -> list[HareOperation]:
+        """All proposed operations for inspection. Apply each application's list separately."""
+        return [operation for operations in self.operations_by_app.values() for operation in operations]
 
     @property
     def has_drift(self) -> bool:
-        return bool(self.operations or self.untracked_tables or self.untracked_columns or self.mismatched_columns)
+        return bool(
+            self.operations_by_app
+            or self.untracked_tables
+            or self.untracked_columns
+            or self.mismatched_columns
+            or self.mismatched_objects
+        )

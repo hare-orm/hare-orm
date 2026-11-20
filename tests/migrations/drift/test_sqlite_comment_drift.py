@@ -23,7 +23,8 @@ def get_models(table_description: str, column_description: str) -> str:
 
 @pytest.fixture(autouse=True)
 def skip_without_sqlite():
-    if os.getenv("HARE_TEST_DB", "").split(":", 1)[0] not in {"", "sqlite"}:
+    # sqlite+aiosqlite://... names SQLite by its scheme's first part.
+    if os.getenv("HARE_TEST_DB", "sqlite").split(":", 1)[0].split("+", 1)[0] != "sqlite":
         pytest.skip("SQLite keeps the comments inside CREATE TABLE")
 
 

@@ -10,7 +10,6 @@ from decimal import Decimal
 import pytest
 
 from hare.dialects.dialect_registry import DialectRegistry
-from hare.dialects.postgresql.enums import PostgresqlDialectName
 from hare.dialects.postgresql.fields.multiranges import (
     DateMultiRangeField,
     DecimalMultiRangeField,
@@ -19,8 +18,8 @@ from hare.dialects.postgresql.fields.multiranges import (
 )
 from hare.dialects.postgresql.fields.ranges import DateRangeField, Range
 from hare.dialects.postgresql.functions.aggregates import RangeAgg
+from hare.dialects.postgresql.postgresql_introspector import PostgresqlIntrospector
 from hare.exceptions import UnSupportedError, ValidationError
-from hare.inspectdb.generation.column_type_mapper import ColumnTypeMapper
 from hare.inspectdb.introspection.column_info import ColumnInfo
 from tests.dialects.postgresql.column_types.models_multi_range import RoomBooking, RoomSchedule
 
@@ -220,7 +219,7 @@ def test_a_range_field_without_a_multirange_type_is_refused():
 )
 def test_inspectdb_maps_multirange_columns(db_type, field_name):
     column = ColumnInfo(name="busy", db_type=db_type, nullable=True, is_pk=False, is_unique=False)
-    field_path, _, is_ambiguous = ColumnTypeMapper.map_column_type(PostgresqlDialectName.POSTGRESQL, column)
+    field_path, _, is_ambiguous = PostgresqlIntrospector.map_column_type(column)
     assert (field_path, is_ambiguous) == (f"hare.dialects.postgresql.fields.multiranges.{field_name}", False)
 
 

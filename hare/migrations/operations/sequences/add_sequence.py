@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 
 
 class AddSequence(AddSchemaObject):
-    """Creates a sequence a model declares, owned by its column; going back drops it.
+    """Creates a sequence a model declares, optionally owned by a column; going back drops it.
 
     Args:
         model_name: The model.

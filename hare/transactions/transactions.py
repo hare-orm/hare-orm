@@ -4,7 +4,7 @@ import inspect
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from functools import partial
-from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
+from typing import TYPE_CHECKING, Any
 
 from hare.core.log import logger
 from hare.dialects.base.client.transaction_client import TransactionClient
@@ -20,9 +20,6 @@ from hare.transactions.transaction_options import TransactionOptions
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
-
-P = ParamSpec("P")
-T = TypeVar("T")
 
 
 class Transactions:
@@ -105,6 +102,8 @@ class Transactions:
             )
         result = callback()
         if inspect.isawaitable(result):
+            if inspect.iscoroutine(result):
+                result.close()
             raise QueryError(
                 "on_commit() outside a transaction can't run an async callback synchronously - "
                 "await it yourself, or call on_commit() from inside a transaction."

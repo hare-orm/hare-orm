@@ -69,13 +69,13 @@ OUTER_JSON_PATH_ANNOTATION_NAME = "hare outer json path"
 
 #: A comparison lookup to the one giving the same result with its two sides swapped.
 MIRRORED_COMPARISON_LOOKUPS: dict[str, str] = {
-    "": "",
+    Lookup.EXACT: Lookup.EXACT,
     "exact": "exact",
-    "not": "not",
-    "gt": "lt",
-    "gte": "lte",
-    "lt": "gt",
-    "lte": "gte",
+    Lookup.NOT: Lookup.NOT,
+    Lookup.GT: Lookup.LT,
+    Lookup.GTE: Lookup.LTE,
+    Lookup.LT: Lookup.GT,
+    Lookup.LTE: Lookup.GTE,
 }
 
 # The SQL type a float/Decimal literal operand is cast to: a database would otherwise infer the
@@ -88,18 +88,11 @@ LITERAL_CAST_SQL_TYPE: dict[type, str] = {
 #: The integers a bare integer literal binds as beside any integer column - its type is taken from the
 #: column beside it, a smallint the narrowest; one beyond is cast to the integer type holding it
 #: (``INTEGER_LITERAL_RANGE``, ``BIG_INTEGER_LITERAL_RANGE``), and one beyond them to a number.
-#: The literals bound in the stored form of their field's type whose bare cast is text - a UUID, a dict as
-#: JSON: a function's main argument is cast to the field's column type, which a column beside it shares.
-FIELD_TYPED_LITERAL_TYPES = (UUID, dict)
 SMALL_INTEGER_LITERAL_RANGE = (-(2**15), 2**15 - 1)
 INTEGER_LITERAL_RANGE = (-(2**31), 2**31 - 1)
 BIG_INTEGER_LITERAL_RANGE = (-(2**63), 2**63 - 1)
 
 RAW_SQL_TOKEN_RE = re.compile(r"%%|%s")
-
-#: The levels a list, tuple or dict given as a value (``Value()``, a ``RawSQL`` parameter) may nest -
-#: the depth a JSON text is written to; a value holding itself nests without end.
-VALUE_PARAMETER_MAX_DEPTH = 255
 
 #: The origin a reference no later query can bind is recorded under (``PlanOrigins``) - a value
 #: of a query built into another one keeping no plan, a SQL term binding a value no term holds: the
@@ -108,7 +101,6 @@ UNBINDABLE_VALUE_ORIGIN = "unbindable"
 
 
 #: The name of a ``JsonTable`` column - a Python identifier without ``__``.
-JSON_TABLE_COLUMN_NAME_PATTERN = re.compile(r"(?!.*__)[A-Za-z_][A-Za-z0-9_]*")
 
 #: The JSON path a ``JsonTable`` column reads when it names none - the item's key of its name.
 JSON_TABLE_DEFAULT_COLUMN_PATH = "$.{name}"

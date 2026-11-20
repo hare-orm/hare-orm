@@ -1,8 +1,9 @@
-//! Remembering attribute values of many instances in one call - `InstanceValues.capture()`.
+//! Remembering attribute values of many instances in one call - `InstanceValues.capture()` and
+//! `InstanceSnapshot.capture_persistence()`.
 
-use pyo3::exceptions::PyAttributeError;
+use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyInt, PyString, PyTuple};
+use pyo3::types::{PyDict, PyInt, PyList, PyString, PyTuple};
 
 /// Remembers the current value of each of `field_names` on each instance, keeping a value already
 /// remembered: `old_values` maps `id(instance)` to `(instance, {field name: value})`; a field the
@@ -41,12 +42,46 @@ pub fn capture_instance_values(
         if values.contains(name)? {
             continue;
         }
-        let value = match instance.getattr(name) {
-            Ok(value) => value,
-            Err(error) if error.is_instance_of::<PyAttributeError>(py) => missing.clone(),
-            Err(error) => return Err(error),
-        };
+        let value = instance.getattr_opt(name)?.unwrap_or_else(|| missing.clone());
         values.set_item(name, value)?;
     }
     Ok(())
+}
+
+/// The persistence snapshots of `instances`, in order - `snapshot_class(instance, values)` of each:
+/// the instance's own (`__dict__`) values of `names` - `missing` for one it lacks, a dict copied, as a
+/// later write edits it in place - followed by the real primary-key attributes. Missing key
+/// attributes remain missing; evaluating the synthetic `pk` would lose that distinction.
+#[pyfunction]
+pub fn capture_persistence_snapshots<'py>(
+    snapshot_class: &Bound<'py, PyAny>,
+    instances: &Bound<'py, PyAny>,
+    names: Vec<Bound<'py, PyString>>,
+    missing: &Bound<'py, PyAny>,
+    primary_key_names: Vec<Bound<'py, PyString>>,
+) -> PyResult<Bound<'py, PyList>> {
+    let py = snapshot_class.py();
+    let state_name = intern!(py, "__dict__");
+    let snapshots = PyList::empty(py);
+    for instance in instances.try_iter()? {
+        let instance = instance?;
+        let state = instance.getattr(state_name)?.cast_into::<PyDict>()?;
+        let values = PyDict::new(py);
+        for name in &names {
+            let value = match state.get_item(name)? {
+                Some(value) => match value.cast::<PyDict>() {
+                    Ok(mapping) => mapping.copy()?.into_any(),
+                    Err(_) => value,
+                },
+                None => missing.clone(),
+            };
+            values.set_item(name, value)?;
+        }
+        for name in &primary_key_names {
+            let value = instance.getattr_opt(name)?.unwrap_or_else(|| missing.clone());
+            values.set_item(name, value)?;
+        }
+        snapshots.append(snapshot_class.call1((instance, values))?)?;
+    }
+    Ok(snapshots)
 }

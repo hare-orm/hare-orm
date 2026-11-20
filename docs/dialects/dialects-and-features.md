@@ -93,18 +93,18 @@ wherever it has a connection.
 | `supports_streaming` | `QuerySet.stream()` pages rows off a cursor inside a transaction | yes | yes | yes | yes |
 | `streams_without_transaction` | `stream()` reads rows outside a transaction too — the server sends the rows as it computes them | no | no | no | yes |
 | `execute_many_scales_poorly` | `executemany()` is slower than one multi-row statement | no | yes | no | yes |
-| `binds_written_parameters` | The driver binds the rows hare's native writer builds as they are | no | yes | no | no |
 | `max_bind_parameters` | Most bind parameters one statement may carry | 32766 | 32767 | 32767 | 1000000 |
 | `max_expression_depth` | The deepest expression one statement may hold (`None`: no limit) — a long list of OR-ed key groups is split across statements | 1000 | `None` | `None` | `None` |
 | `max_bulk_update_rows` | Most rows one `bulk_update()` statement writes (`None`: as many as the parameters allow) | `None` | `None` | `None` | 1000 |
 | `cascade_depth_limit` | The recursion depth a native `ON DELETE CASCADE` stops at; the client then raises `CascadeDepthLimitError`, and hare finishes a deep cascade itself, fewer levels than this at a time | the build's `SQLITE_LIMIT_TRIGGER_DEPTH` (1000; 100 in the official 3.37.2 library) | none | none | none |
 | `supports_nulls_distinct` | A unique constraint takes `NULLS [NOT] DISTINCT` | no | from 15 | from 15 | no |
-| `explain_options` | The options `explain(**options)` takes | none | those of the server's version (`GENERIC_PLAN` from 16, `MEMORY` and `SERIALIZE` from 17) | the same | none |
+| `PostgresqlFeatures.explain_options` | The options `explain(**options)` takes | none | those of the server's version (`GENERIC_PLAN` from 16, `MEMORY` and `SERIALIZE` from 17) | the same | none |
 | `supports_pool_status` | The client reports its pool's status and metrics — `get_pool_status()`, [pool metrics](../observability/pool-health.md) | yes | yes | yes | clickhouse-driver — yes, clickhouse-connect — no |
 
-Where a feature is missing, the operation that needs it raises `UnSupportedError` naming it before
-anything is sent — `select_for_update()` on SQLite, `Transactions.distributed()` without two-phase
-commit, `stream()` without streaming.
+Where a feature is missing, the operation that needs it raises `UnSupportedError` before performing
+the unsupported action — `select_for_update()` on SQLite, `Transactions.distributed()` without
+two-phase commit, `stream()` without streaming. Determining capabilities can first open a connection
+and read the server's version or settings; this is not a guarantee that no SQL has been sent.
 
 ### <a id="database-features"></a>Features of the database
 
@@ -148,8 +148,9 @@ same values.
 | `supports_without_overlaps` | `UniqueConstraint(without_overlaps=True)` and `CompositePrimaryKey(without_overlaps=True)` — `WITHOUT OVERLAPS` on the last field, a range | no | yes (18+) | no |
 | `supports_returning_old_new` | `returning(old=...)` of `update()` and `merge()` — `RETURNING old.column` | no | yes (18+) | no |
 | `supports_json_table` | `JSON_TABLE` — `JsonTable(...)` | no | yes (17+) | no |
-| `supports_text_search_configurations` | [Full-text search](search-and-geodata/full-text-search.md) with text search configurations, `SearchVector` values, lexemes, label weights, rank normalization and the headline's fragment options | no | yes | no |
-| `supports_full_text_index` | `FullTextIndex` — an FTS5 table kept in step by triggers, which [full-text search](search-and-geodata/full-text-search.md) reads, and `SearchRank`'s weights by field | yes (a SQLite built with FTS5) | no (tsvector search) | no |
+| `supports_text_search_configurations` | Explicit config= for a search query, vector or headline | no | yes | no |
+| `text_search_operations` | Independent TextSearchOperation entries, checked by the dialect against connection features | — | — | — |
+| `SqliteFeatures.supports_full_text_index` | `FullTextIndex` — an FTS5 table kept in step by triggers, which [full-text search](search-and-geodata/full-text-search.md) reads, and `SearchRank`'s weights by field | yes (a SQLite built with FTS5) | no (tsvector search) | no |
 | `supports_vector_search` | The distances and `__nearby` of [`hare.vectors`](search-and-geodata/vector-search.md) — pgvector on PostgreSQL, sqlite-vec on SQLite | with `load_sqlite_vec=true` | yes (pgvector) | no |
 | `supports_tenant_schemas` | A [schema per tenant](../soft-delete-versions-tenants/schema-per-tenant.md) — `tenant_schema_template`, `Meta.tenant_schema`, `TenantSchemas` | no | yes | no |
 | `supports_spatial` | The spatial lookups, paths, functions and aggregates of [`hare.gis`](search-and-geodata/gis.md) | with `load_spatialite=true` | yes (PostGIS) | yes (the geo types — see [Types](clickhouse/types.md#geo)) |
@@ -186,11 +187,16 @@ same values.
 | `supports_row_updates` | An `UPDATE` of stored rows | yes | yes | yes |
 | `supports_row_deletes` | A `DELETE` of stored rows | yes | yes | yes |
 | `supports_recursive_queries` | A recursive `WITH` query — `with_recursive()`; without, it raises `UnSupportedError` | yes | yes | yes |
-| `reads_trailing_comment_of_insert` | A comment ending an `INSERT ... VALUES` is a comment; without, query tags go before such a statement — ClickHouse reads what follows `VALUES` as data | yes | yes | no |
 | `supports_correlated_subqueries` | A correlated subquery; without, an `EXISTS` correlated by equal columns is written as an `IN` test and any other is refused | yes | yes | yes |
 | `rewrites_correlated_exists` | An `EXISTS` correlated by equal columns (a row of them for a composite key too) is written as an `IN` test even where correlated subqueries run — the server refuses its own in a join's `ON` and over a `UNION DISTINCT`; one correlated by more than equalities is the server's own there, and raises `UnSupportedError` elsewhere | no | no | yes |
 | `supports_ordered_correlated_subqueries` | A correlated subquery orders and slices its own rows (`Subquery(... .order_by(...)[:1])`) | yes | yes | no |
-| `orders_by_correlated_subqueries` | A correlated subquery runs in `ORDER BY` and beside a `WHERE`; without, the rows are picked in a derived table and filtered, ordered and sliced outside it | yes | yes | no |
+| `supports_correlated_select` | Correlated subquery in SELECT | yes | yes | yes |
+| `supports_correlated_order_by` | Correlated subquery in ORDER BY | yes | yes | no |
+| `supports_correlated_group_by` | Correlated subquery in GROUP BY | yes | yes | no |
+| `supports_correlated_update` | Correlated subquery in UPDATE | yes | yes | no |
+| `supports_correlated_delete` | Correlated subquery in DELETE | yes | yes | no |
+| `rewrites_correlated_order_by` | Correlated ordering through a column of one derived SELECT | no | no | yes |
+| `correlated_select_requires_unfiltered_source` | Selected correlation computed before outer conditions | no | no | yes |
 
 Each field is documented on `hare.dialects.base.features.Features`.
 `connection.dialect.minimum_server_version` is the oldest server hare runs on: SQLite 3.35.5, PostgreSQL
@@ -220,7 +226,7 @@ from hare.dialects.dialect_registry import DialectRegistry
 
 DialectRegistry.get_dialect("postgresql")                  # the dialect object
 DialectRegistry.get_driver("postgresql+asyncpg")           # the driver an engine names
-DialectRegistry.get_driver_for_url_scheme("sqlite")        # the driver a database URL scheme picks
+DialectRegistry.get_driver_for_url_scheme("sqlite+aiosqlite")  # the driver a URL scheme picks
 DialectRegistry.get_dialects(), DialectRegistry.get_drivers()
 ```
 
@@ -229,12 +235,12 @@ driver is imported and registered only when a connection or a lookup names it, s
 `sqlite+aiosqlite://` imports nothing of PostgreSQL and `Hare.init()` on `postgresql://` nothing of
 SQLite; `get_dialects()` lists the built-in dialects first, in the same order every time. A name or
 scheme no built-in driver has, and a call to `get_dialects()`/`get_drivers()`, loads every module named
-in the `hare.dialects` entry point group of an installed package — a third-party dialect registers its
-drivers on import:
+in the `hare.dialects` entry point group of an installed package, then calls its contribution factory.
+Importing the module does not register drivers:
 
 ```toml
 [project.entry-points."hare.dialects"]
-colstore = "hare_colstore.driver"
+colstore = "hare_colstore.driver:extension"
 ```
 
 Its engine and database URL scheme then work like the built-in ones. How to write one is in
@@ -242,12 +248,15 @@ Its engine and database URL scheme then work like the built-in ones. How to writ
 
 ### <a id="registering-after-init"></a>Registering after `Hare.init()`
 
-A dialect, a driver, a term renderer or type mapping of a dialect, a `register_lookup()` lookup, a path
-transform and a dialect's QuerySet method can be registered at any time. Every registration drops what
-hare cached from the registries — the SQL of queries, row-reading plans, filter and ordering descriptions
-— and rebuilds the filters of every bound model, so the next query uses it; a query already built runs on
-with the SQL it has. Registrations usually run on import, before `Hare.init()`, when nothing is cached
-yet and the drop costs nothing.
+A dialect, driver, renderer, type mapping, lookup, path transform or QuerySet method can be registered
+after initialization. Extension factories return an `ExtensionContribution` without registration
+side effects. `Registries.register()` validates and publishes the contribution as one atomic snapshot,
+then invalidates dependent caches once; a rejected contribution leaves the previous snapshot intact.
+
+An active execution keeps its captured snapshot, including nested statements and iterator pages.
+A later independent execution sees the new registration. Importing an extension module is not the
+registration step. Direct registration methods remain available outside factories; see
+[Registering an extension](../extending/writing-a-dialect/index.md#registering).
 
 ## <a id="tests-by-capability"></a>Tests by capability
 

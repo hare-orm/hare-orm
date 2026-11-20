@@ -1,17 +1,20 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from copy import copy
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, overload
 
 from hare.classes.value_descriptions import ValueDescriptions
-from hare.exceptions import ConfigurationError, UnSupportedError
+from hare.exceptions import ConfigurationError
 from hare.fields.field import Field
+from hare.fields.generation.generated_column import GeneratedColumn
 
 if TYPE_CHECKING:
     from hare.ddl.raw_sql_term import RawSQLTerm
     from hare.ddl.schema_objects.enum_type import EnumType
     from hare.dialects.base.dialect import Dialect
+    from hare.fields.data.containers.container_field import HeldValuePath
+    from hare.fields.narrowing.narrowing_limit import NarrowingLimit
     from hare.query.expressions.expression import Expression
     from hare.sql.terms.term import Term
 
@@ -32,8 +35,8 @@ class GeneratedField(Field[Any]):
 
     Raises:
         ConfigurationError: ``expression`` is neither an expression of hare, a ``RawSQLTerm`` nor a
-            mapping of dialect names to ``RawSQLTerm``, or has no entry for the dialect, or
-            ``stored=False`` on a dialect without ``VIRTUAL`` columns.
+            mapping of dialect names to ``RawSQLTerm``, or has no entry for the dialect.
+        UnSupportedError: ``stored=False`` on a dialect without ``VIRTUAL`` columns.
     """
 
     allows_generated = True
@@ -46,24 +49,16 @@ class GeneratedField(Field[Any]):
         **kwargs: Any,
     ) -> None:
         if kwargs.get("primary_key") or kwargs.get("pk"):
-            # A generated column can't be the primary key: the DDL of a primary key column expects
-            # an auto-increment definition.
             raise ConfigurationError(
-                "GeneratedField can't be primary_key=True - every DDL path that renders a "
-                "primary key column assumes an auto-increment integer PK's self-contained "
-                "GENERATED_SQL (already including its own type and PRIMARY KEY marker), which "
-                "this class's GENERATED_SQL (just the bare GENERATED ALWAYS AS (...) clause) "
-                "doesn't provide. Use a plain field for the primary key and put this expression "
-                "on a separate, non-pk column instead."
+                "GeneratedField can't be primary_key=True - computed columns are not supported "
+                "as model primary keys. Use a plain field for the primary key and put this "
+                "expression on a separate column."
             )
         if kwargs.get("validators"):
-            # The application never writes this column, so validators here would never run - they go
-            # on output_field.
             raise ConfigurationError(
                 "GeneratedField can't take validators= - its value is computed by the database, "
-                "never assigned by the application, so there's nothing to validate. Put "
-                "validators on output_field= instead if you need to validate one of the "
-                "expression's own input columns."
+                "so write validators do not run for it. Put validators on the expression's "
+                "input fields or declare a database constraint on the computed result."
             )
         # Local import: the ddl package imports the query package, which imports the fields.
         from hare.ddl.raw_sql_term import RawSQLTerm
@@ -91,54 +86,28 @@ class GeneratedField(Field[Any]):
         self.field_type = output_field.field_type
 
     @staticmethod
-    def get_effective_field(field: Field[Any]) -> Field[Any]:
+    @overload
+    def get_effective_field(field: Field[Any]) -> Field[Any]: ...
+
+    @staticmethod
+    @overload
+    def get_effective_field(field: None) -> None: ...
+
+    @staticmethod
+    def get_effective_field(field: Field[Any] | None) -> Field[Any] | None:
         """The field a value of ``field`` has: a GeneratedField's output field, any other field
         itself.
 
         Args:
-            field: The field.
+            field: The field, or None if it is unknown.
 
         Returns:
-            The field the value has.
+            The field the value has, or None for an unknown field.
         """
         return field.output_field if isinstance(field, GeneratedField) else field
 
-    def _expression_for_dialect(self, dialect: Dialect) -> str:
-        # Local import: the ddl package imports the query package, which imports the fields.
-        from hare.ddl.expressions.declared_expressions import DeclaredExpressions
-        from hare.ddl.raw_sql_term import RawSQLTerm
-
-        if isinstance(self.expression, RawSQLTerm):
-            return self.expression.sql
-        if not isinstance(self.expression, dict):
-            return DeclaredExpressions.get_sql(self.expression, self.model, dialect)
-        expression = dialect.get_declared_variant(self.expression)
-        if expression is None:
-            raise ConfigurationError(
-                f"GeneratedField {self.model_field_name!r} has no expression for dialect {str(dialect.name)!r}."
-            )
-        return expression.sql
-
     def get_generated_sql(self, dialect: Dialect) -> str:
-        if not self.stored and not dialect.features.supports_virtual_generated_columns:
-            raise UnSupportedError(
-                f"GeneratedField {self.model_field_name!r} has stored=False, but the {dialect} dialect "
-                "only supports STORED generated columns."
-            )
-        if self.model_field_name in self.get_generated_from_field_names():
-            # A column computed from itself - a database refuses its table, or every row written.
-            raise ConfigurationError(
-                f"GeneratedField {self.model_field_name!r} reads itself - a column can't be computed from its "
-                "own value."
-            )
-        expression = self._expression_for_dialect(dialect)
-        schema_editor_class = dialect.schema_editor_class
-        template = (
-            schema_editor_class.STORED_GENERATED_COLUMN_TEMPLATE
-            if self.stored
-            else schema_editor_class.VIRTUAL_GENERATED_COLUMN_TEMPLATE
-        )
-        return template.format(expression=expression)
+        return GeneratedColumn(self.expression, self.stored).get_sql(self, dialect)
 
     def get_python_type(self) -> Any:
         return self.output_field.get_python_type()
@@ -152,6 +121,19 @@ class GeneratedField(Field[Any]):
 
     def get_column_type(self, dialect: Dialect) -> str:
         return self.output_field.get_column_type(dialect)
+
+    def get_narrowing_limit(self, old_field: Field[Any]) -> NarrowingLimit | None:
+        """Preserve the output field's semantic limits when altering computed columns.
+
+        Stored and virtual columns can become unreadable without changing their SQL
+        type or expression, for example when an output enum loses a member. Compare
+        the effective old output through the normal field hook before schema changes.
+        """
+        return self.output_field.get_narrowing_limit(self.get_effective_field(old_field))
+
+    def get_held_narrowing_limits(self, old_field: Field[Any]) -> Sequence[tuple[HeldValuePath, NarrowingLimit]]:
+        """The output container's element limits, preserving its custom narrowing hooks."""
+        return self.output_field.get_held_narrowing_limits(self.get_effective_field(old_field))
 
     def exists_on(self, dialect: Dialect) -> bool:
         return self.output_field.exists_on(dialect)
@@ -179,7 +161,9 @@ class GeneratedField(Field[Any]):
         return self.output_field.to_python(value)
 
     def get_assign_normalized_types(self) -> frozenset[type]:
-        return self.output_field.get_assign_normalized_types()
+        return self._get_unchanged_assign_types(
+            GeneratedField.to_python, *self.output_field.get_assign_normalized_types()
+        )
 
     @property
     def constraints(self) -> dict[str, Any]:
@@ -197,21 +181,15 @@ class GeneratedField(Field[Any]):
         return self.output_field.requires_enum_type
 
     def get_generated_from_field_names(self) -> tuple[str, ...]:
-        # Local import: the ddl package imports the query package, which imports the fields.
-        from hare.ddl.expressions.expression_field_renaming import ExpressionFieldRenaming
-
-        # A raw SQL expression's fields aren't read out of it.
-        return tuple(sorted(ExpressionFieldRenaming.get_all_read_field_names(self.expression)))
+        return GeneratedColumn(self.expression, self.stored).get_field_names()
 
     def with_renamed_generated_from_field(self, old_name: str, new_name: str) -> Field[Any]:
-        # Local import: the ddl package imports the query package, which imports the fields.
-        from hare.ddl.expressions.expression_field_renaming import ExpressionFieldRenaming
-
-        renamed_expression = ExpressionFieldRenaming.get_renamed(self.expression, old_name, new_name)
-        if renamed_expression is self.expression:
+        declaration = GeneratedColumn(self.expression, self.stored)
+        renamed = declaration.with_renamed_field(old_name, new_name)
+        if renamed is declaration:
             return self
         renamed_field = copy(self)
-        renamed_field.expression = renamed_expression
+        renamed_field.expression = renamed.expression
         return renamed_field
 
     def deconstruct(self) -> tuple[str, list[Any], dict[str, Any]]:

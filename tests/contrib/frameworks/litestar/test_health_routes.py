@@ -12,14 +12,14 @@ from hare.contrib.frameworks.litestar import HarePlugin
 from hare.health import HealthCheck
 from tests.contrib.frameworks.health_apps import HEALTHY_CONFIG, AlwaysDegraded, make_unhealthy_config
 
-REQUIRES = ("litestar",)
-
 pytestmark = pytest.mark.sqlite_only
 
 
 @pytest.mark.asyncio
 async def test_a_healthy_application_is_ready_and_alive():
-    app = Litestar([], plugins=[HarePlugin(HEALTHY_CONFIG, health_routes=HealthRoutes(HealthCheck()))])
+    app = Litestar(
+        [], plugins=[HarePlugin(HEALTHY_CONFIG, health_routes=HealthRoutes(HealthCheck()))], logging_config=None
+    )
     async with AsyncTestClient(app) as client:
         ready = await client.get("/health/ready")
         assert ready.status_code == 200
@@ -38,7 +38,7 @@ async def test_a_healthy_application_is_ready_and_alive():
 async def test_an_unhealthy_application_is_not_ready_but_alive():
     with tempfile.TemporaryDirectory() as directory:
         plugin = HarePlugin(make_unhealthy_config(directory), health_routes=HealthRoutes(HealthCheck()))
-        async with AsyncTestClient(Litestar([], plugins=[plugin])) as client:
+        async with AsyncTestClient(Litestar([], plugins=[plugin], logging_config=None)) as client:
             ready = await client.get("/health/ready")
             assert ready.status_code == 503
             assert ready.json()["connections"]["unreachable"] == {"status": "unhealthy"}
@@ -49,7 +49,7 @@ async def test_an_unhealthy_application_is_not_ready_but_alive():
 async def test_a_degraded_application_answers_the_status_it_was_given():
     health_routes = HealthRoutes(HealthCheck(degraded_when=[AlwaysDegraded()]), degraded_status_code=429)
     async with AsyncTestClient(
-        Litestar([], plugins=[HarePlugin(HEALTHY_CONFIG, health_routes=health_routes)])
+        Litestar([], plugins=[HarePlugin(HEALTHY_CONFIG, health_routes=health_routes)], logging_config=None)
     ) as client:
         ready = await client.get("/health/ready")
         assert (ready.status_code, ready.json()["status"]) == (429, "degraded")
@@ -61,6 +61,6 @@ async def test_the_routes_run_outside_the_request_transaction():
         plugin = HarePlugin(
             make_unhealthy_config(directory), atomic_requests=True, health_routes=HealthRoutes(HealthCheck())
         )
-        async with AsyncTestClient(Litestar([], plugins=[plugin])) as client:
+        async with AsyncTestClient(Litestar([], plugins=[plugin], logging_config=None)) as client:
             assert (await client.get("/health/ready")).status_code == 503
             assert (await client.get("/health/live")).status_code == 200

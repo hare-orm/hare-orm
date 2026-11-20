@@ -21,6 +21,7 @@ from hare.fields.db_defaults.random_hex import RandomHex
 from hare.fields.db_defaults.sql_default import SqlDefault
 from hare.fields.enums import NowValueType
 from hare.time import Timezone
+from hare.time.zone_settings import ZoneSettings
 
 if TYPE_CHECKING:
     from hare.dialects.base.renderers.term_renderers import TermRenderers
@@ -46,7 +47,7 @@ class SqliteDefaults:
         # SQLite's DEFAULT takes a literal, a signed number or a parenthesized expression. A subclass
         # with no standard SQL of its own (UuidV7) refuses here.
         sql = default.get_standard_sql()
-        if SQLITE_BARE_DEFAULT_PATTERN.fullmatch(sql) or default.is_parenthesized(sql):
+        if SQLITE_BARE_DEFAULT_PATTERN.fullmatch(sql):
             return sql
         return f"({sql})"
 
@@ -63,17 +64,17 @@ class SqliteDefaults:
             constant offset, the ``SQLITE_LOCAL_NOW_FUNCTION_NAME`` function for a zone with DST.
         """
         if default.value_type == NowValueType.DATETIME:
-            return SQLITE_NOW_UTC_SQL if Timezone.get_use_timezone() else SQLITE_NOW_LOCAL_SQL
+            return SQLITE_NOW_UTC_SQL if ZoneSettings.get_use_timezone() else SQLITE_NOW_LOCAL_SQL
         suffix = ""
-        if Timezone.get_use_timezone():
+        if ZoneSettings.get_use_timezone():
             constant_offset = default.get_constant_utc_offset(Timezone.default())
             if constant_offset is None:
                 return SQLITE_NOW_LOCAL_NOW_FUNCTION_SQL_TEMPLATE.format(
-                    zone=sql_context.dialect.literals.get_string_literal_sql(Timezone.name()),
+                    zone=sql_context.dialect.literals.get_string_literal_sql(ZoneSettings.name()),
                     value_type=default.value_type.value,
                 )
             moment = SQLITE_NOW_SHIFTED_MOMENT_TEMPLATE.format(minutes=int(constant_offset.total_seconds() // 60))
-            suffix = " || " + sql_context.dialect.literals.get_string_literal_sql(default.get_configured_offset_text())
+            suffix = " || " + sql_context.dialect.literals.get_string_literal_sql(Timezone.get_fixed_offset_text())
         else:
             moment = SQLITE_NOW_LOCAL_MOMENT
         if default.value_type == NowValueType.DATE:

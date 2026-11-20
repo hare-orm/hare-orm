@@ -9,6 +9,7 @@ from hare.query.enums import LookupValueShape
 
 if TYPE_CHECKING:
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -32,11 +33,14 @@ class ValueType:
         accepts_expressions: Whether an expression, a term or a subquery is taken too.
         alternatives: Types the value may be instead, whole - outside its shape (a range lookup's
             ``Range``).
-        is_any: Whether any value is taken - every other attribute is then ignored.
+        is_any: Whether the item's type is unknown; shape, expressions and whole-value alternatives
+            still apply.
+        accepted_classes: Additional input representations accepted even when a type checker
+            reads a more specific declared field type. Empty for values read from the database.
     """
 
     classes: tuple[Any, ...] = ()
-    declared_in: tuple[type[Model], str] | None = None
+    declared_in: tuple[ModelBinding, str] | None = None
     accepts_enum_values: bool = False
     models: tuple[type[Model], ...] = ()
     literals: tuple[str, ...] = ()
@@ -45,3 +49,4 @@ class ValueType:
     accepts_expressions: bool = False
     alternatives: tuple[Any, ...] = ()
     is_any: bool = False
+    accepted_classes: tuple[Any, ...] = ()

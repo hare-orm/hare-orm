@@ -3,7 +3,6 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any, ClassVar
 
-from hare.dialects.enums import ParameterPosition
 from hare.exceptions import QueryError
 from hare.fields.field import Field
 from hare.query.expressions import Expression, F, Function
@@ -12,18 +11,21 @@ from hare.query.expressions.constants import BIG_INTEGER_LITERAL_RANGE
 from hare.query.expressions.enums import NumericValueType
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
-from hare.query.expressions.numeric.numeric_type import NumericType
 from hare.query.expressions.numeric.numeric_typing import NumericTyping
+from hare.query.expressions.structure.enums import ArgumentRole
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.query.expressions.value import Value
+from hare.query.functions.comparison.function_arguments import FunctionArguments
 from hare.query.functions.math.enums import MathResultType
 from hare.sql.functions.declarations import MathFunction as MathFunctionTerm
 from hare.sql.terms.term import Term
-from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 
 class MathFunction(Function):
     """A numeric function of one or more numbers - a field name, an expression or a literal in any
     position. ``output`` picks the result type (``MathResultType``)."""
+
+    structure = ExpressionStructure(positional_role=ArgumentRole.FIELD)
 
     #: The SQL function name, also the name of hare's function after its prefix where a dialect
     #: registers one.
@@ -75,12 +77,7 @@ class MathFunction(Function):
         for default_value, default_result in zip(self.default_values, default_results, strict=True):
             self._raise_if_argument_type_refused(default_value, default_result)
         terms = super()._get_default_terms(function_arg, default_results, expression_context)
-        return [
-            Value.get_typed_term(term, term.value, ParameterPosition.FUNCTION_ARGUMENT, expression_context.dialect)
-            if isinstance(term, ValueWrapper)
-            else term
-            for term in terms
-        ]
+        return FunctionArguments.get_typed_literal_terms(terms, expression_context)
 
     def _get_result_term(
         self,
@@ -110,12 +107,9 @@ class MathFunction(Function):
         if self.output is MathResultType.FLOAT:
             return NumericTyping.FLOAT_OUTPUT_FIELD
         fields = [result.output_field for result in (function_arg, *default_results)]
-        numeric_types: list[NumericType] = []
-        for field in fields:
-            numeric_type = NumericTyping.get_field_type(field)
-            if numeric_type is None:
-                return None
-            numeric_types.append(numeric_type)
+        numeric_types = NumericTyping.get_field_types(fields)
+        if numeric_types is None:
+            return None
         if self.output is MathResultType.SAME:
             return fields[0]
         value_types = {numeric_type.type for numeric_type in numeric_types}
@@ -123,6 +117,4 @@ class MathFunction(Function):
             return NumericTyping.FLOAT_OUTPUT_FIELD
         if NumericValueType.DECIMAL in value_types:
             return NumericTyping.DECIMAL_QUOTIENT_OUTPUT_FIELD
-        if self.output is MathResultType.REMAINDER:
-            return NumericTyping.INTEGER_OUTPUT_FIELD
         return NumericTyping.FLOAT_OUTPUT_FIELD

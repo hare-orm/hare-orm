@@ -25,6 +25,7 @@ from hare.health.enums import HealthStatus
 from hare.health.health_report import HealthReport
 from hare.instrumentation.pools.pool_metrics import PoolMetrics
 from hare.instrumentation.pools.pool_registry import PoolRegistry
+from hare.instrumentation.pools.sample_window import SampleWindow
 
 if TYPE_CHECKING:
     from hare.core.connections.connection_handler import ConnectionHandler
@@ -66,12 +67,12 @@ class HealthCheck:
         check_direct: bool = False,
     ) -> None:
         self.timeout_seconds = timeout_seconds
-        self.degraded_when = tuple(
-            [WaitingRequests(at_least=1), PoolSaturation(ratio=DEFAULT_POOL_SATURATION_RATIO)]
+        self.degraded_when = (
+            (WaitingRequests(at_least=1), PoolSaturation(ratio=DEFAULT_POOL_SATURATION_RATIO))
             if degraded_when is None
-            else degraded_when
+            else tuple(degraded_when)
         )
-        self.unhealthy_when = tuple([PingFailed()] if unhealthy_when is None else unhealthy_when)
+        self.unhealthy_when = (PingFailed(),) if unhealthy_when is None else tuple(unhealthy_when)
         self.criteria_by_connection: dict[str, tuple[tuple[HealthCriterion, ...], tuple[HealthCriterion, ...]]] = {}
         for name, criteria in (criteria_by_connection or {}).items():
             self.criteria_by_connection[name] = (
@@ -128,10 +129,14 @@ class HealthCheck:
         """
         ping_result = server_ping = None
         if ping:
-            client = handler.get_main(name)
-            ping_result = await self.ping(client)
-            if self.check_direct:
-                server_ping = await self.ping_server(client)
+            try:
+                client = handler.get_main(name)
+            except ConfigurationError as error:
+                ping_result = PingResult.failed(error)
+            else:
+                ping_result = await self.ping(client)
+                if self.check_direct:
+                    server_ping = await self.ping_server(client)
         pools = self.get_pool_changes(handler, name)
         connection_check = ConnectionCheck(name, ping_result, server_ping, pools)
         degraded_when, unhealthy_when = self.criteria_by_connection.get(
@@ -176,7 +181,7 @@ class HealthCheck:
         try:
             return await ConnectionPing.run(client, self.timeout_seconds)
         except Exception as error:  # a health check reports, it never raises about the database
-            return PingResult(False, None, type(error).__name__)
+            return PingResult.failed(error)
 
     async def ping_server(self, client: DatabaseClient) -> PingResult | None:
         """Pings the server past a client's transaction pooler.
@@ -190,7 +195,7 @@ class HealthCheck:
         try:
             server_client = client.get_server_client()
         except Exception as error:  # no direct way to the server is a failed ping
-            return PingResult(False, None, type(error).__name__)
+            return PingResult.failed(error)
         if server_client is client:
             return None
         return await self.ping(server_client)
@@ -206,18 +211,10 @@ class HealthCheck:
             The pools, by role and schema.
         """
         changes = []
-        for client in PoolRegistry.get_clients():
-            if (
-                client.connection_handler is not handler
-                or client.connection_alias != name
-                or not client.features.supports_pool_status
-            ):
-                continue
-            status = client.get_pool_status()
-            if status is None:
-                continue
+        for client, status in PoolRegistry.iter_statuses(handler=handler, alias=name):
             previous_taken, previous_timeouts, previous_failures, wait_cursor = self.readings.get(client, (0, 0, 0, 0))
-            wait_cursor, waits, _ = client.pool_statistics.get_waits_since(wait_cursor)
+            waits = SampleWindow.from_records(wait_cursor, client.pool_statistics.get_waits_since(wait_cursor))
+            wait_cursor = waits.end_cursor
             self.readings[client] = (
                 status.acquire_count,
                 status.acquire_timeouts,
@@ -230,7 +227,7 @@ class HealthCheck:
                     max(0, status.acquire_count - previous_taken),
                     max(0, status.acquire_timeouts - previous_timeouts),
                     max(0, status.connect_failures - previous_failures),
-                    tuple(waits),
+                    waits,
                 )
             )
         return tuple(sorted(changes, key=lambda change: (change.status.role, change.status.schema or "")))

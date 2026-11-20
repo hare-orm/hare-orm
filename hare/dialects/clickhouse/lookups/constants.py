@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
+
 #: The name of the key existence test - no function of ClickHouse; the term writes its own SQL.
 CLICKHOUSE_JSON_KEY_EXISTENCE_FUNCTION_NAME = "HARE_JSON_KEY_EXISTENCE"
 
@@ -43,10 +45,10 @@ CLICKHOUSE_DYNAMIC_COMPARED_DECIMAL_SCALE = 38
 CLICKHOUSE_VALUE_SET_MINIMUM = 500
 #: The integer types the column of a set of values takes, the narrowest first, each with its range.
 CLICKHOUSE_VALUE_SET_INTEGER_TYPES = (
-    ("Int64", -(2**63), 2**63 - 1),
-    ("UInt64", 0, 2**64 - 1),
-    ("Int128", -(2**127), 2**127 - 1),
-    ("Int256", -(2**255), 2**255 - 1),
+    (ClickhouseTypeName.INT64, -(2**63), 2**63 - 1),
+    (ClickhouseTypeName.UINT64, 0, 2**64 - 1),
+    (ClickhouseTypeName.INT128, -(2**127), 2**127 - 1),
+    (ClickhouseTypeName.INT256, -(2**255), 2**255 - 1),
 )
 
 

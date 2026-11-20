@@ -16,8 +16,11 @@ from hare.ddl.enums import TriggerEvent
 from hare.ddl.indexes import Index, PartialIndex
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.ddl.schema_objects.trigger import Trigger
+from hare.declarations.declaration_value_serializer import DeclarationValueSerializer
+from hare.declarations.import_manager import ImportManager
 from hare.dialects.postgresql.fields import Range
 from hare.exceptions import ConfigurationError
+from hare.migrations.migration import Migration
 from hare.migrations.operations import (
     AddConstraint,
     AddIndex,
@@ -38,7 +41,13 @@ from hare.migrations.operations import (
     RunPython,
     RunSQL,
 )
-from hare.migrations.writer import ImportManager, MigrationWriter
+from hare.migrations.state.migration_environment import MigrationEnvironment
+from hare.migrations.state.state import State
+from hare.migrations.writer import MigrationWriter
+from hare.models import Model
+from hare.query.expressions import ConditionValue, Exists, F, Q
+from hare.query.queryset import QuerySet
+from tests.utils.project_sources import ProjectSources
 
 pytestmark = pytest.mark.database_independent
 
@@ -65,15 +74,6 @@ def forget_imported_app_package():
         del sys.modules[module_name]
 
 
-def _prepare_migration_package(tmp_path: Path, app_label: str) -> str:
-    package_dir = tmp_path / app_label
-    migrations_dir = package_dir / "migrations"
-    migrations_dir.mkdir(parents=True)
-    (package_dir / "__init__.py").write_text("", encoding="ascii")
-    (migrations_dir / "__init__.py").write_text("", encoding="ascii")
-    return f"{app_label}.migrations"
-
-
 def _write_migration(
     tmp_path: Path,
     monkeypatch,
@@ -81,7 +81,8 @@ def _write_migration(
     operations,
     expected: str,
 ) -> None:
-    module_path = _prepare_migration_package(tmp_path, "app")
+    ProjectSources(tmp_path).prepare_migrations(tmp_path / "app")
+    module_path = "app.migrations"
     monkeypatch.syspath_prepend(str(tmp_path))
 
     writer = MigrationWriter(
@@ -99,7 +100,8 @@ def test_write_uses_lf_line_endings_on_every_platform(tmp_path: Path, monkeypatc
     """MigrationWriter.write() must always emit LF line endings, even on Windows -
     Path.write_text()'s default text-mode newline translation would otherwise silently turn
     every "\\n" in as_string() into "\\r\\n" there."""
-    module_path = _prepare_migration_package(tmp_path, "app")
+    ProjectSources(tmp_path).prepare_migrations(tmp_path / "app")
+    module_path = "app.migrations"
     monkeypatch.syspath_prepend(str(tmp_path))
 
     operations = [
@@ -334,7 +336,8 @@ def test_writer_handles_tuple_indexes_in_options(tmp_path: Path, monkeypatch) ->
             },
         ),
     ]
-    module_path = _prepare_migration_package(tmp_path, "app")
+    ProjectSources(tmp_path).prepare_migrations(tmp_path / "app")
+    module_path = "app.migrations"
     monkeypatch.syspath_prepend(str(tmp_path))
     writer = MigrationWriter(
         "0001_initial",
@@ -438,7 +441,8 @@ def test_writer_renders_composite_target_fk_to_field(tmp_path: Path, monkeypatch
             ]
         """
     )
-    module_path = _prepare_migration_package(tmp_path, "app")
+    ProjectSources(tmp_path).prepare_migrations(tmp_path / "app")
+    module_path = "app.migrations"
     monkeypatch.syspath_prepend(str(tmp_path))
 
     writer = MigrationWriter("0006_composite_fk", "app", operations, migrations_module=module_path)
@@ -455,13 +459,16 @@ def test_writer_renders_composite_target_fk_to_field(tmp_path: Path, monkeypatch
 
 
 def test_writer_excludes_fk_source_field(tmp_path: Path, monkeypatch) -> None:
+    relation = fields.ForeignKeyField("app.Author", related_name="posts")
+    shadow = fields.IntField(source_field="author_id")
+    shadow.reference = relation
     operations = [
         CreateModel(
             name="Post",
             fields=[
                 ("id", fields.IntField(primary_key=True)),
-                ("author", fields.ForeignKeyField("app.Author", related_name="posts")),
-                ("author_id", fields.IntField(source_field="author_id")),
+                ("author", relation),
+                ("author_id", shadow),
             ],
         )
     ]
@@ -484,6 +491,36 @@ def test_writer_excludes_fk_source_field(tmp_path: Path, monkeypatch) -> None:
         """
     )
     _write_migration(tmp_path, monkeypatch, "0005_fk_source", operations, expected)
+
+
+@pytest.mark.parametrize("relation", [fields.ForeignKeyField, fields.OneToOneField])
+@pytest.mark.parametrize("composite", [False, True], ids=["scalar-key", "composite-key"])
+def test_writer_preserves_explicit_fields_beside_composite_relation(relation, composite):
+    child_fields = [
+        ("number", fields.IntField(primary_key=not composite, generated=False)),
+        ("parent", relation("app.Parent", related_name=False)),
+        ("parent_id", fields.IntField()),
+    ]
+    if composite:
+        child_fields.append(("region", fields.IntField()))
+    operations = [
+        CreateModel(
+            "Parent",
+            [
+                ("region", fields.IntField()),
+                ("number", fields.IntField()),
+            ],
+            options={"primary_key_attribute": ("region", "number")},
+        ),
+        CreateModel(
+            "Child", child_fields, options={"primary_key_attribute": ("region", "number")} if composite else None
+        ),
+    ]
+    source = MigrationWriter("0001_initial", "app", operations).as_string()
+    migration = Migration.from_source(source, name="0001_initial", app_label="app")
+    prepared = migration.prepare(State(environment=MigrationEnvironment()))
+    assert "parent_id" in dict(migration.operations[1].fields)
+    assert "parent_id" in prepared.after.models[("app", "Child")].fields
 
 
 def test_writer_serializes_on_delete_enum(tmp_path: Path, monkeypatch) -> None:
@@ -561,7 +598,8 @@ def test_writer_rejects_lambda_default(tmp_path: Path, monkeypatch) -> None:
             field=fields.CharField(max_length=120, default=lambda: "x"),
         )
     ]
-    module_path = _prepare_migration_package(tmp_path, "app")
+    ProjectSources(tmp_path).prepare_migrations(tmp_path / "app")
+    module_path = "app.migrations"
     monkeypatch.syspath_prepend(str(tmp_path))
     writer = MigrationWriter(
         "0004_lambda",
@@ -585,7 +623,8 @@ def test_writer_allows_partial_default(tmp_path: Path, monkeypatch) -> None:
             field=fields.CharField(max_length=120, default=functools.partial(_default_value)),
         )
     ]
-    module_path = _prepare_migration_package(tmp_path, "app")
+    ProjectSources(tmp_path).prepare_migrations(tmp_path / "app")
+    module_path = "app.migrations"
     monkeypatch.syspath_prepend(str(tmp_path))
     writer = MigrationWriter(
         "0005_partial",
@@ -605,7 +644,8 @@ def test_writer_rejects_partial_lambda(tmp_path: Path, monkeypatch) -> None:
             field=fields.CharField(max_length=120, default=functools.partial(lambda: "x")),
         )
     ]
-    module_path = _prepare_migration_package(tmp_path, "app")
+    ProjectSources(tmp_path).prepare_migrations(tmp_path / "app")
+    module_path = "app.migrations"
     monkeypatch.syspath_prepend(str(tmp_path))
     writer = MigrationWriter(
         "0006_partial_lambda",
@@ -628,7 +668,8 @@ def test_writer_rejects_local_function_default(tmp_path: Path, monkeypatch) -> N
             field=fields.CharField(max_length=120, default=_local_default),
         )
     ]
-    module_path = _prepare_migration_package(tmp_path, "app")
+    ProjectSources(tmp_path).prepare_migrations(tmp_path / "app")
+    module_path = "app.migrations"
     monkeypatch.syspath_prepend(str(tmp_path))
     writer = MigrationWriter(
         "0007_local_default",
@@ -819,7 +860,7 @@ def test_render_value_timedelta_preserves_microsecond_precision() -> None:
 
     imports = ImportManager()
     td = datetime.timedelta(days=100000, microseconds=1)
-    rendered = MigrationWriter.render_value(td, imports)
+    rendered = DeclarationValueSerializer.render_value(td, imports)
     assert eval(rendered) == td  # noqa: S307
 
 
@@ -832,7 +873,7 @@ def test_render_value_refuses_an_object_its_text_doesnt_rebuild() -> None:
 
     for value in (_NoDeconstruct(), fractions.Fraction(1, 3), collections.deque([1]), array.array("i", [1])):
         with pytest.raises(ConfigurationError, match="can't be written into a migration"):
-            MigrationWriter.render_value(value, ImportManager())
+            DeclarationValueSerializer.render_value(value, ImportManager())
 
 
 def test_render_value_writes_ip_addresses_and_sets_as_code() -> None:
@@ -851,7 +892,7 @@ def test_render_value_writes_ip_addresses_and_sets_as_code() -> None:
         3 + 4j,
     ):
         imports = ImportManager()
-        rendered = MigrationWriter.render_value(value, imports)
+        rendered = DeclarationValueSerializer.render_value(value, imports)
         namespace = {"ipaddress": ipaddress}
         assert eval(rendered, namespace) == value  # noqa: S307
         assert type(eval(rendered, namespace)) is type(value)  # noqa: S307
@@ -861,7 +902,7 @@ def test_render_value_uses_deconstruct_protocol_for_arbitrary_objects() -> None:
     """Any object without explicit support (e.g. a Crypto instance passed as
     EncryptedJSONField(crypto=...)) used to serialize as an invalid repr()."""
     imports = ImportManager()
-    rendered = MigrationWriter.render_value(_Deconstructable("x"), imports)
+    rendered = DeclarationValueSerializer.render_value(_Deconstructable("x"), imports)
     assert rendered == "_Deconstructable('x')"
     assert "_Deconstructable" in imports.imports.get("tests.migrations.migration_files.test_writer", set())
 
@@ -871,7 +912,7 @@ def test_render_value_prefers_migration_import_path_over_deconstruct() -> None:
     constructor again (critical for secrets like Crypto: reconstructing it would mean writing the
     encryption key literally into the migration file)."""
     imports = ImportManager()
-    rendered = MigrationWriter.render_value(_SingletonRef(), imports)
+    rendered = DeclarationValueSerializer.render_value(_SingletonRef(), imports)
     assert rendered == "some_singleton"
     assert "some_singleton" in imports.imports.get("app.utils.crypto", set())
 
@@ -1021,8 +1062,8 @@ def test_functions_of_one_name_from_two_modules_stay_two_values(tmp_path, monkey
     from defaults_shop_b.defaults import make_code as make_b
 
     imports = ImportManager()
-    first = MigrationWriter.render_value(fields.CharField(max_length=5, default=make_a), imports)
-    second = MigrationWriter.render_value(fields.CharField(max_length=5, default=make_b), imports)
+    first = DeclarationValueSerializer.render_value(fields.CharField(max_length=5, default=make_a), imports)
+    second = DeclarationValueSerializer.render_value(fields.CharField(max_length=5, default=make_b), imports)
     namespace: dict[str, object] = {}
     exec("\n".join([*imports.render(), f"first = {first}", f"second = {second}"]), namespace)  # noqa: S102
 
@@ -1043,7 +1084,20 @@ def test_functions_of_one_name_from_two_modules_stay_two_values(tmp_path, monkey
 def test_a_range_default_is_written_as_the_call_building_it(value) -> None:
     """A Range had no deconstruct() - makemigrations refused a range field's default."""
     imports = ImportManager()
-    rendered = MigrationWriter.render_value(value, imports)
+    rendered = DeclarationValueSerializer.render_value(value, imports)
     namespace: dict[str, object] = {}
     exec("\n".join([*imports.render(), f"value = {rendered}"]), namespace)  # noqa: S102
     assert namespace["value"] == value
+
+
+@pytest.mark.parametrize("predicate", ["field", "condition_value", "exists"])
+def test_writer_rejects_expression_predicates_in_conditions(predicate):
+    if predicate == "exists":
+        condition = Q(Exists(QuerySet(Model)))
+    elif predicate == "condition_value":
+        condition = Q.from_expression(ConditionValue(Q(is_active=True)))
+    else:
+        condition = Q.from_expression(F("is_active"))
+    for value in (condition, ~condition & Q(name="visible")):
+        with pytest.raises(ConfigurationError, match="Q expression predicate can't be written into a migration"):
+            DeclarationValueSerializer.render_condition(value, ImportManager())

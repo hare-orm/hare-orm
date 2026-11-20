@@ -13,6 +13,8 @@ from hare.sql.sql_context import SqlContext
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
+    from hare.gis.functions.spatial_output_domain import SpatialOutputDomain
+    from hare.gis.terms.spatial_function_term import SpatialFunctionTerm
     from hare.sql.terms.term import Term
 
 
@@ -80,3 +82,8 @@ class PostgresqlRenderers(CheckedTermRenderers):
             # `a*$1::text` would cast only the last operand.
             return f"({argument_sql})::text"
         return f"{argument_sql}::text"
+
+    def get_spatial_output_domain(self, term: SpatialFunctionTerm, domain: SpatialOutputDomain) -> SpatialOutputDomain:
+        from hare.dialects.postgresql.spatial.postgresql_spatial_renderers import PostgresqlSpatialRenderers
+
+        return PostgresqlSpatialRenderers.get_output_domain(term, domain)

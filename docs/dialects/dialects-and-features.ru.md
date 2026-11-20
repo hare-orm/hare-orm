@@ -94,18 +94,18 @@ connection.features.supports_nulls_distinct    # True у PostgreSQL 15 и нов
 | `supports_streaming` | `QuerySet.stream()` читает строки через курсор внутри транзакции | да | да | да | да |
 | `streams_without_transaction` | `stream()` читает строки и вне транзакции — сервер отдаёт строки по мере вычисления | нет | нет | нет | да |
 | `execute_many_scales_poorly` | `executemany()` медленнее одной команды на много строк | нет | да | нет | да |
-| `binds_written_parameters` | Драйвер передаёт строки, собранные встроенным записывающим кодом hare, как есть | нет | да | нет | нет |
 | `max_bind_parameters` | Наибольшее число параметров в одной команде | 32766 | 32767 | 32767 | 1000000 |
 | `max_expression_depth` | Наибольшая глубина выражения в одной команде (`None` — без предела); длинный список групп ключей через OR делится на несколько команд | 1000 | `None` | `None` | `None` |
 | `max_bulk_update_rows` | Наибольшее число строк одной команды `bulk_update()` (`None` — сколько позволяют параметры) | `None` | `None` | `None` | 1000 |
 | `cascade_depth_limit` | Глубина рекурсии, на которой останавливается собственный `ON DELETE CASCADE` базы; тогда клиент даёт `CascadeDepthLimitError`, а глубокий каскад доводит до конца hare — меньшим числом уровней за раз | `SQLITE_LIMIT_TRIGGER_DEPTH` сборки (1000; 100 у официальной библиотеки 3.37.2) | нет | нет | нет |
 | `supports_nulls_distinct` | Ограничение уникальности принимает `NULLS [NOT] DISTINCT` | нет | с 15 | с 15 | нет |
-| `explain_options` | Параметры, которые принимает `explain(**options)` | нет | параметры версии сервера (`GENERIC_PLAN` с 16, `MEMORY` и `SERIALIZE` с 17) | так же | нет |
+| `PostgresqlFeatures.explain_options` | Параметры, которые принимает `explain(**options)` | нет | параметры версии сервера (`GENERIC_PLAN` с 16, `MEMORY` и `SERIALIZE` с 17) | так же | нет |
 | `supports_pool_status` | Клиент сообщает состояние и метрики своего пула — `get_pool_status()`, [метрики пула](../observability/pool-health.ru.md) | да | да | да | clickhouse-driver — да, clickhouse-connect — нет |
 
-Если возможности нет, операция, которой она нужна, даёт `UnSupportedError` с её названием до отправки
-чего-либо: `select_for_update()` в SQLite, `Transactions.distributed()` без двухфазной фиксации,
-`stream()` без потоковой передачи.
+Если возможности нет, операция, которой она нужна, даёт `UnSupportedError` до выполнения
+неподдерживаемого действия: `select_for_update()` в SQLite, `Transactions.distributed()` без
+двухфазной фиксации, `stream()` без потоковой передачи. Для определения возможностей может сначала
+открыться соединение и прочитаться версия или настройки сервера; это не гарантия отсутствия SQL.
 
 ### <a id="database-features"></a>Возможности базы
 
@@ -149,8 +149,9 @@ connection.features.supports_nulls_distinct    # True у PostgreSQL 15 и нов
 | `supports_without_overlaps` | `UniqueConstraint(without_overlaps=True)` и `CompositePrimaryKey(without_overlaps=True)` — `WITHOUT OVERLAPS` у последнего поля, диапазона | нет | да (18+) | нет |
 | `supports_returning_old_new` | `returning(old=...)` у `update()` и `merge()` — `RETURNING old.column` | нет | да (18+) | нет |
 | `supports_json_table` | `JSON_TABLE` — `JsonTable(...)` | нет | да (17+) | нет |
-| `supports_text_search_configurations` | [Полнотекстовый поиск](search-and-geodata/full-text-search.ru.md) с конфигурациями, `SearchVector` как значением, лексемами, весами меток, нормализацией ранга и параметрами фрагментов разметки | нет | да | нет |
-| `supports_full_text_index` | `FullTextIndex` — таблица FTS5, которую держат в согласии триггеры и из которой читает [полнотекстовый поиск](search-and-geodata/full-text-search.ru.md), и веса полей у `SearchRank` | да (SQLite, собранная с FTS5) | нет (поиск по tsvector) | нет |
+| `supports_text_search_configurations` | Явный config= для поискового запроса, вектора или разметки | нет | да | нет |
+| `text_search_operations` | Отдельно объявленные операции TextSearchOperation; проверяются диалектом по возможностям соединения | — | — | — |
+| `SqliteFeatures.supports_full_text_index` | `FullTextIndex` — таблица FTS5, которую держат в согласии триггеры и из которой читает [полнотекстовый поиск](search-and-geodata/full-text-search.ru.md), и веса полей у `SearchRank` | да (SQLite, собранная с FTS5) | нет (поиск по tsvector) | нет |
 | `supports_vector_search` | Расстояния и `__nearby` из [`hare.vectors`](search-and-geodata/vector-search.ru.md) — pgvector в PostgreSQL, sqlite-vec в SQLite | с `load_sqlite_vec=true` | да (pgvector) | нет |
 | `supports_tenant_schemas` | [Схема на арендатора](../soft-delete-versions-tenants/schema-per-tenant.ru.md) — `tenant_schema_template`, `Meta.tenant_schema`, `TenantSchemas` | нет | да | нет |
 | `supports_spatial` | Пространственные операторы, пути, функции и агрегаты [`hare.gis`](search-and-geodata/gis.ru.md) | с `load_spatialite=true` | да (PostGIS) | да (гео-типы — см. [Типы](clickhouse/types.ru.md#geo)) |
@@ -187,11 +188,16 @@ connection.features.supports_nulls_distinct    # True у PostgreSQL 15 и нов
 | `supports_row_updates` | `UPDATE` хранимых строк | да | да | да |
 | `supports_row_deletes` | `DELETE` хранимых строк | да | да | да |
 | `supports_recursive_queries` | Рекурсивный запрос `WITH` — `with_recursive()`; без этого он даёт `UnSupportedError` | да | да | да |
-| `reads_trailing_comment_of_insert` | Комментарий в конце `INSERT ... VALUES` остаётся комментарием; без этого теги запроса ставятся перед такой командой — ClickHouse читает всё после `VALUES` как данные | да | да | нет |
 | `supports_correlated_subqueries` | Связанный подзапрос; без этого `EXISTS`, связанный равенством колонок, пишется как проверка `IN`, а любой другой отклоняется | да | да | да |
 | `rewrites_correlated_exists` | `EXISTS`, связанный равенством колонок (и строки колонок составного ключа), пишется как проверка `IN` и там, где связанные подзапросы выполняются, — собственный `EXISTS` сервер не выполняет в `ON` соединения и над `UNION DISTINCT`; связанный не только равенствами там — собственный `EXISTS` сервера, а в остальных случаях даёт `UnSupportedError` | нет | нет | да |
 | `supports_ordered_correlated_subqueries` | Связанный подзапрос сам сортирует и срезает свои строки (`Subquery(... .order_by(...)[:1])`) | да | да | нет |
-| `orders_by_correlated_subqueries` | Связанный подзапрос выполняется в `ORDER BY` и рядом с `WHERE`; без этого строки выбираются в производной таблице, а фильтруются, сортируются и срезаются снаружи | да | да | нет |
+| `supports_correlated_select` | Связанный подзапрос в SELECT | да | да | да |
+| `supports_correlated_order_by` | Связанный подзапрос в ORDER BY | да | да | нет |
+| `supports_correlated_group_by` | Связанный подзапрос в GROUP BY | да | да | нет |
+| `supports_correlated_update` | Связанный подзапрос в UPDATE | да | да | нет |
+| `supports_correlated_delete` | Связанный подзапрос в DELETE | да | да | нет |
+| `rewrites_correlated_order_by` | Сортировка по связанному подзапросу через колонку одного производного SELECT | нет | нет | да |
+| `correlated_select_requires_unfiltered_source` | Вычисление выбранного связанного подзапроса до внешних условий | нет | нет | да |
 
 Каждое поле описано в `hare.dialects.base.features.Features`. `connection.dialect.minimum_server_version`
 — самая старая версия сервера, с которой работает hare: SQLite 3.35.5, PostgreSQL 14, ClickHouse 25.8.
@@ -221,7 +227,7 @@ from hare.dialects.dialect_registry import DialectRegistry
 
 DialectRegistry.get_dialect("postgresql")                  # объект диалекта
 DialectRegistry.get_driver("postgresql+asyncpg")           # драйвер, который называет engine
-DialectRegistry.get_driver_for_url_scheme("sqlite")        # драйвер, который выбирает схема адреса
+DialectRegistry.get_driver_for_url_scheme("sqlite+aiosqlite")  # драйвер схемы адреса
 DialectRegistry.get_dialects(), DialectRegistry.get_drivers()
 ```
 
@@ -231,11 +237,11 @@ DialectRegistry.get_dialects(), DialectRegistry.get_drivers()
 `postgresql://` — ничего от SQLite; `get_dialects()` перечисляет встроенные диалекты первыми, всегда в
 одном порядке. Имя или схема, которых нет у встроенных драйверов, а также
 `get_dialects()`/`get_drivers()` загружают каждый модуль, названный в группе точек входа `hare.dialects`
-установленного пакета, — сторонний диалект регистрирует свои драйверы при импорте:
+установленного пакета, затем вызывают фабрику его объявлений. Импорт модуля не регистрирует драйверы:
 
 ```toml
 [project.entry-points."hare.dialects"]
-colstore = "hare_colstore.driver"
+colstore = "hare_colstore.driver:extension"
 ```
 
 После этого его `engine` и схема адреса работают так же, как встроенные. Как написать свой диалект — в
@@ -243,13 +249,15 @@ colstore = "hare_colstore.driver"
 
 ### <a id="registering-after-init"></a>Регистрация после `Hare.init()`
 
-Диалект, драйвер, способ вывода выражения или запись типа диалекта, оператор фильтра из
-`register_lookup()`, часть пути внутри значения и метод `QuerySet` от диалекта можно регистрировать в
-любой момент. Каждая регистрация сбрасывает всё, что hare сохранил из реестров, — SQL запросов, планы
-чтения строк, описания фильтров и сортировок — и заново собирает фильтры каждой привязанной модели,
-поэтому следующий запрос уже использует новое; запрос, построенный раньше, выполняется со своим SQL.
-Обычно регистрация происходит при импорте, до `Hare.init()`, когда сохранённого ещё ничего нет и сброс
-ничего не стоит.
+Диалект, драйвер, способ вывода выражения, отображение типа, оператор фильтра, преобразование пути
+и метод QuerySet можно регистрировать после инициализации. Фабрики возвращают `ExtensionContribution` без
+побочной регистрации. `Registries.register()` проверяет и атомарно публикует весь вклад одним снимком,
+затем однократно сбрасывает зависимые кэши; при отказе предыдущий снимок сохраняется.
+
+Текущее выполнение сохраняет захваченный снимок, включая вложенные команды и страницы итератора.
+Следующее независимое выполнение видит новую регистрацию. Сам импорт модуля расширения не является
+регистрацией. Методы прямой регистрации доступны вне фабрик; см.
+[Регистрация расширения](../extending/writing-a-dialect/index.ru.md#registering).
 
 ## <a id="tests-by-capability"></a>Тесты по возможностям
 

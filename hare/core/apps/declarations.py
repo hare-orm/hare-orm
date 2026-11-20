@@ -8,3 +8,6 @@ if TYPE_CHECKING:
 
 #: A model as it is named - its class, its ``"app.Model"`` label or a ``swappable()`` setting.
 type ModelReference = type[Model] | str | SwappableModelReference
+
+#: Connection, normalized schema and normalized table name within one application.
+type TableIdentity = tuple[str | None, str | None, str]

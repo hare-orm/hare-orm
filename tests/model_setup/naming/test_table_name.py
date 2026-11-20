@@ -68,7 +68,7 @@ async def _m2m_through_table_name_for_order(app_label_order: list[str]) -> str:
                 },
                 table_name_generator=m2m_order_dependence_table_name_generator,
             )
-            return OrderDepOwner._meta.fields_map["targets"].through
+            return HareContext.require_current().apps.get_binding(OrderDepOwner).fields_map["targets"].through
     finally:
         sys.modules.pop(owner_module_name, None)
         sys.modules.pop(target_module_name, None)
@@ -103,12 +103,12 @@ async def table_name_db():
 
 @pytest.mark.asyncio
 async def test_glabal_name_generator(table_name_db):
-    assert Tournament._meta.db_table == "test_tournament"
+    assert HareContext.require_current().apps.get_binding(Tournament).db_table == "test_tournament"
 
 
 @pytest.mark.asyncio
 async def test_custom_table_name_precedence(table_name_db):
-    assert CustomTable._meta.db_table == "my_custom_table"
+    assert HareContext.require_current().apps.get_binding(CustomTable).db_table == "my_custom_table"
 
 
 @pytest.mark.database_independent

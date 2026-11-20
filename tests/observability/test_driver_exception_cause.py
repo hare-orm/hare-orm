@@ -2,6 +2,7 @@
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.exceptions import IntegrityError, OperationalError
 from tests.shared_models.testmodels import Tournament
 
@@ -14,7 +15,7 @@ async def test_integrity_error_is_raised_from_the_driver_exception(db):
     cause = raised.value.__cause__
     assert cause is not None
     assert cause is raised.value.args[0]
-    if Tournament._meta.connection.dialect.name == "postgresql":
+    if HareContext.require_current().apps.get_queryset(Tournament).get_connection().dialect.name == "postgresql":
         assert cause.sqlstate == "23505"
         assert cause.table_name == "tournament"
 
@@ -22,7 +23,12 @@ async def test_integrity_error_is_raised_from_the_driver_exception(db):
 @pytest.mark.asyncio
 async def test_operational_error_is_raised_from_the_driver_exception(db):
     with pytest.raises(OperationalError) as raised:
-        await Tournament._meta.connection.execute("SELECT missing_column FROM tournament")
+        await (
+            HareContext.require_current()
+            .apps.get_queryset(Tournament)
+            .get_connection()
+            .execute("SELECT missing_column FROM tournament")
+        )
     assert raised.value.__cause__ is not None
-    if Tournament._meta.connection.dialect.name == "postgresql":
+    if HareContext.require_current().apps.get_queryset(Tournament).get_connection().dialect.name == "postgresql":
         assert raised.value.__cause__.sqlstate == "42703"

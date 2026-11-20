@@ -1,6 +1,7 @@
 """squashmigrations: a run of an app's migrations squashed into one that the loader puts in their
 place where none or all of them are applied, and leaves out until all are."""
 
+import ast
 import importlib
 import sqlite3
 import sys
@@ -10,11 +11,11 @@ from typing import Any
 
 import pytest
 
-from hare import Hare
 from hare.exceptions import ConfigurationError
 from hare.migrations.api import migrate, squashmigrations
 from hare.migrations.exceptions import MigrationLoadError, UnknownMigrationError
-from hare.migrations.operations import AddField, CreateModel, RemoveField, RunPython, RunSQL
+from hare.migrations.operations import AddField, AlterField, CreateModel, RemoveField, RunPython, RunSQL
+from tests.utils.project_sources import ProjectSources
 
 pytestmark = pytest.mark.sqlite_only
 
@@ -49,13 +50,13 @@ from hare.migrations import operations as ops
 
 
 async def seed_widgets(apps, schema_editor):
-    widget_model = apps.get_model("app.Widget")
+    widgets = apps.get_queryset("app.Widget", using=schema_editor.client)
     for number in json.loads("[1, 2]"):
-        await widget_model.objects.create(id=number, name=f"seeded-{number}")
+        await widgets.create(id=number, name=f"seeded-{number}")
 
 
 async def unseed_widgets(apps, schema_editor):
-    await apps.get_model("app.Widget").objects.filter(id__in=[1, 2]).delete()
+    await apps.get_queryset("app.Widget", using=schema_editor.client).filter(id__in=[1, 2]).delete()
 
 
 class Migration(migrations.Migration):
@@ -73,8 +74,8 @@ from hare.migrations import operations as ops
 class Migration(migrations.Migration):
     dependencies = [("app", "0003_seed")]
     operations = [
-        ops.AddField(model_name="Widget", name="color", field=fields.CharField(max_length=20, default="red")),
-        ops.AlterField(model_name="Widget", name="color", field=fields.CharField(max_length=30, default="blue")),
+        ops.AddField(model_name="Widget", name="color", field=fields.CharField(max_length=20, db_default="red")),
+        ops.AlterField(model_name="Widget", name="color", field=fields.CharField(max_length=30, db_default="blue")),
     ]
 """
 ADD_NOTE = """
@@ -129,12 +130,8 @@ class SquashProject:
         importlib.invalidate_caches()
 
     def write_package(self, package_name: str, migrations: dict[str, str]) -> Path:
-        package_path = self.tmp_path / package_name
-        migrations_path = package_path / "migrations"
-        migrations_path.mkdir(parents=True)
-        (package_path / "__init__.py").write_text("", encoding="utf-8")
-        (package_path / "models.py").write_text("", encoding="utf-8")
-        (migrations_path / "__init__.py").write_text("", encoding="utf-8")
+        sources = ProjectSources(self.tmp_path)
+        migrations_path = sources.prepare_migrations(sources.write_package(package_name))
         for name, source in migrations.items():
             (migrations_path / f"{name}.py").write_text(source.lstrip(), encoding="utf-8")
         return migrations_path
@@ -166,10 +163,7 @@ class SquashProject:
         }
 
     async def migrate(self, target: str | None = None) -> None:
-        try:
-            await migrate(config=self.config, target=target)
-        finally:
-            await Hare.close_connections()
+        await migrate(config=self.config, target=target)
 
     async def squash(self, end_name: str, start_name: str | None = None, squashed_name: str | None = None) -> str:
         squashed = await squashmigrations(
@@ -210,6 +204,31 @@ ALL_APP_MIGRATIONS = {("app", name) for name in MIGRATIONS}
 FINAL_WIDGET_COLUMNS = ["id", "name", "size", "color", "note"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delete_earlier_squash", [False, True], ids=["kept", "deleted"])
+@pytest.mark.parametrize("applied", ["none", "partial", "earlier-squash"])
+async def test_resquashing_keeps_one_execution_and_reversible_journal(
+    tmp_path, monkeypatch, delete_earlier_squash, applied
+):
+    project = SquashProject(tmp_path, monkeypatch)
+    if applied == "partial":
+        await project.migrate("app.0001_initial")
+    earlier = await project.squash("0002_add_size", squashed_name="first")
+    if applied == "earlier-squash":
+        await project.migrate(f"app.{earlier}")
+    later = await project.squash("0003_seed", squashed_name="second")
+    if delete_earlier_squash:
+        project.delete_migrations(earlier)
+
+    await project.migrate()
+    assert project.columns("widget") == FINAL_WIDGET_COLUMNS
+    assert project.widget_names() == ["seeded-1", "seeded-2"]
+    assert project.journal() == ALL_APP_MIGRATIONS | {("app", earlier), ("app", later)}
+    await project.migrate("app.zero")
+    assert "widget" not in project.tables()
+    assert project.journal() == set()
+
+
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_squashed_migration_shortens_operations_and_keeps_the_data_migration(tmp_path, monkeypatch):
@@ -224,14 +243,27 @@ async def test_squashed_migration_shortens_operations_and_keeps_the_data_migrati
     assert squashed.elided_operation_count == 1
     assert squashed.squashed_operation_count == 6
     # The CreateModel takes in the AddField that comes before the RunPython; the ones after it stay.
-    assert [type(operation) for operation in writer.operations] == [CreateModel, RunPython, AddField, AddField]
+    assert [type(operation) for operation in writer.operations] == [
+        CreateModel,
+        RunPython,
+        AddField,
+        AlterField,
+        AddField,
+    ]
     assert [name for name, _field in writer.operations[0].fields] == ["id", "name", "size"]
-    assert writer.operations[2].field.max_length == 30
+    assert writer.operations[3].field.max_length == 30
     source = writer.as_string()
     assert "async def seed_widgets(apps, schema_editor):" in source
     assert "import json" in source
     assert "RunSQL" not in source
-    assert "squash_app_" not in source
+    # Original callback paths survive as inert declaration identities, never imports.
+    imports = [
+        node.module if isinstance(node, ast.ImportFrom) else alias.name
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in node.names
+    ]
+    assert all(not name.startswith("squash_app_") for name in imports if name is not None)
 
 
 @pytest.mark.asyncio
@@ -242,6 +274,8 @@ async def test_a_fresh_database_runs_the_squashed_migration_in_place_of_the_repl
     assert project.journal() == ALL_APP_MIGRATIONS | {("app", squashed_name)}
     assert project.columns("widget") == FINAL_WIDGET_COLUMNS
     assert project.widget_names() == ["seeded-1", "seeded-2"]
+    with closing(sqlite3.connect(project.database_path)) as connection:
+        assert connection.execute("SELECT color FROM widget ORDER BY id").fetchall() == [("red",), ("red",)]
     # Nothing left to apply.
     await project.migrate()
     assert project.widget_names() == ["seeded-1", "seeded-2"]
@@ -305,14 +339,30 @@ async def test_unapplying_to_zero_through_the_squashed_migration(tmp_path, monke
 
 
 @pytest.mark.asyncio
-async def test_another_apps_dependency_on_a_replaced_migration(tmp_path, monkeypatch):
+@pytest.mark.parametrize("history", ["original", "replacement", "partial-original"])
+async def test_another_apps_dependency_on_a_replaced_migration(tmp_path, monkeypatch, history):
     project = SquashProject(tmp_path, monkeypatch, with_other_app=True)
-    squashed_name = await project.squash("0005")
-    project.delete_migrations(*MIGRATIONS)
+    if history == "partial-original":
+        await project.migrate(target="app.0002_add_size")
+    expected_journal = ALL_APP_MIGRATIONS | {("other", "0001_initial")}
+    if history != "original":
+        squashed_name = await project.squash("0005")
+        expected_journal.add(("app", squashed_name))
+    if history == "replacement":
+        project.delete_migrations(*MIGRATIONS)
     await project.migrate()
-    assert ("other", "0001_initial") in project.journal()
-    assert ("app", squashed_name) in project.journal()
-    assert "gadget" in project.tables()
+    assert project.journal() == expected_journal
+    assert project.columns("widget") == FINAL_WIDGET_COLUMNS
+    assert project.columns("gadget") == ["id", "widget_id"]
+    assert project.widget_names() == ["seeded-1", "seeded-2"]
+    with closing(sqlite3.connect(project.database_path)) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("INSERT INTO gadget (id, widget_id) VALUES (1, 2)")
+        assert connection.execute(
+            "SELECT gadget.id, widget.name FROM gadget JOIN widget ON gadget.widget_id = widget.id"
+        ).fetchall() == [(1, "seeded-2")]
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            connection.execute("INSERT INTO gadget (id, widget_id) VALUES (2, 999)")
 
 
 @pytest.mark.asyncio
@@ -340,11 +390,11 @@ async def test_deleted_replaced_files_while_some_are_still_unapplied_is_refused(
 @pytest.mark.asyncio
 async def test_squash_refuses_unknown_names_and_a_start_after_the_end(tmp_path, monkeypatch):
     project = SquashProject(tmp_path, monkeypatch)
-    with pytest.raises(UnknownMigrationError, match="No migration"):
+    with pytest.raises(UnknownMigrationError, match="Cannot find migration"):
         await squashmigrations(config=project.config, app_label="app", end_name="9999")
     with pytest.raises(ConfigurationError, match="doesn't come before"):
         await squashmigrations(config=project.config, app_label="app", start_name="0004", end_name="0002")
-    with pytest.raises(UnknownMigrationError, match="More than one"):
+    with pytest.raises(UnknownMigrationError, match="Ambiguous migration name '000'"):
         await squashmigrations(config=project.config, app_label="app", end_name="000")
     single = await squashmigrations(config=project.config, app_label="app", start_name="0002", end_name="0002")
     assert single.writer is None

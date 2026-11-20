@@ -4,6 +4,7 @@ the first existing schema on the search_path - which isn't always "public"."""
 import pytest
 
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.inspectdb import SchemaInspector
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
 from hare.transactions.transactions import Transactions
@@ -19,7 +20,7 @@ class Rollback(Exception):
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_a_schema_other_than_public_as_the_default(db):
-    alias = Tournament._meta.default_connection
+    alias = HareContext.require_current().apps.get_binding(Tournament).default_connection
     with pytest.raises(Rollback):
         async with Transactions.atomic(alias) as connection:
             await connection.execute_script(

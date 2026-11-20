@@ -4,6 +4,7 @@ value cast to JSON, the key order not mattering; a String column of JSON text by
 import pytest
 
 from hare.contrib.test import assert_query_count
+from hare.core.hare_context import HareContext
 from hare.exceptions import ValidationError
 from tests.dialects.clickhouse.models import Attachment
 
@@ -26,14 +27,18 @@ async def test_a_document_equals_the_same_document(clickhouse_db):
     assert await get_ids(document={"k": "v", "list": [1, "x", None], "flags": [True, False]}) == [3]
     assert await get_ids(document__not={"a": 2, "b": 1}) == [2, 3, 9]
     reordered = await get_ids(document={"b": 1, "a": 2})
-    assert reordered == ([1] if Attachment._meta.connection.features.supports_json_type else [])
+    assert reordered == (
+        [1]
+        if HareContext.require_current().apps.get_queryset(Attachment).get_connection().features.supports_json_type
+        else []
+    )
 
 
 @pytest.mark.asyncio
 async def test_a_boolean_beside_a_number_in_an_array_is_kept_or_refused(clickhouse_db):
     """A JSON column's mutation reads an array of a boolean and a number as numbers - an update would store
     true as 1, so no write of one is taken; a String column of JSON text keeps it as written."""
-    if Attachment._meta.connection.features.supports_json_type:
+    if HareContext.require_current().apps.get_queryset(Attachment).get_connection().features.supports_json_type:
         with pytest.raises(ValidationError, match="boolean beside a number or a text"):
             await Attachment.objects.create(id=1, document={"values": [1, 2.5, None, True]})
         with pytest.raises(ValidationError, match="boolean beside a number or a text"):
@@ -62,7 +67,7 @@ async def test_an_empty_list_matches_no_document_or_every_one(clickhouse_db):
 async def test_in_and_a_value_no_column_holds_is_refused(clickhouse_db):
     """__in is an equality of each document - no IN takes a JSON column; a number, a string or an array is no
     value a JSON column holds, refused as a write of it is."""
-    if not Attachment._meta.connection.features.supports_json_type:
+    if not HareContext.require_current().apps.get_queryset(Attachment).get_connection().features.supports_json_type:
         pytest.skip("a String column of JSON text holds any JSON value - compared by its text")
     await Attachment.objects.bulk_create(
         [Attachment(id=index, document=document) for index, document in enumerate(DOCUMENTS, start=1)]

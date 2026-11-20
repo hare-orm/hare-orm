@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
-from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
-from hare.fields.relations.fields.one_to_one_field_instance import OneToOneFieldInstance
+from hare.migrations.constants import RELATION_FIELDS
 from hare.migrations.exceptions import IncompatibleStateError
 from hare.migrations.operations.constants import MISSING_MODEL_MESSAGE
 from hare.migrations.operations.dependencies.operation_dependency import OperationDependency
@@ -13,6 +11,8 @@ from hare.migrations.operations.dependencies.relation_dependencies import Relati
 from hare.migrations.operations.enums import DependencyType
 from hare.migrations.operations.models.table_renaming_operation import TableRenamingOperation
 from hare.migrations.operations.operation import Operation
+from hare.migrations.operations.operation_rewrite import OperationRewrite
+from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state import State
 from hare.migrations.state.state_apps import StateApps
 from hare.models.enums import ModelOption
@@ -35,66 +35,61 @@ class RenameModel(TableRenamingOperation):
             {self.get_model_label(self.old_name, app_label), self.get_model_label(self.new_name, app_label)}
         )
 
-    def reduce(self, other: Operation, app_label: str) -> list[Operation] | bool:
+    def get_rewrite(self, other: Operation, app_label: str) -> OperationRewrite | None:
         """Renames in a row become one rename - none when it ends at the first name."""
         if isinstance(other, RenameModel) and self.is_same_model_name(self.new_name, other.old_name):
             if self.is_same_model_name(self.old_name, other.new_name):
-                return []
-            return [RenameModel(self.old_name, other.new_name)]
-        return super().reduce(other, app_label)
+                return OperationRewrite(())
+            return OperationRewrite((RenameModel(self.old_name, other.new_name),))
+        return super().get_rewrite(other, app_label)
 
     def get_table_model_names(self) -> tuple[str, ...]:
         return (self.old_name, self.new_name)
 
-    def get_renamed_table(self, table: str, table_is_explicit: bool | None) -> str:
-        """The model's table after the rename - named after the new class, unless the model names
-        its table itself.
+    def get_renamed_table(self, table: str, table_is_explicit: bool) -> str:
+        """Rename only a recorded table name that follows the model."""
+        return table if not table or table_is_explicit else ModelState.get_default_table_name(self.new_name)
 
-        Args:
-            table: The table before the rename.
-            table_is_explicit: Whether the model names its table; None in a migration recorded
-                before that was kept - the table then counts as given when it differs from the
-                class name.
-
-        Returns:
-            The table.
-        """
-        if table_is_explicit is None:
-            table_is_explicit = table != self.old_name.lower()
-        return table if table_is_explicit else self.new_name.lower()
-
-    def get_field_relating_to_new_name(self, field: Any, app_label: str) -> Any:
+    def get_field_relating_to_new_name(self, field: Any, app_label: str, state: State | None = None) -> Any:
         """A relation to the renamed model, or a many-to-many relation through it, as it is after
         the rename.
 
         Args:
             field: A field of any model.
             app_label: The migration's app.
+            state: The state selecting swappable targets; omitted for already concrete model references.
 
         Returns:
             A copy naming the model by its new name; the field itself when it doesn't name the model.
         """
-        if not isinstance(field, (ForeignKeyFieldInstance, OneToOneFieldInstance, ManyToManyFieldInstance)):
+        if not isinstance(field, RELATION_FIELDS):
             return field
         old_model_key = (app_label, self.old_name)
         new_reference = f"{app_label}.{self.new_name}"
         # A label, a model class or a swappable reference alike.
-        relates_to_model = StateApps.split_reference(field.model_name) == old_model_key
+        relates_to_model = (
+            state.get_model_key(field.model_name) if state is not None else StateApps.split_reference(field.model_name)  # type: ignore[arg-type]
+        ) == old_model_key
         goes_through_model = (
             isinstance(field, ManyToManyFieldInstance)
             and field.through_model is not None
-            and StateApps.split_reference(field.through_model) == old_model_key
+            and (
+                state.get_model_key(field.through_model)
+                if state is not None
+                else StateApps.split_reference(field.through_model)  # type: ignore[arg-type]
+            )
+            == old_model_key
         )
         if not relates_to_model and not goes_through_model:
             return field
-        renamed_field = deepcopy(field)
+        renamed_field = field.snapshot()
         if relates_to_model:
             renamed_field.model_name = new_reference
         if isinstance(renamed_field, ManyToManyFieldInstance) and goes_through_model:
             renamed_field.through_model = new_reference
         return renamed_field
 
-    def get_provided_dependencies(self, app_label: str) -> list[OperationDependency]:
+    def get_provided_dependencies(self, app_label: str, state: State) -> list[OperationDependency]:
         return [
             OperationDependency.of_model(app_label, self.old_name, DependencyType.REMOVED),
             OperationDependency.of_model(app_label, self.new_name, DependencyType.CREATED),
@@ -126,7 +121,7 @@ class RenameModel(TableRenamingOperation):
         old_table = model_state_to_change.table
         model_state_to_change.name = self.new_name
         model_state_to_change.table = self.get_renamed_table(
-            old_table, model_state_to_change.options.get(ModelOption.TABLE_IS_EXPLICIT)
+            old_table, ModelState.is_table_explicit(model_state_to_change.options)
         )
         if model_state_to_change.options.get(ModelOption.TABLE) == old_table:
             model_state_to_change.options[ModelOption.TABLE] = model_state_to_change.table
@@ -136,9 +131,9 @@ class RenameModel(TableRenamingOperation):
 
         for model_key, model_state in state.models.items():
             for field_name, field in model_state.fields.items():
-                renamed_field = self.get_field_relating_to_new_name(field, app_label)
+                renamed_field = self.get_field_relating_to_new_name(field, app_label, state)
                 if renamed_field is not field:
-                    model_state.fields[field_name] = renamed_field
+                    model_state.set_field(field_name, renamed_field)
                     changed_model_keys.add(model_key)
 
         # Every model whose relation now points at the new name is rendered again too - its

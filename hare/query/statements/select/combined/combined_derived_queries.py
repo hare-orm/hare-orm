@@ -3,9 +3,10 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from copy import copy
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import FieldError, QueryError
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.expressions import Expression, Ordering
 from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
 from hare.query.rows.values_rows.combined_values_rows import CombinedValuesRows
@@ -64,17 +65,13 @@ class CombinedDerivedQueries:
         """
         union = query._get_execution_query()
         union._plan_origin = query
-        if value_wrapper_references is not None:
-            union._make_subquery(value_wrapper_references=value_wrapper_references)
-        else:
-            union._make_subquery()
+        union._make_subquery(value_wrapper_references=value_wrapper_references)
         rows_query = copy(union.query)
         columns = []
         for field_name in field_names:
-            column_name = query.model._meta.fields_db_projection.get(field_name)
-            if column_name not in union._rows.get_output_names():
+            if field_name not in union._rows.get_output_names():
                 raise FieldError(f"The union doesn't select {field_name!r} - it can't be used as an __in filter value")
-            columns.append(rows_query.field(column_name))
+            columns.append(rows_query.field(union._rows.get_ordering_alias(field_name)))
         return union._connection.query_class.from_(rows_query).select(*columns)
 
     @staticmethod
@@ -101,10 +98,10 @@ class CombinedDerivedQueries:
         parsed_orderings: list[tuple[str, Order]] = []
         for ordering in orderings:
             field_name, order = query._get_ordering_name(ordering)
-            if field_name == "pk" and not query._combines_values:
+            if field_name == PRIMARY_KEY_ALIAS and not query._combines_values:
                 parsed_orderings.extend(
                     (primary_key_attribute_name, order)
-                    for primary_key_attribute_name in query.model._meta.primary_key_attribute_names
+                    for primary_key_attribute_name in query._binding.primary_key_attribute_names  # type: ignore[union-attr]
                 )
                 continue
             query._rows.check_ordering_name(field_name)
@@ -126,7 +123,7 @@ class CombinedDerivedQueries:
         Returns:
             The copy.
         """
-        combination = cast("Combination", queryset._combination)
+        combination: Combination = queryset._combination  # type: ignore[assignment]
         changed_queryset = queryset._clone()
         changed_queryset._combination = replace(
             combination,
@@ -161,7 +158,7 @@ class CombinedDerivedQueries:
             )
         queryset = query._source_queryset._clone()
         queryset._combination = replace(
-            cast("Combination", queryset._combination),
+            queryset._combination,  # type: ignore[type-var]
             prefetched_relations=query._prefetched_relations + tuple(relations),
         )
         return queryset
@@ -198,23 +195,22 @@ class CombinedDerivedQueries:
                 "tuples/dicts, not model instances, so there's nothing to attach a prefetched relation to."
             )
         queryset = CombinedDerivedQueries.get_changed_branches_queryset(query._source_queryset, select_values)
-        queryset._combination = replace(cast("Combination", queryset._combination), prefetched_relations=())
-        first_leaf = cast("ValuesQuery", CombinedBranches.get_first_leaf(CombinedQuery(queryset)))
-        output_name_by_selected_name = dict(
-            zip(
-                ValuesOutput.get_output_field_names(first_leaf),
-                ValuesOutput.get_output_names_for_set_operation(first_leaf),
-                strict=True,
-            )
-        )
+        queryset._combination = replace(queryset._combination, prefetched_relations=())  # type: ignore[type-var]
+        first_leaf: ValuesQuery = CombinedBranches.get_first_leaf(CombinedQuery(queryset))  # type: ignore[assignment]
+        selected_names = first_leaf._get_selected_field_names()
+        output_names = ValuesOutput.get_output_names_for_set_operation(first_leaf)
+        output_name_by_selected_name = dict(zip(selected_names, output_names, strict=True))
+        for selected_name, output_name in zip(selected_names, output_names, strict=True):
+            path = ValuesOutput.get_concrete_field_path(first_leaf, selected_name)
+            output_name_by_selected_name.setdefault(path, output_name)
         orderings: list[tuple[str, Order]] = []
         for field_name, order in query._orderings:
-            output_name = output_name_by_selected_name.get(field_name)
-            if output_name is None:
+            selected_output = output_name_by_selected_name.get(field_name)
+            if selected_output is None:
                 raise QueryError(
                     f"The union is ordered by {field_name!r}, which .values()/.values_list() doesn't select - "
                     "select it too."
                 )
-            orderings.append((output_name, order))
+            orderings.append((selected_output, order))
         queryset._orderings = orderings
         return queryset

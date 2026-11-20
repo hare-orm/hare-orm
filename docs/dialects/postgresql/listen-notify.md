@@ -78,11 +78,14 @@ await listener.start()
 await listener.stop()
 ```
 
-or `async with NotificationListener(...) as listener: ...`.
+or `async with NotificationListener(...) as listener: ...`. The first argument accepts a connection
+alias or a `DatabaseClient`. On first start, an alias selects the current context's client; a supplied
+client retains its settings and owner. A transaction client selects its underlying root client.
+Reconnects and resource cleanup keep that choice even if another application context becomes current.
 
 - **`start()`** starts a background task and returns once the first `LISTEN` attempt has finished
-  (connected, or failed and now retrying in the background). Idempotent. The task always uses the alias's
-  shared client, even when `start()` is called inside a transaction.
+  (connected, or failed and now retrying in the background). Idempotent. The task uses the selected
+  root client, even when `start()` is called inside a transaction.
 - **`stop()`** cancels that task, closes the dedicated connection and cancels still-running async
   callbacks, waiting for all of it. Idempotent.
 - **`run()`** is the loop itself — await it directly to run it in a task you own (`stop()` still works);

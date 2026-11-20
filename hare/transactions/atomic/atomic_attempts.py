@@ -14,8 +14,9 @@ if TYPE_CHECKING:
 class AtomicAttempts:
     """``async for attempt in Transactions.atomic(retries=N):`` - the runs of a transaction, each
     entered with ``async with attempt:``. A run its block or its commit ends with
-    ``TransactionRetryError`` is rolled back and followed by another, up to ``retries`` more; the
-    iteration stops after a run that commits, or ends with another error.
+    ``TransactionRetryError`` is followed by another only after confirmed rollback, up to
+    ``retries`` more. Committed and unknown outcomes, including callback failures after commit,
+    end the iteration without another run.
 
     Args:
         get_connection: Gives the connection each run starts on.

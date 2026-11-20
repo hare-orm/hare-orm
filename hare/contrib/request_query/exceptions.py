@@ -8,7 +8,7 @@ from hare.exceptions import HareError
 class InvalidRequestQuery(ValueError):
     """The values of a request don't make a valid request query - a value of the wrong type, an
     ordering the query doesn't allow, a malformed cursor. A framework adapter answers it with
-    ``400 Bad Request``.
+    ``400`` in Litestar or ``422`` in FastAPI and Robyn.
 
     Args:
         errors: One dict per error: ``loc`` (the parameter, empty for an error of the whole query -

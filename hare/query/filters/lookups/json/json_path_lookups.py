@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.caching.cache import Cache
-from hare.exceptions import QueryError, UnSupportedError
+from hare.exceptions import QueryError
 from hare.fields import Field, JSONField
 from hare.fields.data.json.json_path_field import JSONPathField
 from hare.query.enums import Lookup
@@ -62,7 +62,7 @@ class JsonPathLookups:
     @staticmethod
     def get_path_field(field: Field[Any]) -> JSONPathField:
         """The JSON path field comparing values of a JSON path or a whole JSON field."""
-        return field if isinstance(field, JSONPathField) else cast("JSONField[Any]", field).get_path_value_field()
+        return field if isinstance(field, JSONPathField) else field.get_path_value_field()  # type: ignore[attr-defined]
 
     @classmethod
     def encode_value(cls, value: Any, instance: Any, field: Field[Any], dialect: Dialect) -> Any:
@@ -81,11 +81,7 @@ class JsonPathLookups:
             UnSupportedError: ``values`` isn't a list/tuple/set.
             ValidationError: A value isn't JSON serializable.
         """
-        if not isinstance(values, (list, tuple, set)):
-            raise UnSupportedError(
-                f"{field.model_field_name}: expected a list/tuple/set of values for this lookup, got "
-                f"{field.get_value_for_message(values)}"
-            )
+        ValueEncoders.check_list_values(values, field)
         path_field = cls.get_path_field(field)
         return [path_field.encode_comparison_value(value, dialect, as_parameter=True) for value in values]
 
@@ -110,11 +106,11 @@ class JsonPathLookups:
     def get_ordering_operators(cls) -> dict[str, Callable[..., Criterion]]:
         """The operator of each lookup ordering JSON values."""
         return {
-            "gt": cls.greater_than,
-            "gte": cls.greater_equal,
-            "lt": cls.less_than,
-            "lte": cls.less_equal,
-            "range": cls.between,
+            Lookup.GT: cls.greater_than,
+            Lookup.GTE: cls.greater_equal,
+            Lookup.LT: cls.less_than,
+            Lookup.LTE: cls.less_equal,
+            Lookup.RANGE: cls.between,
         }
 
     @classmethod
@@ -173,12 +169,13 @@ class JsonPathLookups:
                 )
             elif suffix in {Lookup.ISNULL, Lookup.NOT_ISNULL}:
                 lookups[suffix] = field_lookup
-        json_lookups = FieldLookups.get_json(cast("JSONField[Any]", cls.ELEMENT_FIELD))
+        json_lookups = FieldLookups.get_json(cls.ELEMENT_FIELD)  # type: ignore[arg-type]
         for suffix in JSON_PATH_CONTAINER_LOOKUPS:
             lookups[suffix] = json_lookups[suffix]
         return lookups
 
     @classmethod
-    def get_lookup_names(cls) -> frozenset[str]:
-        """The suffixes of the lookups of a JSON path value."""
-        return frozenset(suffix for suffix in cls.get_lookups() if suffix)
+    def get_lookup_suffix(cls, segments: list[str]) -> str | None:
+        """The last segment when it names a lookup of a JSON path value."""
+        suffix = segments[-1] if segments else ""
+        return suffix if suffix and suffix in cls.get_lookups() else None

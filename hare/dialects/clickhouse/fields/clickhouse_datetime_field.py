@@ -5,6 +5,7 @@ import zoneinfo
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.classes.value_descriptions import ValueDescriptions
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.clickhouse.fields.constants import (
     CLICKHOUSE_DATE32_RANGE,
     CLICKHOUSE_DATETIME64_MAX_PRECISION,
@@ -29,7 +30,8 @@ TDatetime = TypeVar("TDatetime", datetime.datetime, datetime.datetime | None)
 class ClickhouseDatetimeField(DatetimeField[TDatetime]):
     """A moment as ClickHouse's own types keep it: ``DateTime`` - whole seconds from 1970 to 2106 -
     without ``precision``, ``DateTime64(precision)`` - digits after the second, from 1900 to 2299 -
-    with it; in the column's ``timezone``. A written moment is rounded to the column's precision, as a
+    with it; precision 9 ends at 2262-04-11 23:47:16.854775 UTC for Python's microsecond values.
+    Values use the column's ``timezone``. A written moment is rounded to the column's precision, as a
     ``DecimalField`` rounds to its places. ``DatetimeField`` writes ``DateTime64(6, 'UTC')``.
 
     Args:
@@ -76,7 +78,7 @@ class ClickhouseDatetimeField(DatetimeField[TDatetime]):
     def SQL_TYPE(self) -> str:  # type: ignore[override]
         timezone_argument = "" if self.timezone is None else f"'{self.timezone}'"
         if self.precision is None:
-            return f"DateTime({timezone_argument})" if timezone_argument else "DateTime"
+            return f"DateTime({timezone_argument})" if timezone_argument else ClickhouseTypeName.DATETIME
         return f"DateTime64({self.precision}{', ' + timezone_argument if timezone_argument else ''})"
 
     def get_column_type_options(self) -> tuple[Any, ...]:
@@ -138,7 +140,7 @@ class ClickhouseDatetimeField(DatetimeField[TDatetime]):
         if not isinstance(value, datetime.datetime):
             return value
         precision = 0 if field.precision is None else field.precision
-        first_moment, last_moment = CLICKHOUSE_DATETIME_RANGE
+        first_moment, _ = CLICKHOUSE_DATETIME_RANGE
         if precision < PYTHON_DATETIME_PRECISION:
             quantum = 10 ** (PYTHON_DATETIME_PRECISION - precision)
             remainder = value.microsecond % quantum
@@ -155,9 +157,12 @@ class ClickhouseDatetimeField(DatetimeField[TDatetime]):
         if (column_first_moment, column_last_moment) != CLICKHOUSE_DATETIME64_RANGE:
             moment = value if value.tzinfo is not None else value.replace(tzinfo=datetime.UTC)
             if not column_first_moment <= moment <= column_last_moment:
-                type_name = "DateTime" if field.precision is None else f"DateTime64({field.precision})"
+                type_name = (
+                    ClickhouseTypeName.DATETIME if field.precision is None else f"DateTime64({field.precision})"
+                )
                 raise ValidationError(
-                    f"{field.model_field_name}: {value} is outside the moments a {type_name} column holds, "
+                    f"{field.model_field_name}: {field.get_value_for_message(value)} is outside the moments a "
+                    f"{type_name} column holds, "
                     f"{column_first_moment} to {column_last_moment}"
                 )
         return ClickhouseTypedValue(value, field.SQL_TYPE)

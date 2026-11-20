@@ -35,7 +35,9 @@ class MigrationChecks:
         """
         state = project_state.clone()
         for writer in ordered_writers:
-            await Migration(writer.name, writer.app_label, operations=writer.operations).apply(state, dry_run=True)
+            state = await Migration(writer.name, writer.app_label, operations=writer.operations).apply(
+                state, dry_run=True
+            )
         new_state = autodetector.current_state(tracked_state=project_state)
         connection_by_app = {
             app_label: config.get("default_connection") for app_label, config in autodetector.apps_config.items()

@@ -1,24 +1,18 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from hare.classes.class_path import ClassPath
 from hare.classes.comparable_values import ComparableValues
-from hare.ddl.constraints.check_constraint import CheckConstraint
-from hare.ddl.constraints.exclusion_constraint import ExclusionConstraint
-from hare.ddl.constraints.unique_constraint import UniqueConstraint
 from hare.ddl.indexes.index import Index
-from hare.ddl.schema_objects.trigger import Trigger
+from hare.declarations.declaration_values import DeclarationValues
 from hare.fields.constants import FOREIGN_KEY_COLUMN_SUFFIX
 from hare.fields.field import Field
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.migrations.autodetection.field_comparable_values import FieldComparableValues
 from hare.migrations.constants import MODEL_OPTIONS_WITH_DEDICATED_OPERATIONS, RELATION_FIELDS
-from hare.migrations.runtime_enums import RuntimeEnums
-from hare.query.expressions import Q
 
 if TYPE_CHECKING:
     from hare.migrations.state.model_state import ModelState
@@ -29,32 +23,7 @@ if TYPE_CHECKING:
 
 
 class StateSignatures:
-    """Comparable signatures of the fields, indexes, constraints and triggers of migration state."""
-
-    @staticmethod
-    def normalize_indexes(value: object) -> list[Index]:
-        """Normalise raw index tuples/Index objects into a flat list of Index instances."""
-        if not value or not isinstance(value, Iterable):
-            return []
-        return [item if isinstance(item, Index) else Index(fields=tuple(item)) for item in value]
-
-    @staticmethod
-    def _get_declared_expression_text(expression: object) -> str:
-        """The code a migration file writes a declared index key expression as - the same for the
-        live model's declaration and for one replayed from a migration file, on every database.
-
-        Args:
-            expression: The declared key: a hare expression, an ``F(...).desc()`` ordering, or a
-                ``RawSQLTerm``.
-
-        Returns:
-            The code.
-        """
-        # Local import: the writer imports the diffing state modules.
-        from hare.migrations.writer.import_manager import ImportManager
-        from hare.migrations.writer.migration_writer import MigrationWriter
-
-        return MigrationWriter.render_value(expression, ImportManager())
+    """Comparable signatures used for migration state comparison."""
 
     @staticmethod
     def get_index_signature(
@@ -68,7 +37,7 @@ class StateSignatures:
         index = index.get_stored_form()
         # A Q condition isn't rendered into `extra` - it has no SQL text until a model is at hand.
         condition = getattr(index, "condition", None)
-        extra = f"{index.extra}{condition!r}" if isinstance(condition, Q) else index.extra
+        extra = DeclarationValues.get_key((index.extra, condition))
         orders = tuple(order.value for order in index.get_key_orders())
         parameter_names = (
             *index.INTEGER_STORAGE_PARAMETERS,
@@ -77,11 +46,9 @@ class StateSignatures:
         )
         storage_parameters = tuple((name, getattr(index, name, None)) for name in parameter_names)
         keys = (
-            tuple(index.field_names)
+            tuple(index.fields)
             if index.fields
-            else tuple(
-                StateSignatures._get_declared_expression_text(expression) for expression in index.declared_expressions
-            )
+            else tuple(DeclarationValues.get_key(expression) for expression in index.declared_expressions)
         )
         return (
             keys,
@@ -93,22 +60,6 @@ class StateSignatures:
             orders,
             storage_parameters,
         )
-
-    @staticmethod
-    def normalize_constraints(value: object) -> list[UniqueConstraint | CheckConstraint | ExclusionConstraint]:
-        if not value or not isinstance(value, Iterable):
-            return []
-        return [
-            constraint
-            for constraint in value
-            if isinstance(constraint, (UniqueConstraint, CheckConstraint, ExclusionConstraint))
-        ]
-
-    @staticmethod
-    def normalize_triggers(value: object) -> list[Trigger]:
-        if not value or not isinstance(value, Iterable):
-            return []
-        return [trigger for trigger in value if isinstance(trigger, Trigger)]
 
     @staticmethod
     def get_field_signature(field: Field[Any]) -> dict[str, object]:
@@ -134,8 +85,8 @@ class StateSignatures:
         if enum_type is not None:
             # By what the enum holds, not by the class - an enum built while the application runs
             # is a new class after every restart.
-            signature["enum_type"] = RuntimeEnums.get_content(enum_type)
-        if isinstance(field, ForeignKeyFieldInstance | ManyToManyFieldInstance):
+            signature["enum_type"] = ComparableValues.get_enum_content(enum_type)
+        if isinstance(field, RELATION_FIELDS):
             signature.pop("related_name", None)
         if isinstance(field, ForeignKeyFieldInstance) and (
             len(field.source_fields) > 1
@@ -161,11 +112,10 @@ class StateSignatures:
         # primary_key_attribute/schema are excluded the same way table/indexes/etc. are - each has its own dedicated
         # detection (a primary_key_attribute change raises separately; a schema change generates AlterModelSchema)
         # instead of falling into the generic AlterModelOptions diff, which never moves a table.
-        return {key: value for key, value in options.items() if key not in MODEL_OPTIONS_WITH_DEDICATED_OPERATIONS}
-
-    @staticmethod
-    def _get_base_signature(bases: Iterable[type]) -> list[str]:
-        return [ClassPath.get(base) for base in bases]
+        # Live models use ModelOption keys, while an operation loaded from disk uses their names.
+        return {
+            str(key): value for key, value in options.items() if key not in MODEL_OPTIONS_WITH_DEDICATED_OPERATIONS
+        }
 
     @staticmethod
     def get_model_signature_key(model_state: ModelState) -> str:
@@ -178,9 +128,7 @@ class StateSignatures:
         Returns:
             The text.
         """
-        return json.dumps(
-            ComparableValues.get(StateSignatures.get_model_signature(model_state)), sort_keys=True, default=repr
-        )
+        return DeclarationValues.get_key(StateSignatures.get_model_signature(model_state))
 
     @staticmethod
     def get_model_signature(model_state: ModelState) -> dict[str, object]:
@@ -202,7 +150,7 @@ class StateSignatures:
         return {
             "fields": fields,
             "options": StateSignatures.get_model_options_for_compare(model_state.options),
-            "bases": StateSignatures._get_base_signature(model_state.bases),
+            "bases": [ClassPath.get(base) for base in model_state.bases],
             "pk_field_name": model_state.pk_field_name,
             "abstract": model_state.abstract,
         }

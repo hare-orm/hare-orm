@@ -14,12 +14,10 @@ import logging
 import pytest
 
 from hare import fields
-from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-from hare.dialects.base.schema.tables.table_comments import TableComments
 from hare.dialects.postgresql.fields.citext_field import CitextField
-from hare.dialects.postgresql.fields.postgis_field import PostGISField
 from hare.dialects.postgresql.schema.postgresql_schema_editor import PostgresqlSchemaEditor
 from hare.dialects.sqlite.schema.sqlite_schema_editor import SqliteSchemaEditor
+from hare.gis import PointField
 from hare.migrations.autodetection.operation_generator import OperationGenerator
 from hare.migrations.operations import (
     CreateExtension,
@@ -32,24 +30,9 @@ from hare.migrations.writer import MigrationWriter
 from hare.vectors import VectorField
 from tests.utils.fake_client import FakeClient
 from tests.utils.operations import apply_operations
+from tests.utils.schema_editor import TestSchemaEditor
 
 pytestmark = pytest.mark.database_independent
-
-
-class TestEditorTableComments(TableComments):
-    __test__ = False
-
-    def get_table_comment_sql(self, table: str, comment: str) -> str:
-        return ""
-
-    def get_column_comment_sql(self, table: str, column: str, comment: str) -> str:
-        return ""
-
-
-class _TestEditor(BaseSchemaEditor):
-    table_comments_class = TestEditorTableComments
-
-    """Minimal concrete editor for tests (base ANSI SQL dialect)."""
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +63,7 @@ async def test_create_extension_noop_for_base(caplog: pytest.LogCaptureFixture, 
     error - create_extension no longer exists on it at all, so the CreateExtension operation's own
     isinstance(state_editor, SchemaAndExtensionSupportMixin) guard is what skips the call and logs."""
     client = FakeClient("sql")
-    editor = _TestEditor(client)
+    editor = TestSchemaEditor(client)
 
     op = CreateExtension(extension_name="citext")
     with caplog.at_level(logging.WARNING):
@@ -192,13 +175,11 @@ def test_autodetector_generates_create_extension_from_meta() -> None:
         pytest.param(
             "Product", "name", CitextField, "citext", id="autodetector_generates_create_extension_from_field"
         ),
-        # PostGISField's requires_extension was previously missing entirely, so a PostGISField model's
-        # CREATE TABLE failed with "type geography does not exist" on a fresh database that never had
-        # CREATE EXTENSION postgis run manually.
+        # The geography field declares its required extension.
         pytest.param(
             "Place",
             "location",
-            PostGISField,
+            lambda: PointField(geography=True),
             "postgis",
             id="autodetector_generates_create_extension_from_postgis_field",
         ),

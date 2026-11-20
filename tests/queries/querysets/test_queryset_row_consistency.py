@@ -4,6 +4,7 @@ same queryset returns."""
 import pytest
 
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.exceptions import QueryError
 from hare.query.expressions import Case, Exists, F, OuterReference, Subquery, Value, When
 from hare.query.functions import Count, Lower, Max, Sum
@@ -73,7 +74,7 @@ async def test_count_and_exists_match_rows_of_to_many_ordering(db):
 async def test_count_of_distinct_on_is_not_served_from_plain_distinct_cache(db):
     await create_authors_with_books()
     assert await Book.objects.all().distinct().count() == 5
-    if Book._meta.connection.dialect.name == "postgresql":
+    if HareContext.require_current().apps.get_queryset(Book).get_connection().dialect.name == "postgresql":
         assert await Book.objects.all().order_by("author_id").distinct("author_id").count() == 2
 
 

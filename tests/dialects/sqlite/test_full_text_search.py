@@ -5,6 +5,7 @@ import pytest
 import pytest_asyncio
 
 from hare.contrib.test import RollbackIsolation, assert_query_count, hare_test_context
+from hare.core.hare_context import HareContext
 from hare.dialects.sqlite.indexes import FullTextIndex
 from hare.dialects.sqlite.search import SqliteTextSearch
 from hare.dialects.sqlite.search.sqlite_full_text_query import SqliteFullTextQuery
@@ -45,7 +46,12 @@ async def get_ids(queryset) -> list[int]:
 @pytest.mark.sqlite_only
 @pytest.mark.asyncio
 async def test_the_index_is_an_fts5_table_with_triggers(search_db):
-    index_name = SearchArticle._meta.indexes[0].get_table_name(SearchArticle)
+    index_name = (
+        HareContext.require_current()
+        .apps.get_binding(SearchArticle)
+        .indexes[0]
+        .get_table_name(HareContext.require_current().apps.get_binding(SearchArticle))
+    )
     _, rows = await SearchArticle.get_connection().execute(
         "SELECT type, name, sql FROM sqlite_master WHERE name LIKE ? ORDER BY type, name", [f"{index_name}%"]
     )
@@ -173,6 +179,8 @@ async def test_search_rank_orders_by_relevance(search_db):
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_search_rank_arguments_are_checked():
+    rank = SearchRank("title", "hare", weights={"title": 1_000_001.0})
+    assert rank.field_weights == (("title", 1_000_001.0),)
     with pytest.raises(ConfigurationError, match="weight"):
         SearchRank("title", "hare", weights={"title": -1})
     with pytest.raises(ConfigurationError, match="weight"):
@@ -226,6 +234,34 @@ async def test_search_headline_marks_matches(search_db):
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_search_headline_arguments_are_checked():
+    marker = "x" * 1001
+    headline = SearchHeadline(
+        "body",
+        "hare",
+        start_sel=marker,
+        stop_sel=marker,
+        fragment_delimiter=marker,
+        max_words=100_002,
+        min_words=100_001,
+        short_word=100_001,
+        max_fragments=100_001,
+    )
+    assert headline.get_options() == {
+        "start_sel": marker,
+        "stop_sel": marker,
+        "fragment_delimiter": marker,
+        "max_words": 100_002,
+        "min_words": 100_001,
+        "short_word": 100_001,
+        "max_fragments": 100_001,
+    }
+    for argument in ("max_words", "min_words", "short_word", "max_fragments"):
+        for value in (True, -1, 1.5):
+            with pytest.raises(ConfigurationError, match=argument):
+                SearchHeadline("body", "hare", **{argument: value})
+    for argument in ("start_sel", "stop_sel", "fragment_delimiter"):
+        with pytest.raises(ConfigurationError, match=argument):
+            SearchHeadline("body", "hare", **{argument: "x\x00"})
     with pytest.raises(ConfigurationError, match="max_words"):
         SearchHeadline("body", "hare", max_words=0)
     with pytest.raises(ConfigurationError, match="start_sel"):
@@ -376,13 +412,13 @@ async def test_text_search_configuration_arguments_are_refused_before_sql(search
     feature = "supports_text_search_configurations"
     with pytest.raises(UnSupportedError, match=feature):
         await SearchArticle.objects.filter(body__search=SearchQuery("hare", config="english"))
-    with pytest.raises(UnSupportedError, match=feature):
+    with pytest.raises(UnSupportedError, match="SearchVector"):
         await SearchArticle.objects.annotate(vector=SearchVector("title"))
-    with pytest.raises(UnSupportedError, match=feature):
+    with pytest.raises(UnSupportedError, match="rank_label_weights"):
         await SearchArticle.objects.annotate(rank=SearchRank("title", "hare", weights=[0.1, 0.2, 0.4, 1.0]))
-    with pytest.raises(UnSupportedError, match=feature):
+    with pytest.raises(UnSupportedError, match="rank_cover_density"):
         await SearchArticle.objects.annotate(rank=SearchRank("title", "hare", cover_density=True))
-    with pytest.raises(UnSupportedError, match=feature):
+    with pytest.raises(UnSupportedError, match="headline_max_fragments"):
         await SearchArticle.objects.annotate(headline=SearchHeadline("title", "hare", max_fragments=2))
     with pytest.raises(UnSupportedError, match="field name"):
         await SearchArticle.objects.annotate(headline=SearchHeadline(Upper("title"), "hare"))

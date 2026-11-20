@@ -3,11 +3,27 @@ import logging
 import pytest
 
 from hare.contrib.test import requires_features
+from hare.dialects.dialect_registry import DialectRegistry
 from hare.exceptions import ConfigurationError
 from hare.instrumentation.declarations import QueryExecuted
 from hare.instrumentation.observers.observers import Observers
 from hare.instrumentation.queries.query_tags import QueryTags
 from hare.transactions.transactions import Transactions
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT 1",
+        "/* header */ INSERT INTO book VALUES (1)",
+        "INSERT INTO book FORMAT CSV\n1,title",
+        "-- unfinished line",
+    ],
+)
+def test_dialect_tag_placement_preserves_opaque_sql(sql):
+    with QueryTags.scope(application="books"):
+        assert QueryTags.append(sql, DialectRegistry.get_dialect("clickhouse")) == "/*application='books'*/ " + sql
 
 
 @pytest.mark.database_independent
@@ -121,21 +137,13 @@ async def test_query_tags_appear_on_a_real_select_query(db):
         Observers.unobserve(QueryExecuted, hook)
 
     assert calls, "the hook never recorded any query - the check below would be vacuous"
-    assert calls[-1].endswith("/*application='billing'*/")
+    assert "/*application='billing'*/" in calls[-1]
 
 
 @pytest.mark.asyncio
 @requires_features(supports_streaming=True)
 async def test_query_tags_appear_on_a_stream_query(db, caplog):
-    """`.stream()` (`stream` on both Postgres drivers) is deliberately not wrapped
-    in `translate_exceptions` - the wrapper that normally applies `QueryTags.append()` - and so
-    has to apply it by hand instead (hare.dialects.postgresql.drivers.asyncpg.client.AsyncpgClient.
-    stream, hare.dialects.postgresql.drivers.rust_pg.client.RustPgClient.stream). This
-    guards against that being silently skipped again. `QueryInstrumentation`'s own query hook
-    isn't usable here (it also only fires via translate_exceptions, a separate, already-documented
-    gap on this same streaming path) - the tagged SQL is instead observed off the client's own
-    debug log, which every backend writes the (already-tagged) query string to.
-    """
+    """The shared stream lifecycle sends tagged SQL to the driver."""
     from tests.shared_models.testmodels import Author
 
     await Author.objects.create(name="Some Author")
@@ -167,7 +175,7 @@ async def test_query_tags_appear_on_a_ddl_execute_script_call(db):
         Observers.unobserve(QueryExecuted, hook)
 
     assert calls, "the hook never recorded any query - the check below would be vacuous"
-    assert calls[-1].endswith("/*application='billing'*/")
+    assert "/*application='billing'*/" in calls[-1]
 
 
 @requires_features(dialect="postgresql")

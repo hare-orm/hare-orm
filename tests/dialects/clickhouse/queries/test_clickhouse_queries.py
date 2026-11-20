@@ -9,6 +9,7 @@ import pytest
 import pytest_asyncio
 
 from hare.contrib.test import assert_query_count
+from hare.core.hare_context import HareContext
 from hare.exceptions import UnSupportedError
 from hare.query.expressions import Case, Exists, F, OuterReference, Q, Subquery, Value, When, Window
 from hare.query.functions import (
@@ -593,7 +594,7 @@ async def test_a_decimal_and_a_float_have_a_float_result(league):
 
 @pytest.mark.asyncio
 async def test_a_query_with_its_values_inline_runs_as_the_values_are_bound(league):
-    connection = Player._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Player).get_connection()
     for queryset in (
         Player.objects.filter(joined__gte=JOINED),
         Player.objects.filter(joined__gte=JOINED.replace(tzinfo=None)),

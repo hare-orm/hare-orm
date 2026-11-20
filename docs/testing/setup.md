@@ -63,14 +63,12 @@ Without pytest-asyncio a test using a fixture fails with what to install.
 
 ### <a id="application-tests"></a>Application tests
 
-An application started by `HareRobyn`, `HarePlugin` (Litestar), `HareLifecycle` (FastAPI) or `HareTaskiq`
-opens its configuration's databases when it starts. Under `hare_app_db` or `hare_app_transactional_db` it
-takes the test's context instead — as its global fallback, which the requests without a context of their
-own see — and its configuration's databases are never opened; stopping the application gives the
-context back to the test, open. Several applications of one test (a web application and a task worker)
-share it: it stays their fallback until the last of them stops, and an application the test leaves
-running gives it back with the test. The connections the application's transactions run on and its
-request queries are checked as at a real start.
+Pass `hare_context=hare_app_db` or `hare_context=hare_app_transactional_db` explicitly to `HareFastAPI`,
+`HarePlugin`, `HareRobyn` or `HareTaskiq` when creating the application under test. A direct
+`HareLifecycle` takes `context=...`. It borrows that context without initializing or closing it;
+the fixture controls database isolation and cleanup. Other applications in the same process keep
+their separate contexts. A fixture never redirects application startup globally. Transaction aliases
+and request-query declarations are checked as at a normal startup.
 
 | Fixture | For |
 |---|---|
@@ -87,6 +85,7 @@ there too, so `hare_app_db` works with them; a driver whose connections belong t
 ```python
 @pytest.mark.asyncio
 async def test_create_reader(hare_app_db):
+    app = create_app(hare_context=hare_app_db)  # forward this argument to HareFastAPI
     transport = httpx.ASGITransport(app=app)   # FastAPI - the app runs in the test's loop
     async with LifespanManager(app), httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post("/readers", json={"name": "ann"})
@@ -146,8 +145,17 @@ on exit. `:memory:` is unaffected.
 The database is dropped on exit even when schema generation fails while entering the block — a model
 whose DDL the database rejects doesn't leave a database behind.
 
+Cleanup retains the resources acquired before a partial startup failure. A failed release does not
+skip other databases, and cancellation waits for all releases to finish. If cleanup also fails, a
+`BaseExceptionGroup` retains the original error and cleanup errors; a single failure keeps its type.
+A rejected database creation does not authorize deleting a database that already existed.
+
 With `reuse_databases=True` a PostgreSQL test database is leased from a pool instead of created and
 dropped — see [PostgreSQL: testing](../dialects/postgresql/testing.md#reuse-databases).
+
+PostgreSQL test-database reset and row cleanup use a separate client with the configured direct server
+settings. They do not temporarily change the test client's host or port; the reset client is closed
+after cleanup, including when cleanup fails.
 
 ## <a id="init-memory-database"></a>Quick scripts: `init_memory_database()`
 

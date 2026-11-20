@@ -4,6 +4,7 @@ delivery per topic (``TopicRouter``)."""
 from __future__ import annotations
 
 from hare.contrib.outbox.deliveries.callable_delivery import CallableDelivery
+from hare.contrib.outbox.deliveries.delivery_result import DeliveryResult
 from hare.contrib.outbox.deliveries.kafka_delivery import KafkaDelivery
 from hare.contrib.outbox.deliveries.outbox_delivery import OutboxDelivery
 from hare.contrib.outbox.deliveries.rabbitmq_delivery import RabbitMQDelivery
@@ -14,6 +15,7 @@ from hare.contrib.outbox.deliveries.webhook_target import WebhookTarget
 
 __all__ = [
     "CallableDelivery",
+    "DeliveryResult",
     "KafkaDelivery",
     "OutboxDelivery",
     "RabbitMQDelivery",

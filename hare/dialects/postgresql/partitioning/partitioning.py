@@ -18,7 +18,7 @@ from hare.sql.identifiers import Identifiers
 
 if TYPE_CHECKING:
     from hare.fields.field import Field
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 #: Renders the value of a partition bound for the key column at a position: ``(position, value) -> SQL``.
 BoundValueRenderer = Callable[[int, Any], str]
@@ -91,6 +91,10 @@ class Partitioning(abc.ABC):
         """
         return {}
 
+    def get_partition_locations(self, table: str, schema: str | None) -> dict[str, tuple[str | None, str]]:
+        """The physical schema and table of each partition of this parent."""
+        return {name: partition.get_location(table, schema) for name, partition in self.get_partitions().items()}
+
     def with_partitions(self, partitions: Mapping[str, Any]) -> Self:
         """The partitioning with other partitions added or removed one at a time.
 
@@ -121,12 +125,12 @@ class Partitioning(abc.ABC):
             ``FOR VALUES ...`` or ``DEFAULT``, by partition name.
         """
 
-    def get_key_fields(self, model: type[Model]) -> list[Field[Any]]:
+    def get_key_fields(self, binding: ModelBinding) -> list[Field[Any]]:
         """The fields holding the key columns, in order - a foreign key stands for the fields of
         its key columns.
 
         Args:
-            model: The partitioned model.
+            binding: The partitioned model.
 
         Returns:
             The fields.
@@ -134,16 +138,16 @@ class Partitioning(abc.ABC):
         Raises:
             ConfigurationError: A key field doesn't exist, or has no column of its own.
         """
-        meta = model._meta
+        model = binding._model
         key_fields: list[Field[Any]] = []
         for name in self.fields:
-            field_object = meta.fields_map.get(name)
+            field_object = binding.fields_map.get(name)
             if field_object is None:
                 raise ConfigurationError(f"{model.__name__}: the partition key field {name!r} doesn't exist")
             if isinstance(field_object, ForeignKeyFieldInstance):
                 key_field_names = field_object.source_fields
-                key_fields.extend(meta.fields_map[key_field_name] for key_field_name in key_field_names)
-            elif name in meta.fields_db_projection:
+                key_fields.extend(binding.fields_map[key_field_name] for key_field_name in key_field_names)
+            elif name in binding.fields_db_projection:
                 key_fields.append(field_object)
             else:
                 raise ConfigurationError(
@@ -152,64 +156,64 @@ class Partitioning(abc.ABC):
                 )
         return key_fields
 
-    def get_column_names(self, model: type[Model]) -> list[str]:
+    def get_column_names(self, binding: ModelBinding) -> list[str]:
         """The key columns, in order.
 
         Args:
-            model: The partitioned model.
+            binding: The partitioned model.
 
         Returns:
             The column names.
         """
-        return [field.source_field or field.model_field_name for field in self.get_key_fields(model)]
+        return [field.source_field or field.model_field_name for field in self.get_key_fields(binding)]
 
-    def get_partition_by_sql(self, model: type[Model], quote: Callable[[str], str]) -> str:
+    def get_partition_by_sql(self, binding: ModelBinding, quote: Callable[[str], str]) -> str:
         """The ``PARTITION BY`` clause of the partitioned table.
 
         Args:
-            model: The partitioned model.
+            binding: The partitioned model.
             quote: Quotes an identifier.
 
         Returns:
             The clause.
         """
-        columns = ", ".join(quote(column) for column in self.get_column_names(model))
+        columns = ", ".join(quote(column) for column in self.get_column_names(binding))
         return f"PARTITION BY {self.strategy} ({columns})"
 
-    def raise_if_unsupported(self, model: type[Model]) -> None:
+    def raise_if_unsupported(self, binding: ModelBinding) -> None:
         """Rejects a partitioning the model's table can't have: an unknown key field, a primary
         key, unique constraint, unique index or exclusion constraint without every key column -
         PostgreSQL enforces them per partition - and partitions that don't fit the key.
 
         Args:
-            model: The partitioned model.
+            binding: The partitioned model.
 
         Raises:
             ConfigurationError: The partitioning doesn't fit the model.
         """
-        key_columns = set(self.get_column_names(model))
-        meta = model._meta
+        model = binding._model
+        key_columns = set(self.get_column_names(binding))
         unique_column_sets: list[tuple[str, set[str]]] = []
-        if meta.has_primary_key:
+        if binding.has_primary_key:
             unique_column_sets.append(
-                ("the primary key", set(meta.get_column_names(meta.primary_key_attribute_names)))
+                ("the primary key", set(binding.get_column_names(binding.primary_key_attribute_names)))
             )
-        for field_name, field_object in meta.fields_map.items():
-            if field_object.unique and not field_object.pk and field_name in meta.fields_db_projection:
+        for field_name, field_object in binding.fields_map.items():
+            if field_object.unique and not field_object.pk and field_name in binding.fields_db_projection:
                 unique_column_sets.append(
-                    (f"the unique field {field_name!r}", {meta.fields_db_projection[field_name]})
+                    (f"the unique field {field_name!r}", {binding.fields_db_projection[field_name]})
                 )
-        for constraint in meta.constraints:
+        for constraint in binding.constraints:
             if isinstance(constraint, UniqueConstraint):
                 described = f"the unique constraint {constraint.name or constraint.fields!r}"
-                unique_column_sets.append((described, set(meta.get_column_names(constraint.fields))))
+                unique_column_sets.append((described, set(binding.get_column_names(constraint.fields))))
             elif isinstance(constraint, ExclusionConstraint):
                 described = f"the exclusion constraint {constraint.name!r}"
-                unique_column_sets.append((described, Partitioning.get_exclusion_columns(model, constraint)))
-        for entry in meta.indexes:
+                unique_column_sets.append((described, Partitioning.get_exclusion_columns(binding, constraint)))
+        for entry in binding.indexes:
             if isinstance(entry, Index) and entry.unique:
                 described = f"the unique index {entry.name or entry.fields!r}"
-                unique_column_sets.append((described, set(meta.get_column_names(entry.field_names))))
+                unique_column_sets.append((described, set(binding.get_column_names(entry.fields))))
         for described, column_set in unique_column_sets:
             if not key_columns <= column_set:
                 missing = ", ".join(sorted(key_columns - column_set))
@@ -217,15 +221,15 @@ class Partitioning(abc.ABC):
                     f"{model.__name__}: {described} doesn't include the partition key column(s) {missing} - "
                     "PostgreSQL enforces it in each partition, so it must include every key column"
                 )
-        self.raise_if_partitions_unsupported(model, len(key_columns))
+        self.raise_if_partitions_unsupported(binding, len(key_columns))
 
     @staticmethod
-    def get_exclusion_columns(model: type[Model], constraint: ExclusionConstraint) -> set[str]:
+    def get_exclusion_columns(binding: ModelBinding, constraint: ExclusionConstraint) -> set[str]:
         """The plain columns an exclusion constraint compares with ``=`` - PostgreSQL enforces one
         per partition only when it compares every key column that way.
 
         Args:
-            model: The model.
+            binding: The model.
             constraint: The constraint.
 
         Returns:
@@ -234,13 +238,13 @@ class Partitioning(abc.ABC):
         field_names = [
             element for element, operator in constraint.expressions if isinstance(element, str) and operator == "="
         ]
-        return set(model._meta.get_column_names(field_names))
+        return set(binding.get_column_names(field_names))
 
-    def raise_if_partitions_unsupported(self, model: type[Model], key_column_count: int) -> None:
+    def raise_if_partitions_unsupported(self, binding: ModelBinding, key_column_count: int) -> None:
         """Rejects partitions that don't fit the key - checked by each strategy.
 
         Args:
-            model: The partitioned model.
+            binding: The partitioned model.
             key_column_count: The number of key columns.
 
         Raises:

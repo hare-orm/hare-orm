@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
 from hare.exceptions import UnSupportedError
 
 if TYPE_CHECKING:
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class Schemas(SchemaEditorPart):
@@ -43,16 +44,18 @@ class Schemas(SchemaEditorPart):
         cascade = " CASCADE" if with_objects else ""
         await self.editor.run_sql(f"DROP SCHEMA IF EXISTS {self.editor.quote(schema_name)}{cascade};")
 
-    def raise_if_model_unmovable(self, model: type[Model]) -> None:
+    def raise_if_model_unmovable(self, binding: ModelBinding) -> None:
         """Refuses moving a model's table to another schema when something of the model can't follow
         it - before any statement of the move runs. Nothing by default.
 
         Args:
-            model: The model, rendered in the schema it moves from.
+            binding: The binding of the model, rendered in the schema it moves from.
         """
 
-    async def move_table_to_schema(self, table_name: str, old_schema: str | None, new_schema: str | None) -> None:
-        """Moves an existing table to another schema, with its rows, constraints and indexes.
+    def get_table_schema_move_plan(
+        self, table_name: str, old_schema: str | None, new_schema: str | None
+    ) -> SchemaChangePlan:
+        """Prepares moving an existing table with its rows, constraints and indexes to another schema.
 
         Args:
             table_name: The table.

@@ -4,12 +4,20 @@ the version bump and the auto_now moment, the active tenant, RETURNING - and wha
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
+from hare import Hare, fields
 from hare.contrib.test import capture_queries, requires_features
 from hare.exceptions import FieldError, QueryError, UnSupportedError
+from hare.instrumentation import Observers, RowsChanged
+from hare.instrumentation.enums import RowOperation
+from hare.models import Model
 from hare.models.tenancy.tenancy import Tenancy
 from hare.query.expressions import F, Q
+from hare.time import Timezone
+from hare.transactions import Transactions
 from tests.shared_models.testmodels import (
     DeletePreviewTenantProject,
     IntFields,
@@ -28,6 +36,23 @@ def upsert(merge):
 
 async def get_stock() -> dict[str, tuple[int, int]]:
     return {stock.sku: (stock.count, stock.version) for stock in await MergeStock.objects.all()}
+
+
+@requires_features(supports_merge=True)
+@pytest.mark.asyncio
+async def test_merge_branches_share_one_execution_timestamp(db, monkeypatch):
+    await MergeStock.objects.create(sku="before", count=1)
+    calls = []
+    moment = datetime(2040, 1, 1, tzinfo=UTC)
+
+    def now():
+        calls.append("clock")
+        return moment
+
+    monkeypatch.setattr(Timezone, "now", now)
+    await upsert(MergeStock.objects.merge([{"sku": "before", "count": 2}, {"sku": "new", "count": 3}], on="sku"))
+    assert calls == ["clock"]
+    assert await MergeStock.objects.order_by("sku").values_list("updated_at", flat=True) == [moment, moment]
 
 
 @requires_features(supports_merge=True)
@@ -211,6 +236,52 @@ async def test_returning_the_written_rows(db):
     ]
 
 
+@requires_features(supports_merge_returning=True)
+@pytest.mark.asyncio
+async def test_returning_refuses_a_field_that_would_replace_the_merge_action(db_isolated):
+    class MergeActionStock(Model):
+        merge_action = fields.IntField()
+
+    Hare.register_live_models([MergeActionStock], app_label="merge_action", connection_alias="models")
+    try:
+        merge = MergeActionStock.objects.merge([{"id": 1}], on="id").when_matched(update={"merge_action": 42})
+        async with capture_queries() as queries:
+            with pytest.raises(FieldError, match="uses 'merge_action' for the action"):
+                merge.returning("merge_action")
+        assert queries.count == 0
+    finally:
+        Hare.unregister_live_models([MergeActionStock])
+
+
+@requires_features(supports_merge_returning=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("returning", (False, True), ids=("count", "returning"))
+async def test_merge_reports_only_its_executed_actions_after_commit(db_isolated, returning):
+    await MergeStock.objects.create(sku="target", count=1)
+    await MergeStock.objects.create(sku="neighbor", count=2)
+    merge = (
+        MergeStock.objects.merge([{"sku": "target", "count": 9}], on="sku")
+        .when_matched(delete=True, condition=Q(sku="unused"))
+        .when_matched(update={"count": F("merge_source__count")})
+        .when_not_matched(insert={"sku": F("merge_source__sku"), "count": F("merge_source__count")})
+    )
+    if returning:
+        merge = merge.returning("sku", "count", "version")
+    events = []
+    with Observers.observing(RowsChanged, events.append, models=[MergeStock]):
+        with pytest.raises(RuntimeError, match="abort the merge"):
+            async with Transactions.atomic(MergeStock.get_connection().connection_alias):
+                await merge
+                assert await get_stock() == {"target": (9, 1), "neighbor": (2, 0)}
+                raise RuntimeError("abort the merge")
+        assert events == []
+        assert await get_stock() == {"target": (1, 0), "neighbor": (2, 0)}
+        result = await merge
+    assert result == ([{"sku": "target", "count": 9, "version": 1, "merge_action": "update"}] if returning else 1)
+    assert [event.operation for event in events] == [RowOperation.UPDATE]
+    assert await get_stock() == {"target": (9, 1), "neighbor": (2, 0)}
+
+
 @requires_features(supports_merge=True)
 @pytest.mark.asyncio
 async def test_the_active_tenant(db):
@@ -334,12 +405,13 @@ async def test_a_merge_it_cant_run_is_refused(db, make, error, message):
         (lambda: MergeStock.objects.merge([], on="sku").returning(), "takes the names of the fields returned"),
     ],
 )
-def test_a_wrong_call_is_refused(make, message):
+def test_a_wrong_call_is_refused(db, make, message):
     with pytest.raises(QueryError, match=message):
         make()
 
 
 @pytest.mark.database_independent
+@pytest.mark.usefixtures("model_conversion_context")
 def test_an_on_field_not_stored_is_refused():
     with pytest.raises(FieldError, match="Unknown field 'stocks' in merge.on=...."):
         MergeSupplier.objects.merge([], on="stocks")

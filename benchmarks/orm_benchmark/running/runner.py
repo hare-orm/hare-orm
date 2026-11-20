@@ -5,22 +5,21 @@ import json
 import os
 import platform
 import random
-import statistics
 import subprocess
 import sys
 import tempfile
-from datetime import UTC, datetime
+from dataclasses import asdict
 from importlib import metadata
 from pathlib import Path
 from typing import Any, ClassVar
 
 from orm_benchmark.constants import (
     BENCHMARK_DIRECTORY,
-    CLICKHOUSE_ROWS,
     ENVIRONMENT_DIRECTORY_PREFIX,
     REPOSITORY,
     SIZES,
 )
+from orm_benchmark.definitions.benchmark_report import BenchmarkReport
 from orm_benchmark.definitions.target import Target
 from orm_benchmark.servers.clickhouse_database import ClickhouseDatabase
 from orm_benchmark.servers.postgresql_database import PostgresqlDatabase
@@ -62,23 +61,12 @@ class Runner:
 
     @staticmethod
     def get_processor_name() -> str:
-        """The processor's marketing name ("Intel Core i7-..."), where the system tells it."""
+        """The processor's marketing name ("Intel Core i7-..."), where Linux tells it."""
         try:
-            if sys.platform == "win32":
-                import winreg
-
-                with winreg.OpenKey(
-                    winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0"
-                ) as key:
-                    return str(winreg.QueryValueEx(key, "ProcessorNameString")[0]).strip()
-            if sys.platform == "darwin":
-                return subprocess.run(
-                    ["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True, check=True
-                ).stdout.strip()
             for line in Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines():
                 if line.startswith("model name"):
                     return line.split(":", 1)[1].strip()
-        except (OSError, subprocess.CalledProcessError):
+        except OSError:
             pass
         return platform.processor() or platform.machine()
 
@@ -105,33 +93,47 @@ class Runner:
         module_name, class_name = cls.SUITES[target.suite].split(":")
         return getattr(importlib.import_module(module_name), class_name)(target, database)
 
-    @staticmethod
-    def get_rows(target: Target, size: str) -> int:
-        """The size of the table a target's scenarios run on."""
-        return CLICKHOUSE_ROWS[size] if target.database == "clickhouse" else SIZES[size]
-
     @classmethod
-    async def run_once(cls, target: Target, size: str) -> dict[str, Any]:
+    async def run_once(cls, target: Target, size: str, seed: int) -> dict[str, Any]:
         """One run of one target.
 
         Args:
             target: The target.
             size: ``small`` or ``large``.
+            seed: The seed for the benchmark workload.
 
         Returns:
             The run's results, versions and environment.
         """
+        random.seed(seed)
         database = cls.get_database(target)
-        server_version = await database.create()
+        server_version = None
+        results = {}
+        error = None
         try:
+            server_version = await database.create()
             suite = cls.get_suite(target, database)
-            results = await suite.run(SIZES[size])
+            suite.seed = seed
+            measured = await suite.run(SIZES[size])
+            results = {
+                name: {"status": "unsupported"} if value is None else {"status": "measured", **asdict(value)}
+                for name, value in measured.items()
+            }
+        except Exception as failure:
+            error = f"{type(failure).__name__}: {failure}"
         finally:
-            await database.drop()
+            if database.created:
+                try:
+                    await database.drop()
+                except Exception as failure:
+                    error = f"{error + '; ' if error else ''}cleanup {type(failure).__name__}: {failure}"
         drivers = {name: version for name in cls.DRIVERS[target.database] if (version := cls.get_version(name))}
         return {
             "target": target.key,
             "size": size,
+            "seed": seed,
+            "status": "failed" if error else "measured",
+            "error": error,
             "version": cls.get_version(target.distribution),
             "drivers": drivers,
             "server": server_version,
@@ -145,7 +147,7 @@ class Runner:
         if target.environment is None:
             return sys.executable
         directory = REPOSITORY / f"{ENVIRONMENT_DIRECTORY_PREFIX}{target.environment}"
-        interpreter = directory / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+        interpreter = directory / "bin/python"
         if not interpreter.exists():
             raise SystemExit(f"{target.key} runs in {directory} - create it as benchmarks/README.md says")
         return str(interpreter)
@@ -156,7 +158,7 @@ class Runner:
         return Path(cls.get_interpreter(target)).resolve() == Path(sys.executable).resolve()
 
     @classmethod
-    def run_all(cls, targets: list[Target], runs: int, size: str) -> dict[str, Any]:
+    def run_all(cls, targets: list[Target], runs: int, size: str, seed: int) -> BenchmarkReport:
         """Every target ``runs`` times, each run in a process of its own - run 1 of every target, then
         run 2 of every target, and so on, so a slow moment of the machine doesn't land on one target.
 
@@ -164,20 +166,23 @@ class Runner:
             targets: The targets.
             runs: How many runs each gets.
             size: ``small`` or ``large``.
+            seed: The seed for the benchmark workload.
 
         Returns:
             The report: by database, the medians and every run's numbers, with the versions and the
             machine.
         """
+        targets = list({target.key: target for target in targets}.values())
         by_target: dict[str, list[dict[str, Any]]] = {target.key: [] for target in targets}
         with tempfile.TemporaryDirectory() as run_directory:
             for run_number in range(1, runs + 1):
+                round_seed = seed + run_number - 1
                 round_order = list(targets)
-                random.Random(run_number).shuffle(round_order)
+                random.Random(round_seed).shuffle(round_order)
                 for target in round_order:
                     output = Path(run_directory) / f"{target.key}-{run_number}.json"
                     print(f"run {run_number}/{runs}: {target.key}", flush=True)
-                    subprocess.run(
+                    process = subprocess.run(
                         [
                             cls.get_interpreter(target),
                             str(BENCHMARK_DIRECTORY / "bench.py"),
@@ -185,40 +190,18 @@ class Runner:
                             target.key,
                             "--size",
                             size,
+                            "--seed",
+                            str(round_seed),
                             "--out",
                             str(output),
                         ],
-                        check=True,
+                        check=False,
                     )
-                    by_target[target.key].append(json.loads(output.read_text(encoding="utf-8")))
-        first_run = next(iter(by_target.values()))[0]
-        report: dict[str, Any] = {
-            "generated": datetime.now(UTC).strftime("%Y-%m-%d"),
-            "size": size,
-            "runs": runs,
-            "environment": first_run["environment"],
-            "hare_release": cls.get_version("hare-orm"),
-            "databases": {},
-        }
-        for target in targets:
-            target_runs = by_target[target.key]
-            database_report = report["databases"].setdefault(
-                target.database,
-                {"server": target_runs[0]["server"], "rows": cls.get_rows(target, size), "drivers": {}, "targets": {}},
-            )
-            database_report["drivers"].update(target_runs[0]["drivers"])
-            scenarios = {}
-            for scenario, first_value in target_runs[0]["results"].items():
-                if first_value is None:
-                    scenarios[scenario] = None
-                    continue
-                values = [run["results"][scenario] for run in target_runs]
-                scenarios[scenario] = {"median": statistics.median(values), "runs": values}
-            # A target of its own environment may run on another Python than the rest.
-            database_report["targets"][target.key] = {
-                "name": target.name,
-                "version": target_runs[0]["version"],
-                "python": target_runs[0]["environment"]["python"],
-                "scenarios": scenarios,
-            }
-        return report
+                    if not output.is_file():
+                        raise RuntimeError(f"{target.key} exited {process.returncode} without a benchmark report")
+                    result = json.loads(output.read_text(encoding="utf-8"))
+                    if process.returncode and result["status"] != "failed":
+                        result.update(status="failed", error=f"Benchmark process exited {process.returncode}")
+                        result["results"] = {}
+                    by_target[target.key].append(result)
+        return BenchmarkReport.collect(targets, by_target, size, seed, cls.get_version("hare-orm"))

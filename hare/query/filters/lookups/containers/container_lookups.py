@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import operator
-from functools import reduce
 from typing import TYPE_CHECKING, Any
 
-from hare.query.filters.lookups.lookups import Lookups
 from hare.sql.terms.containers import (
     ArrayContainedByTerm,
     ArrayContainsTerm,
@@ -13,10 +10,11 @@ from hare.sql.terms.containers import (
     ArrayOverlapTerm,
     MapContainsKeyTerm,
 )
+from hare.sql.terms.criteria.basic_criterion import BasicCriterion
+from hare.sql.terms.criteria.criterion import Criterion
 
 if TYPE_CHECKING:
     from hare.fields.field import Field
-    from hare.sql.terms.criteria.criterion import Criterion
     from hare.sql.terms.term import Term
 
 
@@ -68,13 +66,13 @@ class ContainerLookups:
         """The map has every key of ``value`` - any map for no key."""
         if not value:
             # 1=1 - true for every row.
-            return Lookups.not_in(term, [])
-        return reduce(operator.and_, (MapContainsKeyTerm(term, key) for key in value))
+            return BasicCriterion.always_true()
+        return Criterion.all(MapContainsKeyTerm(term, key) for key in value)
 
     @staticmethod
     def has_any_keys(term: Term, value: list[Any]) -> Criterion:
         """The map has a key of ``value`` - no map for no key."""
         if not value:
             # 1=0 - true for no row.
-            return Lookups.is_in(term, [])
-        return reduce(operator.or_, (MapContainsKeyTerm(term, key) for key in value))
+            return BasicCriterion.always_false()
+        return Criterion.any(MapContainsKeyTerm(term, key) for key in value)

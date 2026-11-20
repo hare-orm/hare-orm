@@ -1,18 +1,13 @@
 """A many-to-many relation on ClickHouse, which has no foreign keys: renaming the model it points at renames
 the column of its through table and makes no foreign key again - the migration was refused halfway."""
 
-import os
 import textwrap
 
 import pytest
 
 from tests.utils.cli_project_factory import project_factory  # noqa: F401
 
-
-@pytest.fixture(autouse=True)
-def skip_without_clickhouse():
-    if not os.getenv("HARE_TEST_DB", "").startswith("clickhouse"):
-        pytest.skip("runs against the ClickHouse test server - make test_clickhouse")
+pytestmark = pytest.mark.usefixtures("skip_without_clickhouse")
 
 
 @pytest.mark.asyncio

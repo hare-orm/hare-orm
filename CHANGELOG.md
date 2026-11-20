@@ -22,6 +22,113 @@ renames that section to its version and date.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-21
+
+### Breaking changes
+
+- `BoundModels` takes a prepared `Apps` registry, rather than a configuration and optional registry;
+  pass `BoundModels(Hare.bind_models(config))`. Dialects come from that registry's graph; the
+  configuration-parsing `get_engine()` helper is removed.
+- `ModelQuery` captures deferred filter values when calls are recorded. Its chain and binding copies
+  preserve subclasses through Python's copy protocol without rerunning constructors; custom `__copy__`
+  implementations must return independent declarations.
+- Custom statement builders return complete `PlanDescription` objects through `_get_build_plan_description()`;
+  the redundant `_get_plan_key`, `_get_plan_values`, `_get_plan_value_description` and
+  `_get_plan_record_description` hooks are removed.
+- Model metadata belongs to an independent registry graph. Retained queries and instances keep their
+  original context and graph; a closed context cannot perform database IO. Use a new `HareContext` for
+  another configuration. `Hare.bind_models()` returns an offline `Apps`; use its `get_binding()`,
+  `new()`, `construct()` and `get_queryset()` factories instead of class-global metadata.
+- Historical data callbacks use `apps.get_queryset(reference, using=schema_editor.client)`. Pass
+  `apps=` when generating request/Pydantic schemas offline. Pickled instances are detached from live
+  resources and require `context.attach(instance)` before database operations.
+- Custom manager/queryset constructors forward `binding=` and `context=`. Schema hooks and change sinks
+  receive `ModelBinding` instead of a model class; its `_model` identifies the Python class.
+- `MigrationSafetyChecker.check()` now takes `migration.prepare(state)` as its second argument,
+  rather than `State`. Update custom checker overrides to accept `PreparedOperationStates`;
+  sequential checks can advance from `prepared.after.clone()` without another dry run.
+- Every supported platform requires the native extension, supplied in platform wheels. The native
+  PostgreSQL driver is available on Linux and macOS; use `postgresql+asyncpg://` on Windows.
+- Replace `PostGISField`, `STDistance` and `STDWithin` with `PointField(geography=True, srid=4326)`,
+  `Distance` and `DWithin`; construct coordinates as `Point(longitude, latitude)`.
+- Declare reusable row restrictions with `Manager(scope=...)`; filters in a custom `get_queryset()` are no
+  longer inferred as JOIN policies.
+- Migration `apply()` and `unapply()` preserve their input `State` and return the resulting state; pass the
+  state before the migration to `unapply()`.
+- Migration `plan()` and `migrate()` return `ConnectionMigrationPlan` records; use `MigrationSession` when
+  several API calls must share connections.
+- Update custom migration operations to the snapshot and `get_rewrite()` contracts and the schema-editor
+  argument of `get_effect()`; remove `bases` from `CreateModel` calls.
+- Use the class returned by `RequestQuery.prepare_parameters()` for validation and schema inspection; the
+  declaration class retains its declared fields.
+- Percent-encode reserved characters in database URL credentials; PostgreSQL `schema` denotes one exact schema
+  name, while multiple schemas belong in `search_path` or `SearchPath(...)`.
+- Dialect entry points now return `ExtensionContribution`; custom drivers must pass a `StatementForm` to
+  `translate_exceptions()`.
+- Custom caches must use explicit holder/model buckets; replace owner helpers with `get_bucket()`,
+  `get_value()`, `set_value()` and `forget_holder()`.
+  Remove the `holds_sql` argument from custom caches. SQL cache entries follow their model binding.
+- Declare ClickHouse dictionary sources with `DictionarySource` and explicit `EnvironmentValue` references, or
+  literal `RawSQLTerm`; raw SQL no longer expands environment placeholders.
+- Install `hare-orm[clickhouse-keeper]` for ClickHouse Keeper allocation and migration locks.
+- `hare.time.ZoneInfo` is the standard-library class; replace the removed `.zone` compatibility attribute with
+  `.key`.
+
+### Added
+
+- Support CPython 3.15 for the core and compatible integrations, with an upper Python bound of
+  `<3.16`. Robyn 0.88 and ClickHouse TCP remain on Python 3.12–3.14; dependency installation and
+  CI select compatible extras and retain TCP coverage on 3.14.
+
+- GIS geometry values and fields cover points, lines, polygons, multi-geometries and collections with explicit
+  SRIDs.
+- `TSVectorField(expression=...)` supports composed `SearchVector` expressions; the `source_fields`, `config`,
+  `weights` and `stored` shorthand remains supported.
+- `ApiGetter.prepare()` and `apply()` separate asynchronous enrichment preparation from assignment.
+
+### Changed
+
+- Share prepared container conversion hooks and schema-query preparation. M2M metadata uses its linked
+  through binding throughout reads, writes, deletion and schema snapshots.
+- Keep only executable child trees after migration preparation and coalesce historical rendering marks;
+  dependency sorting and splitting use the same provider matching.
+- Batch native asyncio delivery and model hydration, and execute cached model plans without allocating statements.
+- Reduce repeated work in query cloning, row materialization and bulk key/array conversion while preserving
+  custom conversion hooks and validation.
+- Reduce intermediate allocations in native parameter and result conversion, prepare annotation readers
+  with the result layout, and reuse comparison and dependency metadata within migration preparation.
+  Ordinary native-to-Python callbacks use PyO3 instead of custom vectorcall wrappers.
+- Connection clones retain effective construction settings; transactions, migrations and integrations use
+  their owning context instead of an unrelated ambient connection.
+- Migration preparation snapshots declarations and assembles schema changes before execution; progress
+  callbacks support synchronous and asynchronous implementations.
+- Framework and Taskiq transaction configuration accepts iterables of connection aliases and snapshots their
+  order once.
+- Removed arbitrary caps on configured pagination/outbox batch sizes, sequence caches and search weights,
+  markers and counts; input validation and database-specific limits remain.
+- Pydantic list loading delegates to the selected submodel's `from_queryset()`, including custom overrides;
+  generated typing and stubs follow published query descriptions.
+- Use maintained dependencies for SQL tokenization, Python source editing, native async interop and Keeper
+  transport; updated contract matrices and English/Russian documentation.
+
+### Fixed
+
+- Align prepared field validation and SQL-plan structure, include nested migration effects in safety
+  inspection, respect dialect object-name scopes, and prevent task retries after a committed or
+  unconfirmed transaction. Preserve computed-field ordering in cached Pydantic schemas and mask
+  field-aware diagnostics consistently.
+
+- Keep relation queries on the instance's current connection and apply router choices at execution time.
+- Enforce tenant-client and transaction-scope checks for explicit clients, nested queries and relation writes.
+- Snapshot supported container subclasses consistently in filters and pending JSON writes.
+- Preserve dependent schema objects across generated-column replacement, renames and table/schema changes, and
+  retain representable catalog details during introspection.
+- Correct expression traversal, query-plan reuse and value conversion across nested queries, containers,
+  projections and dialect-specific clauses. Map keys are converted before their values; reverse relations compare relation keys consistently
+  when creating, adding or removing objects.
+- Preserve cancellation and primary failures while draining connection, stream, integration and outbox
+  resources; lost Keeper ownership interrupts the protected migration scope.
+
 ## [0.12.0] - 2026-11-01
 
 ### Breaking changes
@@ -244,7 +351,8 @@ Wheels with the Rust extension are built for Linux (glibc and musl), macOS and W
 - **Documentation** in English and Russian, and benchmarks against SQLAlchemy, Tortoise ORM,
   yara-orm and Django - see [Benchmarks](https://hare-orm.github.io/hare-orm/benchmarks/).
 
-[Unreleased]: https://github.com/hare-orm/hare-orm/compare/v0.12.0...dev
+[Unreleased]: https://github.com/hare-orm/hare-orm/compare/v0.13.0...dev
+[0.13.0]: https://github.com/hare-orm/hare-orm/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/hare-orm/hare-orm/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/hare-orm/hare-orm/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/hare-orm/hare-orm/compare/v0.9.0...v0.10.0

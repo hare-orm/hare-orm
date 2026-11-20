@@ -13,8 +13,5 @@ WAKEUP_RECONNECT_BACKOFF_SECONDS = 0.5
 #: The channel, Redis channel, Kafka topic or RabbitMQ exchange a wakeup signals on by default.
 DEFAULT_WAKEUP_CHANNEL = "hare_outbox"
 
-#: The separator of the topics one wakeup signal carries.
-WAKEUP_TOPIC_SEPARATOR = "\n"
-
 #: How long a Kafka wakeup topic keeps its signals - a relay reads only new ones.
 KAFKA_WAKEUP_RETENTION_MILLISECONDS = 60000

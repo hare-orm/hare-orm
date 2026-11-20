@@ -2,22 +2,14 @@
 //! array of a type whose binary format is not its text.
 
 use bytes::BytesMut;
-use fallible_iterator::FallibleIterator;
 use tokio_postgres::types::{IsNull, Kind as TypeShape, Type};
 
-use crate::pg::value::decode::{decode_value, ServerTextForms};
+use crate::pg::decode_context::PgDecodeContext;
+use crate::pg::parameter_encoding::{PgParameterEncoding, PgParameterMode};
+use crate::pg::types::constants::MAX_ARRAY_DIMENSIONS;
+use crate::pg::value::decode::{decode_value_with_context, ServerTextForms};
 use crate::pg::value::{domain_base_type, BoxError, Value};
-
-/// True when `member_type`'s binary wire format is its own text, so a string can be written
-/// as-is even where a binary encoding is required (an array element, a range bound, COPY).
-pub(crate) fn member_type_is_text_compatible(member_type: &Type) -> bool {
-    let member_type = domain_base_type(member_type);
-    matches!(
-        *member_type,
-        Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::UNKNOWN | Type::JSON | Type::JSONB | Type::UUID
-    ) || matches!(member_type.kind(), TypeShape::Enum(_))
-        || member_type.name() == "citext"
-}
+use crate::pg::wire_reader::PgWireReader;
 
 /// True when `value` is a list of strings (NULLs and nested lists of them allowed, at least one
 /// string) bound to an array of a type whose binary wire format is not its text - pgvector
@@ -41,7 +33,7 @@ pub(crate) fn is_text_format_array(value: &Value, postgres_type: &Type) -> bool 
     let TypeShape::Array(member_type) = domain_base_type(postgres_type).kind() else {
         return false;
     };
-    if member_type_is_text_compatible(member_type) {
+    if PgParameterEncoding::accepts_text_in_binary(member_type) {
         return false;
     }
     let mut has_text = false;
@@ -50,28 +42,28 @@ pub(crate) fn is_text_format_array(value: &Value, postgres_type: &Type) -> bool 
 
 /// Writes Postgres's text array literal (`{"a",NULL,{"b"}}`) for a list checked by
 /// `is_text_format_array` - every string double-quoted, with `"` and `\` backslash-escaped.
-pub(crate) fn write_text_array_literal(items: &[Value], out: &mut String) {
-    out.push('{');
+pub(crate) fn write_text_array_literal(items: &[Value], out: &mut BytesMut, delimiter: u8) {
+    out.extend_from_slice(b"{");
     for (index, item) in items.iter().enumerate() {
         if index > 0 {
-            out.push(',');
+            out.extend_from_slice(&[delimiter]);
         }
         match item {
-            Value::Array(sub_items) => write_text_array_literal(sub_items, out),
+            Value::Array(sub_items) => write_text_array_literal(sub_items, out, delimiter),
             Value::Text(text) => {
-                out.push('"');
-                for character in text.chars() {
-                    if character == '"' || character == '\\' {
-                        out.push('\\');
+                out.extend_from_slice(b"\"");
+                for byte in text.bytes() {
+                    if byte == b'"' || byte == b'\\' {
+                        out.extend_from_slice(b"\\");
                     }
-                    out.push(character);
+                    out.extend_from_slice(&[byte]);
                 }
-                out.push('"');
+                out.extend_from_slice(b"\"");
             }
-            _ => out.push_str("NULL"),
+            _ => out.extend_from_slice(b"NULL"),
         }
     }
-    out.push('}');
+    out.extend_from_slice(b"}");
 }
 
 /// Encodes a list (nested lists for more dimensions, e.g. `[[1, 2], [3, 4]]`) as ONE Postgres
@@ -88,7 +80,9 @@ pub(crate) fn encode_array(items: &[Value], postgres_type: &Type, out: &mut Byte
         )
         .into()
     })?;
-    if !member_type_is_text_compatible(member_type) && leaves.iter().any(|leaf| matches!(leaf, Value::Text(_))) {
+    if !PgParameterEncoding::accepts_text_in_binary(member_type)
+        && leaves.iter().any(|leaf| matches!(leaf, Value::Text(_)))
+    {
         return Err(format!(
             "cannot bind a string as an element of a {} array - array elements have no separate \
              text-format encoding path (only a top-level scalar parameter of this type can be \
@@ -107,7 +101,9 @@ pub(crate) fn encode_array(items: &[Value], postgres_type: &Type, out: &mut Byte
         dimensions,
         member_type.oid(),
         leaves,
-        |leaf, buffer| match leaf.encode(member_type, buffer, false)? {
+        |leaf, buffer| match PgParameterEncoding::new(leaf, member_type, PgParameterMode::BinaryRequired)
+            .encode(buffer)?
+        {
             IsNull::No => Ok(postgres_protocol::IsNull::No),
             IsNull::Yes => Ok(postgres_protocol::IsNull::Yes),
         },
@@ -120,18 +116,25 @@ pub(crate) fn encode_array(items: &[Value], postgres_type: &Type, out: &mut Byte
 /// list - or reports why the nesting is not a valid rectangular array: a sub-array whose length
 /// differs from a sibling's, or a scalar/NULL element beside sibling sub-arrays.
 pub(crate) fn array_shape_and_leaves(items: &[Value]) -> Result<(Vec<usize>, Vec<&Value>), String> {
+    let mut leaves = Vec::new();
+    let shape = append_array_leaves(items, &mut leaves)?;
+    Ok((shape, leaves))
+}
+
+/// Append row-major leaves while checking the shape before any value is encoded.
+fn append_array_leaves<'a>(items: &'a [Value], leaves: &mut Vec<&'a Value>) -> Result<Vec<usize>, String> {
     if items.iter().all(|item| !matches!(item, Value::Array(_))) {
-        return Ok((vec![items.len()], items.iter().collect()));
+        leaves.extend(items.iter());
+        return Ok(vec![items.len()]);
     }
     let mut sub_shape: Option<Vec<usize>> = None;
-    let mut leaves = Vec::new();
     for item in items {
         let Value::Array(sub_items) = item else {
             return Err("a scalar or NULL element sits alongside a sub-array at the same nesting depth - every \
                  element at a given depth must itself be a sub-array of the same shape"
                 .to_string());
         };
-        let (shape, mut sub_leaves) = array_shape_and_leaves(sub_items)?;
+        let shape = append_array_leaves(sub_items, leaves)?;
         match &sub_shape {
             None => sub_shape = Some(shape),
             Some(expected) if *expected == shape => {}
@@ -141,31 +144,25 @@ pub(crate) fn array_shape_and_leaves(items: &[Value]) -> Result<(Vec<usize>, Vec
                 ));
             }
         }
-        leaves.append(&mut sub_leaves);
     }
     let mut full_shape = vec![items.len()];
     full_shape.extend(sub_shape.expect("items is non-empty in this branch"));
-    Ok((full_shape, leaves))
+    Ok(full_shape)
 }
 
 /// Rebuilds the nested `Value::Array` tree from wire-order dimension sizes and the flat,
 /// row-major leaves.
-pub(crate) fn nest_leaves(dims: &[usize], leaves: Vec<Value>) -> Value {
-    match dims {
-        [] | [_] => Value::Array(leaves),
-        [outer, rest @ ..] => {
-            let chunk_size: usize = rest.iter().product();
-            let mut remaining = leaves;
-            let mut sub_arrays = Vec::with_capacity(*outer);
-            // Exactly `outer` chunks, even when `chunk_size` is 0.
-            for _ in 0..*outer {
-                let chunk_tail = remaining.split_off(chunk_size.min(remaining.len()));
-                sub_arrays.push(nest_leaves(rest, remaining));
-                remaining = chunk_tail;
-            }
-            Value::Array(sub_arrays)
+fn nest_leaves(dims: &[usize], leaves: Vec<Value>) -> Value {
+    let mut level = leaves;
+    for &width in dims.iter().skip(1).rev() {
+        let mut items = level.into_iter();
+        let mut parent = Vec::new();
+        while items.len() != 0 {
+            parent.push(Value::Array(items.by_ref().take(width).collect()));
         }
+        level = parent;
     }
+    Value::Array(level)
 }
 
 /// Decodes an array of any dimensionality into nested `Value::Array`s, each element through
@@ -174,29 +171,52 @@ pub(crate) fn decode_array<'a>(
     member_type: &Type,
     raw: &'a [u8],
     forms: &mut ServerTextForms<'a>,
+    context: &mut PgDecodeContext,
 ) -> Result<Value, BoxError> {
-    let array = postgres_protocol::types::array_from_sql(raw)?;
-    let mut dims = Vec::new();
-    let mut dimensions = array.dimensions();
-    while let Some(dimension) = dimensions.next()? {
-        dims.push(
-            usize::try_from(dimension.len)
-                .map_err(|_| format!("invalid array payload: negative dimension size {}", dimension.len))?,
-        );
+    let mut reader = PgWireReader::new(raw, "array");
+    let dimension_count = reader.count(8)?;
+    if dimension_count > MAX_ARRAY_DIMENSIONS {
+        return Err("array dimensions exceed PostgreSQL MAXDIM".into());
     }
-    // ndim == 0 is Postgres's representation of every empty array, whatever its shape was.
-    if dims.is_empty() {
-        return Ok(Value::Array(vec![]));
+    let flags = reader.i32()?;
+    if !matches!(flags, 0 | 1) {
+        return Err("invalid array NULL flag".into());
     }
-    let mut leaves = Vec::new();
-    let mut values = array.values();
-    while let Some(element) = values.next()? {
-        leaves.push(match element {
-            Some(bytes) => decode_value(member_type, bytes, forms)?,
-            None => Value::Null,
-        });
+    let _member_oid = reader.u32()?;
+    let mut dims = Vec::with_capacity(dimension_count);
+    let mut leaf_count = usize::from(dimension_count != 0);
+    for _ in 0..dimension_count {
+        let size = usize::try_from(reader.i32()?).map_err(|_| "negative array dimension")?;
+        let _lower_bound = reader.i32()?;
+        leaf_count = leaf_count.checked_mul(size).ok_or("array dimensions overflow")?;
+        dims.push(size);
     }
-    Ok(nest_leaves(&dims, leaves))
+    if leaf_count > reader.remaining().len() / 4 {
+        return Err("array dimensions exceed the number of wire elements".into());
+    }
+    let mut slots = 0_usize;
+    let mut prefix = 1_usize;
+    if leaf_count != 0 {
+        for dimension in &dims {
+            prefix = prefix.checked_mul(*dimension).ok_or("array shape size overflow")?;
+            slots = slots.checked_add(prefix).ok_or("array result size overflow")?;
+        }
+    }
+    context.reserve_values(slots)?;
+    context.visit(dimension_count.saturating_sub(1), |context| {
+        let mut leaves = Vec::with_capacity(leaf_count);
+        for _ in 0..leaf_count {
+            leaves.push(match reader.nullable_bytes()? {
+                Some(bytes) => decode_value_with_context(member_type, bytes, forms, context)?,
+                None => Value::Null,
+            });
+        }
+        reader.finish()?;
+        if leaf_count == 0 {
+            return Ok(Value::Array(Vec::new()));
+        }
+        Ok(nest_leaves(&dims, leaves))
+    })
 }
 
 #[cfg(test)]
@@ -205,6 +225,7 @@ mod tests {
 
     use tokio_postgres::types::{Format, Kind as TypeShape, ToSql, Type};
 
+    use crate::pg::parameter_encoding::{PgParameterEncoding, PgParameterMode};
     use crate::pg::value::test_support::*;
     use crate::pg::value::Value;
 
@@ -215,7 +236,10 @@ mod tests {
         let value = Value::Array(vec![Value::Text("abcdef".to_string()), Value::Null]);
         assert!(matches!(value.encode_format(&Type::MACADDR_ARRAY), Format::Text));
         let mut out = BytesMut::new();
-        value.to_sql(&Type::MACADDR_ARRAY, &mut out).expect("a text array literal must encode");
+        PgParameterEncoding::new(&value, &Type::MACADDR_ARRAY, PgParameterMode::Negotiated)
+            .with_text_array_delimiter(Some(b','))
+            .encode(&mut out)
+            .expect("a text array literal must encode");
         assert_eq!(&out[..], b"{\"abcdef\",NULL}");
     }
 
@@ -226,8 +250,27 @@ mod tests {
             Value::Array(vec![Value::Text("[1,2]".to_string()), Value::Null]),
         ]);
         let mut out = BytesMut::new();
-        value.to_sql(&vector_array_type(), &mut out).expect("a nested text array literal must encode");
+        PgParameterEncoding::new(&value, &vector_array_type(), PgParameterMode::Negotiated)
+            .with_text_array_delimiter(Some(b','))
+            .encode(&mut out)
+            .expect("a nested text array literal must encode");
         assert_eq!(&out[..], b"{{\"a\\\"b\",\"c\\\\d\"},{\"[1,2]\",NULL}}");
+    }
+
+    #[test]
+    fn every_array_dimension_uses_the_native_member_delimiter() {
+        let value = Value::Array(vec![
+            Value::Array(vec![Value::Text("(1,2),(3,4)".to_string()), Value::Null]),
+            Value::Array(vec![Value::Text("(5,6),(7,8)".to_string()), Value::Text("é\"\\".to_string())]),
+        ]);
+        let mut out = BytesMut::new();
+        assert!(value.to_sql(&Type::BOX_ARRAY, &mut out).is_err());
+        assert!(out.is_empty());
+        PgParameterEncoding::new(&value, &Type::BOX_ARRAY, PgParameterMode::Negotiated)
+            .with_text_array_delimiter(Some(b';'))
+            .encode(&mut out)
+            .unwrap();
+        assert_eq!(&out[..], "{{\"(1,2),(3,4)\";NULL};{\"(5,6),(7,8)\";\"é\\\"\\\\\"}}".as_bytes());
     }
 
     #[test]
@@ -279,7 +322,7 @@ mod tests {
 mod encode_tests {
     use bytes::{Buf, BytesMut};
 
-    use tokio_postgres::types::{IsNull, Kind as TypeShape, ToSql, Type};
+    use tokio_postgres::types::{IsNull, ToSql, Type};
 
     use crate::pg::value::Value;
 
@@ -412,18 +455,6 @@ mod encode_tests {
     }
 
     #[test]
-    fn int4_array_type_shape_is_a_single_level_not_nested_regardless_of_actual_data_shape() {
-        // Confirms the assumption encode_nd_array's own doc comment relies on: Postgres has no
-        // per-dimension catalog type, so INT4_ARRAY's TypeShape::Array member is always the plain
-        // scalar INT4 - never TypeShape::Array(TypeShape::Array(INT4)) - no matter how deeply nested the
-        // actual value being bound against it is.
-        match Type::INT4_ARRAY.kind() {
-            TypeShape::Array(member) => assert_eq!(*member, Type::INT4),
-            other => panic!("expected TypeShape::Array(INT4), got {other:?}"),
-        }
-    }
-
-    #[test]
     fn nested_array_against_a_non_array_column_type_is_a_clean_error_not_a_panic() {
         let value = Value::Array(vec![Value::Array(vec![int_value(1), int_value(2)])]);
         let mut out = BytesMut::new();
@@ -435,6 +466,33 @@ mod encode_tests {
 #[cfg(test)]
 mod decode_tests {
     use super::*;
+
+    #[test]
+    fn impossible_dimensions_and_trailing_elements_are_rejected() {
+        let mut raw = 2_i32.to_be_bytes().to_vec();
+        raw.extend_from_slice(&0_i32.to_be_bytes());
+        raw.extend_from_slice(&Type::INT4.oid().to_be_bytes());
+        for _ in 0..2 {
+            raw.extend_from_slice(&i32::MAX.to_be_bytes());
+            raw.extend_from_slice(&1_i32.to_be_bytes());
+        }
+        assert!(decode_array(
+            &Type::INT4,
+            &raw,
+            &mut ServerTextForms::collecting(),
+            &mut PgDecodeContext::new(raw.len())
+        )
+        .is_err());
+        let mut empty = vec![0; 12];
+        empty.push(1);
+        assert!(decode_array(
+            &Type::INT4,
+            &empty,
+            &mut ServerTextForms::collecting(),
+            &mut PgDecodeContext::new(empty.len())
+        )
+        .is_err());
+    }
     use bytes::BytesMut;
 
     use tokio_postgres::types::{ToSql, Type};
@@ -525,7 +583,12 @@ mod decode_tests {
         let value = Value::Array(vec![Value::Array(vec![Value::Int(1)])]);
         let mut out = BytesMut::new();
         value.to_sql(&Type::INT4_ARRAY, &mut out).expect("must encode");
-        let result = decode_array(&Type::INT4_ARRAY, &out, &mut ServerTextForms::collecting());
+        let result = decode_array(
+            &Type::INT4_ARRAY,
+            &out,
+            &mut ServerTextForms::collecting(),
+            &mut PgDecodeContext::new(out.len()),
+        );
         assert!(result.is_err(), "expected a clean Err, got {:?}", result.map(|_| ()));
     }
 }

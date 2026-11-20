@@ -20,6 +20,7 @@ from hare.contrib.factories import (
     Trait,
 )
 from hare.contrib.test import RollbackIsolation, capture_queries, hare_test_context
+from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError
 from hare.models.tenancy.tenancy import Tenancy
 from tests.contrib.factories_models import Article, Label, Member, Note, Profile, StoreItem, Team, Version
@@ -145,10 +146,24 @@ async def test_related_rows_point_at_the_object(db):
 
 @pytest.mark.sqlite_only
 @pytest.mark.asyncio
+async def test_related_factory_keeps_created_parent_when_values_include_another(db):
+    other_author = await MemberFactory.create()
+
+    class AuthorWithArticles(MemberFactory):
+        articles = RelatedFactory(PlainArticleFactory, "author", size=2, author=other_author, title="linked")
+
+    author = await AuthorWithArticles.create()
+
+    assert await Article.objects.filter(author=other_author).count() == 0
+    assert await Article.objects.filter(author=author, title="linked").count() == 2
+
+
+@pytest.mark.sqlite_only
+@pytest.mark.asyncio
 async def test_a_batch_without_related_objects_is_one_insert_where_the_keys_come_back(db):
     async with capture_queries() as counter:
         items = await LabelFactory.create_batch(5)
-    features = Label._meta.connection.features
+    features = HareContext.require_current().apps.get_queryset(Label).get_connection().features
     # A key the database generates comes back from a multi-row insert only with RETURNING.
     assert counter.count == (1 if features.supports_returning and features.guarantees_returning_order else 5)
     assert len(items) == 5
@@ -232,6 +247,8 @@ async def test_values_not_cycled_run_out_with_an_error_naming_them(db):
 
 
 @pytest.mark.database_independent
+@pytest.mark.usefixtures("model_conversion_context")
+@pytest.mark.parametrize("model_conversion_context", [["tests.contrib.factories_models"]], indirect=True)
 def test_a_subclass_of_a_factory_numbers_its_objects_on_in_the_same_sequence():
     """A factory subclassing another one makes rows of the same table - its objects aren't numbered
     from 0 again, so a unique value made of the number isn't made twice."""
@@ -243,6 +260,8 @@ def test_a_subclass_of_a_factory_numbers_its_objects_on_in_the_same_sequence():
 
 
 @pytest.mark.database_independent
+@pytest.mark.usefixtures("model_conversion_context")
+@pytest.mark.parametrize("model_conversion_context", [["tests.contrib.factories_models"]], indirect=True)
 def test_each_object_gets_a_plain_list_or_dict_of_its_own():
     first, second = ProfileFactory.build_batch(2)
     first.settings["tags"].append("b")

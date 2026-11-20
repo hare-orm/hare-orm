@@ -5,6 +5,7 @@ import asyncio
 from typing import Any
 
 from hare.contrib.repeated_queries import RepeatedQueryDetector
+from hare.core.hare_context import HareContext
 from hare.core.routing.written_connections import WrittenConnections
 
 
@@ -25,8 +26,9 @@ async def in_a_task_that_wrote_before(start_request) -> tuple[Any, Any]:
     and an earlier count of repeated queries."""
 
     async def task():
-        WrittenConnections.current.set(WrittenConnections())
-        RepeatedQueryDetector.current_counts.set({"earlier": {}})
-        return await start_request()
+        async with HareContext() as context:
+            WrittenConnections.current.set(WrittenConnections({context.identity: {"default": 1.0}}))
+            RepeatedQueryDetector.current_counts.set({"earlier": {}})
+            return await start_request()
 
     return await asyncio.create_task(task())

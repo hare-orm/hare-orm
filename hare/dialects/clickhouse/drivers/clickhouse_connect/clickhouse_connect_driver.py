@@ -4,7 +4,6 @@ from typing import TYPE_CHECKING, Any
 
 from hare.dialects.clickhouse.connection.clickhouse_driver import ClickhouseDriver
 from hare.dialects.clickhouse.drivers.constants import CLICKHOUSE_CONNECT_DRIVER_NAME
-from hare.dialects.dialect_registry import DialectRegistry
 from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
@@ -40,4 +39,4 @@ class ClickhouseConnectDriver(ClickhouseDriver):
         return (ClickhouseConnectClient,)
 
 
-DialectRegistry.register_driver(ClickhouseConnectDriver())
+extension = ClickhouseConnectDriver.get_contribution

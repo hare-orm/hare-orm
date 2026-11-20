@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from hare.core.caching.cache import Cache
@@ -12,12 +13,14 @@ from hare.query.expressions import Expression, F, Ordering
 from hare.query.key_columns import KeyColumns
 from hare.query.lookup_info.lookup_info_builder import LookupInfoBuilder
 from hare.query.queryset.arguments.annotation_arguments import AnnotationArguments
+from hare.query.queryset.concrete_field_paths import ConcreteFieldPaths
 from hare.query.queryset.constants import EXPRESSION_ORDERING_ALIAS_PREFIX, PLAIN_ORDERINGS_CACHE_SIZE
 from hare.query.queryset.single_rows.none_awaitable_type import NoneAwaitable
 from hare.sql import Order
 
 if TYPE_CHECKING:
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset.queryset import QuerySet
 
 
@@ -33,9 +36,7 @@ class OrderingArguments:
     #: queryset without annotations; None where a name reads a path ordered by an alias of its
     #: own. A name crosses relations into other models, so a change of any model forgets every
     #: entry.
-    plain_orderings: ClassVar[Cache[Any]] = Cache(
-        PLAIN_ORDERINGS_CACHE_SIZE, holds_sql=False, depends_on_other_models=True
-    )
+    plain_orderings: ClassVar[Cache[Any]] = Cache(PLAIN_ORDERINGS_CACHE_SIZE, depends_on_other_models=True)
 
     @staticmethod
     def get_plain_orderings(
@@ -55,20 +56,21 @@ class OrderingArguments:
         for ordering in orderings:
             if type(ordering) is not str:
                 return None
-        model = queryset.model
-        parsed = OrderingArguments.plain_orderings.get_for_model(model, (orderings,), CACHE_MISS)
+        key = (orderings,)
+        bucket = OrderingArguments.plain_orderings.get_bucket(queryset._binding)
+        parsed = bucket.get(key, CACHE_MISS)
         if parsed is CACHE_MISS:
             names = [queryset._get_ordering_name(ordering)[0] for ordering in orderings]
             if AnnotationArguments.get_path_annotations(queryset, names):
                 parsed = None
             else:
                 parsed = tuple(OrderingArguments.parse_orderings(queryset, orderings))
-            OrderingArguments.plain_orderings[(model, orderings)] = parsed
+            bucket[key] = parsed
         return parsed
 
     @staticmethod
     def get_expression_aliases(
-        orderings: tuple[str | Expression | Ordering, ...],
+        orderings: Sequence[str | Expression | Ordering],
     ) -> tuple[dict[str, Expression], tuple[str | Expression | Ordering, ...]]:
         """The aliases the expressions among ``orderings`` are ordered by, and the orderings naming
         them instead.
@@ -117,10 +119,11 @@ class OrderingArguments:
             Standard ordering for QuerySet.
         """
         new_ordering = []
+        model_binding: ModelBinding = queryset._binding  # type: ignore[assignment]
         for ordering in orderings:
             field_name, order_type = queryset._get_ordering_name(ordering, reverse=reverse)
             if queryset._annotations:
-                field_name = KeyColumns.get_primary_key_name(queryset.model, queryset._annotations, field_name)
+                field_name = KeyColumns.get_primary_key_name(model_binding, queryset._annotations, field_name)
             # "pk" orders by every primary key field, a forward relation by its own key column(s).
             if field_name in queryset._annotations or field_name.partition("__")[0] in queryset._annotations:
                 ordering_info = AnnotationArguments.get_annotation_description(
@@ -128,12 +131,21 @@ class OrderingArguments:
                     "ordering",
                     field_name,
                     lambda: LookupInfoBuilder.get_ordering_info(
-                        queryset.model, field_name, annotations=queryset._annotations
+                        model_binding, field_name, annotations=queryset._annotations
                     ),
                 )
             else:
-                ordering_info = queryset.model._meta.get_ordering_info(field_name)
-            for ordering_field_name in ordering_info.paths:
+                ordering_info = model_binding.get_ordering_info(field_name)
+            concrete_paths = (
+                path
+                for name in ordering_info.paths
+                for path in (
+                    (name,)
+                    if name in queryset._annotations or name.partition("__")[0] in queryset._annotations
+                    else ConcreteFieldPaths.get_paths(model_binding, name)
+                )
+            )
+            for ordering_field_name in concrete_paths:
                 ordering_type = order_type
                 if (
                     nulls_last_by_default
@@ -206,7 +218,7 @@ class OrderingArguments:
         current: Any = obj
         *relation_names, last_name = field_name.split("__")
         for relation_name in relation_names:
-            relation_field = type(current)._meta.fields_map.get(relation_name)
+            relation_field = current._binding.fields_map.get(relation_name)
             if isinstance(relation_field, (BackwardForeignKeyRelation, ManyToManyFieldInstance)) and not isinstance(
                 relation_field, BackwardOneToOneRelation
             ):
@@ -236,10 +248,11 @@ class OrderingArguments:
         Returns:
             A clone ordered by the primary key, or this queryset itself.
         """
+        model_binding: ModelBinding = queryset._binding  # type: ignore[assignment]
         if (
             (queryset._limit is not None or queryset._offset)
             and not queryset._apply_default_ordering(queryset._orderings)
             and not queryset._distinct_on
         ):
-            return queryset._with_orderings(*queryset.model._meta.primary_key_attribute_names)
+            return queryset._with_orderings(*model_binding.primary_key_attribute_names)
         return queryset

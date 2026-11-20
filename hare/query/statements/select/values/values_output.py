@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.exceptions import FieldError
+from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.key_columns import KeyColumns
+from hare.query.lookup_info.bound_lookup_path import BoundLookupPath
 from hare.query.queryset.concrete_field_paths import ConcreteFieldPaths
-from hare.query.rows.native.enums import FieldBucket
 from hare.query.rows.values_rows.value_field import ValueField
 from hare.query.statements.building.query_annotations import QueryAnnotations
 from hare.query.statements.building.query_joins import QueryJoins
@@ -16,6 +17,7 @@ TModel = TypeVar("TModel", bound="Model")
 if TYPE_CHECKING:
     from hare.fields.field import Field as ModelField
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.statements.select.values_query import ValuesQuery
 
 
@@ -25,28 +27,24 @@ class ValuesOutput:
     returned one."""
 
     @staticmethod
-    def get_composite_key_components(
-        model: type[Model], name: str, annotations: dict[str, Any], alias_keys: Collection[str] = ()
-    ) -> tuple[str, ...]:
+    def get_composite_key_components(binding: ModelBinding, name: str, annotations: dict[str, Any]) -> tuple[str, ...]:
         """The field paths of a selected name reading a composite key - ``pk`` of a composite
-        primary key, or a relation to one (``target``, ``target__pk``, ``tags``).
+        primary key, a relation to one (``target``, ``target__pk``, ``tags``), or an ``F`` annotation
+        naming such a key.
 
         Args:
-            model: The queried model.
+            binding: The queried model.
             name: The selected name.
             annotations: The query's annotations.
-            alias_keys: Names used as aliases rather than scalar annotations.
 
         Returns:
             The key's field paths in key order, empty when the name reads one column.
         """
         if annotations:
-            expanded = KeyColumns.get_primary_key_name(model, annotations, name)
-            if name not in annotations or name in alias_keys or expanded == "pk":
-                name = expanded
+            name = KeyColumns.get_primary_key_name(binding, annotations, name)
         if name in annotations:
             return ()
-        field_paths = ConcreteFieldPaths.get_paths(model, name)
+        field_paths = ConcreteFieldPaths.get_paths(binding, name)
         return field_paths if len(field_paths) > 1 else ()
 
     @staticmethod
@@ -59,27 +57,26 @@ class ValuesOutput:
         Returns:
             The value fields, in output order.
         """
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
         return tuple(
-            ValuesOutput.get_selected_value_field(query, query.model, name)
-            for name in ValuesOutput.get_output_field_names(query)
+            ValuesOutput.get_selected_value_field(query, model_binding, name)
+            for name in query._get_selected_field_names()
         )
 
     @staticmethod
     def get_column_converters(
-        query: ValuesQuery, value_fields: tuple[ValueField, ...] | None = None
+        query: ValuesQuery,
     ) -> list[tuple[str, Callable[[Any], Any] | None]]:
         """Each selected column's alias and the function decoding its value, None when the raw
         value is used as-is.
 
         Args:
             query: The values query.
-            value_fields: What each column is read as, when already known.
 
         Returns:
             The converters, in output order.
         """
-        if value_fields is None:
-            value_fields = ValuesOutput.get_value_fields(query)
+        value_fields = ValuesOutput.get_value_fields(query)
         python_reader = query.dialect.types.get_python_reader
         return [
             (alias, None if value_field.is_native or value_field.field is None else python_reader(value_field.field))
@@ -126,7 +123,8 @@ class ValuesOutput:
         """
         if field in query._annotations:
             return field
-        return ConcreteFieldPaths.get_path(query.model, field)
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
+        return ConcreteFieldPaths.get_path(model_binding, field)
 
     @staticmethod
     def add_field_to_select_query(query: ValuesQuery, field: str, return_as: str) -> None:
@@ -141,107 +139,84 @@ class ValuesOutput:
         table = query._effective_basetable()
 
         if field in query._annotations:
-            # A dict of its own: the annotations are the originating queryset's.
-            query._annotations = {**query._annotations, return_as: query._annotations[field]}
+            # QueryAnnotations selects this source expression under its output aliases.
             return
 
-        if field in query.model._meta.fields_db_projection:
-            db_field = query.model._meta.fields_db_projection[field]
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
+        if field in model_binding.fields_db_projection:
+            db_field = model_binding.fields_db_projection[field]
             query.query._select_field(table[db_field].as_(return_as))
             return
 
-        field_, __, forwarded_fields = field.partition("__")
-        if field_ in query.model._meta.fetch_fields:
-            related_table, related_db_field = QueryJoins.join_table_with_forwarded_fields(
-                query,
-                model=query.model,
+        if field.partition("__")[0] in model_binding.fetch_fields:
+            context = ExpressionContext(
+                binding=model_binding,
                 table=table,
-                field=field_,
-                forwarded_fields=forwarded_fields,
+                annotations=query._annotations,
+                dialect=query.dialect,
+                connection=query._connection,
+                visibility=query._visibility,
+                select_related_extra_conditions=query._select_related_extra_conditions,
+                application_context=query._context,
             )
-            query.query._select_field(related_table[related_db_field].as_(return_as))
+            bound_path = BoundLookupPath.bind(context, field)
+            for join in bound_path.joins:
+                QueryJoins.join_table(query, join)
+            query.query._select_field(bound_path.column.as_(return_as))
             return
 
         raise FieldError(f"Unknown field {field!r} for model {query.model.__name__!r}")
 
     @staticmethod
     def get_selected_value_field(
-        query: ValuesQuery, model: type[TModel], field: str, *, is_root: bool = True
+        query: ValuesQuery, binding: ModelBinding, field: str, *, is_root: bool = True
     ) -> ValueField:
         """What a selected name's value is read as.
 
         Args:
             query: The values query.
-            model: The model the name is a path from.
+            binding: The model the name is a path from.
             field: The name.
             is_root: Whether the name is the selected one, not its rest past a relation - only the selected
                 name can be one of the query's annotations.
 
         Returns:
-            The model and name of a model field (the model None for an annotation), with the field
-            the value is decoded through - None for a value used as the driver returns it.
+            The value field and whether to preserve the driver's value without conversion.
+            A missing field leaves the driver value unchanged.
 
         Raises:
             FieldError: The name is neither a field nor an annotation.
         """
+        model = binding._model
         if is_root and model is query.model:
             field = ValuesOutput.get_concrete_field_path(query, field)
 
-        if field in model._meta.fetch_fields:
+        if field in binding.fetch_fields:
             # return as is to get whole model objects
-            return ValueField(None, field, None, is_native=True)
+            return ValueField(None, is_native=True)
 
-        layout_entry = model._meta.get_hydration_layout(query._connection).entry_by_field_name.get(field)
-        if layout_entry is not None and layout_entry[2] == FieldBucket.NATIVE:
-            return ValueField(model, field, layout_entry[1], is_native=True)
+        layout_entry = binding.get_hydration_layout(query._connection).entry_by_field_name.get(field)
+        if layout_entry is not None and layout_entry[2] is None:
+            return ValueField(layout_entry[1], is_native=True)
 
         if is_root and field in query._annotations:
             # Read from this build's own dict - the annotation expression is shared between queries.
             field_object = query._annotation_output_fields.get(field)
-            return ValueField(None, field, field_object or None, is_native=not field_object)
+            return ValueField(field_object or None, is_native=not field_object)
 
-        if field in model._meta.fields_map:
-            return ValueField(model, field, model._meta.fields_map[field], is_native=False)
+        if field in binding.fields_map:
+            return ValueField(binding.fields_map[field], is_native=False)
 
         field_, __, forwarded_fields = field.partition("__")
-        if field_ in model._meta.fetch_fields:
-            new_model = model._meta.fields_map[field_].related_model  # type: ignore[attr-defined]
-            return ValuesOutput.get_selected_value_field(query, new_model, forwarded_fields, is_root=False)
+        if field_ in binding.fetch_fields:
+            return ValuesOutput.get_selected_value_field(
+                query,
+                binding.fields_map[field_].get_related_binding(),  # type: ignore[attr-defined]
+                forwarded_fields,
+                is_root=False,
+            )
 
         raise FieldError(f"Unknown field {field!r} for model {model.__name__!r}")
-
-    @staticmethod
-    def register_selected_annotations(query: ValuesQuery, output_aliases: Mapping[str, str]) -> None:
-        """Registers each selected annotation again under its alias - the part of
-        ``add_field_to_select_query()`` that builds nothing, in the same order, so the query can be
-        described before the selected fields are resolved.
-
-        Args:
-            query: The values query.
-            output_aliases: Each selected field name by its alias.
-        """
-        for alias, field in output_aliases.items():
-            field = ValuesOutput.get_concrete_field_path(query, field)
-            if field in query._annotations:
-                query._annotations = {**query._annotations, alias: query._annotations[field]}
-
-    @staticmethod
-    def get_output_field_names(query: ValuesQuery) -> Collection[str]:
-        """The field/annotation names visible to the caller, one per selected column.
-
-        Args:
-            query: The values query.
-        """
-        return query._selected_fields_by_alias.values()
-
-    @staticmethod
-    def selects_composite_key(query: ValuesQuery) -> bool:
-        """Whether a selected name returns a composite key, combined from several columns.
-
-        Args:
-            query: The values query.
-        """
-        return query._rows.has_composite_outputs
 
     @staticmethod
     def get_output_aliases(query: ValuesQuery) -> Collection[str]:
@@ -250,7 +225,12 @@ class ValuesOutput:
         Args:
             query: The values query.
         """
-        return query._selected_fields_by_alias.keys()
+        aliases = query._result_column_aliases
+        return (
+            query._selected_fields_by_alias.keys()
+            if aliases is None
+            else tuple(aliases.get(name, name) for name in query._selected_fields_by_alias)
+        )
 
     @staticmethod
     def get_output_names_for_set_operation(query: ValuesQuery) -> list[str]:
@@ -268,30 +248,10 @@ class ValuesOutput:
         return list(query._selected_fields_by_alias.values())
 
     @staticmethod
-    def get_selected_fields_by_alias(query: ValuesQuery) -> Mapping[str, str]:
-        """Each selected field or annotation name by the alias its column is selected under.
-
-        Args:
-            query: The values query.
-        """
-        return query._selected_fields_by_alias
-
-    @staticmethod
-    def get_ordering_field_names(query: ValuesQuery, annotation_output_aliases: Mapping[str, str]) -> Collection[str]:
-        """The selected names ``QueryOrdering.get_ordering()`` may order by.
-
-        Args:
-            query: The values query.
-            annotation_output_aliases: Each selected annotation's name -> the alias it is SELECTed
-                under.
-
-        Returns:
-            The names.
-        """
-        if query._rows.keyed_by_output_name:
-            # A renamed annotation (.values(renamed="annotation")) is SELECTed under its new name.
-            return [*query._selected_fields_by_alias, *annotation_output_aliases]
-        return query._selected_fields_by_alias.values()
+    def get_field_by_selected_name(query: ValuesQuery, selected_name: str) -> ModelField[Any] | None:
+        """The field of a selected column, with its alias taking precedence over a field name."""
+        field_name = query._selected_fields_by_alias.get(selected_name, selected_name)
+        return ValuesOutput.get_output_value_field(query, field_name)
 
     @staticmethod
     def get_output_reader(query: ValuesQuery, field_name: str) -> Callable[[Any], Any] | None:

@@ -2,6 +2,7 @@ from datetime import UTC
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from tests.shared_models.testmodels import (
     BooleanFields,
     DatetimeFields,
@@ -110,22 +111,18 @@ async def test_union_query_unaffected(db):
 
 
 @pytest.mark.asyncio
-async def test_layout_readers_follow_the_bucket_of_each_column(db):
-    """A related-model row is read column by column through the layout's readers: none for a
-    column the driver already returns as the right type, the field type for a default-bucket
-    column (a NULL stays None), the field's own conversion otherwise."""
+async def test_layout_readers_preserve_native_values_and_convert_other_columns(db):
+    """Column and field lookup share one reader; non-native booleans retain NULL handling."""
     from hare import Connections
-    from hare.query.rows.native.enums import FieldBucket
 
-    layout = Tournament._meta.get_hydration_layout(Connections.get("models"))
-    for field_name, (column, _field, bucket, _dialect_reader) in layout.entry_by_field_name.items():
-        reader = layout.reader_by_field_name[field_name]
-        assert layout.reader_by_column[column] is reader
-        assert (reader is None) == (bucket == FieldBucket.NATIVE)
+    layout = HareContext.require_current().apps.get_binding(Tournament).get_hydration_layout(Connections.get("models"))
+    for field_name, (column, field, reader) in layout.entry_by_field_name.items():
+        assert layout.entry_by_column[column] == (field_name, field, reader)
 
-    boolean_layout = BooleanFields._meta.get_hydration_layout(Connections.get("models"))
-    for field_name, (_column, _field, bucket, _dialect_reader) in boolean_layout.entry_by_field_name.items():
-        if bucket == FieldBucket.DEFAULT:
-            reader = boolean_layout.reader_by_field_name[field_name]
+    boolean_layout = (
+        HareContext.require_current().apps.get_binding(BooleanFields).get_hydration_layout(Connections.get("models"))
+    )
+    for _column, field, reader in boolean_layout.entry_by_field_name.values():
+        if field.field_type is bool and reader is not None:
             assert reader(None) is None
             assert reader(1) is True

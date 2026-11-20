@@ -84,7 +84,7 @@ async def test_a_foreign_key_added_unvalidated_checks_new_rows_and_validates_lat
     tables = SafeTables()
     try:
         state = await tables.create()
-        before = state.clone()
+        before = state
         foreign_key_name = GeneratedNames.get_foreign_key_name(BOOK_TABLE, ("editor_id",))
         migration = make_migration(
             "0002_editor",
@@ -118,7 +118,7 @@ async def test_a_unique_constraint_takes_over_an_index_built_concurrently(db_sim
     tables = SafeTables()
     try:
         state = await tables.create()
-        before = state.clone()
+        before = state
         migration = make_migration(
             "0002_unique_title",
             AddIndex("Book", Index(fields=("title",), name="safe_book_title", unique=True), concurrently=True),
@@ -176,7 +176,7 @@ async def test_not_null_is_set_safely(db_simple, atomic):
     try:
         state = await tables.create()
         migration = make_migration("0002_title_not_null", AlterColumnNotNullSafe("Book", "title"), atomic=atomic)
-        await migration.apply(state.clone(), schema_editor=tables.get_editor(atomic=atomic))
+        await migration.apply(state, schema_editor=tables.get_editor(atomic=atomic))
         with pytest.raises(IntegrityError):
             await tables.connection.execute_script(f"INSERT INTO {tables.quote(BOOK_TABLE)} (id) VALUES (3)")
     finally:
@@ -192,7 +192,7 @@ async def test_not_null_is_refused_while_a_row_holds_null(db_simple, atomic):
         await tables.connection.execute_script(f"INSERT INTO {tables.quote(BOOK_TABLE)} (id) VALUES (3)")
         migration = make_migration("0002_title_not_null", AlterColumnNotNullSafe("Book", "title"), atomic=atomic)
         with pytest.raises(ConfigurationError, match="1 row\\(s\\) still have NULL"):
-            await migration.apply(state.clone(), schema_editor=tables.get_editor(atomic=atomic))
+            await migration.apply(state, schema_editor=tables.get_editor(atomic=atomic))
         # Nothing is left behind - neither NOT NULL nor a CHECK.
         await tables.connection.execute_script(f"INSERT INTO {tables.quote(BOOK_TABLE)} (id) VALUES (4)")
     finally:

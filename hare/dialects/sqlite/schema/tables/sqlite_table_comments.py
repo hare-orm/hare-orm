@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.dialects.base.schema.tables.table_comments import TableComments
 from hare.dialects.sqlite.schema.constants import SQLITE_COMMENT_ESCAPES
 
 if TYPE_CHECKING:
     from hare.dialects.sqlite.schema.sqlite_schema_editor import SqliteSchemaEditor
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class SqliteTableComments(TableComments):
@@ -17,13 +18,14 @@ class SqliteTableComments(TableComments):
 
     editor: SqliteSchemaEditor
 
-    async def alter_table_comment(self, model: type[Model]) -> None:
+    def get_table_comment_plan(self, old_binding: ModelBinding, new_binding: ModelBinding) -> SchemaChangePlan:
         """Rebuilds the table - its comment is part of its ``CREATE TABLE`` text.
 
         Args:
-            model: The model, rendered with its new description.
+            old_binding: The binding of the existing table's declaration.
+            new_binding: The binding of the table with its new description.
         """
-        await self.editor.table_rebuild.remake_table(model, model)
+        return self.editor.table_rebuild.get_rebuild_plan(old_binding, new_binding)
 
     def get_table_comment_sql(self, table: str, comment: str) -> str:
         return f" /* {comment.translate(SQLITE_COMMENT_ESCAPES)} */"

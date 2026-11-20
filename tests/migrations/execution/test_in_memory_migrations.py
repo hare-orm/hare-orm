@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from hare import Hare, fields
+from hare.core.hare_context import HareContext
 from hare.dialects.sqlite.schema.sqlite_schema_editor import SqliteSchemaEditor
 from hare.exceptions import ConfigurationError
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
@@ -78,7 +79,7 @@ class ContentTypes:
         # Kept as text, as the panel keeps it, and read back before running.
         source = MigrationWriter(migration.name, CONTENT_APP, migration.operations).as_string()
         migration = Migration.from_source(source, name=migration.name, app_label=CONTENT_APP)
-        state_before = self.state.clone()
+        state_before = self.state
         self.state = await self.runner.apply(migration, self.state)
         self.migrations.append((migration, state_before))
         self.register(new_model)
@@ -144,8 +145,7 @@ async def test_a_content_type_through_its_whole_life(db_isolated, content):
     # A row loaded before the new version holds the relations of the old one - read it again.
     tournament = await Tournament.objects.get(id=tournament.id)
     assert [(type(item), item.subtitle) for item in await tournament.news.all()] == [(subtitled_model, "Day one")]
-    with pytest.raises(ConfigurationError, match="unregistered"):
-        await first_query().fetch()
+    assert [item.title for item in await first_query().fetch()] == ["Opening"]
     assert "subtitle" in pydantic_model_creator(subtitled_model, name="SubtitledNews").model_fields
 
     archived_status = build_status(ARCHIVED="archived")
@@ -184,8 +184,10 @@ async def test_a_content_type_through_its_whole_life(db_isolated, content):
     content.register(None)
     await content.run(drop_model, None)
     assert not await connection_has_table(connection, "content_news")
-    assert "news" not in Tournament._meta.many_to_many_fields
-    assert "covering_news" not in Tournament._meta.backward_foreign_key_fields
+    assert "news" not in HareContext.require_current().apps.get_binding(Tournament).many_to_many_fields
+    assert (
+        "covering_news" not in HareContext.require_current().apps.get_binding(Tournament).backward_foreign_key_fields
+    )
 
 
 @pytest.mark.asyncio

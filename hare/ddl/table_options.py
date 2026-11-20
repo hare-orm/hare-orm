@@ -10,10 +10,10 @@ from hare.exceptions import UnSupportedError
 
 if TYPE_CHECKING:
     from hare.ddl.raw_sql_term import RawSQLTerm
+    from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.features import Features
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-    from hare.models import Model
-    from hare.models.meta_info import MetaInfo
+    from hare.models.model_binding import ModelBinding
     from hare.query.expressions import Expression
     from hare.query.queryset.queryset import QuerySet
 
@@ -78,15 +78,16 @@ class TableOptions:
         Returns:
             The queryset.
         """
-        table_options = queryset.model._meta.get_table_options(queryset.dialect)
+        model_binding: ModelBinding = queryset._binding  # type: ignore[assignment]
+        table_options = model_binding.get_table_options(queryset.dialect)
         return queryset if table_options is None else table_options.with_row_versions_merged(queryset)
 
-    def raise_if_unsupported(self, model: type[Model], features: Features) -> None:
+    def raise_if_unsupported(self, binding: ModelBinding, features: Features) -> None:
         """Rejects options the model's table can't be created with - checked before its DDL is
         written, so the mistake gets a clear message rather than the database's own error.
 
         Args:
-            model: The model.
+            binding: The structural metadata of the table.
             features: The features of the connection the table is created on.
 
         Raises:
@@ -94,11 +95,11 @@ class TableOptions:
             UnSupportedError: The connection can't create a table with the options.
         """
 
-    def raise_if_unsampled(self, model: type[Model]) -> None:
+    def raise_if_unsampled(self, binding: ModelBinding) -> None:
         """Rejects a sample of the table (``sample()``) its options don't allow - nothing by default.
 
         Args:
-            model: The model.
+            binding: The structural metadata of the table.
 
         Raises:
             QueryError: The table can't be read in a sample.
@@ -115,12 +116,12 @@ class TableOptions:
         """
         return column_type
 
-    def get_column_clauses_sql(self, model: type[Model], field_name: str, editor: BaseSchemaEditor) -> str:
+    def get_column_clauses_sql(self, binding: ModelBinding, field_name: str, editor: BaseSchemaEditor) -> str:
         """Returns what the options add to a column's definition, after its type, default and inline
         comment - a compression codec, a time to live.
 
         Args:
-            model: The model the table is of.
+            binding: The binding of the model the table is of.
             field_name: The column's field.
             editor: The schema editor of the connection the DDL runs on.
 
@@ -129,13 +130,13 @@ class TableOptions:
         """
         return ""
 
-    def get_after_create_sqls(self, model: type[Model], table_sql: str, editor: BaseSchemaEditor) -> list[str]:
+    def get_after_create_sqls(self, binding: ModelBinding, table_name: str, editor: BaseSchemaEditor) -> list[str]:
         """Returns the statements the options run right after the table's ``CREATE TABLE`` - what
         the table gets by a statement of its own.
 
         Args:
-            model: The model the table is created for.
-            table_sql: The created table, quoted - the model's own, or the copy a rebuild fills.
+            binding: The binding of the model the table is created for.
+            table_name: The unquoted physical table name; its namespace comes from the model.
             editor: The schema editor of the connection the DDL runs on.
 
         Returns:
@@ -155,35 +156,37 @@ class TableOptions:
         """
         return list(primary_key_field_names)
 
-    def get_fixed_field_names(self, model: type[Model]) -> frozenset[str]:
+    def get_fixed_field_names(self, binding: ModelBinding) -> frozenset[str]:
         """Returns the fields whose columns the database never updates in place - the columns of the
         table's keys on a database that sorts and partitions its rows by them.
 
         Args:
-            model: The model.
+            binding: The structural metadata of the table.
 
         Returns:
             The field names - none by default.
         """
         return frozenset()
 
-    def raise_if_fixed_fields_written(self, model: type[Model], field_names: Iterable[str]) -> None:
+    def raise_if_fixed_fields_written(self, binding: ModelBinding, field_names: Iterable[str]) -> None:
         """Refuses an update writing a field whose column the database never updates in place.
 
         Args:
-            model: The model.
+            binding: The structural metadata of the table.
             field_names: The fields written.
 
         Raises:
             UnSupportedError: A field is one of ``get_fixed_field_names()``.
         """
-        fixed_field_names = self.get_fixed_field_names(model)
+        fixed_field_names = self.get_fixed_field_names(binding)
         if not fixed_field_names:
             return
         written_fixed_names = [name for name in field_names if name in fixed_field_names]
         if written_fixed_names:
             raise UnSupportedError(
-                FIXED_FIELDS_WRITTEN_MESSAGE.format(model=model.__name__, fields=", ".join(written_fixed_names))
+                FIXED_FIELDS_WRITTEN_MESSAGE.format(
+                    model=binding._model.__name__, fields=", ".join(written_fixed_names)
+                )
             )
 
     def keeps_row_versions(self) -> bool:
@@ -194,6 +197,11 @@ class TableOptions:
             False by default.
         """
         return False
+
+    @staticmethod
+    def get_effective_storage_table_name(table_name: str, options: TableOptions | None) -> str:
+        """Select the physical table name from the active options, when present."""
+        return options.get_storage_table_name(table_name) if options else table_name
 
     def get_storage_table_name(self, table_name: str) -> str:
         """Returns the table the rows of a model are stored in - the one the DDL of the model's
@@ -207,12 +215,14 @@ class TableOptions:
         """
         return table_name
 
-    def get_companion_table_sqls(self, model: type[Model], editor: BaseSchemaEditor, *, replaces: bool) -> list[str]:
+    def get_companion_table_sqls(
+        self, binding: ModelBinding, editor: BaseSchemaEditor, *, replaces: bool
+    ) -> list[str]:
         """Returns the statements creating the table the options put before the one storing the rows
         - a table spreading them over the servers of a cluster.
 
         Args:
-            model: The model.
+            binding: The structural metadata of the table.
             editor: The schema editor of the connection the DDL runs on.
             replaces: Whether the table exists and is made anew - after its model's columns changed.
 
@@ -229,11 +239,11 @@ class TableOptions:
         """
         return ""
 
-    def get_create_suffix_sql(self, model: type[Model], editor: BaseSchemaEditor) -> str:
+    def get_create_suffix_sql(self, binding: ModelBinding, editor: BaseSchemaEditor) -> str:
         """Returns what ``CREATE TABLE`` takes after the column list.
 
         Args:
-            model: The model whose table is created.
+            binding: The binding of the model whose table is created.
             editor: The schema editor of the connection the DDL runs on - its dialect writes an
                 expression of the options, its quoting an identifier.
 
@@ -275,19 +285,20 @@ class TableOptions:
         """
         return self
 
-    def with_sql_queries(self, model: type[Model]) -> Self:
+    def with_sql_queries(self, binding: ModelBinding, client: DatabaseClient | None = None) -> Self:
         """The options as a model's state keeps them - a queryset they hold written as its SQL, as a
         migration file keeps it.
 
         Args:
-            model: The model declaring them.
+            binding: The binding of the model declaring them.
+            client: The client used to compile embedded queries, when the state is built with one.
 
         Returns:
             The options - themselves by default: they hold no queryset.
         """
         return self
 
-    def with_relation_keys(self, meta: MetaInfo) -> Self:
+    def with_relation_keys(self, meta: ModelBinding) -> Self:
         """The options naming the key fields of each relation they name - a model's options, once its
         relations have key fields.
 

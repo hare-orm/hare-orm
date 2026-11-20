@@ -9,9 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import ConfigurationError, HareError, QueryError
 from hare.query.scopes.row_visibility import RowVisibility
-from hare.query.scopes.tenants.all_tenants import AllTenants
 from hare.query.scopes.tenants.model_tenants import ModelTenants
-from hare.query.scopes.tenants.tenant_values import TenantValues
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
@@ -21,6 +19,30 @@ if TYPE_CHECKING:
 class TenantRowLevelSecurity:
     """Sets a transaction's tenants for the ``TenantCondition`` policies and checks a query of such a
     model runs in a transaction that set them."""
+
+    @staticmethod
+    def check_transaction_scope(client: DatabaseClient) -> None:
+        """Keep a transaction's installed tenant scope unchanged, including explicit clients.
+
+        Called for a transaction client whose tenant settings have been installed. Schema
+        selection is separate: a pinned schema client does not need an ambient schema scope.
+
+        Args:
+            client: The transaction whose original scope must still be active.
+
+        Raises:
+            QueryError: The active scope differs from the transaction's original one.
+        """
+        from hare.models.tenancy.tenancy import Tenancy
+
+        scope = Tenancy.current.get()
+        transaction_scope = client.tenant_scope  # type: ignore[attr-defined]
+        if scope is not transaction_scope and scope != transaction_scope:
+            raise QueryError(
+                f"The transaction on {client.connection_alias!r} sees the rows of the tenant scope "
+                f"{transaction_scope!r} it began in - a query in it can't switch to {scope!r}; open the "
+                "transaction inside the tenant scope"
+            )
 
     @staticmethod
     def get_transaction_setting(client: DatabaseClient) -> tuple[Any, str | None]:
@@ -59,12 +81,10 @@ class TenantRowLevelSecurity:
         Returns:
             The texts; None for every tenant.
         """
-        scope_class = type(scope)
-        if scope_class is AllTenants:
-            return None
-        if scope_class is TenantValues:
-            return [str(value) for value in scope.values]
-        return [str(scope)]
+        from hare.models.tenancy.tenancy import Tenancy
+
+        values = Tenancy.get_values(scope)
+        return None if values is None else [str(value) for value in values]
 
     @staticmethod
     def get_missing_tenants_error(model: type[Model], client: DatabaseClient) -> HareError:

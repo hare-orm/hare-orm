@@ -4,6 +4,7 @@ from copy import copy
 from typing import TYPE_CHECKING, Any
 
 from hare.classes.value_descriptions import ValueDescriptions
+from hare.core.connections.relation_constraints import RelationConstraints
 from hare.dialects.base.clauses.enums import RowLockStrength
 from hare.exceptions import QueryError, UnSupportedError
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
@@ -16,6 +17,7 @@ from hare.sql.identifiers import Identifiers
 
 if TYPE_CHECKING:
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.statements.awaitable_query import AwaitableQuery
 
 
@@ -48,7 +50,7 @@ class RowLocks:
         inner_join_aliases: set[str] = set()
         joined_aliases = {table.get_table_name() for table in query._joined_tables}
         for name in sorted(query._select_for_update_of):
-            if name in ("self", query.model._meta.db_table):
+            if name in ("self", query._binding.db_table):  # type: ignore[union-attr]
                 table_names.add(base_table_name)
                 continue
             alias = base_table_name
@@ -107,9 +109,13 @@ class RowLocks:
                     f"select_for_update(of=...) can't lock {name!r}: {hop_path!r} is a nullable relation, "
                     "so it's joined with LEFT OUTER JOIN, whose nullable side can't be locked."
                 )
-            ambient_condition = RowScopes.of(hop_field.related_model).get_condition(visibility=query._visibility)
+            ambient_condition = RowScopes.of(hop_field.get_related_binding()).get_condition(
+                visibility=query._visibility
+            )
             if (
-                not hop_field.has_database_constraint
+                not RelationConstraints.is_enforced(
+                    hop_field, query._context, connection=query._connection, source_binding=query._binding
+                )
                 or ambient_condition is not None
                 or hop_path in query._select_related_extra_conditions
             ):
@@ -177,8 +183,9 @@ class RowLocks:
         """
         model = query.model
         fields: list[ForeignKeyFieldInstance[Any]] = []
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
         for part in name.split("__"):
-            field = model._meta.fields_map.get(part)
+            field = model_binding.graph.get_binding(model).fields_map.get(part)
             if not isinstance(field, ForeignKeyFieldInstance):
                 raise QueryError(
                     f"select_for_update(of=...) got {ValueDescriptions.get_shown_value(name)}, which is not a "

@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
-import os
+import datetime
 
 import pytest
 
 from hare import Hare, fields
+from hare.contrib.test.databases.temporary_databases import TemporaryDatabases
 from hare.contrib.test.isolated_contexts import hare_test_context
+from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError
-from hare.migrations.drift import DriftResult, detect_drift_for_alias
+from hare.migrations.drift import DriftResult, detect_drift, detect_drift_for_alias
+from hare.migrations.state.migration_environment import MigrationEnvironment
+from hare.migrations.state.state import State
 from hare.models import Model
 from tests.utils.database_under_test import DatabaseUnderTest
 
@@ -39,6 +43,103 @@ class AliasDriftExternal(Model):
 
 
 APPS_CONFIG = {"alias_drift": {"models": [], "default_connection": "models"}}
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+@pytest.mark.parametrize("composite", [False, True], ids=["scalar", "composite"])
+@pytest.mark.parametrize("file_database", [False, True], ids=["memory", "file"])
+@pytest.mark.parametrize("aware", [False, True], ids=["naive", "aware"])
+@pytest.mark.parametrize("entry", ["state", "alias"])
+async def test_drift_uses_the_captured_applications_timezone(tmp_path, composite, file_database, aware, entry):
+    default_moment = datetime.datetime(2024, 1, 2, 3, 4, 5, tzinfo=datetime.UTC if aware else None)
+
+    class Entry(Model):
+        number = fields.IntField(primary_key=not composite, generated=False)
+        region = fields.IntField(default=7)
+        if composite:
+            pk = fields.CompositePrimaryKey("region", "number")
+        moment = fields.DatetimeField(db_default=default_moment)
+
+    app_config = {"library": {"models": [], "default_connection": "default"}}
+    url = f"sqlite+aiosqlite://{tmp_path / 'source.sqlite3'}" if file_database else "sqlite+aiosqlite://:memory:"
+    async with HareContext() as first:
+        await first.init({"connections": {"default": url}, "apps": app_config}, timezone="Europe/Moscow")
+        first.register_live_models([Entry], "library")
+        await first.generate_schemas()
+        client = first.get_connection()
+        query = first.apps.get_queryset(Entry)
+        await query.create(number=1)
+        before = await query.values_list("moment", flat=True)
+        state = State.from_models([Entry], app_label="library", environment=MigrationEnvironment.from_apps(first.apps))
+        async with HareContext() as second:
+            await second.init({"connections": {"default": "sqlite+aiosqlite://:memory:"}, "apps": {}}, timezone="UTC")
+            for _ in range(2):
+                result = (
+                    await detect_drift(client, state, ["library"])
+                    if entry == "state"
+                    else await detect_drift_for_alias(first.apps, app_config, "default")
+                )
+                assert not result.has_drift, result
+                assert HareContext.require_current() is second
+                assert await query.values_list("moment", flat=True) == before
+
+
+@pytest.mark.sqlite_only
+@pytest.mark.asyncio
+@pytest.mark.parametrize("composite", [False, True], ids=["scalar", "composite"])
+@pytest.mark.parametrize("placement", ["same-alias", "other-alias", "same-table-other-alias"])
+async def test_alias_drift_keeps_other_databases_out_of_inventory_and_shadow(composite, placement):
+    other_alias = "main" if placement == "same-alias" else "alt"
+    same_table = placement == "same-table-other-alias"
+    config = {
+        "connections": {"main": None, "alt": None},
+        "apps": {
+            "library": {"models": [], "default_connection": "main"},
+            "archive": {"models": [], "default_connection": other_alias},
+        },
+    }
+    async with TemporaryDatabases(config, "sqlite+aiosqlite://:memory:", generate_schemas=False) as context:
+
+        class Book(Model):
+            number = fields.IntField(primary_key=not composite, generated=False)
+            if composite:
+                region = fields.IntField()
+                pk = fields.CompositePrimaryKey("region", "number")
+
+            class Meta:
+                table = "library_book"
+
+        class ArchivedBook(Model):
+            number = fields.IntField(primary_key=not composite, generated=False)
+            if composite:
+                region = fields.IntField()
+                pk = fields.CompositePrimaryKey("region", "number")
+
+            class Meta:
+                table = "library_book" if same_table else "archive_book"
+
+        context.register_live_models([Book], "library", "main")
+        context.register_live_models([ArchivedBook], "archive", other_alias)
+        main = context.get_connection("main")
+        other = context.get_connection(other_alias)
+        await main.dialect.schema_editor_class(main).create_model(HareContext.require_current().apps.get_binding(Book))
+        await other.dialect.schema_editor_class(other).create_model(
+            HareContext.require_current().apps.get_binding(ArchivedBook)
+        )
+        if placement == "other-alias":
+            await main.execute_script("CREATE TABLE archive_book (number INTEGER)")
+        if same_table:
+            await main.execute_script("ALTER TABLE library_book ADD COLUMN rogue INT")
+        result = await detect_drift_for_alias(context.apps, config["apps"], "main", app_labels=["library"])
+        assert result.operations == []
+        assert result.mismatched_objects == []
+        assert result.untracked_tables == (["archive_book"] if placement == "other-alias" else [])
+        assert result.untracked_columns == ([("library", "Book", "library_book", "rogue")] if same_table else [])
+        if same_table:
+            other_result = await detect_drift_for_alias(context.apps, config["apps"], "alt", app_labels=["archive"])
+            assert not other_result.has_drift
+            assert "rogue" not in {row["name"] for row in await other.execute_dicts("PRAGMA table_info(library_book)")}
 
 
 def alias_drift_context(db_url: str = "sqlite+aiosqlite://:memory:"):
@@ -162,7 +263,7 @@ async def test_detect_drift_for_alias_rejects_an_alias_without_apps():
 
 @pytest.mark.asyncio
 async def test_detect_drift_for_alias_uses_a_non_default_postgres_schema():
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+    db_url = DatabaseUnderTest.get_url()
     if not DatabaseUnderTest.get_dialect().features.supports_schemas:
         pytest.skip("A separate database schema is a Postgres-only concept")
     async with alias_drift_context(db_url) as ctx:
@@ -186,7 +287,7 @@ async def test_detect_drift_for_alias_uses_a_non_default_postgres_schema():
 
 @pytest.mark.asyncio
 async def test_detect_drift_for_alias_looks_up_schemaless_models_in_the_search_path_schema():
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+    db_url = DatabaseUnderTest.get_url()
     if not DatabaseUnderTest.get_dialect().features.supports_schemas:
         pytest.skip("A separate database schema is a Postgres-only concept")
     async with alias_drift_context(db_url) as ctx:
@@ -198,7 +299,9 @@ async def test_detect_drift_for_alias_looks_up_schemaless_models_in_the_search_p
             # The table hare creates for the model, in the schema the search path names first.
             editor = connection.dialect.schema_editor_class(connection)
             await connection.execute_script(
-                editor.table_creation.get_model_sql_data(AliasDriftWidget).get_table_creation_sql()
+                editor.table_creation.get_model_sql_data(
+                    HareContext.require_current().apps.get_binding(AliasDriftWidget)
+                ).get_table_creation_sql()
             )
             await create_external_table(connection, '"alias_drift_external"')
             result = await detect_drift_for_alias(ctx.apps, APPS_CONFIG, "models")

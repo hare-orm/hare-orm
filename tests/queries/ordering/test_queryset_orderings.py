@@ -2,6 +2,7 @@
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.exceptions import FieldError
 from hare.query.expressions import F
 from hare.query.functions import Length
@@ -58,7 +59,7 @@ def test_order_by_without_arguments_drops_meta_ordering(db):
 
 
 def test_meta_ordering_is_not_included(db):
-    assert DefaultOrdered._meta.ordering
+    assert HareContext.require_current().apps.get_binding(DefaultOrdered).ordering
     assert DefaultOrdered.objects.all().orderings == ()
     assert DefaultOrdered.objects.all().order_by("-second").orderings == (("second", Order.DESC),)
 
@@ -84,7 +85,9 @@ async def test_the_rows_come_in_the_reported_order(db):
 def test_field_names_given_as_text_are_parsed_once(db):
     OrderingArguments.plain_orderings.forget_all()
     first = Event.objects.all().order_by("tournament", "-name")
-    kept = OrderingArguments.plain_orderings.get_for_model(Event, (("tournament", "-name"),))
+    kept = OrderingArguments.plain_orderings.get_bucket(HareContext.require_current().apps.get_binding(Event)).get(
+        (("tournament", "-name"),)
+    )
     assert kept == (("tournament_id", Order.ASC), ("name", Order.DESC))
     second = Event.objects.filter(name="x").order_by("tournament", "-name")
     assert first.orderings == second.orderings == kept
@@ -109,4 +112,9 @@ def test_a_name_of_an_annotation_orders_by_the_annotation(db):
     Tournament.objects.all().order_by("name")
     queryset = Tournament.objects.annotate(name_length=Length("name")).order_by("name_length", "name")
     assert queryset.orderings == (("name_length", Order.ASC), ("name", Order.ASC))
-    assert OrderingArguments.plain_orderings.get_for_model(Tournament, (("name_length", "name"),)) is None
+    assert (
+        OrderingArguments.plain_orderings.get_bucket(HareContext.require_current().apps.get_binding(Tournament)).get(
+            (("name_length", "name"),)
+        )
+        is None
+    )

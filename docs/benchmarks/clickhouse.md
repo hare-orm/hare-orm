@@ -8,16 +8,15 @@ which counts operations per second.
 
 ## <a id="summary"></a>Summary
 
-How many times slower than hare-orm on clickhouse-connect over HTTP (its faster driver in this run)
-each library is, on average: the ratio of geometric means of the times over every scenario both run,
-except the cold start.
+How many times slower than hare-orm on clickhouse-driver over the native TCP protocol (its faster
+driver in this run) each library is, on average: the ratio of geometric means of the times over
+every scenario both run, except the cold start.
 
 ![Times slower than hare-orm, on average](../assets/benchmarks/clickhouse-summary-slower-en-light.svg#gh-light-mode-only)
 ![Times slower than hare-orm, on average](../assets/benchmarks/clickhouse-summary-slower-en-dark.svg#gh-dark-mode-only)
 
 The load test: 50 workers run 1,000 operations: 80% `get()` by key, 20% a `GROUP BY` of a day.
-Measured warm: every pool connection runs every operation of the load before the timing starts, as
-in an application that has been running.
+Measured after an untimed concurrent warmup of every operation in the load.
 
 Operations per second:
 
@@ -27,7 +26,7 @@ Operations per second:
 ## <a id="by-scenario"></a>By scenario
 
 Each scenario is drawn on its own scale: compare the bars within one scenario, not across scenarios.
-The fastest time is in bold. A bar is the median of 5 runs, and the thin line over it spans the best
+The fastest time is in bold. A bar is the median of 3 runs, and the thin line over it spans the best
 run to the worst.
 
 ### <a id="reads"></a>Reads
@@ -44,11 +43,16 @@ run to the worst.
 
 | | |
 |---|---|
-| Date | 2026-10-30 |
-| Machine | Windows 11, 13th Gen Intel(R) Core(TM) i5-13400, 16 CPU |
-| Python | 3.14.3 |
-| hare-orm release | 0.12.0 |
-| Runs | 5, median |
+| Date | 2026-11-21 |
+| Machine | Linux 6.6.114.1-microsoft-standard-WSL2, 13th Gen Intel(R) Core(TM) i5-13400, 16 CPU |
+| Python | 3.14.8 |
+| hare-orm release | 0.13.0-dev (package metadata 0.12.0) |
+| Execution | Linux Docker on Windows 11 (WSL2) |
+| CPU allocation | benchmark:4 vCPUs (8-11), PostgreSQL:4 (4-7), ClickHouse:2 (0-1) |
+| Storage | SQLite: Linux ext4 Docker volume, PostgreSQL and ClickHouse data: tmpfs |
+| PostgreSQL durability | fsync=off, synchronous_commit=off, full_page_writes=off |
+| Source snapshot | release-0.13.0, git 6066803746ca |
+| Runs | 3, median |
 | ClickHouse | 25.8.33.6 |
 | asynch | 0.2.5 |
 | clickhouse-connect | 1.10.0 |
@@ -58,29 +62,35 @@ run to the worst.
 | django-clickhouse-backend | 2.0 |
 | Rows in the table | 1,000,000 |
 
-- On PostgreSQL every ORM gets a pool of 50 connections, all opened before anything is timed.
+- On PostgreSQL every ORM has a pool limit of 50 connections. The driver determines how many
+  connections open; cold start is measured before warmup.
 - On PostgreSQL every table gets a `VACUUM (FULL, ANALYZE)`, untimed, before each group of scenarios
   and each load test, and autovacuum is off for them: every group starts from compact tables.
   Otherwise autovacuum clears the dead rows the writes leave at a random moment of the run, and
   whether it has come by decides the query plan — with a parallel scan or without.
-- Before a load test, every connection of the pool runs every operation of the load, untimed: the
-  test measures an application that has been running, not one just started — each connection is open
-  and has prepared its statements.
-- Within a run, a scenario is repeated 3–5 times and its fastest repetition counts; the rows a write
-  scenario puts back are cleared before each repetition, untimed. The deletes and the many-to-many
-  `add()` change the data for good and run once.
+- Before a load test, concurrent workers run every operation of the load, untimed. This warms the
+  operations without guaranteeing preparation on each physical connection.
+- For hare, tortoise-orm and yara-orm, query entry points are obtained after ORM initialization,
+  outside the cold-start timer. Scenarios measure queries of an initialized application, without
+  rebinding templates declared before initialization.
+- Most scenarios repeat 3–5 times; their median counts and all samples are retained. Before each
+  bulk insert or `get_or_create()` repetition, that scenario's rows are cleared outside the timer.
+  Sequential inserts accumulate rows until the next group; updates reuse the changed rows. Deletes,
+  many-to-many `add()` and the cold start run once.
 - Each ORM runs in a process of its own. The runs go round after round, the ORMs in a shuffled order
   each round; a scenario's result is the median over the runs.
 - On Windows a run's process turns off its power throttling (EcoQoS): the scheduler otherwise may
   move a process without a window onto a hybrid processor's efficiency cores, where it runs at half
   the speed.
-- SQLAlchemy runs twice on PostgreSQL and SQLite: with a transaction around each session (its
-  default) and with the engine in autocommit mode, where every statement commits on its own, as in
-  hare and Django.
-- A scenario an ORM has no way to write is marked “not in this ORM” on its chart and left out of its
-  average.
+- SQLAlchemy runs twice on PostgreSQL and SQLite: with normal transactional sessions whose write
+  scenarios commit explicitly, and in autocommit mode with each statement committed individually.
+  Transaction and streaming scenarios use transactional sessions.
+- Unsupported scenarios, failures and missing measurements have distinct labels; comparisons use
+  only measured scenarios shared by both ORMs.
 - The start is the library's init and its first query, timed with the library already imported; it
-  is left out of the average.
+  excludes table creation and is left out of the average.
+- JSON retains raw samples, the seed, conditions and versions. Load latency measures each operation
+  from start to completion, including its wait for a connection.
 - On SQLite every ORM runs on one file the way it does by default; SQLAlchemy's connections wait up
   to 30 s for the file's write lock instead of the default 5 s — its pool of five otherwise stops
   the write load at “database is locked”. `select_for_update()` isn't measured on SQLite, which has

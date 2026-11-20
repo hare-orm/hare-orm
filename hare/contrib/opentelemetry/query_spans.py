@@ -22,8 +22,8 @@ class QuerySpans(QueryWrapper):
 
     Args:
         tracer_provider: The TracerProvider to get a tracer from - the global one by default.
-        record_sql_statement: Whether the ``db.query.text`` span attribute holds the (parameter-bound,
-            never literal-holding) SQL text.
+        record_sql_statement: Whether ``db.query.text`` holds the SQL exactly as submitted. Bind
+            values are not recorded separately; literals already present in raw SQL or DDL remain.
     """
 
     def __init__(self, tracer_provider: TracerProvider | None = None, *, record_sql_statement: bool = True) -> None:
@@ -64,6 +64,9 @@ class QuerySpans(QueryWrapper):
                         break
                 yield batch
         finally:
-            span.end()
-            if (close_batches := getattr(batches, "aclose", None)) is not None:
-                await close_batches()
+            try:
+                if (close_batches := getattr(batches, "aclose", None)) is not None:
+                    with trace.use_span(span, end_on_exit=False):
+                        await close_batches()
+            finally:
+                span.end()

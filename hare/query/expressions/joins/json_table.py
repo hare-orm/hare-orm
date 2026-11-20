@@ -6,12 +6,14 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from hare.exceptions import FieldError, QueryError, UnSupportedError
 from hare.fields.data.numeric.int_field import IntField
 from hare.fields.field import Field
-from hare.query.expressions.constants import JSON_TABLE_COLUMN_NAME_PATTERN, JSON_TABLE_DEFAULT_COLUMN_PATH
+from hare.query.expressions.constants import JSON_TABLE_DEFAULT_COLUMN_PATH
 from hare.query.expressions.expression import Expression
 from hare.query.expressions.expression_result import ExpressionResult
 from hare.query.expressions.f import F
 from hare.query.expressions.joins.json_table_column import JsonTableColumn
 from hare.query.expressions.joins.named_columns import NamedColumns
+from hare.query.expressions.structure.enums import ArgumentRole
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.sql.builder.tables.json_table_query import JsonTableQuery
 from hare.sql.terms.criteria.true_criterion import TrueCriterion
 
@@ -46,6 +48,8 @@ class JsonTable(NamedColumns):
             that isn't an identifier, a column that isn't a field.
     """
 
+    structure = ExpressionStructure(positions=((0, ArgumentRole.FIELD),), keywords=(("document", ArgumentRole.FIELD),))
+
     repeats_rows = True
 
     #: The field of the ordinality column.
@@ -74,12 +78,12 @@ class JsonTable(NamedColumns):
 
     @staticmethod
     def check_column_name(name: Any) -> None:
-        """Rejects a column name that isn't a Python identifier without ``__``.
+        """Rejects a column name that isn't an ASCII identifier without ``__``.
 
         Raises:
             QueryError: It is another name.
         """
-        if not isinstance(name, str) or JSON_TABLE_COLUMN_NAME_PATTERN.fullmatch(name) is None:
+        if not isinstance(name, str) or not name.isascii() or not name.isidentifier() or "__" in name:
             raise QueryError(f"A JsonTable() column name is an identifier without '__', got {name!r}")
 
     @classmethod

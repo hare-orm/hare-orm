@@ -1,16 +1,15 @@
 # PostgreSQL: поля
 
-Всё на этой странице находится в `hare.dialects.postgresql` — собственном пакете диалекта PostgreSQL — и
-работает только с подключением к PostgreSQL. Если объявить любое из этих полей в модели, которая работает
-с другим диалектом (SQLite, ClickHouse), при создании команд таблицы будет `UnSupportedError`, а не
-команды, не имеющие смысла для этой базы. Все поля этой страницы, кроме `ArrayField`, импортируются из
-`hare.dialects.postgresql.fields`; `ArrayField` — это `hare.fields.ArrayField`, который работает и в
-ClickHouse, — см. [Типы ClickHouse](../clickhouse/types.ru.md#containers):
+Поля, предназначенные только для PostgreSQL, импортируются из `hare.dialects.postgresql.fields`.
+На другом диалекте генерация их DDL даёт `UnSupportedError`. Эта страница описывает и общие поля:
+`hare.fields.ArrayField` работает также в ClickHouse — см.
+[Типы ClickHouse](../clickhouse/types.ru.md#containers), — а `hare.gis.PointField` поддерживает PostgreSQL,
+SQLite и ClickHouse с возможностями, описанными в [GIS](../search-and-geodata/gis.ru.md).
 
 ```python
 from hare.dialects.postgresql.fields import (
     CitextField, FixedCharField, HStoreField, InetField, IntervalField, IntRangeField, LtreeField,
-    NaiveDatetimeField, NaiveTimeField, NativeEnumField, PostGISField, Range, TSVectorField,
+    NaiveDatetimeField, NaiveTimeField, NativeEnumField, Range, TSVectorField,
     # ... любое поле этой страницы
 )
 from hare.fields import ArrayField
@@ -63,6 +62,9 @@ await Book.objects.filter(keywords__item=(0, "sea"))  # keywords[1] = 'sea'
 (`[[1, 2], None]`) дают `ValidationError` до отправки. Массив пустых подмассивов (`[[]]`, `[[], []]`)
 PostgreSQL сохраняет как пустой массив, и он читается как `[]`; ClickHouse сохраняет его как есть.
 
+Та же проверка вложенной формы действует для подклассов `ArrayField`, в том числе разных подклассов
+на соседних уровнях, после преобразования элементов их writers.
+
 Чтобы получить элемент как вычисляемое значение, а не фильтровать по нему, используйте
 [`ArrayItem`](functions.ru.md) — позиция тоже отсчитывается с 0:
 
@@ -88,6 +90,11 @@ await Book.objects.filter(keywords__len__gte=2)
 await Book.objects.filter(keywords__0_2__contains=["whaling"])
 await Book.objects.all().order_by("keywords__0").values_list("keywords__0", "keywords__len")
 ```
+
+Элементы с датой или временем и границы диапазонов сохраняют обычные составные операторы:
+`moments__0__year__gte=2024`, `moments__0__date__in=[date(2024, 1, 1)]` или
+`during__startswith__year__range=(2023, 2024)`. Описание сортировки принимает те же пути
+к значениям, например `moments__0__year`.
 
 ## <a id="wall-clock-fields"></a>`NaiveDatetimeField`, `NaiveTimeField`, `IntervalField`, `FixedCharField`
 
@@ -209,13 +216,18 @@ await Loan.objects.filter(status__in=[LoanStatus.LENT, "overdue"]).order_by("sta
   `type_schema`, создаётся так же, как `Meta.schema` модели (`CreateSchema`). Замена `CharEnumField` на
   `NativeEnumField` или перенос колонки на другой тип (другие `type_name` или `type_schema`) преобразует её
   на месте через текст (`ALTER COLUMN ... TYPE ... USING`).
+  Поля с неявной и явной схемой используют один тип, если текущая схема PostgreSQL совпадает с явной.
+  В этом случае у полей должны совпадать метки, а тип сохраняется до удаления последнего использования.
+  Если текущая схема PostgreSQL другая, поля используют два отдельных типа.
 - **Изменение членов.** Новые члены, добавленные так, что старые сохраняют порядок, становятся новыми
   метками на месте (`ALTER TYPE ... ADD VALUE`) — добавленное так значение нельзя использовать в той же
   транзакции, поэтому записывайте такие строки в следующей миграции. Удалённый или переставленный член
   заменяет тип: колонки этого типа (и колонки-массивы) и их значения по умолчанию преобразуются в новый
-  тип одной командой, поэтому ни одна строка не должна хранить удалённую метку — сначала обновите такие
+  тип в одной транзакции, поэтому ни одна строка не должна хранить удалённую метку — сначала обновите такие
   строки: миграция, нашедшая такую строку, бросает `FieldNarrowingDataLossError` с именем таблицы и
-  колонки, ничего не изменив.
+  колонки, ничего не изменив. Исходные выражения defaults сохраняются до переименования типа и
+  восстанавливаются без изменений. Блокировки и ограничения зависимостей описаны в
+  [операциях миграции enum](../../migrations/operations.ru.md).
 - **Фильтры** — общий набор: равенство, `__in`, `__isnull` и сравнения в порядке перечисления. Метка вне
   перечисления даёт `ValidationError` до выполнения запроса.
 - Только PostgreSQL (`features.supports_enum_types`); на другой базе поле даёт `UnSupportedError`.
@@ -312,29 +324,42 @@ await Edition.objects.filter(attributes__keys__overlap=["format", "weight"])
 
 ## <a id="tsvectorfield"></a>`TSVectorField`
 
-```python
-class TSVectorField:
-    def __init__(
-        self,
-        source_fields: Sequence[str] | str | None = None,
-        config: str | None = None,
-        weights: Sequence[str] | None = None,
-        stored: bool = True,
-        **kwargs: Any,
-    ) -> None: ...
-```
-При `stored=True` и заданных `source_fields` создаётся как `GENERATED ALWAYS AS (...) STORED` — значение
-поддерживает сам PostgreSQL, код приложения для этого не нужен:
+`TSVectorField()` — обычная записываемая колонка вектора. Для вычисления значения PostgreSQL
+задайте `expression` либо короткое объявление через `source_fields`.
 
 ```python
+from hare.search import SearchQuery, SearchVector
+
 class Book(Model):
     title = fields.CharField(max_length=300)
     description = fields.TextField()
-    search_vector = TSVectorField(source_fields=("title", "description"), config="english")
+    search_vector = TSVectorField(
+        expression=SearchVector("title", weight="A") + SearchVector("description", weight="B"),
+        config="english",
+    )
 ```
 
-Миграция, меняющая тип колонки поля-источника, удаляет колонку вектора перед изменением и добавляет её
-после — PostgreSQL не меняет колонку, которую читает генерируемая; векторы вычисляются заново.
+`config` поля задаёт настройку по умолчанию для вложенных `SearchVector` и строкового
+`__search`. Явный `SearchVector.config` переопределяет её только для своего вектора;
+явный `SearchQuery.config` управляет обработкой поисковой строки. Исходное выражение не меняется.
+
+Например, `SearchVector("title", config="russian") + SearchVector("description", config="english")`
+можно задать без общего `config` поля. У каждого вычисляемого вектора всё равно должна быть
+конфигурация. Для поиска по такому полю нужен явно настроенный запрос, например
+`SearchQuery("книга", config="russian") | SearchQuery("book", config="english")`.
+hare не угадывает язык и не добавляет OR автоматически. Строковый поиск без общей настройки
+у этой вычисляемой формы вызывает `QueryError`; поведение обычной колонки сохраняется.
+
+Короткая форма остаётся:
+`TSVectorField(source_fields=("title", "description"), config="russian", weights=("A", "B"))`.
+Обе формы используют общий механизм вычисляемых колонок. `expression` нельзя совмещать
+с `source_fields` или `weights`. Для генерации по умолчанию действует `stored=True`;
+`stored=False` у короткой формы оставляет записываемую колонку, а выражение с виртуальной
+генерацией требует соответствующей возможности диалекта.
+
+Зависимости и переименования полей определяются выражением. Миграция изменения типа исходной
+колонки удаляет зависимые вычисляемые колонки перед изменением и добавляет после него —
+PostgreSQL заново вычисляет векторы.
 
 ## <a id="ltreefield"></a>`LtreeField`
 
@@ -401,37 +426,11 @@ await Category.objects.annotate(section=Subpath("path", 1, 1)).values_list("sect
 
 Только PostgreSQL: на другой базе поле даёт `UnSupportedError`.
 
-## <a id="postgisfield"></a>`PostGISField`
+## <a id="spatial-fields"></a>Пространственные поля
 
-```python
-class PostGISField:
-    def __init__(self, **kwargs: Any) -> None: ...
-```
-Хранит `geography(Point,4326)` — широту и долготу в WGS84 с точными расчётами расстояний на стороне базы.
-Нужно расширение `postgis`; автоматическое создание миграций добавляет `CreateExtension("postgis")`
-везде, где используется это поле. Значение в Python — кортеж **`(latitude, longitude)`**. Другие типы
-геометрий, SRID, плоские колонки, пространственные операторы и функции — см.
-[Геоданные (GIS)](../search-and-geodata/gis.ru.md).
-
-```python
-class Store(Model):
-    location = PostGISField()
-
-    class Meta:
-        indexes = (GistIndex(fields=("location",)),)
-```
-
-Сразу есть оператор фильтра `within_km`:
-
-```python
-await Store.objects.filter(location__within_km=(55.75, 37.62, 10))  # в пределах 10 км от точки
-```
-
-Радиус — конечное число не меньше нуля (`int`, `float` или `Decimal`), точка проверяется так же, как
-записываемое значение. Иначе — `ValidationError` до отправки запроса.
-
-Для сортировки и фильтров по расстоянию сложнее простого радиуса используйте вычисляемые значения
-`STDistance`/`STDWithin` (см. [Функции PostgreSQL](functions.ru.md)).
+`PointField(geography=True, srid=4326)` из `hare.gis` хранит `geography(Point,4326)`.
+Значение — `Point(longitude, latitude)`; расстояния для geography измеряются в метрах.
+Типы, `__dwithin`, `Distance` и `DWithin` описаны в [GIS](../search-and-geodata/gis.ru.md).
 
 ## <a id="range-fields"></a>Поля диапазонов
 

@@ -1,3 +1,4 @@
+use crate::pg::tls::PgTls;
 use std::pin::Pin;
 use std::task::{ready, Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -6,7 +7,7 @@ use tokio_postgres::config::Host;
 use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::{CancelToken, NoTls};
 
-use super::{PgTls, CANCEL_REQUEST_DELIVERY_TIMEOUT, POSTGRES_DEFAULT_PORT};
+use super::{CANCEL_REQUEST_DELIVERY_TIMEOUT, POSTGRES_DEFAULT_PORT};
 
 /// Where a `CancelRequest` is sent - the server the pool connects to.
 #[derive(Clone)]

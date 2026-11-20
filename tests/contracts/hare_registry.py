@@ -8,7 +8,6 @@ from typing import Any, ClassVar
 import hare
 from hare.fields.field import Field
 from tests.contracts.constants import FIELD_PACKAGES
-from tests.matrix.constants import NATIVE_REQUIREMENT
 from tests.matrix.suite_environments import SuiteEnvironments
 from tests.utils.package_requirements import PackageRequirements
 
@@ -46,19 +45,14 @@ class HareRegistry:
         Returns:
             True when it can import.
         """
-        requirements = PackageRequirements.get(module_name)
-        if NATIVE_REQUIREMENT in requirements and not SuiteEnvironments.current_native:
-            return False
-        return all(SuiteEnvironments.installs(name) for name in requirements if name != NATIVE_REQUIREMENT)
+        return all(SuiteEnvironments.installs(name) for name in PackageRequirements.get(module_name))
 
     @classmethod
-    def get_installed_modules(cls) -> list[Any]:
-        """Every module of hare the run's environment can import, imported.
-
-        Returns:
-            The modules.
-        """
-        return [importlib.import_module(name) for name in cls.get_module_names() if cls.is_installed(name)]
+    def import_installed_modules(cls) -> None:
+        """Import every module of hare available in the run's environment."""
+        for name in cls.get_module_names():
+            if cls.is_installed(name):
+                importlib.import_module(name)
 
     @classmethod
     def get_field_classes(cls) -> list[type[Field[Any]]]:
@@ -67,7 +61,7 @@ class HareRegistry:
         Returns:
             The classes, by their dotted path.
         """
-        cls.get_installed_modules()
+        cls.import_installed_modules()
         found: dict[str, type[Field[Any]]] = {}
         pending: list[type[Field[Any]]] = [Field]
         while pending:

@@ -12,7 +12,8 @@ from hare.query.plans.plan_origins import PlanOrigins
 from hare.query.plans.recording.scope_value_source import ScopeValueSource
 
 if TYPE_CHECKING:
-    from hare.models import Model
+    from hare.core.hare_context import HareContext
+    from hare.models.model_binding import ModelBinding
     from hare.query.expressions.conditions.q import Q
     from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences, ValueReference
     from hare.query.scopes.row_visibility import RowVisibility
@@ -61,19 +62,22 @@ class PlanRecording:
     @classmethod
     def record_scope(
         cls,
-        model: type[Model],
+        binding: ModelBinding,
         visibility: RowVisibility,
         condition: Q | None,
         value_wrapper_references: RecordedValueReferences,
+        *,
+        application_context: HareContext | None = None,
     ) -> None:
         """Records a model's default scope folded into a JOIN, each reference under the origin of its
         value.
 
         Args:
-            model: The joined model.
+            binding: The joined model binding.
             visibility: The visibility the scope was read with.
             condition: The scope's condition, None for a scope that had none.
             value_wrapper_references: The references recorded while the condition was resolved.
+            application_context: The context used to describe the scope condition.
         """
         recording = cls.current.get()
         if recording is None:
@@ -84,14 +88,21 @@ class PlanRecording:
         description = (
             PlanDescription.ABSENT
             if condition is None
-            else PlanOrigins.describe(partial(condition.get_plan_description, PlanContext(model=model)))
+            else PlanOrigins.describe(
+                partial(
+                    condition.get_plan_description,
+                    PlanContext(binding=binding, application_context=application_context),
+                )
+            )
         )
         if description is None or description.origins is None:
             recording.keeps_plan = False
             return
-        source = ScopeValueSource(model, visibility, description.structure, len(description.values))
+        source = ScopeValueSource(binding, visibility, description.structure, len(description.values))
         position_by_origin = {origin: position for position, origin in enumerate(description.origins)}
-        references_by_position = recording.scope_references.setdefault(source, [[] for _origin in description.origins])
+        references_by_position = recording.scope_references.get(source)
+        if references_by_position is None:
+            references_by_position = recording.scope_references[source] = [[] for _origin in description.origins]
         for origin, reference in value_wrapper_references:
             position = position_by_origin.get(origin)
             if reference is None or position is None:

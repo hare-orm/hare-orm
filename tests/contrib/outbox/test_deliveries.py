@@ -75,9 +75,10 @@ async def test_a_kafka_event_the_producer_refuses_fails_alone(db_outbox):
 
     events = [DemoOutboxEvent(topic="widget.created", payload={"mark": mark}) for mark in ("ok", "unconfirmed")]
     outcomes = await KafkaDelivery(producer=producer).deliver_batch(events, concurrency=1, timeout_seconds=0.05)
-    assert outcomes[0] is None
-    assert isinstance(outcomes[1], TimeoutError)
-    assert str(outcomes[1]) == "the batch wasn't confirmed within 0.05 seconds"
+    assert outcomes[0].event_id == events[0].id
+    assert outcomes[0].error is None
+    assert isinstance(outcomes[1].error, TimeoutError)
+    assert str(outcomes[1].error) == "the batch wasn't confirmed within 0.05 seconds"
 
 
 @pytest.mark.asyncio

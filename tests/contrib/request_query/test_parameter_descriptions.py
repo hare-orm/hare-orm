@@ -29,6 +29,7 @@ from hare.contrib.request_query import (
     RequestQuery,
     SearchConfig,
 )
+from hare.contrib.request_query.constants import GENERATION_BUCKET_KEY
 from hare.contrib.request_query.enums import DeletedRows
 from hare.query.enums import Lookup, LookupValueShape
 from hare.query.expressions import Q
@@ -206,7 +207,7 @@ async def test_options_give_what_a_request_may_choose(db_request_query):
     limit = descriptions["limit"]
     assert (limit.parameter_type, limit.default, limit.required) == (ParameterType.LIMIT, 20, False)
     assert (descriptions["offset"].parameter_type, descriptions["offset"].default) == (ParameterType.OFFSET, 0)
-    assert list(descriptions) == list(DescribedBookQuery.model_fields)
+    assert list(descriptions) == list(DescribedBookQuery.prepare_parameters().model_fields)
 
     cursor_descriptions = describe(DescribedOrderLineQuery)
     assert cursor_descriptions["cursor"].parameter_type is ParameterType.CURSOR
@@ -222,7 +223,7 @@ DESCRIBE_WITHOUT_CONNECTIONS_SCRIPT = textwrap.dedent(
     from hare.core.hare_context import HareContext
     from hare.dialects.postgresql.request_query import PostgresqlRequestQuery
 
-    Hare.bind_models(
+    apps = Hare.bind_models(
         HareConfig.from_db_url(
             "postgresql://user:password@127.0.0.1:1/unused", {"models": ["tests.contrib.request_query.models"]}
         )
@@ -231,10 +232,10 @@ DESCRIBE_WITHOUT_CONNECTIONS_SCRIPT = textwrap.dedent(
 
     result = {"context": HareContext.get_current() is not None}
     for base in (RequestQuery, PostgresqlRequestQuery):
-        query_class = base.for_model(Book, filters=(FilterField("status"), FilterField("author__name")))
+        query_class = base.for_model(Book, apps=apps, filters=(FilterField("status"), FilterField("author__name")))
         result[base.__name__] = [
             [description.name, str(description.parameter_type), description.filter_key]
-            for description in query_class.describe_parameters()
+            for description in query_class.describe_parameters(apps=apps)
         ]
     print(json.dumps(result))
     """
@@ -267,18 +268,22 @@ async def test_a_registration_while_the_declaration_is_built_does_not_drop_the_f
 
     original_build = DeclarationBuilder.build
     registrations = []
-    forgotten = []
+    candidates = []
 
     def build_with_a_registration(self):
+        candidates.append(self.request_query_class)
         if not registrations:
             registrations.append(True)
             Registries.changed()
-            forgotten.append(self.request_query_class not in RequestQuery.prepared_classes)
         return original_build(self)
 
     monkeypatch.setattr(DeclarationBuilder, "build", build_with_a_registration)
     query_class = RequestQuery.for_model(Book, filters=(FilterField("status"), FilterField("author__name")))
     names = [description.name for description in query_class.describe_parameters()]
     assert registrations == [True]
-    assert forgotten == [True]
+    schema = query_class.prepare_parameters()
+    assert len(candidates) >= 2
+    assert schema is candidates[-1] and schema is not candidates[0]
+    assert schema.parameter_generation.schema is schema
+    assert query_class.get_cache_bucket()[GENERATION_BUCKET_KEY] is schema.parameter_generation
     assert names[:2] == ["status", "author__name"]

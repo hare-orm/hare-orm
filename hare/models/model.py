@@ -1,28 +1,20 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from copy import copy
-from typing import TYPE_CHECKING, Any, ClassVar, Generator, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Generator, Self, SupportsIndex, TypeVar
 
-from hare.classes.value_descriptions import ValueDescriptions
-from hare.core.connections.connections import Connections
-from hare.core.hare_context import HareContext
+from hare.core.connections.model_connection_choice import ModelConnectionChoice
 from hare.exceptions import (
-    ConfigurationError,
     FieldError,
     IncompleteInstanceError,
     NoValuesFetched,
     QueryError,
 )
-from hare.fields.constants import SENSITIVE_VALUE_PLACEHOLDER
-from hare.fields.field import Field
 from hare.fields.relations.fields.relational_field import RelationalField
-from hare.fields.relations.relation_values import RelationValues
 from hare.models.class_building.generic_foreign_keys import GenericForeignKeys
 from hare.models.constants import (
     CLONE_PK_NOT_GIVEN,
     EMPTY_PENDING_DEFAULTS,
-    MISSING_DEFAULT_CONNECTION_MESSAGE,
     PARTIAL_INSTANCE_WITHOUT_KEY_MESSAGE,
 )
 from hare.models.deletion.cascade.deletion_collector import DeletionCollector
@@ -36,17 +28,24 @@ from hare.models.instances.instance_copies import InstanceCopies
 from hare.models.instances.instance_initialization import InstanceInitialization
 from hare.models.instances.instance_refresh import InstanceRefresh
 from hare.models.instances.instance_saving import InstanceSaving
-from hare.models.meta_info import MetaInfo
+from hare.models.model_binding import ModelBinding
+from hare.models.model_declaration import ModelDeclaration
 from hare.models.model_meta import ModelMeta
 from hare.models.tenancy.tenancy import Tenancy
+from hare.models.write.declarations import RollbackRestoreLayer
+from hare.models.write.instance_values import InstanceValues
 from hare.models.write.instance_writer import InstanceWriter
 from hare.models.write.rules.tenant_write_rules import TenantWriteRules
+from hare.models.write.write_finalizer import WriteFinalizer
 from hare.models.write.write_steps import WriteSteps
+from hare.query.constants import PRIMARY_KEY_ALIAS
+from hare.query.execution.query_execution import QueryExecution
 from hare.query.managers.base_manager import BaseManager
 from hare.query.queryset.relations.related_queryset.relation_rows import RelationRows
 from hare.sql import Table
 
 if TYPE_CHECKING:
+    from hare.core.hare_context import HareContext
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.models.deletion.preview.delete_preview import DeletePreview
 
@@ -60,8 +59,10 @@ class Model(metaclass=ModelMeta):
     ``refresh_from_db``). Queries start at ``Model.objects``, not on the class itself.
     """
 
-    #: The model's Meta - the base model's empty one here, every model class gets its own.
-    _meta = MetaInfo(None)
+    #: Declaration inputs are shared; configured metadata belongs to a registry graph.
+    _declaration: ModelDeclaration
+    _binding: ModelBinding
+    _context: HareContext | None
 
     #: Where the model's queries start: ``Model.objects`` is a queryset of its rows. Set per
     #: model class by the metaclass - the ``objects`` the class declares, ``Meta.manager``, or
@@ -87,45 +88,46 @@ class Model(metaclass=ModelMeta):
     _allow_soft_delete_write: bool = False
     #: The values to put back on the instance should the transactions of its writes roll back - one
     #: layer per open savepoint span; None until a write in a transaction registers one.
-    _pending_rollback_restore_stack: list[dict[str, Any]] | None = None
+    _pending_rollback_restore_stack: list[RollbackRestoreLayer] | None = None
+
+    def __new__(cls, *args: Any, **kwargs: Any) -> Self:
+        from hare.core.hare_context import HareContext
+
+        construction = InstanceInitialization.construction.get()
+        context: HareContext | None
+        if construction is None:
+            context = HareContext.require_current()
+            context.check_open()
+            binding = context.get_model_binding(cls)
+        else:
+            source_binding, context = construction
+            binding = source_binding.graph.get_binding(cls)
+        obj = super().__new__(cls)
+        object.__setattr__(obj, "_binding", binding)
+        object.__setattr__(obj, "_context", context)
+        return obj
 
     def __init__(self, **kwargs: Any) -> None:
-        meta = self._meta
+        from hare.core.hare_context import HareContext
+
+        meta = getattr(self, "_binding", None)
+        if meta is None:
+            context = HareContext.require_current()
+            meta = context.get_model_binding(type(self))
+            object.__setattr__(self, "_binding", meta)
+            object.__setattr__(self, "_context", context)
         if meta.computed_field_names and not meta.computed_field_names.isdisjoint(kwargs):
-            InstanceInitialization.raise_for_computed_fields(type(self), kwargs)
+            InstanceInitialization.raise_for_computed_fields(meta, kwargs)
         if meta.generic_foreign_key_fields:
             kwargs = GenericForeignKeys.expand_kwargs(meta, kwargs, apply_defaults=True)
-        constructor = meta.instance_constructor
-        if constructor is None:
-            constructor = meta.get_instance_constructor()
-        if constructor and constructor.construct(self, kwargs):
-            return
-        # Not field names - set past the overridden __setattr__.
-        _setattr = object.__setattr__
-        _setattr(self, "_saved_in_db", False)
-
-        # Assign defaults for missing fields. A plain column of the new instance is set directly,
-        # as in InstanceInitialization.set_kwargs() - Model.__setattr__ has nothing to refresh on it
-        # yet; a relation, an automatic primary key and a model overriding __setattr__ still go
-        # through it.
-        sets_columns_directly = type(self).__setattr__ is Model.__setattr__
-        fields_db_projection = meta.fields_db_projection
-        generated_pk_field_name = meta.generated_pk_field_name
-        # A field the database computes holds no value until a row of the instance is read.
-        for key in meta.fields.difference(
-            InstanceInitialization.set_kwargs(self, kwargs, assigns_directly=sets_columns_directly),
-            meta.computed_field_names,
-        ):
-            InstanceInitialization.assign_default(
-                self,
-                key,
-                object.__setattr__
-                if sets_columns_directly and key in fields_db_projection and key != generated_pk_field_name
-                else setattr,
-            )
+        # The keywords assigned and every field left out given its default - by the model's constructor.
+        copied = InstanceInitialization.copied_values.get()
+        InstanceInitialization.get_constructor(meta).construct(
+            self, kwargs, copied[1] if copied is not None and copied[0] is self else None
+        )
 
     def __setattr__(self, key: str, value: Any) -> None:
-        meta = self._meta
+        meta = self._binding
         hooks = meta.setattr_hooks
         if hooks is None:
             hooks = meta.get_setattr_hooks()
@@ -138,14 +140,18 @@ class Model(metaclass=ModelMeta):
                 pending_defaults.pop(key, None)
             meta.next_setattr(self, key, value)
             return
+        accessor = meta.relation_accessors.get(key)
+        if accessor is not None:
+            if accessor.fset is None:
+                raise AttributeError(f"Relation {key!r} cannot be assigned")
+            accessor.fset(self, value)
+            return
         # A field's value replaces its pending async default.
         if pending_defaults:
             pending_defaults.pop(key, None)
         if meta.soft_delete_field is not None and key == meta.soft_delete_field:
             SoftDeletion.check_soft_delete_write_allowed(self, key)
-        if key in meta.foreign_key_fields or key in meta.one_to_one_fields:
-            RelationValues.validate_relation_type(type(self), key, value)
-        elif (cache_key := meta.foreign_key_shadow_columns.get(key)) is not None:
+        if (cache_key := meta.foreign_key_shadow_columns.get(key)) is not None:
             # A key column assigned directly (author_id = 2) drops the cached related object of its
             # relation.
             if hasattr(self, cache_key):
@@ -183,46 +189,53 @@ class Model(metaclass=ModelMeta):
         Returns:
             The key's text.
         """
-        meta = self._meta
-        fields_map = meta.fields_map
-        names = meta.primary_key_attribute_names
-        if not any(fields_map[name].sensitive for name in names):
-            return str(self.pk)
-        shown_parts = [
-            SENSITIVE_VALUE_PLACEHOLDER if fields_map[name].sensitive else repr(getattr(self, name, None))
-            for name in names
-        ]
-        return shown_parts[0] if len(names) == 1 else f"({', '.join(shown_parts)})"
+        return self._binding.get_shown_primary_key(self.pk)
 
     def _pk_is_unset(self) -> bool:
+        return Model._is_unset_pk_value(self.pk)
+
+    @staticmethod
+    def _is_unset_pk_value(pk: Any) -> bool:
         # `is None`, not truthiness: a composite pk is a non-empty tuple even when unset, and 0 is a
         # valid pk.
-        pk = self.pk
         return any(component is None for component in pk) if isinstance(pk, tuple) else pk is None
 
+    def __delattr__(self, name: str) -> None:
+        accessor = self._binding.relation_accessors.get(name)
+        if accessor is not None:
+            if accessor.fdel is None:
+                raise AttributeError(f"Relation {name!r} cannot be deleted")
+            accessor.fdel(self)
+            return
+        super().__delattr__(name)
+
     def __getattr__(self, name: str) -> Any:
-        # Reached only for an attribute the instance doesn't hold - a field a .only()/.defer()
-        # query left out, or one a write returning no row left unloaded, is named as such; an
-        # internal cache attribute misses at no extra cost.
-        if name[:1] != "_" and (self._partial or name in self._meta.fields_map):
-            meta = self._meta
-            if name == "pk" or name in meta.primary_key_attribute_names:
-                # The pk property raised too - refresh_from_db() needs the key itself.
-                raise NoValuesFetched(
-                    f"{type(self).__name__}.{name} wasn't fetched - a .only()/.defer() query left the primary key "
-                    "out; name it in .only() to read, save or refresh the object"
-                )
-            if not self._saved_in_db and name in meta.computed_field_names:
-                raise NoValuesFetched(
-                    f"{type(self).__name__}.{name} is computed by the database - it holds a value once the object's "
-                    "row is written and read"
-                )
-            # A generic foreign key's branch keys left out raise from its descriptor, read here again.
-            if name in meta.fields_map or name in meta.generic_foreign_key_fields:
-                raise NoValuesFetched(
-                    f"{type(self).__name__}.{name} wasn't fetched - a .only()/.defer() query, or a write returning "
-                    f"no row, left it out; load it with refresh_from_db(fields=[{name!r}])"
-                )
+        if name[:1] != "_":
+            meta = self._binding
+            accessor = meta.relation_accessors.get(name)
+            if accessor is not None:
+                return accessor.__get__(self, type(self))
+            # Reached only for an attribute the instance doesn't hold - a field a .only()/.defer()
+            # query left out, or one a write returning no row left unloaded, is named as such; an
+            # internal cache attribute misses at no extra cost.
+            if self._partial or name in meta.fields_map:
+                if name == PRIMARY_KEY_ALIAS or name in meta.primary_key_attribute_names:
+                    # The pk property raised too - refresh_from_db() needs the key itself.
+                    raise NoValuesFetched(
+                        f"{type(self).__name__}.{name} wasn't fetched - a .only()/.defer() query left the primary key "
+                        "out; name it in .only() to read, save or refresh the object"
+                    )
+                if not self._saved_in_db and name in meta.computed_field_names:
+                    raise NoValuesFetched(
+                        f"{type(self).__name__}.{name} is computed by the database - "
+                        "it holds a value once the object's row is written and read"
+                    )
+                # A generic foreign key's branch keys left out raise from its descriptor, read here again.
+                if name in meta.fields_map or name in meta.generic_foreign_key_fields:
+                    raise NoValuesFetched(
+                        f"{type(self).__name__}.{name} wasn't fetched - a .only()/.defer() query, "
+                        f"or a write returning no row, left it out; load it with refresh_from_db(fields=[{name!r}])"
+                    )
         raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
     def __repr__(self) -> str:
@@ -232,21 +245,21 @@ class Model(metaclass=ModelMeta):
         return f"<{self.__class__.__name__}>"
 
     def __hash__(self) -> int:
-        if not self._meta.has_primary_key:
+        if not self._binding.has_primary_key:
             # A row of a model without a primary key is only ever equal to itself.
             return object.__hash__(self)
         try:
             pk = self.pk
         except NoValuesFetched:
             raise TypeError("Model instances without a fetched primary key are unhashable") from None
-        if (isinstance(pk, tuple) and any(component is None for component in pk)) or pk is None:
+        if Model._is_unset_pk_value(pk):
             raise TypeError("Model instances without id are unhashable")
         return hash(pk)
 
     def __iter__(self) -> Any:
         # The field names, not the column names - a field whose source_field differs from its name is
         # read by its name.
-        for field in self._meta.fields_db_projection:
+        for field in self._binding.fields_db_projection:
             # A field whose async default() hasn't run yet (an unsaved instance) has no attribute
             # at all - reported as None, same as get_dirty_fields() and construct() do.
             if field in self._await_when_save:
@@ -270,13 +283,18 @@ class Model(metaclass=ModelMeta):
         """
         return dict(self)
 
-    def __getstate__(self) -> dict[str, Any]:
-        """Drops the pending rollback-restore bookkeeping before pickling or deep-copying - it refers
-        to a live connection and an open transaction of this process.
-        """
-        state = self.__dict__.copy()
-        state.pop("_pending_rollback_restore_stack", None)
-        return state
+    def __reduce_ex__(self, protocol: SupportsIndex) -> tuple[Any, tuple[Any, ...], Any]:
+        return InstanceCopies.allocate, (type(self),), self.__getstate__()
+
+    def __setstate__(self, state: dict[str, Any] | tuple[dict[str, Any], dict[str, Any]]) -> None:
+        InstanceCopies.set_state(self, state)
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> Self:
+        return InstanceCopies.deep_copy(self, memo)
+
+    def __getstate__(self) -> dict[str, Any] | tuple[dict[str, Any], dict[str, Any]]:
+        """Retain dictionary and slot values without live transaction rollback bookkeeping."""
+        return InstanceCopies.get_state(self, detached=True)
 
     def __eq__(self, other: object) -> bool:
         if type(other) is not type(self):
@@ -288,7 +306,7 @@ class Model(metaclass=ModelMeta):
             # A key a .only()/.defer() query left out is unknown - the instance equals only itself.
             return self is other
         # An unsaved instance equals only itself - two of them both have an unset pk.
-        if (isinstance(pk, tuple) and any(component is None for component in pk)) or pk is None:
+        if Model._is_unset_pk_value(pk):
             return self is other
         return pk == other_pk
 
@@ -297,7 +315,7 @@ class Model(metaclass=ModelMeta):
         # and () without a key - read straight off it, every `.pk` access goes through here.
         # The key of an instance a .only()/.defer() query left it out of raises - None would read as
         # an unsaved instance.
-        primary_key_attribute = self._meta.primary_key_attribute
+        primary_key_attribute = self._binding.primary_key_attribute
         if type(primary_key_attribute) is str:
             try:
                 return getattr(self, primary_key_attribute)
@@ -312,17 +330,12 @@ class Model(metaclass=ModelMeta):
         return tuple(getattr(self, name, None) for name in primary_key_attribute)
 
     def _set_pk_value(self, value: Any) -> None:
-        self._meta.raise_if_no_primary_key("setting pk")
-        if self._meta.has_composite_primary_key:
-            if not isinstance(value, tuple) or len(value) != len(self._meta.primary_key_attribute):
-                raise QueryError(
-                    f"Composite pk must be set to a {len(self._meta.primary_key_attribute)}-tuple matching "
-                    f"{self._meta.primary_key_attribute}, got {ValueDescriptions.get_description(value)}"
-                )
-            for name, part in zip(self._meta.primary_key_attribute, value, strict=True):
+        self._binding.raise_if_no_primary_key("setting pk")
+        if self._binding.has_composite_primary_key:
+            for name, part in self._binding.get_composite_primary_key_parts(value):
                 setattr(self, name, part)
             return
-        setattr(self, cast("str", self._meta.primary_key_attribute), value)
+        setattr(self, self._binding.primary_key_attribute, value)  # type: ignore[arg-type]
 
     pk = property(_get_pk_value, _set_pk_value)
     """The value of the model's primary key - a tuple of a composite one. ``pk`` names the key in
@@ -333,48 +346,7 @@ class Model(metaclass=ModelMeta):
         forward relation is shared; a reverse or many-to-many container is replaced with an
         unfetched one bound to the copy, and a cached reverse one-to-one is dropped.
         """
-        cls = type(self)
-        obj = cls.__new__(cls)
-        obj.__dict__.update(self.__dict__)
-        _setattr = object.__setattr__
-
-        # A dict of its own: assigning a field pops its pending default in place.
-        pending_defaults = self.__dict__.get("_await_when_save")
-        if pending_defaults is not None:
-            _setattr(obj, "_await_when_save", dict(pending_defaults))
-
-        # A dict of its own: a partial write updates the snapshot in place. Absent on an instance of
-        # a model without Meta.track_dirty_fields.
-        existing_dirty_snapshot = getattr(self, "_dirty_snapshot", None)
-        if existing_dirty_snapshot is not None:
-            _setattr(obj, "_dirty_snapshot", dict(existing_dirty_snapshot))
-
-        for field_name in self._meta.direct_fields:
-            if field_name not in obj.__dict__:
-                continue  # not loaded on a .only()/.defer() partial instance - leave it that way
-            value = obj.__dict__[field_name]
-            copied_value = FieldSnapshot.copy_value(value)
-            if copied_value is not value:
-                _setattr(obj, field_name, copied_value)
-
-        meta = self._meta
-        # The copy's to-many relations unfetched - not the original's rows.
-        for key in (*meta.backward_foreign_key_fields, *meta.many_to_many_fields):
-            cache_key = f"_{key}"
-            if cache_key in obj.__dict__:
-                _setattr(obj, cache_key, RelationRows())
-        for key in meta.backward_one_to_one_fields:
-            cache_key = f"_{key}"
-            if cache_key in obj.__dict__:
-                object.__delattr__(obj, cache_key)
-
-        # Rollback bookkeeping never transfers to a copy - RollbackRestores.register_rollback_restore()'s pending
-        # stack (and the live DB clients it references) is scoped to the ORIGINAL instance's own
-        # writes inside a still-open transaction, meaningless once duplicated onto a second one.
-        if "_pending_rollback_restore_stack" in obj.__dict__:
-            object.__delattr__(obj, "_pending_rollback_restore_stack")
-
-        return obj
+        return InstanceCopies.copy(self)
 
     def clone(self: TModel, pk: Any = CLONE_PK_NOT_GIVEN) -> TModel:
         """An unsaved copy of the object - saving it inserts a new row.
@@ -393,66 +365,8 @@ class Model(metaclass=ModelMeta):
             QueryError: If pk is required but not provided.
             ConfigurationError: ``pk`` is given for a model without a primary key.
         """
-        obj = copy(self)
-        # A clone is a row not inserted yet - every field is dirty.
-        object.__setattr__(obj, "_dirty_snapshot", None)
-        # Marked unsaved before any pk assignment below: assigning a generated pk on an unsaved
-        # instance is what makes Model.__setattr__ send it in the INSERT (see its pk branch).
-        object.__setattr__(obj, "_saved_in_db", False)
-        # An auto_now_add value is only ever filled in while still None, so the copy would
-        # otherwise keep the original's timestamp instead of getting its own on first save.
-        for field_name, field in self._meta.fields_map.items():
-            if getattr(field, "auto_now_add", False):
-                setattr(obj, field_name, None)
-        # The values the database computed belong to the original's row - the copy's are read with its own.
-        for field_name in self._meta.computed_field_names:
-            obj.__dict__.pop(field_name, None)
-        # A copy of a soft-deleted row isn't born deleted.
-        soft_delete_field = self._meta.soft_delete_field
-        if soft_delete_field is not None:
-            setattr(obj, soft_delete_field, None)
-        if not self._meta.has_primary_key:
-            # No key to reset - the copy is a new row as it is.
-            if pk is not CLONE_PK_NOT_GIVEN:
-                self._meta.raise_if_no_primary_key(f"{type(self).__name__}.clone(pk=...)")
-            return obj
-        if pk is CLONE_PK_NOT_GIVEN:
-            if self._meta.has_composite_primary_key:
-                # Every component of a composite PK is resolved independently, the same way a
-                # single-column PK is below - a component with its own default=/db_default=
-                # (e.g. a version field) gets a fresh value; a component with neither raises.
-                for field_name, field in zip(self._meta.primary_key_attribute, self._meta.pk_fields, strict=True):
-                    InstanceCopies.apply_clone_pk_component_default(obj, field_name, field)
-                return obj
-            pk_field: Field[Any] = self._meta.pk
-            if pk_field.generated is False and pk_field.default is None and pk_field.has_db_default():
-                # A primary key with only a db_default: the INSERT leaves the column to the
-                # database.
-                obj.pk = pk_field.get_db_default_value()
-            elif pk_field.generated is False and pk_field.default is None:
-                raise QueryError(
-                    f"{self._meta.full_name} requires explicit primary key. Please use .clone(pk=<value>)"
-                )
-            elif pk_field.generated is False:
-                # An app-side default (UUIDField's uuid4): computed anew, the database assigns
-                # nothing.
-                pk_default = pk_field.default
-                if pk_field._default_is_coroutine:
-                    # After the assignment: __setattr__ pops the pending default of an assigned
-                    # field.
-                    obj.pk = None
-                    InstanceInitialization.add_pending_default(
-                        obj, cast("str", self._meta.primary_key_attribute), pk_default
-                    )
-                elif callable(pk_default):
-                    obj.pk = pk_default()
-                else:
-                    obj.pk = pk_default
-            else:
-                obj.pk = None
-        else:
-            obj.pk = pk
-        return obj
+        with QueryExecution(self._context):
+            return InstanceCopies.clone(self, pk)
 
     @classmethod
     def construct(cls: type[TModel], *, _saved_in_db: bool = False, **kwargs: Any) -> TModel:
@@ -477,34 +391,60 @@ class Model(metaclass=ModelMeta):
         Returns:
             The new instance.
         """
-        self = cls.__new__(cls)
-        meta = self._meta
+        from hare.core.hare_context import HareContext
+
+        context = HareContext.require_current()
+        return cls._construct_with_binding(
+            context.get_model_binding(cls), context, _saved_in_db=_saved_in_db, **kwargs
+        )
+
+    @classmethod
+    def _construct_with_binding(
+        cls: type[TModel],
+        binding: ModelBinding,
+        context: HareContext | None,
+        *,
+        _saved_in_db: bool = False,
+        **kwargs: Any,
+    ) -> TModel:
+        """Use one unchecked constructor for live and explicitly bound offline registries."""
+        self = object.__new__(cls)
+        object.__setattr__(self, "_binding", binding)
+        object.__setattr__(self, "_context", context)
         _setattr = object.__setattr__
 
         _setattr(self, "_saved_in_db", _saved_in_db)
+
+        if binding.generic_foreign_key_fields:
+            # Give trusted logical values to the same branch/column mapping as ordinary
+            # construction, then let the unchecked relation loop below retain object identity.
+            kwargs = GenericForeignKeys.expand_kwargs(binding, kwargs, apply_defaults=False, validate=False)
 
         # Track source fields that are auto-populated from FK/O2O objects
         # so that the default-setting loop doesn't overwrite them with None.
         populated_source_fields: set[str] = set()
 
         for key, value in kwargs.items():
-            if key in meta.backward_foreign_key_fields or key in meta.many_to_many_fields:
+            if key == PRIMARY_KEY_ALIAS:
+                _setattr(self, key, value)
+                populated_source_fields.update(binding.primary_key_attribute_names)
+            elif key in binding.backward_foreign_key_fields or key in binding.many_to_many_fields:
                 # A to-many relation given its rows - fetched; its relation object is made when read.
                 relation_rows = RelationRows()
-                relation_rows._fetched = True
-                relation_rows.related_objects = list(value)
+                relation_rows.set_fetched(list(value))
                 _setattr(self, f"_{key}", relation_rows)
-            elif key in meta.backward_one_to_one_fields:
+            elif key in binding.backward_one_to_one_fields:
                 # Backward O2O: store at _{key} for property getter
                 _setattr(self, f"_{key}", value)
-            elif key in meta.foreign_key_fields or key in meta.one_to_one_fields:
+            elif key in binding.foreign_key_fields or key in binding.one_to_one_fields:
                 # FK/O2O: store at _{key} for property getter, also set source field(s) - one
                 # per composite-PK-target component when the target's PK isn't a single column.
                 _setattr(self, f"_{key}", value)
-                foreign_key_field = cast("RelationalField[Any]", meta.fields_map[key])
-                if foreign_key_field.to_field_instances:
+                foreign_key_field: RelationalField[Any] = binding.fields_map[key]  # type: ignore[assignment]
+                to_field_instances = foreign_key_field.to_field_instances
+                if to_field_instances:
                     for source_field, to_field_instance in zip(
-                        foreign_key_field.source_fields, foreign_key_field.to_field_instances, strict=True
+                        foreign_key_field.source_fields, to_field_instances, strict=True
                     ):
                         if value is not None:
                             _setattr(self, source_field, getattr(value, to_field_instance.model_field_name, None))
@@ -515,14 +455,17 @@ class Model(metaclass=ModelMeta):
                 # Data fields, source fields, or unknown fields: store directly
                 _setattr(self, key, value)
 
-        # The key columns a relation's object filled in keep its values.
+        # The key columns filled by pk or a relation keep their explicit values.
         InstanceInitialization.set_constructed_defaults(
-            self, meta.fields.difference(kwargs, meta.fetch_fields, populated_source_fields, meta.computed_field_names)
+            self,
+            binding.fields.difference(
+                kwargs, binding.fetch_fields, populated_source_fields, binding.computed_field_names
+            ),
         )
 
         # Same rule as Model.__setattr__ (bypassed above): a not-yet-persisted instance with a
         # value for its auto-generated pk sends it in the INSERT.
-        generated_pk_field_name = meta.generated_pk_field_name
+        generated_pk_field_name = binding.generated_pk_field_name
         if (
             generated_pk_field_name is not None
             and not _saved_in_db
@@ -547,12 +490,12 @@ class Model(metaclass=ModelMeta):
                 field.
             ValidationError: A field rejects a value.
         """
-        meta = self._meta
-        # Unknown keys are dropped here - InstanceInitialization.set_kwargs() raises for them.
+        meta = self._binding
+        # Unknown keys are dropped here - the model's constructor raises for them.
         known_data = {
             key: value
             for key, value in data.items()
-            if key == "pk"
+            if key == PRIMARY_KEY_ALIAS
             or key in meta.foreign_key_fields
             or key in meta.one_to_one_fields
             or key in meta.fields_db_projection
@@ -561,7 +504,9 @@ class Model(metaclass=ModelMeta):
             or key in meta.many_to_many_fields
             or key in meta.generic_foreign_key_fields
         }
-        InstanceInitialization.set_kwargs(self, known_data)
+        if meta.generic_foreign_key_fields:
+            known_data = GenericForeignKeys.expand_kwargs(self._binding, known_data, apply_defaults=False)
+        InstanceInitialization.get_constructor(self._binding).assign(self, known_data)
         return self
 
     @classmethod
@@ -578,25 +523,16 @@ class Model(metaclass=ModelMeta):
         Raises:
             ConfigurationError: No Hare context is active, the model is swapped out or has no default
                 connection, or its tenancy needs a setting of the connection it lacks
-                (``MetaInfo.check_tenant_client()``).
+                (``ModelBinding.check_tenant_client()``).
             QueryError: The model's tenancy needs a single active tenant or a transaction that set its
                 tenants.
         """
-        cls._meta.check_not_swapped()
+        from hare.core.hare_context import HareContext
+
         context = HareContext.require_current()
-        router = context.router
-        connection = router.db_for_write(cls) if for_write else router.db_for_read(cls)
-        meta = cls._meta
-        if connection is None:
-            # MetaInfo.connection inlined - the context is already at hand, and this is the hottest path of
-            # the ORM.
-            default_connection = meta.default_connection
-            if default_connection is None:
-                raise ConfigurationError(MISSING_DEFAULT_CONNECTION_MESSAGE.format(model_name=cls.__name__))
-            connection = context.connections.get(default_connection)
-        if meta.checks_tenant_client:
-            meta.check_tenant_client(connection)
-        return connection
+        binding = context.get_model_binding(cls)
+        binding.check_not_swapped()
+        return ModelConnectionChoice.get(context, binding, for_write)
 
     @classmethod
     def get_routed_connection(cls, *, for_write: bool = False) -> DatabaseClient:
@@ -614,13 +550,12 @@ class Model(metaclass=ModelMeta):
             ConfigurationError: No Hare context is active, the model is swapped out or has no default
                 connection.
         """
-        cls._meta.check_not_swapped()
+        from hare.core.hare_context import HareContext
+
         context = HareContext.require_current()
-        router = context.router
-        connection = router.db_for_write(cls) if for_write else router.db_for_read(cls)
-        if connection is not None:
-            return connection
-        return cls._meta.connection
+        binding = context.get_model_binding(cls)
+        binding.check_not_swapped()
+        return ModelConnectionChoice.get_unchecked(context, binding, for_write)
 
     def __await__(self: TModel) -> Generator[Any, None, TModel]:
         async def _self() -> TModel:
@@ -659,7 +594,7 @@ class Model(metaclass=ModelMeta):
                 saved (``get_dirty_fields()``, ``Meta.track_dirty_fields``) - as ``update_fields``
                 naming them; nothing changed sends no statement. An unsaved instance is inserted
                 whole.
-            update_fields: If provided, it should be a tuple/list of fields by name. This is
+            update_fields: If provided, an iterable of field names, including forward relations. This is
                 the subset of fields that should be updated. On an instance that has a pk it
                 always issues an UPDATE by primary key - even for an instance never loaded from
                 or saved to the database (``Model(id=known_id, name="x")``) - and raises
@@ -671,8 +606,7 @@ class Model(metaclass=ModelMeta):
             force_update: Update the row - ``IntegrityError`` when there is none.
 
         Raises:
-            FieldError: ``update_fields`` names an unknown field or a relation (name the relation's key
-                field, e.g. ``author_id``, instead).
+            FieldError: ``update_fields`` names an unknown field or a relation without writable columns.
             QueryError: ``update_fields`` is a single string or names the primary key or
                 ``Meta.soft_delete_field`` (use ``delete()``/``restore()``); both ``force_create`` and
                 ``force_update`` are set; ``changed_only`` is given with ``update_fields`` or
@@ -685,38 +619,62 @@ class Model(metaclass=ModelMeta):
             StaleObjectError: If ``Meta.optimistic_lock_field`` is set and the row was concurrently
                 modified since this instance was read.
         """
-        update_fields = InstanceSaving.get_checked_update_fields(
-            self, update_fields, changed_only, force_create=force_create, force_update=force_update
-        )
-        if update_fields is not None and not update_fields:
-            return
-        # A tenant-scoped model is written only into the active scope's tenant; with no scope, the
-        # instance's own value is trusted. A partial update not touching the tenant field checks the
-        # tenant the instance holds, without filling it - the row's own is checked by the UPDATE.
-        tenant_field = self._meta.tenant_field
-        if tenant_field and (update_fields is None or tenant_field in update_fields):
-            TenantWriteRules.scope_objects(self.__class__, (self,), "save", fills_missing=True, requires_active=False)
-        elif tenant_field and self.__dict__.get(tenant_field) is not None:
-            TenantWriteRules.scope_objects(self.__class__, (self,), "save", fills_missing=False, requires_active=False)
-
-        if self._await_when_save:
-            await InstanceSaving.set_async_default_field(self)
-        connection = Connections.get_client(using) or InstanceConnections.get_connection_for_instance(self, True)
-        if Tenancy.has_tenant_scoped_relations(self.__class__):
-            await Tenancy.check_relation_targets(
-                self.__class__, [Tenancy.get_relation_row(self)], connection, update_fields
+        with QueryExecution(self._context):
+            update_fields = InstanceSaving.get_checked_update_fields(
+                self, update_fields, changed_only, force_create=force_create, force_update=force_update
             )
-        writer = InstanceWriter(self.__class__, connection)
-        if self._partial:
-            InstanceSaving.check_partial_instance_saving(self, update_fields)
+            if update_fields is not None and not update_fields:
+                return
+            self._binding.graph.check_published()
+            # A tenant-scoped model is written only into the active scope's tenant; with no scope, the
+            # instance's own value is trusted. A partial update not touching the tenant field checks the
+            # tenant the instance holds, without filling it - the row's own is checked by the UPDATE.
+            tenant_field = self._binding.tenant_field
+            prepared_values = InstanceValues() if tenant_field or self._await_when_save else None
+            if prepared_values is not None:
+                prepared_values.capture_preparation((self,))
+            try:
+                if tenant_field and (update_fields is None or tenant_field in update_fields):
+                    TenantWriteRules.scope_objects(
+                        self._binding, (self,), "save", fills_missing=True, requires_active=False
+                    )
+                elif tenant_field and self.__dict__.get(tenant_field) is not None:
+                    TenantWriteRules.scope_objects(
+                        self._binding, (self,), "save", fills_missing=False, requires_active=False
+                    )
 
-        # On a database without transactions the row and its report are one step a cancel can't split.
-        await WriteSteps.run_whole(
-            connection,
-            InstanceSaving.write_row(
-                self, writer, connection, update_fields, force_create=force_create, force_update=force_update
-            ),
-        )
+                if self._await_when_save:
+                    await InstanceSaving.set_async_default_field(self)
+                connection = InstanceConnections.get_connection_for_instance(self, True, using=using)
+                if Tenancy.has_tenant_scoped_relations(self._binding):
+                    await Tenancy.check_relation_targets(
+                        self._binding,
+                        [Tenancy.get_relation_row(self, Tenancy.get_relation_field_names(self._binding))],
+                        connection,
+                        update_fields,
+                    )
+                writer = InstanceWriter(self._binding, connection)
+                if self._partial:
+                    InstanceSaving.check_partial_instance_saving(self, update_fields)
+            except BaseException as error:
+                if prepared_values is not None:
+                    WriteFinalizer.restore_failed_values(prepared_values, error)
+                raise
+            if prepared_values is not None:
+                prepared_values.keep(connection)
+
+            # On a database without transactions the row and its report are one step a cancel can't split.
+            await WriteSteps.get_whole_run(
+                connection,
+                InstanceSaving.write_row(
+                    self,
+                    writer,
+                    update_fields,
+                    force_create=force_create,
+                    force_update=force_update,
+                    prepared_values=prepared_values,
+                ),
+            )
 
     async def delete(self, using: str | DatabaseClient | None = None) -> None:
         """Deletes the object. With ``Meta.soft_delete_field`` the row is marked deleted instead, and
@@ -736,11 +694,13 @@ class Model(metaclass=ModelMeta):
             StaleObjectError: ``Meta.optimistic_lock_field`` is set and the row was modified
                 concurrently.
         """
-        self._meta.raise_if_no_primary_key(f"{self.__class__.__name__}.delete() of one row")
-        TenantWriteRules.check_existing_object(self, "delete")
-        connection = Connections.get_client(using) or InstanceConnections.get_connection_for_instance(self, True)
-        # On a database without transactions the cascade, the row and their report are one step a cancel can't split.
-        await WriteSteps.get_whole_run(connection, InstanceDeletion.delete_and_report(self, connection))
+        with QueryExecution(self._context):
+            self._binding.raise_if_no_primary_key(f"{self.__class__.__name__}.delete() of one row")
+            TenantWriteRules.check_existing_object(self, "delete")
+            connection = InstanceConnections.get_connection_for_instance(self, True, using=using)
+            # On a database without transactions the cascade, the row and their report are one step a
+            # cancel can't split.
+            await WriteSteps.get_whole_run(connection, InstanceDeletion.delete_and_report(self, connection))
 
     async def hard_delete(self, using: str | DatabaseClient | None = None) -> None:
         """Deletes the row for real, even with ``Meta.soft_delete_field`` and even when it is
@@ -760,16 +720,20 @@ class Model(metaclass=ModelMeta):
             StaleObjectError: ``Meta.optimistic_lock_field`` is set and the row was modified
                 concurrently.
         """
-        TenantWriteRules.check_existing_object(self, "delete")
-        connection = Connections.get_client(using) or InstanceConnections.get_connection_for_instance(self, True)
-        InstanceDeletion.check_deletable(self)
-        await DeletionCollector.check_protected(type(self), [self.pk], connection)
-        await DeletionCollector.check_protected_transitively(type(self), [self.pk], connection)
-        await WriteSteps.get_whole_run(connection, InstanceDeletion.hard_delete_and_report(self, connection))
+        with QueryExecution(self._context):
+            TenantWriteRules.check_existing_object(self, "delete")
+            connection = InstanceConnections.get_connection_for_instance(self, True, using=using)
+            InstanceDeletion.check_deletable(self)
+            await DeletionCollector.check_protected(self._binding, [self.pk], connection)
+            await DeletionCollector.check_protected_transitively(self._binding, [self.pk], connection)
+            await WriteSteps.get_whole_run(connection, InstanceDeletion.hard_delete_and_report(self, connection))
 
     async def delete_preview(self, *, using: str | DatabaseClient | None = None) -> DeletePreview:
         """Reports what ``delete()`` would remove, soft-delete, null out or reset, and which rows block
-        it, without writing anything. An already soft-deleted instance gets an empty preview.
+        it, without writing anything. An already soft-deleted instance gets an empty preview
+        when it uses the standard deletion method. Overrides are never called: their row
+        keys appear in ``unknown_actions`` and ``can_delete`` is None unless known blockers
+        already make it False.
 
         Args:
             using: Specific DB connection to read through instead of the default one.
@@ -781,17 +745,20 @@ class Model(metaclass=ModelMeta):
             QueryError: The tenant scope doesn't match, or the object has never been persisted.
             IncompleteInstanceError: The primary key was not loaded.
         """
-        TenantWriteRules.check_existing_object(self, "delete")
-        connection = Connections.get_client(using) or InstanceConnections.get_connection_for_instance(self, True)
-        if not self._saved_in_db:
-            raise QueryError("Can't preview deleting unpersisted record")
-        if not all(hasattr(self, pk_name) for pk_name in self._meta.primary_key_attribute_names):
-            raise IncompleteInstanceError(
-                PARTIAL_INSTANCE_WITHOUT_KEY_MESSAGE.format(
-                    model_name=self.__class__.__name__, action="preview deleting"
+        from hare.query.execution.query_execution import QueryExecution
+
+        with QueryExecution(self._context):
+            TenantWriteRules.check_existing_object(self, "delete")
+            connection = InstanceConnections.get_connection_for_instance(self, True, using=using)
+            if not self._saved_in_db:
+                raise QueryError("Can't preview deleting unpersisted record")
+            if not all(hasattr(self, pk_name) for pk_name in self._binding.primary_key_attribute_names):
+                raise IncompleteInstanceError(
+                    PARTIAL_INSTANCE_WITHOUT_KEY_MESSAGE.format(
+                        model_name=self.__class__.__name__, action="preview deleting"
+                    )
                 )
-            )
-        return await DeletePreviewBuilder.build(self, connection)
+            return await DeletePreviewBuilder.build(self, connection)
 
     async def restore(self, using: str | DatabaseClient | None = None, *, cascade: bool = False) -> None:
         """Reverses ``.delete()`` on a soft-deleted instance.
@@ -810,22 +777,25 @@ class Model(metaclass=ModelMeta):
             StaleObjectError: ``Meta.optimistic_lock_field`` is set and the row was modified
                 concurrently.
         """
-        self._meta.raise_if_no_primary_key(f"{self.__class__.__name__}.restore() of one row")
-        TenantWriteRules.check_existing_object(self, "restore")
-        if not self._meta.soft_delete_field:
-            raise QueryError(f"{type(self).__name__} has no Meta.soft_delete_field configured")
-        connection = Connections.get_client(using) or InstanceConnections.get_connection_for_instance(self, True)
-        if not self._saved_in_db:
-            raise QueryError("Can't restore unpersisted record")
-        if not all(hasattr(self, pk_name) for pk_name in self._meta.primary_key_attribute_names):
-            raise IncompleteInstanceError(
-                PARTIAL_INSTANCE_WITHOUT_KEY_MESSAGE.format(model_name=self.__class__.__name__, action="restore")
-            )
-        InstanceSaving.check_optimistic_lock_field_loaded(self, "restore")
-        await WriteSteps.get_whole_run(connection, InstanceDeletion.restore_and_report(self, connection, cascade))
+        with QueryExecution(self._context):
+            self._binding.raise_if_no_primary_key(f"{self.__class__.__name__}.restore() of one row")
+            TenantWriteRules.check_existing_object(self, "restore")
+            if not self._binding.soft_delete_field:
+                raise QueryError(f"{type(self).__name__} has no Meta.soft_delete_field configured")
+            connection = InstanceConnections.get_connection_for_instance(self, True, using=using)
+            if not self._saved_in_db:
+                raise QueryError("Can't restore unpersisted record")
+            if not all(hasattr(self, pk_name) for pk_name in self._binding.primary_key_attribute_names):
+                raise IncompleteInstanceError(
+                    PARTIAL_INSTANCE_WITHOUT_KEY_MESSAGE.format(model_name=self.__class__.__name__, action="restore")
+                )
+            InstanceSaving.check_optimistic_lock_field_loaded(self, "restore")
+            await WriteSteps.get_whole_run(connection, InstanceDeletion.restore_and_report(self, connection, cascade))
 
     def snapshot(self, fields: Iterable[str] | None = None) -> FieldSnapshot:
-        """Captures an immutable copy of the instance's direct field values.
+        """Captures direct field values in a read-only mapping, independently copied from the instance.
+
+        Nested mutable values in the snapshot are not frozen.
 
         Args:
             fields: Direct field names to capture. ``None`` captures every loaded direct field.
@@ -838,20 +808,16 @@ class Model(metaclass=ModelMeta):
             IncompleteInstanceError: If a named field wasn't loaded by ``.only()``/``.defer()``.
         """
         if fields is None:
-            return FieldSnapshot(type(self), DirtyFields.capture_field_values(self, self._meta.direct_fields))
+            return FieldSnapshot(self._binding, DirtyFields.capture_field_values(self, self._binding.direct_fields))
         field_names = list(dict.fromkeys(fields))
-        direct_fields = self._meta.direct_fields
+        direct_fields = self._binding.direct_fields
         for field_name in field_names:
             if field_name not in direct_fields:
                 raise FieldError(
                     f"{type(self).__name__} has no direct field {field_name!r} to snapshot "
                     f"(available: {', '.join(sorted(direct_fields))})"
                 )
-            if not hasattr(self, field_name):
-                raise IncompleteInstanceError(
-                    f"{type(self).__name__} is a partial model, field {field_name!r} is not loaded"
-                )
-        return FieldSnapshot(type(self), DirtyFields.capture_field_values(self, field_names))
+        return FieldSnapshot(self._binding, DirtyFields.capture_field_values(self, field_names, require_loaded=True))
 
     def diff_against(self, snapshot: FieldSnapshot) -> dict[str, tuple[Any, Any]]:
         """Compares the instance's current values with a snapshot's.
@@ -882,9 +848,9 @@ class Model(metaclass=ModelMeta):
         Raises:
             QueryError: If the model has no ``Meta.track_dirty_fields = True``.
         """
-        if not self._meta.track_dirty_fields:
+        if not self._binding.track_dirty_fields:
             raise QueryError(f"{type(self).__name__} has no Meta.track_dirty_fields configured")
-        direct_fields = self._meta.direct_fields
+        direct_fields = self._binding.direct_fields
         dirty_snapshot: dict[str, Any] | None = getattr(self, "_dirty_snapshot", None)
         if dirty_snapshot is None:
             return {field_name: (None, getattr(self, field_name, None)) for field_name in direct_fields}
@@ -913,23 +879,26 @@ class Model(metaclass=ModelMeta):
             QueryError: If object has never been persisted.
             QueryError: If ``fields`` is a single string instead of a collection.
         """
-        self._meta.raise_if_no_primary_key(f"{self.__class__.__name__}.refresh_from_db()")
-        if fields is not None:
-            fields = InstanceSaving.get_validated_field_names(type(self), fields, "fields")
-            if not fields:
-                return
-            fields = InstanceRefresh.get_refreshed_field_names(type(self), list(fields))
-        if not self._saved_in_db:
-            raise QueryError("Can't refresh unpersisted record")
-        if not all(hasattr(self, pk_name) for pk_name in self._meta.primary_key_attribute_names):
-            raise IncompleteInstanceError(
-                PARTIAL_INSTANCE_WITHOUT_KEY_MESSAGE.format(model_name=self.__class__.__name__, action="refresh")
-            )
-        connection = Connections.get_client(using) or InstanceConnections.get_connection_for_instance(self)
-        refreshed_obj = await InstanceRefresh.get_queryset(self, connection, fields).get(pk=self.pk)
-        InstanceRefresh.apply(self, refreshed_obj, fields)
+        with QueryExecution(self._context):
+            self._binding.raise_if_no_primary_key(f"{self.__class__.__name__}.refresh_from_db()")
+            if fields is not None:
+                fields = InstanceRefresh.get_refresh_field_names(self._binding, fields)
+                if not fields:
+                    return
+            if not self._saved_in_db:
+                raise QueryError("Can't refresh unpersisted record")
+            if not all(hasattr(self, pk_name) for pk_name in self._binding.primary_key_attribute_names):
+                raise IncompleteInstanceError(
+                    PARTIAL_INSTANCE_WITHOUT_KEY_MESSAGE.format(model_name=self.__class__.__name__, action="refresh")
+                )
+            connection = InstanceConnections.get_connection_for_instance(self, using=using)
+            refreshed_obj = await InstanceRefresh.get_queryset(self, connection, fields).get(pk=self.pk)
+            InstanceRefresh.apply(self, refreshed_obj, fields)
 
     @classmethod
     def get_table(cls) -> Table:
         """The model's table in the SQL builder, qualified by ``Meta.schema``."""
-        return Table(name=cls._meta.db_table, schema=cls._meta.schema)
+        from hare.core.hare_context import HareContext
+
+        binding = HareContext.require_current().get_model_binding(cls)
+        return Table(name=binding.db_table, schema=binding.schema)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import copy
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.ddl.schema_objects.view_creation_order import ViewCreationOrder
 from hare.migrations.autodetection.constants import CREATE_MODEL_DEFERRED_OPTIONS
@@ -12,6 +12,7 @@ from hare.migrations.autodetection.diffs.materialized_view_diff import Materiali
 from hare.migrations.autodetection.diffs.policy_diff import PolicyDiff
 from hare.migrations.autodetection.diffs.view_diff import ViewDiff
 from hare.migrations.operations import (
+    AddSchemaObject,
     AlterRowLevelSecurity,
     HareOperation,
     RemoveSchemaObject,
@@ -36,7 +37,7 @@ class SchemaObjectOperations:
     - ``late_operations``, after every table is created and changed: sequences, functions,
       dictionaries, views, materialized views, row level security, policies and grants created and changed, each type
       after the types it may use;
-    - ``last_operations``: functions and sequences dropped, once nothing uses them.
+    - ``last_operations``: functions and sequences with no replacement dropped, once nothing uses them.
 
     An object whose declaration is unchanged is left alone - raw SQL is the user's: a column it reads
     changing is the user's to account for, as with ``RunSQL``. A changed one is removed and added when
@@ -44,8 +45,8 @@ class SchemaObjectOperations:
 
     Args:
         alters_in_place: Whether a changed object is altered rather than removed and added.
-        changed_columns: The columns the migration changes, ``(table, column)`` each - an object reading
-            one is removed and added.
+        replaces_functions: Whether a function needs a new physical definition. Changed views and
+            policies are detached before its replacement because their SQL may call it.
     """
 
     #: The types, in the order they are created.
@@ -60,10 +61,13 @@ class SchemaObjectOperations:
     )
 
     def __init__(
-        self, alters_in_place: bool = True, changed_columns: frozenset[tuple[str, str]] = frozenset()
+        self,
+        alters_in_place: bool = True,
+        *,
+        replaces_functions: bool = False,
     ) -> None:
         self.alters_in_place = alters_in_place
-        self.changed_columns = changed_columns
+        self.replaces_functions = replaces_functions
         self.removals_by_type: dict[type[SchemaObjectDiff], list[HareOperation]] = {
             diff_class: [] for diff_class in self.diff_classes
         }
@@ -78,6 +82,7 @@ class SchemaObjectOperations:
         #: The views and materialized views removed, by the removing operation - dropped in the reverse of
         #: the order they are created in.
         self.removed_views: dict[int, Any] = {}
+        self.view_schemas: dict[int, str | None] = {}
 
     @staticmethod
     def without_deferred_options(options: dict[str, Any]) -> dict[str, Any]:
@@ -102,21 +107,46 @@ class SchemaObjectOperations:
         created_state.options = self.without_deferred_options(model_state.options)
         self.add_changed_model(created_state, model_state)
 
-    def add_changed_model(self, old_model_state: ModelState, new_model_state: ModelState) -> None:
+    def add_changed_model(
+        self,
+        old_model_state: ModelState,
+        new_model_state: ModelState,
+        *,
+        changed_columns: frozenset[tuple[str | None, str, str]] = frozenset(),
+    ) -> None:
         """Collects the operations taking what a model declares from one state to another.
 
         Args:
             old_model_state: The model's state before.
             new_model_state: The model's state after.
+            changed_columns: The columns changing on this model's connection, by schema, table and column.
         """
         for diff_class in self.diff_classes:
-            diff = diff_class(old_model_state, new_model_state, self.alters_in_place, self.changed_columns)
+            alters_in_place = (
+                diff_class is SequenceDiff
+                or self.alters_in_place
+                and not (self.replaces_functions and diff_class in (ViewDiff, MaterializedViewDiff, PolicyDiff))
+            )
+            diff = diff_class(old_model_state, new_model_state, alters_in_place, changed_columns)
             removed_last = isinstance(diff, DeclaredSchemaObjectDiff) and diff.removed_last
-            for operation in diff.get_operations():
+            operations = diff.get_operations()
+            replacement_names = (
+                {operation.schema_object.name for operation in operations if isinstance(operation, AddSchemaObject)}
+                if removed_last
+                else set()
+            )
+            for operation in operations:
+                if diff_class in (ViewDiff, MaterializedViewDiff):
+                    state = old_model_state if isinstance(operation, RemoveSchemaObject) else new_model_state
+                    self.view_schemas[id(operation)] = state.options.get(ModelOption.SCHEMA)
                 if isinstance(operation, RenameSchemaObject):
                     self.renames.append(operation)
                 elif removed_last and isinstance(operation, RemoveSchemaObject):
-                    self.last_removals_by_type[diff_class].append(operation)
+                    if operation.name in replacement_names:
+                        # The old declaration must leave before the new one can take its name.
+                        self.additions_by_type[diff_class].append(operation)
+                    else:
+                        self.last_removals_by_type[diff_class].append(operation)
                 elif isinstance(operation, RemoveSchemaObject):
                     self.removals_by_type[diff_class].append(operation)
                     if diff_class in (ViewDiff, MaterializedViewDiff):
@@ -143,7 +173,9 @@ class SchemaObjectOperations:
                 operations.extend(
                     reversed(
                         ViewCreationOrder.get_ordered(
-                            view_removals, lambda operation: self.removed_views[id(operation)]
+                            view_removals,
+                            lambda operation: self.removed_views[id(operation)],
+                            get_schema=lambda operation: self.view_schemas[id(operation)],
                         )
                     )
                 )
@@ -163,7 +195,9 @@ class SchemaObjectOperations:
                 view_operations = [*self.additions_by_type[ViewDiff], *self.additions_by_type[MaterializedViewDiff]]
                 operations.extend(
                     ViewCreationOrder.get_ordered(
-                        view_operations, lambda operation: cast("Any", operation).schema_object
+                        view_operations,
+                        lambda operation: operation.schema_object,  # type: ignore[attr-defined]
+                        get_schema=lambda operation: self.view_schemas[id(operation)],
                     )
                 )
             elif diff_class is not MaterializedViewDiff:

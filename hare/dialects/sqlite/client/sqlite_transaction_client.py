@@ -4,9 +4,10 @@ import abc
 import asyncio
 import time
 from itertools import count
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar
 
 from hare.dialects.base.client.constants import DISCARDED_CLIENT_MESSAGE, TRANSACTION_FINALISED_MESSAGE
+from hare.dialects.base.client.enums import StatementForm
 from hare.dialects.base.client.transaction_client import TransactionClient
 from hare.dialects.base.transactions.savepoints.nested_savepoint_lock import NestedSavepointLock
 from hare.dialects.sqlite.client.sqlite_client import SqliteClient
@@ -38,12 +39,17 @@ class SqliteTransactionClient(TransactionClient, SqliteClient):
         self._connection = connection._connection
         self.binds_parameters_by_number = connection.binds_parameters_by_number
         self.function_errors = connection.function_errors
+        self.parameter_adapters = connection.parameter_adapters
         self._lock = asyncio.Lock()
         #: Whether the transaction is aborted - read on the top-level wrapper, shared by every nested
         #: savepoint wrapper of the same transaction.
         self._transaction_aborted = False
         #: The connection's busy timeout before a top-level transaction with a lock timeout set it.
         self._previous_busy_timeout: int | None = None
+
+    def get_physical_client(self) -> SqliteClient:
+        """Keep the physical root pinned by this transaction, even after context replacement."""
+        return self.get_non_transactional_client()  # type: ignore[return-value]
 
     async def _take_transaction_resources(self) -> None:
         # The one connection belongs to one top-level transaction at a time.
@@ -119,10 +125,10 @@ class SqliteTransactionClient(TransactionClient, SqliteClient):
                 self.log.exception("Failed to release the connection after an abandoned BEGIN")
 
     def _mark_transaction_aborted(self) -> None:
-        cast("SqliteTransactionClient", self._get_top_level_transaction())._transaction_aborted = True
+        self._get_top_level_transaction()._transaction_aborted = True  # type: ignore[attr-defined]
 
     def _is_transaction_aborted(self) -> bool:
-        return cast("SqliteTransactionClient", self._get_top_level_transaction())._transaction_aborted
+        return self._get_top_level_transaction()._transaction_aborted  # type: ignore[attr-defined]
 
     async def _disable_query_only(self) -> None:
         """Turns ``PRAGMA query_only`` back off before a read-only top-level transaction ends, so
@@ -144,9 +150,9 @@ class SqliteTransactionClient(TransactionClient, SqliteClient):
             query: The statement.
         """
 
-    savepoint = SqliteClient.translate_exceptions(TransactionClient.savepoint)
-    commit = SqliteClient.translate_exceptions(TransactionClient.commit)
-    rollback = SqliteClient.translate_exceptions(TransactionClient.rollback)
+    savepoint = SqliteClient.translate_exceptions(StatementForm.CONTROL)(TransactionClient.savepoint)
+    commit = SqliteClient.translate_exceptions(StatementForm.CONTROL)(TransactionClient.commit)
+    rollback = SqliteClient.translate_exceptions(StatementForm.CONTROL)(TransactionClient.rollback)
 
     async def begin(self) -> None:
         try:
@@ -162,7 +168,7 @@ class SqliteTransactionClient(TransactionClient, SqliteClient):
         return isinstance(error, Exception)
 
     async def _check_commit_allowed(self) -> None:
-        if self._finalized:
+        if self.transaction_state.finished:
             raise TransactionManagementError(TRANSACTION_FINALISED_MESSAGE)
         if self._is_transaction_aborted():
             if self._savepoint_name is None:
@@ -184,8 +190,4 @@ class SqliteTransactionClient(TransactionClient, SqliteClient):
         return None
 
     def _get_new_savepoint_name(self) -> str:
-        return self._gen_savepoint_name()
-
-    @classmethod
-    def _gen_savepoint_name(cls) -> str:
-        return f"hare_savepoint_{next(cls._savepoint_name_counter)}"
+        return f"hare_savepoint_{next(type(self)._savepoint_name_counter)}"

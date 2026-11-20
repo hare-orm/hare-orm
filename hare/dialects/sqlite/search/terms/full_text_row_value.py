@@ -3,9 +3,10 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
+from hare.dialects.sqlite.search.sqlite_search_renderers import SqliteSearchRenderers
 from hare.sql.builder_methods import BuilderMethods
 from hare.sql.sql_context import SqlContext
-from hare.sql.terms.node import TNode
+from hare.sql.terms.node import Node
 from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
@@ -54,16 +55,14 @@ class FullTextRowValue(Term):
         """
         return ()
 
-    def nodes_(self) -> Iterator[TNode]:
-        yield self  # type:ignore[misc]
-        yield from self.row_key.nodes_()
-        yield from self.query.nodes_()
-        for value_term in self.get_value_terms():
-            yield from value_term.nodes_()
+    def get_children(self) -> Iterator[Node]:
+        yield self.row_key
+        yield self.query
+        yield from self.get_value_terms()
 
     @BuilderMethods.builder
     def replace_table(self, current_table: Table | None, new_table: Table | None) -> Self:
-        """Replaces the table of the row's key column.
+        """Replaces table references in the row key and search query.
 
         Args:
             current_table: The table to be replaced.
@@ -73,6 +72,7 @@ class FullTextRowValue(Term):
             A copy with the table replaced.
         """
         self.row_key = self.row_key.replace_table(current_table, new_table)
+        self.query = self.query.replace_table(current_table, new_table)
         return self
 
     def get_function_sql(self, sql_context: SqlContext, index_table_sql: str) -> str:
@@ -89,9 +89,8 @@ class FullTextRowValue(Term):
 
     def get_sql(self, sql_context: SqlContext) -> str:
         inner_context = sql_context.copy(with_alias=False)
-        index_table_sql = sql_context.quote(self.index_table_name)
-        qualified_index_table_sql = (
-            f"{sql_context.quote(self.index_schema)}.{index_table_sql}" if self.index_schema else index_table_sql
+        index_table_sql, qualified_index_table_sql = SqliteSearchRenderers.get_index_table_names_sql(
+            sql_context, self.index_table_name, self.index_schema
         )
         function_sql = self.get_function_sql(inner_context, index_table_sql)
         query_sql = self.query.get_sql(inner_context)

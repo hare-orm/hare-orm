@@ -9,6 +9,7 @@ from hare.fields.data.containers.array_field import ArrayField
 from hare.fields.enums import HeldValueStep
 from hare.fields.generated_field import GeneratedField
 from hare.fields.narrowing.constants import FLOAT32_MANTISSA_BITS
+from hare.fields.narrowing.enum_values_limit import EnumValuesLimit
 from hare.fields.narrowing.float_precision_limit import FloatPrecisionLimit
 from hare.migrations.exceptions import FieldNarrowingDataLossError
 
@@ -61,6 +62,12 @@ class PostgresqlColumnNarrowingCheck(ColumnNarrowingCheck):
             dimensions += 1
             field = field.base_field
         return dimensions
+
+    def get_enum_overflow_predicate_sql(self, limit: EnumValuesLimit, quoted_column: str) -> str:
+        """Compare string labels as text without coercing new labels to the old enum type."""
+        if all(isinstance(value, str) for value in limit.values):
+            quoted_column = f"CAST({quoted_column} AS TEXT)"
+        return super().get_enum_overflow_predicate_sql(limit, quoted_column)
 
     def get_network_overflow_predicate_sql(self, quoted_column: str) -> str:
         """A WHERE predicate matching the rows whose address has host bits set beyond its prefix.

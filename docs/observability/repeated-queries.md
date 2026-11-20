@@ -1,8 +1,8 @@
 # N+1 query detection
 
 A runtime detector that counts identically shaped queries issued within one unit of work and reports once
-a configurable threshold is crossed inside a sliding time window — an observer of `QueryExecuted`, so it
-needs no changes to any dialect.
+a configurable threshold is reached inside a fixed time window per shape. It observes `QueryExecuted`,
+so it needs no changes to any dialect.
 
 ```python
 class RepeatedQueryDetector:
@@ -63,12 +63,12 @@ innermost frame outside hare: the observer runs inline in the task that issued i
 
 ## <a id="options"></a>Options
 
-`threshold` is how many queries of one shape within `window_seconds` are repeated; a shape below the
-threshold that long after its first query starts counting fresh. `action="warn"` (the default) logs via
+`threshold` is how many queries of one shape within `window_seconds` are repeated. Each shape's first
+query starts a fixed window; its first query at or after that window expires starts a fresh count,
+whether or not the previous window produced a report. `action="warn"` (the default) logs via
 `hare.core.log.logger.warning`; pass a callable instead (`Callable[[RepeatedQueryReport], None]`) for
 custom routing — a metric, a structured log event. An exception it raises is logged and never reaches the
-query — to fail a test on an N+1, assert on [`collect()`](#collect) instead. Any other string is a
-`ConfigurationError`.
+query — to fail a test on an N+1, assert on [`collect()`](#collect) instead.
 
 ## <a id="units-of-work"></a>Units of work
 
@@ -141,8 +141,7 @@ Semantics:
 - **Child tasks** created inside the block (`asyncio.create_task`, `gather` of coroutines, ...) inherit
   the context and are counted too — they run on behalf of the block. Queries they issue after the block
   has exited are ignored.
-- One collection object can't be re-entered while active (`QueryError`); `repeated()` rejects
-  `threshold < 1` with `QueryError`.
+- One collection object can't be re-entered while active (`QueryError`).
 - Exiting in a different task than the one that entered (e.g. an async-generator pytest fixture whose
   teardown runs in another task) doesn't raise: the collection closes, stops counting, and its observer
   is removed from the exiting task's context.
@@ -160,4 +159,6 @@ active timezone name used to build an `EXTRACT(... AT TIME ZONE 'zone')`-style `
 lookup, which (like every other value) reaches the final SQL text as a bound parameter, so two otherwise
 identical zone-aware lookups issued under two different configured timezones are intentionally the *same*
 shape here. A bulk `COPY` is counted like any other statement, under its
-`COPY <table> (<columns>) FROM STDIN` text — one per batch, never N+1-shaped in practice.
+`COPY <table> (<columns>) FROM STDIN` text — one per batch. Repeated batches with the same shape can reach
+the threshold and produce a report. This heuristic also flags legitimate batch loops; use the call site
+to decide whether the repetition needs attention.

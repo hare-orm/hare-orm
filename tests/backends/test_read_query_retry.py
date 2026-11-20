@@ -1,20 +1,30 @@
-"""PostgresqlClient._execute_read_query_with_retry() - mid-query connection-loss retry/backoff
-for a statically read-only query (AwaitableQuery.is_read_only), shared by both AsyncpgClient
-and RustPgClient. Pure unit tests against a real client instance with _translate_exceptions
-monkeypatched - no real DB connection needed, mirroring tests/backends/test_connect_retry.py's
-own pattern for PostgresqlClient._create_pool_with_retry(). See tests/backends/
-test_postgres_common_client.py for translate_exceptions' own contextvar-gating (only a
-read-only, query-executing, non-transactional call is ever retried) and tests/backends/
-test_postgres.py for the live pg_terminate_backend proof against a real Postgres."""
+"""Explicit statement retry and per-attempt events, without a database server."""
+
+from types import SimpleNamespace
 
 import pytest
 
+from hare.dialects.base.client import statement_execution
+from hare.dialects.base.client.enums import StatementForm
 from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
 from hare.exceptions import DBConnectionError, OperationalError
 from hare.instrumentation.declarations import QueryExecuted
+from hare.instrumentation.observers import observers
 from hare.instrumentation.observers.observers import Observers
+from tests.utils.manual_clock import ManualClock
 
-REQUIRES = ("asyncpg",)
+pytestmark = pytest.mark.database_independent
+
+
+@pytest.fixture(autouse=True)
+def retry_clock(monkeypatch):
+    clock = ManualClock()
+    monkeypatch.setattr(statement_execution, "time", clock)
+    monkeypatch.setattr(
+        statement_execution, "asyncio", SimpleNamespace(**{**vars(statement_execution.asyncio), "sleep": clock.sleep})
+    )
+    monkeypatch.setattr(observers, "time", clock)
+    return clock
 
 
 def _make_client(**overrides):
@@ -51,18 +61,14 @@ async def test_execute_read_query_with_retry_succeeds_after_transient_connection
     client = _make_client(read_retry_max_retries=3, read_retry_backoff_base_seconds=0.001)
     attempts = []
 
-    async def fake_translate_exceptions(func, *args, **kwargs):
-        return await func(client, *args, **kwargs)
-
-    client._translate_exceptions = fake_translate_exceptions
-
-    async def flaky(_self):
+    @AsyncpgClient.translate_exceptions(StatementForm.SQL)
+    async def flaky(_self, query, values=None):
         attempts.append(1)
         if len(attempts) < 3:
             raise DBConnectionError("simulated: connection lost mid-query")
         return "FAKE_ROWS"
 
-    result = await client._execute_read_query_with_retry(flaky)
+    result = await flaky(client, "SELECT 1", retry_read=True)
 
     assert result == "FAKE_ROWS"
     assert len(attempts) == 3
@@ -73,17 +79,13 @@ async def test_execute_read_query_with_retry_reraises_after_exhausting_retries()
     client = _make_client(read_retry_max_retries=2, read_retry_backoff_base_seconds=0.001)
     attempts = []
 
-    async def fake_translate_exceptions(func, *args, **kwargs):
-        return await func(client, *args, **kwargs)
-
-    client._translate_exceptions = fake_translate_exceptions
-
-    async def always_fails(_self):
+    @AsyncpgClient.translate_exceptions(StatementForm.SQL)
+    async def always_fails(_self, query, values=None):
         attempts.append(1)
         raise DBConnectionError("simulated: still down")
 
     with pytest.raises(DBConnectionError):
-        await client._execute_read_query_with_retry(always_fails)
+        await always_fails(client, "SELECT 1", retry_read=True)
 
     # The initial attempt plus read_retry_max_retries retries.
     assert len(attempts) == 3
@@ -98,43 +100,27 @@ async def test_execute_read_query_with_retry_does_not_retry_operational_error():
     client = _make_client(read_retry_max_retries=5, read_retry_backoff_base_seconds=0.001)
     attempts = []
 
-    async def fake_translate_exceptions(func, *args, **kwargs):
-        try:
-            return await func(client, *args, **kwargs)
-        except ValueError as exc:
-            raise OperationalError(exc)
-
-    client._translate_exceptions = fake_translate_exceptions
-
-    async def query_canceled(_self):
+    @AsyncpgClient.translate_exceptions(StatementForm.SQL)
+    async def query_canceled(_self, query, values=None):
         attempts.append(1)
-        raise ValueError("simulated: query_canceled")
+        raise OperationalError("simulated: query_canceled")
 
     with pytest.raises(OperationalError):
-        await client._execute_read_query_with_retry(query_canceled)
+        await query_canceled(client, "SELECT 1", retry_read=True)
 
     assert len(attempts) == 1
 
 
 @pytest.mark.asyncio
-async def test_execute_read_query_with_retry_records_each_attempt_to_instrumentation():
-    """Each attempt - failed or successful - must reach QueryInstrumentation separately, with its
-    own honest duration. Before this fix, translate_exceptions() recorded once for the WHOLE
-    retried call (its outer start/finally), so two failed attempts before a successful third were
-    completely invisible to instrumentation - no failure record, and the one "success" record's
-    duration silently absorbed both backoff sleeps. See translate_exceptions()'s `record_here`
-    flag (hare.dialects.postgresql.client) - it skips its own top-level record whenever it
-    dispatches into this method, making this the only place a retried read gets recorded."""
+async def test_execute_read_query_with_retry_records_each_attempt_to_instrumentation(retry_clock):
+    """Each attempt reports its duration and translated error, excluding backoff sleeps."""
     client = _make_client(read_retry_max_retries=3, read_retry_backoff_base_seconds=0.05)
     attempts = []
 
-    async def fake_translate_exceptions(func, *args, **kwargs):
-        return await func(client, *args, **kwargs)
-
-    client._translate_exceptions = fake_translate_exceptions
-
-    async def flaky(_self):
+    @AsyncpgClient.translate_exceptions(StatementForm.SQL)
+    async def flaky(_self, query, values=None):
         attempts.append(1)
+        retry_clock.advance(len(attempts) / 8)
         if len(attempts) < 3:
             raise DBConnectionError("simulated: connection lost mid-query")
         return "FAKE_ROWS"
@@ -147,7 +133,7 @@ async def test_execute_read_query_with_retry_records_each_attempt_to_instrumenta
 
     Observers.observe(QueryExecuted, hook)
     try:
-        result = await client._execute_read_query_with_retry(flaky, sql="SELECT 1", parameters=[42])
+        result = await flaky(client, "SELECT 1", [42], retry_read=True)
         # Hooks now dispatch in the background (never awaited by the query call itself) - drain
         # every in-flight one before asserting on their effect, or this is flaky.
         await Observers.wait_for_pending()
@@ -161,10 +147,9 @@ async def test_execute_read_query_with_retry_records_each_attempt_to_instrumenta
     for sql, params, duration_ms, exception in calls[:2]:
         assert (sql, params) == ("SELECT 1", [42])
         assert isinstance(exception, DBConnectionError)
-        # A failed attempt does no real work here, so its own honest duration must stay far
-        # below the 50ms backoff delay that follows it - the pre-fix bug would have folded that
-        # sleep (and the other attempt's) into a single reported duration well past this bound.
-        assert duration_ms < 40
+
+    assert [call[2] for call in calls] == pytest.approx([125, 250, 375])
+    assert retry_clock.delays == [0.05, 0.1]
 
     sql, params, duration_ms, exception = calls[2]
     assert (sql, params) == ("SELECT 1", [42])

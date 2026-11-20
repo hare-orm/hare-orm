@@ -4,6 +4,7 @@ import abc
 import uuid
 from typing import NoReturn
 
+from hare.dialects.base.client.enums import StatementForm
 from hare.dialects.base.client.transaction_client import TransactionClient
 from hare.dialects.base.client.transaction_lifecycle.transaction_ending import TransactionEnding
 from hare.dialects.postgresql.client.constants import (
@@ -20,12 +21,16 @@ from hare.transactions.enums import TransactionEventType
 class PostgresqlTransactionClient(TransactionClient, abc.ABC):
     """What the transaction clients of both PostgreSQL drivers share."""
 
-    begin = PostgresqlClient.translate_exceptions(TransactionClient.begin)
-    savepoint = PostgresqlClient.translate_exceptions(TransactionClient.savepoint)
-    release_savepoint = PostgresqlClient.translate_exceptions(TransactionClient.release_savepoint)
-    savepoint_rollback = PostgresqlClient.translate_exceptions(TransactionClient.savepoint_rollback)
-    commit = PostgresqlClient.translate_exceptions(TransactionClient.commit)
-    rollback = PostgresqlClient.translate_exceptions(TransactionClient.rollback)
+    begin = PostgresqlClient.translate_exceptions(StatementForm.CONTROL)(TransactionClient.begin)
+    savepoint = PostgresqlClient.translate_exceptions(StatementForm.CONTROL)(TransactionClient.savepoint)
+    release_savepoint = PostgresqlClient.translate_exceptions(StatementForm.CONTROL)(
+        TransactionClient.release_savepoint
+    )
+    savepoint_rollback = PostgresqlClient.translate_exceptions(StatementForm.CONTROL)(
+        TransactionClient.savepoint_rollback
+    )
+    commit = PostgresqlClient.translate_exceptions(StatementForm.CONTROL)(TransactionClient.commit)
+    rollback = PostgresqlClient.translate_exceptions(StatementForm.CONTROL)(TransactionClient.rollback)
 
     @abc.abstractmethod
     async def _driver_check_alive(self) -> None:
@@ -73,7 +78,6 @@ class PostgresqlTransactionClient(TransactionClient, abc.ABC):
         Raises:
             TransactionManagementError: Always.
         """
-        self._pending_top_level_operation = None
         await self._driver_rollback()
         commit_error = TransactionManagementError(POSTGRES_ABORTED_TRANSACTION_COMMIT_MESSAGE)
         await TransactionEnding.finish_after_failed_commit(self, commit_error)

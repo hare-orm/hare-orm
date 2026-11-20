@@ -1,25 +1,14 @@
 from __future__ import annotations
 
 import inspect
-from inspect import _ParameterKind as ParameterType
 from typing import TYPE_CHECKING
 
-from mypy.nodes import (
-    ARG_NAMED,
-    ARG_NAMED_OPT,
-    ARG_OPT,
-    ARG_POS,
-    ARG_STAR,
-    ARG_STAR2,
-    ArgKind as ArgumentType,
-    Argument,
-    Var,
-)
+from mypy.nodes import Argument, Var
 from mypy.plugins.common import add_method_to_class
 from mypy.types import AnyType, TypeOfAny
 from mypy.typevars import fill_typevars
 
-from hare.contrib.mypy.constants import QUERYSET_FULLNAME
+from hare.contrib.mypy.constants import ARGUMENT_TYPES, QUERYSET_FULLNAME
 from hare.query.queryset.extensions.query_set_extensions import QuerySetExtensions
 
 if TYPE_CHECKING:
@@ -37,15 +26,6 @@ class QuerySetExtensionMethods:
     Args:
         model_registry: The project's models and connections.
     """
-
-    #: mypy's argument type of each type of parameter, required and with a default.
-    ARGUMENT_TYPES: dict[ParameterType, tuple[ArgumentType, ArgumentType]] = {
-        inspect.Parameter.POSITIONAL_ONLY: (ARG_POS, ARG_OPT),
-        inspect.Parameter.POSITIONAL_OR_KEYWORD: (ARG_POS, ARG_OPT),
-        inspect.Parameter.KEYWORD_ONLY: (ARG_NAMED, ARG_NAMED_OPT),
-        inspect.Parameter.VAR_POSITIONAL: (ARG_STAR, ARG_STAR),
-        inspect.Parameter.VAR_KEYWORD: (ARG_STAR2, ARG_STAR2),
-    }
 
     def __init__(self, model_registry: ModelRegistry) -> None:
         self.model_registry = model_registry
@@ -65,7 +45,7 @@ class QuerySetExtensionMethods:
             return
         dialect_classes = [type(dialect) for _alias, dialect in sorted(bound_models.dialects_by_connection.items())]
         any_type = AnyType(TypeOfAny.explicit)
-        for name, implementations in sorted(QuerySetExtensions.registered.items()):
+        for name, implementations in sorted(QuerySetExtensions.get_registered().items()):
             implementation = next(
                 (
                     implementations[dialect_class]
@@ -84,7 +64,8 @@ class QuerySetExtensionMethods:
                 return_type=fill_typevars(class_definition_context.cls.info),
             )
 
-    def get_arguments(self, implementation: QuerySetExtension, any_type: AnyType) -> list[Argument]:
+    @staticmethod
+    def get_arguments(implementation: QuerySetExtension, any_type: AnyType) -> list[Argument]:
         """mypy's arguments of a method's call.
 
         Args:
@@ -96,7 +77,7 @@ class QuerySetExtensionMethods:
         """
         arguments = []
         for parameter in implementation.get_call_signature().parameters.values():
-            required_type, optional_type = self.ARGUMENT_TYPES[parameter.kind]
+            required_type, optional_type = ARGUMENT_TYPES[parameter.kind]
             arguments.append(
                 Argument(
                     Var(parameter.name, any_type),

@@ -57,13 +57,13 @@ class PostgresqlQueryClauses(LimitReturningConflictQueryClauses):
         action_sql = "DO NOTHING" if when.action is MergeAction.DO_NOTHING else self.get_merge_action_sql(when)
         return f" WHEN {POSTGRESQL_MERGE_MATCH_SQL[when.match]}{self.get_merge_condition_sql(when)} THEN {action_sql}"
 
-    def get_merge_returning_sql(self, returned: Sequence[ReturnedValue], action_alias_sql: str) -> str:
+    def get_merge_returning_sql(self, returned: Sequence[ReturnedValue], action_alias_sql: str | None) -> str:
         """``RETURNING merge_action(), ...`` - PostgreSQL 17+."""
-        if not returned:
+        if action_alias_sql is None:
             return ""
-        return f" RETURNING merge_action() AS {action_alias_sql}," + ",".join(
-            self.get_returned_value_sql(value) for value in returned
-        )
+        columns = [f"merge_action() AS {action_alias_sql}"]
+        columns.extend(self.get_returned_value_sql(value) for value in returned)
+        return " RETURNING " + ",".join(columns)
 
     def get_old_row_value_sql(self, column_sql: str) -> str:
         """``old.column`` - PostgreSQL 18+."""
@@ -107,7 +107,7 @@ class PostgresqlQueryClauses(LimitReturningConflictQueryClauses):
         required_options = sorted(
             option.upper() for option, required in (options or POSTGRESQL_DEFAULT_EXPLAIN_OPTIONS).items() if required
         )
-        if unsupported_options := set(required_options) - features.explain_options:
+        if unsupported_options := set(required_options) - features.explain_options:  # type: ignore[attr-defined]
             raise UnSupportedError(
                 f"Unsupported options: {unsupported_options} - not taken by the PostgreSQL server of this connection"
             )

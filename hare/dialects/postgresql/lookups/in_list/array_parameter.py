@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import datetime
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from functools import partial
 from typing import Any
 
 from hare.dialects.postgresql.lookups.constants import (
@@ -32,18 +33,22 @@ class ArrayParameter(Cast, ListParameter):
         # Array (not a plain ParameterizedValueWrapper) - it binds the whole list as ONE parameter
         # when a parameterizer is present, and renders a valid `ARRAY[...]` literal for
         # `.sql(parameters_inline=True)` when there isn't one.
-        self.array = Array(*values)
-        super().__init__(self.array, f"{element_type}[]")
+        super().__init__(Array(*values), f"{element_type}[]")
         self.element_type = element_type
         self.typed_by_values = typed_by_values
 
     def get_parameter_source(self) -> Term:
-        return self.array
+        return self.args[0]
 
-    def get_parameter(self, values: list[Any], *, holds_no_term: bool = False) -> list[Any] | None:
-        if not holds_no_term and self.holds_term(values):
+    def get_parameter_encoder(self) -> Callable[[list[Any]], list[Any] | None]:
+        return partial(self.encode_parameter, element_type=self.element_type, typed_by_values=self.typed_by_values)
+
+    @classmethod
+    def encode_parameter(cls, values: list[Any], *, element_type: str, typed_by_values: bool) -> list[Any] | None:
+        """Encode a fresh list using the declared array type without retaining a SQL array."""
+        if cls.holds_term(values):
             return None
-        if self.typed_by_values and self.get_array_element_type(values) != self.element_type:
+        if typed_by_values and cls.get_array_element_type(values) != element_type:
             return None
         return values
 

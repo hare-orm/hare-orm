@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 from hare.classes.class_path import ClassPath
 from hare.ddl.schema_objects.named_schema_object import NamedSchemaObject
@@ -32,7 +32,7 @@ class Dictionary(NamedSchemaObject):
         for option_name in ("key", "attributes"):
             field_names = getattr(self, option_name)
             if (
-                not isinstance(cast("object", field_names), (list, tuple))
+                not isinstance(field_names, (list, tuple))
                 or not field_names
                 or not all(isinstance(field_name, str) and field_name for field_name in field_names)
             ):

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable
+
+from hare.instrumentation.constants import DURATION_RECORDS_CAPACITY
 from hare.instrumentation.pools.duration_records import DurationRecords
+from hare.instrumentation.pools.enums import PoolMetricEvent
 
 
 class PoolStatistics:
@@ -10,6 +15,8 @@ class PoolStatistics:
 
     The counters taking a connection changes are plain attributes, changed in place without a call;
     a wait for a connection is measured only while the pool metrics are enabled (``PoolMetrics``).
+    Completed measurements synchronize their counters internally and notify their recorder after
+    releasing that lock. Callers must not hold their pool's lock across these notifications.
     """
 
     __slots__ = (
@@ -21,9 +28,11 @@ class PoolStatistics:
         "connect_failures",
         "wait_records",
         "connect_records",
+        "recorder",
+        "lock",
     )
 
-    def __init__(self) -> None:
+    def __init__(self, capacity: int = DURATION_RECORDS_CAPACITY) -> None:
         #: The tasks taking a connection right now - waiting for one when the pool has none free.
         self.acquiring = 0
         self.acquire_count = 0
@@ -31,8 +40,14 @@ class PoolStatistics:
         self.acquire_wait_seconds_total = 0.0
         self.connect_count = 0
         self.connect_failures = 0
-        self.wait_records = DurationRecords()
-        self.connect_records = DurationRecords()
+        self.wait_records = DurationRecords(capacity)
+        self.connect_records = DurationRecords(capacity)
+        self.recorder: Callable[[str, float], None] | None = None
+        self.lock = threading.Lock()
+
+    def set_recorder(self, recorder: Callable[[str, float], None] | None) -> None:
+        """Set the event sink independently from bounded health-check observations."""
+        self.recorder = recorder
 
     def add_wait(self, seconds: float) -> None:
         """Counts a wait for a connection.
@@ -40,12 +55,20 @@ class PoolStatistics:
         Args:
             seconds: How long it took.
         """
-        self.acquire_wait_seconds_total += seconds
-        self.wait_records.add(seconds)
+        with self.lock:
+            self.acquire_wait_seconds_total += seconds
+            self.wait_records.add(seconds)
+        recorder = self.recorder
+        if recorder is not None:
+            recorder(PoolMetricEvent.WAIT, seconds)
 
     def add_timeout(self) -> None:
         """Counts a wait for a connection that ran out of ``pool_acquire_timeout``."""
-        self.acquire_timeouts += 1
+        with self.lock:
+            self.acquire_timeouts += 1
+        recorder = self.recorder
+        if recorder is not None:
+            recorder(PoolMetricEvent.TIMEOUT, 1)
 
     def add_connect(self, seconds: float) -> None:
         """Counts an opened connection.
@@ -53,12 +76,20 @@ class PoolStatistics:
         Args:
             seconds: How long opening it took.
         """
-        self.connect_count += 1
-        self.connect_records.add(seconds)
+        with self.lock:
+            self.connect_count += 1
+            self.connect_records.add(seconds)
+        recorder = self.recorder
+        if recorder is not None:
+            recorder(PoolMetricEvent.CONNECT, seconds)
 
     def add_connect_failure(self) -> None:
         """Counts a failure to open a connection."""
-        self.connect_failures += 1
+        with self.lock:
+            self.connect_failures += 1
+        recorder = self.recorder
+        if recorder is not None:
+            recorder(PoolMetricEvent.CONNECT_FAILURE, 1)
 
     def get_counts(self) -> tuple[int, int, float, int, int]:
         """The counters.
@@ -67,13 +98,14 @@ class PoolStatistics:
             The connections taken, the timeouts, the time waited in all, the connections opened
             and the failures to open one.
         """
-        return (
-            self.acquire_count,
-            self.acquire_timeouts,
-            self.acquire_wait_seconds_total,
-            self.connect_count,
-            self.connect_failures,
-        )
+        with self.lock:
+            return (
+                self.acquire_count,
+                self.acquire_timeouts,
+                self.acquire_wait_seconds_total,
+                self.connect_count,
+                self.connect_failures,
+            )
 
     def get_waits_since(self, cursor: int) -> tuple[int, list[float], int]:
         """The waits for a connection after a reader's cursor - see ``DurationRecords.get_since()``."""

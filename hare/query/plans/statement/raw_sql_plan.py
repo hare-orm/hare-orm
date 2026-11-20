@@ -18,13 +18,11 @@ class RawSQLPlan:
         parameter_indexes: The index of the parameter each placeholder binds, in placeholder order.
     """
 
-    __slots__ = ("sql", "parameter_indexes", "parameterizer")
+    __slots__ = ("sql", "parameter_indexes")
 
     def __init__(self, sql: str, parameter_indexes: tuple[int, ...]) -> None:
         self.sql = sql
         self.parameter_indexes = parameter_indexes
-        #: Used for its should_parameterize() - the same decision rendering makes.
-        self.parameterizer = Parameterizer()
 
     def bind(self, parameters: Sequence[Any]) -> list[Any] | None:
         """The values of the placeholders for a call's parameters.
@@ -39,9 +37,7 @@ class RawSQLPlan:
         conditionally_parameterized_types = Parameterizer.conditionally_parameterized_types
         for index in self.parameter_indexes:
             value = RawSQL.get_parameter_value(parameters[index])
-            if isinstance(value, conditionally_parameterized_types) and not self.parameterizer.should_parameterize(
-                value
-            ):
+            if isinstance(value, conditionally_parameterized_types) and not Parameterizer.should_parameterize(value):
                 return None
             values.append(Value.get_bound_value(value))
         return values

@@ -4,6 +4,7 @@ from collections.abc import Mapping, Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
+from hare.core.extensions.declarations import ExtensionContribution
 from hare.dialects.base.clauses.query_clauses import QueryClauses
 from hare.dialects.base.features import Features
 from hare.dialects.base.literals.sql_literals import SqlLiterals
@@ -104,11 +105,9 @@ class Dialect:
         """
         return True
 
-    def install(self) -> None:
-        """Adds what the dialect brings to hare's own field types - a path transform reading
-        inside a core field's value (a text transform of the database) - once, when the dialect is
-        registered. Does nothing by default.
-        """
+    def get_contribution(self) -> ExtensionContribution:
+        """Declare field and query extensions installed atomically with this dialect."""
+        return ExtensionContribution()
 
     @cached_property
     def sql_context(self) -> SqlContext:
@@ -179,7 +178,7 @@ class Dialect:
     def types(self) -> TypeRegistry:
         """How the dialect stores hare's fields - built on first use."""
         types = self.build_types()
-        types.in_use = True
+        types.mappings.seal()
         types.mirrors = [variant.types for variant in self.variants]
         return types
 
@@ -195,6 +194,7 @@ class Dialect:
     def filter_operators(self) -> FilterOperators:
         """The operators the dialect runs lookups with - built on first use."""
         filter_operators = self.build_filter_operators()
+        filter_operators.overrides.seal()
         filter_operators.mirrors = [variant.filter_operators for variant in self.variants]
         return filter_operators
 
@@ -361,6 +361,9 @@ class Dialect:
     def renderers(self) -> TermRenderers:
         """How the dialect renders the terms whose SQL differs between dialects - built on first use."""
         renderers = self.build_renderers()
+        renderers.renderers.seal()
+        renderers.name_renderers.seal()
+        renderers.function_renderers.seal()
         renderers.mirrors = [variant.renderers for variant in self.variants]
         return renderers
 

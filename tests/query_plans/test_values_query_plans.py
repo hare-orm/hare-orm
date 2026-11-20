@@ -5,15 +5,9 @@ key doesn't hold still decides by the full check."""
 import pytest
 
 from hare.query.expressions import Q
-from hare.query.plans.statement.statement_plans import StatementPlans
 from hare.query.relation_loading.select import Select
 from tests.shared_models.testmodels import Author, Book, DoubleFK
-
-
-async def count_plan_hits(statement) -> tuple[object, int]:
-    hits = StatementPlans.hits
-    result = await statement
-    return result, StatementPlans.hits - hits
+from tests.utils.statement_plan_checks import StatementPlanChecks
 
 
 async def create_books() -> tuple[Book, Book]:
@@ -26,12 +20,14 @@ async def create_books() -> tuple[Book, Book]:
 async def test_values_and_values_list_run_on_their_plan(db):
     first, second = await create_books()
     await Book.objects.filter(name="alpha").values_list("id", flat=True)
-    ids, hits = await count_plan_hits(Book.objects.filter(name="beta").values_list("id", flat=True))
+    ids, hits = await StatementPlanChecks.count_plan_hits(
+        Book.objects.filter(name="beta").values_list("id", flat=True)
+    )
     assert (ids, hits) == ([second.id], 1)
     await Book.objects.filter(name="alpha").values("id", "name")
-    rows, hits = await count_plan_hits(Book.objects.filter(name="beta").values("id", "name"))
+    rows, hits = await StatementPlanChecks.count_plan_hits(Book.objects.filter(name="beta").values("id", "name"))
     assert (rows, hits) == ([{"id": second.id, "name": "beta"}], 1)
-    rows, hits = await count_plan_hits(Book.objects.filter(name="alpha").values("id", "name"))
+    rows, hits = await StatementPlanChecks.count_plan_hits(Book.objects.filter(name="alpha").values("id", "name"))
     assert (rows, hits) == ([{"id": first.id, "name": "alpha"}], 1)
 
 
@@ -91,11 +87,11 @@ async def test_distinct_ordered_by_an_unselected_field_runs_on_its_plan(db):
 
     await author_names(0.0)
     for minimum_rating, expected in ((0.0, ["a", "b", "a"]), (2.0, ["b", "a"]), (3.0, ["a"])):
-        names, hits = await count_plan_hits(author_names(minimum_rating))
+        names, hits = await StatementPlanChecks.count_plan_hits(author_names(minimum_rating))
         assert (names, hits) == (expected, 1)
     await author_names(0.0).limit(1)
     for minimum_rating, limit, expected in ((0.0, 1, ["a"]), (2.0, 1, ["b"]), (0.0, 2, ["a", "b"])):
-        names, hits = await count_plan_hits(author_names(minimum_rating).limit(limit))
+        names, hits = await StatementPlanChecks.count_plan_hits(author_names(minimum_rating).limit(limit))
         assert (names, hits) == (expected, 1)
     for _ in range(2):
         assert await author_names(0.0).first() == "a"
@@ -107,12 +103,12 @@ async def test_distinct_ordered_by_an_unselected_field_runs_on_its_plan(db):
 async def test_count_and_exists_run_on_their_plan(db):
     await create_books()
     await Book.objects.filter(name="alpha").count()
-    count, hits = await count_plan_hits(Book.objects.filter(name="nobody").count())
+    count, hits = await StatementPlanChecks.count_plan_hits(Book.objects.filter(name="nobody").count())
     assert (count, hits) == (0, 1)
     await Book.objects.filter(name="alpha").exists()
-    exists, hits = await count_plan_hits(Book.objects.filter(name="beta").exists())
+    exists, hits = await StatementPlanChecks.count_plan_hits(Book.objects.filter(name="beta").exists())
     assert (exists, hits) == (True, 1)
-    exists, hits = await count_plan_hits(Book.objects.filter(name="nobody").exists())
+    exists, hits = await StatementPlanChecks.count_plan_hits(Book.objects.filter(name="nobody").exists())
     assert (exists, hits) == (False, 1)
 
 

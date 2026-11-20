@@ -6,6 +6,7 @@ from hare.dialects.postgresql.search.criterion.ts_query_invert import TsQueryInv
 from hare.dialects.postgresql.search.functions.plain_to_ts_query import PlainToTsQuery
 from hare.dialects.postgresql.search.functions.to_ts_vector import ToTsVector
 from hare.sql.terms.criteria.basic_criterion import BasicCriterion
+from hare.sql.terms.node_structure import NodeStructure
 from hare.sql.terms.term import Term
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
@@ -30,11 +31,23 @@ class SearchCriterion(BasicCriterion):
         self, term: Term, expression: Term | str, vectorize: bool = True, config: str | Term | None = None
     ) -> None:
         vector_config = config
-        if vector_config is None and isinstance(expression, Term):
+        if vectorize and vector_config is None and isinstance(expression, Term):
             vector_config = self.get_query_config(expression)
         vector = ToTsVector(term, config=vector_config) if vectorize else term
         query = expression if isinstance(expression, Term) else PlainToTsQuery(ValueWrapper(expression), config=config)
         super().__init__(Comp.search, vector, query)
+
+    @classmethod
+    def has_explicit_query_config(cls, query: Term) -> bool:
+        """Check every query-building leaf, allowing explicitly configured mixed-language queries."""
+        if isinstance(query, TsQueryFunction):
+            return query.config_term is not None
+        if isinstance(query, TsQueryInvert):
+            return cls.has_explicit_query_config(query.term)
+        if isinstance(query, TsInfixOperator):
+            return cls.has_explicit_query_config(query.left) and cls.has_explicit_query_config(query.right)
+        # A supplied column or raw SQL term is already a query value; its internals are opaque.
+        return True
 
     @classmethod
     def get_query_config(cls, query: Term) -> Term | None:
@@ -56,7 +69,5 @@ class SearchCriterion(BasicCriterion):
             right_config = cls.get_query_config(query.right)
             if left_config is None or right_config is None:
                 return None
-            if isinstance(left_config, ValueWrapper) and isinstance(right_config, ValueWrapper):
-                return left_config if left_config.value == right_config.value else None
-            return left_config if left_config is right_config else None
+            return left_config if NodeStructure.get_key(left_config) == NodeStructure.get_key(right_config) else None
         return None

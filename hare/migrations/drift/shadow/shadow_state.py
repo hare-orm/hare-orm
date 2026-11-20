@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import dataclasses
 from collections.abc import Iterable
 from typing import Any
@@ -20,19 +19,27 @@ class ShadowState:
     them."""
 
     @staticmethod
-    def get(model_states: Iterable[tuple[tuple[str, str], ModelState]], shadow: ShadowDatabase) -> State:
+    def get(
+        model_states: Iterable[tuple[tuple[str, str], ModelState]], shadow: ShadowDatabase, source_state: State
+    ) -> State:
         """The state of the models as the shadow builds them.
 
         Args:
             model_states: The models, by their (app, name).
             shadow: The shadow.
+            source_state: Supplies the captured application and connection assignments.
 
         Returns:
             The state.
         """
-        shadow_state = State()
-        for key, model_state in model_states:
-            shadow_model_state = model_state.clone()
+        selected = dict(model_states)
+        shadow_state = State(
+            models={key: model.clone() for key, model in {**source_state.models, **selected}.items()},
+            default_connections=dict(source_state.default_connections),
+            environment=source_state.environment,
+        )
+        for key in selected:
+            shadow_model_state = shadow_state.models[key]
             options = shadow_model_state.options
             if schema := options.get(ModelOption.SCHEMA):
                 options[ModelOption.SCHEMA] = ShadowState.get_schema(schema, shadow)
@@ -40,14 +47,14 @@ class ShadowState:
                 options[ModelOption.TABLE_OPTIONS] = tuple(
                     shadow.get_shadow_table_options(entry) for entry in table_options
                 )
-            for field_name, field in list(shadow_model_state.fields.items()):
+            if materialized_views := options.get(ModelOption.MATERIALIZED_VIEWS):
+                options[ModelOption.MATERIALIZED_VIEWS] = tuple(
+                    shadow.get_shadow_materialized_view(view) for view in materialized_views
+                )
+            for field in shadow_model_state.fields.values():
                 enum_type = field.requires_enum_type
                 if enum_type is not None and enum_type.schema:
-                    # A copy of its own - the field's parts are shared with the declared state.
-                    shadow_field = copy.deepcopy(field)
-                    ShadowState.place_enum_types(shadow_field, shadow)
-                    shadow_model_state.fields[field_name] = shadow_field
-            shadow_state.models[key] = shadow_model_state
+                    ShadowState.place_enum_types(field, shadow)
         return shadow_state
 
     @staticmethod

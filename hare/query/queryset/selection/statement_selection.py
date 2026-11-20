@@ -1,22 +1,22 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.query.enums import RowShape
 from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import AggregatedMultiValuedPaths
 from hare.query.queryset.arguments.annotation_arguments import AnnotationArguments
 from hare.query.queryset.arguments.values_arguments import ValuesArguments
 from hare.query.queryset.combination.queryset_combination import QuerySetCombination
-from hare.query.queryset.extensions.query_set_extensions import QuerySetExtensions
 from hare.query.queryset.row_multiplication import RowMultiplication
 from hare.query.queryset.selection.values_selection import ValuesSelection
 from hare.query.statements.select.model_rows_query import ModelRowsQuery
-from hare.query.statements.select.rows_query import RowsQuery
 from hare.sql import Order
 
 if TYPE_CHECKING:
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset.queryset import QuerySet
     from hare.query.statements.select.combined_query import CombinedQuery
+    from hare.query.statements.select.select_query import SelectQuery
     from hare.query.statements.select.values_query import ValuesQuery
 
 
@@ -29,11 +29,14 @@ class StatementSelection:
     of their keys or of one field."""
 
     @staticmethod
-    def get_select_query(queryset: QuerySet[Any, Any]) -> RowsQuery[Any]:
+    def get_select_query(
+        queryset: QuerySet[Any, Any], *, model_query_class: type[ModelRowsQuery[Any]] | None = None
+    ) -> SelectQuery[Any] | CombinedQuery:
         """The query of this queryset's rows, made for the caller alone.
 
         Args:
             queryset: The queryset.
+            model_query_class: The executor of model rows; values and combinations keep theirs.
 
         Returns:
             The query of the combined rows, of the selected values, else of model instances.
@@ -42,7 +45,7 @@ class StatementSelection:
             return QuerySetCombination.get_combined_query(queryset)
         if queryset._selection is not None:
             return StatementSelection.get_values_query(queryset)
-        return ModelRowsQuery(queryset)
+        return (ModelRowsQuery if model_query_class is None else model_query_class)(queryset)
 
     @staticmethod
     def get_rows_source(queryset: SameQuerySet) -> SameQuerySet | ValuesQuery | CombinedQuery:
@@ -74,7 +77,7 @@ class StatementSelection:
         """
         from hare.query.statements.select.values_query import ValuesQuery
 
-        selection = cast("ValuesSelection", queryset._selection)
+        selection: ValuesSelection = queryset._selection  # type: ignore[assignment]
         annotations = queryset._annotations
         if selection.shape is RowShape.DICT:
             if selection.selects_every_field:
@@ -128,7 +131,8 @@ class StatementSelection:
                 *queryset._apply_default_ordering(queryset._orderings),
                 *((annotation_name, Order.ASC) for annotation_name in distinct_annotation_names),
             ]
-        primary_key_attribute_names = queryset.model._meta.primary_key_attribute_names
+        model_binding: ModelBinding = queryset._binding  # type: ignore[assignment]
+        primary_key_attribute_names = model_binding.primary_key_attribute_names
         values_queryset = rows_queryset.values_list(
             *primary_key_attribute_names, flat=len(primary_key_attribute_names) == 1
         )
@@ -160,26 +164,64 @@ class StatementSelection:
         return rows_queryset
 
     @staticmethod
-    def get_rows_query_if_rows_repeat(
-        queryset: QuerySet[Any, Any], *, counts_changed_rows: bool = True
-    ) -> ValuesQuery | None:
+    def get_model_rows_query_for_summary(
+        queryset: QuerySet[Any, Any], *, sliced: bool = False
+    ) -> ModelRowsQuery[Any] | None:
+        """Keep row identity that cannot be reconstructed from primary-key columns.
+
+        A primary-key selection would reconstruct columns omitted by only()/defer() and
+        change which rows DISTINCT merges. The ordinary model executor already builds the
+        exact selected rows; summaries consume that source without loading model instances.
+        """
+        if queryset._selection is not None or queryset._combination is not None or queryset._distinct_on:
+            return None
+        model_binding: ModelBinding = queryset._binding  # type: ignore[assignment]
+        changes_row_shape = queryset._distinct or queryset._annotations or queryset._group_bys
+        has_slice = sliced and (queryset._limit is not None or bool(queryset._offset))
+        keyless_rows = not model_binding.has_primary_key and (changes_row_shape or has_slice)
+        partial_distinct_rows = queryset._distinct and (queryset._fields_for_select or queryset._deferred_fields)
+        if not (keyless_rows or partial_distinct_rows):
+            return None
+        source = queryset._clone()
+        source._single = source._raise_does_not_exist = source._select_for_update = False
+        source._reverse_result_order = False
+        if keyless_rows and not changes_row_shape:
+            # A plain slice chooses the rows independently of which model fields it loads.
+            source._fields_for_select = source._deferred_fields = ()
+        if not sliced:
+            source._limit = source._offset = None
+        return ModelRowsQuery(source)
+
+    @staticmethod
+    def get_rows_query_if_rows_repeat(queryset: QuerySet[Any, Any]) -> ValuesQuery | ModelRowsQuery[Any] | None:
         """The unsliced primary key query of the rows, when they repeat a primary key,
-        ``.distinct(<fields>)`` picks one row per group or a call of the dialect's QuerySet method
-        changes which rows are returned (``QuerySetExtension.changes_rows``) - ``count()``/``exists()``
-        count them as returned.
+        ``.distinct(<fields>)`` picks one row per group so summaries count them as returned. Dialect-specific
+        extension effects are selected separately after binding the summary to its connection.
 
         Args:
             queryset: The queryset.
-            counts_changed_rows: Whether a call changing which rows are returned makes the query - not
-                for an ``aggregate()`` of a slice, which reads the rows by their primary key.
 
         Returns:
             The query, or None when the rows are the plain matching rows.
         """
+        model_rows = StatementSelection.get_model_rows_query_for_summary(queryset)
+        if model_rows is not None:
+            return model_rows
+        if not StatementSelection.rows_repeat_for_summary(queryset):
+            return None
+        unsliced_queryset = queryset._clone()
+        unsliced_queryset._limit = None
+        unsliced_queryset._offset = None
+        return StatementSelection.get_primary_key_values_query(unsliced_queryset)
+
+    @staticmethod
+    def rows_repeat_for_summary(queryset: QuerySet[Any, Any]) -> bool:
+        """Whether a summary needs a derived row selection, without constructing that selection."""
         orderings = queryset._apply_default_ordering(queryset._orderings)
         # A composite primary key has no single column for COUNT(DISTINCT ...) - a .distinct()
         # then counts its distinct rows as a derived table.
-        distinct_over_composite_key = queryset._distinct and queryset.model._meta.has_composite_primary_key
+        model_binding: ModelBinding = queryset._binding  # type: ignore[assignment]
+        distinct_over_composite_key = queryset._distinct and model_binding.has_composite_primary_key
         if (
             not queryset._distinct_on
             and not distinct_over_composite_key
@@ -187,19 +229,15 @@ class StatementSelection:
                 orderings
                 and any(
                     field_name not in queryset._annotations
-                    and field_name not in queryset.model._meta.ordering_expressions
-                    and AggregatedMultiValuedPaths.get_multi_valued_paths(queryset.model, field_name)
+                    and field_name not in model_binding.ordering_expressions
+                    and AggregatedMultiValuedPaths.get_multi_valued_paths(model_binding, field_name)
                     for field_name, _order in orderings
                 )
             )
             and not StatementSelection.get_distinct_row_multiplying_annotation_names(queryset)
-            and not (counts_changed_rows and queryset._extension_calls and QuerySetExtensions.changes_rows(queryset))
         ):
-            return None
-        unsliced_queryset = queryset._clone()
-        unsliced_queryset._limit = None
-        unsliced_queryset._offset = None
-        return StatementSelection.get_primary_key_values_query(unsliced_queryset)
+            return False
+        return True
 
     @staticmethod
     def get_distinct_row_multiplying_annotation_names(queryset: QuerySet[Any, Any]) -> list[str]:

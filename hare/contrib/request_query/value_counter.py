@@ -5,13 +5,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from hare.classes.value_descriptions import ValueDescriptions
-from hare.contrib.request_query.constants import DESCENDING_PREFIX, ROW_COUNT_ANNOTATION, ROW_COUNT_SQL
+from hare.contrib.request_query.constants import DESCENDING_PREFIX, ROW_COUNT_ANNOTATION
 from hare.contrib.request_query.enums import EachRowOnce
 from hare.contrib.request_query.value_target import ValueTarget
 from hare.exceptions import FieldError, QueryError
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
-from hare.query.expressions.raw_sql import RawSQL
+from hare.query.functions import Count
 from hare.query.queryset.selection.statement_selection import StatementSelection
+from hare.sql.terms.star import Star
 
 if TYPE_CHECKING:
     from hare.contrib.request_query.request_query import RequestQuery
@@ -88,7 +89,7 @@ class ValueCounter:
         # to attach to.
         grouped = (
             StatementSelection.get_values_rows_queryset(queryset)
-            .annotate(**{ROW_COUNT_ANNOTATION: RawSQL(ROW_COUNT_SQL)})
+            .annotate(**{ROW_COUNT_ANNOTATION: Count(Star())})
             .group_by(*paths)
             .order_by(f"{DESCENDING_PREFIX}{ROW_COUNT_ANNOTATION}", *paths)
         )

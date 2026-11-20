@@ -9,10 +9,11 @@ from hare.ddl.indexes.index import Index
 from hare.exceptions import ConfigurationError, QueryError
 from hare.fields.relations.fields.generic_foreign_key_field_instance import GenericForeignKeyFieldInstance
 from hare.fields.relations.swappable_model_reference import SwappableModelReference
+from hare.sql.identifiers import Identifiers
 
 if TYPE_CHECKING:
-    from hare.models import Model
-    from hare.models.meta_info import MetaInfo
+    from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
+    from hare.models.model_binding import ModelBinding, ModelConstraint
 
 
 class GenericForeignKeys:
@@ -67,7 +68,7 @@ class GenericForeignKeys:
             base: The base.
             attributes: The attributes collected.
         """
-        meta = getattr(base, "_meta", None)
+        meta = getattr(base, "_declaration", None)
         declarations = (
             meta.generic_foreign_key_fields
             if meta is not None
@@ -79,34 +80,37 @@ class GenericForeignKeys:
         )
         for name, value in declarations.items():
             if name not in attributes:
-                attributes[name] = deepcopy(value)
+                attributes[name] = value.snapshot()
 
     @staticmethod
     def bind(
-        model: type[Model], generic_fields: dict[str, GenericForeignKeyFieldInstance[Any]], is_abstract: bool
+        meta: ModelBinding, generic_fields: dict[str, GenericForeignKeyFieldInstance[Any]], is_abstract: bool
     ) -> None:
         """Binds the generic foreign keys to the model built: each one's ``CHECK`` joins the
         model's constraints, and a unique constraint or index naming it becomes one per branch.
 
         Args:
-            model: The model.
+            meta: The model binding being prepared.
             generic_fields: Its generic foreign keys by name.
             is_abstract: Whether the model is abstract.
         """
-        meta = model._meta
+        model = meta._model
         meta.generic_foreign_key_fields = generic_fields
         if not generic_fields:
             return
-        for generic_field in generic_fields.values():
+        for name, generic_field in generic_fields.items():
             generic_field.model = model
+            generic_field.model_field_name = name
+            generic_field._binding = meta
         if is_abstract:
             return
-        GenericForeignKeyFieldInstance.declared_names.update(generic_fields)
         branched_fields = {name: field for name, field in generic_fields.items() if field.branch_names}
         GenericForeignKeys.expand_schema_entries(meta, branched_fields)
 
     @staticmethod
-    def expand_schema_entries(meta: MetaInfo, generic_fields: dict[str, GenericForeignKeyFieldInstance[Any]]) -> None:
+    def expand_schema_entries(
+        meta: ModelBinding, generic_fields: dict[str, GenericForeignKeyFieldInstance[Any]]
+    ) -> None:
         """Adds the ``CHECK`` of each generic foreign key with its branches known, and turns every
         unique constraint and index naming one into one per branch.
 
@@ -116,18 +120,37 @@ class GenericForeignKeys:
         """
         if not generic_fields:
             return
+        if meta.generic_schema_binding is None:
+            meta.generic_schema_binding = {
+                "declared_constraints": meta.constraints,
+                "declared_indexes": meta.indexes,
+                "expanded_constraints": (),
+                "expanded_indexes": (),
+            }
+        meta.constraints, meta.indexes = GenericForeignKeys.get_schema_entries(
+            meta.constraints, meta.indexes, generic_fields
+        )
+        meta.generic_schema_binding["expanded_constraints"] = meta.constraints
+        meta.generic_schema_binding["expanded_indexes"] = meta.indexes
+
+    @staticmethod
+    def get_schema_entries(
+        declared_constraints: tuple[Any, ...],
+        declared_indexes: tuple[Any, ...],
+        generic_fields: dict[str, GenericForeignKeyFieldInstance[Any]],
+    ) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
+        """Expand generic declarations for class-state capture and graph linking identically."""
         constraints: list[Any] = []
-        for constraint in meta.constraints:
+        for constraint in declared_constraints:
             if isinstance(constraint, UniqueConstraint):
                 constraints.extend(GenericForeignKeys.get_unique_constraint_per_branch(constraint, generic_fields))
             else:
                 constraints.append(constraint)
         constraints.extend(generic_field.get_check_constraint() for generic_field in generic_fields.values())
-        meta.constraints = tuple(constraints)
         indexes: list[tuple[str, ...] | Index] = []
-        for index in meta.indexes:
+        for index in declared_indexes:
             indexes.extend(GenericForeignKeys.get_index_per_branch(index, generic_fields))
-        meta.indexes = tuple(indexes)
+        return tuple(constraints), tuple(indexes)
 
     @staticmethod
     def get_branch_combinations(
@@ -151,7 +174,7 @@ class GenericForeignKeys:
                 combinations = [(suffix, [*names, field_name]) for suffix, names in combinations]
             else:
                 combinations = [
-                    (f"{suffix}_{branch_name}", [*names, branch_name])
+                    (f"{suffix}_{len(branch_name)}_{branch_name}", [*names, branch_name])
                     for suffix, names in combinations
                     for branch_name in generic_field.branch_names
                 ]
@@ -174,7 +197,11 @@ class GenericForeignKeys:
         if not any(field_name in generic_fields for field_name in constraint.fields):
             return [constraint]
         return [
-            replace(constraint, fields=tuple(names), name=f"{constraint.name}{suffix}" if constraint.name else None)
+            replace(
+                constraint,
+                fields=tuple(names),
+                name=Identifiers.get_within_limit(f"{constraint.name}{suffix}") if constraint.name else None,
+            )
             for suffix, names in GenericForeignKeys.get_branch_combinations(constraint.fields, generic_fields)
         ]
 
@@ -203,12 +230,14 @@ class GenericForeignKeys:
             branch_index = deepcopy(index)
             branch_index.fields = names
             if index.name:
-                branch_index.name = f"{index.name}{suffix}"
+                branch_index.name = Identifiers.get_within_limit(f"{index.name}{suffix}")
             branch_indexes.append(branch_index)
         return branch_indexes
 
     @staticmethod
-    def expand_kwargs(meta: MetaInfo, kwargs: dict[str, Any], *, apply_defaults: bool) -> dict[str, Any]:
+    def expand_kwargs(
+        meta: ModelBinding, kwargs: dict[str, Any], *, apply_defaults: bool, validate: bool = True
+    ) -> dict[str, Any]:
         """Field values given by name with each generic foreign key's value given as the values of
         its branches.
 
@@ -217,6 +246,8 @@ class GenericForeignKeys:
             kwargs: The values by name.
             apply_defaults: Whether a generic foreign key given no value - nor any branch - takes
                 its ``default``: a new instance is being built.
+            validate: Check explicit nullability and conflicting names. Trusted construction
+                skips those assignment policies, retaining the same structural branch mapping.
 
         Returns:
             The values - ``kwargs`` itself when no generic foreign key takes part.
@@ -236,14 +267,15 @@ class GenericForeignKeys:
                 if key in kwargs
             ]
             if name in kwargs:
-                if given_branch_keys:
+                if validate and given_branch_keys:
                     raise QueryError(
                         f"{generic_field.get_label()} and its branch {given_branch_keys[0]!r} were both given - "
                         "give one"
                     )
                 if expanded_kwargs is None:
                     expanded_kwargs = dict(kwargs)
-                expanded_kwargs.update(generic_field.get_branch_values(expanded_kwargs.pop(name)))
+                get_values = generic_field.get_branch_values if validate else generic_field.get_branch_assignments
+                expanded_kwargs.update(get_values(expanded_kwargs.pop(name)))
             elif apply_defaults and not given_branch_keys and generic_field.default is not None:
                 if expanded_kwargs is None:
                     expanded_kwargs = dict(kwargs)
@@ -251,23 +283,49 @@ class GenericForeignKeys:
         return kwargs if expanded_kwargs is None else expanded_kwargs
 
     @staticmethod
-    def expand_swappable_targets(model: type[Model], targets_by_setting: dict[str, dict[str, str]]) -> None:
+    def expand_swappable_targets(meta: ModelBinding, targets_by_setting: dict[str, dict[str, str]]) -> None:
         """Builds the branches of the model's generic foreign keys whose targets are a ``swappable``
         setting - known only once the configuration is.
 
         Args:
-            model: The model.
+            meta: The model binding being prepared.
             targets_by_setting: Setting name to its targets - branch name to ``"app.Model"``.
 
         Raises:
             ConfigurationError: A setting isn't configured, or a branch name is taken.
         """
-        meta = model._meta
-        expanded: dict[str, GenericForeignKeyFieldInstance[Any]] = {}
-        for name, generic_field in meta.generic_foreign_key_fields.items():
-            if not isinstance(generic_field.to, SwappableModelReference) or generic_field.branch_names:
-                continue
-            setting = generic_field.to.setting
+        model = meta._model
+        swappable_fields = {
+            name: field
+            for name, field in meta.generic_foreign_key_fields.items()
+            if isinstance(field.to, SwappableModelReference)
+        }
+        if not swappable_fields:
+            return
+        binding = meta.generic_schema_binding
+        extra_constraints: tuple[ModelConstraint, ...] = ()
+        extra_indexes: tuple[tuple[str, ...] | Index, ...] = ()
+        if binding is not None:
+            expanded_constraints = {id(constraint) for constraint in binding["expanded_constraints"]}
+            expanded_indexes = {id(index) for index in binding["expanded_indexes"]}
+            extra_constraints = tuple(
+                constraint for constraint in meta.constraints if id(constraint) not in expanded_constraints
+            )
+            extra_indexes = tuple(index for index in meta.indexes if id(index) not in expanded_indexes)
+            meta.constraints = binding["declared_constraints"]
+            meta.indexes = binding["declared_indexes"]
+        for generic_field in swappable_fields.values():
+            for branch_name in generic_field.branch_names:
+                branch: ForeignKeyFieldInstance[Any] = meta.fields_map[branch_name]  # type: ignore[assignment]
+                for column_name in branch.source_fields:
+                    column = meta.fields_map.get(column_name)
+                    if column is not None and column.reference is branch:
+                        meta.remove_field(column_name)
+                meta.remove_field(branch_name)
+            generic_field.branch_names = ()
+            generic_field.branch_by_model = {}
+        for name, generic_field in swappable_fields.items():
+            setting = generic_field.to.setting  # type: ignore[union-attr]
             targets = targets_by_setting.get(setting)
             if targets is None:
                 raise ConfigurationError(
@@ -283,5 +341,6 @@ class GenericForeignKeys:
                     )
                 meta.add_field(branch_name, branch)
             generic_field.branch_names = tuple(targets)
-            expanded[name] = generic_field
-        GenericForeignKeys.expand_schema_entries(meta, expanded)
+        GenericForeignKeys.expand_schema_entries(meta, meta.generic_foreign_key_fields)
+        meta.constraints = (*meta.constraints, *extra_constraints)
+        meta.indexes = (*meta.indexes, *extra_indexes)

@@ -21,7 +21,7 @@ from hare.dialects.sqlite.functions.sqlite_function_errors import SqliteFunction
 from hare.dialects.sqlite.functions.sqlite_native_functions import SqliteNativeFunctions
 from hare.fields.data.temporal.time_delta_field import TimeDeltaField
 from hare.sql.constants import MICROSECONDS_PER_DAY
-from hare.time import Timezone
+from hare.time.system_zone import SystemZone
 
 
 class TemporalArithmeticFunctions:
@@ -40,7 +40,7 @@ class TemporalArithmeticFunctions:
             A timezone-aware datetime, so arithmetic between values is on absolute time.
         """
         parsed = datetime.datetime.fromisoformat(value)
-        return Timezone.make_system_local_aware(parsed) if parsed.tzinfo is None else parsed
+        return SystemZone.make_system_local_aware(parsed) if parsed.tzinfo is None else parsed
 
     @classmethod
     def shift_datetime(cls, value: str | None, microseconds: int | None, sign: int) -> str | None:
@@ -62,7 +62,7 @@ class TemporalArithmeticFunctions:
         try:
             delta = datetime.timedelta(microseconds=sign * microseconds)
             if parsed.tzinfo is None:
-                return Timezone.get_system_local_naive(cls.get_aware_datetime(value) + delta).isoformat(" ")
+                return SystemZone.get_system_local_naive(cls.get_aware_datetime(value) + delta).isoformat(" ")
             return (parsed + delta).astimezone(datetime.UTC).isoformat(" ")
         except OverflowError:
             # A ValueError - sqlite3 reports an OverflowError as a too long text.
@@ -138,9 +138,7 @@ class TemporalArithmeticFunctions:
                 for name in TEMPORAL_ARITHMETIC_FUNCTION_NAMES
             }
         )
-        native_functions = SqliteNativeFunctions.module
-        if native_functions is not None:
-            functions = native_functions.TemporalArithmetic(functions)
+        functions = SqliteNativeFunctions.module.TemporalArithmetic(functions)
         await connection.create_function(SQLITE_DATETIME_SHIFT_FUNCTION_NAME, 3, functions.shift_datetime)
         await connection.create_function(SQLITE_DATE_SHIFT_FUNCTION_NAME, 3, functions.shift_date)
         await connection.create_function(SQLITE_DATETIME_DIFFERENCE_FUNCTION_NAME, 2, functions.difference_datetime)

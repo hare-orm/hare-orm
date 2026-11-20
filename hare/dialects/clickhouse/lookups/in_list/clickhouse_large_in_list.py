@@ -7,6 +7,7 @@ from typing import Any
 
 from hare.dialects.base.parameters.large_in_list import LargeInList
 from hare.dialects.clickhouse.client.declarations import ClickhouseValueSet
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.clickhouse.lookups.constants import CLICKHOUSE_VALUE_SET_INTEGER_TYPES, CLICKHOUSE_VALUE_SET_MINIMUM
 from hare.dialects.clickhouse.lookups.in_list.clickhouse_value_set_values import ClickhouseValueSetValues
 from hare.sql.terms.criteria.criterion import Criterion
@@ -18,22 +19,19 @@ class ClickhouseLargeInList(LargeInList):
     one plain type each - UUIDs, integers, texts, dates - bound as one parameter a read sends as an
     external table; any other list keeps the plain ``IN (...)`` form."""
 
-    @classmethod
     def get_membership_criterion(
-        cls, term: Term, values: Sequence[Any], non_null_values: list[Any], element_type: str | None
+        self, term: Term, values: Sequence[Any], non_null_values: list[Any], element_type: str | None
     ) -> Criterion | None:
-        value_set = cls.get_value_set(non_null_values)
+        value_set = self.get_value_set(non_null_values)
         return None if value_set is None else term.isin(ClickhouseValueSetValues(value_set))
 
-    @classmethod
     def get_row_container(
-        cls, value_rows: list[tuple[Any, ...]], element_types: Sequence[str | None] | None = None
+        self, value_rows: list[tuple[Any, ...]], element_types: Sequence[str | None] | None = None
     ) -> Term | None:
-        value_set = cls.get_row_value_set(value_rows)
+        value_set = self.get_row_value_set(value_rows)
         return None if value_set is None else ClickhouseValueSetValues(value_set)
 
-    @classmethod
-    def get_value_set(cls, values: list[Any]) -> ClickhouseValueSet | None:
+    def get_value_set(self, values: list[Any]) -> ClickhouseValueSet | None:
         """The parameter of a list of single values.
 
         Args:
@@ -44,11 +42,10 @@ class ClickhouseLargeInList(LargeInList):
         """
         if len(values) < CLICKHOUSE_VALUE_SET_MINIMUM:
             return None
-        column_type = cls.get_column_type(values)
+        column_type = self.get_column_type(values)
         return None if column_type is None else ClickhouseValueSet((column_type,), list(values))
 
-    @classmethod
-    def get_row_value_set(cls, value_rows: list[tuple[Any, ...]]) -> ClickhouseValueSet | None:
+    def get_row_value_set(self, value_rows: list[tuple[Any, ...]]) -> ClickhouseValueSet | None:
         """The parameter of a list of rows of values.
 
         Args:
@@ -61,7 +58,7 @@ class ClickhouseLargeInList(LargeInList):
             return None
         column_types = []
         for position in range(len(value_rows[0])):
-            column_type = cls.get_column_type([row[position] for row in value_rows])
+            column_type = self.get_column_type([row[position] for row in value_rows])
             if column_type is None:
                 return None
             column_types.append(column_type)
@@ -82,11 +79,11 @@ class ClickhouseLargeInList(LargeInList):
             if type(value) is not value_type:
                 return None
         if value_type is uuid.UUID:
-            return "UUID"
+            return ClickhouseTypeName.UUID
         if value_type is str:
-            return "String"
+            return ClickhouseTypeName.STRING
         if value_type is datetime.date:
-            return "Date32"
+            return ClickhouseTypeName.DATE32
         if value_type is int:
             least, greatest = min(values), max(values)
             for type_name, low, high in CLICKHOUSE_VALUE_SET_INTEGER_TYPES:

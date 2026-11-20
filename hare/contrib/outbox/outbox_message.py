@@ -12,7 +12,8 @@ class OutboxMessage:
     Attributes:
         topic: The event's topic - a delivery routes on it.
         payload: The event's payload - JSON values, or values ``OutboxJsonEncoding`` writes.
-        idempotency_key: At most one event ever exists per key - the one stored is returned instead.
+        idempotency_key: The stored event is returned while retained. After cleanup removes it,
+            the same key may create a new event.
         ordering_key: Events of one key are delivered strictly in the order they were written.
         headers: Metadata of the event besides its payload.
         extra_field_values: Values of the columns a subclass declares on top of ``OutboxEvent``'s own.

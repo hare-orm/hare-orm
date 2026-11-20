@@ -1,12 +1,13 @@
-"""DDL is decided by the migration state alone: the SQL sqlmigrate shows for a migration is the SQL migrate
-runs - dropping a unique field and a relation, renaming a constraint, rebuilding a SQLite table - and
-migrate reads nothing from the database's catalog to write it."""
+"""Migration preview and execution use the same DDL, allowing fresh identifiers for temporary objects.
+Execution needs connection settings and constraint checks and reads no table definitions."""
 
+import re
 from collections.abc import AsyncGenerator
 
 import pytest
 import pytest_asyncio
 
+from hare.contrib.test import capture_queries
 from hare.ddl.constraints import CheckConstraint, UniqueConstraint
 from hare.dialects.postgresql.schema.postgresql_schema_editor import PostgresqlSchemaEditor
 from hare.dialects.sqlite.drivers.aiosqlite.client import AiosqliteClient
@@ -53,27 +54,8 @@ MIGRATIONS = [
 ]
 
 
-class RecordingClient:
-    """Records every statement a client is asked to run - the DDL and any read of the catalog."""
-
-    def __init__(self, client) -> None:
-        self.client = client
-        self.statements: list[str] = []
-        for method_name in ("execute", "execute_dicts", "execute_script"):
-            self.record(method_name)
-
-    def record(self, method_name: str) -> None:
-        method = getattr(self.client, method_name)
-
-        async def recorded(query, *args, **kwargs):
-            self.statements.append(query)
-            return await method(query, *args, **kwargs)
-
-        setattr(self.client, method_name, recorded)
-
-
 @pytest_asyncio.fixture(params=["sqlite", "postgresql"])
-async def client(request) -> AsyncGenerator:
+async def client(request, migration_context) -> AsyncGenerator:
     if request.param == "postgresql":
         # Nothing to run against - the statements are only recorded.
         yield FakeClient("postgresql", inline_comment=False)
@@ -92,15 +74,23 @@ def get_editor(client, *, collect_sql: bool):
     return client.dialect.schema_editor_class(client, atomic=True, collect_sql=collect_sql)
 
 
+def normalize_rebuild_names(statements: list[str]) -> list[str]:
+    """Compare independently generated names while retaining each name's references in order."""
+    names: dict[str, str] = {}
+    name_pattern = re.compile(r"\bnew__book [0-9a-f]{32}\b")
+    return [
+        name_pattern.sub(lambda match: names.setdefault(match[0], f"rebuild {len(names)}"), sql) for sql in statements
+    ]
+
+
 @pytest.mark.asyncio
-async def test_sqlmigrate_shows_what_migrate_runs_and_migrate_reads_no_catalog(client) -> None:
+async def test_sqlmigrate_shows_ddl_and_runtime_only_reads_required_connection_settings(client) -> None:
     state = State()
     for migration in MIGRATIONS:
         collecting_editor = get_editor(client, collect_sql=True)
-        await migration.apply(state.clone(), schema_editor=collecting_editor, collect_sql=True)
+        await migration.apply(state, schema_editor=collecting_editor, collect_sql=True)
         shown_sql = [statement for statement in collecting_editor.collected_sql if not statement.startswith("--")]
 
-        recording_client = RecordingClient(client) if not isinstance(client, FakeClient) else None
         run_sql: list[str] = []
         editor = get_editor(client, collect_sql=False)
         original_run_sql = editor.run_sql
@@ -111,20 +101,35 @@ async def test_sqlmigrate_shows_what_migrate_runs_and_migrate_reads_no_catalog(c
 
         editor.run_sql = recorded_run_sql
         executed_before = len(client.executed) if isinstance(client, FakeClient) else 0
-        await migration.apply(state, schema_editor=editor)
+        async with capture_queries(client) as recorded:
+            state = await migration.apply(state, schema_editor=editor)
 
-        assert run_sql == shown_sql, migration.name
+        assert normalize_rebuild_names(run_sql) == normalize_rebuild_names(shown_sql), migration.name
         if isinstance(client, FakeClient):
             # Every statement sent to the database is DDL from the state - no catalog query.
             assert client.executed[executed_before:] == run_sql, migration.name
         else:
-            assert recording_client is not None
             # The DDL runs statement by statement; a read is a SELECT or a PRAGMA asking - not setting -
             # something.
             catalog_reads = [
                 statement
-                for statement in recording_client.statements
+                for statement in recorded.queries
                 if statement.lstrip().upper().startswith("SELECT")
                 or (statement.lstrip().upper().startswith("PRAGMA") and "=" not in statement)
             ]
-            assert catalog_reads == [], migration.name
+            # Constraint state, its native namespaces and rename settings, not table definitions.
+            assert catalog_reads[0] == "PRAGMA foreign_keys", migration.name
+            databases = await client.execute_dicts("PRAGMA database_list")
+            checks = [f"PRAGMA {editor.quote(database['name'])}.foreign_key_check" for database in databases]
+            assert catalog_reads[-len(checks) :] == checks, migration.name
+            assert all(catalog_reads.count(check) == 1 for check in checks), migration.name
+            assert catalog_reads.count("PRAGMA database_list") == 1, migration.name
+            assert catalog_reads.count("PRAGMA legacy_alter_table") == (
+                3 if migration.name == "0002_changes" else 0
+            ), migration.name
+            assert set(catalog_reads) <= {
+                "PRAGMA foreign_keys",
+                *checks,
+                "PRAGMA database_list",
+                "PRAGMA legacy_alter_table",
+            }, migration.name

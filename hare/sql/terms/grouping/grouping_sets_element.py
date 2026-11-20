@@ -3,15 +3,11 @@ from __future__ import annotations
 from collections.abc import Iterator, Sequence
 from typing import TYPE_CHECKING
 
-from hare.sql.builder_methods import BuilderMethods
 from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
-    from typing import Self
-
-    from hare.sql.builder.tables.table import Table
     from hare.sql.sql_context import SqlContext
-    from hare.sql.terms.node import TNode
+    from hare.sql.terms.node import Node
 
 
 class GroupingSetsElement(Term):
@@ -22,25 +18,18 @@ class GroupingSetsElement(Term):
         sets: The sets of grouped terms.
     """
 
+    structure_attributes = ("sets",)
+
     def __init__(self, sets: Sequence[Sequence[Term]]) -> None:
         super().__init__()
         self.sets = [list(grouping_set) for grouping_set in sets]
 
-    def nodes_(self) -> Iterator[TNode]:
-        yield self  # type:ignore[misc]
+    def get_children(self) -> Iterator[Node]:
         for grouping_set in self.sets:
-            for term in grouping_set:
-                yield from term.nodes_()
+            yield from grouping_set
 
     def get_sql(self, sql_context: SqlContext) -> str:
         sets_sql = ",".join(
             f"({','.join(term.get_sql(sql_context) for term in grouping_set)})" for grouping_set in self.sets
         )
         return f"GROUPING SETS ({sets_sql})"
-
-    @BuilderMethods.builder
-    def replace_table(self, current_table: Table | None, new_table: Table | None) -> Self:
-        self.sets = [
-            [term.replace_table(current_table, new_table) for term in grouping_set] for grouping_set in self.sets
-        ]
-        return self

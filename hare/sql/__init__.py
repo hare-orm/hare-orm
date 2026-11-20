@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from hare.dialects.base.clauses.enums import JoinType
 from hare.sql.builder.queries.query import Query
 from hare.sql.builder.tables.aliased_query import AliasedQuery
 from hare.sql.builder.tables.database import Database
 from hare.sql.builder.tables.schema import Schema
 from hare.sql.builder.tables.table import Table
-from hare.sql.enums import DatePart, JoinType
+from hare.sql.enums import DatePart
 from hare.sql.exceptions import (
     CaseException,
     FunctionException,

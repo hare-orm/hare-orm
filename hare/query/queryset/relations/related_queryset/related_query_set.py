@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Iterable, Iterator
-from typing import TYPE_CHECKING, Any, ClassVar, Self, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Self, TypeVar, overload
 
 from hare.core.caching.cache import Cache
-from hare.dialects.base.transactions.savepoints.savepoint_span import current_savepoint_span
+from hare.dialects.base.client.transaction_lifecycle.transaction_callbacks import TransactionCallbacks
 from hare.exceptions import (
     NoValuesFetched,
 )
@@ -14,14 +14,15 @@ from hare.query.expressions.constants import PLAIN_VALUE_TYPES
 from hare.query.queryset.arguments.filter_arguments import FilterArguments
 from hare.query.queryset.constants import RELATION_CLASS_CACHE_SIZE
 from hare.query.queryset.queryset import QuerySet
+from hare.query.queryset.relations.related_queryset.declarations import RelationRollbackReset
 from hare.query.queryset.specification_copying import SpecificationCopying
 from hare.query.scopes.row_visibility import RowVisibility
-from hare.transactions.atomic.atomic import Atomic
-from hare.transactions.transactions import Transactions
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.dialects.base.client.transaction_client import TransactionClient
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 from hare.query.queryset.relations.related_queryset.related_rows_iterator import RelatedRowsIterator
 from hare.query.queryset.relations.related_queryset.relation_rows import RelationRows
 from hare.query.queryset.relations.related_queryset.unsaved_owner_condition import UnsavedOwnerCondition
@@ -42,12 +43,17 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
         from_fields: The instance's fields holding the values ``relation_fields`` must equal.
     """
 
+    # Relations always originate from an instance in a prepared graph.
+    _binding: ModelBinding
+
     __slots__ = (
         "instance",
         "relation_fields",
         "from_fields",
         "relation_rows",
+        "_source_relation_rows",
         "_bound_key_values",
+        "_bound_connection_alias",
         "_is_bound",
         "_rollback_reset_layers",
         # The obj's RelationRows holds its relation object weakly.
@@ -56,9 +62,7 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
 
     #: (relation class, queryset class) -> the relation class of related models whose manager has
     #: a queryset class of its own - such a relation has that class's methods too.
-    CLASSES_BY_QUERYSET_CLASS: ClassVar[Cache[type]] = Cache(
-        RELATION_CLASS_CACHE_SIZE, holds_sql=False, keyed_by_model=False
-    )
+    CLASSES_BY_QUERYSET_CLASS: ClassVar[Cache[type]] = Cache(RELATION_CLASS_CACHE_SIZE)
 
     def __init__(
         self,
@@ -71,32 +75,38 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
         # The query settings come from the related model's manager when the relation is read off
         # the obj - see _bind().
         self.model = remote_model
+        self._binding = obj._binding.graph.get_binding(remote_model)
+        self._context = obj._context
         self.relation_fields = relation_fields
         self.instance = obj
         self.from_fields = from_fields
         #: The fetched rows - the ones the obj keeps, when given.
         self.relation_rows = RelationRows() if relation_rows is None else relation_rows
+        #: Instance cache invalidated by writes, even when this declaration reads another source.
+        self._source_relation_rows = self.relation_rows
         #: The obj's key values the query settings were made for.
         self._bound_key_values: tuple[Any, ...] | None = None
+        #: The instance's connection alias these query settings were made for.
+        self._bound_connection_alias: str | None = None
         #: Whether the query settings were made - a relation read off the obj with its rows
         #: fetched makes them on their first use.
         self._is_bound = False
         #: The open transactions a reset of the fetched rows on rollback is registered with - made on
         #: the first registration, most relations are only read.
-        self._rollback_reset_layers: list[dict[str, Any]] | None = None
+        self._rollback_reset_layers: list[RelationRollbackReset] | None = None
 
     @classmethod
-    def get_class_for(cls, remote_model: type[Model]) -> type[Self]:
+    def get_class_for(cls, binding: ModelBinding) -> type[Self]:
         """The class of this relation to ``remote_model`` - with the methods of the queryset
         class its manager declares.
 
         Args:
-            remote_model: The related model.
+            binding: The binding of the related model.
 
         Returns:
             The class.
         """
-        queryset_class = remote_model._meta.manager.queryset_class
+        queryset_class = binding.manager.queryset_class
         if queryset_class is QuerySet:
             return cls
         key = (cls, queryset_class)
@@ -105,7 +115,7 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
             relation_class = RelatedQuerySet.CLASSES_BY_QUERYSET_CLASS[key] = type(
                 f"{cls.__name__}{queryset_class.__name__}", (cls, queryset_class), {"__slots__": ()}
             )
-        return cast("type[Self]", relation_class)
+        return relation_class
 
     def __getstate__(self) -> dict[str, Any]:
         """The relation without its query settings and its rollback registrations - they hold
@@ -122,9 +132,13 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         self.relation_rows = RelationRows()
+        self._source_relation_rows = self.relation_rows
         for name, value in state.items():
             setattr(self, name, value)
+        self._binding = self.instance._binding.graph.get_binding(self.model)
+        self._context = self.instance._context
         self._bound_key_values = None
+        self._bound_connection_alias = None
         self._is_bound = False
 
     @property
@@ -166,9 +180,9 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
             QueryError: A field the relation references the instance by was left unloaded.
         """
         instance = self.instance
-        manager = self.model._meta.manager
+        manager = self._binding.manager
         if not instance._saved_in_db:
-            queryset = manager.get_queryset()
+            queryset = manager.create_queryset(binding=self._binding, context=self._context)
             queryset._q_objects.append(UnsavedOwnerCondition())
             key_values = None
         else:
@@ -177,15 +191,14 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
                 # when queried.
                 key_values = tuple([getattr(instance, field_name, None) for field_name in self.from_fields])
             else:
-                try:
-                    key_values = tuple([getattr(instance, field_name) for field_name in self.from_fields])
-                except AttributeError:
-                    # A referenced field left unloaded - the error names it.
-                    RelationValues.get_relation_key_values(
-                        instance, self.from_fields, f"The relation to {self.model.__name__}"
-                    )
-                    raise
-            if key_values == self._bound_key_values and not manager.overrides_get_queryset:
+                key_values = RelationValues.get_relation_key_values(
+                    instance, self.from_fields, f"The relation to {self.model.__name__}"
+                )
+            if (
+                key_values == self._bound_key_values
+                and instance._connection_alias == self._bound_connection_alias
+                and not manager.overrides_get_queryset
+            ):
                 return
             relation_rows = self.relation_rows
             bound_settings = relation_rows.bound_settings
@@ -199,7 +212,7 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
                 # for these key values.
                 self._copy_bound_settings(bound_settings[2], key_values)
                 return
-            queryset = manager.get_queryset()
+            queryset = manager.create_queryset(binding=self._binding, context=self._context)
             # _append_filters(), the conditions built only once the relation is queried - a
             # relation whose fetched rows are only read never builds them.
             relation_filters = dict(zip(self.relation_fields, key_values, strict=True))
@@ -234,33 +247,67 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
             queryset: The queryset holding them.
             key_values: The key values they were made for; None for an unsaved obj.
         """
-        SpecificationCopying.compile_copy(type(queryset))(queryset, self)
-        if hasattr(queryset, "__dict__"):
-            self.__dict__.update(queryset.__dict__)
+        SpecificationCopying.copy_state(queryset, self)
         self._bound_key_values = key_values
+        self._bound_connection_alias = self.instance._connection_alias
         self._is_bound = True
+
+    def _clone_keeping_calls(self) -> Self:
+        """Retain relation writes while giving a changed declaration independent fetched rows.
+
+        Connection, visibility and tenant choices can select different rows from the instance's
+        prefetch. Writes still invalidate that canonical cache, including on rollback, but a
+        read of this clone must neither consume nor publish rows in it.
+        """
+        queryset = super()._clone_keeping_calls()
+        queryset.relation_rows = RelationRows()
+        queryset._rollback_reset_layers = None
+        return queryset
 
     def _clone(self) -> Self:
         # A queryset of the manager's class - without the relation's writes and fetched rows.
-        queryset_class = self.model._meta.manager.queryset_class
+        queryset_class = self._binding.manager.queryset_class
         queryset = queryset_class.__new__(queryset_class)
-        SpecificationCopying.compile_copy(queryset_class)(self, queryset)
-        queryset._prefetch_queries = {key: list(value) for key, value in self._prefetch_queries.items()}
+        SpecificationCopying.copy_state(self, queryset, queryset_class)
         return queryset  # type: ignore[return-value]
 
-    def _get_model_queryset(self, connection: DatabaseClient) -> QuerySet[TModel]:
-        """A queryset of the related model's manager pinned to ``connection`` - what the relation's writes
-        create and match rows of the related model through.
+    def _get_connection_argument(self, using: str | DatabaseClient | None = None) -> str | DatabaseClient | None:
+        """The method's explicit connection, else the relation's declared ``using()`` choice.
+
+        Unbound fetched relations have no query settings yet and contribute no explicit choice.
+        Routing and model-specific tenant checks remain with the operation's connection selector.
+        """
+        if using is None and getattr(self, "_connection_explicitly_chosen", False):
+            return self._connection
+        return using
+
+    def _get_model_queryset(self, connection: DatabaseClient | None = None) -> QuerySet[TModel]:
+        """A queryset of the related model's manager for a relation write.
+
+        A supplied client pins an operation already executing. Without one, the parent's
+        connection metadata follows the ordinary late routing and transaction lookup.
+        The relation's default scope and visibility accompany both paths; its filters and
+        selection settings do not replace the manager's fresh write queryset.
 
         Args:
-            connection: The connection.
+            connection: An executing operation's client, or None for a deferred query.
 
         Returns:
             The queryset.
         """
-        queryset = cast("QuerySet[TModel]", self.model._meta.manager.get_queryset())
-        queryset._apply_connection(connection)
-        queryset._connection_explicitly_chosen = True
+        queryset: QuerySet[TModel] = self._binding.manager.create_queryset(
+            binding=self._binding, context=self._context
+        )
+        self._share_default_scope(queryset)
+        queryset._options = queryset._options.updated(extension_calls=self._extension_calls)
+        if connection is None:
+            if self._get_connection_argument() is not None:
+                self._share_connection(queryset)
+            else:
+                queryset._set_instance_connection(self.instance)
+        else:
+            queryset._apply_connection(connection)
+            queryset._connection_explicitly_chosen = True
         return queryset
 
     def __contains__(self, item: Any) -> bool:
@@ -298,16 +345,8 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
         """
         relation_rows = self.relation_rows
         if not relation_rows._fetched:
-            raise NoValuesFetched("No values were fetched for this relation - await it or prefetch it")
+            raise NoValuesFetched("No values were fetched for this relation - use async for or prefetch it")
         return relation_rows.related_objects
-
-    def _set_result_for_query(self, sequence: list[TModel], attribute_name: str | None = None) -> None:
-        # Several Prefetch(..., to_attribute=...) of one relation share this container - a to_attribute result
-        # leaves the bare relation unfetched.
-        if attribute_name:
-            setattr(self.instance, attribute_name, sequence)
-        else:
-            self.relation_rows.set_fetched(sequence)
 
     def _reset_cache_on_rollback(self, connection: DatabaseClient) -> None:
         """Registers a reset of this relation's fetched rows if the transaction or savepoint ``connection`` is
@@ -315,31 +354,42 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
         """
         if not connection.is_transaction_client:
             return
-        registered_on = Atomic.get_connection(connection.connection_alias)
-        if not registered_on.is_transaction_client:
-            return
-        current_span = current_savepoint_span.get()
+        transaction: TransactionClient = connection  # type: ignore[assignment]
+        registered_on = transaction._get_top_level_transaction()
+        current_span = TransactionCallbacks.get_registration_span(transaction)
         layers = self._rollback_reset_layers
         if layers is None:
             layers = self._rollback_reset_layers = []
-        while layers and layers[-1]["client"]._finalized:
-            layers.pop()
-        if layers and layers[-1]["span"] is current_span:
+        layers[:] = [layer for layer in layers if not layer.client.transaction_state.finished]
+        if any(layer.client is registered_on and layer.span is current_span for layer in layers):
             return
-        Transactions.on_rollback(self._reset_cache, using=connection.connection_alias)
-        layers.append({"span": current_span, "client": registered_on})
+        layer = RelationRollbackReset(registered_on, current_span)
+        layers.append(layer)
 
-    def _reset_cache(self) -> None:
-        # The relation's own drop - a subclass's registers a reset again.
-        RelatedQuerySet._invalidate_local_cache(self)
+        def discard() -> None:
+            layers[:] = [entry for entry in layers if entry is not layer]
+
+        def invalidate() -> None:
+            try:
+                RelatedQuerySet._invalidate_local_cache(self)
+            finally:
+                discard()
+
+        TransactionCallbacks.add_on_rollback_callback(transaction, invalidate, is_user_callback=False)
+        TransactionCallbacks.add_on_commit_callback(transaction, discard, is_user_callback=False)
+
+    def _invalidate_after_write(self, connection: DatabaseClient) -> None:
+        """Drop fetched rows now and register another drop on the actual write's rollback."""
+        self._invalidate_local_cache()
+        self._reset_cache_on_rollback(connection)
 
     def _invalidate_local_cache(self) -> None:
         """Drops the relation's fetched rows after a write through it, so the next read reflects the
         write.
         """
-        relation_rows = self.relation_rows
-        relation_rows._fetched = False
-        relation_rows.related_objects = []
+        for relation_rows in (self.relation_rows, self._source_relation_rows):
+            relation_rows._fetched = False
+            relation_rows.related_objects = []
 
     @staticmethod
     async def _get_set_members(members: tuple[Any, ...]) -> tuple[Any, ...]:

@@ -2,16 +2,15 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from hare.fields import Field
-from hare.fields.data.text.text_values import TextValues
+from hare.fields.data.text.string_field import StringField
 
 if TYPE_CHECKING:
     from hare.sql.terms.term import Term
 
 
-class CitextField(Field[str]):
+class CitextField(StringField[str]):
     """A ``CITEXT`` column - text compared, indexed and sorted ignoring case. Needs the ``citext``
     extension; the migration autodetector adds ``CreateExtension("citext")`` wherever the field is
     used.
@@ -29,14 +28,5 @@ class CitextField(Field[str]):
 
         return partial(Cast, as_type=self.SQL_TYPE)
 
-    def get_written_value_of_another_type(self, value: Any) -> Any:
-        TextValues.raise_if_not_text(self, value)
-        return super().get_written_value_of_another_type(value)
-
-    def to_python(self, value: Any) -> Any:
-        if value is not None and not isinstance(value, str):
-            TextValues.raise_if_not_text(self, value)
-        return super().to_python(value)
-
-    def from_db_value(self, value: Any) -> Any:
-        return self.to_python(TextValues.get_read_text(value))
+    def get_assign_normalized_types(self) -> frozenset[type]:
+        return self._get_unchanged_assign_types(CitextField.to_python, self.field_type)

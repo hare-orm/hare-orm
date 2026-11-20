@@ -7,17 +7,19 @@ import pytest
 import pytest_asyncio
 
 from hare import fields
+from hare.core.hare_context import HareContext
 from hare.dialects.clickhouse.types.clickhouse_json_values import ClickhouseJsonValues
 from hare.exceptions import FieldError, ValidationError
 from hare.query.expressions import F
 from hare.query.functions import Cast, Max, Min
-from tests.dialects.clickhouse.models import Player
+from tests.dialects.clickhouse.models import Player, Team
+from tests.utils.model_bindings import ModelBindings
 
 
 @pytest_asyncio.fixture
 async def documents(clickhouse_db):
     data = {"url": "http://x/y", "ratio": 1.0, "big": 1e20, "count": 10, "flag": True}
-    if not Player._meta.connection.features.supports_json_type:
+    if not HareContext.require_current().apps.get_queryset(Player).get_connection().features.supports_json_type:
         # A JSON column keeps no null - the write is refused.
         data["nothing"] = None
     await Player.objects.create(id=1, name="http://x/y", data=data)
@@ -72,7 +74,7 @@ async def test_values_order_as_clickhouse_orders_a_dynamic(clickhouse_db):
 
 @pytest.mark.asyncio
 async def test_a_json_null_is_a_value_and_a_missing_key_none(documents):
-    if Player._meta.connection.features.supports_json_type:
+    if HareContext.require_current().apps.get_queryset(Player).get_connection().features.supports_json_type:
         # A JSON column keeps no null - the path is a missing one.
         assert await ids(data__nothing=None) == [1, 2, 3]
         assert await ids(data__nothing__isnull=True) == [1, 2, 3]
@@ -85,7 +87,7 @@ async def test_a_json_null_is_a_value_and_a_missing_key_none(documents):
 
 @pytest.mark.asyncio
 async def test_a_none_in_a_list_or_negated_follows_the_equality_with_none(documents):
-    if Player._meta.connection.features.supports_json_type:
+    if HareContext.require_current().apps.get_queryset(Player).get_connection().features.supports_json_type:
         # A JSON column keeps no null - None matches a missing path, as equality does.
         assert await ids(data__nothing__in=[None]) == [1, 2, 3]
         assert await ids(data__count__in=[10, None]) == [1]
@@ -147,7 +149,7 @@ async def test_a_key_holding_a_dot_is_a_key_not_a_path(clickhouse_db):
 
 @pytest.mark.asyncio
 async def test_a_key_the_json_type_cant_hold_is_refused(clickhouse_db):
-    connection = Player._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Player).get_connection()
     if not connection.dialect.stores_json_natively:
         pytest.skip("the column holds the JSON text")
     with pytest.raises(ValidationError, match="can't hold '%2E'"):
@@ -158,7 +160,7 @@ async def test_a_key_the_json_type_cant_hold_is_refused(clickhouse_db):
 @pytest.mark.database_independent
 def test_the_json_text_of_a_dotted_key_follows_the_server():
     """A dot in a value or a number is no key - only a key's dot is escaped."""
-    field = Player._meta.fields_map["data"]
+    field = ModelBindings.prepare(Team, Player).get_binding(Player).fields_map["data"]
     escaped = ClickhouseJsonValues.to_db_escaping_key_dots(field, {"a.b": "c.d", "n": 1.5, "l": [{"e.f": 1}]}, Player)
     assert escaped == field.to_db_value({"a%2Eb": "c.d", "n": 1.5, "l": [{"e%2Ef": 1}]}, Player)
 
@@ -184,7 +186,7 @@ async def test_a_value_a_json_column_would_read_back_otherwise_is_refused(clickh
     """A JSON column dropped a key holding null or an empty object, read an integer past 64 bits as a
     float and a boolean beside a number or a text as that number or text - the text stored on the native
     protocol keeps them all."""
-    if not Player._meta.connection.features.supports_json_type:
+    if not HareContext.require_current().apps.get_queryset(Player).get_connection().features.supports_json_type:
         await Player.objects.create(id=1, name="kept", data=data)
         assert await Player.objects.values_list("data", flat=True) == [data]
         return

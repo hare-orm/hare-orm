@@ -4,23 +4,30 @@ and compared by drift with the declared ones as the server writes them."""
 
 import pytest
 
+from hare import fields
+from hare.core.hare_context import HareContext
 from hare.ddl.raw_sql_term import RawSQLTerm
+from hare.dialects.clickhouse.clickhouse_engine import ClickhouseEngine
 from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
 from hare.dialects.clickhouse.introspection.clickhouse_observed_table_options import ClickhouseObservedTableOptions
 from hare.dialects.clickhouse.introspection.clickhouse_sql_parts import ClickhouseSqlParts
 from hare.dialects.clickhouse.introspection.constants import CLICKHOUSE_ENGINE_CLAUSES
 from hare.dialects.clickhouse.schema_objects.clickhouse_projection import ClickhouseProjection
+from hare.inspectdb import ModelFactory
+from hare.inspectdb.introspection.catalog_sql import CatalogSql
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
+from hare.migrations import Migration, MigrationRunner
 from hare.migrations.drift import detect_drift
-from hare.migrations.operations import AlterModelOptions
-from hare.migrations.state.model_state import ModelState
+from hare.migrations.operations import AlterField, AlterModelOptions
 from hare.migrations.state.state import State
+from hare.migrations.state.state_values import StateValues
+from hare.query.expressions import F
 from tests.dialects.clickhouse import models
 from tests.dialects.clickhouse.models import Hit, PageView, Team
 from tests.utils.model_source_generator import ModelSourceGenerator
 
 OBSERVED = ClickhouseTableOptions(
-    engine="ReplacingMergeTree(duration_ms)",
+    engine=ClickhouseEngine("ReplacingMergeTree", F("duration_ms")),
     order_by=("id", "site", RawSQLTerm("intHash32(id)")),
     sample_by=RawSQLTerm("intHash32(id)"),
     partition_by=RawSQLTerm("toYYYYMM(seen)"),
@@ -32,10 +39,50 @@ OBSERVED = ClickhouseTableOptions(
 
 
 async def get_table_options_changes(connection, model):
-    state = State()
-    state.models[("models", model.__name__)] = ModelState.make_from_model("models", model)
+    state = State.from_models([model], app_label="models")
     drift = await detect_drift(connection, state, ["models"])
     return [operation for operation in drift.operations if isinstance(operation, AlterModelOptions)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("column", ["category", "category code"])
+async def test_reconstructed_partition_column_selects_a_rebuild_for_type_changes(clickhouse_db, column):
+    connection = HareContext.require_current().apps.get_queryset(Hit).get_connection()
+    quote = connection.dialect.literals.quote_identifier
+    quoted_column = quote(column)
+    await connection.execute_script(
+        f"CREATE TABLE inspected_partition(id UInt64, {quoted_column} Int32, value Int32) "
+        f"ENGINE=MergeTree PARTITION BY {quoted_column} ORDER BY id;"
+        "INSERT INTO inspected_partition VALUES(1,1,3),(2,2,5)"
+    )
+    model = None
+    try:
+        info = await DatabaseCatalog.inspect_table(connection, "inspected_partition")
+        model = ModelFactory.from_table_info(
+            info, connection.dialect.name, app_label="inspected", skip_many_to_many_through_tables=False
+        )
+        clickhouse_db.register_live_models([model], app_label="inspected", connection_alias="models", managed=False)
+        field_name = HareContext.require_current().apps.get_binding(model).fields_db_projection_reverse[column]
+        assert HareContext.require_current().apps.get_binding(model).table_options[0].partition_by == field_name
+        state = State.from_models([model], default_connections={"inspected": "models"})
+        snapshot = StateValues.get(state)
+        migration = Migration(
+            "widen_partition",
+            "inspected",
+            operations=[AlterField(model.__name__, field_name, fields.BigIntField(source_field=column))],
+        )
+        runner = MigrationRunner(connection)
+        await runner.apply(migration, state)
+        assert StateValues.get(state) == snapshot
+        await runner.unapply(migration, state)
+        assert StateValues.get(state) == snapshot
+        assert await connection.execute_dicts(
+            f"SELECT id, {quoted_column} AS category, value FROM inspected_partition ORDER BY id"
+        ) == [{"id": 1, "category": 1, "value": 3}, {"id": 2, "category": 2, "value": 5}]
+    finally:
+        if model is not None and HareContext.require_current().apps.get_binding(model)._inited:
+            clickhouse_db.unregister_live_models([model])
+        await connection.execute_script("DROP TABLE inspected_partition")
 
 
 @pytest.mark.database_independent
@@ -64,7 +111,7 @@ def test_the_engine_and_the_column_list_are_read():
         "SETTINGS": "a = 1, b = 'it\\'s, x'",
     }
     assert ClickhouseSqlParts.get_clauses("Memory", CLICKHOUSE_ENGINE_CLAUSES) == {"": "Memory"}
-    assert ClickhouseSqlParts.get_before_parentheses(" default.t (`a` String) ") == "default.t"
+    assert CatalogSql.get_parenthesized_parts(" default.t (`a` String) ") == ("default.t", "`a` String", " ")
     assert ClickhouseObservedTableOptions.get_settings("a = 1, b = 'it\\'s, x', c = 0.5") == {
         "a": 1,
         "b": "it's, x",
@@ -84,7 +131,7 @@ def test_the_engine_and_the_column_list_are_read():
 
 @pytest.mark.asyncio
 async def test_options_are_read_back_and_written_by_inspectdb(clickhouse_db):
-    connection = Hit._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Hit).get_connection()
     table = await DatabaseCatalog.inspect_table(connection, "hit")
     assert table.table_options == OBSERVED
     # A table of no options of its own, and one sorted by more than its key.
@@ -104,7 +151,7 @@ async def test_options_are_read_back_and_written_by_inspectdb(clickhouse_db):
     )
     compile(source, "<generated>", "exec")
     for expected in (
-        "engine='ReplacingMergeTree(duration_ms)'",
+        "engine=ClickhouseEngine('ReplacingMergeTree', F('duration_ms'))",
         "order_by=('id', 'site', RawSQLTerm('intHash32(id)'))",
         "column_codecs=(('page', 'ZSTD(3)'), ('duration_ms', 'Delta(4), ZSTD(1)'))",
     ):
@@ -113,10 +160,10 @@ async def test_options_are_read_back_and_written_by_inspectdb(clickhouse_db):
 
 @pytest.mark.asyncio
 async def test_drift_finds_no_change_of_the_declared_options(clickhouse_db):
-    connection = Team._meta.connection
-    state = State()
-    for name in ("Hit", "Team", "PageView", "Reading", "Trade"):
-        state.models[("models", name)] = ModelState.make_from_model("models", getattr(models, name))
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
+    state = State.from_models(
+        [getattr(models, name) for name in ("Hit", "Team", "PageView", "Reading", "Trade")], app_label="models"
+    )
     drift = await detect_drift(connection, state, ["models"])
     assert [operation for operation in drift.operations if isinstance(operation, AlterModelOptions)] == []
     # A sampled table's PRIMARY KEY holds the keys of its sort up to the sampling one, not only the
@@ -137,7 +184,7 @@ async def test_drift_finds_no_change_of_the_declared_options(clickhouse_db):
     ],
 )
 async def test_drift_finds_a_changed_option(clickhouse_db, change_sql, restore_sql):
-    connection = Hit._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Hit).get_connection()
     await connection.execute_script(f"ALTER TABLE hit {change_sql}")
     try:
         assert len(await get_table_options_changes(connection, Hit)) == 1
@@ -148,7 +195,7 @@ async def test_drift_finds_a_changed_option(clickhouse_db, change_sql, restore_s
 
 @pytest.mark.asyncio
 async def test_drift_finds_an_added_projection(clickhouse_db):
-    connection = PageView._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(PageView).get_connection()
     await connection.execute_script(
         "ALTER TABLE pageview ADD PROJECTION by_duration (SELECT duration_ms, count() GROUP BY duration_ms)"
     )

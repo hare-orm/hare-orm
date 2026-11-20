@@ -20,6 +20,9 @@ class ConfigLocator:
 
         Returns:
             Module path and var name that stores the hare config.
+
+        Raises:
+            CLIError: The project file is unreadable or ``hare_orm`` is not a configuration reference.
         """
         if not (config := os.getenv(ENV_HARE_ORM_CONFIG, "")) and (config_path := Path(file)).exists():
             try:
@@ -29,4 +32,6 @@ class ConfigLocator:
             tool_section = doc.get("tool", {})
             hare_section = tool_section.get("hare", {}) if isinstance(tool_section, dict) else {}
             config = hare_section.get("hare_orm", "") if isinstance(hare_section, dict) else ""
+            if not isinstance(config, str):
+                raise CLIError(f"{file}: [tool.hare] hare_orm must name a configuration module variable or file")
         return config

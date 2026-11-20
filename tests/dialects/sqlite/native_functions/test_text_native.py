@@ -8,8 +8,7 @@ import pytest
 
 from hare.dialects.sqlite.functions.sqlite_native_functions import SqliteNativeFunctions
 from hare.dialects.sqlite.functions.text.sqlite_text_functions import SqliteTextFunctions
-
-REQUIRES = ("native",)
+from tests.dialects.sqlite.native_functions.function_comparison import FunctionComparison
 
 pytestmark = [
     pytest.mark.database_independent,
@@ -19,22 +18,12 @@ TEXTS = [None, "", "a", "abc", "héllo wörld", "😀x😀", 12, 1.5, b"bytes"]
 COUNTS = [None, -10, -2, -1, 0, 1, 2, 3, 10, "2", 1.9, 0x1F600, 0xD800, 0x110000]
 
 
-def call_both(native_call, python_call, arguments):
-    try:
-        expected = python_call(*arguments)
-    except Exception as error:  # noqa: BLE001 - the error is what is compared.
-        with pytest.raises(type(error)):
-            native_call(*arguments)
-        return
-    assert native_call(*arguments) == expected, arguments
-
-
 def test_text_functions() -> None:
     functions = SqliteTextFunctions.get_functions()
     native = SqliteNativeFunctions.module.TextFunctions(functions)
     grids = {
-        "left": itertools.product(TEXTS, COUNTS),
-        "right": itertools.product(TEXTS, COUNTS),
+        "left": itertools.product(TEXTS, [*COUNTS, -(2**63), 2**63 - 1]),
+        "right": itertools.product(TEXTS, [*COUNTS, -(2**63), 2**63 - 1]),
         "lpad": itertools.product(TEXTS, COUNTS, [None, "", "xy", "😀"]),
         "rpad": itertools.product(TEXTS, COUNTS, [None, "", "xy", "😀"]),
         "repeat": itertools.product(TEXTS, COUNTS),
@@ -45,4 +34,4 @@ def test_text_functions() -> None:
     for name, arguments_grid in grids.items():
         native_function, python_function = getattr(native, name), functions[name][1]
         for arguments in arguments_grid:
-            call_both(native_function, python_function, arguments)
+            FunctionComparison.assert_equal(native_function, python_function, *arguments)

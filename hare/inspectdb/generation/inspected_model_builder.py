@@ -5,29 +5,29 @@ factory both build from it.
 
 from __future__ import annotations
 
-import json
+from collections import Counter
 from dataclasses import replace
 from typing import Any
 
-from hare.ddl.constraints.exclusion_constraint import ExclusionConstraint
 from hare.ddl.constraints.unique_constraint import UniqueConstraint
 from hare.ddl.enums import GeneratedNamePrefix
 from hare.ddl.generated_names import GeneratedNames
 from hare.ddl.indexes.index import Index
 from hare.ddl.raw_sql_term import RawSQLTerm
+from hare.declarations.declaration_value_serializer import DeclarationValueSerializer
 from hare.dialects.dialect_registry import DialectRegistry
-from hare.exceptions import ConfigurationError, ValidationError
-from hare.fields.db_defaults.sql_default import SqlDefault
+from hare.exceptions import ConfigurationError
 from hare.fields.enums import OnDelete
 from hare.fields.field import Field
 from hare.inspectdb.constants import (
     AMBIGUOUS_REASON_SENTINEL_KWARG,
     BASE_FIELD_SENTINEL_KWARG,
     GENERATED_INTEGER_KEY_FIELD_PATHS,
-    JSON_FIELD_PATH,
 )
-from hare.inspectdb.generation.column_type_mapper import ColumnTypeMapper
+from hare.inspectdb.generation.catalog_diagnostic_comments import CatalogDiagnosticComments
 from hare.inspectdb.generation.declarations import ModelGenerationOptions
+from hare.inspectdb.generation.inspected_column_defaults import InspectedColumnDefaults
+from hare.inspectdb.generation.inspected_field_rules import InspectedFieldRules
 from hare.inspectdb.generation.inspected_model import InspectedModel
 from hare.inspectdb.generation.model_naming import ModelNaming
 from hare.inspectdb.introspection.column_info import ColumnInfo
@@ -36,7 +36,6 @@ from hare.inspectdb.introspection.index_info import IndexInfo
 from hare.inspectdb.introspection.inspected_field_specification import InspectedFieldSpecification
 from hare.inspectdb.introspection.table_info import TableInfo
 from hare.migrations.state.model_state import ModelState
-from hare.migrations.writer.migration_writer import MigrationWriter
 from hare.models import Model
 from hare.models.class_building.constants import TABLE_NAME_SEPARATOR
 from hare.models.class_building.model_field_collection import ModelFieldCollection
@@ -51,17 +50,15 @@ class InspectedModelBuilder:
         self,
         table: TableInfo,
         options: ModelGenerationOptions,
-        extra_reserved_attribute_names: frozenset[str] = frozenset(),
     ) -> None:
         """Prepares the build.
 
         Args:
             table: The table.
             options: How the table is turned into a model.
-            extra_reserved_attribute_names: Attribute names the model's fields mustn't take.
         """
         self.table = table
-        self.dialect = options.dialect
+        self.options = options
         self.connection_dialect = options.connection_dialect or DialectRegistry.get_dialect(options.dialect)
         #: The dialect's introspector - its index classes and the index names it makes up.
         self.introspector_class = DatabaseCatalog.get_dialect_introspector_class(options.dialect)
@@ -86,9 +83,7 @@ class InspectedModelBuilder:
         #: Attributes whose field class can't be indexed (JSONField, BinaryField, ...) - an index
         #: or UniqueConstraint over one can't be declared on the model.
         self.non_indexable_attribute_names: set[str] = set()
-        self.reserved_attribute_names = (
-            ModelFieldCollection.get_reserved_field_names() | extra_reserved_attribute_names
-        )
+        self.reserved_attribute_names = ModelFieldCollection.get_reserved_field_names()
         self.used_attribute_names: set[str] = {
             name
             for composite_foreign_key in table.composite_foreign_keys
@@ -140,7 +135,13 @@ class InspectedModelBuilder:
         return bool(index.deferrable or index.include or index.nulls_not_distinct or index.without_overlaps)
 
     def is_default_index_name(
-        self, name: str, prefix: GeneratedNamePrefix, column_names: list[str], name_parts: tuple[str, ...] = ()
+        self,
+        name: str,
+        prefix: GeneratedNamePrefix,
+        column_names: list[str],
+        name_parts: tuple[str, ...] = (),
+        *,
+        expression_keys: bool = False,
     ) -> bool:
         """Whether an index's name is the one it gets without an explicit name.
 
@@ -149,6 +150,7 @@ class InspectedModelBuilder:
             prefix: hare's generated-name prefix for the declaration.
             column_names: The index's columns, or its rendered expression terms.
             name_parts: What else hare hashes into the generated name.
+            expression_keys: The index's SQL expression keys, in declared order.
 
         Returns:
             True for hare's generated name, or a name the database made up for an index or
@@ -156,7 +158,9 @@ class InspectedModelBuilder:
         """
         if self.introspector_class.is_unnamed_index_name(name, self.table.name, column_names):
             return True
-        return name == GeneratedNames.get_index_name(prefix, self.table.name, column_names, name_parts)
+        return name == GeneratedNames.get_index_name(
+            prefix, self.table.name, column_names, name_parts, expression_keys=expression_keys
+        )
 
     def is_default_special_index_name(
         self, index: IndexInfo, index_class: type[Index], args: list[Any], kwargs: dict[str, Any]
@@ -181,11 +185,17 @@ class InspectedModelBuilder:
             args = index.get_ordered_key_terms(list(index.columns))
         try:
             declared_index = index_class(*args, **kwargs)
-            field_names = declared_index.field_names
+            field_names = declared_index.get_key_names()
         except (ConfigurationError, TypeError, ValueError):
             return True
         prefix = GeneratedNamePrefix.UNIQUE_INDEX if declared_index.unique else GeneratedNamePrefix.INDEX
-        return self.is_default_index_name(index.name, prefix, field_names, declared_index.get_name_parts())
+        return self.is_default_index_name(
+            index.name,
+            prefix,
+            field_names,
+            declared_index.get_name_parts(),
+            expression_keys=not bool(declared_index.fields),
+        )
 
     def is_indexed_by_leading_columns(self, column_names: list[str]) -> bool:
         """Whether a plain or unique index, or the composite primary key, starts with these
@@ -220,61 +230,6 @@ class InspectedModelBuilder:
             return {}
         return {"db_index": False}
 
-    def get_field_db_default(self, field_path: str, db_default: Any) -> Any:
-        """Adapts an introspected column default to the field class it is declared on.
-
-        Args:
-            field_path: Dotted path of the generated field class.
-            db_default: The introspected default.
-
-        Returns:
-            For a JSONField, a string default parsed as the JSON document it holds (kept as a
-            string it would be stored as a JSON string literal) - a JSON null as its text, as None is no
-            default; otherwise db_default unchanged.
-        """
-        if field_path != JSON_FIELD_PATH or not isinstance(db_default, str):
-            return db_default
-        try:
-            document = json.loads(db_default)
-        except ValueError:
-            return db_default
-        if document is None:
-            return SqlDefault(self.connection_dialect.literals.get_string_literal_sql(db_default))
-        return document
-
-    def get_db_default_the_field_takes(self, field: Field[Any], db_default: Any) -> Any:
-        """A literal default as the field takes it - the value it stands for read the way the field reads
-        the database's values (``'7'`` an int, ``1`` and ``'t'`` a bool), or its text as a ``SqlDefault``
-        when the field takes no value of it (``'NaN'`` of a float, ``'infinity'`` of a date, ``'1 day'`` of a
-        duration): a default the field refuses broke ``hare drift`` instead of being compared.
-
-        Args:
-            field: The field, built with the default.
-            db_default: The default introspected.
-
-        Returns:
-            The default the field takes.
-        """
-        if type(db_default) not in (str, int, float, bool):
-            return db_default
-        types = self.connection_dialect.types
-        try:
-            types.get_db_value(field, db_default, None)
-        except ValidationError:
-            pass
-        else:
-            return db_default
-        try:
-            read_default = types.get_python_value(field, db_default)
-            types.get_db_value(field, read_default, None)
-        except (ValidationError, TypeError, ValueError):
-            pass
-        else:
-            return read_default
-        if isinstance(db_default, str):
-            return SqlDefault(self.connection_dialect.literals.get_string_literal_sql(db_default))
-        return SqlDefault(str(db_default))
-
     @staticmethod
     def construct(path: str, args: list[Any] | None = None, kwargs: dict[str, Any] | None = None) -> Any:
         """The object ``path(*args, **kwargs)`` builds - a field, an index, a constraint.
@@ -288,7 +243,7 @@ class InspectedModelBuilder:
             The object.
         """
         # A field held in an argument (an array's element) is built first.
-        return MigrationWriter.get_callable(path)(
+        return DeclarationValueSerializer.get_callable(path)(
             *InspectedFieldSpecification.build_arguments(args or []),
             **InspectedFieldSpecification.build_arguments(kwargs or {}),
         )
@@ -306,15 +261,14 @@ class InspectedModelBuilder:
         Returns:
             The reason, None when the field's column type is the column's.
         """
-        introspector_class = DatabaseCatalog.get_dialect_introspector_class(self.dialect)
         try:
-            field = MigrationWriter.get_callable(path)(
+            field = DeclarationValueSerializer.get_callable(path)(
                 null=column.nullable, **InspectedFieldSpecification.build_arguments(field_kwargs)
             )
             declared_type = field.get_column_type(self.connection_dialect)
         except (ConfigurationError, TypeError, ValueError):
             return None
-        if declared_type is None or not introspector_class.column_types_differ(declared_type, column):
+        if declared_type is None or not self.introspector_class.column_types_differ(declared_type, column):
             return None
         return (
             f"the column is {column.db_type!r}, the field writes {declared_type!r} - hare has no field of the "
@@ -416,8 +370,10 @@ class InspectedModelBuilder:
         )
 
     def _check_many_to_many_through_table(self) -> str | None:
-        """A note when the table has hare's many-to-many through table shape - every column in a
-        foreign key, two or more of them - which the many-to-many field rebuilds.
+        """A note when this table alone has a possible many-to-many through-table shape.
+
+        This check has no target-table metadata. Module generation uses its separate classifier
+        across all inspected tables to determine which relations can be reconstructed.
 
         Returns:
             The note, None for any other table.
@@ -425,9 +381,10 @@ class InspectedModelBuilder:
         if self.table.is_many_to_many_junction_shape:
             return (
                 f"# NOTE: table {self.table.name!r} looks like a ManyToManyField through table "
-                "(every column is a foreign key, no other columns) - skipped. Declare the M2M "
-                f"field on one of its related models with through={self.table.name!r} instead of "
-                "modeling this table directly.\n"
+                "(every column is a foreign key, no other columns) - skipped. Set "
+                "skip_many_to_many_through_tables=False to generate an explicit model. Review "
+                "the table's constraints and related models before declaring a ManyToManyField "
+                f"with through={self.table.name!r}.\n"
             )
         return None
 
@@ -444,22 +401,24 @@ class InspectedModelBuilder:
         self.is_composite_pk = len(self.pk_columns) > 1
 
     def _detect_relations_needing_related_name(self) -> None:
-        """Two relations from this table to the same target would both get the default backward
-        relation name on that target - every relation to such a target gets an explicit
-        ``related_name="<table>_<field>_set"`` instead."""
+        """Use explicit names for repeated targets or an unusable default reverse attribute.
+
+        A valid database table name need not be a Python attribute. Normalize the
+        existing explicit-name form for both scalar and composite relations; leave
+        usable defaults, including Unicode names, unchanged.
+        """
         # A single-column FK that's also a composite PK member is rendered as a plain field.
         relation_target_tables = [
             foreign_key.target_table
             for column_name, foreign_key in self.foreign_keys.items()
             if not (column_name in self.pk_columns and self.is_composite_pk)
         ] + [cfk.target_table for cfk in self.table.composite_foreign_keys]
+        default_name = f"{self.table.name}s"
+        needs_safe_default = ModelNaming.get_field_name(default_name) != default_name
         self.targets_needing_related_name = {
-            target_table for target_table in relation_target_tables if relation_target_tables.count(target_table) > 1
-        }
-        self.foreign_key_columns_needing_related_name = {
-            column_name
-            for column_name, foreign_key in self.foreign_keys.items()
-            if foreign_key.target_table in self.targets_needing_related_name
+            target_table
+            for target_table, count in Counter(relation_target_tables).items()
+            if count > 1 or needs_safe_default
         }
 
     def _detect_foreign_key_columns_needing_raw_name(self) -> set[str]:
@@ -491,28 +450,24 @@ class InspectedModelBuilder:
             self.field_attribute_names[column_name] = column_name
         return composite_foreign_key_member_columns
 
-    def _allocate_attribute_name(self, preferred_name: str) -> str:
+    def _allocate_attribute_name(self, preferred_name: str, column_name: str | None = None) -> str:
         """Picks a unique attribute name that doesn't shadow a Model attribute.
 
         Args:
             preferred_name: Already identifier-safe name derived from the column.
+            column_name: Physical identity, when allocating a column in an existing model.
 
         Returns:
             preferred_name, with ``_field`` appended while it is reserved - a field name ends in no
             ``_`` - and a numeric suffix (_2, _3, ...) while it is already taken by an earlier attribute.
         """
-        attribute_name = preferred_name
-        while attribute_name in self.reserved_attribute_names:
-            attribute_name = f"{attribute_name}_field"
-        if attribute_name in self.used_attribute_names:
-            suffix = 2
-            numbered_name = f"{attribute_name}_{suffix}"
-            while numbered_name in self.used_attribute_names or numbered_name in self.reserved_attribute_names:
-                suffix += 1
-                numbered_name = f"{attribute_name}_{suffix}"
-            attribute_name = numbered_name
-        self.used_attribute_names.add(attribute_name)
-        return attribute_name
+        if column_name is not None and self.options.field_names_by_column:
+            if name := self.options.field_names_by_column.get(column_name):
+                self.used_attribute_names.add(name)
+                return name
+        return ModelNaming.allocate_attribute_name(
+            preferred_name, self.used_attribute_names, self.reserved_attribute_names
+        )
 
     def _build_columns(
         self, foreign_key_columns_needing_raw_name: set[str], composite_foreign_key_member_columns: set[str]
@@ -524,12 +479,12 @@ class InspectedModelBuilder:
             # CompositePrimaryKey rejects any relation field as a component. It falls through to
             # the plain-field path below instead, with the relation dropped and flagged.
             if column.name in self.foreign_keys and not (column.name in self.pk_columns and self.is_composite_pk):
-                self._build_foreign_key_column(column.name, foreign_key_columns_needing_raw_name)
+                self._build_foreign_key_column(column, foreign_key_columns_needing_raw_name)
                 continue
-            self._build_plain_column(column.name)
+            self._build_plain_column(column)
 
-    def _build_foreign_key_column(self, column_name: str, foreign_key_columns_needing_raw_name: set[str]) -> None:
-        column = next(column for column in self.table.columns if column.name == column_name)
+    def _build_foreign_key_column(self, column: ColumnInfo, foreign_key_columns_needing_raw_name: set[str]) -> None:
+        column_name = column.name
         foreign_key = self.foreign_keys[column_name]
         needs_source_field = False
         if column_name in foreign_key_columns_needing_raw_name:
@@ -537,14 +492,16 @@ class InspectedModelBuilder:
             needs_source_field = True
         else:
             raw_foreign_key_field_name = column_name[:-3] if column_name.endswith("_id") else f"{column_name}_fk"
-        foreign_key_field_name = self._allocate_attribute_name(ModelNaming.get_field_name(raw_foreign_key_field_name))
+        foreign_key_field_name = self._allocate_attribute_name(
+            ModelNaming.get_field_name(raw_foreign_key_field_name), column_name
+        )
         self.field_attribute_names[column_name] = foreign_key_field_name
         kwargs: dict[str, Any] = {}
         # A relation's shadow column defaults to "<attribute>_id" - any other real column name
         # (a raw/renamed attribute, or a column without the "_id" suffix) needs source_field=.
         if needs_source_field or f"{foreign_key_field_name}_id" != column_name:
             kwargs["source_field"] = column_name
-        if column_name in self.foreign_key_columns_needing_related_name:
+        if foreign_key.target_table in self.targets_needing_related_name:
             kwargs["related_name"] = ModelNaming.get_field_name(f"{self.table.name}_{foreign_key_field_name}_set")
         # An FK column that is itself the table's (non-composite) primary key holds at most one row
         # per related object - only OneToOneField accepts primary_key=True.
@@ -571,13 +528,13 @@ class InspectedModelBuilder:
             kwargs["db_default"] = column.db_default
         if foreign_key.to_field is not None:
             kwargs["to_field"] = foreign_key.to_field
-        on_delete, rules_todo_reason = ColumnTypeMapper.get_foreign_key_rules(
+        on_delete, rules_todo_reason = InspectedFieldRules.get_foreign_key_rules(
             foreign_key.on_delete, foreign_key.on_update, foreign_key.deferral
         )
-        on_delete, set_default_todo_reason = ColumnTypeMapper.get_on_delete_fallback(
+        on_delete, set_default_todo_reason = InspectedFieldRules.get_on_delete_fallback(
             on_delete, column.db_default is not None, column.nullable
         )
-        todo_reason = "; ".join(filter(None, (set_default_todo_reason, rules_todo_reason))) or None
+        todo_reason = "; ".join(filter(None, (set_default_todo_reason, rules_todo_reason, column.todo_reason))) or None
         if on_delete != OnDelete.CASCADE:
             kwargs["on_delete"] = on_delete
         if column.description:
@@ -615,11 +572,10 @@ class InspectedModelBuilder:
             kwargs["db_index"] = True
         return False
 
-    def _build_plain_column(self, column_name: str) -> None:
-        column = next(column for column in self.table.columns if column.name == column_name)
-        attribute_name = self._allocate_attribute_name(ModelNaming.get_field_name(column.name))
+    def _build_plain_column(self, column: ColumnInfo) -> None:
+        attribute_name = self._allocate_attribute_name(ModelNaming.get_field_name(column.name), column.name)
         self.field_attribute_names[column.name] = attribute_name
-        path, extra_kwargs, is_ambiguous = ColumnTypeMapper.map_column_type(self.dialect, column)
+        path, extra_kwargs, is_ambiguous = self.introspector_class.map_column_type(column)
         ambiguous_reason = extra_kwargs.pop(AMBIGUOUS_REASON_SENTINEL_KWARG, None)
         base_field = extra_kwargs.pop(BASE_FIELD_SENTINEL_KWARG, None)
         dropped_foreign_key_reason = None
@@ -638,7 +594,7 @@ class InspectedModelBuilder:
                 "relation was dropped; declare it by hand against a model of that table with "
                 f"Meta.schema = {foreign_key.target_schema!r}"
             )
-        is_indexable = ColumnTypeMapper.is_indexable_field_path(path)
+        is_indexable = InspectedFieldRules.is_indexable_field_path(path)
         if not is_indexable:
             self.non_indexable_attribute_names.add(attribute_name)
         dropped_index_reason = None
@@ -724,7 +680,9 @@ class InspectedModelBuilder:
         # A primary key column can carry its own DB-level DEFAULT (e.g. a UUID PK with DEFAULT
         # gen_random_uuid()) - applied regardless of is_pk.
         if column.db_default is not None:
-            kwargs["db_default"] = self.get_field_db_default(path, column.db_default)
+            kwargs["db_default"] = InspectedColumnDefaults.get_for_path(
+                self.connection_dialect, path, column.db_default
+            )
         if column.description:
             kwargs["description"] = column.description
         if base_field is not None:
@@ -732,7 +690,7 @@ class InspectedModelBuilder:
             kwargs["base_field"] = self.construct(base_field_path, kwargs=base_field_kwargs)
         field = self.construct(path, kwargs=kwargs)
         if "db_default" in kwargs:
-            db_default = self.get_db_default_the_field_takes(field, kwargs["db_default"])
+            db_default = InspectedColumnDefaults.get_for_field(self.connection_dialect, field, kwargs["db_default"])
             if db_default is not kwargs["db_default"]:
                 kwargs["db_default"] = db_default
                 field = self.construct(path, kwargs=kwargs)
@@ -757,13 +715,14 @@ class InspectedModelBuilder:
             column_descriptions = {columns_by_name[column_name].description for column_name in cfk.columns}
             if len(column_descriptions) == 1 and (shared_description := column_descriptions.pop()):
                 kwargs["description"] = shared_description
+            column_names = list(cfk.columns)
             relation_index = next(
                 (
                     index
                     for index in self.table.indexes
                     if not index.is_unique
                     and not index.is_special(unique_include_is_constraint=True)
-                    and index.columns == list(cfk.columns)
+                    and index.columns == column_names
                     # A descending index, or one named otherwise than the relation names its index, is
                     # one of its own, not the relation's.
                     and not index.has_descending_key()
@@ -784,7 +743,7 @@ class InspectedModelBuilder:
                     and not index.condition_sql
                     and not index.is_special(unique_include_is_constraint=True)
                     # In the order of the key - another order is a constraint of its own.
-                    and index.columns == list(cfk.columns)
+                    and index.columns == column_names
                     and not index.has_descending_key()
                 ),
                 None,
@@ -796,11 +755,11 @@ class InspectedModelBuilder:
                 if relation_index is not None:
                     kwargs["db_index"] = True
             else:
-                kwargs.update(self.get_foreign_key_index_kwargs(list(cfk.columns), relation_index is not None))
-            on_delete, rules_todo_reason = ColumnTypeMapper.get_foreign_key_rules(
+                kwargs.update(self.get_foreign_key_index_kwargs(column_names, relation_index is not None))
+            on_delete, rules_todo_reason = InspectedFieldRules.get_foreign_key_rules(
                 cfk.on_delete, cfk.on_update, cfk.deferral
             )
-            on_delete, set_default_todo_reason = ColumnTypeMapper.get_on_delete_fallback(
+            on_delete, set_default_todo_reason = InspectedFieldRules.get_on_delete_fallback(
                 on_delete, shared_db_default is not None, nullable
             )
             todo_reason = "; ".join(filter(None, (set_default_todo_reason, rules_todo_reason))) or None
@@ -827,37 +786,45 @@ class InspectedModelBuilder:
                 field_names_by_column[column_name] = composite_foreign_key.field_name
         return field_names_by_column
 
-    def get_index_field_names(self, index: IndexInfo) -> list[str]:
+    def get_index_field_names(self, index: IndexInfo, field_names_by_column: dict[str, str]) -> list[str]:
         """The field names an index or a unique constraint lists, in their order and without their
         key orders - a composite relation's columns named once.
 
         Args:
             index: The index.
+            field_names_by_column: The column mapping prepared after all model fields are built.
 
         Returns:
             The names.
         """
         return [
-            field_name.removeprefix("-")
-            for field_name in index.get_declared_relation_fields(self.get_index_field_names_by_column())
+            field_name.removeprefix("-") for field_name in index.get_declared_relation_fields(field_names_by_column)
         ]
 
     def _build_composite_pk(self) -> None:
         if not self.is_composite_pk:
             return
+        if any(column.is_pk and column.nullable for column in self.table.columns):
+            self.meta_layout.append(
+                f"# TODO: nullable composite PRIMARY KEY {tuple(self.pk_columns)!r} cannot be declared as "
+                "CompositePrimaryKey; nullable fields are preserved with Meta.primary_key=None. "
+                "Recreating this model will not recreate the database's PRIMARY KEY."
+            )
+            return
         self.composite_pk_names = [self.field_attribute_names[column_name] for column_name in self.pk_columns]
 
-    def _get_unique_constraint(self, index: IndexInfo) -> UniqueConstraint:
+    def _get_unique_constraint(self, index: IndexInfo, field_names_by_column: dict[str, str]) -> UniqueConstraint:
         """Reconstructs a unique index as a UniqueConstraint - named when its database name isn't
         the generated one, and carrying its predicate and deferral.
 
         Args:
             index: A plain btree unique index over real columns.
+            field_names_by_column: The column mapping prepared after all model fields are built.
 
         Returns:
             The UniqueConstraint.
         """
-        kwargs: dict[str, Any] = {"fields": self.get_index_field_names(index)}
+        kwargs: dict[str, Any] = {"fields": self.get_index_field_names(index, field_names_by_column)}
         if not self.is_default_index_name(index.name, GeneratedNamePrefix.UNIQUE_CONSTRAINT, index.columns):
             kwargs["name"] = index.name
         if index.condition_sql:
@@ -888,23 +855,25 @@ class InspectedModelBuilder:
             and index.expression_terms is None
         )
 
-    def _get_special_index(self, index: IndexInfo) -> Index:
+    def _get_special_index(self, index: IndexInfo, field_names_by_column: dict[str, str]) -> Index:
         """Reconstructs an index with an opclass, access method, predicate or expression term.
 
         Args:
             index: The introspected index.
+            field_names_by_column: The column mapping prepared after all model fields are built.
 
         Returns:
             The Index, PartialIndex or access-method subclass.
         """
         index_class, index_args, index_kwargs = index.get_index_declaration(
-            self.introspector_class.INDEX_CLASSES_BY_TYPE, self.get_index_field_names_by_column(), as_key_terms=False
+            self.introspector_class.INDEX_CLASSES_BY_TYPE, field_names_by_column, as_key_terms=False
         )
         if not self.is_default_special_index_name(index, index_class, index_args, index_kwargs):
             index_kwargs["name"] = index.name
         return index_class(*index_args, **index_kwargs)
 
     def _build_meta_entries(self) -> None:
+        field_names_by_column = self.get_index_field_names_by_column()
         table = self.table
         declarable_indexes, undeclarable_index_comments = self._get_declarable_indexes()
         # A partial unique index under hare's generated PartialIndex(unique=True) name stays that
@@ -912,7 +881,8 @@ class InspectedModelBuilder:
         partial_unique_constraint_indexes = [
             index
             for index in declarable_indexes
-            if self.is_partial_unique_constraint(index) and self._get_special_index(index).name is not None
+            if self.is_partial_unique_constraint(index)
+            and self._get_special_index(index, field_names_by_column).name is not None
         ]
         partial_unique_constraint_index_ids = {id(index) for index in partial_unique_constraint_indexes}
         special_indexes = [
@@ -927,34 +897,23 @@ class InspectedModelBuilder:
         multi_column_plain = [index for index in plain_indexes if not index.is_unique]
 
         self._add_table_meta_options()
-        index_calls = self._get_plain_index_calls(multi_column_plain)
-        special_index_calls, index_comments = self._get_special_index_calls(special_indexes)
+        index_calls = self._get_plain_index_calls(multi_column_plain, field_names_by_column)
+        special_index_calls, index_comments = self._get_special_index_calls(special_indexes, field_names_by_column)
         index_calls.extend(special_index_calls)
-        unique_index_calls, unique_constraint_calls = self._get_unique_declarations(plain_indexes)
+        unique_index_calls, unique_constraint_calls = self._get_unique_declarations(
+            plain_indexes, field_names_by_column
+        )
         index_calls.extend(unique_index_calls)
         unique_constraint_calls.extend(
-            self._get_unique_constraint(index)
+            self._get_unique_constraint(index, field_names_by_column)
             for index in (*self.constraint_unique_column_indexes.values(), *partial_unique_constraint_indexes)
         )
         if index_calls:
             self.add_meta_option(ModelOption.INDEXES, index_calls)
         self._add_index_comments(index_comments, undeclarable_index_comments)
         self._add_constraints(unique_constraint_calls)
-        self.meta_layout.extend(
-            f"# TODO: column {name!r} is a generated (GENERATED ALWAYS AS (...)) column, but "
-            "its expression text wasn't in a shape this could parse back out of the table's raw SQL "
-            f"({raw_sql!r}) - it's been dropped entirely; add it back by hand as a GeneratedField."
-            for name, raw_sql in table.unparsed_generated_columns
-        )
         self._add_triggers()
-        self.meta_layout.extend(
-            f"# TODO: composite foreign key {name!r} ({', '.join(columns)}) wasn't reconstructed as "
-            "a ForeignKeyField - either it doesn't reference the target's whole primary key, or its "
-            'columns aren\'t named "<field>_<target key column>", the only names a composite relation '
-            "declares. The member columns are plain fields above; to declare the relation, rename the "
-            "columns so (a RunSQL migration) and replace them with the ForeignKeyField."
-            for name, columns in table.unparsed_foreign_keys
-        )
+        self.meta_layout.extend(CatalogDiagnosticComments.get(diagnostic) for diagnostic in table.diagnostics)
 
     def _get_declarable_indexes(self) -> tuple[list[IndexInfo], list[str]]:
         """The table's indexes a model can declare - those of a relation left out - and a comment
@@ -992,9 +951,8 @@ class InspectedModelBuilder:
         table = self.table
         if self.needs_table_meta:
             self.add_meta_option(ModelOption.TABLE, table.name)
-        if not self.pk_columns:
-            # No primary key - a model without one, so
-            # the metaclass adds no "id" the table doesn't have.
+        if not self.pk_columns or (self.is_composite_pk and self.composite_pk_names is None):
+            # No representable primary key: prevent an invented id column.
             self.add_meta_option(ModelOption.PRIMARY_KEY, None)
         if self.needs_schema_meta:
             self.add_meta_option(ModelOption.SCHEMA, table.schema)
@@ -1003,11 +961,6 @@ class InspectedModelBuilder:
         if table.table_options is not None:
             self.add_meta_option(
                 ModelOption.TABLE_OPTIONS, [table.table_options.with_field_names(self.field_attribute_names)]
-            )
-        if table.unparsed_partitioning is not None:
-            self.meta_layout.append(
-                f"# TODO: the table is partitioned as {table.unparsed_partitioning!r}, which no partitioning of "
-                "hare declares - a migration of the model creates it unpartitioned; partition it by hand."
             )
         if table.row_level_security is not None:
             self.add_meta_option(ModelOption.ROW_LEVEL_SECURITY, table.row_level_security)
@@ -1044,21 +997,23 @@ class InspectedModelBuilder:
                     for grant in table.grants
                 ],
             )
-        self.meta_layout.extend(f"# TODO: {note} - grant it with a RunSQL migration" for note in table.unparsed_grants)
 
-    def _get_plain_index_calls(self, multi_column_plain: list[IndexInfo]) -> list[Index]:
+    def _get_plain_index_calls(
+        self, multi_column_plain: list[IndexInfo], field_names_by_column: dict[str, str]
+    ) -> list[Index]:
         """The ``Index`` of each plain non-unique index over several columns, and of each named index
         of one column.
 
         Args:
             multi_column_plain: The plain non-unique indexes.
+            field_names_by_column: The column mapping prepared after all model fields are built.
 
         Returns:
             The indexes.
         """
         index_calls: list[Index] = []
         for index in multi_column_plain:
-            declared_fields = index.get_declared_relation_fields(self.get_index_field_names_by_column())
+            declared_fields = index.get_declared_relation_fields(field_names_by_column)
             index_kwargs: dict[str, Any] = {"fields": declared_fields}
             name_parts = Index(fields=declared_fields).get_name_parts()
             if not self.is_default_index_name(index.name, GeneratedNamePrefix.INDEX, index.columns, name_parts):
@@ -1070,12 +1025,15 @@ class InspectedModelBuilder:
             index_calls.append(Index(fields=[self.field_attribute_names[column_name]], name=index.name))
         return index_calls
 
-    def _get_special_index_calls(self, special_indexes: list[IndexInfo]) -> tuple[list[Index], list[str]]:
+    def _get_special_index_calls(
+        self, special_indexes: list[IndexInfo], field_names_by_column: dict[str, str]
+    ) -> tuple[list[Index], list[str]]:
         """The index of each index of another type or with options, with a note on what its
         declaration can't carry.
 
         Args:
             special_indexes: The indexes.
+            field_names_by_column: The column mapping prepared after all model fields are built.
 
         Returns:
             The indexes, and the notes.
@@ -1083,7 +1041,7 @@ class InspectedModelBuilder:
         index_calls: list[Index] = []
         index_comments: list[str] = []
         for index in special_indexes:
-            index_calls.append(self._get_special_index(index))
+            index_calls.append(self._get_special_index(index, field_names_by_column))
             index_label = ", ".join(index.expression_terms or index.columns)
             if index.is_unique and index.index_type in self.introspector_class.INDEX_CLASSES_BY_TYPE:
                 index_comments.append(
@@ -1100,12 +1058,15 @@ class InspectedModelBuilder:
 
         return index_calls, index_comments
 
-    def _get_unique_declarations(self, plain_indexes: list[IndexInfo]) -> tuple[list[Index], list[UniqueConstraint]]:
+    def _get_unique_declarations(
+        self, plain_indexes: list[IndexInfo], field_names_by_column: dict[str, str]
+    ) -> tuple[list[Index], list[UniqueConstraint]]:
         """What each plain unique index stands for: an ``Index(unique=True)``, a named
         ``UniqueConstraint``, or (under the generated name) an unnamed one.
 
         Args:
             plain_indexes: The plain indexes, unique or not.
+            field_names_by_column: The column mapping prepared after all model fields are built.
 
         Returns:
             The unique indexes, and the unique constraints.
@@ -1114,12 +1075,12 @@ class InspectedModelBuilder:
         # A plain unique index stands for the declaration whose name it has: an Index(unique=True),
         # a named UniqueConstraint, or (under the generated name) an unnamed one.
         unique_constraint_calls: list[UniqueConstraint] = []
-        unnamed_unique_field_sets: list[tuple[str, ...]] = []
+        unnamed_unique_field_sets: set[tuple[str, ...]] = set()
         for index in plain_indexes:
             if not index.is_unique:
                 continue
-            attribute_names = self.get_index_field_names(index)
-            declared_fields = index.get_declared_relation_fields(self.get_index_field_names_by_column())
+            attribute_names = self.get_index_field_names(index, field_names_by_column)
+            declared_fields = index.get_declared_relation_fields(field_names_by_column)
             if declared_fields != attribute_names:
                 # A descending key - only an Index(unique=True) declares one.
                 index_kwargs: dict[str, Any] = {"fields": declared_fields, "unique": True}
@@ -1139,13 +1100,14 @@ class InspectedModelBuilder:
                 ):
                     index_calls.append(Index(fields=attribute_names, unique=True))
                 else:
-                    unique_constraint_calls.append(self._get_unique_constraint(index))
+                    unique_constraint_calls.append(self._get_unique_constraint(index, field_names_by_column))
                 continue
             # An unnamed constraint carries no name of its own, so two physical unique indexes
             # over the same column set are always redundant.
-            if tuple(attribute_names) not in unnamed_unique_field_sets:
-                unnamed_unique_field_sets.append(tuple(attribute_names))
-                unique_constraint_calls.append(UniqueConstraint(fields=tuple(attribute_names)))
+            field_names = tuple(attribute_names)
+            if field_names not in unnamed_unique_field_sets:
+                unnamed_unique_field_sets.add(field_names)
+                unique_constraint_calls.append(UniqueConstraint(fields=field_names))
         return index_calls, unique_constraint_calls
 
     def _add_index_comments(self, index_comments: list[str], undeclarable_index_comments: list[str]) -> None:
@@ -1161,23 +1123,11 @@ class InspectedModelBuilder:
         self.meta_layout.extend(index_comments)
         self.meta_layout.extend(undeclarable_index_comments)
         self.meta_layout.extend(
-            f"# TODO: index {index.name or index.columns!r} has {', '.join(index.unrepresentable_properties)} in "
-            "the database, which no hare index or constraint can declare - reconstructed without it. Keep it "
-            "with a RunSQL migration if it matters."
-            for index in (*table.column_indexes, *table.indexes)
-            if index.unrepresentable_properties
-        )
-        self.meta_layout.extend(
             f"# TODO: index {index.name!r} is invalid in the database - its build didn't finish, so the database "
-            "keeps it but doesn't use it (nor enforces its uniqueness). Drop it and create it again."
+            "keeps it but doesn't use it for queries. An invalid unique index can still enforce uniqueness. "
+            "Drop it and create it again."
             for index in table.indexes
             if not index.is_valid
-        )
-        self.meta_layout.extend(
-            f"# TODO: index {name!r} wasn't reconstructed ({raw_def!r}) - an expression term carries "
-            "something Index(*expressions)/its subclasses can't represent (an operator class, sort order "
-            "or collation next to an expression, or a definition that couldn't be parsed). Add it back by hand."
-            for name, raw_def in table.unparsed_indexes
         )
 
     def _add_constraints(self, unique_constraint_calls: list[UniqueConstraint]) -> None:
@@ -1192,8 +1142,8 @@ class InspectedModelBuilder:
         # silently shadow each other.
         constraint_calls: list[Any] = list(unique_constraint_calls)
         for constraint in table.exclusion_constraints:
-            renamed_constraint = ExclusionConstraint(
-                name=constraint.name,
+            renamed_constraint = replace(
+                constraint,
                 expressions=tuple(
                     (
                         self.field_attribute_names.get(field_name, field_name)
@@ -1203,32 +1153,18 @@ class InspectedModelBuilder:
                     )
                     for field_name, operator in constraint.expressions
                 ),
-                using=constraint.using,
-                condition=constraint.condition,
                 include=tuple(
                     self.field_attribute_names.get(column_name, column_name) for column_name in constraint.include
                 ),
-                deferrable=constraint.deferrable,
-                initially_deferred=constraint.initially_deferred,
             )
             constraint_calls.append(renamed_constraint)
         constraint_calls.extend(table.check_constraints)
         if constraint_calls:
             self.add_meta_option(ModelOption.CONSTRAINTS, constraint_calls)
         self.meta_layout.extend(
-            f"# TODO: exclusion constraint {name!r} wasn't in a shape ExclusionConstraint(...) "
-            f"could reconstruct ({raw_def!r}) - add it back by hand."
-            for name, raw_def in table.unparsed_exclusion_constraints
-        )
-        self.meta_layout.extend(
             f"# TODO: CHECK constraint {name!r} is not validated in the database - the existing rows "
             "haven't been checked against it; a ValidateConstraint migration checks them."
             for name in table.not_valid_constraint_names
-        )
-        self.meta_layout.extend(
-            f"# TODO: CHECK constraint {name!r} wasn't in a shape CheckConstraint(...) could "
-            f"reconstruct ({raw_def!r}) - add it back by hand."
-            for name, raw_def in table.unparsed_check_constraints
         )
 
     def _add_triggers(self) -> None:
@@ -1236,8 +1172,3 @@ class InspectedModelBuilder:
         table = self.table
         if table.triggers:
             self.add_meta_option(ModelOption.TRIGGERS, list(table.triggers))
-        self.meta_layout.extend(
-            f"# TODO: trigger {name!r} wasn't in a shape Trigger(...) could reconstruct "
-            f"({raw_def!r}) - add it back by hand."
-            for name, raw_def in table.unparsed_triggers
-        )

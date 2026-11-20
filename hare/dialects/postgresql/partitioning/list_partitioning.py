@@ -10,7 +10,7 @@ from hare.dialects.postgresql.partitioning.partitions.partition import Partition
 from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclasses.dataclass(frozen=True)
@@ -27,18 +27,19 @@ class ListPartitioning(ExplicitPartitioning):
     strategy: ClassVar[PartitionStrategy] = PartitionStrategy.LIST
     partition_class: ClassVar[type[Partition]] = ListPartition
 
-    def raise_if_partitions_unsupported(self, model: type[Model], key_column_count: int) -> None:
+    def raise_if_partitions_unsupported(self, binding: ModelBinding, key_column_count: int) -> None:
         """Rejects a key of several columns, partitions sharing a name and a value two partitions
         list.
 
         Args:
-            model: The partitioned model.
+            binding: The partitioned model binding.
             key_column_count: The number of key columns.
 
         Raises:
             ConfigurationError: The partitions don't fit.
         """
-        super().raise_if_partitions_unsupported(model, key_column_count)
+        model = binding._model
+        super().raise_if_partitions_unsupported(binding, key_column_count)
         if key_column_count != 1:
             raise ConfigurationError(
                 f"{model.__name__}: ListPartitioning takes a key of one column, got {self.fields!r}"

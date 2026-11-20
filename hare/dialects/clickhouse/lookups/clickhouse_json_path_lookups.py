@@ -42,8 +42,8 @@ class ClickhouseJsonPathLookups:
         """
         return value if isinstance(value, Term) else ClickhouseJsonValueText(ValueWrapper(value))
 
-    @classmethod
-    def compare_keys(cls, term: Term, value: Any, comparison: str) -> Criterion:
+    @staticmethod
+    def compare_keys(term: Term, value: Any, comparison: str) -> Criterion:
         """The typed values ClickHouse reads of the path's JSON text and of ``value``'s compared.
 
         Args:

@@ -4,24 +4,12 @@ import pytest
 
 from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.instrumentation.declarations import TransactionEvent
-from hare.instrumentation.observers.observer_dispatch import ObserverDispatch
 from hare.instrumentation.observers.observers import Observers
 from hare.transactions.enums import TransactionEventType
 from hare.transactions.transactions import Transactions
 from tests.shared_models.testmodels import IntFields
 
-pytestmark = pytest.mark.sqlite_only
-
-
-@pytest.fixture(autouse=True)
-def _clear_observers():
-    """The process observers are process-wide state - a test that leaves an observer behind would
-    leak it into later tests."""
-    Observers.process_observers.clear()
-    ObserverDispatch.pending_errors.clear()
-    yield
-    Observers.process_observers.clear()
-    ObserverDispatch.pending_errors.clear()
+pytestmark = [pytest.mark.sqlite_only, pytest.mark.usefixtures("cleared_process_observers")]
 
 
 @pytest.mark.database_independent
@@ -161,4 +149,4 @@ async def test_wait_for_pending_cancels_a_stuck_transaction_observer_after_the_t
 
     await asyncio.wait_for(Observers.wait_for_pending(timeout_seconds=0.1), 5)
 
-    assert ObserverDispatch.pending_tasks == set()
+    assert Observers.get_dispatcher().pending_tasks == set()

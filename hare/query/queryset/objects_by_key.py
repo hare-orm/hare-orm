@@ -6,12 +6,14 @@ from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import FieldError, QueryError
 from hare.models.uniqueness.declared_uniqueness import DeclaredUniqueness
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.queryset.arguments.collection_arguments import CollectionArguments
 from hare.query.queryset.arguments.values_arguments import ValuesArguments
 from hare.query.queryset.combination.queryset_combination import QuerySetCombination
 from hare.query.relation_loading.prefetching.prefetch_checks import PrefetchChecks
 
 if TYPE_CHECKING:
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset.queryset import QuerySet
 
 
@@ -67,16 +69,16 @@ class ObjectsByKey:
             FieldError: The model has no such field.
         """
         model = queryset.model
-        meta = model._meta
-        if field_name == "pk":
+        meta: ModelBinding = queryset._binding  # type: ignore[assignment]
+        if field_name == PRIMARY_KEY_ALIAS:
             meta.raise_if_no_primary_key("in_bulk() by the primary key")
-            return tuple(meta.primary_key_attribute_names)
+            return meta.primary_key_attribute_names
         if field_name not in meta.fields_map:
             raise FieldError(f"in_bulk(): {model.__name__} has no field {field_name!r}")
-        attribute_names = tuple(DeclaredUniqueness.get_attribute_names(model, (field_name,)))
+        attribute_names = DeclaredUniqueness.get_attribute_names(meta, (field_name,))
         is_unique = any(
             uniqueness.attribute_names == attribute_names and uniqueness.condition is None
-            for uniqueness in DeclaredUniqueness.get_declared(model)
+            for uniqueness in DeclaredUniqueness.get_declared(meta)
         )
         if not is_unique and ObjectsByKey.get_distinct_attribute_names(queryset) != attribute_names:
             raise QueryError(f"in_bulk()'s field_name must be a unique field, but {field_name!r} isn't.")
@@ -93,8 +95,8 @@ class ObjectsByKey:
         Returns:
             The attribute names; None without fields of the model's own.
         """
-        model = queryset.model
         distinct_on = tuple(queryset._distinct_on)
-        if not distinct_on or not all(name in model._meta.fields_map for name in distinct_on):
+        model_binding: ModelBinding = queryset._binding  # type: ignore[assignment]
+        if not distinct_on or not all(name in model_binding.fields_map for name in distinct_on):
             return None
-        return tuple(DeclaredUniqueness.get_attribute_names(model, distinct_on))
+        return DeclaredUniqueness.get_attribute_names(model_binding, distinct_on)

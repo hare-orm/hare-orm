@@ -3,34 +3,31 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Iterator
 from itertools import chain
 from types import ModuleType
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.core.apps.many_to_many_linking import ManyToManyLinking
+from hare.core.apps.model_binding_graph import ModelBindingGraph
+from hare.core.apps.model_binding_preparation import ModelBindingPreparation
 from hare.core.apps.model_connection_checks import ModelConnectionChecks
 from hare.core.apps.model_discovery import ModelDiscovery
+from hare.core.apps.model_name_checks import ModelNameChecks
 from hare.core.apps.relation_linking import RelationLinking
 from hare.core.apps.swappable_models import SwappableModels
 from hare.core.apps.table_names import TableNames
-from hare.core.caching.caches import Caches
 from hare.core.connections.connection_handler import ConnectionHandler
-from hare.core.constants import DEFAULT_CONNECTION_NAME
-from hare.ddl.constraints.exclusion_constraint import ExclusionConstraint
-from hare.ddl.constraints.unique_constraint import UniqueConstraint
-from hare.ddl.indexes.index import Index
 from hare.exceptions import ConfigurationError
-from hare.fields.relations.fields.backward_foreign_key_relation import BackwardForeignKeyRelation
-from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
-from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.fields.relations.swappable_model_reference import SwappableModelReference
 from hare.models import Model
 from hare.models.class_building.generic_foreign_keys import GenericForeignKeys
-from hare.query.lookup_info.lookup_info_builder import LookupInfoBuilder
-from hare.query.queryset.pending_calls.calls_before_setup import CallsBeforeSetup
 from hare.sql import Table
-from hare.sql.builder.queries.query_builder import QueryBuilder
-from hare.sql.identifiers import Identifiers
 
 if TYPE_CHECKING:
-    from hare.core.apps.declarations import ModelReference
+    from hare.core.apps.declarations import ModelReference, TableIdentity
+    from hare.core.hare_context import HareContext
+    from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.dialects.base.dialect import Dialect
+    from hare.dialects.base.literals.sql_literals import SqlLiterals
+    from hare.models.model_binding import ModelBinding
 
 
 class Apps:
@@ -52,8 +49,18 @@ class Apps:
         *,
         validate_connections: bool = True,
         swappable: dict[str, str | dict[str, str]] | None = None,
+        context: HareContext | None = None,
+        dialects: dict[str, Dialect] | None = None,
     ) -> None:
         self.apps: dict[str, dict[str, type[Model]]] = {}
+        self.context = context
+        self.binding_graph = ModelBindingGraph(
+            dialects
+            if dialects is not None
+            else {alias: connections.get_dialect(alias) for alias in connections._db_config or {}}
+        )
+        self.binding_graph.seal()
+        self._preparation: ModelBindingPreparation | None = None
         #: Swappable model settings - setting name to the ``"app_label.ModelName"`` it points at.
         self.swappable_settings: dict[str, str | dict[str, str]] = dict(swappable or {})
         self._config = config or {}
@@ -61,7 +68,42 @@ class Apps:
         self._table_name_generator = table_name_generator
         self._validate_connections = validate_connections
         if self._config:
-            ModelDiscovery.load_from_config(self)
+            with ModelBindingPreparation(self):
+                ModelDiscovery.load_from_config(self)
+
+    def get_binding(self, reference: ModelReference) -> ModelBinding:
+        """Get this registry version's metadata, independent of class-global state."""
+        model = reference if isinstance(reference, type) else self.get_model(reference)
+        if self._preparation is not None:
+            return self._preparation.graph.get_binding(model)
+        return self.binding_graph.get_binding(model)
+
+    def get_prepared_binding(self, model: type[Model]) -> ModelBinding | None:
+        """Read an existing completed node of the published graph, without allocating it.
+
+        Implicit model managers remain templates until their exact class has a completed
+        binding. Explicit factories use get_binding and require registration.
+        """
+        binding = self.binding_graph.bindings.get(model)
+        return binding if binding is not None and binding._inited else None
+
+    def new(self, reference: ModelReference, **values: Any) -> Model:
+        """Create through the ordinary model constructor using this explicit registry."""
+        binding = self.get_binding(reference)
+        from hare.models.instances.instance_initialization import InstanceInitialization
+
+        return InstanceInitialization.new(binding, self.context, **values)
+
+    def construct(self, reference: ModelReference, **values: Any) -> Model:
+        """Use the ordinary unchecked constructor with this registry's metadata."""
+        binding = self.get_binding(reference)
+        return binding._model._construct_with_binding(binding, self.context, **values)
+
+    def get_queryset(self, reference: ModelReference, *, using: str | DatabaseClient | None = None) -> Any:
+        """Start a normal or historical query with this registry's explicit binding."""
+        binding = self.get_binding(reference)
+        queryset = binding.manager.create_queryset(binding=binding, context=self.context)
+        return queryset if using is None else queryset.using(using)
 
     def init_app(
         self,
@@ -82,71 +124,100 @@ class Apps:
         Raises:
             ConfigurationError: A module can't be imported, or a model is wrong.
         """
-        app_models: list[type[Model]] = []
-        for module in module_list:
-            app_models += ModelDiscovery.discover_models(module, label)
+        with ModelBindingPreparation(self):
+            app_models: list[type[Model]] = []
+            for module in module_list:
+                app_models += ModelDiscovery.discover_models(module, label, apps=self)
+            self._preparation.include(app_models)  # type: ignore[union-attr]
+            for model in app_models:
+                self.get_binding(model).app = label
 
-        # Merged, not replaced: a second registration under the label keeps the earlier models, and
-        # the table name collision check sees them.
-        self.apps.setdefault(label, {}).update({model.__name__: model for model in app_models})
+            # Merged, not replaced: a second registration under the label keeps the earlier models, and
+            # the table name collision check sees them.
+            self.apps.setdefault(label, {}).update({model.__name__: model for model in app_models})
 
-        if init_relations:
-            self.init_relations()
+            if init_relations:
+                self.rebind_relations()
 
-        return self.apps[label]
+            return self.apps[label]
 
     def assign_default_connection(self, app_label: str, default_connection: str) -> None:
-        """Points every model registered under ``app_label`` at ``default_connection``."""
+        """Set connection placement on the draft nodes of one registered app."""
+        if self._preparation is None:
+            raise ConfigurationError("Connection placement can only change while preparing a model graph")
         for model in self.apps[app_label].values():
-            model._meta.default_connection = default_connection
+            self.get_binding(model).default_connection = default_connection
 
-    def bind_models(self) -> None:
-        """Binds the registered models to this registry again: their default connections, table
-        names, swapped state, relations and base queries.
+    def finish_model_binding(self) -> None:
+        """Validate and publish live bindings after declarations and connections are assigned.
 
-        A model class is shared by every registry that loads its module, and the last one to bind
-        it wins - a nested context loading the same module with another configuration, or a
-        re-init that failed half-way, leaves the models bound to that configuration. Calling this
-        on the registry that should own them puts them back.
+        Initial discovery, live registration and restoration use the same finalization.
+        Callers retain their ModelBindingGraph boundary and discovery-specific checks.
         """
-        for name, info in self._config.items():
-            if name in self.apps:
-                self.assign_default_connection(name, info.get("default_connection", DEFAULT_CONNECTION_NAME))
-        self.init_relations()
+        from hare.core.apps.cross_connection_checks import CrossConnectionChecks
+        from hare.core.apps.enum_member_checks import EnumMemberChecks
+
+        self.rebind_relations()
+        CrossConnectionChecks.check_cross_connection_constraints(self)
+        EnumMemberChecks.add_to_models(self.get_binding(model) for model in self.get_models_iterable())
+        CrossConnectionChecks.check_change_capture_connections(self)
         if self._validate_connections:
             self.build_initial_querysets()
 
     def build_initial_querysets(self) -> None:
-        """Binds every registered model's ``basetable``/``basequery``/``basequery_all_fields`` to this
-        registry's connection and dialect. They live on the model class, so two contexts registering
-        one module concurrently overwrite each other's binding - the last one wins. A model whose
-        writes its connection can't make is refused first (``ModelConnectionChecks``).
-
-        Raises:
-            ConfigurationError: A model's connection can't make one of its writes.
-        """
+        """Validate model writes and prepare graph-local SQL inputs for configured dialects."""
         for app in self.apps.values():
             for model in app.values():
-                ModelConnectionChecks.check_model_writes(model)
+                binding = self.get_binding(model)
+                ModelConnectionChecks.check_model_writes(
+                    binding,
+                    self._connections.get_main(binding.default_connection),  # type: ignore[arg-type]
+                )
         ModelConnectionChecks.raise_if_names_differ_only_in_case(
-            [model for app in self.apps.values() for model in app.values() if model._meta.swapped is None]
+            [
+                binding
+                for app in self.apps.values()
+                for model in app.values()
+                if (binding := self.get_binding(model)).swapped is None
+            ],
+            self._connections,
         )
         self.bind_base_queries()
+
+    def rebind_relations(self) -> None:
+        """Rebuild a complete live registry from declarations, including reused model classes.
+
+        Initial loading and live registration share this boundary. Historical registries
+        prepare their snapshots through the same relation linker.
+        """
+        with ModelBindingPreparation(self):
+            self.init_relations()
 
     def bind_base_queries(self) -> None:
         """Binds every registered model's ``basetable``/``basequery``/``basequery_all_fields`` to its
         connection's dialect, without checking what the connection can write - enough to write a
         queryset as SQL where no connection is opened."""
+        if self._preparation is None:
+            with ModelBindingPreparation(self):
+                self.init_relations()
+                self.bind_base_queries()
+            return
         for app in self.apps.values():
             for model in app.values():
-                model._meta.basetable = Table(
-                    name=model._meta.db_table,
-                    schema=model._meta.schema,
-                    table_options=tuple(model._meta.table_options),
+                binding = self.get_binding(model)
+                self.bind_model_base_queries(
+                    binding,
+                    self._connections.get_main(binding.default_connection),  # type: ignore[arg-type]
                 )
-                basequery = model._meta.connection.query_class.from_(model._meta.basetable)
-                model._meta.basequery = basequery
-                model._meta.basequery_all_fields = basequery.select(*model._meta.db_fields)
+
+    @staticmethod
+    def bind_model_base_queries(binding: ModelBinding, connection: DatabaseClient) -> None:
+        """Prepare structural SQL inputs with the caller's explicitly selected client."""
+        binding.basetable = Table(
+            name=binding.db_table, schema=binding.schema, table_options=tuple(binding.table_options)
+        )
+        binding.basequery = connection.query_class.from_(binding.basetable)
+        binding.basequery_all_fields = binding.basequery.select(*binding.db_fields)
 
     def get_swappable_label(self, setting: str) -> str:
         """The ``app_label.ModelName`` label a ``swappable`` setting points at - the configured
@@ -159,29 +230,14 @@ class Apps:
             ConfigurationError: The setting is neither configured nor declared by exactly one model.
         """
         if setting in self.swappable_settings:
-            label = self.swappable_settings[setting]
-            if isinstance(label, dict):
-                raise ConfigurationError(
-                    f"Swappable setting {setting!r} names several models - only a GenericForeignKeyField takes it"
-                )
-            return label
+            return SwappableModels.get_single_model_label(setting, self.swappable_settings[setting])
         default_labels = [
             f"{app_label}.{model_name}"
             for app_label, app in self.apps.items()
             for model_name, model in app.items()
-            if model._meta.swappable == setting
+            if self.get_binding(model).swappable == setting
         ]
-        if len(default_labels) == 1:
-            return default_labels[0]
-        if not default_labels:
-            raise ConfigurationError(
-                f"Unknown swappable setting {setting!r} - no model declares Meta.swappable = {setting!r}; "
-                'set it in the "swappable" config section'
-            )
-        raise ConfigurationError(
-            f"Swappable setting {setting!r} is declared by several models ({', '.join(default_labels)}) - "
-            'choose one in the "swappable" config section'
-        )
+        return SwappableModels.get_declared_model_label(setting, default_labels)
 
     def get_generated_table_name(self, model: type[Model]) -> str:
         """The table name of a model without ``Meta.table`` - from this registry's
@@ -205,29 +261,6 @@ class Apps:
             )
         return table_name
 
-    def _check_table_name_collisions(self) -> None:
-        """Refuses two registered models resolving to the same table on one connection.
-
-        Raises:
-            ConfigurationError: Two models share a table.
-        """
-        # Two models defaulting to one table name are rejected here, naming both - per (connection,
-        # schema), as schema generation groups them.
-        model_by_table: dict[tuple[str | None, str | None, str], type[Model]] = {}
-        for app in self.apps.values():
-            for model in app.values():
-                if model._meta.swapped is not None:
-                    continue
-                table_key = (model._meta.default_connection, model._meta.schema, model._meta.db_table)
-                colliding_model = model_by_table.get(table_key)
-                if colliding_model is not None and colliding_model is not model:
-                    raise ConfigurationError(
-                        f"Models {colliding_model._meta.full_name!r} and {model._meta.full_name!r} both "
-                        f"resolve to table {model._meta.db_table!r} on connection "
-                        f"{model._meta.default_connection!r} - give one of them an explicit Meta.table name."
-                    )
-                model_by_table[table_key] = model
-
     def get_models_referencing(self, model: type[Model]) -> list[str]:
         """``"<Model>.<field>"`` for every OTHER registered model whose own forward FK/O2O/M2M
         field points at ``model``."""
@@ -235,99 +268,42 @@ class Apps:
         for registered_model in self.get_models_iterable():
             if registered_model is model:
                 continue
-            if model in RelationLinking.get_relation_targets(registered_model):
-                meta = registered_model._meta
-                for field_name in sorted(meta.foreign_key_fields | meta.one_to_one_fields | meta.many_to_many_fields):
-                    field = meta.fields_map[field_name]
-                    if getattr(field, "related_model", None) is model and not getattr(field, "_generated", False):
-                        references.append(f"{meta.full_name}.{field_name}")
+            meta = self.get_binding(registered_model)
+            for field_name in sorted(meta.forward_key_relation_names | meta.many_to_many_fields):
+                field = meta.fields_map[field_name]
+                if getattr(field, "related_model", None) is model and not getattr(field, "_generated", False):
+                    references.append(f"{meta.full_name}.{field_name}")
         return references
 
     def remove_models(self, models: Iterable[type[Model]]) -> None:
-        """Removes registered models together with everything their registration added: the backward
-        relations and generated many-to-many fields on their targets, their relation setup state,
-        and every cache entry built for them or their targets. Relations among the removed models
-        don't block it.
-
-        Args:
-            models: The registered model classes.
-
-        Raises:
-            ConfigurationError: A model isn't registered here, or a model outside ``models`` still
-                has a relation pointing at one of them.
-        """
+        """Validate removal against this published graph, then publish the remaining graph."""
         models_to_remove = list(dict.fromkeys(models))
         for model in models_to_remove:
             if self.get_registered_app_label(model) is None:
                 raise ConfigurationError(f"Model {model.__name__!r} is not registered.")
-        removed_model_names = {model._meta.full_name for model in models_to_remove}
+        removed_names = {self.get_binding(model).full_name for model in models_to_remove}
         for model in models_to_remove:
             references = [
                 reference
                 for reference in self.get_models_referencing(model)
-                if reference.rsplit(".", 1)[0] not in removed_model_names
+                if reference.rsplit(".", 1)[0] not in removed_names
             ]
             if references:
                 raise ConfigurationError(
-                    f"Cannot unregister {model._meta.full_name!r} - still referenced by "
+                    f"Cannot unregister {self.get_binding(model).full_name!r} - still referenced by "
                     f"{', '.join(references)}. Unregister the referencing model(s) first."
                 )
-        self.discard_models(models_to_remove)
-
-    def discard_models(self, models: Iterable[type[Model]]) -> None:
-        """Undoes whatever registering ``models`` got done, with no precondition checks - also
-        safe for a model whose relation initialisation stopped part-way, or that never reached
-        the registry at all.
-
-        Args:
-            models: The model classes to undo.
-        """
-        models_to_discard = list(dict.fromkeys(models))
-        affected_models: set[type[Model]] = set(models_to_discard)
-        for model in models_to_discard:
-            targets = RelationLinking.get_relation_targets(model)
-            affected_models.update(targets)
-            for target in targets:
-                backward_field_names = [
-                    field_name
-                    for field_name, field in target._meta.fields_map.items()
-                    if getattr(field, "related_model", None) is model
-                    and (
-                        isinstance(field, BackwardForeignKeyRelation)
-                        or (isinstance(field, ManyToManyFieldInstance) and field._generated)
-                    )
-                ]
-                for field_name in backward_field_names:
-                    target._meta.remove_field(field_name)
-        for model in models_to_discard:
-            meta = model._meta
-            for field_name in meta.foreign_key_fields | meta.one_to_one_fields:
-                relation_field = cast("ForeignKeyFieldInstance[Any]", meta.fields_map[field_name])
-                for shadow_name in relation_field.source_fields:
-                    if shadow_name != field_name and shadow_name in meta.fields_map:
-                        meta.remove_field(shadow_name)
-            self.drop_registry_entry(model)
-            meta._inited = False
-            meta._foreign_key_or_one_to_one_inited = False
-            meta.default_connection = None
-            meta.basetable = Table("")
-            meta.basequery = QueryBuilder()
-            meta.basequery_all_fields = QueryBuilder()
-        Caches.forget_model_caches(affected_models)
-
-    def drop_registry_entry(self, model: type[Model]) -> None:
-        """Removes ``model``'s own entry from this registry (and its app, once empty) - touches
-        nothing else; a no-op when ``model`` isn't registered.
-
-        Args:
-            model: The model class to remove.
-        """
-        app_label = self.get_registered_app_label(model)
-        if app_label is None:
-            return
-        del self.apps[app_label][model.__name__]
-        if not self.apps[app_label]:
-            del self.apps[app_label]
+        with ModelBindingPreparation(self) as preparation:
+            for model in models_to_remove:
+                app_label = self.get_registered_app_label(model)
+                if app_label is not None:
+                    app_models = self.apps[app_label]
+                    del app_models[model.__name__]
+                    if not app_models:
+                        del self.apps[app_label]
+                # Preparation holds an unpublished graph with a mutable mapping.
+                preparation.graph.bindings.pop(model, None)  # type: ignore[attr-defined]
+            self.finish_model_binding()
 
     def get_registered_app_label(self, model: type[Model]) -> str | None:
         """The app label ``model`` itself (not merely a same-named class) is registered under.
@@ -344,8 +320,7 @@ class Apps:
 
     def get_model(self, reference: ModelReference) -> type[Model]:
         """The model a reference names - an ``"app.Model"`` label, a ``swappable()`` setting (the model the
-        setting points at), or a class (the registry's own class of the model, the class itself when the
-        registry holds none).
+        setting points at), or the exact class registered in this version of the registry.
 
         Args:
             reference: The reference.
@@ -359,7 +334,9 @@ class Apps:
         if isinstance(reference, SwappableModelReference):
             reference = self.get_swappable_label(reference.setting)
         if not isinstance(reference, str):
-            return self.apps.get(reference._meta.app or "", {}).get(reference.__name__) or reference
+            if self.get_registered_app_label(reference) is not None:
+                return reference
+            raise ConfigurationError(f"Model {reference.__name__!r} is not registered in this registry")
         app_label, model_name = self.split_validated_reference(reference)
         try:
             return self.apps[app_label][model_name]
@@ -369,11 +346,7 @@ class Apps:
             raise ConfigurationError(f"No model with name {model_name!r} registered in app {app_label!r}.")
 
     def get_models_iterable(self) -> Iterable[type[Model]]:
-        model_list_generator = (model_list for model_list in (app.values() for app in self.apps.values()))
-        return chain.from_iterable(model_list_generator)
-
-    def clear(self) -> None:
-        self.apps.clear()
+        return chain.from_iterable(app.values() for app in self.apps.values())
 
     def __contains__(self, key: str) -> bool:
         return key in self.apps
@@ -413,29 +386,39 @@ class Apps:
             raise ConfigurationError(f'{reference!r} is not a model reference - expected "<app>.<Model>"')
         return items[0], items[1]
 
-    @staticmethod
-    def model_identity(target_model: type[Model]) -> tuple[str | None, str]:
-        return target_model._meta.app, target_model.__name__
+    def model_identity(self, target_model: type[Model]) -> tuple[str | None, str]:
+        return self.get_binding(target_model).app, target_model.__name__
 
     def init_relations(self) -> None:
-        """Wires the relations of every model and finalises each one - its lookups described; the querysets
-        built before the models were set up become ordinary ones.
+        """Wire and finalise each node in the unpublished graph, including lookup metadata.
+        Unbound queryset templates are replayed separately when a caller selects this graph.
         """
-        self.link_relations()
-        # The models a Meta.change_capture names by its label, before the capture is worked out.
-        for app in self.apps.values():
-            for model in app.values():
-                if model._meta.change_capture is not None:
-                    model._meta.change_capture.link_models(self)
-        # Every model's lookups, once all relations are wired - its filters and orderings are
-        # described without a connection, right after early binding (Hare.bind_models()) too.
-        for app in self.apps.values():
-            for model in app.values():
-                model._meta.finalise_model()
-        # The querysets built before the models were set up become ordinary ones.
-        CallsBeforeSetup.apply_pending()
+        with ModelBindingPreparation(self):
+            self.link_relations()
+            # The models a Meta.change_capture names by its label, before the capture is worked out.
+            for app in self.apps.values():
+                for model in app.values():
+                    binding = self.get_binding(model)
+                    if binding._inited and binding.change_capture is not None:
+                        binding.change_capture.link_models(self)
+            # Every model's lookups, once all relations are wired - its filters and orderings are
+            # described without a connection, right after early binding (Hare.bind_models()) too.
+            for app in self.apps.values():
+                for model in app.values():
+                    binding = self.get_binding(model)
+                    if binding._inited:
+                        binding.finalise_model()
+                    else:
+                        # Historical graphs can represent a migration before all relation targets
+                        # exist. Keep their scalar column metadata; queries require complete nodes.
+                        binding.finalise_fields()
+                    binding.basequery_all_fields = binding.basequery.select(*binding.db_fields)
 
-    def link_relations(self) -> None:
+    def _check_table_name_collisions(self) -> None:
+        """Check a live registry's tables; a migration registry may retain aliases of one table."""
+        ModelNameChecks._check_table_name_collisions(self)
+
+    def link_relations(self, *, deferred_models: frozenset[type[Model]] = frozenset()) -> None:
         """Wires the relations of every model not inited yet - both sides of each - and marks it
         inited; no model is finalised."""
         # Every model gets its table name before the main pass: the through table names below use
@@ -446,311 +429,51 @@ class Apps:
         swappable_targets = SwappableModels.get_swappable_targets(self)
         for app in self.apps.values():
             for model in app.values():
-                if model._meta.generic_foreign_key_fields and not model._meta._inited:
-                    GenericForeignKeys.expand_swappable_targets(model, swappable_targets)
+                if model in deferred_models:
+                    continue
+                binding = self.get_binding(model)
+                if binding.generic_foreign_key_fields and not binding._inited:
+                    GenericForeignKeys.expand_swappable_targets(binding, swappable_targets)
 
-        self._check_object_names()
+        ModelNameChecks._check_object_names(self)
 
-        table_owners = RelationLinking.get_table_owners(self)
+        table_holders = RelationLinking.get_table_holders(self)
         for app_name, app in self.apps.items():
             for model_name, model in app.items():
-                if model._meta._inited:
+                if model in deferred_models:
+                    continue
+                binding = self.get_binding(model)
+                if binding._inited:
                     continue
                 RelationLinking.ensure_foreign_key_or_one_to_one_inited(self, model)
-                for field in sorted(model._meta.many_to_many_fields):
-                    self._link_many_to_many(app_name, model_name, model, field, table_owners)
-                for generic_field in model._meta.generic_foreign_key_fields.values():
+                for field in sorted(binding.many_to_many_fields):
+                    ManyToManyLinking._link_many_to_many(self, app_name, model_name, model, field, table_holders)
+                for generic_field in binding.generic_foreign_key_fields.values():
                     if generic_field.branch_names:
                         generic_field.bind_branches()
                 # Only once every relation of the model resolved - a model whose initialisation
                 # raised part-way must not look finished to a later init_relations() pass.
-                model._meta._inited = True
+                binding._inited = True
 
-    def _check_object_names(self) -> None:
-        """Refuses two models declaring a database object of the same name on one connection and
-        schema, and one model declaring two constraints or indexes of one name.
+    def get_table_identity(self, model: type[Model], schema: str | None, table: str) -> TableIdentity:
+        """Identify a physical table using the connection's identifier comparison rules.
 
-        Raises:
-            ConfigurationError: Such objects are declared.
+        Schema-less declarations retain their dialect's effective declaration namespace:
+        Each dialect supplies its effective default schema or retains an unspecified schema.
         """
-        # An explicitly named unique or exclusion constraint, index or trigger inherited from an
-        # abstract base would give every concrete subclass a database object of the same name -
-        # rejected here, naming both models. A check constraint's name is per table and is exempt.
-        constraint_by_name: dict[tuple[str | None, str | None, str], type[Model]] = {}
-        for app in self.apps.values():
-            for model in app.values():
-                if model._meta.swapped is not None:
-                    continue
-                names = [
-                    constraint.name
-                    for constraint in model._meta.constraints
-                    if isinstance(constraint, (UniqueConstraint, ExclusionConstraint)) and constraint.name
-                ]
-                names.extend(index.name for index in model._meta.indexes if isinstance(index, Index) and index.name)
-                # Constraints and indexes share their names; a trigger and its function may share one.
-                repeated_names = sorted({name for name in names if names.count(name) > 1})
-                if repeated_names:
-                    raise ConfigurationError(
-                        f"Model {model._meta.full_name!r} declares more than one constraint/index named "
-                        f"{repeated_names[0]!r} - give each its own name."
-                    )
-                if model._meta.triggers:
-                    # Imported only for a model declaring triggers - importing it here for every
-                    # init would load hare.migrations, which imports this module.
-                    from hare.ddl.schema_objects.trigger import Trigger
-
-                    names.extend(trigger.name for trigger in model._meta.triggers if isinstance(trigger, Trigger))
-                names.extend(
-                    schema_object.name
-                    for schema_object in (
-                        *model._meta.views,
-                        *model._meta.materialized_views,
-                        *model._meta.dictionaries,
-                        *model._meta.sequences,
-                        *model._meta.functions,
-                    )
-                )
-                for name in names:
-                    constraint_key = (model._meta.default_connection, model._meta.schema, name)
-                    colliding_model = constraint_by_name.get(constraint_key)
-                    if colliding_model is not None and colliding_model is not model:
-                        raise ConfigurationError(
-                            f"Models {colliding_model._meta.full_name!r} and {model._meta.full_name!r} both "
-                            f"declare a constraint/index named {name!r} on connection "
-                            f"{model._meta.default_connection!r} - likely inherited unchanged from a shared "
-                            "abstract base. Give each subclass its own explicit name."
-                        )
-                    constraint_by_name[constraint_key] = model
-
-    def _link_many_to_many(
-        self,
-        app_name: str,
-        model_name: str,
-        model: type[Model],
-        field: str,
-        table_owners: dict[tuple[str | None, str], tuple[type[Model], str | None]],
-    ) -> None:
-        """Links a many-to-many field declared on a model: its target, its through table and keys,
-        its backward name, and the generated field of the other side.
-
-        Args:
-            app_name: The model's app.
-            model_name: The model's name in it.
-            model: The model.
-            field: The field's name.
-            table_owners: Who holds each table name - ``RelationLinking.get_table_owners()``.
-
-        Raises:
-            ConfigurationError: A model of the relation has no primary key, a self-referential
-                relation goes through a model, or the backward name is taken or reserved.
-        """
-        many_to_many_object = cast("ManyToManyFieldInstance[Any]", model._meta.fields_map[field])
-        if many_to_many_object._generated:
-            return
-
-        related_model, related_model_name = RelationLinking.get_related_model(self, many_to_many_object.model_name)
-        many_to_many_object.related_model = related_model
-        # A link row names both rows by their keys.
-        model._meta.raise_if_no_primary_key(f'ManyToManyField "{model.__name__}.{field}"')
-        related_model._meta.raise_if_no_primary_key(f'ManyToManyField "{model.__name__}.{field}" to it')
-
-        through_model, forward_keys, backward_keys, generated_on_delete = self._get_many_to_many_through_keys(
-            model, field, many_to_many_object, related_model
-        )
-        many_to_many_object.forward_key, many_to_many_object.forward_keys = forward_keys[0], forward_keys
-        many_to_many_object.backward_key, many_to_many_object.backward_keys = backward_keys[0], backward_keys
-
-        backward_relation_name = many_to_many_object.related_name = cast(
-            "str",
-            RelationLinking.get_backward_relation_name(
-                many_to_many_object.related_name, model._meta.db_table, model._meta.app, model.__name__
-            ),
-        )
-        is_swapped = model._meta.swapped is not None
-        if not is_swapped and backward_relation_name in related_model._meta.fields:
-            raise ConfigurationError(
-                f"backward relation {backward_relation_name!r} duplicates in model {related_model_name}"
-                ' - use a related_name template such as "%(app_label)s_%(class)s_..." to give each'
-                " concrete model a distinct backward-accessor name."
-            )
-        if not is_swapped:
-            RelationLinking.check_related_name_not_reserved(related_model, backward_relation_name, model, field)
-
-        self._set_many_to_many_through_table(
-            model, field, many_to_many_object, related_model, through_model, is_swapped, table_owners
+        literals = self.get_identifier_rules(model)
+        return (
+            self.get_binding(model).default_connection,
+            literals.get_schema_key(schema),
+            literals.get_identifier_key(table),
         )
 
-        # The through model is passed as the class, with its reconciled on_delete.
-        many_to_many_relation = ManyToManyFieldInstance(
-            f"{app_name}.{model_name}",
-            through_model if through_model is not None else many_to_many_object.through,
-            forward_key=many_to_many_object.backward_key,
-            backward_key=many_to_many_object.forward_key,
-            related_name=field,
-            on_delete=generated_on_delete,
-            field_type=model,
-            description=many_to_many_object.description,
-        )
-        many_to_many_relation._generated = True
-        many_to_many_relation.through = many_to_many_object.through
-        many_to_many_relation.through_schema = many_to_many_object.through_schema
-        many_to_many_relation.through_model = through_model
-        many_to_many_relation.through_model_class = through_model
-        # Swapped from the owning side, which already resolved both sides.
-        many_to_many_relation.forward_keys = many_to_many_object.backward_keys
-        many_to_many_relation.backward_keys = many_to_many_object.forward_keys
-        LookupInfoBuilder.forget_descriptions()
-        if not is_swapped:
-            related_model._meta.add_field(backward_relation_name, many_to_many_relation)
+    def get_identifier_rules(self, model: type[Model]) -> SqlLiterals:
+        """The captured dialect's comparison rules; pure states supply generic SQL rules."""
+        binding = self.get_binding(model)
+        return binding.graph.get_dialect(binding.default_connection).literals
 
     def get_identifier_key(self, model: type[Model], name: str) -> str:
-        """What a name of a model's table is told apart by on the database of its connection.
-
-        Args:
-            model: The model.
-            name: The name.
-
-        Returns:
-            Its key.
-        """
-        connection_alias = cast("str", model._meta.default_connection)
-        return self._connections.get_dialect(connection_alias).literals.get_identifier_key(name)
-
-    def _get_many_to_many_through_keys(
-        self,
-        model: type[Model],
-        field: str,
-        many_to_many_object: ManyToManyFieldInstance[Any],
-        related_model: type[Model],
-    ) -> tuple[type[Model] | None, tuple[str, ...], tuple[str, ...], Any]:
-        """The through model of a many-to-many field, the columns of its keys to each side, and the
-        ``on_delete`` of the generated other side.
-
-        Args:
-            model: The model declaring the field.
-            field: The field's name.
-            many_to_many_object: The field.
-            related_model: The target.
-
-        Returns:
-            The through model (None for a through table of its own), the forward keys, the backward
-            keys and the generated side's ``on_delete``.
-
-        Raises:
-            ConfigurationError: A self-referential relation goes through a model.
-        """
-        through_model: type[Model] | None = None
-        if many_to_many_object.through_model is not None:
-            # The through model's own foreign keys must be resolved first. The declared
-            # reference isn't overwritten - migration state copies the field as
-            # declared.
-            through_model, _ = RelationLinking.get_related_model(self, many_to_many_object.through_model)
-            many_to_many_object.through_model_class = through_model
-            RelationLinking.ensure_foreign_key_or_one_to_one_inited(self, through_model)
-            if self.model_identity(model) == self.model_identity(related_model):
-                raise ConfigurationError(
-                    f'ManyToManyField "{model.__name__}.{field}" is self-referential '
-                    f"through {through_model.__name__!r} - hare cannot auto-detect "
-                    "which of the through model's two FK fields belongs to which "
-                    "side. Use a plain opaque through= table name instead for a "
-                    "self-referential relation."
-                )
-            backward_foreign_key = RelationLinking.find_many_to_many_through_foreign_key(
-                through_model, model, "owning"
-            )
-            forward_foreign_key = RelationLinking.find_many_to_many_through_foreign_key(
-                through_model, related_model, "related"
-            )
-            forward_keys = forward_foreign_key.db_column_names
-            backward_keys = backward_foreign_key.db_column_names
-            # The declared on_delete, taken before the reconciliations below overwrite
-            # it.
-            declared_on_delete = many_to_many_object.on_delete
-            many_to_many_object.on_delete = RelationLinking.reconcile_many_to_many_through_on_delete(
-                declared_on_delete, backward_foreign_key, field, model.__name__
-            )
-            generated_on_delete = RelationLinking.reconcile_many_to_many_through_on_delete(
-                declared_on_delete, forward_foreign_key, field, related_model.__name__
-            )
-        else:
-            # The class name, not db_table - the related model may not have been visited
-            # yet.
-            # Expanded from the keys as declared - never from columns an earlier linking filled in.
-            forward_keys = RelationLinking.expand_many_to_many_key(
-                many_to_many_object.declared_forward_key,
-                related_model.__name__.lower(),
-                related_model._meta.primary_key_attribute_names,
-            )
-            backward_keys = RelationLinking.expand_many_to_many_key(
-                many_to_many_object.declared_backward_key,
-                model._meta.db_table,
-                model._meta.primary_key_attribute_names,
-            )
-            if not many_to_many_object.declared_backward_key and backward_keys == forward_keys:
-                # Self-referential: the default backward side would collide with the
-                # forward side's columns.
-                backward_keys = RelationLinking.expand_many_to_many_key(
-                    "", f"{model._meta.db_table}_rel", model._meta.primary_key_attribute_names
-                )
-            # Both sides are columns of one table hare creates - a name twice, as its database tells names
-            # apart, failed its CREATE TABLE.
-            clashing_keys = {self.get_identifier_key(model, key) for key in forward_keys} & {
-                self.get_identifier_key(model, key) for key in backward_keys
-            }
-            if clashing_keys:
-                raise ConfigurationError(
-                    f'ManyToManyField "{model.__name__}.{field}": forward_key and backward_key name the same '
-                    f"column {sorted(clashing_keys)} of the through table - give the two sides different names"
-                )
-            # The automatic through table has no foreign key field of its own - both
-            # directions share the declared on_delete.
-            generated_on_delete = many_to_many_object.on_delete
-        return through_model, forward_keys, backward_keys, generated_on_delete
-
-    def _set_many_to_many_through_table(
-        self,
-        model: type[Model],
-        field: str,
-        many_to_many_object: ManyToManyFieldInstance[Any],
-        related_model: type[Model],
-        through_model: type[Model] | None,
-        is_swapped: bool,
-        table_owners: dict[tuple[str | None, str], tuple[type[Model], str | None]],
-    ) -> None:
-        """Sets a many-to-many field's through table and schema - the through model's, else the
-        declared table, else one named after both models.
-
-        Args:
-            model: The model declaring the field.
-            field: The field's name.
-            many_to_many_object: The field.
-            related_model: The target.
-            through_model: The through model, None for a through table of its own.
-            is_swapped: Whether the model is swapped out.
-            table_owners: Who holds each table name - the field's automatic through table added.
-
-        Raises:
-            ConfigurationError: The generated table name is taken.
-        """
-        if through_model is not None:
-            # The through model's own table, in its own schema.
-            many_to_many_object.through = through_model._meta.db_table
-            many_to_many_object.through_schema = through_model._meta.schema
-        else:
-            if not many_to_many_object.through:
-                # A model referenced by class but not registered here gets the name its
-                # registry's generator would give.
-                related_model_table_name = related_model._meta.db_table or self.get_generated_table_name(related_model)
-                # A swappable target is named by the field, not by the model the
-                # setting happens to point at - the table must not depend on it.
-                through = (
-                    f"{model._meta.db_table}_{field}"
-                    if isinstance(many_to_many_object.model_name, SwappableModelReference)
-                    else f"{model._meta.db_table}_{related_model_table_name}"
-                )
-                # Shortened with a digest to fit the identifier limit.
-                through = Identifiers.get_within_limit(through)
-                if not is_swapped:
-                    RelationLinking.check_auto_through_table_name_free(table_owners, through, model, field)
-                many_to_many_object.through = through
-            many_to_many_object.through_schema = model._meta.schema
+        """Compare a name by the captured dialect, retaining spelling for a pure state."""
+        literals = self.get_identifier_rules(model)
+        return literals.get_identifier_key(name)

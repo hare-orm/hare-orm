@@ -15,7 +15,6 @@ def test_rename_model_unregisters_old_state() -> None:
         name="Author",
         fields=[("id", fields.IntField(primary_key=True))],
         options={"app": "blog", "table": "author", "primary_key_attribute": "id"},
-        bases=["Model"],
     )
     create.state_forward("blog", state)
     assert ("blog", "Author") in state.models

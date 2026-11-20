@@ -2,12 +2,10 @@
 //! can't apply - a `Now()` default of a date or time column. A time takes the zone's standard
 //! offset; a zone reporting none, or one with seconds, goes to the Python function.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use chrono::{DateTime, NaiveDateTime};
+use chrono::{NaiveDateTime, Utc};
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyDelta, PyDeltaAccess, PyDict, PyString};
+use pyo3::types::{PyDelta, PyDeltaAccess, PyString};
 use pyo3::{PyTraverseError, PyVisit};
 
 use crate::sqlite_functions::iso_moment::{format_date, format_time};
@@ -15,13 +13,6 @@ use crate::sqlite_functions::zone_conversions::{read_fields, ZoneConversions};
 
 /// The `value_type` of a date.
 const DATE_VALUE_TYPE: &str = "date";
-
-/// The current UTC instant.
-fn get_utc_now() -> Option<NaiveDateTime> {
-    let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
-    let microseconds = i64::try_from(elapsed.as_micros()).ok()?;
-    DateTime::from_timestamp_micros(microseconds).map(|moment| moment.naive_utc())
-}
 
 /// Whole seconds of a timedelta; None for one with microseconds.
 fn get_delta_seconds(delta: &Bound<'_, PyDelta>) -> Option<i64> {
@@ -39,7 +30,7 @@ pub struct LocalNow {
 #[pymethods]
 impl LocalNow {
     #[new]
-    fn new(zone_parser: Py<PyAny>, zones_by_name: Py<PyDict>, get_local_now_text_in_python: Py<PyAny>) -> Self {
+    fn new(zone_parser: Py<PyAny>, zones_by_name: Py<PyAny>, get_local_now_text_in_python: Py<PyAny>) -> Self {
         LocalNow { zones: ZoneConversions::new(zone_parser, zones_by_name), get_local_now_text_in_python }
     }
 
@@ -57,10 +48,8 @@ impl LocalNow {
     ) -> PyResult<Bound<'py, PyAny>> {
         let py = zone_name.py();
         let value_type_text = value_type.cast::<PyString>().ok().and_then(|text| text.to_str().ok());
-        if let (true, Some(value_type_text), Some(utc)) =
-            (zone_name.is_instance_of::<PyString>(), value_type_text, get_utc_now())
-        {
-            if let Some(text) = self.get_text(utc, zone_name, value_type_text)? {
+        if let (true, Some(value_type_text)) = (zone_name.is_instance_of::<PyString>(), value_type_text) {
+            if let Some(text) = self.get_text(Utc::now().naive_utc(), zone_name, value_type_text)? {
                 return Ok(PyString::new(py, &text).into_any());
             }
         }

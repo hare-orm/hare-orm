@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from hare.fields.data.numeric.big_int_field import BigIntField
 from hare.query.expressions import Aggregate
 from hare.query.expressions.expression_context import ExpressionContext
-from hare.query.expressions.expression_result import ExpressionResult
+from hare.query.expressions.expression_result import ExpressionResult, TableCriterionTuple
+from hare.query.key_columns import KeyColumns
 from hare.query.queryset.concrete_field_paths import ConcreteFieldPaths
+from hare.query.statements.projections.projected_value import ProjectedValue
 from hare.sql import functions
 from hare.sql.terms.case.case import Case
+from hare.sql.terms.term import Term
+from hare.sql.terms.tuple import Tuple
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 
@@ -16,8 +22,7 @@ class Count(Aggregate):
 
     database_function = functions.Count
 
-    #: Shared, long-lived instance - the statement plans hold an annotation's output
-    #: field weakly, so a fresh instance per call would be collected immediately.
+    #: Shared result descriptors avoid allocating a field for each expression build.
     COUNT_OUTPUT_FIELD = BigIntField()
 
     value_field = COUNT_OUTPUT_FIELD
@@ -38,7 +43,7 @@ class Count(Aggregate):
         Returns:
             True for such a column.
         """
-        meta = expression_context.model._meta
+        meta = expression_context.binding
         return field_name in meta.fields_db_projection and not meta.fields_map[field_name].null
 
     def _get_nested_field(self, expression_context: ExpressionContext, field: str) -> ExpressionResult:
@@ -53,9 +58,17 @@ class Count(Aggregate):
             The counted term.
         """
 
-        if field in expression_context.annotations:
-            return super()._get_nested_field(expression_context, field)
-        component_paths = ConcreteFieldPaths.get_paths(expression_context.model, field)
+        annotation = expression_context.annotations.get(field)
+        if isinstance(annotation, ProjectedValue) and isinstance(annotation.term, Tuple):
+            return self._get_composite_argument(expression_context, annotation.term.values, [])
+        if annotation is not None:
+            key_path = KeyColumns.get_primary_key_name(
+                expression_context.binding, expression_context.annotations, field
+            )
+            if key_path == field:
+                return super()._get_nested_field(expression_context, field)
+            field = key_path
+        component_paths = ConcreteFieldPaths.get_paths(expression_context.binding, field)
         if len(component_paths) <= 1:
             result = super()._get_nested_field(expression_context, field)
             if (
@@ -71,10 +84,16 @@ class Count(Aggregate):
         component_results = [
             super(Count, self)._get_nested_field(expression_context, path) for path in component_paths
         ]
-        joins = component_results[0].joins
+        return self._get_composite_argument(
+            expression_context, [result.term for result in component_results], component_results[0].joins
+        )
+
+    def _get_composite_argument(
+        self, expression_context: ExpressionContext, component_terms: Sequence[Term], joins: list[TableCriterionTuple]
+    ) -> ExpressionResult:
+        """Count key rows or distinct complete keys using the same semantics for derived columns."""
         if not self.distinct:
-            return ExpressionResult(term=component_results[0].term, joins=joins)
-        component_terms = [component_result.term for component_result in component_results]
+            return ExpressionResult(term=component_terms[0], joins=joins)
         key_term = expression_context.dialect.renderers.get_composite_distinct_key(component_terms)
         # A missing key (a null foreign key, no related row) stays NULL, so it isn't counted.
         counted_term = Case().when(component_terms[0].isnull(), ValueWrapper(None)).else_(key_term)

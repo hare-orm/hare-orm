@@ -4,7 +4,6 @@ import inspect
 import typing
 from collections.abc import Callable
 from functools import wraps
-from typing import cast
 from unittest import SkipTest
 
 from hare.contrib.test.features.feature_conditions import FeatureConditions
@@ -64,7 +63,7 @@ def requires_features(connection_alias: str | None = None, **conditions: typing.
                     check_features()
                     return test_item(*args, **kwargs)
 
-            return cast("TestItem", skip_wrapper)
+            return skip_wrapper
 
         # Assume a class is decorated
         test_functions = {

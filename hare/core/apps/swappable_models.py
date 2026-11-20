@@ -5,6 +5,7 @@ from inspect import isclass
 from types import ModuleType
 from typing import TYPE_CHECKING
 
+from hare.core.constants import SWAPPABLE_SETTING_MULTIPLE_MODELS_MESSAGE
 from hare.exceptions import ConfigurationError
 from hare.models import Model
 
@@ -16,6 +17,39 @@ class SwappableModels:
     """Swappable models: the settings checked to name models of the right apps, every model declaring
     Meta.swappable marked with the label its setting points at, and the settings naming the targets
     of a generic foreign key."""
+
+    @staticmethod
+    def get_single_model_label(setting: str, value: str | dict[str, str]) -> str:
+        """Read the configured value of a setting that names one model.
+
+        Args:
+            setting: The configured setting's name, used in an error message.
+            value: Its model label or its generic-reference mapping.
+
+        Returns:
+            The scalar label without conversion.
+
+        Raises:
+            ConfigurationError: The value is a generic-reference mapping instead of a scalar label.
+        """
+        if isinstance(value, dict):
+            raise ConfigurationError(SWAPPABLE_SETTING_MULTIPLE_MODELS_MESSAGE.format(setting=setting))
+        return value
+
+    @staticmethod
+    def get_declared_model_label(setting: str, labels: list[str]) -> str:
+        """Read the sole model label declaring a swappable setting."""
+        if len(labels) == 1:
+            return labels[0]
+        if not labels:
+            raise ConfigurationError(
+                f"Unknown swappable setting {setting!r} - no model declares Meta.swappable = {setting!r}; "
+                'set it in the "swappable" config section'
+            )
+        raise ConfigurationError(
+            f"Swappable setting {setting!r} is declared by several models ({', '.join(labels)}) - "
+            'choose one in the "swappable" config section'
+        )
 
     @staticmethod
     def check_swappable_settings(apps: Apps) -> None:
@@ -32,19 +66,11 @@ class SwappableModels:
         for setting, value in apps.swappable_settings.items():
             if isinstance(value, dict):
                 for label in value.values():
-                    SwappableModels.check_swappable_target(apps, setting, label)
+                    SwappableModels.get_swappable_target(apps, setting, label)
                 continue
             label = value
-            app_label, model_name = label.split(".", 1)
-            target_model = apps.apps.get(app_label, {}).get(model_name)
-            if target_model is None:
-                reason = (
-                    "it is an abstract model (Meta.abstract = True)"
-                    if SwappableModels.is_abstract_model_of_app(apps, app_label, model_name)
-                    else f'app "{app_label}" has no such model'
-                )
-                raise ConfigurationError(f"Swappable setting {setting!r} points at {label!r}, but {reason}")
-            target_setting = target_model._meta.swappable
+            target_model = SwappableModels.get_swappable_target(apps, setting, label)
+            target_setting = apps.get_binding(target_model).swappable
             if target_setting is not None and target_setting != setting:
                 target_label = apps.swappable_settings.get(target_setting, label)
                 if target_label != label:
@@ -54,25 +80,30 @@ class SwappableModels:
                     )
 
     @staticmethod
-    def check_swappable_target(apps: Apps, setting: str, label: str) -> None:
-        """Checks a target of a ``swappable`` setting naming the targets of a generic foreign key.
+    def get_swappable_target(apps: Apps, setting: str, label: str) -> type[Model]:
+        """Finds the registered concrete model of a scalar or generic ``swappable`` setting.
 
         Args:
             apps: The registry.
             setting: The setting name.
             label: The ``"app_label.ModelName"`` label of a target.
 
+        Returns:
+            The registered target model.
+
         Raises:
             ConfigurationError: The model isn't registered, or is abstract.
         """
         app_label, model_name = label.split(".", 1)
-        if apps.apps.get(app_label, {}).get(model_name) is None:
+        target_model = apps.apps.get(app_label, {}).get(model_name)
+        if target_model is None:
             reason = (
                 "it is an abstract model (Meta.abstract = True)"
                 if SwappableModels.is_abstract_model_of_app(apps, app_label, model_name)
                 else f'app "{app_label}" has no such model'
             )
             raise ConfigurationError(f"Swappable setting {setting!r} points at {label!r}, but {reason}")
+        return target_model
 
     @staticmethod
     def get_swappable_targets(apps: Apps) -> dict[str, dict[str, str]]:
@@ -99,20 +130,21 @@ class SwappableModels:
         for models_path in apps._config.get(app_label, {}).get("models", ()):
             module = models_path if isinstance(models_path, ModuleType) else importlib.import_module(models_path)
             candidate = getattr(module, model_name, None)
-            if isclass(candidate) and issubclass(candidate, Model) and candidate._meta.abstract:
+            if isclass(candidate) and issubclass(candidate, Model) and candidate._declaration.abstract:
                 return True
         return False
 
     @staticmethod
     def init_swapped_models(apps: Apps) -> None:
-        """Marks every model declaring ``Meta.swappable`` with the label its setting points at
-        instead of it (``_meta.swapped``), or None while it is the model in use.
+        """Sets each binding's ``swapped`` label from its ``Meta.swappable`` setting,
+        or None while that binding's model is the one in use.
 
         Args:
             apps: The registry.
         """
         for app_label, app in apps.apps.items():
             for model_name, model in app.items():
-                setting = model._meta.swappable
+                binding = apps.get_binding(model)
+                setting = binding.swappable
                 label = apps.get_swappable_label(setting) if setting else None
-                model._meta.swapped = label if label is not None and label != f"{app_label}.{model_name}" else None
+                binding.swapped = label if label is not None and label != f"{app_label}.{model_name}" else None

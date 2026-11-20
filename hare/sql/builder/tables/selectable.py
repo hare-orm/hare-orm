@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from copy import copy
 from typing import TYPE_CHECKING
 
+from hare.sql.builder.tables.declarations import SourceBinding
 from hare.sql.builder_methods import BuilderMethods
 from hare.sql.identifiers import Identifiers
 from hare.sql.sql_context import SqlContext
@@ -12,8 +14,8 @@ from hare.sql.terms.star import Star
 if TYPE_CHECKING:
     from typing import Self
 
+    from hare.dialects.base.clauses.enums import JoinType
     from hare.sql.builder.tables.table import Table
-    from hare.sql.enums import JoinType
 
 
 class Selectable(Node):
@@ -27,17 +29,26 @@ class Selectable(Node):
 
     def __init__(self, alias: str | None) -> None:
         self.alias = alias
+        self.source_binding = SourceBinding()
 
     @BuilderMethods.builder
-    def as_(self, alias: str) -> Self:
+    def as_(self, alias: str | None) -> Self:
         # Join aliases are built cumulatively (previous alias + "__" + hop) with no length cap, so
         # two long multi-hop paths would collide once the database truncates them to its
         # identifier limit - they are shortened with a digest of the whole alias instead.
-        self.alias = Identifiers.get_within_limit(alias)
+        self.alias = Identifiers.get_within_limit(alias) if alias is not None else None
+        self.source_binding = SourceBinding()
         return self
 
     def field(self, name: str) -> Field:
         return Field(name, table=self)
+
+    def _copy_preserving_source(self) -> Self:
+        """Copy this SQL source while keeping references to its occurrence valid."""
+        cloned = copy(self)
+        cloned.source_binding = self.source_binding
+        cloned.__dict__.pop("_hash_cache", None)
+        return cloned
 
     def replace_table(self, current_table: Table | None, new_table: Table | None) -> Self:
         """Replaces every occurrence of a table with another one - returns self unless a subclass can
@@ -70,6 +81,24 @@ class Selectable(Node):
 
     def get_table_name(self) -> str | None:
         return self.alias
+
+    def get_namespace(self, sql_context: SqlContext) -> str | None:
+        """The source alias selected by the current rendering scope, else its table name."""
+        if self.source_binding in sql_context.source_aliases:
+            return sql_context.source_aliases[self.source_binding]
+        return self.get_table_name()
+
+    def get_column_sql(self, name: str, sql_context: SqlContext) -> str:
+        """Render a column in this source's namespace.
+
+        Row references such as a trigger's NEW/OLD supply their namespace here, before SQL
+        rendering. A caller never needs to replace text inside a completed statement.
+        """
+        column_sql = sql_context.quote(name)
+        if sql_context.with_namespace or self.alias or self.source_binding in sql_context.source_aliases:
+            namespace = self.get_namespace(sql_context)
+            return f"{sql_context.quote(namespace)}.{column_sql}"
+        return column_sql
 
     def get_sql(self, sql_context: SqlContext) -> str:
         """The SQL of the source of rows.

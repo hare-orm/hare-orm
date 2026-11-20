@@ -57,7 +57,7 @@ class JsonValues:
             return [JsonValues.get_json_value(item) for item in value]
         if isinstance(value, Mapping):
             return {JsonValues.get_json_key(key): JsonValues.get_json_value(item) for key, item in value.items()}
-        return JsonValues.get_plain_json_value(value)
+        return JsonValues.get_json_value(JsonValues.get_plain_json_value(value))
 
     @staticmethod
     def get_json_key(key: Any) -> str:

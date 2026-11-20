@@ -1,0 +1,305 @@
+from __future__ import annotations
+
+from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine
+from contextvars import ContextVar, Token
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
+
+from hare.core.connections.model_connection_choice import ModelConnectionChoice
+from hare.core.enums import ApplicationScope
+from hare.core.hare_context import HareContext
+from hare.core.registries import Registries
+from hare.dialects.base.client.transaction_client import TransactionClient
+from hare.exceptions import ConfigurationError, QueryError
+from hare.fields.encrypted.field_encryption import FieldEncryption
+from hare.query.execution.messages import DEPENDENCY_REQUIRES_EXECUTION, SELECT_FOR_UPDATE_OUTSIDE_TRANSACTION
+from hare.query.expressions import Q
+from hare.query.scopes.row_scope_binding import RowScopeBinding
+from hare.query.scopes.row_visibility import RowVisibility
+
+if TYPE_CHECKING:
+    from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.dialects.base.results.statement_result import StatementResult
+    from hare.query.execution.query_dependency import QueryDependency
+    from hare.query.queryset.query_specification import QuerySpecification
+
+
+TResult = TypeVar("TResult")
+
+
+class QueryExecution:
+    """Transient dependency values for one execution, including its nested statements.
+
+    Values are loaded once per execution and reused by nested statements and iterator pages.
+    The task context is installed only while executing code: yielding an iterator item never
+    leaves this context in its consumer. Concurrent and repeated executions remain independent.
+    """
+
+    current: ClassVar[ContextVar[dict[QueryDependency, Q | None] | None]] = ContextVar(
+        "hare_query_dependencies", default=None
+    )
+    #: The conditions of an execution started outside any other - shared, never changed in place.
+    EMPTY_CONDITIONS: ClassVar[dict[QueryDependency, Q | None]] = {}
+
+    __slots__ = (
+        "conditions",
+        "snapshot",
+        "encryption",
+        "row_scopes",
+        "tenant_scope",
+        "tokens",
+        "conditions_are_shared",
+        "context",
+        "application_token",
+    )
+
+    def __init__(self, context: HareContext | None) -> None:
+        self.context = context
+        self.application_token: Token[HareContext | ApplicationScope | None] | None = None
+        changed_application = self.context is not HareContext.get_current()
+        token = (
+            HareContext.current_context.set(self.context if self.context is not None else ApplicationScope.DETACHED)
+            if changed_application
+            else None
+        )
+        try:
+            inherited = None if changed_application else self.current.get()
+            self.conditions: dict[QueryDependency, Q | None] = (
+                self.EMPTY_CONDITIONS if inherited is None else inherited
+            )
+            # The conditions are the enclosing execution's own until a dependency of this one is loaded.
+            self.conditions_are_shared = True
+            self.snapshot = Registries.current()
+            self.encryption = FieldEncryption.get_binding()
+            self.tenant_scope = RowVisibility.active_tenant.get()
+            self.row_scopes = (None if changed_application else RowScopeBinding.current.get()) or RowScopeBinding()
+            #: The tokens restoring the caller's context, while the inputs are installed.
+            self.tokens: tuple[Token[Any] | None, ...] | None = None
+        finally:
+            if token is not None:
+                HareContext.current_context.reset(token)
+
+    def __enter__(self) -> None:
+        """Installs changed inputs for one step; inherited bindings retain their separate scopes."""
+        self.application_token = (
+            HareContext.current_context.set(self.context if self.context is not None else ApplicationScope.DETACHED)
+            if HareContext.get_current() is not self.context
+            else None
+        )
+        self.tokens = (
+            self.current.set(self.conditions) if self.current.get() is not self.conditions else None,
+            Registries.execution_snapshot.set(self.snapshot)
+            if Registries.execution_snapshot.get() is not self.snapshot
+            else None,
+            FieldEncryption.binding.set(self.encryption)
+            if FieldEncryption.binding.get() is not self.encryption
+            else None,
+            RowScopeBinding.current.set(self.row_scopes)
+            if RowScopeBinding.current.get() is not self.row_scopes
+            else None,
+            RowVisibility.active_tenant.set(self.tenant_scope)
+            if RowVisibility.active_tenant.get() is not self.tenant_scope
+            else None,
+        )
+
+    def __exit__(self, *exception_info: object) -> None:
+        """Restores the caller's context, on every exit."""
+        token, snapshot_token, encryption_token, scope_token, tenant_token = self.tokens  # type: ignore[misc]
+        self.tokens = None
+        if tenant_token is not None:
+            RowVisibility.active_tenant.reset(tenant_token)
+        elif RowVisibility.active_tenant.get() is not self.tenant_scope:
+            RowVisibility.active_tenant.set(self.tenant_scope)
+        if scope_token is not None:
+            RowScopeBinding.current.reset(scope_token)
+        elif RowScopeBinding.current.get() is not self.row_scopes:
+            RowScopeBinding.current.set(self.row_scopes)
+        if encryption_token is not None:
+            FieldEncryption.binding.reset(encryption_token)
+        elif FieldEncryption.binding.get() is not self.encryption:
+            FieldEncryption.binding.set(self.encryption)
+        if snapshot_token is not None:
+            Registries.execution_snapshot.reset(snapshot_token)
+        elif Registries.execution_snapshot.get() is not self.snapshot:
+            Registries.execution_snapshot.set(self.snapshot)
+        if token is not None:
+            self.current.reset(token)
+        elif self.current.get() is not self.conditions:
+            self.current.set(self.conditions)
+
+        if self.application_token is not None:
+            HareContext.current_context.reset(self.application_token)
+            self.application_token = None
+
+    async def prepare(self, specification: QuerySpecification[Any]) -> None:
+        """Load missing inputs; an empty query performs no dependency IO.
+
+        None marks an input skipped for an empty query. It supplies a neutral condition
+        when compiling that query, but a nonempty query sharing the input must load it.
+        """
+        needs_values = specification._needs_dependency_values()
+        for dependency in specification._execution_dependencies:
+            if self.conditions.get(dependency) is None:
+                if self.conditions_are_shared:
+                    self.conditions = self.conditions.copy()
+                    self.conditions_are_shared = False
+                    if self.tokens is not None:
+                        token = self.current.set(self.conditions)
+                        if self.tokens[0] is None:
+                            self.tokens = (token, *self.tokens[1:])
+                self.conditions[dependency] = await dependency.load() if needs_values else None
+
+    async def call(self, operation: Callable[[], Awaitable[TResult]]) -> TResult:
+        """Run an operation with these inputs and restore the caller's context on every exit."""
+        with self:
+            return await operation()
+
+    @staticmethod
+    def get_bound(query: Any) -> Any:
+        """Bind a reusable template locally and require an explicit origin for execution."""
+        if query._binding is None:
+            from hare.query.queryset.pending_calls.calls_before_setup import CallsBeforeSetup
+
+            query = CallsBeforeSetup.bind(query, HareContext.require_current())
+        query._binding.graph.check_published()
+        query._binding._check_bound()
+        if query._context is None:
+            raise ConfigurationError("A detached query needs an explicit application context before execution")
+        query._context.check_open()
+        if query._connection is not None:
+            ModelConnectionChoice.check_context(query._context, query._connection)
+        return query
+
+    @classmethod
+    async def run(cls, query: Any) -> Any:
+        """Prepare the declaration's dependencies before the statement's normal executor."""
+        query = cls.get_bound(query)
+        execution = cls(query._context)
+        if query._execution_dependencies:
+            # A loader may install an ambient binding of its own. Restore the execution's
+            # snapshot before invoking the operation, as on iterator resume.
+            with execution:
+                await execution.prepare(query)
+        query._context.check_open()
+        with execution:
+            return await query._execute_bound()
+
+    @classmethod
+    async def run_operation(
+        cls,
+        specifications: tuple[QuerySpecification[Any], ...],
+        operation: Callable[[], Awaitable[TResult]],
+    ) -> TResult:
+        """Prepare inputs shared by an operation involving multiple query declarations."""
+        if specifications:
+            from hare.query.queryset.pending_calls.calls_before_setup import CallsBeforeSetup
+
+            origin = cls.get_bound(specifications[0])
+            specifications = (
+                origin,
+                *(
+                    CallsBeforeSetup.bind(specification, origin._context, origin._binding.graph)
+                    for specification in specifications[1:]
+                ),
+            )
+        execution = cls(specifications[0]._context if specifications else HareContext.get_current())
+        for specification in specifications:
+            if specification._execution_dependencies:
+                with execution:
+                    await execution.prepare(specification)
+        if specifications:
+            origin._context.check_open()
+        with execution:
+            return await operation()
+
+    @staticmethod
+    async def read(
+        specification: QuerySpecification[Any], connection: DatabaseClient, operation: Coroutine[Any, Any, TResult]
+    ) -> TResult:
+        """Runs a read of a summary - with the read checks of ``check_read_lock()`` and
+        ``raise_read_error()`` the readers of rows make themselves."""
+        try:
+            QueryExecution.check_read_lock(specification, connection)
+        except QueryError:
+            operation.close()
+            raise
+        try:
+            return await operation
+        except Exception as error:
+            QueryExecution.raise_read_error(connection, error)
+            raise
+
+    @staticmethod
+    async def fetch_rows(
+        connection: DatabaseClient, sql: str, parameters: list[Any] | None, *, retry_read: bool = False
+    ) -> StatementResult:
+        """Execute a statement and keep the driver metadata alongside its rows."""
+        return await connection._execute_built(
+            sql,
+            parameters,
+            returns_rows=True,
+            rows_by_position=connection.features.supports_positional_rows,
+            retry_read=retry_read,
+        )
+
+    @staticmethod
+    def check_read_lock(specification: QuerySpecification[Any], connection: DatabaseClient) -> None:
+        """Refuses a ``select_for_update()`` read outside a transaction - its lock would be released at
+        once.
+
+        Args:
+            specification: The query read.
+            connection: The connection it reads on.
+
+        Raises:
+            QueryError: The query locks its rows and the connection isn't a transaction's.
+        """
+        if specification._select_for_update and not isinstance(connection, TransactionClient):
+            raise QueryError(SELECT_FOR_UPDATE_OUTSIDE_TRANSACTION)
+
+    @staticmethod
+    def raise_read_error(connection: DatabaseClient, error: Exception) -> None:
+        """Raises a driver's failure to decode a read's result as hare's error, when it is one.
+
+        Args:
+            connection: The connection read on.
+            error: The failure.
+        """
+        read_error = connection.get_result_read_error(error)
+        if read_error is not None:
+            raise read_error from error
+
+    @classmethod
+    def get_condition(cls, dependency: QueryDependency) -> Q:
+        """Read an execution input, rejecting synchronous preview of an unbound dependency."""
+        conditions = cls.current.get()
+        if conditions is None or dependency not in conditions:
+            raise QueryError(DEPENDENCY_REQUIRES_EXECUTION)
+        condition = conditions[dependency]
+        return Q() if condition is None else condition
+
+    @classmethod
+    async def iterate(
+        cls,
+        specification: QuerySpecification[Any],
+        iterator: AsyncGenerator[TResult],
+    ) -> AsyncGenerator[TResult]:
+        """Keep dependency values for an iterator, without leaking context across yields.
+
+        Closing or cancelling the iterator closes its underlying cursor with the same inputs.
+        The inner generator is closed even when loading a dependency fails.
+        """
+        execution = cls(specification._context)
+        try:
+            if specification._execution_dependencies:
+                with execution:
+                    await execution.prepare(specification)
+            while True:
+                try:
+                    with execution:
+                        item = await anext(iterator)
+                except StopAsyncIteration:
+                    return
+                yield item
+        finally:
+            with execution:
+                await iterator.aclose()

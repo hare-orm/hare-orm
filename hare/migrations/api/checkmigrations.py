@@ -4,11 +4,9 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from hare.core.config import HareConfig
-from hare.core.connections.connections import Connections
 from hare.core.constants import DEFAULT_LARGE_TABLE_ROWS
-from hare.migrations.api.migration_request_parser import MigrationRequestParser
+from hare.migrations.api.migration_session import MigrationSession
 from hare.migrations.execution.connections_plan import ConnectionsPlan
-from hare.migrations.execution.executor.migration_executor import MigrationExecutor
 from hare.migrations.safety.migration_risk import MigrationRisk
 from hare.migrations.safety.migration_safety_checker import MigrationSafetyChecker
 
@@ -32,24 +30,11 @@ async def checkmigrations(
 
     Raises:
         UnknownMigrationError: ``app_labels`` names an app that isn't configured.
-        ConfigurationError: A migration's ``safety_exemptions`` holds something other than a
-            ``MigrationRiskCode``.
     """
     hare_config = HareConfig.load(config)
     safety_config = hare_config.migrations.safety if hare_config.migrations is not None else None
     checker = MigrationSafetyChecker(
         large_table_rows=safety_config.large_table_rows if safety_config is not None else DEFAULT_LARGE_TABLE_ROWS
     )
-    config_dict = hare_config.to_dict()
-    configured_apps, selected_apps, apps_by_connection = await MigrationRequestParser.init_selected_apps(
-        config_dict, app_labels
-    )
-    # Every configured app is loaded by each executor: a dependency may name another connection's
-    # migration.
-    executors = {
-        connection_alias: MigrationExecutor(
-            Connections.get(connection_alias), subset, full_apps_config=configured_apps
-        )
-        for connection_alias, subset in apps_by_connection.items()
-    }
-    return await ConnectionsPlan(executors).check_safety(checker)
+    async with MigrationSession(hare_config, app_labels) as session:
+        return await ConnectionsPlan(session.create_executors()).check_safety(checker)

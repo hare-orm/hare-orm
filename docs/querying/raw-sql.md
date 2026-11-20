@@ -24,6 +24,12 @@ neither a column nor a field of the model becomes an attribute of each instance,
 `author.book_count`), holding the driver's value. A column name returned more than once
 (`SELECT b.*, a.id ...`) raises `QueryError` — alias the extra column.
 
+Extra columns cannot replace model methods, properties, persistence state or relation caches
+(`save`, `_binding`, `_context`, `_declaration`, `_saved_in_db`, `_connection_alias`, `_books`): `FieldError`
+is raised before
+instances are returned. Safe custom extras, including `_` names and user-declared class defaults,
+remain available. The SQL text and the values of ordinary model columns are the caller's responsibility.
+
 ## <a id="rawsql"></a>`RawSQL`
 
 ```python
@@ -107,7 +113,8 @@ Without `schema`, rows come back as plain `dict`s. `using` targets a specific co
 its client; without it, this only works when exactly one connection is configured (`QueryError`
 otherwise, with the list of configured names). `rows_affected` is the number of rows fetched for a SELECT
 (or a write with `RETURNING`), and the rows the statement itself changed for an INSERT/UPDATE/DELETE —
-rows changed by triggers or foreign-key cascades it set off are not counted, on every database. A row is
+rows changed by triggers or foreign-key cascades it set off are not counted, on every database.
+The affected count is `None` when the database or driver does not report it. A row is
 a dict by column name, so a result with two columns of one name raises `QueryError` — give them aliases
 (`.as_("...")`), or read it with [`execute_described()`](#execute-query-result), which keeps both. An
 expression without an alias is named by the database (PostgreSQL names `COUNT(...)` `count`).
@@ -171,7 +178,9 @@ application's SQL console, a report. It returns a `DescribedResult(columns, rows
   has none.
 - `rows` — tuples of values in the order of `columns`; empty for a statement that returns no rows.
 - `row_count` — the rows the statement changed, for a write without `RETURNING`; otherwise the rows it
-  returned.
+  returned. `None` when the database or driver does not report the affected count.
 
 It works on SQLite, asyncpg, rust_pg and ClickHouse, on a transaction's connection too. `sql` is written
 for the connection's dialect, with its placeholders for `values`.
+On PostgreSQL, use an explicit type such as `$1::uuid` when the surrounding SQL does not determine
+the parameter type. See [raw PostgreSQL parameters](../dialects/postgresql/connecting.md#driver-differences).

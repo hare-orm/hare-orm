@@ -7,10 +7,11 @@ from mypy.typeops import make_simplified_union
 from mypy.types import NoneType, Type
 
 from hare.contrib.mypy.annotation_types import AnnotationTypes
-from hare.contrib.mypy.constants import LOOKUP_SEPARATOR, UNSUPPORTED_FIELD_MESSAGE, UNSUPPORTED_LOOKUP_MESSAGE
+from hare.contrib.mypy.constants import UNSUPPORTED_FIELD_MESSAGE, UNSUPPORTED_LOOKUP_MESSAGE
 from hare.contrib.mypy.mypy_types import MypyTypes
 from hare.exceptions import HareError
 from hare.fields.field import Field
+from hare.query.constants import LOOKUP_SEPARATOR
 
 if TYPE_CHECKING:
     from mypy.plugin import MethodSigContext, Plugin
@@ -18,7 +19,7 @@ if TYPE_CHECKING:
 
     from hare.contrib.mypy.model_registry import ModelRegistry
     from hare.dialects.base.dialect import Dialect
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.lookup_info.lookup_info import LookupInfo
 
 
@@ -46,11 +47,10 @@ class FilterArgumentsCheck:
             The signature.
         """
         mypy_types = MypyTypes(self.plugin, method_signature_context.api, self.model_registry)
-        queryset_arguments = mypy_types.get_queryset_arguments(method_signature_context.type)
-        call = method_signature_context.context
-        if queryset_arguments is None or not isinstance(call, CallExpr):
+        queryset_call = mypy_types.get_queryset_call(method_signature_context.type, method_signature_context.context)
+        if queryset_call is None:
             return method_signature_context.default_signature
-        model, queryset_type = queryset_arguments
+        model, queryset_type, call = queryset_call
         annotations = AnnotationTypes.get_annotations(method_signature_context.type, queryset_type)
         method_parameter_names = set(method_signature_context.default_signature.arg_names)
         types_by_name = {
@@ -63,7 +63,7 @@ class FilterArgumentsCheck:
     def get_key_type(
         self,
         mypy_types: MypyTypes,
-        model: type[Model],
+        binding: ModelBinding,
         annotations: TypedDictType | None,
         key: str,
         call: CallExpr,
@@ -72,7 +72,7 @@ class FilterArgumentsCheck:
 
         Args:
             mypy_types: The types of the call.
-            model: The queryset's model.
+            binding: The queryset's model binding.
             annotations: The queryset's annotations, None when they aren't known.
             key: The filter key.
             call: The call.
@@ -88,23 +88,23 @@ class FilterArgumentsCheck:
                 [annotations.items[name], NoneType(), *mypy_types.get_always_accepted_types()]
             )
         try:
-            lookup_info = model._meta.get_lookup_info(key)
+            lookup_info = binding.get_lookup_info(key)
         except HareError as error:
             if annotations is not None:
                 mypy_types.fail(str(error), call)
             return mypy_types.any()
-        dialect = self.model_registry.get_dialect(model)
+        dialect = self.model_registry.get_dialect(binding)
         if dialect is not None and not lookup_info.is_supported(dialect):
-            mypy_types.fail(FilterArgumentsCheck.get_unsupported_message(model, key, lookup_info, dialect), call)
+            mypy_types.fail(FilterArgumentsCheck.get_unsupported_message(binding, key, lookup_info, dialect), call)
         return mypy_types.get_filter_value_type(lookup_info)
 
     @staticmethod
-    def get_unsupported_message(model: type[Model], key: str, lookup_info: LookupInfo, dialect: Dialect) -> str:
+    def get_unsupported_message(binding: ModelBinding, key: str, lookup_info: LookupInfo, dialect: Dialect) -> str:
         """Why a filter key doesn't run on a dialect - a field it reads has no column type there, or
         its last part isn't a lookup or a transform there.
 
         Args:
-            model: The queryset's model.
+            binding: The queryset's model binding.
             key: The filter key.
             lookup_info: The description of the key.
             dialect: The dialect of the model's connection.
@@ -112,6 +112,7 @@ class FilterArgumentsCheck:
         Returns:
             The message.
         """
+        model = binding._model
         missing_fields = [
             field_object
             for field_object in (lookup_info.field, lookup_info.value_field)

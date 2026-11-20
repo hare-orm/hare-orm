@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 from types import TracebackType
-from typing import TYPE_CHECKING, Self, cast
+from typing import Self
 
+from hare.core.resource_completion import ResourceCompletion
+from hare.dialects.base.schema.constants import SCHEMA_CLEANUP_FAILED
 from hare.dialects.base.schema.shadow.shadow_database import ShadowDatabase
 from hare.dialects.sqlite.client.constants import SQLITE_ATTACHED_DATABASES_OPTION_NAME
 from hare.dialects.sqlite.constants import SQLITE_IN_MEMORY_FILENAME
-
-if TYPE_CHECKING:
-    from hare.dialects.sqlite.client.sqlite_client import SqliteClient
 
 
 class SqliteShadowDatabase(ShadowDatabase):
@@ -17,7 +16,7 @@ class SqliteShadowDatabase(ShadowDatabase):
     connection attaches - and gone when it is closed."""
 
     async def __aenter__(self) -> Self:
-        attached_databases = cast("SqliteClient", self.connection).attached_databases
+        attached_databases = self.connection.attached_databases  # type: ignore[attr-defined]
         self.client = self.connection.create_independent_client(
             {
                 "file_path": SQLITE_IN_MEMORY_FILENAME,
@@ -33,4 +32,5 @@ class SqliteShadowDatabase(ShadowDatabase):
         traceback: TracebackType | None,
     ) -> None:
         if self.client is not None:
-            await self.client.close()
+            with ResourceCompletion.preserve_error(exception, SCHEMA_CLEANUP_FAILED):
+                await ResourceCompletion.wait(self.client.close())

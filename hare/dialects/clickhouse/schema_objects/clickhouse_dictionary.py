@@ -12,6 +12,7 @@ from hare.dialects.clickhouse.schema.constants import (
     CLICKHOUSE_DICTIONARY_LAYOUT_PATTERN,
     CLICKHOUSE_DICTIONARY_LIFETIME_LIMIT,
 )
+from hare.dialects.clickhouse.schema_objects.dictionary_source import DictionarySource
 from hare.exceptions import ConfigurationError
 
 
@@ -39,20 +40,19 @@ class ClickhouseDictionary(Dictionary):
             a key of any fields; ``"HASHED()"``, ``"FLAT()"`` a key of one unsigned 64-bit integer.
         lifetime: After how many seconds the dictionary is loaded again - a number, or the least
             and the greatest of them (the server picks a moment in between); 0 for never.
-        source: ``RawSQLTerm`` of another source than the model's table, as ``SOURCE(...)`` takes it
-            - ``RawSQLTerm("POSTGRESQL(NAME orders_database TABLE 'country')")``. A ``{env:NAME}``
-            in it is replaced by the environment variable ``NAME`` when the dictionary is created -
-            a password stays out of the migration file.
+        source: A ``DictionarySource`` with literal options and explicit ``EnvironmentValue``
+            references, or ``RawSQLTerm`` as ``SOURCE(...)`` takes it. Raw SQL is literal;
+            environment placeholders inside it are not interpreted. None reads the model's table.
 
     Raises:
         ConfigurationError: See ``Dictionary``; ``layout`` isn't a layout with its arguments,
             ``lifetime`` isn't a number of seconds or a pair of them within ten years, ``source``
-            isn't ``RawSQLTerm`` of SQL.
+            is neither ``DictionarySource`` nor ``RawSQLTerm`` of SQL.
     """
 
     layout: str = CLICKHOUSE_DICTIONARY_DEFAULT_LAYOUT
     lifetime: int | tuple[int, int] = 0
-    source: RawSQLTerm | None = None
+    source: DictionarySource | RawSQLTerm | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -82,9 +82,13 @@ class ClickhouseDictionary(Dictionary):
                 f"{owner}: a {self.layout} dictionary keeps no rows - each lookup reads the source - so it takes no "
                 f"lifetime, got {self.lifetime!r}"
             )
-        if self.source is not None and (not isinstance(self.source, RawSQLTerm) or not self.source.sql.strip()):
+        if (
+            self.source is not None
+            and not isinstance(self.source, DictionarySource)
+            and (not isinstance(self.source, RawSQLTerm) or not self.source.sql.strip())
+        ):
             raise ConfigurationError(
-                f"{owner}: source takes RawSQLTerm(...) of a source as SOURCE(...) takes it, got "
+                f"{owner}: source takes DictionarySource(...) or RawSQLTerm(...) as SOURCE(...) takes it, got "
                 f"{ValueDescriptions.get_shown_value(self.source)}"
             )
 

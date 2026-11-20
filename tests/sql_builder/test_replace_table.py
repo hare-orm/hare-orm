@@ -10,9 +10,11 @@ reached the wrapped term.
 
 import pytest
 
+from hare.dialects.sqlite.query import SqliteQuery
 from hare.sql import Field, Table
 from hare.sql.enums import Equality
 from hare.sql.terms import NestedCriterion
+from hare.sql.terms.qualified_outer_field import QualifiedOuterField
 
 pytestmark = pytest.mark.database_independent
 
@@ -81,3 +83,52 @@ def test_set_does_not_collapse_distinct_fields_after_replace_table():
 
     assert {f2, Field("col", table=t1)} == {Field("col", table=t2), Field("col", table=t1)}
     assert len({f2, Field("col", table=t1)}) == 2
+
+
+@pytest.mark.parametrize("alias", [None, "source_rows"])
+def test_a_table_replacement_retargets_a_derived_source_without_changing_the_original(alias):
+    source = SqliteQuery.from_(WIDGET).select(WIDGET.id).as_(alias)
+    query = SqliteQuery.from_(source).select(source.id)
+    expected_source = SqliteQuery.from_(GADGET).select(GADGET.id).as_(alias)
+    expected = SqliteQuery.from_(expected_source).select(expected_source.id)
+    original = query.get_sql()
+
+    assert query.replace_table(WIDGET, GADGET).get_sql() == expected.get_sql()
+    assert query.get_sql() == original
+
+
+def test_a_table_replacement_retargets_update_assignments_and_returning():
+    changes = Table("changes")
+    query = (
+        SqliteQuery.update(WIDGET)
+        .from_(changes)
+        .set(WIDGET.amount, WIDGET.amount + changes.increment)
+        .where(WIDGET.id == changes.id)
+        .returning(WIDGET.id)
+    )
+    expected = (
+        SqliteQuery.update(GADGET)
+        .from_(changes)
+        .set(GADGET.amount, GADGET.amount + changes.increment)
+        .where(GADGET.id == changes.id)
+        .returning(GADGET.id)
+    )
+
+    assert query.replace_table(WIDGET, GADGET).get_sql() == expected.get_sql()
+
+
+def test_read_columns_include_the_physical_outer_column_used_by_a_subquery():
+    source = WIDGET.as_("source")
+    query = SqliteQuery.from_(GADGET).select(GADGET.amount).where(GADGET.id == QualifiedOuterField(source, "wire_id"))
+
+    assert query.get_read_columns() == {("gadget", "amount"), ("gadget", "id"), ("widget", "wire_id")}
+
+
+def test_a_cte_over_a_derived_table_keeps_physical_column_dependencies():
+    source = SqliteQuery.from_(WIDGET).select(WIDGET.id)
+    named_rows = Table("picked")
+    body = SqliteQuery.from_(source).select(source.id)
+    query = SqliteQuery.from_(named_rows).with_(body, "picked").select(named_rows.id)
+
+    assert query.get_sql().startswith('WITH "picked" AS (')
+    assert query.get_read_columns() == {("widget", "id")}

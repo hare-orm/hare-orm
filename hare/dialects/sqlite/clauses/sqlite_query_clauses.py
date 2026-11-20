@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar
 
 from hare.dialects.base.clauses.limit_returning_conflict_query_clauses import LimitReturningConflictQueryClauses
 from hare.dialects.sqlite.clauses.constants import (
@@ -53,7 +53,7 @@ class SqliteQueryClauses(LimitReturningConflictQueryClauses):
         pattern = like.right
         upper = isinstance(pattern, Upper)
         if upper:
-            pattern = cast("Upper", pattern).args[0]
+            pattern = pattern.args[0]  # type: ignore[attr-defined]
         if (
             not isinstance(pattern, ValueWrapper)
             or not isinstance(pattern.value, str)

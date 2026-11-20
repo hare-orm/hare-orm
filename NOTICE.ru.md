@@ -65,11 +65,12 @@ limitations under the License.
 проекта [yara-orm](https://github.com/vsdudakov/yara-orm), открытой ORM под лицензией MIT, и эти его
 части переработаны из кода yara-orm:
 
-- в `rust/native/src/pg/client.rs` — настройка TLS-подключения (проверки сертификата и сборка
-  подключения по ним) и приведение типов параметров к общему типу по всем строкам `execute_many`;
+- в `rust/native/src/pg/tls/` — настройка TLS, включая проверку сертификатов и создание коннектора;
+- в `rust/native/src/pg/parameter_values.rs` — приведение типов параметров к общему типу по всем
+  строкам `execute_many`;
 - в `rust/native/src/pg/value/` (`mod.rs`, `from_python.rs`, `into_python.rs`) — основа типа
   `Value`: его варианты и их преобразование в объекты Python и обратно;
-- в `rust/native/src/pg/error.rs` — тип ошибок драйвера.
+- в `rust/native/src/pg/error/` — тип ошибок драйвера.
 
 На эти части по-прежнему распространяется его лицензия:
 

@@ -52,7 +52,8 @@ class NetworkField(Field[Any]):
         try:
             return self.parse(value)
         except (ValueError, TypeError) as error:
-            raise self.get_validation_error(error, value) from error
+            validation_error = self.get_validation_error(error, value)
+        raise validation_error
 
     def to_python(self, value: Any) -> Any:
         return None if value is None else self.get_parsed(value)

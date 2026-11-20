@@ -16,8 +16,5 @@ class ClickhouseDriverTransactionClient(ClickhouseTransactionClient, ClickhouseD
     async def open_transaction_connection(self) -> ClickhouseDriverConnections:
         return ClickhouseDriverConnections(1, self.get_connection_settings(with_db=True), self.pool_statistics)
 
-    async def close_transaction_connection(self, connection: ClickhouseDriverConnections) -> None:
-        await connection.close()
-
     async def send_transaction_statement(self, sql: str) -> None:
         await self._connection.run(self._run_command, sql)

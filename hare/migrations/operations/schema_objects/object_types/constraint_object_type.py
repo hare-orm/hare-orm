@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import replace
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.ddl.constraints.check_constraint import CheckConstraint
 from hare.ddl.constraints.exclusion_constraint import ExclusionConstraint
 from hare.ddl.constraints.unique_constraint import UniqueConstraint
+from hare.ddl.schema_references import SchemaReferences
 from hare.migrations.exceptions import IncompatibleStateError
 from hare.migrations.operations.declared_uniqueness_checks import DeclaredUniquenessChecks
 from hare.migrations.operations.schema_objects.object_types.schema_object_type import SchemaObjectType
@@ -16,7 +16,7 @@ from hare.models.uniqueness.declared_uniqueness import DeclaredUniqueness
 if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
     from hare.migrations.state.model_state import ModelState
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class ConstraintObjectType(SchemaObjectType):
@@ -25,6 +25,10 @@ class ConstraintObjectType(SchemaObjectType):
 
     option: ClassVar[ModelOption] = ModelOption.CONSTRAINTS
     noun: ClassVar[str] = "constraint"
+
+    @staticmethod
+    def get_referenced_field_names(schema_object: Any) -> frozenset[str]:
+        return SchemaReferences.get_constraint_field_names(schema_object)
 
     @classmethod
     def get_objects(cls, model_state: ModelState) -> list[Any]:
@@ -38,7 +42,7 @@ class ConstraintObjectType(SchemaObjectType):
     def find(
         cls,
         model_state: ModelState,
-        get_model: Callable[[], type[Model]],
+        get_model: Callable[[], ModelBinding],
         *,
         name: str | None = None,
         fields: list[str] | None = None,
@@ -59,7 +63,7 @@ class ConstraintObjectType(SchemaObjectType):
         raise IncompatibleStateError(f"Constraint {name or fields} is not present on {model_state.name}")
 
     @classmethod
-    def raise_if_object_unsupported(cls, editor: BaseSchemaEditor, model: type[Model], schema_object: Any) -> None:
+    def raise_if_object_unsupported(cls, editor: BaseSchemaEditor, model: ModelBinding, schema_object: Any) -> None:
         if isinstance(schema_object, ExclusionConstraint):
             editor.constraint_statements.exclusion_constraint_sql(model, schema_object)
         elif isinstance(schema_object, UniqueConstraint) and editor.client.features.supports_unique_constraints:
@@ -70,15 +74,9 @@ class ConstraintObjectType(SchemaObjectType):
             )
 
     @classmethod
-    def renamed(cls, schema_object: Any, new_name: str) -> Any:
-        return replace(schema_object, name=new_name)
-
-    @classmethod
-    async def add(cls, editor: BaseSchemaEditor, model: type[Model], schema_object: Any, **options: Any) -> None:
+    async def add(cls, editor: BaseSchemaEditor, model: ModelBinding, schema_object: Any, **options: Any) -> None:
         if options.get("not_valid"):
-            await editor.constraint_statements.add_check_constraint_not_valid(
-                model, cast("CheckConstraint", schema_object)
-            )
+            await editor.constraint_statements.get_unvalidated_check_add_plan(model, schema_object).execute(editor)
         else:
             await editor.add_constraint(model, schema_object)
 
@@ -86,13 +84,13 @@ class ConstraintObjectType(SchemaObjectType):
     async def remove(
         cls,
         editor: BaseSchemaEditor,
-        model: type[Model],
-        remaining_model: type[Model],
+        model: ModelBinding,
+        remaining_model: ModelBinding,
         schema_object: Any,
         **options: Any,
     ) -> None:
         await editor.remove_constraint(remaining_model, schema_object)
 
     @classmethod
-    async def rename(cls, editor: BaseSchemaEditor, model: type[Model], old_object: Any, new_object: Any) -> None:
+    async def rename(cls, editor: BaseSchemaEditor, model: ModelBinding, old_object: Any, new_object: Any) -> None:
         await editor.rename_constraint(model, old_object, new_object)

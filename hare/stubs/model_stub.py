@@ -1,19 +1,18 @@
 from __future__ import annotations
 
-import dataclasses
 import inspect
 import typing
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.exceptions import FieldError
+from hare.models.write.rules.enums import WriteType
+from hare.query.constants import LOOKUP_SEPARATOR, PRIMARY_KEY_ALIAS
 from hare.query.generic_foreign_keys.constants import GENERIC_FOREIGN_KEY_LOOKUPS, GENERIC_FOREIGN_KEY_TYPE_KEY
 from hare.query.generic_foreign_keys.generic_foreign_key_paths import GenericForeignKeyPaths
 from hare.query.managers.base_manager import BaseManager
 from hare.query.queryset.queryset import QuerySet
 from hare.stubs.constants import (
     FILTERS_SUFFIX,
-    LOOKUP_SEPARATOR,
-    PRIMARY_KEY_ATTRIBUTE_NAME,
     QUERYSET_SUFFIX,
     UPDATES_SUFFIX,
     WRITES_SUFFIX,
@@ -22,11 +21,12 @@ from hare.stubs.stub_imports import StubImports
 from hare.stubs.value_type_text import ValueTypeText
 from hare.typing_info.declarations import ValueType
 from hare.typing_info.filter_value_types import FilterValueTypes
+from hare.typing_info.write_value_types import WriteValueTypes
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.fields.relations.fields.relational_field import RelationalField
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.lookup_info.lookup_info import LookupInfo
 
 
@@ -42,47 +42,48 @@ class ModelStub:
         relation_depth: How many relations a filter key crosses at most.
     """
 
-    def __init__(self, model: type[Model], dialect: Dialect, imports: StubImports, relation_depth: int) -> None:
-        self.model = model
+    def __init__(self, binding: ModelBinding, dialect: Dialect, imports: StubImports, relation_depth: int) -> None:
+        model = binding._model
+        self._binding = binding
         self.dialect = dialect
         self.imports = imports
         self.relation_depth = relation_depth
         self.value_type_text = ValueTypeText(imports)
-        self.model_name = model.__name__
+        model_name = model.__name__
         #: The names of the model's declarations - free names of the stub's module.
-        self.filters_name = imports.declare(f"{self.model_name}{FILTERS_SUFFIX}")
-        self.writes_name = imports.declare(f"{self.model_name}{WRITES_SUFFIX}")
-        self.updates_name = imports.declare(f"{self.model_name}{UPDATES_SUFFIX}")
-        self.queryset_name = imports.declare(f"{self.model_name}{QUERYSET_SUFFIX}")
+        self.filters_name = imports.declare(f"{model_name}{FILTERS_SUFFIX}")
+        self.writes_name = imports.declare(f"{model_name}{WRITES_SUFFIX}")
+        self.updates_name = imports.declare(f"{model_name}{UPDATES_SUFFIX}")
+        self.queryset_name = imports.declare(f"{model_name}{QUERYSET_SUFFIX}")
 
-    def get_paths(self, model: type[Model], prefix: str, depth: int) -> list[str]:
+    def get_paths(self, binding: ModelBinding, prefix: str, depth: int) -> list[str]:
         """The field paths a filter key may start with - the model's fields, and the fields of the
         models its relations lead to, ``depth`` relations deep - back to a model crossed before too
         (``shop__items__name``, ``parent__parent__name``).
 
         Args:
-            model: The model the paths start at.
+            binding: The model the paths start at.
             prefix: The path to the model.
             depth: How many more relations a path crosses.
 
         Returns:
             The paths.
         """
-        paths = [f"{prefix}{name}" for name in model._meta.generic_foreign_key_fields]
-        for name, field in model._meta.fields_map.items():
+        paths = [f"{prefix}{name}" for name in binding.generic_foreign_key_fields]
+        for name, field in binding.fields_map.items():
             path = f"{prefix}{name}"
             paths.append(path)
             related_model = getattr(field, "related_model", None)
             if depth > 0 and isinstance(related_model, type):
-                paths.extend(self.get_paths(related_model, f"{path}__", depth - 1))
+                paths.extend(self.get_paths(binding.graph.get_binding(related_model), f"{path}__", depth - 1))
         return paths
 
     def get_filter_types(self) -> dict[str, ValueType]:
         """The type of the value of each filter key."""
         filter_types: dict[str, ValueType] = {}
-        for path in [PRIMARY_KEY_ATTRIBUTE_NAME, *self.get_paths(self.model, "", self.relation_depth)]:
+        for path in [PRIMARY_KEY_ALIAS, *self.get_paths(self._binding, "", self.relation_depth)]:
             try:
-                lookups = self.get_generic_lookups(path) or self.model._meta.get_lookups(path, self.dialect)
+                lookups = self.get_generic_lookups(path) or self._binding.get_lookups(path, self.dialect)
             except FieldError:
                 # A field no filter reads (a generic relation's own attribute).
                 continue
@@ -108,7 +109,7 @@ class ModelStub:
             for lookup in sorted(GENERIC_FOREIGN_KEY_LOOKUPS):
                 suffix = LOOKUP_SEPARATOR.join(part for part in (type_suffix, lookup) if part)
                 lookup_info = GenericForeignKeyPaths.get_lookup_info(
-                    self.model, f"{path}{LOOKUP_SEPARATOR}{suffix}" if suffix else path
+                    self._binding, f"{path}{LOOKUP_SEPARATOR}{suffix}" if suffix else path
                 )
                 if lookup_info is None:
                     return {}
@@ -116,43 +117,12 @@ class ModelStub:
         return lookups
 
     def get_write_types(self) -> dict[str, ValueType]:
-        """The type of the value of each field ``create()`` and ``update()`` take."""
-        write_types: dict[str, ValueType] = {}
-        meta = self.model._meta
-        for name in meta.fields_db_projection:
-            field = meta.fields_map[name]
-            write_types[name] = ValueType(
-                classes=(field.field_type, *field.get_accepted_value_types()),
-                declared_in=(self.model, name),
-                accepts_enum_values=True,
-                nullable=field.null,
-            )
-        for name in self.get_direct_relation_names():
-            relation = cast("RelationalField[Any]", meta.fields_map[name])
-            write_types[name] = ValueType(models=(relation.related_model,), nullable=relation.null)
-        for name, generic_field in meta.generic_foreign_key_fields.items():
-            # A branch's row is taken as a dict too - {"type": <branch>, <key fields>}.
-            write_types[name] = ValueType(
-                classes=(dict,), models=tuple(generic_field.branch_by_model), nullable=generic_field.null
-            )
-        if meta.primary_key_attribute:
-            key_type = meta.get_lookup_info(PRIMARY_KEY_ATTRIBUTE_NAME).value_type
-            write_types[PRIMARY_KEY_ATTRIBUTE_NAME] = ValueType(classes=(key_type,))
-        return write_types
+        """The type of each field value accepted by ``create()``."""
+        return WriteValueTypes.get_all(self._binding)
 
     def get_update_types(self) -> dict[str, ValueType]:
-        """The type of the value of each field ``update()`` takes - a write's, or an expression."""
-        return {
-            name: dataclasses.replace(value_type, accepts_expressions=True)
-            for name, value_type in self.get_write_types().items()
-        }
-
-    def get_direct_relation_names(self) -> list[str]:
-        """The model's foreign key and one-to-one relations, in the order the model declares them -
-        a stub written twice is the same text."""
-        meta = self.model._meta
-        relation_names = meta.foreign_key_fields | meta.one_to_one_fields
-        return [name for name in meta.fields_map if name in relation_names]
+        """The shared write contracts with expressions accepted for updates."""
+        return WriteValueTypes.get_all(self._binding, accepts_expressions=True, write_type=WriteType.UPDATE)
 
     def get_typed_dict(self, name: str, types_by_key: dict[str, ValueType]) -> list[str]:
         """The lines of a ``TypedDict`` whose keys are optional - the functional form takes any key."""
@@ -167,7 +137,7 @@ class ModelStub:
 
     def get_declarations(self) -> list[str]:
         """The lines the stub adds for the model."""
-        model = self.imports.add_class(self.model)
+        model = self.imports.add_class(self._binding._model)
         filters = self.filters_name
         writes = self.writes_name
         updates = self.updates_name
@@ -182,6 +152,10 @@ class ModelStub:
         exists = self.imports.add("hare.query.expressions", "Exists")
         single = self.imports.add("hare.query.queryset.single_rows.query_set_single", "QuerySetSingle")
         update_query = self.imports.add("hare.query.statements.write.update_query", "UpdateQuery")
+        dict_name = self.imports.add("builtins", "dict")
+        str_name = self.imports.add("builtins", "str")
+        tuple_name = self.imports.add("builtins", "tuple")
+        bool_name = self.imports.add("builtins", "bool")
         lines = [
             *self.get_typed_dict(filters, self.get_filter_types()),
             "",
@@ -189,7 +163,7 @@ class ModelStub:
             "",
             *self.get_typed_dict(updates, self.get_update_types()),
             "",
-            f"class {queryset_name}({self.get_queryset_base_text(self.model._meta.manager.queryset_class)}):",
+            f"class {queryset_name}({self.get_queryset_base_text(self._binding.manager.queryset_class)}):",
             f"    def filter(self, *args: {q_name} | {exists}, **kwargs: {unpack}[{filters}]) -> {self_name}: ...",
             f"    def exclude(self, *args: {q_name} | {exists}, **kwargs: {unpack}[{filters}]) -> {self_name}: ...",
             f"    @{overload}",
@@ -200,10 +174,11 @@ class ModelStub:
             f"multiple_objects_returned_exception: {any_name} = ..., **kwargs: {unpack}[{filters}]) -> "
             f"{single}[{model}]: ...",
             f"    async def create(self, **kwargs: {unpack}[{writes}]) -> {model}: ...",
-            f"    async def get_or_create(self, defaults: dict[str, {any_name}] | None = None, "
-            f"**kwargs: {unpack}[{filters}]) -> tuple[{model}, bool]: ...",
-            f"    async def update_or_create(self, defaults: dict[str, {any_name}] | None = None, create_defaults: "
-            f"dict[str, {any_name}] | None = None, **kwargs: {unpack}[{filters}]) -> tuple[{model}, bool]: ...",
+            f"    async def get_or_create(self, defaults: {dict_name}[{str_name}, {any_name}] | None = None, "
+            f"**kwargs: {unpack}[{filters}]) -> {tuple_name}[{model}, {bool_name}]: ...",
+            f"    async def update_or_create(self, defaults: {dict_name}[{str_name}, {any_name}] | None = None, "
+            f"create_defaults: {dict_name}[{str_name}, {any_name}] | None = None, "
+            f"**kwargs: {unpack}[{filters}]) -> {tuple_name}[{model}, {bool_name}]: ...",
             f"    def update(self, **kwargs: {unpack}[{updates}]) -> {update_query}: ...",
             *self.get_extension_method_lines(),
         ]
@@ -219,7 +194,8 @@ class ModelStub:
         lines.extend(
             [
                 f"    @{overload}",
-                f"    def values_list(self, *fields_: str, flat: bool = False, named: bool = False, **kwargs: "
+                f"    def values_list(self, *fields_: {str_name}, flat: {bool_name} = False, "
+                f"named: {bool_name} = False, **kwargs: "
                 f"{any_name}) -> {queryset}[{model}, {any_name}, {any_name}]: ...",
             ]
         )
@@ -238,7 +214,7 @@ class ModelStub:
         any_name = self.imports.add("typing", "Any")
         self_name = self.imports.add("typing", "Self")
         lines = []
-        for name, implementations in sorted(QuerySetExtensions.registered.items()):
+        for name, implementations in sorted(QuerySetExtensions.get_registered().items()):
             implementation = implementations.get(type(self.dialect))
             if implementation is None:
                 continue
@@ -288,28 +264,27 @@ class ModelStub:
         return ", ".join(parts)
 
     def get_selected_types(self) -> dict[str, ValueType]:
-        """The type of each field ``values_list(name, flat=True)`` selects."""
+        """The read type of each direct stored field for ``values_list(name, flat=True)`` overloads.
+
+        Relation paths and expression outputs retain the queryset's general return type.
+        """
         selected_types: dict[str, ValueType] = {}
-        for name in self.model._meta.fields_db_projection:
+        for name in self._binding.fields_db_projection:
             try:
-                lookup_info = self.model._meta.get_lookup_info(name)
+                lookup_info = self._binding.get_lookup_info(name)
             except FieldError:
                 continue
             selected_types[name] = FilterValueTypes.get_selected_value_type(lookup_info)
         return selected_types
 
-    def get_attribute_annotations(self) -> dict[str, str]:
-        """The annotation of each field of the model's class."""
-        return ModelStub.get_field_annotations(self.model, self.imports)
-
     @staticmethod
-    def get_field_annotations(model: type[Model], imports: StubImports) -> dict[str, str]:
+    def get_field_annotations(binding: ModelBinding, imports: StubImports) -> dict[str, str]:
         """The annotation of each field of a model's class - abstract too - ``Field[<value>]``, a
         descriptor giving the field on the class and its value on an instance; a relation's value is
         the related object, ``Any`` while the relation names its model by a string.
 
         Args:
-            model: The model.
+            binding: The model.
             imports: The stub's imports.
 
         Returns:
@@ -317,18 +292,17 @@ class ModelStub:
         """
         value_type_text = ValueTypeText(imports)
         field_class = imports.add("hare.fields.field", "Field")
-        meta = model._meta
-        relation_names = meta.foreign_key_fields | meta.one_to_one_fields
+        relation_names = binding.forward_key_relation_names
         annotations: dict[str, str] = {}
-        for name in meta.fields_db_projection:
-            field = meta.fields_map[name]
+        for name in binding.fields_db_projection:
+            field = binding.fields_map[name]
             value_class = getattr(field, "enum_type", None) or field.get_python_type()
             value_type = ValueType(classes=(value_class,), nullable=field.null)
             annotations[name] = f"{field_class}[{value_type_text.get_text(value_type)}]"
-        for name in meta.fields_map:
+        for name in binding.fields_map:
             if name not in relation_names:
                 continue
-            relation = cast("RelationalField[Any]", meta.fields_map[name])
+            relation: RelationalField[Any] = binding.fields_map[name]  # type: ignore[assignment]
             related_model = relation.related_model
             value_type = (
                 ValueType(models=(related_model,), nullable=relation.null)
@@ -341,15 +315,13 @@ class ModelStub:
     def get_primary_key_lines(self) -> list[str]:
         """The lines declaring ``pk`` in the model's class - the key's value, a tuple of the key fields'
         values for a composite key, None also taken on assignment; none for a model without a key."""
-        if not self.model._meta.primary_key_attribute:
+        if not self._binding.primary_key_attribute:
             return []
-        key_type = FilterValueTypes.get_selected_value_type(
-            self.model._meta.get_lookup_info(PRIMARY_KEY_ATTRIBUTE_NAME)
-        )
+        key_type = FilterValueTypes.get_selected_value_type(self._binding.get_lookup_info(PRIMARY_KEY_ALIAS))
         key_text = self.value_type_text.get_text(key_type)
-        name = PRIMARY_KEY_ATTRIBUTE_NAME
+        name = PRIMARY_KEY_ALIAS
         return [
-            "    @property",
+            f"    @{self.imports.add('builtins', 'property')}",
             f"    def {name}(self) -> {key_text}: ...",
             f"    @{name}.setter",
             f"    def {name}(self, value: {self.value_type_text.get_union([key_text, 'None'])}) -> None: ...",
@@ -360,9 +332,9 @@ class ModelStub:
         declares besides) - the queryset it gives: the stub's queryset for the default manager's
         queryset class, else the class itself."""
         class_var = self.imports.add("typing", "ClassVar")
-        default_queryset_class = self.model._meta.manager.queryset_class
+        default_queryset_class = self._binding.manager.queryset_class
         managers: dict[str, BaseManager] = {}
-        for model_class in reversed(self.model.__mro__):
+        for model_class in reversed(self._binding._model.__mro__):
             managers.update(
                 (name, value) for name, value in vars(model_class).items() if isinstance(value, BaseManager)
             )
@@ -412,7 +384,7 @@ class ModelStub:
         Returns:
             The annotation.
         """
-        model = self.imports.add_class(self.model)
+        model = self.imports.add_class(self._binding._model)
         any_name = self.imports.add("typing", "Any")
         class_text = self.value_type_text.get_class_text(queryset_class)
         if queryset_class is QuerySet or class_text == any_name:

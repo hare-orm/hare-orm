@@ -9,6 +9,7 @@ from typing import Any, assert_type
 import pytest
 
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.exceptions import DoesNotExist, MultipleObjectsReturned
 from hare.instrumentation.declarations import QueryExecuted
 from hare.instrumentation.observers.observers import Observers
@@ -190,7 +191,7 @@ async def test_get_without_counting_reads_one_row(db):
         )
         with pytest.raises(MultipleObjectsReturned):
             await Tournament.objects.get(name="two")
-    clauses = Tournament._meta.connection.dialect.clauses
+    clauses = HareContext.require_current().apps.get_queryset(Tournament).get_connection().dialect.clauses  # type: ignore[union-attr]
 
     def asks_for(event: QueryExecuted, row_count: int) -> bool:
         bound_integers = [value for value in event.parameters or () if type(value) is int]

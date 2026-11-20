@@ -3,8 +3,6 @@ drift` CLI command/argparse (see tests/cli/test_drift.py for that end-to-end cov
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from hare import fields
@@ -12,7 +10,7 @@ from hare.contrib.test import requires_features
 from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.core.connections.connections import Connections
 from hare.ddl.constraints import CheckConstraint, ExclusionConstraint, UniqueConstraint
-from hare.ddl.enums import ExclusionConstraintUsing, TriggerTiming
+from hare.ddl.enums import ExclusionConstraintUsing, SchemaPartType, TriggerTiming
 from hare.ddl.indexes import Index, PartialIndex
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.ddl.schema_objects.trigger import Trigger
@@ -20,14 +18,15 @@ from hare.dialects.postgresql.indexes import HnswIndex, IvfflatIndex
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
 from hare.migrations.autodetection.migration_autodetector import MigrationAutodetector
 from hare.migrations.drift import DriftResult, detect_drift
-from hare.migrations.operations import AddConstraint, AddField, AddIndex, AlterField
+from hare.migrations.operations import AddConstraint, AddField, AddIndex, AlterField, SeparateDatabaseAndState
 from hare.models import Model
 from hare.models.enums import ModelOption
 from hare.query.expressions import Q
 from hare.query.functions import Lower
 from hare.vectors import VectorField
-from tests.migrations.round_trips.test_round_trip_real_db import APP_LABEL, RoundTrip, build_live_state, build_model
+from tests.migrations.round_trips.test_round_trip_real_db import RoundTrip, build_live_state, build_model
 from tests.utils.database_under_test import DatabaseUnderTest
+from tests.utils.model_bindings import ModelBindings
 
 
 class DriftWidget(Model):
@@ -357,7 +356,7 @@ async def test_detect_drift_reports_no_drift_on_a_synced_schema():
 @pytest.mark.asyncio
 async def test_detect_drift_reports_no_drift_for_the_synced_drift_models():
     """DriftStateBuilder used to synthesize the implicit per-field Index the live model's own
-    ModelState.make_from_model() adds for a plain db_index=True field only on the "new_state"
+    ModelState.make_from_declaration() adds for a plain db_index=True field only on the "new_state"
     (live models) side, never on the observed database side - a freshly-applied db_index=True
     field showed permanent, unfixable "Add index" drift. Likewise a plain CheckConstraint of
     Meta.constraints, which the observed side never read, showed as a phantom AddConstraint.
@@ -390,7 +389,7 @@ async def test_detect_drift_respects_a_models_own_meta_schema():
     Postgres-only: Meta.schema is a real, separately-creatable schema there; SQLite has no such
     concept (CreateSchema/DropSchema are no-ops on it), so this fix has nothing to exercise on
     that dialect."""
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+    db_url = DatabaseUnderTest.get_url()
     if not DatabaseUnderTest.get_dialect().features.supports_schemas:
         pytest.skip("Meta.schema is a real, separate concept only on Postgres")
     async with hare_test_context(
@@ -416,7 +415,7 @@ async def test_detect_drift_respects_a_models_own_meta_schema():
 async def test_a_model_in_a_schema_not_created_yet_is_reported_missing():
     """detect_drift() raised SchemaNotFoundError for a model whose Meta.schema the database doesn't have
     yet - its model is missing like one whose table isn't there."""
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+    db_url = DatabaseUnderTest.get_url()
     if not DatabaseUnderTest.get_dialect().features.supports_schemas:
         pytest.skip("Meta.schema is a real, separate concept only on Postgres")
     async with hare_test_context(
@@ -441,7 +440,7 @@ async def test_a_model_in_a_schema_not_created_yet_is_reported_missing():
 async def test_a_model_naming_the_default_schema_is_compared():
     """The shadow made its own schema for the default one, then made it again for the model's Meta.schema -
     drift failed with "schema already exists"."""
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+    db_url = DatabaseUnderTest.get_url()
     if not DatabaseUnderTest.get_dialect().features.supports_schemas:
         pytest.skip("Meta.schema is a real, separate concept only on Postgres")
     async with hare_test_context(
@@ -554,8 +553,8 @@ async def test_detect_drift_reports_missing_field_as_add_field_operation():
         )
 
         assert result.has_drift is True
-        assert len(result.operations) == 1
-        operation = result.operations[0]
+        prepare, operation = result.operations
+        assert isinstance(prepare, SeparateDatabaseAndState)
         assert isinstance(operation, AddField)
         assert "description" in operation.describe()
         assert result.untracked_tables == []
@@ -645,7 +644,7 @@ async def test_detect_drift_reports_no_drift_for_a_synced_expression_index():
     IndexInfo never carried it back from introspection), and even once that's fixed, comparing
     the reconstructed RawSQLTerm expression against the live model's own resolved Term by repr()
     reported permanent, unfixable remove+add drift for every expression index, named or not."""
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+    db_url = DatabaseUnderTest.get_url()
     if DatabaseUnderTest.get_dialect().name != "postgresql":
         pytest.skip("Expression-based index reconstruction is Postgres-only")
     async with hare_test_context(
@@ -676,7 +675,7 @@ async def test_detect_drift_ignores_postgres_canonicalized_exclusion_condition_t
     on every single run, even immediately after a fresh `hare migrate` with nothing yet changed.
 
     Postgres-only - ExclusionConstraint/EXCLUDE has no SQLite equivalent at all."""
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+    db_url = DatabaseUnderTest.get_url()
     if DatabaseUnderTest.get_dialect().name != "postgresql":
         pytest.skip("ExclusionConstraint/EXCLUDE is Postgres-only")
     async with hare_test_context(
@@ -739,19 +738,24 @@ async def test_detect_drift_reports_a_missing_or_broken_many_to_many_through_tab
         )
 
         assert result.has_drift is True
-        assert [
+        additions = [
             (type(operation), operation.model_name, operation.name)
             for operation in result.operations
             if isinstance(operation, AddField)
-        ] == [(AddField, "DriftManyToManyPost", "labels")]
+        ]
+        if through_table_ddl is None:
+            assert additions == [(AddField, "DriftManyToManyPost", "labels")]
+            assert result.mismatched_objects == []
+        else:
+            assert additions == []
+            assert result.mismatched_objects[0].table == "drift_m2m_post_label"
         assert result.untracked_tables == []
 
 
 @pytest.mark.sqlite_only
 @pytest.mark.asyncio
 async def test_detect_drift_reports_a_json_column_of_the_older_sqlite_type():
-    """JSONField's SQLite column type changed from JSON to JSON_TEXT - a table created with the older type
-    has a column of another type (another affinity), whose field is altered."""
+    """Drift reports the old JSON affinity when a field cannot recreate it for rollback."""
     async with hare_test_context(
         modules=["tests.migrations.drift.test_drift"], app_label="drift_models", connection_label="models"
     ) as ctx:
@@ -769,13 +773,15 @@ async def test_detect_drift_reports_a_json_column_of_the_older_sqlite_type():
             connection, current_state(ctx), ["drift_models"], schema=DatabaseUnderTest.get_public_schema()
         )
 
-        assert [(type(operation).__name__, operation.name) for operation in result.operations] == [
-            ("AlterField", "payload")
+        assert result.has_drift
+        assert result.operations == []
+        assert [(item.part_type, item.table, item.name) for item in result.mismatched_objects] == [
+            (SchemaPartType.COLUMN, "drift_json_document", "payload")
         ]
 
 
 def _postgres_test_database_url_or_skip() -> str:
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+    db_url = DatabaseUnderTest.get_url()
     if DatabaseUnderTest.get_dialect().name != "postgresql":
         pytest.skip("Postgres-only drift scenario")
     return db_url
@@ -889,7 +895,7 @@ async def test_detect_drift_matches_unique_constraints_and_unique_indexes_to_the
     widget = _build_unique_drift_widget()
     await round_trip.migrate_to(widget)
 
-    result = await detect_drift(round_trip.connection, build_live_state(widget), [APP_LABEL])
+    result = await round_trip.get_drift(build_live_state(widget))
 
     assert result.operations == []
 
@@ -907,9 +913,13 @@ async def test_detect_drift_still_reports_a_dropped_single_column_unique_constra
             'ALTER TABLE "unique_drift_widget" DROP CONSTRAINT "uq_udw_code"; DROP INDEX "uidx_udw_label"'
         )
 
-    result = await detect_drift(round_trip.connection, build_live_state(widget), [APP_LABEL])
+    result = await round_trip.get_drift(build_live_state(widget))
 
-    assert sorted(type(operation).__name__ for operation in result.operations) == ["AddConstraint", "AddIndex"]
+    assert sorted(type(operation).__name__ for operation in result.operations) == [
+        "AddConstraint",
+        "AddIndex",
+        "SeparateDatabaseAndState",
+    ]
     (add_index,) = [operation for operation in result.operations if isinstance(operation, AddIndex)]
     (add_constraint,) = [operation for operation in result.operations if isinstance(operation, AddConstraint)]
     assert add_index.index.name == "uidx_udw_label"
@@ -933,10 +943,14 @@ async def test_detect_drift_reports_a_renamed_unique_constraint_as_its_removal_a
         ]
     )
 
-    result = await detect_drift(round_trip.connection, build_live_state(renamed_widget), [APP_LABEL])
+    result = await round_trip.get_drift(build_live_state(renamed_widget))
 
-    assert [type(operation).__name__ for operation in result.operations] == ["RemoveConstraint", "AddConstraint"]
-    remove_constraint, add_constraint = result.operations
+    assert [type(operation).__name__ for operation in result.operations] == [
+        "SeparateDatabaseAndState",
+        "RemoveConstraint",
+        "AddConstraint",
+    ]
+    _, remove_constraint, add_constraint = result.operations
     assert remove_constraint.name == "uq_udw_code"
     assert add_constraint.constraint.name == "uq_udw_code_renamed"
 
@@ -961,7 +975,7 @@ async def test_detect_drift_matches_an_inlined_sqlite_unique_constraint_by_its_d
     )
     await round_trip.migrate_to(widget)
 
-    result = await detect_drift(round_trip.connection, build_live_state(widget), [APP_LABEL])
+    result = await round_trip.get_drift(build_live_state(widget))
 
     assert result.operations == []
 
@@ -986,16 +1000,20 @@ async def test_detect_drift_matches_conditional_and_deferrable_unique_constraint
     )
     await round_trip.migrate_to(widget)
 
-    assert (await detect_drift(round_trip.connection, build_live_state(widget), [APP_LABEL])).operations == []
+    assert (await round_trip.get_drift(build_live_state(widget))).operations == []
 
     await round_trip.connection.execute_script(
         'ALTER TABLE "conditional_unique_widget" DROP CONSTRAINT "uq_cuw_c"; '
         'ALTER TABLE "conditional_unique_widget" ADD CONSTRAINT "uq_cuw_c" UNIQUE ("c")'
     )
-    result = await detect_drift(round_trip.connection, build_live_state(widget), [APP_LABEL])
+    result = await round_trip.get_drift(build_live_state(widget))
 
-    assert [type(operation).__name__ for operation in result.operations] == ["RemoveConstraint", "AddConstraint"]
-    assert result.operations[1].constraint.deferrable is True
+    assert [type(operation).__name__ for operation in result.operations] == [
+        "SeparateDatabaseAndState",
+        "RemoveConstraint",
+        "AddConstraint",
+    ]
+    assert result.operations[2].constraint.deferrable is True
 
 
 @pytest.mark.asyncio
@@ -1019,9 +1037,13 @@ async def test_detect_drift_reports_a_changed_predicate_of_a_conditional_unique_
         'CREATE UNIQUE INDEX "uq_cuw_a_live" ON "conditional_unique_widget" ("a") WHERE deleted = true'
     )
 
-    result = await detect_drift(round_trip.connection, build_live_state(widget), [APP_LABEL])
+    result = await round_trip.get_drift(build_live_state(widget))
 
-    assert sorted(type(operation).__name__ for operation in result.operations) == ["AddConstraint", "RemoveConstraint"]
+    assert sorted(type(operation).__name__ for operation in result.operations) == [
+        "AddConstraint",
+        "RemoveConstraint",
+        "SeparateDatabaseAndState",
+    ]
 
 
 def _build_trigger_drift_widget(dialect: str, body: str | None = None):
@@ -1059,7 +1081,7 @@ async def test_detect_drift_uses_the_declared_wording_of_a_reserialized_trigger(
     widget = _build_trigger_drift_widget(round_trip.dialect)
     await round_trip.migrate_to(widget)
 
-    result = await detect_drift(round_trip.connection, build_live_state(widget), [APP_LABEL])
+    result = await round_trip.get_drift(build_live_state(widget))
 
     assert result.operations == []
 
@@ -1075,9 +1097,12 @@ async def test_detect_drift_still_reports_a_changed_trigger_body(db_isolated_no_
     )
     changed_widget = _build_trigger_drift_widget(round_trip.dialect, changed_body)
 
-    result = await detect_drift(round_trip.connection, build_live_state(changed_widget), [APP_LABEL])
+    result = await round_trip.get_drift(build_live_state(changed_widget))
 
-    assert [type(operation).__name__ for operation in result.operations] == ["AlterTrigger"]
+    assert [type(operation).__name__ for operation in result.operations] == [
+        "SeparateDatabaseAndState",
+        "AlterTrigger",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1090,9 +1115,10 @@ async def test_detect_drift_reports_a_changed_type_of_a_single_column_primary_ke
     )
     widget = build_model("KeyTypeWidget", "key_type_widget", {})
 
-    result = await detect_drift(round_trip.connection, build_live_state(widget), [APP_LABEL])
+    result = await round_trip.get_drift(build_live_state(widget))
 
-    (alter_field,) = result.operations
+    prepare, alter_field = result.operations
+    assert isinstance(prepare, SeparateDatabaseAndState)
     assert isinstance(alter_field, AlterField)
     assert alter_field.name == "id"
     assert isinstance(alter_field.field, fields.IntField)
@@ -1109,7 +1135,7 @@ async def test_detect_drift_reports_no_drift_for_a_generated_or_typed_primary_ke
     )
     await round_trip.migrate_to(*widgets)
 
-    result = await detect_drift(round_trip.connection, build_live_state(*widgets), [APP_LABEL])
+    result = await round_trip.get_drift(build_live_state(*widgets))
 
     assert result.operations == []
 
@@ -1121,9 +1147,7 @@ async def test_detect_drift_reports_a_comment_changed_in_the_database(db_isolate
     from hare.fields import CharField, IntField
     from hare.migrations.operations import AlterField, AlterModelOptions
     from tests.migrations.round_trips.test_round_trip_real_db import (
-        APP_LABEL,
         RoundTrip,
-        build_live_state,
         build_model,
     )
 
@@ -1138,26 +1162,22 @@ async def test_detect_drift_reports_a_comment_changed_in_the_database(db_isolate
     )
     await round_trip.migrate_to(model)
 
-    async def get_drift_operations() -> list[type]:
-        drift = await detect_drift(round_trip.connection, build_live_state(model), [APP_LABEL])
-        return [type(operation) for operation in drift.operations]
-
-    assert await get_drift_operations() == []
+    assert await round_trip.get_drift_operation_types(model) == []
     await round_trip.connection.execute_script("COMMENT ON COLUMN drift_commented.code IS 'Changed by hand'")
-    assert await get_drift_operations() == [AlterField]
+    assert await round_trip.get_drift_operation_types(model) == [SeparateDatabaseAndState, AlterField]
     await round_trip.connection.execute_script(
         "COMMENT ON COLUMN drift_commented.code IS 'The code'; COMMENT ON TABLE drift_commented IS NULL"
     )
-    assert await get_drift_operations() == [AlterModelOptions]
+    assert await round_trip.get_drift_operation_types(model) == [SeparateDatabaseAndState, AlterModelOptions]
 
 
 @pytest.mark.asyncio
-async def test_detect_drift_reports_a_dropped_primary_key(db_isolated_no_schema):
+@pytest.mark.parametrize("schema", [None, "drift_keyed_schema"])
+async def test_detect_drift_reports_a_dropped_primary_key(db_isolated_no_schema, schema):
     """A primary key column's own constraint was never compared: a table whose PRIMARY KEY was
     dropped showed no drift."""
     from hare.fields import IntField
     from tests.migrations.round_trips.test_round_trip_real_db import (
-        APP_LABEL,
         RoundTrip,
         build_live_state,
         build_model,
@@ -1166,18 +1186,19 @@ async def test_detect_drift_reports_a_dropped_primary_key(db_isolated_no_schema)
     round_trip = RoundTrip(db_isolated_no_schema.get_connection())
     if round_trip.dialect != "postgresql":
         pytest.skip("SQLite drops a primary key only by rebuilding the table")
-    model = build_model("Keyed", "drift_keyed", {"id": IntField(primary_key=True), "price": IntField()})
+    model = build_model(
+        "Keyed", "drift_keyed", {"id": IntField(primary_key=True), "price": IntField()}, {"schema": schema}
+    )
     await round_trip.migrate_to(model)
-    result = await detect_drift(round_trip.connection, build_live_state(model), [APP_LABEL])
+    result = await round_trip.get_drift(build_live_state(model))
     assert (result.operations, result.mismatched_columns) == ([], [])
 
+    table = "drift_keyed" if schema is None else f"{schema}.drift_keyed"
     (primary_key_row,) = await round_trip.connection.execute_dicts(
-        "SELECT conname FROM pg_constraint WHERE conrelid = 'drift_keyed'::regclass AND contype = 'p'"
+        f"SELECT conname FROM pg_constraint WHERE conrelid = '{table}'::regclass AND contype = 'p'"
     )
-    await round_trip.connection.execute_script(
-        f'ALTER TABLE drift_keyed DROP CONSTRAINT "{primary_key_row["conname"]}"'
-    )
-    result = await detect_drift(round_trip.connection, build_live_state(model), [APP_LABEL])
+    await round_trip.connection.execute_script(f'ALTER TABLE {table} DROP CONSTRAINT "{primary_key_row["conname"]}"')
+    result = await round_trip.get_drift(build_live_state(model))
     assert [(mismatch.column, mismatch.detail) for mismatch in result.mismatched_columns] == [
         ("id", "is not in the table's PRIMARY KEY, the model's primary key holds it")
     ]
@@ -1187,7 +1208,7 @@ async def test_detect_drift_reports_a_dropped_primary_key(db_isolated_no_schema)
 async def test_detect_drift_reports_a_changed_predicate_or_method_of_an_exclusion_constraint():
     """The declared condition was taken whatever the database's was - a predicate added by hand was
     no drift; and an EXCLUDE USING hash wasn't read, so drift added the constraint without removing it."""
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+    db_url = DatabaseUnderTest.get_url()
     if DatabaseUnderTest.get_dialect().name != "postgresql":
         pytest.skip("ExclusionConstraint/EXCLUDE is Postgres-only")
     async with hare_test_context(
@@ -1215,7 +1236,9 @@ async def test_detect_drift_reports_a_changed_predicate_or_method_of_an_exclusio
                 "ALTER TABLE drift_exclusion_widget DROP CONSTRAINT drift_excl_no_overlap; "
                 f"ALTER TABLE drift_exclusion_widget ADD CONSTRAINT drift_excl_no_overlap {definition}"
             )
-            assert await get_operation_types() == ["AddConstraint", "RemoveConstraint"], definition
+        assert await get_operation_types() == ["AddConstraint", "RemoveConstraint", "SeparateDatabaseAndState"], (
+            definition
+        )
 
 
 @pytest.mark.asyncio
@@ -1230,7 +1253,6 @@ async def test_detect_drift_reports_a_native_enum_column_turned_into_text(db_iso
     from hare.fields import IntField
     from hare.migrations.operations import AlterField
     from tests.migrations.round_trips.test_round_trip_real_db import (
-        APP_LABEL,
         RoundTrip,
         build_live_state,
         build_model,
@@ -1255,39 +1277,38 @@ async def test_detect_drift_reports_a_native_enum_column_turned_into_text(db_iso
     await round_trip.connection.execute_script(
         f"ALTER TABLE drift_moody ALTER COLUMN mood TYPE {column_type} USING mood::text"
     )
-    result = await detect_drift(round_trip.connection, build_live_state(model), [APP_LABEL])
-    assert [type(operation) for operation in result.operations] == [AlterField]
+    result = await round_trip.get_drift(build_live_state(model))
+    assert [type(operation) for operation in result.operations] == [SeparateDatabaseAndState, AlterField]
 
 
 @pytest.mark.asyncio
 async def test_detect_drift_reports_a_dropped_foreign_key_of_a_through_table():
     """A many-to-many relation's through table was checked for its columns, its UNIQUE and its
     indexes, never its FOREIGN KEY constraints."""
-    from hare.migrations.operations import AlterField
-
     if DatabaseUnderTest.get_dialect().name != "postgresql":
         pytest.skip("SQLite drops a FOREIGN KEY only by rebuilding the table")
     async with hare_test_context(
         modules=["tests.migrations.drift.test_drift"],
-        db_url=os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:"),
+        db_url=DatabaseUnderTest.get_url(),
         app_label="drift_models",
         connection_label="models",
     ) as ctx:
         connection = Connections.get("models")
 
-        async def get_altered_field_names() -> list[str]:
+        async def get_affected_tables() -> list[str]:
             result = await detect_drift(
                 connection, current_state(ctx), ["drift_models"], schema=DatabaseUnderTest.get_public_schema()
             )
-            return [operation.name for operation in result.operations if isinstance(operation, AlterField)]
+            assert result.operations == []
+            return [mismatch.table for mismatch in result.mismatched_objects]
 
-        assert await get_altered_field_names() == []
+        assert await get_affected_tables() == []
         rows = await connection.execute_dicts(
             "SELECT conname FROM pg_constraint WHERE conrelid = 'drift_m2m_post_label'::regclass AND contype = 'f' "
             "ORDER BY conname"
         )
         await connection.execute_script(f'ALTER TABLE drift_m2m_post_label DROP CONSTRAINT "{rows[0]["conname"]}"')
-        assert await get_altered_field_names() == ["labels"]
+        assert await get_affected_tables() == ["drift_m2m_post_label"]
 
 
 @pytest.mark.asyncio
@@ -1298,7 +1319,6 @@ async def test_detect_drift_reports_an_extension_type_column_turned_into_text(db
     from hare.fields import IntField
     from hare.migrations.operations import AlterField
     from tests.migrations.round_trips.test_round_trip_real_db import (
-        APP_LABEL,
         RoundTrip,
         build_live_state,
         build_model,
@@ -1311,11 +1331,11 @@ async def test_detect_drift_reports_an_extension_type_column_turned_into_text(db
         "Mailbox", "drift_mailbox", {"id": IntField(primary_key=True, generated=False), "mail": CitextField()}
     )
     await round_trip.migrate_to(model)
-    result = await detect_drift(round_trip.connection, build_live_state(model), [APP_LABEL])
+    result = await round_trip.get_drift(build_live_state(model))
     assert result.operations == []
     await round_trip.connection.execute_script("ALTER TABLE drift_mailbox ALTER COLUMN mail TYPE text")
-    result = await detect_drift(round_trip.connection, build_live_state(model), [APP_LABEL])
-    assert [type(operation) for operation in result.operations] == [AlterField]
+    result = await round_trip.get_drift(build_live_state(model))
+    assert [type(operation) for operation in result.operations] == [SeparateDatabaseAndState, AlterField]
 
 
 @pytest.mark.asyncio
@@ -1326,7 +1346,6 @@ async def test_detect_drift_reads_a_triggers_condition_and_whether_it_fires(db_i
     from hare.fields import IntField
     from hare.migrations.operations import AlterTrigger
     from tests.migrations.round_trips.test_round_trip_real_db import (
-        APP_LABEL,
         RoundTrip,
         build_live_state,
         build_model,
@@ -1356,20 +1375,20 @@ async def test_detect_drift_reads_a_triggers_condition_and_whether_it_fires(db_i
         )
 
     async def get_operation_types(model: type) -> list[type]:
-        result = await detect_drift(round_trip.connection, build_live_state(model), [APP_LABEL])
+        result = await round_trip.get_drift(build_live_state(model))
         return [type(operation) for operation in result.operations]
 
     enabled_model = get_model(True)
     await round_trip.migrate_to(enabled_model)
     assert await get_operation_types(enabled_model) == []
     await round_trip.connection.execute_script("ALTER TABLE drift_priced DISABLE TRIGGER drift_priced_when")
-    assert await get_operation_types(enabled_model) == [AlterTrigger]
+    assert await get_operation_types(enabled_model) == [SeparateDatabaseAndState, AlterTrigger]
     await round_trip.connection.execute_script(
         "ALTER TABLE drift_priced ENABLE TRIGGER drift_priced_when; DROP TRIGGER drift_priced_when ON drift_priced; "
         "CREATE TRIGGER drift_priced_when BEFORE UPDATE ON drift_priced FOR EACH ROW WHEN (NEW.price > 2) "
         "EXECUTE FUNCTION drift_priced_when_fn()"
     )
-    assert await get_operation_types(enabled_model) == [AlterTrigger]
+    assert await get_operation_types(enabled_model) == [SeparateDatabaseAndState, AlterTrigger]
 
     disabled_model = get_model(False)
     await round_trip.migrate_to(disabled_model)
@@ -1393,4 +1412,4 @@ def test_a_disabled_trigger_is_refused_on_sqlite():
     editor = SQLITE_DIALECT.schema_editor_class(FakeClient("sqlite"))
     trigger = Trigger(name="drift_muted_insert", on="INSERT", body=RawSQLTerm("SELECT 1;"), enabled=False)
     with pytest.raises(UnSupportedError, match="disabled trigger"):
-        editor.trigger_statements.get_trigger_create_sqls(model, trigger)
+        editor.trigger_statements.get_trigger_create_sqls(ModelBindings.prepare(model).get_binding(model), trigger)

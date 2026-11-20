@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, cast
+from typing import Any
 
 from hare.ddl.constraints.foreign_key_constraint import ForeignKeyConstraint
 from hare.ddl.enums import GeneratedNamePrefix
@@ -12,6 +12,7 @@ from hare.fields.field import Field
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.one_to_one_field_instance import OneToOneFieldInstance
 from hare.models import Model
+from hare.models.model_binding import ModelBinding
 
 
 class ColumnDefinitions(SchemaEditorPart):
@@ -35,22 +36,25 @@ class ColumnDefinitions(SchemaEditorPart):
         required_feature = getattr(db_default, "required_feature", None)
         if required_feature is not None and not getattr(self.editor.client.features, required_feature):
             raise UnSupportedError(f"{db_default!r} needs a newer {self.editor.client.dialect} server")
-        return cast("str", db_default.get_sql(self.editor.client.dialect))
+        return db_default.get_sql(self.editor.client.dialect)
 
-    def get_field_db_default_sql(self, field: Field[Any], model: type[Model]) -> str:
+    def get_field_db_default_sql(self, field: Field[Any], binding: ModelBinding) -> str:
         """The SQL of a field's ``db_default`` - an expression's own, a value as its literal.
 
         Args:
             field: The field, which has a ``db_default``.
-            model: Its model.
+            binding: Its model.
 
         Returns:
             The SQL.
         """
+        model = binding._model
         if hasattr(field.db_default, "get_sql"):
             return self.get_db_default_sql(field.db_default)
         dialect = self.editor.client.dialect
-        return dialect.literals.get_literal_sql(dialect.types.get_db_value(field, field.db_default, model))
+        return dialect.literals.get_field_literal_sql(
+            field, dialect.types.get_db_value(field, field.db_default, model)
+        )
 
     def get_generated_column_sql(self, field: Field[Any]) -> str | None:
         """The generation clause of a generated column, checked against the connected server.
@@ -120,26 +124,26 @@ class ColumnDefinitions(SchemaEditorPart):
         return f" CONSTRAINT {self.editor.quote(name)} PRIMARY KEY"
 
     @staticmethod
-    def get_primary_key_name(model: type[Model], column_names: Sequence[str]) -> str:
+    def get_primary_key_name(binding: ModelBinding, column_names: Sequence[str]) -> str:
         """The name of a model's primary key - made from its table and columns.
 
         Args:
-            model: The model.
+            binding: The model.
             column_names: The key's columns.
 
         Returns:
             The name.
         """
-        return GeneratedNames.get_index_name(GeneratedNamePrefix.PRIMARY_KEY, model, list(column_names))
+        return GeneratedNames.get_index_name(GeneratedNamePrefix.PRIMARY_KEY, binding.db_table, list(column_names))
 
     def get_column_definition(
-        self, model: type[Model], field_name: str, *, with_reference: bool = True, nullable: bool | None = None
+        self, binding: ModelBinding, field_name: str, *, with_reference: bool = True, nullable: bool | None = None
     ) -> str:
         """The definition of one column of a model's table - the only place one is made: a generated
         primary key, a generated column, a relation's key column (with its foreign key), a plain column.
 
         Args:
-            model: The model.
+            binding: The model.
             field_name: The field holding the column.
             with_reference: False leaves a key column's foreign key out - it is added on its own.
             nullable: Whether the column accepts NULL - the field's own setting when None.
@@ -147,31 +151,30 @@ class ColumnDefinitions(SchemaEditorPart):
         Returns:
             The definition.
         """
-        meta = model._meta
-        db_field = meta.fields_db_projection[field_name]
-        field_object = meta.fields_map[field_name]
-        comment = self.get_column_trailing_sql(model, field_name, self.get_column_description(model, field_name))
+        db_field = binding.fields_db_projection[field_name]
+        field_object = binding.fields_map[field_name]
+        comment = self.get_column_trailing_sql(binding, field_name, self.get_column_description(binding, field_name))
         if field_object.pk and field_object.generated:
             generated_sql = field_object.get_generated_sql(self.editor.client.dialect)
             if generated_sql:
                 return self.editor.GENERATED_PK_TEMPLATE.format(
                     field_name=self.editor.quote(db_field),
                     generated_sql=generated_sql,
-                    primary_key=self.get_primary_key_clause(self.get_primary_key_name(model, (db_field,))),
+                    primary_key=self.get_primary_key_clause(self.get_primary_key_name(binding, (db_field,))),
                     comment=comment,
                 )
         if field_object.generated and not field_object.pk:
-            generated_column_sql = self.get_non_pk_generated_field_sql(model, field_object, db_field, comment)
+            generated_column_sql = self.get_non_pk_generated_field_sql(binding, field_object, db_field, comment)
             if generated_column_sql:
                 return generated_column_sql
-        default = self.get_column_default_sql(field_object, model)
+        default = self.get_column_default_sql(field_object, binding)
         if getattr(field_object, "reference", None):
-            return self.get_foreign_key_field_definition(model, field_name, default, with_reference=with_reference)
+            return self.get_foreign_key_field_definition(binding, field_name, default, with_reference=with_reference)
         return self.get_field_sql(
             db_field=db_field,
-            field_type=self.get_table_column_type(model, field_object),
+            field_type=self.get_table_column_type(binding, field_object),
             nullable=field_object.null if nullable is None else nullable,
-            primary_key_name=self.get_primary_key_name(model, (db_field,)) if field_object.pk else None,
+            primary_key_name=self.get_primary_key_name(binding, (db_field,)) if field_object.pk else None,
             comment=comment,
             default=default,
         )
@@ -189,71 +192,70 @@ class ColumnDefinitions(SchemaEditorPart):
         return sql_type
 
     @staticmethod
-    def get_column_description(model: type[Model], field_name: str) -> str | None:
+    def get_column_description(binding: ModelBinding, field_name: str) -> str | None:
         """A column's comment - a relation's key column takes the relation's description.
 
         Args:
-            model: The model.
+            binding: The model.
             field_name: The column's field.
 
         Returns:
             The description, None for none.
         """
-        field = model._meta.fields_map[field_name]
+        field = binding.fields_map[field_name]
         reference = getattr(field, "reference", None)
         return reference.description if reference is not None else field.description
 
-    def get_column_trailing_sql(self, model: type[Model], field_name: str, description: str | None) -> str:
+    def get_column_trailing_sql(self, binding: ModelBinding, field_name: str, description: str | None) -> str:
         """What follows a column's type and default - its inline comment, then the clauses the
         table's ``Meta.table_options`` of the dialect give the column.
 
         Args:
-            model: The model whose table holds the column.
+            binding: The model whose table holds the column.
             field_name: The column's field.
             description: The column's comment, None or empty for none.
 
         Returns:
             The SQL, each part with its leading space; empty for neither.
         """
-        meta = model._meta
         trailing_sql = (
             self.editor.table_comments.get_column_comment_sql(
-                table=self.editor.qualify_table_name(meta.db_table, meta.schema),
-                column=meta.fields_db_projection[field_name],
+                table=self.editor.qualify_table_name(binding.db_table, binding.schema),
+                column=binding.fields_db_projection[field_name],
                 comment=description,
             )
             if description
             else ""
         )
-        table_options = meta.get_table_options(self.editor.client.dialect)
+        table_options = binding.get_table_options(self.editor.client.dialect)
         return (
             trailing_sql
             if table_options is None
-            else trailing_sql + table_options.get_column_clauses_sql(model, field_name, self.editor)
+            else trailing_sql + table_options.get_column_clauses_sql(binding, field_name, self.editor)
         )
 
-    def get_table_column_type(self, model: type[Model], field: Field[Any]) -> str:
+    def get_table_column_type(self, binding: ModelBinding, field: Field[Any]) -> str:
         """Returns the type a column of a model's table is declared with - the dialect's type of the
         field, as the table's ``Meta.table_options`` of the dialect declare it.
 
         Args:
-            model: The model whose table holds the column.
+            binding: The model whose table holds the column.
             field: The field whose type the column has.
 
         Returns:
             The column type.
         """
         column_type = field.get_column_type(self.editor.client.dialect)
-        table_options = model._meta.get_table_options(self.editor.client.dialect)
+        table_options = binding.get_table_options(self.editor.client.dialect)
         return column_type if table_options is None else table_options.get_column_type(column_type)
 
     def get_non_pk_generated_field_sql(
-        self, model: type[Model], field_object: Field[Any], db_field: str, comment: str = ""
+        self, binding: ModelBinding, field_object: Field[Any], db_field: str, comment: str = ""
     ) -> str | None:
         """Non-PK `GENERATED ALWAYS AS (...)` column definition, or None if not applicable.
 
         Args:
-            model: The model whose table holds the column.
+            binding: The model whose table holds the column.
             field_object: field to render.
             db_field: quoted column name source.
             comment: inline column comment SQL.
@@ -268,7 +270,7 @@ class ColumnDefinitions(SchemaEditorPart):
             return None
         return self.get_field_sql(
             db_field=db_field,
-            field_type=f"{self.get_table_column_type(model, field_object)} {generated_sql}",
+            field_type=f"{self.get_table_column_type(binding, field_object)} {generated_sql}",
             nullable=field_object.null,
             primary_key_name=None,
             comment=comment,
@@ -305,31 +307,27 @@ class ColumnDefinitions(SchemaEditorPart):
             comment=comment,
         )
 
-    def get_column_default_sql(self, field_object: Field[Any], model: type[Model]) -> str:
+    def get_column_default_sql(self, field_object: Field[Any], binding: ModelBinding) -> str:
         """Returns a column's ``DEFAULT`` clause from its field's ``db_default``.
 
         Args:
             field_object: The field.
-            model: The field's model.
+            binding: The field's model.
 
         Returns:
             The clause with its leading space, or an empty string for a field without ``db_default``.
         """
         if not field_object.has_db_default():
             return ""
-        db_default = field_object.db_default
-        if hasattr(db_default, "get_sql"):
-            return f" DEFAULT {self.get_db_default_sql(db_default)}"
-        db_value = self.editor.client.dialect.types.get_db_value(field_object, db_default, model)
-        return f" DEFAULT {self.editor.client.dialect.literals.get_literal_sql(db_value)}"
+        return f" DEFAULT {self.get_field_db_default_sql(field_object, binding)}"
 
     def get_column_definitions(
-        self, model: type[Model], deferred_table_keys: frozenset[tuple[str | None, str]] = frozenset()
+        self, binding: ModelBinding, deferred_table_keys: frozenset[tuple[str | None, str]] = frozenset()
     ) -> tuple[list[str], set[tuple[str | None, str]], list[ForeignKeyConstraint], list[ForeignKeyConstraint]]:
         """Returns the column definitions of a model's table.
 
         Args:
-            model: The model.
+            binding: The model.
             deferred_table_keys: The ``(schema, table)`` of the tables created after this one - a
                 foreign key to one of them is added once they exist.
 
@@ -342,28 +340,24 @@ class ColumnDefinitions(SchemaEditorPart):
         references: set[tuple[str | None, str]] = set()
         composite_foreign_key_constraints: list[ForeignKeyConstraint] = []
         deferred_foreign_key_constraints: list[ForeignKeyConstraint] = []
-        for field_name, db_field in model._meta.fields_db_projection.items():
-            reference = cast(
-                "ForeignKeyFieldInstance[Model] | None", getattr(model._meta.fields_map[field_name], "reference", None)
+        for field_name, db_field in binding.fields_db_projection.items():
+            reference: ForeignKeyFieldInstance[Model] | None = getattr(
+                binding.fields_map[field_name], "reference", None
             )
             if not reference:
-                column_definitions.append(self.get_column_definition(model, field_name))
+                column_definitions.append(self.get_column_definition(binding, field_name))
                 continue
-            related_meta = reference.related_model._meta
+            related_meta = reference.get_related_binding()
             creates_foreign_key = self.editor.foreign_key_rebuild.creates_foreign_key(reference)
             is_deferred = creates_foreign_key and (related_meta.schema, related_meta.db_table) in deferred_table_keys
-            column_definitions.append(self.get_column_definition(model, field_name, with_reference=not is_deferred))
+            column_definitions.append(self.get_column_definition(binding, field_name, with_reference=not is_deferred))
             if not creates_foreign_key:
                 continue
             is_composite = len(reference.to_field_instances) > 1
             if is_deferred:
-                if not is_composite:
+                if not is_composite or db_field == reference.source_fields[0]:
                     deferred_foreign_key_constraints.append(
-                        self.editor.table_creation.get_single_column_foreign_key_constraint(model, field_name)
-                    )
-                elif db_field == reference.source_fields[0]:
-                    deferred_foreign_key_constraints.append(
-                        self.editor.table_creation.get_composite_foreign_key_constraint(model, reference)
+                        self.editor.table_creation.get_foreign_key_constraint(binding, reference)
                     )
                 continue
             # Only a real constraint orders the tables: a relation without one has no DDL-level
@@ -372,7 +366,7 @@ class ColumnDefinitions(SchemaEditorPart):
             references.add((related_meta.schema, related_meta.db_table))
             if is_composite and db_field == reference.source_fields[0]:
                 composite_foreign_key_constraints.append(
-                    self.editor.table_creation.get_composite_foreign_key_constraint(model, reference)
+                    self.editor.table_creation.get_foreign_key_constraint(binding, reference)
                 )
         return column_definitions, references, composite_foreign_key_constraints, deferred_foreign_key_constraints
 
@@ -390,23 +384,23 @@ class ColumnDefinitions(SchemaEditorPart):
             UnSupportedError: The field has no column type on this dialect.
         """
         if isinstance(pk_field, OneToOneFieldInstance):
-            return self.get_pk_column_type(pk_field.related_model._meta.pk)
+            return self.get_pk_column_type(pk_field.get_related_binding().pk)
         if sql_type := pk_field.get_column_type(self.editor.client.dialect):
             return sql_type
         raise UnSupportedError(f"Can't get SQL type of {pk_field} for {self.editor.client.dialect.name}")
 
     def get_foreign_key_field_definition(
-        self, model: type[Model], key_field_name: str, default: str = "", *, with_reference: bool = True
+        self, binding: ModelBinding, key_field_name: str, default: str = "", *, with_reference: bool = True
     ) -> str:
         """Returns the column definition of a relation's key column.
 
         A single-column key with a database constraint carries an inline ``REFERENCES`` clause; a
         composite key's columns are plain, their table-level constraint added separately
-        (``TableCreation.get_composite_foreign_key_constraint()``); a relation without a database constraint
+        (``TableCreation.get_foreign_key_constraint()``); a relation without a database constraint
         (``creates_foreign_key``) gives a plain column.
 
         Args:
-            model: The model declaring the relation.
+            binding: The model declaring the relation.
             key_field_name: The key field's name.
             default: The column's ``DEFAULT`` clause, with its leading space, or an empty string.
             with_reference: False leaves the ``REFERENCES`` clause out - the constraint is added
@@ -415,14 +409,14 @@ class ColumnDefinitions(SchemaEditorPart):
         Returns:
             The column definition.
         """
-        key_field = model._meta.fields_map[key_field_name]
-        foreign_key_field = cast("ForeignKeyFieldInstance[Model]", key_field.reference)
-        db_field = model._meta.fields_db_projection[key_field_name]
+        key_field = binding.fields_map[key_field_name]
+        foreign_key_field: ForeignKeyFieldInstance[Model] = key_field.reference  # type: ignore[assignment]
+        db_field = binding.fields_db_projection[key_field_name]
         comment = self.get_column_trailing_sql(
-            model, key_field_name, self.get_column_description(model, key_field_name)
+            binding, key_field_name, self.get_column_description(binding, key_field_name)
         )
-        column_type = self.get_table_column_type(model, key_field)
-        primary_key_name = self.get_primary_key_name(model, (db_field,)) if key_field.pk else None
+        column_type = self.get_table_column_type(binding, key_field)
+        primary_key_name = self.get_primary_key_name(binding, (db_field,)) if key_field.pk else None
         if (
             len(foreign_key_field.to_field_instances) > 1
             or not self.editor.foreign_key_rebuild.creates_foreign_key(foreign_key_field)
@@ -437,10 +431,7 @@ class ColumnDefinitions(SchemaEditorPart):
                 default=default,
             )
 
-        to_field_name = (
-            foreign_key_field.to_field_instance.source_field or foreign_key_field.to_field_instance.model_field_name
-        )
-        related_model = foreign_key_field.related_model
+        constraint = self.editor.table_creation.get_foreign_key_constraint(binding, foreign_key_field)
         return self.get_field_sql(
             db_field=db_field,
             field_type=column_type,
@@ -449,11 +440,11 @@ class ColumnDefinitions(SchemaEditorPart):
             comment="",
             default=default,
         ) + self.get_foreign_key_reference_string(
-            constraint_name=GeneratedNames.get_foreign_key_name(model._meta.db_table, (db_field,)),
+            constraint_name=constraint.name,
             db_field=db_field,
-            table=self.editor.get_referenced_table_sql(related_model._meta.db_table, related_model._meta.schema),
-            field=to_field_name,
-            on_delete=foreign_key_field.db_on_delete,
+            table=constraint.to_table,
+            field=constraint.to_fields[0],
+            on_delete=constraint.on_delete,
             comment=comment,
         )
 

@@ -31,7 +31,7 @@ async def intfields_with_nulls_data(db):
         await IntFields.objects.create(intnum=number, intnum_null=score)
 
 
-async def walk_forward(base, page_size: int) -> list[list[int]]:
+async def walk_forward(base, page_size: int, expected: list[int]) -> list[list[int]]:
     pages: list[list[int]] = []
     queryset = base
     while True:
@@ -39,10 +39,14 @@ async def walk_forward(base, page_size: int) -> list[list[int]]:
         if not page:
             return pages
         pages.append([row.intnum for row in page])
+        collected = [value for current_page in pages for value in current_page]
+        assert collected == expected[: len(collected)], "Forward cursor did not advance through the expected rows"
         queryset = base.after_cursor(*base.cursor_values(page[-1]))
 
 
-async def walk_backward_from_last_page(base, last_page_first_row, page_size: int) -> list[list[int]]:
+async def walk_backward_from_last_page(
+    base, last_page_first_row, page_size: int, expected: list[int]
+) -> list[list[int]]:
     """Pages strictly before the last forward page's first row, walking back to the start."""
     pages: list[list[int]] = []
     cursor = base.cursor_values(last_page_first_row)
@@ -51,16 +55,20 @@ async def walk_backward_from_last_page(base, last_page_first_row, page_size: int
         if not page:
             return pages
         pages.append([row.intnum for row in page])
+        collected = [value for current_page in reversed(pages) for value in current_page]
+        assert collected == expected[-len(collected) :], "Backward cursor did not advance through the expected rows"
         cursor = base.cursor_values(page[0])
 
 
 async def assert_forward_and_backward_pages_match(base, page_size: int) -> None:
     full = [row.intnum for row in await base]
-    forward_pages = await walk_forward(base, page_size)
+    forward_pages = await walk_forward(base, page_size, full)
     assert [intnum for page in forward_pages for intnum in page] == full
 
     last_page_first_row = await IntFields.objects.get(intnum=forward_pages[-1][0])
-    backward_pages = await walk_backward_from_last_page(base, last_page_first_row, page_size)
+    backward_pages = await walk_backward_from_last_page(
+        base, last_page_first_row, page_size, full[: -len(forward_pages[-1])]
+    )
     # Every forward page but the (possibly short) last one is a full page_size page, walking
     # back from the start of the last one - the same boundaries in reverse.
     assert backward_pages[::-1] == forward_pages[:-1]
@@ -379,6 +387,7 @@ async def test_cursor_values_nested_fk_returns_key_and_pages_through(employee_ch
         if not page:
             break
         seen.extend(row.id for row in page)
+        assert seen == full[: len(seen)], "Forward cursor did not advance through the expected rows"
         queryset = base.after_cursor(*base.cursor_values(page[-1]))
     assert seen == full
 
@@ -390,6 +399,8 @@ async def test_cursor_values_nested_fk_returns_key_and_pages_through(employee_ch
         if not page:
             break
         backward_pages.insert(0, [row.id for row in page])
+        collected = [value for current_page in backward_pages for value in current_page]
+        assert collected == full[-len(collected) :], "Backward cursor did not advance through the expected rows"
         cursor = base.cursor_values(page[0])
     assert [row_id for page in backward_pages for row_id in page] == full
 

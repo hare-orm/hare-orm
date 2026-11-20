@@ -7,7 +7,8 @@ import uuid
 
 import pytest
 
-from hare.migrations.writer import ImportManager, MigrationWriter
+from hare.declarations.declaration_value_serializer import DeclarationValueSerializer
+from hare.declarations.import_manager import ImportManager
 from tests.migrations.round_trips.test_round_trip import (  # noqa: F401
     RoundTripProject,
     database_url,
@@ -32,7 +33,7 @@ class Event(Model):
 def read_back(function):
     """The object a migration file gets for ``function`` - its imports run, its expression evaluated."""
     imports = ImportManager()
-    rendered = MigrationWriter.render_value(function, imports)
+    rendered = DeclarationValueSerializer.render_value(function, imports)
     namespace: dict = {}
     exec("\n".join(imports.render()), namespace)  # noqa: S102
     return eval(rendered, namespace)  # noqa: S307

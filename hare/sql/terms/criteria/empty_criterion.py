@@ -15,6 +15,8 @@ T = TypeVar("T")
 class EmptyCriterion(Criterion):
     """No condition yet: combining it with a criterion gives that criterion."""
 
+    structure_attributes = ()
+
     is_aggregate: bool | None = None
     tables_: set[Table] = set()
 

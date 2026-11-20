@@ -5,6 +5,7 @@ import pytest
 from hare.exceptions import ConfigurationError
 from hare.migrations.loading.migration_loader import MigrationLoader
 from hare.migrations.loading.recorder import NoopRecorder
+from tests.utils.project_sources import ProjectSources
 
 pytestmark = pytest.mark.database_independent
 
@@ -26,11 +27,7 @@ def _write_migration(migrations_dir: Path, name: str, dependencies: list[tuple[s
 
 
 def _write_app(tmp_path: Path, app_label: str) -> tuple[Path, str]:
-    package_dir = tmp_path / app_label
-    migrations_dir = package_dir / "migrations"
-    migrations_dir.mkdir(parents=True)
-    (package_dir / "__init__.py").write_text("", encoding="ascii")
-    (migrations_dir / "__init__.py").write_text("", encoding="ascii")
+    migrations_dir = ProjectSources(tmp_path).prepare_migrations(tmp_path / app_label)
     return migrations_dir, f"{app_label}.migrations"
 
 

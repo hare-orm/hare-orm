@@ -4,6 +4,7 @@ get_json_value() writes by default, an outbox event's values among them."""
 import datetime
 import decimal
 import enum
+import json
 import uuid
 
 import pytest
@@ -38,6 +39,24 @@ class Color(enum.Enum):
 )
 def test_a_value_has_its_json_form(value, json_value):
     assert JsonValues.get_json_value(value) == json_value
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (float("nan"), "NaN"),
+        (float("inf"), "Infinity"),
+        (float("-inf"), "-Infinity"),
+        (decimal.Decimal("1.50"), "1.50"),
+        ((decimal.Decimal("2.50"), {"ratio": float("inf")}), ["2.50", {"ratio": "Infinity"}]),
+    ],
+)
+def test_an_enum_value_is_recursively_normalized_to_strict_json(value, expected):
+    choice = enum.Enum("Choice", {"VALUE": value}).VALUE
+    field = fields.CharEnumField(type(choice))
+    actual = field.get_json_value(choice)
+    assert actual == expected
+    assert json.loads(json.dumps(actual, allow_nan=False)) == expected
 
 
 @pytest.mark.parametrize(

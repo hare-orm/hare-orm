@@ -2,22 +2,21 @@ from __future__ import annotations
 
 import dataclasses
 from copy import copy
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.classes.deferred_import import DeferredImport
 from hare.ddl.conditions.field_condition import FieldCondition
 from hare.exceptions import QueryError
-from hare.fields.relations.fields.generic_foreign_key_field_instance import GenericForeignKeyFieldInstance
-from hare.fields.relations.fields.relational_field import RelationalField
+from hare.fields.data.boolean_field import BooleanField
+from hare.fields.generated_field import GeneratedField
 from hare.query.enums import Connector
 from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import AggregatedMultiValuedPaths
 from hare.query.expressions.conditions.query_modifier import QueryModifier
-from hare.query.expressions.constants import (
-    LIST_LOOKUP_SUFFIXES,
-)
+from hare.query.expressions.expression import Expression
 from hare.query.expressions.expression_context import ExpressionContext
-from hare.query.expressions.f import F
+from hare.query.expressions.structure.declarations import ExpressionChild
+from hare.query.expressions.structure.enums import ArgumentRole
 from hare.query.expressions.subqueries.exists import Exists
-from hare.query.expressions.value import Value
 from hare.query.filters.resolution.filter_kwargs import FilterKwargs
 from hare.query.filters.resolution.filter_values import FilterValues
 from hare.query.filters.resolution.to_many_filters import ToManyFilters
@@ -25,11 +24,15 @@ from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.description.hashable_values import HashableValues
 from hare.query.plans.description.plannable import Plannable
 from hare.query.plans.enums import PlanPartType
+from hare.sql.enums import Equality
+from hare.sql.terms.criteria.basic_criterion import BasicCriterion
 from hare.sql.terms.criteria.criterion import Criterion
 from hare.sql.terms.criteria.not_criterion import Not
+from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
+    from hare.query.generic_foreign_keys.generic_foreign_key_paths import GenericForeignKeyPaths
 
 
 class Q(Plannable, FieldCondition):
@@ -41,6 +44,11 @@ class Q(Plannable, FieldCondition):
         conditions: Inner ``Q`` expressions or ``Exists(...)`` conditions.
         filters: The filters of this node.
     """
+
+    #: ``GenericForeignKeyPaths`` - imported at its first read, as its module imports this one.
+    generic_foreign_key_paths: ClassVar[DeferredImport[type[GenericForeignKeyPaths]]] = DeferredImport(
+        "hare.query.generic_foreign_keys.generic_foreign_key_paths", "GenericForeignKeyPaths"
+    )
 
     __slots__ = (
         "_children",
@@ -74,6 +82,19 @@ class Q(Plannable, FieldCondition):
         self._set_up(Connector.AND, conditions, filters)
 
     @classmethod
+    def from_expression(cls, expression: Expression) -> Q:
+        """Match a declared boolean expression without changing positional filter arguments.
+
+        The expression is bound in the consuming query's context. Its SQL must be a
+        criterion or its declared output field must be boolean; other scalar results
+        raise QueryError when the condition is prepared. Joins and aggregate placement
+        remain those of the expression.
+        """
+        condition = cls()
+        condition.expression = expression
+        return condition
+
+    @classmethod
     def with_connector(cls, connector: Connector, /, *conditions: Q | Exists, **filters: Any) -> Q:
         """Returns a ``Q`` joining its conditions with ``connector`` - ``Connector.OR`` for "any one
         holds": ``Q.with_connector(Connector.OR, name="Ursula", title="Wizard")``.
@@ -99,7 +120,7 @@ class Q(Plannable, FieldCondition):
         Args:
             connector: How the conditions join.
             args: Inner ``Q`` expressions, or ``Exists(...)`` conditions.
-            kwargs: Filter statements.
+            kwargs: The constructor's fresh keyword dictionary; values are captured in place.
 
         Raises:
             QueryError: ``connector`` isn't a ``Connector``, or a positional condition is
@@ -109,32 +130,22 @@ class Q(Plannable, FieldCondition):
             if connector not in Connector:
                 raise QueryError("A Q's connector must be Connector.AND or Connector.OR")
             connector = Connector(connector)
-        #: The boolean expression this node matches on - set only on a ``Q(Exists(...))`` node,
-        #: which has no kwargs and no children.
-        self.expression: Exists | None = None
+        #: A boolean expression leaf, without kwargs or children.
+        self.expression: Expression | None = None
         children: list[Q] = []
         if args:
             if len(args) == 1 and not kwargs and isinstance(args[0], Exists):
                 self.expression = args[0]
             else:
-                nodes = [Q(arg) if isinstance(arg, Exists) else arg for arg in args]
+                children = [Q(arg) if isinstance(arg, Exists) else arg for arg in args]
                 if kwargs:
-                    nodes.insert(0, Q.with_connector(connector, **kwargs))
+                    children.insert(0, Q.with_connector(connector, **kwargs))
                     kwargs = {}
-                for node in nodes:
+                for node in children:
                     if not isinstance(node, Q):
                         raise QueryError("All ordered arguments must be Q nodes or Exists(...) conditions")
-                    children.append(node)
-        if kwargs:
-            filters = {}
-            for key, value in kwargs.items():
-                value = FilterValues.get_detached_value(value)
-                if type(value) is Value:
-                    value = FilterValues.get_literal_value(value)
-                if key.endswith(LIST_LOOKUP_SUFFIXES):
-                    value = FilterValues.get_list_lookup_value(key, value)
-                filters[key] = value
-            kwargs = filters
+        for key, value in kwargs.items():
+            kwargs[key] = FilterValues.get_captured_filter_value(key, value)
         #: The conditions this Q joins by its connector (``children``); None for a ``get_extended()`` Q
         #: until they are first read.
         self._children: tuple[Q, ...] | None = tuple(children)
@@ -205,8 +216,8 @@ class Q(Plannable, FieldCondition):
             extensions: list[Q] = []
             node: Q = self
             while node._children is None:
-                extensions.append(cast("Q", node._extension))
-                node = cast("Q", node._extended_from)
+                extensions.append(node._extension)  # type: ignore[arg-type]
+                node = node._extended_from  # type: ignore[assignment]
             children = self._children = (*node._children, *reversed(extensions))
             self._extended_from = self._extension = None
         return children
@@ -276,6 +287,8 @@ class Q(Plannable, FieldCondition):
         return hash(self.get_structure_key())
 
     def __repr__(self) -> str:
+        if self.expression is not None and not isinstance(self.expression, Exists):
+            return f"{self.get_negation_prefix()}Q.from_expression({self.expression!r})"
         arguments = [repr(child) for child in self.children]
         if self.expression is not None:
             arguments.append(repr(self.expression))
@@ -284,47 +297,16 @@ class Q(Plannable, FieldCondition):
             return f"{self.get_negation_prefix()}Q.with_connector({', '.join(['Connector.OR', *arguments])})"
         return f"{self.get_negation_prefix()}Q({', '.join(arguments)})"
 
-    def names_generic_field(self, declared_names: set[str], model: type[Model] | None = None) -> bool:
-        """Whether a filter key of this node may name a generic foreign key - one of its parts is
-        the name of one, and with ``model`` known, the part is a generic foreign key of the model
-        the key reaches there.
+    def names_generic_field(self, binding: ModelBinding) -> bool:
+        """Whether a filter key of this node reaches a generic foreign key of the model.
 
         Args:
-            declared_names: The names of the generic foreign keys of every model.
-            model: The model the keys start from, None where unknown.
+            binding: The model the keys start from.
 
         Returns:
-            True when a key has such a part.
+            True when a key names a generic foreign key, directly or through relations.
         """
-        for key in self.filters:
-            segments = key.split("__")
-            if declared_names.isdisjoint(segments):
-                continue
-            if model is None or self.path_names_generic_field(model, segments):
-                return True
-        return False
-
-    @staticmethod
-    def path_names_generic_field(model: type[Model], segments: list[str]) -> bool:
-        """Whether a key's path, walked from ``model`` through its relations, reaches a generic
-        foreign key.
-
-        Args:
-            model: The model the path starts from.
-            segments: The path's parts.
-
-        Returns:
-            True when a part is a generic foreign key of the model reached there.
-        """
-        current_model = model
-        for segment in segments:
-            if segment in current_model._meta.generic_foreign_key_fields:
-                return True
-            relation = current_model._meta.fields_map.get(segment)
-            if not isinstance(relation, RelationalField):
-                return False
-            current_model = relation.related_model
-        return False
+        return any(Q.generic_foreign_key_paths.get_generic_path(binding, key) is not None for key in self.filters)
 
     def get_negation_prefix(self) -> str:
         """The ``~`` operators that rebuild this node's negation from a plain ``Q(...)``."""
@@ -355,22 +337,26 @@ class Q(Plannable, FieldCondition):
         Returns:
             The field names.
         """
-        names: set[str] = set()
-        for child in self.children:
-            names |= child.get_referenced_field_names()
-        for key, value in self.filters.items():
-            names.add(key.partition("__")[0])
-            names |= {reference.name.partition("__")[0] for reference in self.get_field_references(value)}
-        return names
+        from hare.query.expressions.structure.expression_traversal import ExpressionTraversal
 
-    @staticmethod
-    def get_field_references(value: Any) -> list[F]:
-        """The ``F()`` references a filter value holds, itself or inside a list/tuple."""
-        if isinstance(value, F):
-            return [value]
-        if isinstance(value, (list, tuple)):
-            return [reference for item in value for reference in Q.get_field_references(item)]
-        return []
+        return {
+            reference.path.partition("__")[0]
+            for reference in ExpressionTraversal.get_field_references(self)
+            if not reference.outer_scopes
+        }
+
+    def get_expression_children(self) -> tuple[ExpressionChild, ...]:
+        return (
+            ExpressionChild("children", self.children),
+            ExpressionChild("expression", self.expression),
+            ExpressionChild("filters", self.filters, ArgumentRole.FILTERS),
+        )
+
+    def rebuild_expression(self, children: tuple[ExpressionChild, ...]) -> Q:
+        result = copy(self)
+        for child in children:
+            setattr(result, child.argument, child.value)  # type: ignore[arg-type]
+        return result
 
     def with_renamed_field(self, old_name: str, new_name: str) -> Q:
         """A copy reading the field ``new_name`` wherever this condition reads ``old_name``.
@@ -383,21 +369,9 @@ class Q(Plannable, FieldCondition):
             The renamed copy - this tree itself is left unchanged.
         """
 
-        def rename_path(path: str) -> str:
-            first, separator, rest = path.partition("__")
-            return f"{new_name}{separator}{rest}" if first == old_name else path
+        from hare.ddl.expressions.expression_field_renaming import ExpressionFieldRenaming
 
-        def rename_value(value: Any) -> Any:
-            if isinstance(value, F):
-                return F(rename_path(value.name))
-            if isinstance(value, (list, tuple)):
-                return type(value)(rename_value(item) for item in value)
-            return value
-
-        renamed = copy(self)
-        renamed.children = tuple(child.with_renamed_field(old_name, new_name) for child in self.children)
-        renamed.filters = {rename_path(key): rename_value(value) for key, value in self.filters.items()}
-        return renamed
+        return ExpressionFieldRenaming.get_renamed(self, old_name, new_name)
 
     def __bool__(self) -> bool:
         if self.filters or self.expression is not None:
@@ -417,18 +391,13 @@ class Q(Plannable, FieldCondition):
         """
         # Copied node by node - the filters are this node's, set up already; a node holds filters or
         # children, never both.
-        copy = type(self).__new__(type(self))
-        copy.children = tuple([child._with_filter_call_generation(generation) for child in self.children])
-        copy.filters = dict(self.filters)
-        copy.connector = self.connector
-        copy.expression = self.expression
-        copy._is_negated = self._is_negated
-        copy._filter_call_generation = generation
-        # Kept like _is_negated: exclude() negates the stamped copy of a `~Q(rel__x)` again.
-        copy._needs_double_negation_rewrite = self._needs_double_negation_rewrite
+        condition = copy(self)
+        condition.children = tuple(child._with_filter_call_generation(generation) for child in self.children)
+        condition.filters = dict(self.filters)
+        condition._filter_call_generation = generation
         # Its values are this condition's (PlanOrigins).
-        copy._plan_origin = self
-        return copy
+        condition._plan_origin = self
+        return condition
 
     def _stamp_filter_call_generation(self, generation: int) -> Q:
         """Stamps ``generation`` on this Q tree in place, like ``_with_filter_call_generation()``
@@ -450,7 +419,7 @@ class Q(Plannable, FieldCondition):
         return modifier & other if self.connector == Connector.AND else modifier | other
 
     def _finalize_modifier(
-        self, modifier: QueryModifier, expression_context: ExpressionContext, recorded_paths_mark: int = 0
+        self, modifier: QueryModifier, expression_context: ExpressionContext, recorded_paths_mark: int
     ) -> QueryModifier:
         """Applies this node's negation to the combined modifier of its kwargs or children.
 
@@ -536,20 +505,19 @@ class Q(Plannable, FieldCondition):
         if self.expression is not None:
             return self._get_expression(expression_context)
         if self.filters:
-            declared_names = GenericForeignKeyFieldInstance.declared_names
-            if declared_names and self.names_generic_field(declared_names, expression_context.model):
+            if self.names_generic_field(expression_context.binding):
                 # A condition built outside filter() - in When(), an aggregate's filter= - may
                 # name a generic foreign key.
                 from hare.query.generic_foreign_keys.generic_foreign_key_filters import GenericForeignKeyFilters
 
-                rewritten = GenericForeignKeyFilters.rewrite_q(expression_context.model, self)
+                rewritten = GenericForeignKeyFilters.rewrite_q(expression_context.binding, self)
                 if rewritten is not self:
                     return rewritten.get_result(expression_context)
             return FilterKwargs.get_kwargs(self, expression_context)
         return self._get_children(expression_context)
 
     def _get_expression(self, expression_context: ExpressionContext) -> QueryModifier:
-        """Resolves a node matching on a boolean expression (``Exists(...)``).
+        """Resolves a declared boolean expression into a composable SQL condition.
 
         Args:
             expression_context: The context this node is resolved against.
@@ -557,8 +525,18 @@ class Q(Plannable, FieldCondition):
         Returns:
             The expression as the criterion - in HAVING when it reads an aggregate.
         """
-        result = cast("Exists", self.expression).get_result(expression_context)
-        criterion = cast("Criterion", result.term)
+        expression: Expression = self.expression  # type: ignore[assignment]
+        result = expression.get_result(expression_context)
+        field = expression.get_value_field(result)
+        criterion: Criterion
+        if field is not None and not isinstance(GeneratedField.get_effective_field(field), BooleanField):
+            raise QueryError("A condition expression must return a boolean value")
+        if isinstance(result.term, Criterion):
+            criterion = result.term
+        elif field is not None:
+            criterion = BasicCriterion(Equality.EQ, result.term, ValueWrapper(True, allow_parametrize=False))
+        else:
+            raise QueryError("A condition expression must return a boolean value")
         if self._is_negated:
             criterion = Not(criterion)
         if criterion.contains_aggregate:

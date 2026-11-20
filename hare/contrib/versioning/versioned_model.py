@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, Self, cast
+from typing import TYPE_CHECKING, Any, Self
 
 from hare import fields
 from hare.contrib.versioning.constants import NEW_VERSION_EXCLUDED_FIELDS_META_OPTION
@@ -10,26 +10,30 @@ from hare.fields.composite_primary_key import CompositePrimaryKey
 from hare.fields.uuid7 import Uuid7
 from hare.models import Model
 from hare.models.class_building.extension_model_options import ExtensionModelOptions
+from hare.models.write.rules.row_write_rules import RowWriteRules
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.expressions import Q
 from hare.query.scopes.row_scopes import RowScopes
 from hare.query.scopes.row_visibility import RowVisibility
 
 if TYPE_CHECKING:
-    from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
+    from hare.query.queryset.queryset import QuerySet
 
 ExtensionModelOptions.allow(NEW_VERSION_EXCLUDED_FIELDS_META_OPTION)
 
 
 class VersionedModel(Model):
-    """An append-only versioned model: every change creates a new row with the same ``id`` and a higher
-    ``version`` instead of changing a row in place. ``(id, version)`` is the composite primary key.
+    """Helpers for creating a new row with the same ``id`` and the next ``version``.
+
+    ``(id, version)`` is the composite primary key. Call ``create_new_version()`` for a versioned edit;
+    ordinary ``save()`` and queryset updates retain their normal behavior.
 
     ``Meta.new_version_excluded_fields`` names the fields, beyond ``id``/``version`` themselves, a new
     version leaves out instead of copying - fields that must always be reset (a single-use token).
 
     Example::
 
-        class AppVersionedModel(YourBaseModel, VersionedModel):
+        class AppVersionedModel(VersionedModel, YourBaseModel):
             class Meta(YourBaseModel.Meta, VersionedModel.Meta):
                 new_version_excluded_fields = ("single_use_token",)
     """
@@ -60,14 +64,12 @@ class VersionedModel(Model):
         """
         # Every version - a soft-deleted one and one a custom Meta.manager hides too: the next
         # version must not collide with it. The tenant scope stays.
-        visibility = RowVisibility(include_deleted=cls._meta.soft_delete_field is not None)
-        queryset = RowScopes.get_base_queryset(cls, visibility).filter(*args, **kwargs)
-        obj = await queryset.order_by("-version").first()
-        if not obj:
-            if exception:
-                raise exception()
-            raise DoesNotExist(cls)
-        return cast("Self", obj)
+        from hare.core.hare_context import HareContext
+
+        binding = HareContext.require_current().get_model_binding(cls)
+        visibility = RowVisibility(include_deleted=binding.soft_delete_field is not None)
+        queryset: QuerySet[Self] = RowScopes.get_base_queryset(binding, visibility)  # type: ignore[assignment]
+        return await cls._get_latest_matching_version(queryset.filter(*args, **kwargs), exception)
 
     @classmethod
     async def get_last_visible_version_or_exception(
@@ -87,8 +89,12 @@ class VersionedModel(Model):
         Raises:
             DoesNotExist: No visible version matches - or ``exception`` when given.
         """
-        obj = await cls.objects.filter(*args, **kwargs).order_by("-version").first()
-        if not obj:
+        return await cls._get_latest_matching_version(cls.objects.filter(*args, **kwargs), exception)
+
+    @classmethod
+    async def _get_latest_matching_version(cls, queryset: QuerySet[Self], exception: type[Exception] | None) -> Self:
+        obj = await queryset.order_by("-version").first()
+        if obj is None:
             if exception:
                 raise exception()
             raise DoesNotExist(cls)
@@ -109,29 +115,38 @@ class VersionedModel(Model):
         """
         if "id" in kwargs or "version" in kwargs:
             raise QueryError("get_new_version() manages 'id' and 'version' itself - they can't be overridden.")
-        excluded_field_names = set(getattr(self._meta.meta, NEW_VERSION_EXCLUDED_FIELDS_META_OPTION, ()))
+        excluded_field_names = set(getattr(self._binding.meta, NEW_VERSION_EXCLUDED_FIELDS_META_OPTION, ()))
         excluded = {"id", "version"} | excluded_field_names
-        relation_field_names = self._meta.foreign_key_fields | self._meta.one_to_one_fields
-        # A forward FK/O2O is stored in its shadow column(s) (e.g. "owner_id") - excluding or
-        # overriding the relation by name has to skip copying those columns too, or the stale
-        # copied shadow value survives the exclusion or conflicts with the override.
-        for field_name in (excluded_field_names | kwargs.keys()) & relation_field_names:
-            excluded.update(cast("ForeignKeyFieldInstance[Any]", self._meta.fields_map[field_name]).source_fields)
-        if self._meta.soft_delete_field is not None:
+        direct_fields = self._binding.fields_map.keys() - self._binding.fetch_fields
+        stored_names = (
+            direct_fields
+            | self._binding.foreign_key_fields
+            | self._binding.one_to_one_fields
+            | self._binding.generic_foreign_key_fields.keys()
+            | {PRIMARY_KEY_ALIAS}
+        )
+        # Use the write contract for every logical name: a relation override replaces its
+        # stored keys, including every branch of a generic relation. Unknown constructor
+        # arguments retain the constructor's policy; they are not validated here.
+        excluded.update(
+            RowWriteRules.get_stored_field_names(
+                self._binding, (excluded_field_names | kwargs.keys()) & stored_names, "get_new_version()"
+            )
+        )
+        if self._binding.soft_delete_field is not None:
             # A new version isn't born deleted.
-            excluded.add(self._meta.soft_delete_field)
+            excluded.add(self._binding.soft_delete_field)
         # A database-computed column and an auto_now column get a fresh value on write anyway,
         # so they're neither copied nor required on a partial instance.
         excluded.update(
             field_name
-            for field_name, field_object in self._meta.fields_map.items()
+            for field_name, field_object in self._binding.fields_map.items()
             if field_object.generated or getattr(field_object, "auto_now", False)
         )
-        direct_fields = self._meta.fields_map.keys() - self._meta.fetch_fields
         # deepcopy - a mutable field value (e.g. JSONField/ArrayField) would otherwise be the
         # literal same object on both this instance and the new version, so mutating one's
         # field in place would silently corrupt the other too.
-        copied_fields = [field for field in direct_fields if field not in excluded and field not in kwargs]
+        copied_fields = [field for field in direct_fields if field not in excluded]
         # The next version always takes "id" and "version" from this one - they can't be given instead.
         unloaded_keys = [field for field in ("id", "version") if not hasattr(self, field)]
         if unloaded_keys:
@@ -146,11 +161,13 @@ class VersionedModel(Model):
                 f"{missing_fields} weren't fetched, so the next version can't copy them; pass them "
                 "to get_new_version()/create_new_version() explicitly or load the full row"
             )
-        data = {field: deepcopy(getattr(self, field)) for field in copied_fields}
-        data["id"] = self.id
-        data["version"] = self.version + 1
-        data.update(kwargs)
-        return type(self)(**data)
+        copied = {field: deepcopy(getattr(self, field)) for field in copied_fields}
+        values = {"id": self.id, "version": self.version + 1, **kwargs}
+        from hare.models.instances.instance_initialization import InstanceInitialization
+
+        new_version = InstanceInitialization.new_from_copied_values(self._binding, self._context, copied, values)
+        new_version._connection_alias = self._connection_alias
+        return new_version  # type: ignore[return-value]
 
     async def create_new_version(self, **kwargs: Any) -> Self:
         """

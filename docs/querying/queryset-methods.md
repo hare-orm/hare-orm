@@ -18,7 +18,7 @@ uses the connection (or open transaction) current at that moment.
 |---|---|---|
 | <code>filter(&#42;args: Q &#124; Exists, &#42;&#42;kwargs)</code> | chain | Clones the queryset and ANDs in the given conditions — see [`filter()`](#filter) |
 | <code>exclude(&#42;args: Q &#124; Exists, &#42;&#42;kwargs)</code> | chain | Same, but drops the rows matching **all** of the call's conditions together: `exclude(a=1, b=2)` is `NOT (a = 1 AND b = 2)` — the same as `exclude(Q(a=1, b=2))` — see [`exclude()`](#exclude) |
-| <code>annotate(&#42;&#42;kwargs: Expression &#124; Term)</code> | chain | Adds computed values and aggregates to the `SELECT`, which later calls can filter on — see [`annotate()`](#annotate) |
+| <code>annotate(&#42;&#42;kwargs: Expression &#124; Term &#124; Q)</code> | chain | Adds computed values and aggregates to the `SELECT`, which later calls can filter on — see [`annotate()`](#annotate) |
 | `alias(**kwargs)` | chain | Like `annotate()` — usable in `.filter()`/`.order_by()` — but the expression isn't added to the `SELECT` unless `.values()`/`.values_list()` asks for it by name. `FieldError` for a name that is a field of the model or `pk`. |
 | <code>order&#95;by(&#42;orderings: str &#124; Expression &#124; Ordering)</code> | chain | Orders the rows: `'-field'` for `DESC`, a JSON path, a date part or an `Ordering` — see [`order_by()`](#order-by) |
 | `orderings -> tuple[tuple[str, Order], ...]` | property | The ordering `order_by()` gave the queryset, one `(path, Order)` per column the query orders by: `pk` stands for every primary key field, a forward relation for its key column(s) (`"author"` → `"author_id"`), `F("rating").desc(nulls_last=True)` for `("rating", Order.DESC_NULLS_LAST)` — see [`orderings`](#orderings) |
@@ -71,7 +71,7 @@ uses the connection (or open transaction) current at that moment.
 | `include_deleted()` / `only_deleted()` | chain | Soft-deleted rows together with the live ones / the soft-deleted rows alone — instead of the default filter of [`Meta.soft_delete_field`](../soft-delete-versions-tenants/soft-delete.md) — see [`include_deleted()` / `only_deleted()`](#include-deleted-only-deleted) |
 | `all_tenants()` | chain | Every tenant's rows, instead of the default filter of [`Meta.tenant_field`](../soft-delete-versions-tenants/multi-tenancy.md#all-tenants) — also for the tenant-scoped models the query reaches through relations. Combines with `include_deleted()`/`only_deleted()` in either order. |
 | `explain(output_format=None, **options)` | `async def` | Runs the statement `sql(explain=True)` returns (`EXPLAIN QUERY PLAN` on SQLite) and returns the plan rows as dicts of column name and value (`{"QUERY PLAN": ...}` on PostgreSQL, `{"explain": ...}` on ClickHouse) — the same on every driver of a database. `output_format=`/extra `**options` are PostgreSQL-only — SQLite raises `UnSupportedError` for those, not for `.explain()` itself. |
-| `using(using)` | chain | Binds the queryset to a specific connection — a connection alias (`"replica"`) or a client (a transaction's, `Connections.get(connection_alias)`); `None` unbinds it — see [Several databases](../connections/multiple-databases.md#using-db). |
+| `using(using)` | chain | Binds the queryset to a specific connection — a connection alias (`"replica"`) or a client (a transaction's, `Connections.get(connection_alias)`); `None` keeps the current connection choice — see [Several databases](../connections/multiple-databases.md#using-db). |
 | `get_connection(*, for_write=False)` | sync | The connection the queryset would run on now — see [`get_connection()`](#get-connection) |
 | `iterator(chunk_size=1000)` | async generator | Reads the rows page by page — see [`iterator()`](#iterator) |
 | `stream(chunk_size=1000)` | async generator | A genuine cursor — a server-side cursor/portal on PostgreSQL, a cursor read in batches on SQLite — inside a transaction. See below. |
@@ -123,7 +123,7 @@ a NULL column/value is handled. A parent without related rows is treated as havi
 
 ```python
 class QuerySet:
-    def annotate(self, **kwargs: Expression | Term) -> Self: ...
+    def annotate(self, **kwargs: Expression | Term | Q) -> Self: ...
 ```
 
 Adds computed fields/aggregates to the `SELECT`; registers lookup suffixes for the annotation, so you can
@@ -133,7 +133,8 @@ an aggregate annotation, `budget__lt=F("total")` — and in `WHERE` otherwise). 
 the model (or `pk`) raises `FieldError`, as does such a name for an expression passed to
 `alias()`/`values()`/`values_list()` — every other reference to it would read the annotation instead of
 the field. So does a name of a relation, of an attribute of the model's class (`save`, `delete`,
-`objects`, `_meta`) or one starting with `_` (the object's own state) — each object read would have the
+`objects`, `_binding`, `_context`, `_declaration`) or one starting with `_` (the object's own state) — each
+object read would have the
 annotation's value in its place. An empty name raises `QueryError`, in `alias()` and `aggregate()` too, and
 so does a name holding whitespace, quotes, brackets, a semicolon or an SQL comment. Any other name is the
 query's own, `hare_…` too: the annotations and columns hare adds itself (an iterator's page boundary, a sliced
@@ -153,6 +154,10 @@ value that isn't an expression (e.g. a bare field name string — use `F("field"
 class QuerySet:
     def order_by(self, *orderings: str | Expression | Ordering) -> Self: ...
 ```
+
+Annotation names are case-sensitive: `order_by("x")` orders by `x`, even when `X` is also selected.
+This holds with `distinct()`, slicing and streaming too.
+
 
 `'-field'` for `DESC`; a path into a JSON field or annotation (`'-data__score'`) orders by the JSON value, in
 the database's own order (see [`F("data__key")`](expressions.md)); a [date part](values.md#date-part-paths)
@@ -182,7 +187,8 @@ The ordering `order_by()` gave the queryset, one `(path, Order)` per column the 
 stands for every primary key field, a forward relation for its key column(s) (`"author"` →
 `"author_id"`), `F("rating").desc(nulls_last=True)` for `("rating", Order.DESC_NULLS_LAST)`. Empty
 without `order_by()` — the query then orders by `Meta.ordering`, which is never included (read
-`Model._meta.ordering`) — and after `order_by()` with no arguments, which leaves the query unordered.
+`apps.get_binding(Model).ordering`) — and after `order_by()` with no arguments, which leaves the query
+unordered.
 `before_cursor()` leaves it as given; a clone keeps it, the next `order_by()` replaces it. `Order` is in
 `hare.sql`.
 
@@ -204,6 +210,12 @@ boundary follows the database's own order of NaN — on ClickHouse, whose `<`/`>
 whose `ORDER BY` puts NaN between the numbers and the NULLs, on the side the NULLs go to, the boundary reads
 it as `x != x` there, with an explicit `nulls_first`/`nulls_last` too, so the rows of NaN are neither lost
 nor repeated.
+
+Each component of a composite key takes a separate cursor value. This also applies
+to a related key: `order_by("author__pk", "id")`, where `Author` has a two-column
+primary key, takes three values. `cursor_values(obj)` returns the expanded tuple
+when the related object is loaded. Ordering and cursor comparisons use the same
+field ordering key, including equality before a later tie-breaker.
 
 ### <a id="before-cursor"></a>`before_cursor()`
 
@@ -267,6 +279,11 @@ ordering. `distinct()` (with or without fields) on a sliced queryset raises
 
 ### <a id="union"></a>`union()`
 
+Model branches match logical field and annotation names even when `source_field` changes physical
+column names or `only()` requests another order. Hidden ordering columns participate in their
+branch's `DISTINCT` and slice, then are removed before the set operation. `union(all=True)` retains
+such source duplicates; `union()` deduplicates the visible outputs.
+
 ```python
 class QuerySet:
     def union(self, *other_querysets: QuerySet[Any, Any], all: bool = False) -> Self: ...
@@ -286,7 +303,8 @@ decoded through the field of the first branch that has one — a `Value(None)` b
 change it (a `date` stays a `date` on SQLite), and it stays undecoded only when another branch's value
 has no field at all (e.g. a `Value("text")`). `.order_by()` on the union refers to the selected columns
 by position, so it works with branches joining a relation or grouping by an aggregate on every database.
-For `.values()` branches, output names differing only by letter case remain distinct, including when
+For model annotations and `.values()` branches, output names differing only by letter case remain
+distinct, including when
 the combined rows are streamed. Internal derived-table columns use separate positional names.
 `select_related()`/`prefetch_related()` on an individual branch (before
 `.union()`/`.intersection()`/`.difference()`) still raises `QueryError` — the loaded relation can't
@@ -392,7 +410,7 @@ class QuerySet:
         *fields_: str,
         flat: bool = False,
         named: bool = False,
-        **kwargs: Expression | Term,
+        **kwargs: Expression | Term | Q,
     ) -> QuerySet[TModel, Any, TAnnotations]: ...
 ```
 
@@ -412,7 +430,7 @@ class QuerySet:
     def values(
         self,
         *args: str,
-        **kwargs: str | Expression | Term,
+        **kwargs: str | Expression | Term | Q,
     ) -> QuerySet[TModel, dict[str, Any], TAnnotations]: ...
 ```
 
@@ -439,7 +457,8 @@ references this model, otherwise together with the same cascade `Model.delete()`
 `ProtectedError` up front if any `on_delete=PROTECT` relation still references a matched row (checked
 once against the whole matched set, not per row); runs the cascade in Python first when a relation has
 `db_constraint=False` (no real `FOREIGN KEY` in the database, so nothing enforces its `on_delete` for a
-plain bulk `DELETE`). A cascade run in Python works in batches, all in one transaction: every wave of
+plain bulk `DELETE`). A cascade run in Python works in batches. On a transactional connection these
+batches share a transaction; cascades across connections have no shared atomicity. Every wave of
 reached rows costs one query per relation and model (more only past the database's bind-parameter limit),
 not one per row, and every row it soft-deletes gets the same `deleted_at`. Only a model that overrides
 `delete()` still has each matched (or cascaded-to) row deleted through that override, one by one — a
@@ -450,6 +469,9 @@ sent — a `DELETE` takes no slice; delete the rows by their keys instead:
 `Model.objects.filter(pk__in=Subquery(qs[:10].values("pk")))`. A filter on an aggregate annotation
 (`HAVING`, also through `.alias()`/`.exclude()`) or across a relation goes through a
 `pk IN (SELECT ...)` subquery, so only the matching rows are deleted.
+
+The same row-admission checks apply to Python cascades, model-method overrides and
+`delete().returning()`: selecting the matching rows first does not bypass a refused slice.
 
 ### <a id="hard-delete"></a>`hard_delete()`
 
@@ -477,9 +499,10 @@ visibility (`Model.objects.filter(...).restore()` reads the deleted rows); await
 restored — `None` on a database reporting none (`Features.reports_written_row_count` off: ClickHouse). One
 `UPDATE` — the `auto_now` fields and `Meta.optimistic_lock_field` follow as in `update()`. `cascade=True` also
 restores the rows each one's soft delete removed with it (those still carrying its deletion time, as
-[`Model.restore(cascade=True)`](../models/model-methods.md)), in one transaction; a model overriding `restore()` gets it called for each
-row. `QueryError` for a model without `Meta.soft_delete_field`, a `values()` queryset, a `union()` or a
-`sample()`. Only the active tenant's rows unless `all_tenants()`.
+[`Model.restore(cascade=True)`](../models/model-methods.md)), within one transaction where the connection
+supports it; operations across connections are not jointly atomic. A model overriding `restore()` gets
+it called for each row. `QueryError` for a model without `Meta.soft_delete_field`, a `values()` queryset,
+a `union()` or a `sample()`. Only the active tenant's rows unless `all_tenants()`.
 
 ### <a id="update"></a>`update()`
 
@@ -492,8 +515,10 @@ class QuerySet:
 (`Features.reports_written_row_count` off: ClickHouse). Rejects
 `Meta.soft_delete_field`/`Meta.optimistic_lock_field` in `kwargs` (`QueryError`) — instead, every matched
 row's `optimistic_lock_field` is bumped automatically (`SET version = version + 1`) whenever `kwargs` is
-non-empty, and every `auto_now` field is set to the same "now" regardless of whether it's named in `kwargs`,
-mirroring `save()`'s own handling of both. Unlike `save()`, there's no staleness check — `.update()` has no
+non-empty. An `auto_now` field not named in `kwargs` receives the execution's shared timestamp; an
+explicit value is retained. Direct assignments are converted once for that execution. Cached SQL and
+a full rebuild use the same converted values and automatic timestamp, including randomized encryption.
+Running the query again prepares new values. Unlike `save()`, there's no staleness check — `.update()` has no
 fetched instance to compare a version against, so it never raises `StaleObjectError`. A sliced queryset and
 one of `.distinct(<fields>)` raise `QueryError`, as on `delete()`; a filter on an aggregate annotation or
 across a relation updates exactly the rows `await qs` returns, through a `pk IN (SELECT ...)` subquery, and
@@ -536,12 +561,14 @@ class QuerySet:
 
 One dict keyed by each kwarg's name, over the whole queryset (after `.group_by()`, over the grouped rows
 — see `group_by()`). A sliced queryset (`qs.order_by("-rating")[:10].aggregate(...)`) aggregates the rows
-of the slice, restricted to them by their primary key; an unordered slice holds the first rows by primary
-key, the rows `first()`/`last()` read. A `.distinct()` slice may filter over a to-many relation
+of the slice. With `group_by()`, the ordering and slice apply to the groups. A plain unordered slice
+of a model with a primary key takes the first rows by that key, like `first()`/`last()`. A model with
+no primary key can aggregate its selected slice directly. A `.distinct()` slice may filter over a
+to-many relation
 (`filter(tags__in=[1, 2]).distinct().order_by("id")[:2].aggregate(...)`): its rows are reduced to one per
 primary key before the metrics run, like an unsliced `.distinct()`. Any other slice whose rows can repeat
-a primary key (a filter, annotation or ordering over a to-many relation) and a model with a composite
-primary key raise `QueryError` — aggregate a sliced `.values()`/`.values_list()` query instead. An
+a primary key (a filter, annotation or ordering over a to-many relation) raises `QueryError` — aggregate
+a sliced `.values()`/`.values_list()` query instead. Composite primary keys are supported. An
 aggregate may be named after a field (`aggregate(price=Sum("price"))`): it takes no field's place — the
 filters before it and another aggregate of the call (`aggregate(s=Sum("i"), c=Count("s"))`) read the
 field.
@@ -658,7 +685,12 @@ when not given) — `(object, created)`. Runs in a transaction and locks the mat
 (`SELECT ... FOR UPDATE`) where the database supports it. As in `get_or_create()`, a row created
 concurrently is told apart by the insert's unique-constraint conflict, so on a database without unique
 constraints (`Features.supports_unique_constraints` — ClickHouse) two concurrent calls can both insert.
-`QueryError` when `defaults` sets `Meta.optimistic_lock_field`, `FieldError` for an unknown field.
+`QueryError` if `defaults` changes the matched row's primary key or sets `Meta.optimistic_lock_field`
+on update. An unknown field raises `FieldError`.
+
+The transaction covers the initial lookup, attempted insertion and any conflicting-row update.
+After an insertion conflict, its savepoint is rolled back and the existing row is read under the
+same lock before applying update defaults. The lock remains held until the operation finishes.
 
 ### <a id="bulk-create"></a>`bulk_create()`
 
@@ -679,7 +711,36 @@ class QuerySet:
     ) -> BulkCreateQuery[TModel]: ...
 ```
 
-Returns the objects, as given (a generator's too) — the ones a conflict skipped or updated included.
+Returns the supplied objects (a generator's too), including ones updated by an upsert, but excluding
+rows skipped with `ignore_conflicts=True`.
+An object loaded from the database keeps its primary key in the insert, including when that key has
+since been reassigned. Its existing key is also the conflict target when `on_conflict` names the primary key.
+
+All batches are bound before the first write: field conversion, column types, parameter limits and
+conflict-key grouping are checked together. A preparation failure sends no INSERT or bulk load and
+restores automatic values assigned during preparation. Execution uses those bound values without
+converting the source objects again. Conflict grouping, change reporting and `RETURNING` matching
+also use these converted rows; custom field writers need not be idempotent. The actual commands
+determine whether a transaction is needed;
+this includes multiple rows submitted through `execute_many()`. COPY preserves consecutive input
+groups instead of moving all objects with explicit keys ahead of the others.
+
+Async primary-key defaults are evaluated before checking whether `RETURNING` can match rows by key.
+An unknown database-generated key still has the dialect's usual restrictions. Failed preparation
+and rolled-back writes restore pending factories and the original absence of key attributes.
+`bulk_update()` includes its pending defaults in the same undo record as automatic assignments;
+explicit batches retain the values of completed earlier batches when a later batch fails.
+
+Objects may mix explicit values and `db_default` for the same field. Consecutive objects with the
+same omitted columns share a batch; their overall order is preserved. `query.preview()` returns
+the bound commands and `requires_transaction` without writing them. If async defaults, automatic
+stamps, blind indexes or keys allocated before insertion still need preparation, it returns
+`commands=None`, `requires_transaction=None` and the names in `deferred_fields`. It never runs
+those defaults just to show a plan. `sql()` raises `QueryError` for a deferred preview instead of
+inventing values. For ready inputs, parameterized and inline SQL use the same batches; a preview
+does not reserve its values for a later execution. COPY commands are available through `preview()`;
+they have no equivalent SQL for `sql()` or `explain()`.
+
 Generated pks, `GeneratedField` columns, and any omitted `db_default` column are **not** populated back
 onto the objects unless `returning=True` (via `RETURNING`; SQLite doesn't keep the input order in a
 multi-row `RETURNING`, so there every object needs its pk set — the rows are matched back by it, by the
@@ -699,7 +760,7 @@ without `use_copy=True` — see [Bulk loads](../dialects/clickhouse/differences.
 loads columns of the integer, float, numeric, boolean, text, UUID, date, time, timestamp, JSON and binary
 types alone — a model with any other column (an array, a range or multirange, an interval, a network
 address, a native enum, an extension's type such as `CitextField`, `HStoreField`, `LtreeField`,
-`PostGISField`, `TSVectorField`) raises `UnSupportedError` naming the offending field on either driver,
+`TSVectorField`) raises `UnSupportedError` naming the offending field on either driver,
 checked uniformly on the Python side before either driver is reached; fall back to `use_copy=False` for a
 model with one of those. `update_fields`/`on_conflict` take field names: a `source_field` column is
 resolved, a forward FK/O2O relation name means its key column(s) (`owner` → `owner_id`), an unknown name
@@ -719,8 +780,16 @@ gets the row's pk. Conflict keys are compared as their fields store them: an `Em
 lowercases the domain, and lowercases the local part only with `lowercase=True`. These conversions also
 apply when classifying the rows as inserted or updated for change events. Objects whose conflict key is
 left to `db_default` are written in separate statements, since their keys are not known before the write.
+An upsert also uses separate statements when the model doesn't declare the constraint's key or the
+database determines key equality, as with PostgreSQL `CITEXT`.
 On a database without an inserted-row flag, reporting such writes may first read the existing primary
 keys to distinguish inserts from updates.
+
+When a unique target treats NULLs as distinct, each input with a stored NULL in that target is
+an independent insert. `returning=True` fills its computed columns and omitted database defaults
+even alongside conflicting updates and on a driver returning rows out of order. Matching uses
+the already bound values; custom writers are not repeated to decide whether the target is NULL.
+A `NULLS NOT DISTINCT` constraint retains its shared conflict identity.
 
 Every object must be an instance of the model itself (another model, a sibling sharing
 an abstract base, or a subclass with a table of its own raises `QueryError`), and one loaded with
@@ -740,7 +809,8 @@ whatever name its constraint has. `conflict_where` (PostgreSQL only) — a `Q` o
 `ON CONFLICT (...) WHERE <conflict_where>` can target it; mutually exclusive with
 `on_conflict_constraint`, requires `on_conflict` to name that index's columns.
 
-<a id="bulk-create-ignore-conflicts"></a>**`ignore_conflicts=True`** gives the objects it inserted, in the order
+<a id="bulk-create-ignore-conflicts"></a>**`ignore_conflicts=True`** gives the objects it inserted, in the
+order
 given — the ones a conflict skipped are left out, keep the pk they were given and aren't marked saved. The
 statements read their rows back (`RETURNING`, with or without `returning=True`), and each row is matched
 to its object by the `on_conflict` fields, else by the primary key — the values as the fields write them
@@ -750,6 +820,14 @@ keys the database
 generates need `on_conflict=[...]` — without it the call raises `UnSupportedError` before any SQL, as on
 a database without `RETURNING`. Of several objects sharing one conflict key in the call the first is the
 one inserted.
+
+When the database chooses an omitted conflict-key field through its default, each input is
+written in a separate statement: its zero or one returned row identifies whether that object
+was inserted. Skipped inputs keep their unset database defaults; known keys retain batching.
+
+Skipped objects retain their earlier automatic stamps and dirty baseline. A transaction rollback
+restores each written object's earlier persistence state, including its connection alias and whether
+it was already saved before this call; it does not mark every input object unsaved indiscriminately.
 
 Matching uses the fields' stored values decoded through their read conversions, including converters
 registered by the dialect. A custom read conversion does not detach a returned row from its input object.
@@ -779,15 +857,18 @@ class QuerySet:
 
 Doesn't support M2M/backward-relation fields (`FieldError`) or `F()`/expression values (`QueryError` — use
 `.update()` or `save()`); requires every object to have a pk, and two objects of one row raise `QueryError`
-before any SQL — keys compared as the database stores them (`"ann@EXAMPLE.com"` and `"ann@example.com"` of
-an `EmailField` key are one row). An object that left an `auto_now` field
+before the first write, even when they are in different batches. Keys follow the database's equality.
+An `EmailField` key is normalized locally. A key such as `CITEXT` can require a read on the target
+connection to compare spellings. An object that left an `auto_now` field
 unloaded (`.only()`/`.defer()`) is stamped all the same. `returning=True` adds a `RETURNING` clause bringing
 back every `GeneratedField` column's fresh value the database recomputed onto each successfully-updated
 object — matched by primary key, not row position, on databases supporting `RETURNING`.
 Explicit `returning=True` raises `UnSupportedError` before SQL on a database without `RETURNING`;
 otherwise it does nothing on a model with no `GeneratedField`. When left `None`, it inherits
-`Meta.returning`; without `RETURNING` support, inherited returning leaves generated fields unloaded
-after the write. On a model with `Meta.optimistic_lock_field`, each object's
+`Meta.returning`. When no computed values are read back (`returning=False`, a false inherited default,
+or inherited returning without `RETURNING` support), computed fields are left unloaded after the write:
+reading them raises `NoValuesFetched` until `refresh_from_db()`. The primary key stays loaded.
+On a model with `Meta.optimistic_lock_field`, each object's
 in-memory version is bumped (and, with `track_dirty_fields`, its dirty snapshot reset) for every row that
 actually wrote, before raising `StaleObjectError` for any row in that batch that didn't — an object whose
 row the queryset's own `.filter(...)` excludes is simply not updated, not reported as stale (a sliced
@@ -806,8 +887,18 @@ each batch is its own statement, not wrapped in a transaction: an error in a lat
 earlier batches committed, and a stale object in one batch doesn't stop the others from being written. A
 model with `Meta.change_capture` writes every batch in one transaction with its events — see
 [Change capture](../integrations/outbox.md#change-capture). On a database reporting no count of the rows
-a write changed (ClickHouse) it awaits to `None` and counts every object as written: no stale object is
-found, and each object's version, dirty snapshot and `auto_now` values are applied.
+a write changed (ClickHouse) it awaits to `None` and counts every object as written, publishing each
+object's dirty snapshot and `auto_now` values. Such a database rejects models with
+`Meta.optimistic_lock_field` during binding; see [database features](../dialects/dialects-and-features.md).
+
+`bulk_update(...).preview()` returns the bound `commands`, `requires_transaction` and
+`deferred_fields`. It never computes automatic timestamps, blind indexes or pending async defaults.
+When those values are needed, both commands and the transaction boundary are `None`; `sql()` and
+`explain()` raise `QueryError` instead of displaying invented values. Without deferred values,
+the preview uses the execution batch builder. The preview includes the transaction needed for change
+capture or implicit splitting. Explicit batches without change capture remain independent statements.
+If a later batch fails in that case, the earlier completed batches retain their published state and
+untouched batches regain their previous stamps.
 
 ### <a id="only"></a>`only()`
 
@@ -820,8 +911,11 @@ Whitelists fields → a partial model. `QueryError` if empty, or combined with `
 left out raises `NoValuesFetched` (an `AttributeError`, so `hasattr()` is `False`) naming it — `pk` too
 when the primary key is left out; name it to save or refresh the object. A `relation__field` entry also
 loads the primary key of every related model on the way, so a `NULL` foreign key yields `None` and an
-existing related row always yields an instance. The key fields `prefetch_related()` needs are loaded too —
-of the model, and of a relation `relation__field` loads (`only("title", "author__name")` beside
+existing related row always yields an instance.
+For a related model without a primary key, its target or connector fields used by the join are
+loaded as its identity instead, including through intermediate relations.
+The key fields `prefetch_related()` needs are loaded too — of the model, and of a relation
+`relation__field` loads (`only("title", "author__name")` beside
 `prefetch_related("author__publisher")` loads `author__publisher_id`); a prefetch of an object missing such a
 key (`prefetch_related_objects()` of a partial one) raises `QueryError`, including nested prefetches.
 The required keys are kept on every intermediate model of a deeper `only()` path, including when an
@@ -853,12 +947,24 @@ Separate queries (not a JOIN of the queried rows); accepts a string (including `
 `Prefetch(...)`. `FieldError` for an unknown/non-relation field. A many-to-many relation's rows come in
 one query, joined to its through table, when the through table and the related rows are on one
 connection, the relation has no `through=` model and a `Prefetch` queryset neither filters by that
-relation nor annotates, `.distinct()`s or prefetches further; otherwise the through table is read in a
+relation nor annotates, `.distinct()`s, selects joined models, applies extensions or prefetches further;
+otherwise the through table is read in a
 query of its own first.
 
 `count()`, `exists()` and `aggregate()` of a queryset that prefetches raise `QueryError` — they return no
 instances to attach the relations to; `prefetch_related(None)` drops every relation prefetched so far:
 `books.prefetch_related(None).count()`. A request query counts its rows so.
+
+Relation loading prepares connection choices and per-parent slices before starting its
+fetch tasks. SQL strategy depends on query shape and database capabilities; installing the
+native accelerator does not change that strategy. The original Prefetch queryset is unchanged.
+
+Results are attached only after every fetch succeeds. On an error or cancellation, unfinished
+sibling tasks are cancelled and awaited before control returns. Existing objects, including
+relations already loaded by select_related(), retain their previous relation caches on a fetch
+failure. This is an in-memory publication guarantee, not a common database snapshot across
+connections. A custom attribute setter that raises during attachment can still leave earlier
+attachments visible.
 
 ### <a id="include-deleted-only-deleted"></a>`include_deleted()` / `only_deleted()`
 
@@ -916,6 +1022,11 @@ is dropped; `values()`/`values_list()` rows too. A
 `.distinct(<fields>)` queryset pages over the rows `DISTINCT ON` picks. A page is fetched with one row
 more than `chunk_size`, which tells whether another page follows — a result ending on a page boundary
 needs no empty query after it.
+
+For an extension declaring `changes_rows=True`, `iterator()` pages the complete extended source
+with an outer `LIMIT`/`OFFSET`. Its own limits, offsets, DISTINCT and window filters remain inside
+that source. Page boundaries do not replace extension boundaries or add primary-key columns to a
+DISTINCT source; this applies to combined model and values queries too.
 
 ### <a id="dates"></a>`dates()`
 
@@ -990,7 +1101,8 @@ ways:
 
 ```python
 # dotted relation string inside Prefetch
-await Author.objects.all().prefetch_related(Prefetch("books__editor", queryset=Reader.objects.filter(is_active=True)))
+await Author.objects.all().prefetch_related(Prefetch("books__editor",
+queryset=Reader.objects.filter(is_active=True)))
 
 # .prefetch_related() called directly on the queryset passed into Prefetch
 await Author.objects.all().prefetch_related(
@@ -1001,7 +1113,12 @@ await Author.objects.all().prefetch_related(
 A path through a relation (`"books__editor"`) loads the relation's own attribute (`author.books`), even
 when a `Prefetch` of the same relation with `to_attribute=` is given too — that one loads only its own
 attribute. A path goes into the `to_attribute` results when it starts with the `to_attribute` name; the
-`Prefetch` giving it may come later in the same call or in an earlier `prefetch_related()` call:
+`Prefetch` giving it may come later in the same call or in an earlier `prefetch_related()` call.
+This also applies to chains of several `to_attribute` names. Declarations already present in the
+queryset passed to `Prefetch` remain available to dependent paths.
+
+`to_attribute` cannot replace persistence state or a relation cache, such as `_saved_in_db` or `_books`.
+Other private user attributes, such as `_alternate_books`, are allowed.
 
 ```python
 authors = await Author.objects.all().prefetch_related(
@@ -1041,6 +1158,11 @@ read and each parent's slice taken of them. A `.distinct()` queryset numbers the
 picked by no key of their own — of a model without a primary key, rows a to-many filter repeats without
 `.distinct()`, and the rows of a many-to-many relation whose queryset filters through a to-many relation or
 whose tables are on other connections — are read whole for the parents and each parent's slice taken of them.
+A cursor-bound `Prefetch` queryset also reads its bounded rows before taking each parent's
+slice: `after_cursor()` and `before_cursor()` are applied by SQL first. A backwards
+slice picks the rows closest to the cursor, skipping its offset from that end, and returns
+them in the original ordering. This uses the same in-memory per-parent slicing as window
+annotations and connections that cannot share the numbering query.
 A forward relation and a reverse one-to-one have one row per parent at most: a slice starting at it keeps it,
 one past it leaves `None`.
 
@@ -1052,11 +1174,9 @@ class QuerySet(QuerySpecification):
 ```
 
 Unlike `iterator()` (which re-runs a fresh `SELECT` per page via `LIMIT`/`OFFSET` or a keyset seek),
-`stream()` opens exactly **one** server-side cursor/portal for the whole scan — a single consistent
-snapshot for the entire iteration. A row already pulled into the cursor's own pipeline is immune to a
-concurrent `DELETE`/`UPDATE` landing partway through, and unfetched rows are read against the snapshot
-the cursor took when it opened, not against whatever the table looks like at the moment each row is
-actually read.
+`stream()` executes **one** statement through the driver's cursor or streaming response.
+Snapshot guarantees follow the database and its isolation level; hare does not impose a common
+snapshot contract across databases.
 
 ```python
 async with Transactions.atomic():
@@ -1068,17 +1188,17 @@ Requires an active `Transactions.atomic()` block on both PostgreSQL drivers — 
 lives in its transaction: asyncpg's `Connection.cursor()`, rust_pg's `DECLARE ... NO SCROLL CURSOR` — and
 on SQLite, where the cursor is read off the
 transaction's connection: `chunk_size` rows per `fetchmany()` hop to aiosqlite's worker thread, the whole
-result never held at once, the cursor closed when the iteration ends, is left or is cancelled. Raises
+result never held at once. The cursor closes when iteration finishes or the generator is closed. Raises
 `QueryError` outside a transaction, and `UnSupportedError` on a database without
-`features.supports_streaming` (one without transactions). `chunk_size` is a per-round-trip prefetch hint
+`features.supports_streaming`. `chunk_size` is a per-round-trip prefetch hint
 honored by asyncpg's `Connection.cursor(prefetch=...)`, rust_pg's `FETCH FORWARD <chunk_size>` of its
 cursor and SQLite's batches. Other queries on the same transaction may run while the
 stream is open — from the loop body, or from sibling tasks (`asyncio.gather()`) sharing the transaction;
 each cursor fetch takes its turn on the transaction's connection.
 
 On ClickHouse (`features.streams_without_transaction`) `stream()` runs outside a transaction too: the
-server sends the rows as it computes them, in blocks the drivers read one at a time, and leaving the loop
-— a `break`, an error, a cancellation — closes the stream and gives the connection back.
+server sends the rows as it computes them, in blocks the drivers read one at a time. Closing the
+generator releases the stream and connection; use `contextlib.aclosing()` for immediate cleanup on `break`.
 
 When the iteration ends early — an exception, a cancellation, or `aclose()` of the generator (a plain
 `break` closes it once the generator is garbage-collected; wrap it in `contextlib.aclosing()` to close it
@@ -1091,7 +1211,8 @@ pool.
 
 ## <a id="recursive"></a>Recursive queries and CTEs
 
-### <a id="with_recursive-walking-a-relation-of-a-model-to-itself"></a>Walking a relation of a model to itself: `with_recursive()`
+### <a id="with_recursive-walking-a-relation-of-a-model-to-itself"></a>Walking a relation of a model to
+itself: `with_recursive()`
 
 ```python
 class QuerySet(QuerySpecification):
@@ -1148,6 +1269,8 @@ reached = await Category.objects.filter(name="Space opera").with_recursive("see_
   `count()` it, read `values()`, prefetch relations, or pass it as an `__in` value
   (`Category.objects.exclude(pk__in=everything)`). Its default order is the model's own — the walk's
   order isn't kept; the depth isn't a column of the rows.
+  A related queryset's fallback to the instance's connection is preserved. Routing is evaluated when
+  the query runs; an explicit `using()` keeps its priority.
 - A combined queryset (`union()`/`intersection()`/`difference()`) raises `QueryError` — call
   `with_recursive()` on a branch.
 
@@ -1237,7 +1360,8 @@ average = await Loan.objects.sample(0.5, method=TableSampleMethod.SYSTEM).aggreg
 ```
 
 ```sql
-SELECT ... FROM "loan" TABLESAMPLE BERNOULLI (5) REPEATABLE (42) WHERE "returned_at" IS NULL ORDER BY "id" LIMIT 20
+SELECT ... FROM "loan" TABLESAMPLE BERNOULLI (5) REPEATABLE (42) WHERE "returned_at" IS NULL ORDER BY "id"
+LIMIT 20
 ```
 
 - **`percent`** — the chance each row (or block) is kept, an `int` or `float` from `0` to `100`: `100`
@@ -1258,9 +1382,8 @@ SELECT ... FROM "loan" TABLESAMPLE BERNOULLI (5) REPEATABLE (42) WHERE "returned
 - **Writes.** `update()`, `delete()` and `hard_delete()` on a sample raise `QueryError` — `TABLESAMPLE`
   is a part of `SELECT` only. Write the sampled rows through their keys:
   `Loan.objects.filter(pk__in=Loan.objects.sample(10, seed=1)).delete()`.
-- A `Meta.manager` whose `get_queryset()` returns a sample raises `ConfigurationError` when a relation
-  needs its scope as a `JOIN` condition, like `with_cte()`. A combined queryset (`union()`/...) raises
-  `QueryError` — sample a branch.
+- Sampling returned by a queryset factory applies only to that queryset; it is not a JOIN
+  policy. A combined queryset (union/...) raises QueryError: sample a branch.
 - PostgreSQL and ClickHouse (`features.supports_table_sample`): on another database the query raises
   `UnSupportedError` before any SQL is sent. Its query keeps no [plan](query-plan-cache.md): the percent
   and the seed are written into `FROM`.
@@ -1271,7 +1394,8 @@ SELECT ... FROM "loan" TABLESAMPLE BERNOULLI (5) REPEATABLE (42) WHERE "returned
 
 `update(...)`, `delete()` and `hard_delete()` await to the number of rows they wrote (`None` on a database
 reporting none: ClickHouse). `.returning()` on
-them awaits to the rows themselves instead — written once, read in the same statement:
+them awaits to the rows themselves instead. Named fields normally come from SQL `RETURNING`;
+instance loading and deletion performed by hare can require additional reads:
 
 ```python
 # The named fields of each updated row, as written - a dict per row.
@@ -1293,8 +1417,9 @@ UPDATE "book" SET "price"="price"*$1 WHERE "copies"<$2 RETURNING "id","price"
   composite one) or `"pk"` (a tuple for a composite primary key); values decode as the field reads them.
   A path through a relation, a reverse or many-to-many relation, an unknown name or a name given twice
   raises `FieldError` at the `returning()` call.
-- **No fields** returns the model instances: the write returns the primary keys, and the rows are read by
-  them in the write's transaction — each instance has every field, as a query would load it.
+- **No fields** returns fully loaded model instances. Usually the write returns primary keys and a
+  follow-up query loads their rows; a model without a primary key is built from all returned columns.
+  Where transactions are supported, the write and follow-up read share one transaction.
 - **An update** returns each row as written: the new values, the `auto_now` fields and the version
   `Meta.optimistic_lock_field` bumped. A value written from an expression is returned as the database
   stored it. A filter through a relation works as on
@@ -1303,14 +1428,17 @@ UPDATE "book" SET "price"="price"*$1 WHERE "copies"<$2 RETURNING "id","price"
   returns the named fields through its own `RETURNING`. A delete hare carries out in Python — an
   `on_delete` the database doesn't enforce, a model with a cascade cycle, a model overriding `delete()`
   (or `hard_delete()`), the instances — reads the
-  matched rows first and deletes them in one transaction. A soft delete (`Meta.soft_delete_field`)
+  matched rows first and deletes them, in one transaction where supported on that connection.
+  A cascade across connections has no shared atomicity. A soft delete (`Meta.soft_delete_field`)
   returns the rows after it: their deletion time set; a row already soft-deleted isn't deleted again nor
   returned (`include_deleted().delete()`). `hard_delete().returning()` deletes for real.
 - No row matched — an empty list. `none()` sends no statement.
 - The order of the rows is the database's (`RETURNING`), else the order the delete matched them in.
-- `returning()` needs `features.supports_returning` (PostgreSQL and SQLite): on another database
-  (ClickHouse) it raises `UnSupportedError` before any SQL is sent. `old=` needs `RETURNING` itself. The
-  statement keeps its [plan](query-plan-cache.md), the returned fields part of its key.
+- Updates and direct SQL deletes need `features.supports_returning` (PostgreSQL and SQLite), otherwise
+  they raise `UnSupportedError` before SQL. Deletion through a Python cascade, soft-delete or an
+  overridden model method can read rows instead, including on ClickHouse; without SQL `RETURNING`
+  this requires a primary key. `old=` requires SQL `RETURNING` support. The statement keeps its
+  [plan](query-plan-cache.md), the returned fields part of its key.
 - **The values before the update.** `update(...).returning(*fields, old=(...))` also returns the fields
   named in `old` as they were before the update, under the key `"old"` — the change of each row in the
   same statement (PostgreSQL 18, `RETURNING old.column`):
@@ -1334,8 +1462,9 @@ class QuerySet(QuerySpecification):
     def insert_from(self, queryset: QuerySet[Any, Any], *, fields: Sequence[str]) -> InsertFromQuery: ...
 ```
 
-`insert_from()` writes the rows a queryset selects into the model's table in one statement — the rows
-never come to Python. It awaits to the number of rows written:
+`insert_from()` writes the rows a queryset selects into the model's table with one `INSERT ... SELECT`.
+`Meta.change_capture` can require additional reads of source keys and written rows. It awaits to the
+number of rows written:
 
 ```python
 written = await ArchivedLoan.objects.insert_from(
@@ -1365,8 +1494,9 @@ SELECT "book_id","reader_id","returned_at",$1 FROM "loan" WHERE "returned_at" IS
   scope of one tenant, as `create()`). Under an active scope the tenant can't be read from the source
   rows, nor a relation to a tenant-scoped model — the insert can't check them row by row — and that
   raises `QueryError`; on the target's `all_tenants()` the source rows are written as they are.
-- The rows aren't read back: no instance is created, no `save()` is called, no signal of a model instance
-  is sent; a `RowsChanged` observer gets the insert without the keys.
+- No model instance is created, no `save()` is called, and no model-instance signal is sent.
+  Without change capture, rows are not read back and `RowsChanged` receives no keys. Change capture
+  can read the written rows and report their keys.
 - **ClickHouse** keeps no uniqueness: the rows are written as the source gives them, a row repeating a
   key is one more row. A model whose `Meta.change_capture` reads the rows written needs its primary key
   among `fields` there — the database returns no rows of a write — `UnSupportedError` otherwise.
@@ -1404,8 +1534,10 @@ MERGE INTO "inventory" USING (SELECT column1 AS "isbn", column2 AS "copies"
   FROM (VALUES (CAST($1 AS VARCHAR), CAST($2 AS INTEGER)), (...)) AS "hare_merge_values") AS "hare_merge_source"
 ON "inventory"."isbn"="hare_merge_source"."isbn"
 WHEN MATCHED AND ... THEN DELETE
-WHEN MATCHED THEN UPDATE SET "copies" = "inventory"."copies"+"hare_merge_source"."copies", "version" = "inventory"."version"+$3
-WHEN NOT MATCHED THEN INSERT ("isbn", "copies") VALUES ("hare_merge_source"."isbn", "hare_merge_source"."copies")
+WHEN MATCHED THEN UPDATE SET "copies" = "inventory"."copies"+"hare_merge_source"."copies", "version" =
+"inventory"."version"+$3
+WHEN NOT MATCHED THEN INSERT ("isbn", "copies") VALUES ("hare_merge_source"."isbn",
+"hare_merge_source"."copies")
 ```
 
 - **The source** — a list of dicts with the same keys (each key a column; a key named after a field of
@@ -1440,6 +1572,8 @@ WHEN NOT MATCHED THEN INSERT ("isbn", "copies") VALUES ("hare_merge_source"."isb
   `Meta.optimistic_lock_field`, `Meta.soft_delete_field` (`QueryError`); an insert writes them as
   `create()` does. An encrypted field with a blind index takes a plain value or `F()` of another such field.
   The values are taken as they are when the branch is added.
+  All automatically assigned timestamps share one moment across the statement's branches;
+  executing the same declaration again prepares a fresh moment.
 - **Tenants.** Under an active scope a tenant written from an expression, an update moving a row out of
   the scope, or a relation to a tenant-scoped model written from an expression raises `QueryError`;
   related instances written as plain values are checked against their model's scope. On the target's
@@ -1449,7 +1583,8 @@ WHEN NOT MATCHED THEN INSERT ("isbn", "copies") VALUES ("hare_merge_source"."isb
   `QueryError` for a `delete=True` branch — use `delete()`.
 - **`.returning(*fields)`** (PostgreSQL 17+) awaits to the written rows: a dict of the named fields plus
   `"merge_action"` — `"insert"`, `"update"` or `"delete"` (a deleted row as it was). At least one field
-  is named. `old=("copies",)` adds those fields as they were before the merge under `"old"` — each None
+  is named. Returning a field named `merge_action` raises `FieldError`. `old=("copies",)` adds those
+  fields as they were before the merge under `"old"` — each None
   for an inserted row, `{"copies": None}` (PostgreSQL 18, [as on `update()`](#returning)).
 - PostgreSQL 15+ (`features.supports_merge`); `when_not_matched_by_source()` and `returning()` need
   PostgreSQL 17 (`supports_merge_not_matched_by_source`, `supports_merge_returning`). On another database

@@ -4,6 +4,7 @@ import re
 
 from hare.gis.enums import GeometryType
 from hare.lazy_loading.lazy_pattern import LazyPattern
+from hare.query.enums import Lookup
 from hare.sql.enums import Equality
 
 #: The SRID of WGS 84 longitude/latitude - a ``GeometryField``'s default.
@@ -97,7 +98,7 @@ DISTANCE_LOOKUP_COMPARISONS = {
 #: The lookup matching rows whose geometry is (or isn't) valid.
 IS_VALID_LOOKUP = "isvalid"
 #: The generic lookups a geometry keeps - equality and ``isnull``.
-KEPT_GENERIC_GEOMETRY_LOOKUPS = ("", "not", "isnull", "not_isnull")
+KEPT_GENERIC_GEOMETRY_LOOKUPS = (Lookup.EXACT, Lookup.NOT, Lookup.ISNULL, Lookup.NOT_ISNULL)
 #: One token of a WKT value - a word, a number, a parenthesis or a comma.
 WKT_TOKEN_PATTERN = LazyPattern(r"\s*(?:([A-Za-z]+)|([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)|([(),]))")
 

@@ -37,10 +37,11 @@ class DecoratedWidget(Model):
 
 
 def test_decorated_class_reads_its_comments():
-    assert DecoratedWidget._meta.fields_map["label"].description == "Read from a decorated class too."
+    assert DecoratedWidget._declaration.fields_map["label"].description == "Read from a decorated class too."
 
 
 def test_class_defined_in_a_function_reads_only_its_own_comments():
+
     def make_widget() -> type[Model]:
         class LocalWidget(Model):
             #: The local widget's title.
@@ -53,12 +54,13 @@ def test_class_defined_in_a_function_reads_only_its_own_comments():
         return LocalWidget
 
     local_widget = make_widget()
-    assert local_widget._meta.fields_map["title"].description == "The local widget's title."
+    assert local_widget._declaration.fields_map["title"].description == "The local widget's title."
     # CommentedWidget's "name" comment is in the same file - not this class's.
-    assert local_widget._meta.fields_map["name"].description is None
+    assert local_widget._declaration.fields_map["name"].description is None
 
 
 def test_same_named_classes_of_two_functions_read_their_own_comments():
+
     def make_first() -> type[Model]:
         class Gadget(Model):
             #: The first gadget's label.
@@ -79,12 +81,12 @@ def test_same_named_classes_of_two_functions_read_their_own_comments():
 
         return Gadget
 
-    assert make_first()._meta.fields_map["label"].description == "The first gadget's label."
-    assert make_second()._meta.fields_map["label"].description == "The second gadget's label."
+    assert make_first()._declaration.fields_map["label"].description == "The first gadget's label."
+    assert make_second()._declaration.fields_map["label"].description == "The second gadget's label."
 
 
 def test_description_is_the_first_line_of_the_hash_colon_block():
-    name_field = CommentedWidget._meta.fields_map["name"]
+    name_field = CommentedWidget._declaration.fields_map["name"]
     assert name_field.description == "The widget's display name."
     assert name_field.docstring == "The widget's display name.\nShown in listings."
 
@@ -92,5 +94,5 @@ def test_description_is_the_first_line_of_the_hash_colon_block():
 def test_hash_colon_inside_an_ordinary_comment_is_not_a_description():
     """Bug: FIELD_COMMENT_RE let a "#:" block start mid-line, so the tail of an ordinary comment
     ('"#:" in passing - not a description.') became the next field's DB column comment."""
-    assert CommentedWidget._meta.fields_map["code"].description is None
-    assert CommentedWidget._meta.fields_map["color"].description is None
+    assert CommentedWidget._declaration.fields_map["code"].description is None
+    assert CommentedWidget._declaration.fields_map["color"].description is None

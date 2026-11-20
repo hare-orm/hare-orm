@@ -2,15 +2,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from hare.inspectdb.exceptions import TableNotFoundError, UnsupportedDialectError
+from hare.inspectdb.exceptions import UnsupportedDialectError
 
 if TYPE_CHECKING:
     from hare.ddl.schema_objects.database_function import DatabaseFunction
     from hare.ddl.schema_objects.database_sequence import DatabaseSequence
-    from hare.ddl.security.grant import Grant
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.dialect import Dialect
+    from hare.inspectdb.introspection.catalog_snapshot import CatalogSnapshot
     from hare.inspectdb.introspection.schema_introspector import SchemaIntrospector
+    from hare.inspectdb.introspection.schema_part import SchemaPart
     from hare.inspectdb.introspection.table_info import TableInfo
 
 
@@ -23,7 +24,7 @@ class DatabaseCatalog:
         """Returns the introspector of a dialect.
 
         Args:
-            dialect_name: The dialect's name.
+            dialect_name: The dialect's name or an existing dialect object.
 
         Returns:
             The dialect's ``SchemaIntrospector`` subclass.
@@ -35,9 +36,10 @@ class DatabaseCatalog:
         from hare.dialects.dialect_registry import DialectRegistry
 
         dialect = DialectRegistry.get_dialect(dialect_name)
-        if dialect.introspector_class is None:
+        introspector_class = dialect.introspector_class
+        if introspector_class is None:
             raise UnsupportedDialectError(dialect.name)
-        return dialect.introspector_class
+        return introspector_class
 
     @staticmethod
     def get_introspector_class(connection: DatabaseClient) -> type[SchemaIntrospector]:
@@ -52,10 +54,16 @@ class DatabaseCatalog:
         Raises:
             UnsupportedDialectError: The dialect has no introspector.
         """
-        introspector_class = connection.dialect.introspector_class
-        if introspector_class is None:
-            raise UnsupportedDialectError(connection.dialect.name)
-        return introspector_class
+        return DatabaseCatalog.get_dialect_introspector_class(connection.dialect)
+
+    @staticmethod
+    async def _get_introspector_and_schema(
+        connection: DatabaseClient, schema: str | None
+    ) -> tuple[type[SchemaIntrospector], str]:
+        introspector = DatabaseCatalog.get_introspector_class(connection)
+        if schema is None:
+            schema = await introspector.fetch_default_schema(connection)
+        return introspector, schema
 
     @staticmethod
     async def get_default_schema(connection: DatabaseClient) -> str:
@@ -109,9 +117,7 @@ class DatabaseCatalog:
             UnsupportedDialectError: The connection's dialect has no introspector.
             SchemaNotFoundError: The schema doesn't exist.
         """
-        introspector_class = DatabaseCatalog.get_introspector_class(connection)
-        if schema is None:
-            schema = await introspector_class.fetch_default_schema(connection)
+        introspector_class, schema = await DatabaseCatalog._get_introspector_and_schema(connection, schema)
         return await introspector_class.fetch_table_names(connection, schema, include_partitions)
 
     @staticmethod
@@ -130,9 +136,7 @@ class DatabaseCatalog:
         Raises:
             UnsupportedDialectError: The connection's dialect has no introspector.
         """
-        introspector_class = DatabaseCatalog.get_introspector_class(connection)
-        if schema is None:
-            schema = await introspector_class.fetch_default_schema(connection)
+        introspector_class, schema = await DatabaseCatalog._get_introspector_and_schema(connection, schema)
         return await introspector_class.fetch_views(connection, schema)
 
     @staticmethod
@@ -149,15 +153,13 @@ class DatabaseCatalog:
         Raises:
             UnsupportedDialectError: The connection's dialect has no introspector.
         """
-        introspector_class = DatabaseCatalog.get_introspector_class(connection)
-        if schema is None:
-            schema = await introspector_class.fetch_default_schema(connection)
+        introspector_class, schema = await DatabaseCatalog._get_introspector_and_schema(connection, schema)
         return await introspector_class.fetch_schema_object_notes(connection, schema)
 
     @staticmethod
     async def get_unattached_schema_objects(
         connection: DatabaseClient, schema: str | None = None
-    ) -> tuple[list[DatabaseSequence], list[DatabaseFunction], list[Grant]]:
+    ) -> tuple[list[DatabaseSequence], list[DatabaseFunction], list[SchemaPart]]:
         """Lists the sequences and functions of a schema no table holds, and the grants on them.
 
         Args:
@@ -170,9 +172,7 @@ class DatabaseCatalog:
         Raises:
             UnsupportedDialectError: The connection's dialect has no introspector.
         """
-        introspector_class = DatabaseCatalog.get_introspector_class(connection)
-        if schema is None:
-            schema = await introspector_class.fetch_default_schema(connection)
+        introspector_class, schema = await DatabaseCatalog._get_introspector_and_schema(connection, schema)
         return await introspector_class.fetch_unattached_schema_objects(connection, schema)
 
     @staticmethod
@@ -192,9 +192,31 @@ class DatabaseCatalog:
         return await DatabaseCatalog.get_introspector_class(connection).fetch_table_exists(connection, table)
 
     @staticmethod
-    async def inspect_table(
-        connection: DatabaseClient, table: str, schema: str | None = None, *, verify_exists: bool = True
-    ) -> TableInfo:
+    async def read_tables(connection: DatabaseClient, tables: list[str], schema: str | None = None) -> CatalogSnapshot:
+        """Read an immutable catalog snapshot without reconstructing fields or models.
+
+        Records are dialect-specific and preserve unknown metadata. The connection's
+        transaction controls consistency across the reader's catalog statements.
+
+        Args:
+            connection: The connection.
+            tables: The tables to capture, preserving their order and repeated names.
+            schema: The tables' namespace, the connection's default one when None.
+
+        Returns:
+            The catalog records for the requested tables. An empty request does not
+            check whether the schema exists.
+
+        Raises:
+            UnsupportedDialectError: The connection's dialect has no introspector.
+            SchemaNotFoundError: The requested tables' schema doesn't exist.
+            TableNotFoundError: A requested table doesn't exist in the schema.
+        """
+        introspector, schema = await DatabaseCatalog._get_introspector_and_schema(connection, schema)
+        return await introspector.fetch_catalog(connection, tables, schema)
+
+    @staticmethod
+    async def inspect_table(connection: DatabaseClient, table: str, schema: str | None = None) -> TableInfo:
         """Inspects one table's full schema.
 
         Args:
@@ -202,23 +224,21 @@ class DatabaseCatalog:
             table: The table.
             schema: The schema ``table`` lives in (a schema, an attached database or a database of
                 the server - the namespace of tables the database has), the connection's default one when None.
-            verify_exists: See inspect_tables().
 
         Returns:
             The table's schema.
 
         Raises:
             UnsupportedDialectError: The connection's dialect has no introspector.
+            SchemaNotFoundError: The table's schema doesn't exist.
             TableNotFoundError: If ``table`` doesn't exist.
         """
-        table_infos = await DatabaseCatalog.inspect_tables(
-            connection, [table], schema=schema, verify_exists=verify_exists
-        )
+        table_infos = await DatabaseCatalog.inspect_tables(connection, [table], schema=schema)
         return table_infos[0]
 
     @staticmethod
     async def inspect_tables(
-        connection: DatabaseClient, tables: list[str], schema: str | None = None, *, verify_exists: bool = True
+        connection: DatabaseClient, tables: list[str], schema: str | None = None
     ) -> list[TableInfo]:
         """Inspects several tables' full schemas.
 
@@ -227,26 +247,17 @@ class DatabaseCatalog:
             tables: The tables to inspect.
             schema: The schema the tables live in (a schema, an attached database or a database of
                 the server - the namespace of tables the database has), the connection's default one when None.
-            verify_exists: Set to ``False`` only when the caller already matched ``tables``
-                against a table list it just fetched itself - skips this method's own
-                get_table_names() round trip. A dialect whose catalog statements take no bind
-                parameters relies on that check to make a table name safe in them.
 
         Returns:
-            One TableInfo per entry of ``tables``, in the same order.
+            One TableInfo per entry of ``tables``, in the same order. An empty
+            request does not check whether the schema exists.
 
         Raises:
             UnsupportedDialectError: The connection's dialect has no introspector.
+            SchemaNotFoundError: The requested tables' schema doesn't exist.
             TableNotFoundError: If a table doesn't exist - checked explicitly, since a catalog
                 that silently returns nothing for one would otherwise describe a table with no
                 columns at all.
         """
-        introspector_class = DatabaseCatalog.get_introspector_class(connection)
-        if schema is None:
-            schema = await introspector_class.fetch_default_schema(connection)
-        if verify_exists and tables:
-            existing_table_names = set(await introspector_class.fetch_table_names(connection, schema, True))
-            for table in tables:
-                if table not in existing_table_names:
-                    raise TableNotFoundError(table)
+        introspector_class, schema = await DatabaseCatalog._get_introspector_and_schema(connection, schema)
         return await introspector_class.fetch_tables(connection, tables, schema)

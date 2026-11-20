@@ -1,16 +1,26 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
-from typing import TYPE_CHECKING, TypeVar, cast
+from collections.abc import Iterator, Mapping
+from typing import TYPE_CHECKING, Any, ClassVar, Self, TypeVar
+
+from hare.classes.deferred_import import DeferredImport
+from hare.sql.terms.node_traversal import NodeTraversal
 
 if TYPE_CHECKING:
+    from hare.sql.terms.functions.aggregate_function import AggregateFunction
     from hare.sql.terms.term import Term
 
 TNode = TypeVar("TNode", bound="Node")
+TMatch = TypeVar("TMatch")
 
 
 class Node:
     """The base of every part of a statement - the nodes of a tree its SQL is written from."""
+
+    #: ``AggregateFunction`` - imported at its first read, as its module imports this one.
+    aggregate_function_class: ClassVar[DeferredImport[type[AggregateFunction]]] = DeferredImport(
+        "hare.sql.terms.functions.aggregate_function", "AggregateFunction"
+    )
 
     is_aggregate: bool | None = None
     #: A window function call - computed after grouping, so an aggregate inside it never groups
@@ -27,25 +37,57 @@ class Node:
     #: either. Declared here, not on a term: a table reads an unknown attribute as its column.
     sensitive = False
 
-    def nodes_(self) -> Iterator[TNode]:
+    #: Explicit semantic inputs; an undeclared subclass is opaque to structural rewriting.
+    structure_attributes: ClassVar[tuple[str, ...] | None] = None
+    #: Values that can contain data but never field references or expression children.
+    literal_attributes: ClassVar[tuple[str, ...]] = ()
+    #: Whether independently built equal structures can denote the same computed value.
+    has_repeatable_value: ClassVar[bool] = True
+
+    def _copy_state(self) -> Self:
+        """Shallow-copy dict and initialized slots without invoking serialization hooks.
+
+        Subclasses renew their identity and copy mutable build containers afterward.
+        """
+        copied = type(self).__new__(type(self))
+        state = object.__getstate__(self)
+        if isinstance(state, tuple):
+            attributes, slots = state
+            for name, value in slots.items():
+                object.__setattr__(copied, name, value)
+        else:
+            attributes = state
+        if attributes:
+            copied.__dict__.update(attributes)
+        return copied
+
+    def rebuild_structure(self, attributes: Mapping[str, Any]) -> Self:
+        """Rebuild declared inputs while preserving node-specific rendering metadata."""
+        from hare.sql.terms.node_structure import NodeStructure
+
+        return NodeStructure.rebuild(self, attributes)  # type: ignore[return-value]
+
+    def get_children(self) -> Iterator[Node]:
+        """Direct structural children, in SQL traversal order; literals remain opaque."""
+        return iter(())
+
+    def nodes_(self) -> Iterator[Node]:
         """The node and every node below it, depth first.
 
         Yields:
             The nodes.
         """
-        yield self  # type:ignore[misc]
+        yield from NodeTraversal.walk(self)
 
-    def find_(self, type: type[TNode]) -> list[TNode]:
-        return [  # type:ignore[var-annotated]
-            node for node in self.nodes_() if isinstance(node, type)
-        ]
+    def find_(self, type: type[TMatch]) -> list[TMatch]:
+        return [node for node in self.nodes_() if isinstance(node, type)]
 
     def _is_group_scope_boundary(self) -> bool:
         """Whether this node's inner terms are outside the enclosing query's grouping scope.
         Returns:
             True for an aggregate call, a window function call or a subquery.
         """
-        return self.is_subquery or self.is_analytic or isinstance(self, aggregate_function_terms.AggregateFunction)
+        return self.is_subquery or self.is_analytic or isinstance(self, Node.aggregate_function_class)
 
     @property
     def contains_aggregate(self) -> bool:
@@ -57,21 +99,16 @@ class Node:
         Returns:
             True when the query needs grouping for this node and it belongs in HAVING, not WHERE.
         """
-        boundary_node_ids: set[int] = set()
-        nodes: Iterator[Node] = self.nodes_()
-        for node in nodes:
-            if id(node) in boundary_node_ids:
-                continue
+        for node in NodeTraversal.walk(self, lambda child: not child.is_subquery):
             if node.is_subquery:
                 if node.is_aggregate:
                     return True
             elif node.is_analytic:
                 continue
-            elif isinstance(node, aggregate_function_terms.AggregateFunction):
+            elif isinstance(node, Node.aggregate_function_class):
                 return True
             else:
                 continue
-            boundary_node_ids.update(map(id, node.nodes_()))
         return False
 
     def get_group_by_column_terms(self) -> list[Term]:
@@ -80,19 +117,7 @@ class Node:
         Returns:
             The column terms, in the order they appear.
         """
-        column_terms: list[Term] = []
-        boundary_node_ids: set[int] = set()
-        nodes: Iterator[Node] = self.nodes_()
-        for node in nodes:
-            if id(node) in boundary_node_ids:
-                continue
-            if node._is_group_scope_boundary():
-                if node.is_subquery:
-                    column_terms.extend(node.outer_reference_terms)
-                boundary_node_ids.update(map(id, node.nodes_()))
-            elif isinstance(node, field_terms.Field) and node.table is not None:
-                column_terms.append(node)
-        return column_terms
+        return self._get_scope_column_terms(opens_root=False)
 
     def get_window_column_terms(self) -> list[Term]:
         """The columns a window function reads outside the aggregates and subqueries in it - its
@@ -100,19 +125,21 @@ class Node:
         Returns:
             The column terms, in the order they appear.
         """
+        return self._get_scope_column_terms(opens_root=True)
+
+    def _get_scope_column_terms(self, *, opens_root: bool) -> list[Term]:
+        """Read columns within a grouping scope, opening the root only for a window."""
+        from hare.sql.terms.field import Field
+
+        def descends(node: Node) -> bool:
+            return (opens_root and node is self) or not node._is_group_scope_boundary()
+
         column_terms: list[Term] = []
-        boundary_node_ids: set[int] = set()
-        nodes: Iterator[Node] = self.nodes_()
-        for node in nodes:
-            if id(node) in boundary_node_ids:
-                continue
-            if node is not self and (
-                node.is_subquery or node.is_analytic or isinstance(node, aggregate_function_terms.AggregateFunction)
-            ):
+        for node in NodeTraversal.walk(self, descends):
+            if not descends(node):
                 if node.is_subquery:
                     column_terms.extend(node.outer_reference_terms)
-                boundary_node_ids.update(map(id, node.nodes_()))
-            elif isinstance(node, field_terms.Field) and node.table is not None:
+            elif isinstance(node, Field) and node.table is not None:
                 column_terms.append(node)
         return column_terms
 
@@ -131,9 +158,4 @@ class Node:
             return []
         if self.contains_aggregate:
             return self.get_group_by_column_terms()
-        return [cast("Term", self)]
-
-
-# After Node is defined: every term builds on it.
-from hare.sql.terms import field as field_terms  # noqa: E402
-from hare.sql.terms.functions import aggregate_function as aggregate_function_terms  # noqa: E402
+        return [self]  # type: ignore[list-item]

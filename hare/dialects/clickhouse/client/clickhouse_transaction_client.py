@@ -4,9 +4,10 @@ import abc
 import asyncio
 import time
 from collections.abc import Sequence
-from typing import Any, cast
+from typing import Any
 
 from hare.dialects.base.client.constants import TRANSACTION_FINALISED_MESSAGE
+from hare.dialects.base.client.enums import StatementForm
 from hare.dialects.base.client.transaction_client import TransactionClient
 from hare.dialects.base.transactions.savepoints.nested_savepoint_lock import NestedSavepointLock
 from hare.dialects.clickhouse.client.clickhouse_client import ClickhouseClient
@@ -72,13 +73,13 @@ class ClickhouseTransactionClient(TransactionClient, ClickhouseClient):
             The driver's connection.
         """
 
-    @abc.abstractmethod
     async def close_transaction_connection(self, connection: Any) -> None:
         """Closes the connection the transaction ran on.
 
         Args:
             connection: The driver's connection.
         """
+        await connection.close()
 
     @abc.abstractmethod
     async def send_transaction_statement(self, sql: str) -> None:
@@ -166,9 +167,9 @@ class ClickhouseTransactionClient(TransactionClient, ClickhouseClient):
         return isinstance(error, Exception)
 
     async def _check_commit_allowed(self) -> None:
-        if self._finalized:
+        if self.transaction_state.finished:
             raise TransactionManagementError(TRANSACTION_FINALISED_MESSAGE)
-        transaction = cast("ClickhouseTransactionClient", self._get_top_level_transaction())
+        transaction: ClickhouseTransactionClient = self._get_top_level_transaction()  # type: ignore[assignment]
         if transaction._transaction_aborted:
             await self.rollback()
             raise TransactionManagementError(f"{CLICKHOUSE_TRANSACTION_ABORTED_MESSAGE} (nothing was committed)")
@@ -183,6 +184,6 @@ class ClickhouseTransactionClient(TransactionClient, ClickhouseClient):
             )
         return super().get_hare_error(error, sql, parameters)
 
-    savepoint = ClickhouseClient.translate_exceptions(TransactionClient.savepoint)
-    commit = ClickhouseClient.translate_exceptions(TransactionClient.commit)
-    rollback = ClickhouseClient.translate_exceptions(TransactionClient.rollback)
+    savepoint = ClickhouseClient.translate_exceptions(StatementForm.CONTROL)(TransactionClient.savepoint)
+    commit = ClickhouseClient.translate_exceptions(StatementForm.CONTROL)(TransactionClient.commit)
+    rollback = ClickhouseClient.translate_exceptions(StatementForm.CONTROL)(TransactionClient.rollback)

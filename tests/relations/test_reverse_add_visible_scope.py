@@ -6,6 +6,7 @@ import dataclasses
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.exceptions import IntegrityError
 from hare.instrumentation import Observers, RowsChanged
 from tests.shared_models.testmodels import SoftDeleteChildCascadeSoft, SoftDeleteParent
@@ -14,7 +15,7 @@ from tests.shared_models.testmodels import SoftDeleteChildCascadeSoft, SoftDelet
 @pytest.mark.parametrize("reports_written_row_count", [True, False], ids=["row count", "no row count"])
 @pytest.mark.asyncio
 async def test_add_refuses_a_soft_deleted_row(db, monkeypatch, reports_written_row_count):
-    connection = SoftDeleteParent._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(SoftDeleteParent).get_connection()
     monkeypatch.setattr(
         connection,
         "features",

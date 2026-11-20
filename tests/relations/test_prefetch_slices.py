@@ -5,29 +5,22 @@ prefetches, and the single row of a forward relation or a reverse one-to-one."""
 
 from __future__ import annotations
 
-import os
-
 import pytest
 import pytest_asyncio
 
 from hare.contrib.test import RollbackIsolation
-from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.exceptions import QueryError
 from hare.query.expressions import Window
 from hare.query.functions.window import RowNumber, Sum
 from hare.query.relation_loading import Prefetch, prefetch_related_objects
 from hare.sql.analytics import Count
 from tests.relations.prefetch_slices_models import Chapter, Label, Novel, Parcel, Shipment, Writer, WriterProfile
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 @pytest_asyncio.fixture(scope="module")
 async def slices_database():
-    async with hare_test_context(
-        modules=["tests.relations.prefetch_slices_models"],
-        db_url=os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:"),
-        app_label="models",
-        connection_label="models",
-    ) as context:
+    async with DatabaseUnderTest.open_model_context(["tests.relations.prefetch_slices_models"]) as context:
         yield context
 
 
@@ -60,6 +53,30 @@ async def library(slices_database):
 
 def titles(novels) -> list[str]:
     return [novel.title for novel in novels]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("library")
+@pytest.mark.parametrize("before", (False, True))
+@pytest.mark.parametrize("window_annotation", (False, True))
+async def test_reverse_prefetch_slices_after_its_cursor_boundary(before, window_annotation):
+    child = Novel.objects.order_by("id")
+    if window_annotation:
+        child = child.annotate(position=Window(RowNumber(), order_by=("id",)))
+    child = child.before_cursor(5) if before else child.after_cursor(1)
+    for start, stop in ((0, 1), (1, 3), (1, None), (0, 0), (5, 7)):
+        writers = await Writer.objects.order_by("id").prefetch_related(
+            Prefetch("novels", queryset=child[start:stop], to_attribute="picked")
+        )
+        expected = []
+        for numbers in ((1, 2, 3), (4, 5), ()):
+            if before:
+                selected = [number for number in numbers if number < 5]
+                selected = selected[::-1][start:stop][::-1]
+            else:
+                selected = [number for number in numbers if number > 1][start:stop]
+            expected.append(selected)
+        assert [[novel.id for novel in writer.picked] for writer in writers] == expected
 
 
 @pytest.mark.asyncio

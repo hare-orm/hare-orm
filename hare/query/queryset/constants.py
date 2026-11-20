@@ -3,11 +3,13 @@ from __future__ import annotations
 import re
 
 from hare.sql.constants import IDENTIFIER_LENGTH_LIMIT
+from hare.sql.enums import TruncType
+from hare.sql.order import Order
 
 #: The slots of a query its copies don't take over: the object a query made again for each
 #: description or build stands for (``PlanOrigins``) - set where it is made, never carried by a clone -
-#: and the weak reference slot of a relation object.
-UNCOPIED_QUERY_SLOTS = frozenset({"_plan_origin", "__weakref__"})
+#: the weak reference slot of a relation object, and dictionary state copied by copy_extension_state().
+UNCOPIED_QUERY_SLOTS = frozenset({"_plan_origin", "__weakref__", "__dict__"})
 
 #: The most calls a queryset's call signature records - a longer chain is built as it goes: each call
 #: would copy the whole signature, making a chain of thousands of calls quadratic.
@@ -34,12 +36,12 @@ LATEST_WITHOUT_FIELDS_MESSAGE = (
 DATES_VALUE_ALIAS = "hare dates value"
 
 #: The units ``dates()`` truncates to, and those ``datetimes()`` does.
-DATES_TRUNC_TYPES = ("year", "quarter", "month", "week", "day")
+DATES_TRUNC_TYPES = (TruncType.YEAR, TruncType.QUARTER, TruncType.MONTH, TruncType.WEEK, TruncType.DAY)
 
-DATETIMES_TRUNC_TYPES = ("year", "quarter", "month", "week", "day", "hour", "minute", "second")
+DATETIMES_TRUNC_TYPES = (*DATES_TRUNC_TYPES, TruncType.HOUR, TruncType.MINUTE, TruncType.SECOND)
 
 #: The orders ``dates()``/``datetimes()`` return their values in.
-DATES_ORDERS = ("ASC", "DESC")
+DATES_ORDERS = (Order.ASC, Order.DESC)
 
 #: The error of ``aggregate()`` over the groups of a ``Rollup``/``Cube``/``GroupingSets`` - a row of
 #: each grouping holds subtotals of the others' rows, so summed again they count rows more than once.

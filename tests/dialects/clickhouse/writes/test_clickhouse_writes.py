@@ -11,6 +11,8 @@ import pytest
 
 from hare import Connections
 from hare.contrib.test import assert_query_count, capture_queries
+from hare.core.apps.model_binding_graph import ModelBindingGraph
+from hare.core.hare_context import HareContext
 from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
 from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
 from hare.dialects.clickhouse.constants import CLICKHOUSE_DIALECT
@@ -53,13 +55,13 @@ from tests.utils.database_under_test import DatabaseUnderTest
 def test_the_option_is_checked():
     with pytest.raises(ConfigurationError, match="MergeTree family"):
         ClickhouseTableOptions(engine="Memory", lightweight_updates=True).raise_if_unsupported(
-            Account, CLICKHOUSE_DIALECT.features
+            ModelBindingGraph().include(Account), CLICKHOUSE_DIALECT.features
         )
 
 
 @pytest.mark.asyncio
 async def test_a_connection_inserts_asynchronously(clickhouse_db):
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     url = os.environ["HARE_TEST_DB"]
     config = DbUrlConfigGenerator.expand(
         DatabaseUnderTest.get_url_with_options("async_insert=true", url.replace("{}", "x"))
@@ -131,7 +133,10 @@ async def test_a_write_of_stored_rows_reports_no_count(clickhouse_db):
 @pytest.mark.asyncio
 async def test_an_update_whose_condition_folds_into_a_constant_runs(clickhouse_db):
     # NOT of a non-Nullable column's IS NULL is a constant.
-    if (await Account._meta.connection.get_server_version())[:2] < (26, 3):
+    if (await HareContext.require_current().apps.get_queryset(Account).get_connection().get_server_version())[:2] < (
+        26,
+        3,
+    ):
         pytest.skip(
             "ClickHouse before 26.3 refuses an UPDATE of a constant value under a negation folding into a constant"
         )
@@ -162,11 +167,13 @@ async def test_an_insert_from_a_queryset_writes_its_rows(clickhouse_db):
 
 @pytest.mark.asyncio
 async def test_a_key_column_is_left_as_it_is_and_refused_when_changed(clickhouse_db):
-    assert PageView._meta.get_table_options(CLICKHOUSE_DIALECT).get_fixed_field_names(PageView) == {
+    page_view_binding = clickhouse_db.apps.get_binding(PageView)
+    reading_binding = clickhouse_db.apps.get_binding(Reading)
+    assert page_view_binding.get_table_options(CLICKHOUSE_DIALECT).get_fixed_field_names(page_view_binding) == {
         "site",
         "viewed_at",
     }
-    assert Reading._meta.get_table_options(CLICKHOUSE_DIALECT).get_fixed_field_names(Reading) == {"version"}
+    assert reading_binding.get_table_options(CLICKHOUSE_DIALECT).get_fixed_field_names(reading_binding) == {"version"}
     moment = datetime.datetime(2026, 1, 2, tzinfo=datetime.UTC)
     view = await PageView.objects.create(site="home", viewed_at=moment, duration_ms=5)
     reading = await Reading.objects.create(id=1, sensor="t", value=3, version=1)
@@ -413,7 +420,10 @@ async def test_a_field_set_to_a_subquery_writes_its_value(clickhouse_db):
     """A subquery is a query's expression and an SQL term at once - an update to a bare Subquery was
     refused, the subquery bound as a parameter. A value past the column's type wraps around, as a
     mutation of ClickHouse writes it."""
-    if (await PageView._meta.connection.get_server_version())[:2] >= (26, 7):
+    if (await HareContext.require_current().apps.get_queryset(PageView).get_connection().get_server_version())[:2] >= (
+        26,
+        7,
+    ):
         pytest.skip(
             "ClickHouse 26.7 refuses a mutation setting a column without NULL to a Nullable subquery "
             "(CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN) - the population column is Nullable"

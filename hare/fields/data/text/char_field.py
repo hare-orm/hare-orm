@@ -4,8 +4,8 @@ from typing import Any, Literal, TypeVar, overload
 
 from hare.exceptions import ConfigurationError
 from hare.fields.data.boolean_field import BooleanField
+from hare.fields.data.text.string_field import StringField
 from hare.fields.data.text.text_field import TextField
-from hare.fields.data.text.text_values import TextValues
 from hare.fields.enums import NarrowedValueSource
 from hare.fields.field import Field
 from hare.fields.narrowing.narrowing_limit import NarrowingLimit
@@ -15,7 +15,7 @@ from hare.fields.validators.limits.max_length_validator import MaxLengthValidato
 TStr = TypeVar("TStr", str, str | None)
 
 
-class CharField(Field[TStr]):
+class CharField(StringField[TStr]):
     """A character field.
 
     Args:
@@ -65,14 +65,5 @@ class CharField(Field[TStr]):
     # A text column reads as a str - to_python() checks only a value assigned of another type.
     keeps_native_db_values = True
 
-    def get_written_value_of_another_type(self, value: Any) -> Any:
-        TextValues.raise_if_not_text(self, value)
-        return super().get_written_value_of_another_type(value)
-
-    def to_python(self, value: Any) -> Any:
-        if value is not None and not isinstance(value, str):
-            TextValues.raise_if_not_text(self, value)
-        return super().to_python(value)
-
-    def from_db_value(self, value: Any) -> Any:
-        return self.to_python(TextValues.get_read_text(value))
+    def get_assign_normalized_types(self) -> frozenset[type]:
+        return self._get_unchanged_assign_types(CharField.to_python, self.field_type)

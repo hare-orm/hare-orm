@@ -1,0 +1,428 @@
+# Shared versions, sources and environments for local runs and CI.
+
+[tools]
+poetry = "2.1.4"
+poetry_export = "1.9.0"
+uv = "0.12.7"
+
+[versions]
+"python" = ["3.12", "3.13", "3.14", "3.15"]
+"postgres" = ["14", "15", "16", "17", "18"]
+"pgbouncer" = ["1.22", "1.23", "1.24", "1.25", "1.26"]
+"clickhouse" = ["25.8", "25.10", "25.12", "26.3", "26.7", "26.8", "26.9"]
+"redis" = ["7.2", "8.10"]
+"rabbitmq" = ["4.0", "4.3"]
+"kafka" = ["3.9", "4.3"]
+
+[images.pgbouncer]
+"1.22" = "edoburu/pgbouncer:1.22.1-p0@sha256:7f39cf2f872c8d9a0bb0e6a5440c3bf5814036eccf284102870ab08e2603a2c7"
+"1.23" = "edoburu/pgbouncer:v1.23.1-p3@sha256:377dec3c0e4a66a1077ec043e16a26ed5702a6d954011a7983a1457c2e070b1d"
+"1.24" = "edoburu/pgbouncer:v1.24.1-p1@sha256:3db3d7223e93af52b4116f642951a1a5fa44702a88c2a59cf7562cac19320c9e"
+"1.25" = "edoburu/pgbouncer:v1.25.2-p0@sha256:7d7a27d9e90985cab5cf42256f5c13a3120baa4b055b69df37beb272b89b2340"
+"1.26" = "edoburu/pgbouncer:v1.26.1-p0@sha256:488422e38cff912895d0d65d8963fcd306e6ac589a724398b6eb8e294e94d624"
+
+[images.kafka]
+"3.9" = "apache/kafka:3.9.2"
+"4.3" = "apache/kafka:4.3.1"
+
+[unsupported_extras]
+"3.15" = ["robyn", "clickhouse-driver"]
+
+[database_driver_extras]
+"sqlite" = []
+"postgresql" = []
+"postgresql+asyncpg" = ["asyncpg"]
+"clickhouse+clickhouse-connect" = ["clickhouse-connect", "clickhouse-keeper"]
+"clickhouse+clickhouse-driver" = ["clickhouse-driver", "clickhouse-keeper"]
+
+[databases_by_driver]
+"rust_pg" = "postgresql"
+"asyncpg" = "postgresql+asyncpg"
+"clickhouse-connect" = "clickhouse+clickhouse-connect"
+"clickhouse-driver" = "clickhouse+clickhouse-driver"
+
+[urls.postgres]
+"asyncpg" = "postgresql+asyncpg://postgres:postgres@127.0.0.1:{port}/test_{{}}"
+"rust_pg" = "postgresql://postgres:postgres@127.0.0.1:{port}/test_{{}}"
+
+[urls.clickhouse]
+"clickhouse-connect" = "clickhouse+clickhouse-connect://default:clickhouse@127.0.0.1:{port}/{database}"
+"clickhouse-driver" = "clickhouse+clickhouse-driver://default:clickhouse@127.0.0.1:{port}/{database}"
+
+[url_queries]
+"pgbouncer" = "?transaction_pooling=true&direct_host=127.0.0.1&direct_port={direct_port}"
+"clickhouse" = "?keeper_hosts={keeper_hosts}"
+"clickhouse_cluster" = "?cluster=hare_sharded"
+
+[paths]
+"clickhouse" = ["tests/dialects/clickhouse", "tests/contracts", "tests/fields/value_types/test_ordered_values.py", "tests/fields/value_types/test_ip_address_text_lookups.py", "tests/fields/value_types/test_ip_address_zones.py"]
+"clickhouse_cluster" = ["tests/dialects/clickhouse/cluster"]
+"sqlite_regexp" = ["tests/queries/filtering/test_posix_regex_filter.py", "tests/backends/test_sqlite_client.py"]
+
+[pytest]
+"options" = ["-q", "-p", "no:cacheprovider", "--tb=short", "--verify-plans"]
+
+[brokers.redis]
+"variable" = "HARE_TEST_REDIS_URL"
+"url" = "redis://127.0.0.1:{port}/0"
+"port_prefix" = 16
+
+[brokers.rabbitmq]
+"variable" = "HARE_TEST_RABBITMQ_URL"
+"url" = "amqp://guest:guest@127.0.0.1:{port}/"
+"port_prefix" = 15
+
+[brokers.kafka]
+"variable" = "HARE_TEST_KAFKA_BOOTSTRAP"
+"url" = "127.0.0.1:{port}"
+"port_prefix" = 19
+
+[sqlite_releases."3.35.5"]
+"amalgamation" = "2021/sqlite-amalgamation-3350500.zip"
+
+[sqlite_releases."3.37.2"]
+"amalgamation" = "2022/sqlite-amalgamation-3370200.zip"
+
+[sqlite_releases."3.38.0"]
+"amalgamation" = "2022/sqlite-amalgamation-3380000.zip"
+
+[sqlite_releases."3.41.0"]
+"amalgamation" = "2023/sqlite-amalgamation-3410000.zip"
+
+[sqlite_releases."3.53.4"]
+"amalgamation" = "2026/sqlite-amalgamation-3530400.zip"
+
+[[environments]]
+name = "core"
+databases = ["sqlite", "postgresql", "clickhouse+clickhouse-connect", "clickhouse+clickhouse-driver"]
+whole_suite = true
+on_newest_servers_only = true
+
+[[environments]]
+name = "asyncpg"
+extras = ["asyncpg"]
+
+[[environments]]
+name = "clickhouse-connect"
+extras = ["clickhouse-connect"]
+
+[[environments]]
+name = "clickhouse-driver"
+extras = ["clickhouse-driver"]
+
+[[environments]]
+name = "clickhouse-keeper"
+extras = ["clickhouse-keeper"]
+
+[[environments]]
+name = "encryption"
+extras = ["encryption"]
+
+[[environments]]
+name = "encryption-pydantic"
+extras = ["encryption", "pydantic"]
+
+[[environments]]
+name = "phone"
+extras = ["phone"]
+
+[[environments]]
+name = "sqlite-vec"
+extras = ["sqlite-vec"]
+
+[[environments]]
+name = "tzlocal"
+extras = ["tzlocal"]
+
+[[environments]]
+name = "yaml"
+extras = ["yaml"]
+
+[[environments]]
+name = "faker"
+extras = ["faker"]
+
+[[environments]]
+name = "pytz"
+groups = ["pytz"]
+
+[[environments]]
+name = "opentelemetry"
+extras = ["opentelemetry"]
+
+[[environments]]
+name = "pydantic"
+extras = ["pydantic"]
+
+[[environments]]
+name = "request-query-http"
+extras = ["request-query", "http"]
+
+[[environments]]
+name = "http"
+extras = ["http"]
+
+[[environments]]
+name = "litestar"
+extras = ["litestar"]
+
+[[environments]]
+name = "fastapi"
+extras = ["fastapi"]
+
+[[environments]]
+name = "fastapi-http"
+extras = ["fastapi", "http"]
+
+[[environments]]
+name = "robyn"
+extras = ["robyn"]
+
+[[environments]]
+name = "taskiq"
+extras = ["taskiq"]
+
+[[environments]]
+name = "redis"
+extras = ["redis"]
+database_independent = false
+
+[[environments]]
+name = "kafka"
+extras = ["kafka"]
+database_independent = false
+
+[[environments]]
+name = "rabbitmq"
+extras = ["rabbitmq"]
+database_independent = false
+
+[[environments]]
+name = "pytest-plugin"
+extras = ["pytest"]
+
+[[environments]]
+name = "mypy"
+extras = ["mypy"]
+
+[[environments]]
+name = "stubs"
+extras = ["pyright"]
+groups = ["pyright-cli"]
+
+[[environments]]
+name = "ipython"
+extras = ["ipython"]
+
+[[environments]]
+name = "all"
+databases = ["sqlite", "postgresql", "postgresql+asyncpg", "clickhouse+clickhouse-connect", "clickhouse+clickhouse-driver"]
+whole_suite = true
+database_independent = false
+all_extras = true
+
+# The platforms of a release's wheels (.github/workflows/platform-wheels.yml): the runner each is
+# built on, maturin's target and manylinux policy on Linux, and how its wheels are checked - `native`
+# installs them on the runner, `alpine` in the python:3.X-alpine images.
+[[wheel_platforms]]
+platform = "manylinux-x86_64"
+runner = "ubuntu-24.04"
+target = "x86_64"
+manylinux = "2014"
+check = "native"
+
+[[wheel_platforms]]
+platform = "manylinux-aarch64"
+runner = "ubuntu-24.04-arm"
+target = "aarch64"
+manylinux = "2014"
+check = "native"
+
+[[wheel_platforms]]
+platform = "musllinux-x86_64"
+runner = "ubuntu-24.04"
+target = "x86_64"
+manylinux = "musllinux_1_2"
+check = "alpine"
+
+[[wheel_platforms]]
+platform = "musllinux-aarch64"
+runner = "ubuntu-24.04-arm"
+target = "aarch64"
+manylinux = "musllinux_1_2"
+check = "alpine"
+
+[[wheel_platforms]]
+platform = "macos-x86_64"
+runner = "macos-15-intel"
+check = "native"
+
+[[wheel_platforms]]
+platform = "macos-arm64"
+runner = "macos-15"
+check = "native"
+
+[[wheel_platforms]]
+platform = "windows-x86_64"
+runner = "windows-2025"
+check = "native"
+
+[[wheel_platforms]]
+platform = "windows-arm64"
+runner = "windows-11-arm"
+check = "native"
+
+[ci.test-sqlite]
+axes = { "python" = "versions.python" }
+
+[ci.test-database-independent]
+axes = { "python" = "versions.python" }
+
+[ci.test-postgres]
+axes = { "postgres" = "versions.postgres", "python" = "versions.python" }
+
+[ci.test-lowest-dependencies]
+axes = { "python" = "versions.python" }
+
+[ci.test-brokers]
+axes = { "python" = "versions.python" }
+
+[ci.test-clickhouse]
+axes = { "clickhouse" = "versions.clickhouse" }
+drivers = "urls.clickhouse"
+matrix = { "include" = [ { "clickhouse" = "25.8", "python" = "3.12", "driver" = "clickhouse-connect" }, { "clickhouse" = "25.8", "python" = "3.12", "driver" = "clickhouse-driver" }, { "clickhouse" = "25.8", "python" = "3.13", "driver" = "clickhouse-connect" }, { "clickhouse" = "25.8", "python" = "3.13", "driver" = "clickhouse-driver" } ] }
+
+[ci.test-pgbouncer]
+axes = { "pgbouncer" = "versions.pgbouncer" }
+newest_axes = { "postgres" = "versions.postgres", "python" = "versions.python" }
+matrix = { "include" = [ { "pgbouncer" = "1.26", "postgres" = "14", "python" = "3.14" } ] }
+
+[ci.test-poetry-add]
+axes = { "python" = "versions.python" }
+
+# The wheels built and installed on one runner of each OS - release.yml builds every platform.
+[ci.platform-wheels]
+platforms = ["manylinux-x86_64", "macos-arm64", "windows-x86_64"]
+
+[ci_gate]
+jobs = [ "catalog", "check", "build-native-linux", "test-sqlite", "test-database-independent", "test-postgres", "test-lowest-dependencies", "test-brokers", "test-clickhouse", "test-pgbouncer", "test-poetry-add", "platform-wheels" ]
+
+# Required in the all-extras profile. Prefer exact node IDs for individual required cases.
+# These suites use versioned names; cluster, pooler and SQLite regexp profiles have their own scope.
+[contracts]
+"tests/contracts/test_field_query_paths.py::test_field_values_survive_query_paths[int]" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*", "clickhouse-connect-[0-9]*", "clickhouse-driver-[0-9]*"]
+"tests/contracts/test_assigned_field_normalization.py::test_text_normalization_runs_for_constructor_create_and_mapping_updates[composite]" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*", "clickhouse-connect-[0-9]*", "clickhouse-driver-[0-9]*"]
+"tests/contracts/test_iterator_scope_lifetime.py::test_iterator_retains_its_starting_scope_and_restores_the_consumer" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*", "clickhouse-connect-[0-9]*", "clickhouse-driver-[0-9]*"]
+"tests/contracts/test_iterator_scope_lifetime.py::test_scoped_reader_closes_early_under_the_consumers_scope[iterator-composite]" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*", "clickhouse-connect-[0-9]*", "clickhouse-driver-[0-9]*"]
+"tests/contracts/test_iterator_scope_lifetime.py::test_scoped_reader_closes_early_under_the_consumers_scope[stream-composite]" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*", "clickhouse-connect-[0-9]*", "clickhouse-driver-[0-9]*"]
+"tests/contracts/test_keyless_query_paths.py::test_keyless_rows_keep_multiplicity_across_operations" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*", "clickhouse-connect-[0-9]*", "clickhouse-driver-[0-9]*"]
+"tests/contracts/test_relation_connection_paths.py::test_raw_requires_every_component_of_a_composite_primary_key" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*", "clickhouse-connect-[0-9]*", "clickhouse-driver-[0-9]*"]
+"tests/contracts/test_write_target_admission.py::test_deletion_routes_refuse_slices_before_sql" = ["database-independent"]
+"tests/contracts/test_transaction_scope_paths.py::test_nested_outcomes_keep_scoped_writes_and_callbacks_together" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/contracts/test_binding_lifecycle_contracts.py::test_registry_rebuild_uses_its_context_under_another_application[composite-file]" = ["database-independent"]
+"tests/migrations/autodetection/test_unmanaged_relation_dependencies.py::test_planners_use_unmanaged_target_keys_without_mutating_declarations" = ["database-independent"]
+"tests/migrations/execution/test_rollback_history.py::test_a_rollback_part_way_leaves_the_schema_a_migrate_to_that_point_makes" = ["sqlite-[0-9]*"]
+"tests/model_instances/test_dirty_tracking.py::test_released_savepoint_preserves_json_baseline_for_outer_rollback" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/query_plans/test_bounded_query_plans.py::test_a_later_query_of_the_structure_runs_on_its_plan" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/query_plans/test_bounded_query_plans.py::test_json_cursor_boundaries_rebind_on_a_kept_plan[values-after_cursor]" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/query_plans/test_bounded_query_plans.py::test_json_cursor_boundaries_rebind_on_a_kept_plan[exists-before_cursor]" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/contracts/test_bulk_conflict_bound_values.py::test_bulk_conflicts_reuse_bound_input_values[reported-upsert-composite]" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/transactions/test_transactions_failure_paths.py::test_failed_commit_rolls_back_and_releases_the_connection" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/inspectdb/test_inspectdb_reconstructed_models.py::test_reconstruction_preserves_primary_key_order_across_relation_columns" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+
+# Inventory and lifecycle checks for the core declaration and write registries.
+"tests/contracts/test_field_classes.py::test_every_exported_field_class_has_a_sample" = ["database-independent"]
+"tests/contracts/meta_options/test_meta_option_inheritance.py::test_every_option_hare_takes_is_sampled_or_named_with_why_not" = ["database-independent"]
+"tests/contracts/writes/test_write_paths_complete.py::test_every_write_method_has_a_path_or_writes_no_row" = ["database-independent"]
+"tests/contracts/test_binding_lifecycle_contracts.py::test_failed_publication_cannot_execute_an_escaped_draft_query" = ["database-independent"]
+"tests/contracts/test_filter_value_snapshots.py::test_binary_array_writes_capture_views_before_the_buffer_changes[Value-composite]" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/contracts/test_write_target_admission.py::test_update_or_create_preserves_the_row_outside_its_lookup[optimistic-lock-composite]" = ["database-independent"]
+
+# Embedded statements, projections, relation equality and tenant scope.
+"tests/multiple_connections/test_subquery_exists_cross_db_guard.py::test_embedded_queries_refuse_different_clients_sharing_an_alias" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/contracts/test_query_shape_interactions.py::test_composite_projection_keeps_its_identity_in_summaries_and_set_ordering[renamed]" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*", "clickhouse-connect-[0-9]*", "clickhouse-driver-[0-9]*"]
+"tests/contracts/test_query_shape_interactions.py::test_ordered_model_union_can_project_the_scalar_pk_alias" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*", "clickhouse-connect-[0-9]*", "clickhouse-driver-[0-9]*"]
+"tests/contracts/test_query_shape_interactions.py::test_output_alias_cannot_replace_another_outputs_relation_path" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*", "clickhouse-connect-[0-9]*", "clickhouse-driver-[0-9]*"]
+"tests/dialects/clickhouse/queries/test_clickhouse_aggregates.py::test_reprojecting_a_grouped_native_expression_keeps_its_groups" = ["clickhouse-connect-[0-9]*", "clickhouse-driver-[0-9]*"]
+"tests/contracts/test_prefetch_query_shapes.py::test_prefetch_matches_keys_using_database_equality[False-False-composite]" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/contracts/test_prefetch_query_shapes.py::test_prefetch_matches_keys_using_database_equality[True-True-composite]" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/contracts/test_tenant_connection_paths.py::test_a_selected_tenant_client_keeps_working[missing-scope]" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+
+# Transaction outcomes at the common boundary and in each driver.
+"tests/transactions/test_transaction_outcomes.py::test_unknown_commit_reports_unknown_and_runs_no_callback" = ["database-independent"]
+"tests/backends/test_sqlite_transaction_abort.py::test_trigger_raise_rollback_aborts_transaction" = ["sqlite-[0-9]*"]
+"tests/backends/test_postgres_transaction_concurrency.py::test_stream_waits_outside_a_sibling_savepoint[fetch]" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/backends/test_postgres_transaction_concurrency.py::test_asyncpg_discards_the_connection_of_an_abandoned_begin" = ["asyncpg-[0-9]*"]
+"tests/backends/test_rust_pg_transactions.py::test_stale_plan_message_does_not_repeat_a_statement_with_effects" = ["rust_pg-[0-9]*"]
+"tests/dialects/clickhouse/transactions/test_clickhouse_transactions.py::test_a_failed_statement_ends_the_transaction" = ["clickhouse-connect-[0-9]*", "clickhouse-driver-[0-9]*"]
+
+# Schema changes and reconstruction that preserve rows, dependencies and object names.
+"tests/contracts/test_migration_runner_state.py::test_recreating_a_generated_column_preserves_its_dependent_chain[transitive-composite-stored]" = ["sqlite-[0-9]*"]
+"tests/contracts/test_migration_runner_state.py::test_physical_column_renames_preserve_generated_names[rename-and-widen-composite]" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/inspectdb/test_inspectdb_reconstructed_models.py::test_reconstruction_keeps_columns_when_a_composite_relation_name_is_unusable[refresh_from_db-source]" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+
+# Cross-path contracts with literal rows, failures at execution boundaries and live cluster placement.
+"tests/contracts/test_callable_defaults.py::test_explicit_null_and_value_do_not_invoke_defaults[bulk]" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*", "clickhouse-connect-[0-9]*", "clickhouse-driver-[0-9]*"]
+"tests/query_plans/test_query_plans_time_zones.py::test_plans_of_the_two_time_zone_modes_stay_apart" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/fields/encryption/test_encryption_key_rotation.py::test_rotation_keeps_completed_batches_and_can_continue_after_failure" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/contracts/test_encryption_rotation_scopes.py::test_rotation_on_a_selected_schema_keeps_the_other_tenants_ciphertext" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/contracts/test_encryption_rotation_scopes.py::test_rotation_respects_row_level_security_on_its_selected_client" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/contracts/test_query_shape_interactions.py::test_nullable_membership_keeps_slices_joins_and_correlations" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*", "clickhouse-connect-[0-9]*", "clickhouse-driver-[0-9]*"]
+"tests/contracts/test_query_shape_interactions.py::test_nested_membership_reuses_its_plan_with_new_nullable_values" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*", "clickhouse-connect-[0-9]*", "clickhouse-driver-[0-9]*"]
+"tests/queries/expressions/test_expression_type_parity.py::test_decimal_arithmetic_filter_values_order_aggregate_update" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/contracts/test_query_shape_interactions.py::test_cursor_pages_use_every_component_to_break_ties[2]" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*", "clickhouse-connect-[0-9]*", "clickhouse-driver-[0-9]*"]
+"tests/contracts/test_query_shape_interactions.py::test_explicit_cte_reads_its_sliced_body" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*", "clickhouse-connect-[0-9]*", "clickhouse-driver-[0-9]*"]
+"tests/queries/expressions/test_with_recursive.py::test_the_active_tenants_rows_only" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/query_plans/test_subquery_query_plans.py::test_values_list_subquery_runs_on_the_plan_and_binds_its_values" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/query_plans/test_plan_connection_features.py::test_a_connection_of_other_features_keeps_its_own_plans" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/query_plans/test_decode_plan_cache.py::test_prepared_columns_allow_unhashable_readers_and_follow_invalidation" = ["database-independent"]
+"tests/contracts/test_distinct_membership.py::test_contains_keeps_distinct_representatives_and_rebinds_keys" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/contracts/test_named_join_identity.py::test_lateral_annotation_keeps_distinct_rows_in_summaries_and_pages[composite]" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/contracts/test_named_join_identity.py::test_array_join_annotation_keeps_distinct_rows_in_summaries_and_pages[composite]" = ["clickhouse-connect-[0-9]*", "clickhouse-driver-[0-9]*"]
+"tests/contracts/test_selected_row_identity.py::test_partial_keyless_join_keeps_existing_all_null_related_rows" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/contracts/test_iterator_scope_lifetime.py::test_iterator_prefetch_uses_the_initial_scope_for_each_page[composite]" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*", "clickhouse-connect-[0-9]*", "clickhouse-driver-[0-9]*"]
+"tests/queries/raw_sql/test_query_result.py::test_raw_and_model_reads_preserve_uuid_and_null_from_the_same_row" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/queries/raw_sql/test_query_result.py::test_a_wrong_raw_parameter_count_leaves_the_connection_usable[pool-uncached]" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/queries/raw_sql/test_query_result.py::test_a_wrong_raw_parameter_count_leaves_the_connection_usable[pool-cached]" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/queries/raw_sql/test_query_result.py::test_a_wrong_raw_parameter_count_leaves_the_connection_usable[transaction-uncached]" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/queries/raw_sql/test_query_result.py::test_a_wrong_raw_parameter_count_leaves_the_connection_usable[transaction-cached]" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/relations/test_relations_with_unique.py::test_filter_by_fk_instance_uses_to_field" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/contracts/test_related_cache_declarations.py::test_clone_writes_and_savepoint_rollback_invalidate_the_source_cache[tags]" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/model_instances/test_dirty_tracking.py::test_partial_only_query_tracks_loaded_fields" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/tenancy/test_tenancy.py::test_normalized_upsert_race_keeps_other_tenants_and_returns_one_key" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/writes/test_bulk_normalized_conflicts.py::test_repeated_normalized_conflict_keys_are_written_in_order" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/writes/rules/test_captured_write.py::test_an_update_moving_rows_to_other_keys_captures_them_as_they_were[fallback]" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/writes/rules/test_captured_write.py::test_an_update_moving_rows_to_other_keys_captures_them_as_they_were[native-if-supported]" = ["rust_pg-18", "asyncpg-18"]
+"tests/contracts/test_write_target_admission.py::test_preview_and_delete_null_only_the_matching_components" = ["database-independent"]
+"tests/tenancy/test_tenant_scope_values.py::test_a_composite_primary_key_and_relations_to_it" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/model_instances/test_optimistic_locking.py::test_optimistic_lock_field_with_composite_pk_stale_save_raises" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/observability/test_change_events.py::test_a_bulk_update_failing_in_a_later_batch_reports_only_the_batches_it_wrote" = ["sqlite-[0-9]*", "rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/writes/test_bulk.py::test_bulk_create_returning_rollback_restores_pk" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/backends/test_postgres.py::test_cancellation_releases_a_single_slot_and_preserves_committed_rows[pool-wait]" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/backends/test_postgres.py::test_cancellation_releases_a_single_slot_and_preserves_committed_rows[statement]" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/backends/test_postgres.py::test_cancellation_releases_a_single_slot_and_preserves_committed_rows[savepoint]" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/multiple_connections/test_transactions_distributed.py::test_distributed_partial_commit_raises_and_recovery_finishes_it[explicit-mixed-drivers]" = ["rust_pg-18", "asyncpg-18"]
+"tests/multiple_connections/test_transactions_distributed.py::test_distributed_partial_commit_raises_and_recovery_finishes_it[default-mixed-drivers]" = ["rust_pg-18", "asyncpg-18"]
+"tests/backends/test_postgres.py::test_closing_the_pool_under_a_checked_out_connection_does_not_break_its_release[close]" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/backends/test_postgres.py::test_closing_the_pool_under_a_checked_out_connection_does_not_break_its_release[discard]" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/dialects/clickhouse/connections/test_clickhouse_connection_opening.py::test_a_client_closed_and_dropped_opens_no_connection_again" = ["clickhouse-connect-[0-9]*", "clickhouse-driver-[0-9]*"]
+"tests/native_acceleration/test_field_codecs.py::test_prepared_and_field_readers_keep_literal_values" = ["database-independent"]
+"tests/dialects/sqlite/native_functions/test_json_path_values_native.py::test_digit_segments_keep_object_keys_array_indexes_and_missing_values" = ["database-independent"]
+"tests/dialects/sqlite/native_functions/test_date_functions_native.py::test_calendar_date_changes_at_local_midnight_without_losing_precision" = ["database-independent"]
+"tests/dialects/postgresql/column_types/test_multi_range_fields.py::test_range_agg_merges_a_group_of_ranges" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/dialects/postgresql/column_types/test_native_enum.py::test_members_are_written_read_filtered_and_ordered_in_the_enums_order" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/dialects/postgresql/column_types/test_network_fields.py::test_family_and_prefix_length_as_paths" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/dialects/clickhouse/column_types/test_clickhouse_containers.py::test_values_round_trip_written_and_inserted" = ["clickhouse-connect-[0-9]*", "clickhouse-driver-[0-9]*"]
+"tests/dialects/clickhouse/writes/test_clickhouse_unfinished_writes.py::test_a_write_cancelled_before_its_report_still_reports_it[update_skills]" = ["clickhouse-connect-[0-9]*", "clickhouse-driver-[0-9]*"]
+"tests/dialects/clickhouse/cluster/test_clickhouse_cluster.py::test_a_distributed_table_spreads_its_rows_and_changes_them_where_they_are" = ["clickhouse-connect-cluster-*", "clickhouse-driver-cluster-*"]
+"tests/dialects/clickhouse/cluster/test_clickhouse_cluster.py::test_a_replicated_table_is_kept_on_every_server" = ["clickhouse-connect-cluster-*", "clickhouse-driver-cluster-*"]
+"tests/dialects/clickhouse/cluster/test_clickhouse_cluster.py::test_migrations_change_the_schema_on_every_server" = ["clickhouse-connect-cluster-*", "clickhouse-driver-cluster-*"]
+"tests/contracts/test_search_config_expressions.py::test_search_config_expressions_follow_each_rows_configuration" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/dialects/postgresql/column_types/test_postgis.py::test_distance_orders_geography_by_meters" = ["rust_pg-18", "asyncpg-18"]
+"tests/dialects/postgresql/column_types/test_vector.py::test_l2_distance_orders_by_nearest" = ["rust_pg-18", "asyncpg-18"]
+"tests/contracts/test_historical_relation_references.py::test_a_historical_queryset_retains_its_bindings_after_a_schema_change[composite]" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/migrations/schema_objects/test_schema_object_migrations.py::test_the_autodetected_operations_run_and_drop_the_readers_of_a_removed_column" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/migrations/operations/test_backfill_partial_application.py::test_backfill_failure_preserves_the_schema_and_history_at_the_transaction_boundary" = ["sqlite-[0-9]*"]
+"tests/migrations/migration_files/test_squashmigrations.py::test_another_apps_dependency_on_a_replaced_migration" = ["sqlite-[0-9]*"]
+"tests/schema/test_generate_schemas_matches_migrate.py::test_created_views_and_constraints_work_and_support_the_next_migration" = ["rust_pg-[0-9]*", "asyncpg-[0-9]*"]
+"tests/migrations/drift/test_drift_for_alias.py::test_alias_drift_keeps_other_databases_out_of_inventory_and_shadow[same-table-other-alias-composite]" = ["sqlite-[0-9]*"]

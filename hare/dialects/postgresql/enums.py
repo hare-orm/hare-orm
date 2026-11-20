@@ -113,13 +113,3 @@ class PostgresqlJsonOperator(StrEnum):
     CONTAINED_BY = "<@"
     HAS_KEYS = "?&"
     HAS_ANY_KEYS = "?|"
-
-
-class RangeBoundType(StrEnum):
-    """The bounds of a range ``rust.native.rows.FieldCodec`` reads itself."""
-
-    INTEGER = "integer"
-    DECIMAL = "decimal"
-    DATE = "date"
-    #: A timestamp, read into the configured zone.
-    DATETIME = "datetime"

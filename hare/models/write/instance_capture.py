@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.instrumentation.capture.capture_needs import CaptureNeeds
     from hare.models import Model
+    from hare.models.write.declarations import WriteOutcome
     from hare.models.write.instance_writer import InstanceWriter
     from hare.models.write.rules.enums import WriteType
 
@@ -35,7 +36,7 @@ class InstanceCapture:
         # Local import: the writer module imports this one.
         from hare.models.write.instance_writer import InstanceWriter
 
-        inner_writer = InstanceWriter(writer.model, connection)
+        inner_writer = InstanceWriter(writer._binding, connection)
         inner_writer.captures_changes = False
         return inner_writer
 
@@ -60,11 +61,12 @@ class InstanceCapture:
         values = ChangeCapturing.get_instance_values(obj, capture_needs) if wrote_every_field else None
         if values is not None:
             return values, ChangeCapturing.get_tenant(obj, capture_needs)
-        values_by_pk = await ChangeCapturing.read_values(type(obj), connection, [obj.pk], capture_needs)
-        return values_by_pk.get(obj.pk, (None, None))
+        values_by_pk = await ChangeCapturing.read_values(obj._binding, connection, [obj.pk], capture_needs)
+        row = ChangeCapturing.get_read_row(obj._binding, connection.dialect.types, obj.pk, values_by_pk, owner=obj)
+        return (None, None) if row is None else row
 
     @staticmethod
-    async def insert(writer: InstanceWriter, obj: Model, capture_needs: CaptureNeeds) -> None:
+    async def insert(writer: InstanceWriter, obj: Model, capture_needs: CaptureNeeds) -> WriteOutcome:
         """Inserts the obj's row and captures it.
 
         Args:
@@ -72,11 +74,12 @@ class InstanceCapture:
             obj: The obj.
             capture_needs: The model's needs.
         """
-        captured = CapturedWrite(type(obj), capture_needs, writer.connection, RowOperation.INSERT)
+        captured = CapturedWrite(obj._binding, capture_needs, writer.connection, RowOperation.INSERT)
         async with captured.transaction() as connection:
-            await InstanceCapture.get_capturing_writer(writer, connection).execute_insert(obj)
+            outcome = await InstanceCapture.get_capturing_writer(writer, connection).execute_insert(obj)
             after, tenant = await InstanceCapture.get_values(obj, connection, capture_needs)
             await captured.capture_values([(obj.pk, None, after, tenant)])
+        return outcome
 
     @staticmethod
     def get_snapshot_values(obj: Model, capture_needs: CaptureNeeds) -> dict[str, Any] | None:
@@ -104,7 +107,7 @@ class InstanceCapture:
         apply_active_tenant_scope_guard: bool,
         only_live_row: bool,
         write_type: WriteType,
-    ) -> int | None:
+    ) -> WriteOutcome:
         """Updates the obj's row and captures it.
 
         Args:
@@ -117,30 +120,32 @@ class InstanceCapture:
             write_type: See ``InstanceWriter.execute_update()``.
 
         Returns:
-            The number of matched rows, or None when there was nothing to write.
+            The outcome, distinguishing an unknown row count from no statement.
         """
-        model = type(obj)
         update_fields = list(update_fields) if update_fields is not None else None
         if update_fields is not None:
             changed: list[str] | None = update_fields
-        elif model._meta.track_dirty_fields:
+        elif obj._binding.track_dirty_fields:
             # In the order the model declares its fields - the same event whatever the set's order.
             dirty_field_names = obj.get_dirty_fields()
-            changed = [field_name for field_name in model._meta.fields_map if field_name in dirty_field_names]
+            changed = [field_name for field_name in obj._binding.fields_map if field_name in dirty_field_names]
         else:
             changed = None
-        captured = CapturedWrite(model, capture_needs, writer.connection, RowOperation.UPDATE, changed=changed)
+        captured = CapturedWrite(obj._binding, capture_needs, writer.connection, RowOperation.UPDATE, changed=changed)
         # A write of some of the fields leaves the others as the row holds them, which a stale obj doesn't.
         wrote_every_field = update_fields is None or set(capture_needs.field_names) - set(
-            model._meta.primary_key_attribute_names
+            obj._binding.primary_key_attribute_names
         ) <= set(update_fields)
         async with captured.transaction() as connection:
             before = None
             if capture_needs.reads_before:
                 before = InstanceCapture.get_snapshot_values(obj, capture_needs) if wrote_every_field else None
                 if before is None:
-                    before = (await captured.read_before([obj.pk])).get(obj.pk)
-            rows = await InstanceCapture.get_capturing_writer(writer, connection).execute_update(
+                    row = ChangeCapturing.get_read_row(
+                        obj._binding, connection.dialect.types, obj.pk, await captured.read_before([obj.pk]), owner=obj
+                    )
+                    before = row
+            outcome = await InstanceCapture.get_capturing_writer(writer, connection).execute_update(
                 obj,
                 update_fields,
                 apply_active_tenant_scope_guard=apply_active_tenant_scope_guard,
@@ -148,12 +153,12 @@ class InstanceCapture:
                 write_type=write_type,
             )
             # A count the database doesn't report may be of the changed row.
-            if rows or (rows is None and not connection.features.reports_written_row_count):
+            if outcome.may_have_written:
                 after, tenant = await InstanceCapture.get_values(
                     obj, connection, capture_needs, wrote_every_field=wrote_every_field
                 )
                 await captured.capture_values([(obj.pk, before, after, tenant)])
-        return rows
+        return outcome
 
     @staticmethod
     async def delete(
@@ -170,7 +175,7 @@ class InstanceCapture:
         Returns:
             The number of matched rows - None where the database reports none.
         """
-        captured = CapturedWrite(type(obj), capture_needs, writer.connection, RowOperation.DELETE)
+        captured = CapturedWrite(obj._binding, capture_needs, writer.connection, RowOperation.DELETE)
         async with captured.transaction() as connection:
             values_by_pk = await captured.read([obj.pk], lock=True)
             rows = await InstanceCapture.get_capturing_writer(writer, connection).execute_delete(
@@ -178,6 +183,9 @@ class InstanceCapture:
             )
             # A count the database doesn't report may be of the removed row.
             if rows is None or rows:
-                before, tenant = values_by_pk.get(obj.pk, (None, None))
+                row = ChangeCapturing.get_read_row(
+                    obj._binding, connection.dialect.types, obj.pk, values_by_pk, owner=obj
+                )
+                before, tenant = (None, None) if row is None else row
                 await captured.capture_values([(obj.pk, before, None, tenant)])
         return rows

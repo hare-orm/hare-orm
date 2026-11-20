@@ -1,33 +1,26 @@
 from __future__ import annotations
 
 import contextvars
-import datetime
 import math
-from collections.abc import Callable, Coroutine, Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from copy import copy
 from enum import Enum
-from functools import partial
 from typing import Any, ClassVar
 
 from hare.query.plans.call_signatures.call_signature_plans import CallSignaturePlans
-from hare.query.plans.call_signatures.call_signature_runs import CallSignatureRuns
 from hare.query.plans.statement.statement_plans import StatementPlans
-from hare.query.queryset.queryset import QuerySet
-from hare.query.queryset.selection.statement_selection import StatementSelection
 from hare.query.statements.awaitable_query import AwaitableQuery
-from hare.query.statements.select.model_rows_query import ModelRowsQuery
 from hare.query.statements.select.raw_sql_query import RawSQLQuery
-from tests.plan_verification.constants import CURRENT_MOMENT_TOLERANCE, FERNET_TOKEN_PREFIX
 from tests.plan_verification.exceptions import PlanMismatchError
 
 
 class PlanVerification:
     """Checks every query that runs on a kept plan against the same query built in full - its SQL
-    text and its parameters must be the ones the plan gave. A query runs on a plan in three places:
-    ``AwaitableQuery._make_query_to_run()`` (a plan found by the query's description or by the calls
-    its queryset was made with), ``CallSignatureRuns.fetch_on_plan()`` (a queryset run without making a
-    query at all) and ``RawSQLQuery._get_statements()`` (a ``.raw()`` query). The full build runs with
+    text and its parameters must be the ones the plan gave. A query of a queryset's calls finds its
+    plan in ``StatementPlanRuns.find_call_plan()`` before any query object is made; a query being
+    built finds one by its description in ``AwaitableQuery._make_query_to_run()``;
+    ``RawSQLQuery._get_statements()`` prepares a ``.raw()`` query. The full build runs with
     every plan lookup answering "none" and no plan kept.
 
     A run is compared right away, in the context it runs in. In a test marked
@@ -58,15 +51,21 @@ class PlanVerification:
         """Patches the places a query runs on a plan, and the plan lookups the full build bypasses."""
         if cls.originals:
             return
-        cls.patch(AwaitableQuery, "_make_query_to_run", cls.get_verified_make_query_to_run)
-        cls.patch(CallSignatureRuns, "fetch_on_plan", cls.get_verified_fetch_on_plan)
-        cls.patch(CallSignatureRuns, "fetch_values_on_plan", cls.get_verified_fetch_values_on_plan)
-        cls.patch(RawSQLQuery, "_get_statements", cls.get_verified_raw_sql_statements)
-        cls.patch(StatementPlans, "find", cls.get_planless_lookup)
-        cls.patch(StatementPlans, "find_for_model", cls.get_planless_lookup)
-        cls.patch(StatementPlans, "record", cls.get_planless_record)
-        cls.patch(CallSignaturePlans, "find", cls.get_planless_lookup)
-        cls.patch(CallSignaturePlans, "record", cls.get_planless_record)
+        try:
+            cls.patch(AwaitableQuery, "_make_query_to_run", cls.get_verified_make_query_to_run)
+            cls.patch(RawSQLQuery, "_get_statements", cls.get_verified_raw_sql_statements)
+            cls.patch(StatementPlans, "find", cls.get_planless_method)
+            cls.patch(StatementPlans, "record", cls.get_planless_method)
+            cls.patch(CallSignaturePlans, "find_with_value_positions", cls.get_planless_method)
+            cls.patch(CallSignaturePlans, "record", cls.get_planless_method)
+            from hare.query.plans.statement.statement_plan_runs import StatementPlanRuns
+            from hare.query.statements.write.matching_rows_query import MatchingRowsQuery
+
+            cls.patch(StatementPlanRuns, "find_call_plan", cls.get_verified_call_plan)
+            cls.patch(MatchingRowsQuery, "_get_statement_on", cls.get_verified_write_statement)
+        except BaseException:
+            cls.uninstall()
+            raise
 
     @classmethod
     def uninstall(cls) -> None:
@@ -124,58 +123,87 @@ class PlanVerification:
             cls.planless.reset(token)
 
     @classmethod
-    def get_planless_lookup(cls, original: Callable[..., Any]) -> Callable[..., Any]:
-        """A plan lookup finding nothing while a query is built in full."""
+    def get_planless_method(cls, original: Callable[..., Any]) -> Callable[..., Any]:
+        """Skip plan lookups and writes during a full query build."""
 
-        def lookup(*args: Any) -> Any:
+        def access_plans(*args: Any) -> Any:
             if cls.planless.get():
                 return None
             return original(*args)
 
-        return lookup
+        return access_plans
 
     @classmethod
-    def get_planless_record(cls, original: Callable[..., Any]) -> Callable[..., Any]:
-        """Keeping a plan - skipped while a query is built in full."""
+    def get_verified_write_statement(cls, original: Callable[..., Any]) -> Callable[..., Any]:
+        """Verify writes with the actual restricted source, transaction and this run's stamps."""
 
-        def record(*args: Any) -> None:
-            if not cls.planless.get():
-                original(*args)
+        def get_statement(query: Any, connection: Any, source: Any = None, **kwargs: Any) -> Any:
+            from hare.query.plans.statement.declarations import CallPlanHit
 
-        return record
+            statement = original(query, connection, source, **kwargs)
+            if isinstance(statement, CallPlanHit) and not cls.planless.get():
+
+                def make_query() -> AwaitableQuery[Any]:
+                    unbuilt = copy(query)
+                    if source is not None:
+                        unbuilt._take_rows_of(source)
+                    unbuilt._apply_connection(connection)
+                    if kwargs.get("prepared") is not None:
+                        unbuilt._prepared_write = kwargs["prepared"]
+                    return unbuilt
+
+                cls.verify(type(query).__name__, query.model, make_query, (statement.sql, statement.parameters))
+            return statement
+
+        return get_statement
 
     @classmethod
-    def get_verified_make_query_to_run(cls, original: Callable[[AwaitableQuery[Any]], None]) -> Callable[..., None]:
+    def get_verified_call_plan(cls, original: Callable[..., Any]) -> Callable[..., Any]:
+        """``StatementPlanRuns.find_call_plan()`` comparing each hit with the query built in full - the
+        one place a query runs on the plan of its queryset's calls."""
+
+        def find_call_plan(query_class: type, specification: Any, connection: Any, *args: Any) -> Any:
+            from hare.query.plans.statement.declarations import CallPlanHit
+            from hare.query.statements.write.matching_rows_query import MatchingRowsQuery
+
+            lookup = original(query_class, specification, connection, *args)
+            if not isinstance(lookup, CallPlanHit) or cls.planless.get() or issubclass(query_class, MatchingRowsQuery):
+                return lookup
+
+            def make_query() -> AwaitableQuery[Any]:
+                from hare.query.queryset.queryset import QuerySet
+                from hare.query.queryset.selection.statement_selection import StatementSelection
+
+                query = (
+                    StatementSelection.get_select_query(specification)
+                    if isinstance(specification, QuerySet)
+                    else copy(specification)
+                )
+                query._apply_connection(connection)
+                return query
+
+            cls.verify(query_class.__name__, specification.model, make_query, (lookup.sql, lookup.parameters))
+            return lookup
+
+        return find_call_plan
+
+    @classmethod
+    def get_verified_make_query_to_run(cls, original: Callable[..., Any]) -> Callable[..., Any]:
         """``_make_query_to_run()`` comparing a run on a plan with the query built in full."""
 
-        def make_query_to_run(query: AwaitableQuery[Any]) -> None:
+        def make_query_to_run(query: AwaitableQuery[Any]) -> tuple[str, list[Any]]:
             if cls.planless.get():
-                original(query)
-                return
+                return original(query)
             unbuilt_query = copy(query)
-            original(query)
-            if query._compiled_statement is not None:
-                cls.verify(type(query).__name__, query.model, lambda: unbuilt_query, query._compiled_statement)
+            hits = StatementPlans.hits
+            statement = original(query)
+            if StatementPlans.hits != hits:
+                if hasattr(type(query), "_prepared_write"):
+                    unbuilt_query._prepared_write = query._prepared_write  # type: ignore[attr-defined]
+                cls.verify(type(query).__name__, query.model, lambda: unbuilt_query, statement)
+            return statement
 
         return make_query_to_run
-
-    @classmethod
-    def get_verified_fetch_on_plan(
-        cls, original: Callable[..., Coroutine[Any, Any, Any]]
-    ) -> Callable[..., Coroutine[Any, Any, Any]]:
-        """``CallSignatureRuns.fetch_on_plan()`` comparing the run with the queryset's query built in full."""
-
-        async def fetch_on_plan(queryset: QuerySet[Any, Any], plan: Any, parameters: list[Any], db: Any) -> Any:
-            unbuilt_queryset = copy(queryset)
-            cls.verify(
-                "QuerySet",
-                queryset.model,
-                partial(cls.get_model_rows_query, unbuilt_queryset, db),
-                (plan.sql, list(parameters)),
-            )
-            return await original(queryset, plan, parameters, db)
-
-        return fetch_on_plan
 
     @classmethod
     def get_verified_raw_sql_statements(
@@ -195,59 +223,6 @@ class PlanVerification:
             return statements
 
         return get_statements
-
-    @classmethod
-    def get_verified_fetch_values_on_plan(
-        cls, original: Callable[..., Coroutine[Any, Any, Any]]
-    ) -> Callable[..., Coroutine[Any, Any, Any]]:
-        """``CallSignatureRuns.fetch_values_on_plan()`` comparing the run with the queryset's values
-        query built in full."""
-
-        async def fetch_values_on_plan(
-            queryset: QuerySet[Any, Any], plan: Any, values_reading: Any, parameters: list[Any], db: Any
-        ) -> Any:
-            unbuilt_queryset = copy(queryset)
-            cls.verify(
-                "QuerySet",
-                queryset.model,
-                partial(cls.get_values_query, unbuilt_queryset, db),
-                (plan.sql, list(parameters)),
-            )
-            return await original(queryset, plan, values_reading, parameters, db)
-
-        return fetch_values_on_plan
-
-    @staticmethod
-    def get_values_query(queryset: QuerySet[Any, Any], db: Any) -> AwaitableQuery[Any]:
-        """The values query a queryset run without making one would build.
-
-        Args:
-            queryset: A copy of the queryset.
-            db: The connection it ran on.
-
-        Returns:
-            The query, not built yet.
-        """
-        query = StatementSelection.get_values_query(queryset)
-        query._is_execution_query = True
-        query._apply_connection(db)
-        return query
-
-    @staticmethod
-    def get_model_rows_query(queryset: QuerySet[Any, Any], db: Any) -> AwaitableQuery[Any]:
-        """The query a queryset run without making one would build.
-
-        Args:
-            queryset: A copy of the queryset.
-            db: The connection it ran on.
-
-        Returns:
-            The query, not built yet.
-        """
-        query = ModelRowsQuery(queryset)
-        query._is_execution_query = True
-        query._apply_connection(db)
-        return query
 
     @classmethod
     def verify(
@@ -353,9 +328,11 @@ class PlanVerification:
 
     @classmethod
     def parameter_matches(cls, built_parameter: Any, planned_parameter: Any) -> bool:
-        """Whether two parameters bind the same value - of the same type, an enum member as its value
-        (as a plan binds it). Two values made anew by each build match by their type alone: the
-        current moment (an ``auto_now`` field's) and a Fernet token, random per encryption.
+        """Whether two parameters bind the same value and type, with enums unwrapped.
+
+        Automatic dates and randomized encodings must be prepared once and shared by
+        both compilation paths. A timestamp tolerance or a token-shaped string cannot
+        establish equivalence. NaN is compared explicitly because it is unequal to itself.
 
         Args:
             built_parameter: The full build's parameter.
@@ -372,27 +349,4 @@ class PlanVerification:
             return False
         if isinstance(built_parameter, float) and math.isnan(built_parameter):
             return math.isnan(planned_parameter)
-        if built_parameter == planned_parameter:
-            return True
-        if isinstance(built_parameter, datetime.datetime):
-            return cls.is_current_moment(built_parameter) and cls.is_current_moment(planned_parameter)
-        if isinstance(built_parameter, str):
-            return (
-                built_parameter.startswith(FERNET_TOKEN_PREFIX)
-                and planned_parameter.startswith(FERNET_TOKEN_PREFIX)
-                and len(built_parameter) == len(planned_parameter)
-            )
-        return False
-
-    @staticmethod
-    def is_current_moment(moment: datetime.datetime) -> bool:
-        """Whether a datetime is the current moment - one a build took just now.
-
-        Args:
-            moment: The datetime.
-
-        Returns:
-            True when it is within ``CURRENT_MOMENT_TOLERANCE`` of now.
-        """
-        now = datetime.datetime.now(moment.tzinfo) if moment.tzinfo else datetime.datetime.now()
-        return abs(now - moment) <= CURRENT_MOMENT_TOLERANCE
+        return built_parameter == planned_parameter

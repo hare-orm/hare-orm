@@ -13,7 +13,7 @@ BLIND_INDEX_SUPPORTED_LOOKUPS = frozenset(
 )
 
 #: The equality and membership lookups a blind index answers instead of its encrypted field.
-BLIND_INDEX_COMPARED_LOOKUPS = ("", "not", "in", "not_in")
+BLIND_INDEX_COMPARED_LOOKUPS = (Lookup.EXACT, Lookup.NOT, Lookup.IN, Lookup.NOT_IN)
 
 #: The characters of a blind index - the hex HMAC-SHA256 of the value.
 BLIND_INDEX_LENGTH = 64

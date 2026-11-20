@@ -8,6 +8,15 @@ from typing import Any, ClassVar
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class ApiAssignment:
+    """A fully converted and validated assignment; preparing it does not mutate its target."""
+
+    container: Any
+    set_name: str
+    value: Any
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class ApiRequestExecuted:
     """A request to a source - each attempt of it. The request's headers aren't part of it.
 
@@ -39,7 +48,6 @@ class ApiTargetValue:
         set_name: The target's name in it.
         set_key: The target's whole path, for the errors.
         value: The value so far.
-        has_value: Whether the value so far isn't empty.
         required: Whether a mapping requires a value.
         default: The value of the target left empty.
     """
@@ -48,6 +56,5 @@ class ApiTargetValue:
     set_name: str
     set_key: str
     value: Any = None
-    has_value: bool = False
     required: bool = False
     default: Any = None

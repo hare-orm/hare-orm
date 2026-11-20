@@ -3,6 +3,7 @@ import datetime
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.exceptions import (
     ConfigurationError,
     FieldError,
@@ -122,7 +123,7 @@ async def test_no_separate_auto_through_table_created(db):
     SchemaIntrospector (the same dialect-agnostic introspection `hare inspectdb` uses) rather than
     a raw SQL query against a dialect-specific system catalog, so this runs unchanged on both
     SQLite and Postgres."""
-    db_client = testmodels.Membership._meta.connection
+    db_client = HareContext.require_current().apps.get_queryset(testmodels.Membership).get_connection()
     table_names = await DatabaseCatalog.get_table_names(db_client)
     assert {"person", "group", "membership"} <= set(table_names)
 
@@ -308,7 +309,7 @@ async def test_through_model_deconstruct(db, owner_class, field_name, through_re
     # field.through - that's what resolves through=Model to the real table name string in the
     # first place. Without it, this test's result depends on some OTHER test in the same xdist
     # worker happening to have already triggered init first.
-    field = owner_class._meta.fields_map[field_name]
+    field = HareContext.require_current().apps.get_binding(owner_class).fields_map[field_name]
     assert field.deconstruct()[2]["through"] == through_reference
     assert field.through == through_table
 

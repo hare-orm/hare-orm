@@ -6,11 +6,14 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.caching.cache import Cache
+from hare.core.caching.cache_bucket import CacheBucket
+from hare.ddl.enums import SchemaNamespace, SchemaPartType
 from hare.dialects.base.literals.constants import SQL_NULL_BYTE, SQL_NULL_BYTE_VALUE_MESSAGE
 from hare.exceptions import ValidationError
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
+    from hare.fields.field import Field
 
 
 class SqlLiterals:
@@ -31,7 +34,7 @@ class SqlLiterals:
 
     #: The writer each set of literals found for a value's class through the class's bases, kept
     #: in a bucket of the set.
-    found_literal_writers: ClassVar[Cache[Any]] = Cache(holds_sql=False, keyed_by_model=False)
+    found_literal_writers: ClassVar[Cache[Any]] = Cache()
 
     def __init__(self, dialect: Dialect) -> None:
         """
@@ -39,12 +42,12 @@ class SqlLiterals:
             dialect: The dialect whose SQL the literals are written into.
         """
         self.dialect = dialect
-        #: The buckets of the caches these literals read (``Cache.get_owner_bucket()``).
+        #: The buckets of the caches these literals read (``Cache.get_bucket()``).
         self.cache_buckets: dict[int, Any] = {}
         #: What writes a value of each class - and of its subclasses - as a literal.
         self.literal_writers: dict[type, Callable[[Any], str]] = self.get_literal_writers()
-        self.literal_writers_by_value_class: dict[type, Callable[[Any], str]] = (
-            SqlLiterals.found_literal_writers.get_owner_bucket(self)
+        self.literal_writers_by_value_class: CacheBucket[Callable[[Any], str]] = (
+            SqlLiterals.found_literal_writers.get_bucket(self)
         )
 
     def quote_identifier(self, name: str) -> str:
@@ -58,6 +61,50 @@ class SqlLiterals:
         """
         escaped = name.replace(self.identifier_quote_char, self.identifier_quote_char * 2)
         return f"{self.identifier_quote_char}{escaped}{self.identifier_quote_char}"
+
+    def get_field_literal_sql(self, field: Field[Any], value: Any) -> str:
+        """Render an already converted value with its column's type information.
+
+        Dialects may need the declared type to disambiguate a stored literal. The
+        caller performs field conversion once before invoking this renderer.
+        """
+        return self.get_literal_sql(value)
+
+    def get_schema_key(self, schema: str | None) -> str | None:
+        """Compare a declared schema without assuming the connection's search path."""
+        return None if schema is None else self.get_identifier_key(schema)
+
+    def get_schema_object_key(
+        self, object_type: SchemaPartType, schema: str | None, table: str, name: str
+    ) -> tuple[SchemaNamespace, str | None, str | None, str] | None:
+        """A physical name key, or None when its server-owned identity is not modeled.
+
+        Dialects define shared namespaces and table-local objects. Opaque function
+        signatures are not parsed or refused by their bare name.
+        """
+        if object_type is SchemaPartType.TRIGGER:
+            return self._get_schema_object_key(SchemaNamespace.TRIGGER, schema, None, name)
+        if object_type in (
+            SchemaPartType.TABLE,
+            SchemaPartType.INDEX,
+            SchemaPartType.VIEW,
+            SchemaPartType.MATERIALIZED_VIEW,
+            SchemaPartType.SEQUENCE,
+            SchemaPartType.DICTIONARY,
+        ):
+            return self._get_schema_object_key(SchemaNamespace.RELATION, schema, None, name)
+        return None
+
+    def _get_schema_object_key(
+        self, namespace: SchemaNamespace, schema: str | None, table: str | None, name: str
+    ) -> tuple[SchemaNamespace, str | None, str | None, str]:
+        """Apply identifier comparison after the dialect has selected the object's scope."""
+        return (
+            namespace,
+            self.get_schema_key(schema),
+            None if table is None else self.get_identifier_key(table),
+            self.get_identifier_key(name),
+        )
 
     def get_identifier_key(self, name: str) -> str:
         """What a name is told apart by - two names of one key name one column or table. A quoted name is
@@ -226,7 +273,7 @@ class SqlLiterals:
         Returns:
             The literal.
         """
-        return self.get_string_literal_sql(f"{value.year:04}-{value.month:02}-{value.day:02}")
+        return self.get_string_literal_sql(value.isoformat())
 
     def get_duration_literal_sql(self, value: datetime.timedelta) -> str:
         """A duration as the text ``get_duration_text()`` gives.
@@ -249,7 +296,9 @@ class SqlLiterals:
         Returns:
             The text.
         """
-        total_microseconds = (duration.days * 86400 + duration.seconds) * 1_000_000 + duration.microseconds
+        from hare.fields.data.temporal.time_delta_field import TimeDeltaField
+
+        total_microseconds = TimeDeltaField.get_microseconds(duration)
         sign = "-" if total_microseconds < 0 else ""
         total_microseconds = abs(total_microseconds)
         microseconds = total_microseconds % 1_000_000

@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from hare.fields.field import Field
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,8 +20,8 @@ class LookupKeyPosition:
         relations: The relations crossed to reach it.
     """
 
-    model: type[Model]
+    binding: ModelBinding
     key: str
     label: str
-    owner_model: type[Model]
+    owner_binding: ModelBinding
     relations: tuple[Field[Any], ...]

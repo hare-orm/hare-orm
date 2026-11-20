@@ -10,6 +10,8 @@ class ParameterizedValueWrapper(ValueWrapper):
     render time; without a parameterizer the value is rendered as a literal.
     """
 
+    structure_attributes = ()
+
     def get_sql(self, sql_context: SqlContext) -> str:
         if sql_context.parameterizer is None:
             return super().get_sql(sql_context)

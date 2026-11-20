@@ -12,6 +12,8 @@ from hare.gis import LineString, MultiLineString, MultiPolygon, Point, Polygon
 from hare.gis.functions import Area, AsText, Buffer, Distance, Intersection, Perimeter
 from hare.query.functions import ArrayAgg, Count, Max
 from tests.dialects.clickhouse.geometries.models import Place, Visit
+from tests.utils.database_under_test import DatabaseUnderTest
+from tests.utils.model_bindings import ModelBindings
 
 #: A square of side 10 with a hole of side 2 in its middle - drawn counter-clockwise.
 SQUARE = Polygon([(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)], [[(4, 4), (6, 4), (6, 6), (4, 6), (4, 4)]], srid=3857)
@@ -56,7 +58,8 @@ def test_column_types():
     from hare.dialects.clickhouse.constants import CLICKHOUSE_DIALECT
     from hare.gis.fields import GeometryField, LineStringField, MultiPointField, PointField, PolygonField
 
-    fields_map = Place._meta.fields_map
+    apps = ModelBindings.prepare(Place)
+    fields_map = apps.get_binding(Place).fields_map
     assert [
         fields_map[name].get_column_type(CLICKHOUSE_DIALECT)
         for name in ("location", "area", "zones", "route", "routes")
@@ -271,8 +274,7 @@ async def test_a_model_of_a_geometry_clickhouse_has_no_column_of_is_refused_when
     """makemigrations wrote the field and every migrate failed before its SQL - the migration chain stuck."""
     import os
 
-    if not os.getenv("HARE_TEST_DB", "").startswith("clickhouse"):
-        pytest.skip("runs against the ClickHouse test server - make test_clickhouse")
+    DatabaseUnderTest.skip_unless_clickhouse()
     import sys
     import types
 

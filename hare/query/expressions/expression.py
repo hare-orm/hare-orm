@@ -1,58 +1,27 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar, Self
+from typing import TYPE_CHECKING, Any, ClassVar
 
-from hare.classes.class_path import ClassPath
 from hare.fields.field import Field
+from hare.query.expressions.structure.expression_declaration import ExpressionDeclaration
 from hare.query.plans.description.plannable import Plannable
 from hare.query.query_connection import QueryConnection
 from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
-    from hare.query.statements.awaitable_query import AwaitableQuery
+    from hare.dialects.base.dialect import Dialect
+    from hare.query.queryset.query_specification import QuerySpecification
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
 from hare.query.expressions.ordering import Ordering
 
 
-class Expression(Plannable, abstract=True):
+class Expression(ExpressionDeclaration, Plannable, abstract=True):
     """The base of the expressions of a query - what resolves to a term of its SQL against a model."""
 
-    #: The arguments the expression was constructed with - see ``deconstruct()``.
-    _constructor_arguments: tuple[tuple[Any, ...], dict[str, Any]]
+    declared_dialects: ClassVar[frozenset[type[Dialect]] | None] = None
 
     unplanned_attributes = ("_constructor_arguments",)
-
-    def __new__(cls, *args: Any, **kwargs: Any) -> Self:
-        """Creates the expression and keeps the arguments it was constructed with, for
-        ``deconstruct()``.
-
-        Args:
-            *args: The constructor's positional arguments.
-            **kwargs: The constructor's keyword arguments.
-
-        Returns:
-            The new expression.
-        """
-        expression = super().__new__(cls)
-        expression._constructor_arguments = (args, kwargs)
-        return expression
-
-    def deconstruct(self) -> tuple[str, list[Any], dict[str, Any]]:
-        """Returns how a migration file rebuilds the expression - its class path and the arguments
-        it was constructed with - so a migration keeps the expression itself, and the database a
-        migration runs on renders its own SQL for it.
-
-        Returns:
-            The path, positional arguments and keyword arguments.
-        """
-        args, kwargs = self.__dict__.get("_constructor_arguments", ((), {}))
-        return ClassPath.get(type(self)), list(args), dict(kwargs)
-
-    def __repr__(self) -> str:
-        args, kwargs = self.__dict__.get("_constructor_arguments", ((), {}))
-        arguments = [*map(repr, args), *(f"{name}={value!r}" for name, value in kwargs.items())]
-        return f"{type(self).__name__}({', '.join(arguments)})"
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
         """Resolves the expression against a query: its term, the joins it needs and the field its value is
@@ -110,6 +79,16 @@ class Expression(Plannable, abstract=True):
             return self.value_field
         return result.output_field
 
+    @staticmethod
+    def _get_referenced_annotation_value(
+        annotation: Expression | Term, expression_context: ExpressionContext
+    ) -> ExpressionResult:
+        """Bind the SQL value and its reader for a reference to an admitted annotation."""
+        if isinstance(annotation, Term) and not isinstance(annotation, Expression):
+            return ExpressionResult(term=annotation)
+        result = annotation.get_result(expression_context)
+        return ExpressionResult(term=result.term, joins=result.joins, output_field=annotation.get_value_field(result))
+
     def get_result_literals(self) -> list[Any]:
         """The literals the expression's value may be - none by default: the database computes it.
 
@@ -135,7 +114,7 @@ class Expression(Plannable, abstract=True):
         return [] if isinstance(value, Term) else [value]
 
     @staticmethod
-    def _get_wrapped_query(wrapped_query: AwaitableQuery[Any], expression_context: ExpressionContext) -> Any:
+    def _get_wrapped_query(wrapped_query: QuerySpecification[Any], expression_context: ExpressionContext) -> Any:
         """Returns the query a ``Subquery(...)``/``Exists(...)`` wraps, bound to the connection the
         outer query runs on.
 
@@ -149,6 +128,11 @@ class Expression(Plannable, abstract=True):
         Raises:
             QueryError: The wrapped query is pinned to another connection than the outer query's.
         """
+
         return QueryConnection.get_bound_to(
-            wrapped_query, expression_context.connection, expression_context.model, "Subquery(...)/Exists(...)"
+            wrapped_query,
+            expression_context.connection,
+            expression_context.binding,
+            "Subquery(...)/Exists(...)",
+            context=expression_context.application_context,
         )

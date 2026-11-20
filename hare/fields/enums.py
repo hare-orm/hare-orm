@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from enum import IntEnum, StrEnum
+from enum import StrEnum
 
 
 class NowValueType(StrEnum):
@@ -51,22 +51,6 @@ class RelationType(StrEnum):
     #: The reverse side of a ``OneToOneField`` (its ``related_name``) - the one row pointing
     #: at this one.
     BACKWARD_ONE_TO_ONE = "backward_one_to_one"
-
-
-class NativeWriteCheck(IntEnum):
-    """What a field's own ``to_db_value`` checks, beyond ``Field.to_db_value``, for a value that is
-    already exactly its ``field_type`` - declared as the field class's ``native_write_check`` so the
-    Rust write accelerator can run the same check itself and keep the field on its fast path.
-
-    The number is what the accelerator reads.
-    """
-
-    #: Nothing more - the class's own checks apply only to values of another type (a bool or a
-    #: float given to an ``IntField``, a string given to a ``BooleanField``).
-    NOTHING = 0
-    #: The float must not be NaN - a NaN is converted by the dialect's own path, which refuses it where
-    #: the database would store NULL.
-    NOT_NAN = 2
 
 
 class HeldValueStep(StrEnum):

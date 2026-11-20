@@ -5,7 +5,8 @@
 всех баз. Полнотекстовый поиск — это [`hare.search`](../search-and-geodata/full-text-search.ru.md).
 
 ```python
-from hare.dialects.postgresql.functions import StringAgg, Subpath, TransactionNow
+from hare.dialects.postgresql.functions import ArraySubquery, StringAgg, Subpath, TransactionNow
+from hare.query.expressions import OuterReference
 from hare.query.functions import ArrayAgg, ArrayItem
 ```
 
@@ -13,8 +14,6 @@ from hare.query.functions import ArrayAgg, ArrayItem
 
 | Функция | SQL |
 |---|---|
-| `STDistance(field, point)` | `ST_DISTANCE(...)` |
-| `STDWithin(field, point, radius_m)` | `ST_DWITHIN(...)` — `radius_m` — конечное число не меньше нуля или выражение, иначе `ValidationError` |
 | `ArrayAgg(field, distinct=False, _filter=None, order_by=())` | `ARRAY_AGG(...)` — каждый элемент раскодируется через поле; общий агрегат hare из `hare.query.functions`, в ClickHouse — `groupArray` |
 | `StringAgg(field, delimiter, distinct=False, _filter=None, order_by=())` | `STRING_AGG(CAST(field AS TEXT), ...)` — `delimiter` — текст или выражение; другое значение вызывает `QueryError` |
 | `JSONBAgg(field, distinct=False, _filter=None, order_by=())` | `JSONB_AGG(...)` — каждый элемент раскодируется через поле |
@@ -34,7 +33,6 @@ from hare.query.functions import ArrayAgg, ArrayItem
 | `ArrayItem(field, index)` | `field[index + 1]` (позиция с 0) — раскодируется через `base_field` массива; у вложенного массива — целая строка (`[[1, 2], [3, 4]]` → `[1, 2]`) |
 
 ```python
-await Store.objects.annotate(distance_m=STDistance("location", (55.75, 37.62))).order_by("distance_m")
 
 await Book.objects.all().annotate(tag_names=ArrayAgg("tags__name")).group_by("id")
 

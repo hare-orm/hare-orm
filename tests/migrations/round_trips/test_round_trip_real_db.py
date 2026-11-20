@@ -24,10 +24,10 @@ from hare.fields.relations.fields import ForeignKeyFieldInstance
 from hare.migrations.autodetection.operation_generator import OperationGenerator
 from hare.migrations.autodetection.rename_questions import RenameQuestions
 from hare.migrations.autodetection.state_signatures import StateSignatures
+from hare.migrations.drift import DriftResult, detect_drift
 from hare.migrations.migration import Migration
 from hare.migrations.operations import AlterField, CreateModel
 from hare.migrations.operations.hare_operation import HareOperation
-from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state import State
 from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
@@ -55,10 +55,7 @@ def build_model(
 
 
 def build_live_state(*models: type[Model]) -> State:
-    live_state = State()
-    for model in models:
-        live_state.models[(APP_LABEL, model.__name__)] = ModelState.make_from_model(APP_LABEL, model)
-    return live_state
+    return State.from_models(models, app_label=APP_LABEL)
 
 
 class RoundTrip:
@@ -79,11 +76,21 @@ class RoundTrip:
         await self.apply(operations)
         return operations
 
-    async def apply(self, operations: list[HareOperation]) -> None:
+    async def apply(self, operations: list[HareOperation]) -> Migration:
         self.migration_count += 1
         migration = Migration(name=f"{self.migration_count:04d}_step", app_label=APP_LABEL)
         migration.operations = list(operations)
         self.tracked_state = await migration.apply(self.tracked_state, dry_run=False, schema_editor=self.editor)
+        return migration
+
+    async def get_drift(self, expected: State) -> DriftResult:
+        """Compare the database with the expected state for this round trip."""
+        return await detect_drift(self.connection, expected, [APP_LABEL])
+
+    async def get_drift_operation_types(self, *models: type[Model]) -> list[type]:
+        """The operation classes proposed for the given live models."""
+        result = await self.get_drift(build_live_state(*models))
+        return [type(operation) for operation in result.operations]
 
     def get_pending_operations(self, *models: type[Model]) -> list[HareOperation]:
         return OperationGenerator(self.tracked_state, build_live_state(*models)).generate()
@@ -570,7 +577,7 @@ async def test_relation_to_a_composite_key_deconstructs_without_a_source_field(r
     target = build_composite_target_model()
     box = build_model("Box", "rt_box", {"rack": ForeignKeyField(f"{APP_LABEL}.Rack", null=True)})
     await round_trip.migrate_to(target, box)
-    initialized_field = round_trip.tracked_state.apps.get_model(f"{APP_LABEL}.Box")._meta.fields_map["rack"]
+    initialized_field = round_trip.tracked_state.apps.get_binding(f"{APP_LABEL}.Box").fields_map["rack"]
     _path, _args, kwargs = initialized_field.deconstruct()
     assert "source_field" not in kwargs
     # A migration written before spells the first key column as source_field - the same field.
@@ -671,7 +678,7 @@ async def test_an_indexed_column_whose_name_needs_quoting_is_quoted(round_trip: 
     assert round_trip.get_pending_operations(model) == []
     generator_sql = round_trip.connection.dialect.schema_editor_class(
         round_trip.connection
-    ).index_statements.get_index_sql(model, [column], safe=True)
+    ).index_statements.get_index_sql(round_trip.tracked_state.apps.get_binding("models.Odd"), [column], safe=True)
     assert '("la""bel; DROP TABLE rt_odd --")' in generator_sql
 
 

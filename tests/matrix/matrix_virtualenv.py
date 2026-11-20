@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import dataclasses
 import os
-import shutil
 import subprocess
-import sys
 from pathlib import Path
 
-from tests.matrix.constants import MATRIX_DATABASE_DRIVER_EXTRAS, REPOSITORY_DIRECTORY
-from tests.matrix.matrix_run import MatrixRun
+from tests.matrix.constants import MATRIX_DATABASE_DRIVER_EXTRAS
+from tests.matrix.matrix_catalog import MatrixCatalog
+from tests.matrix.paths import REPOSITORY_DIRECTORY
+from tests.matrix.suite_environment import SuiteEnvironment
 
 
 @dataclasses.dataclass(frozen=True)
@@ -29,21 +29,15 @@ class MatrixVirtualenv:
     groups: tuple[str, ...]
 
     @classmethod
-    def get(cls, run: MatrixRun) -> MatrixVirtualenv:
-        """The virtualenv of a run.
-
-        Args:
-            run: The run.
-
-        Returns:
-            The virtualenv.
-        """
-        environment = run.suite_environment
+    def get(cls, python_version: str, environment: SuiteEnvironment, database: str) -> MatrixVirtualenv:
+        """The virtualenv for this Python, suite environment and database driver."""
         driver_extras = tuple(
-            extra for extra in MATRIX_DATABASE_DRIVER_EXTRAS[run.database] if extra not in environment.extras
+            extra for extra in MATRIX_DATABASE_DRIVER_EXTRAS[database] if extra not in environment.extras
         )
-        name = "-".join([f".venv-{run.python_version}", environment.name, *driver_extras])
-        return cls(run.python_version, name, (*environment.extras, *driver_extras), environment.groups)
+        if MatrixCatalog.get_unsupported_extras(python_version).intersection(driver_extras):
+            raise SystemExit(f"{database} is not available on Python {python_version}")
+        name = "-".join([f".venv-{python_version}", environment.name, *driver_extras])
+        return cls(python_version, name, (*environment.extras, *driver_extras), environment.groups)
 
     def get_path(self) -> Path:
         """The virtualenv's directory."""
@@ -51,24 +45,19 @@ class MatrixVirtualenv:
 
     def get_python_executable(self) -> Path:
         """The virtualenv's Python."""
-        return self.get_path() / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+        return self.get_path() / "bin/python"
 
     def create(self, interpreter: str | None) -> None:
         """Creates the virtualenv and installs hare into it - ``poetry install`` of the main and test
         groups, the groups and the extras.
 
         Args:
-            interpreter: The Python creating it; ``py -X.Y`` on Windows and ``pythonX.Y`` elsewhere when None.
+            interpreter: The Python creating it; ``pythonX.Y`` when None.
 
         Raises:
             subprocess.CalledProcessError: Creating it or installing into it failed.
         """
-        if interpreter is not None:
-            creator = [interpreter]
-        elif shutil.which("py") is not None:
-            creator = ["py", f"-{self.python_version}"]
-        else:
-            creator = [f"python{self.python_version}"]
+        creator = [interpreter if interpreter is not None else f"python{self.python_version}"]
         # --clear: a virtualenv made again holds only what its environment installs, never a package left
         # from an earlier install.
         subprocess.run([*creator, "-m", "venv", "--clear", str(self.get_path())], cwd=REPOSITORY_DIRECTORY, check=True)

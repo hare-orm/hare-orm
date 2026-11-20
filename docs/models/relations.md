@@ -31,6 +31,10 @@ class Book(Model):
 The key column (`author_id`; one per key column of a composite key) stands among the table's columns
 where the relation is declared among the model's fields.
 
+Assigning a related instance copies its referenced key columns, including when its `__bool__`
+or `__len__` makes it false in Python. Only `None` clears a nullable relation. Prefetching a
+related instance preserves those same key columns.
+
 | Argument | Meaning |
 |---|---|
 | `to` | The related model class, a `"app.Model"` string, or `swappable("SETTING")` (see [Swappable models](#swappable-models)). |
@@ -72,9 +76,9 @@ either strategy again.
 class OnDelete(StrEnum):
     CASCADE = "CASCADE"
     RESTRICT = "RESTRICT"
-    SET_NULL = "SET_NULL"     # requires null=True
-    SET_DEFAULT = "SET_DEFAULT"  # requires db_default (or default, with db_constraint=False) — see below
-    NO_ACTION = "NO_ACTION"
+    SET_NULL = "SET NULL"     # requires null=True
+    SET_DEFAULT = "SET DEFAULT"  # requires db_default (or default, with db_constraint=False) — see below
+    NO_ACTION = "NO ACTION"
     PROTECT = "PROTECT"       # enforced in Python; the DDL gets a deferrable NO ACTION backstop
 ```
 
@@ -94,8 +98,8 @@ it back off.
 A delete that `RESTRICT` or `NO_ACTION` refuses raises `IntegrityError` on every database. Its message is
 the database's own where the database enforces the constraint — PostgreSQL names the constraint and the
 table, SQLite says only `FOREIGN KEY constraint failed` — and hare's
-(`Cannot delete P because C.p has on_delete=RESTRICT and live rows point at it`) where hare checks it
-itself: a relation of `db_constraint=False`, and every relation on ClickHouse.
+(`Cannot delete P because C.p has on_delete=RESTRICT and rows point at it (including soft-deleted rows)`)
+where hare checks it itself: a relation of `db_constraint=False`, and every relation on ClickHouse.
 
 Shortcuts `CASCADE`, `RESTRICT`, `SET_NULL`, `SET_DEFAULT`, `NO_ACTION`, `PROTECT` are all importable
 directly from `hare.fields`.
@@ -153,6 +157,10 @@ expression), so either one is enough. The same Python-side cascade is what runs 
 every shadow column and can't be split per component, so a different value per component needs
 `db_constraint=False` with a tuple `default=`.
 
+The Python-side cascade awaits an asynchronous `default` before updating the referencing rows.
+A callable may return `None` for a nullable relation; a composite relation then has all its key
+columns set to `NULL` together.
+
 Fields declared inside a migration file are not checked: they describe a schema that was already applied.
 To give such a column a `DEFAULT`, add `db_default` to the model and generate a new migration — it sets
 the column `DEFAULT` on the existing table.
@@ -177,8 +185,7 @@ class Review(Model):
 - No separate index is created when an index the model already declares starts with the key column(s), in
   any order: a plain `Meta.indexes` entry (`Index(fields=...)`, unique or not), an unconditional
   `UniqueConstraint`, or the composite primary key. A partial, expression or non-btree index doesn't
-  count — except an unnamed one over exactly the key column(s): it gets the same generated name as the
-  relation's own index, so the relation's index is left out. Give one of them a `name=` to get both.
+  count. Its generated name includes its declaration, so it can coexist with the relation's index.
 - A relation to a [composite primary key](#targeting-a-composite-primary-key) gets one index over all of
   its key columns.
 - `db_constraint=False` keeps the index — hare's own cascade looks rows up by the column.
@@ -261,12 +268,17 @@ Indexes the key columns of the automatic through table that its `UNIQUE` index d
 ### <a id="on-delete-row"></a>`on_delete`
 
 `CASCADE`/`RESTRICT`/`NO_ACTION`/`PROTECT`/`SET_NULL` are valid here. `SET_DEFAULT` isn't — through-table
-columns are always `NOT NULL` with no default, so there's nothing for it to fall back to — it raises
+columns have no default, so there's nothing for it to fall back to — it raises
 `ConfigurationError`. With a `Model` as `through`, the field's `on_delete` is propagated onto the through
 model's own FK fields (when they left theirs at `CASCADE`), and `SET_DEFAULT` is accepted only if both of
 those FK fields satisfy the [`SET_DEFAULT` rule](#set-default-needs-db-default).
 
 ### <a id="many-to-many-across-connections"></a>A relation to a model on another connection
+
+A many-to-many relation does not choose its class by routing connections when its fetched
+rows are accessed. A relation without query settings can serve iteration, length and membership
+from its fetched rows alone. Query binding preserves the related manager's QuerySet class;
+cross-connection reads declare linked keys as an execution dependency.
 
 A `ManyToManyField` to a model on another connection (`db_constraint=False`) keeps its through table on
 the connection of the model declaring it, and no query joins the two connections' tables:
@@ -285,6 +297,10 @@ the connection of the model declaring it, and no query joins the two connections
   field of `Tag` (`tags__name=...`) or a query of it (`tags__in=Tag.objects.filter(...)`), and
   `Tag.objects.filter(books=...)`, raise `QueryError`.
 - `prefetch_related("tags")` queries each connection apart.
+
+Linked keys are loaded once within one execution, including all pages of an iterator.
+An empty query skips this read; another nonempty part of the same operation still loads the keys.
+Repeated or concurrent executions obtain independent inputs.
 
 ### <a id="a-model-as-through"></a>A `Model` as `through`
 
@@ -318,6 +334,11 @@ await book.contributors.add(author, through_defaults={"role": "translator"})
 ```
 
 Applied only to rows this call actually inserts — an already-existing pair is left as-is.
+An explicit through-field value suppresses that field's synchronous or asynchronous default,
+even when other fields still need their defaults. `set(..., through_defaults=...)` follows the same rule.
+Explicit values are converted once per operation, including `set(clear=True)` and `create()`.
+Restoring a uniquely declared soft-deleted pair reuses those converted assignments, including
+encrypted values and blind indexes. A single-pass input is not consumed again during insertion or restore.
 `through_defaults` is meaningless (raises `QueryError`) without a real `through=Model`, for a field name
 that doesn't exist on the through model, or for one of the through model's own FK fields making up the
 relation itself. A through-model field nothing fills — not nullable, without a default, not generated —
@@ -325,12 +346,19 @@ has to be given in `through_defaults`: `add()` raises `ValidationError` before i
 does. A through model whose key the database hands out from a series before the rows are written
 (ClickHouse) takes the keys of the new rows from it, as `create()` does.
 
+Python defaults, including callable and async defaults, also populate an encrypted field's blind
+index. Sensitive defaults and keys remain hidden in logged parameters, including the SELECTs
+that check a relation's visibility and tenant before writing it.
+
 When the through model has [`Meta.tenant_field`](../soft-delete-versions-tenants/multi-tenancy.md),
 `add()` fills it with the value of the through model's `Tenancy.scope()` unless `through_defaults` gives
 it — under a scope of several values `through_defaults` has to; a `through_defaults` tenant outside that
 scope raises `QueryError`.
 
 ### <a id="relation-operations"></a>Operations on the relation
+
+The multi-command operations below are atomic only on a database that supports transactions.
+On a database without transactions, commands run sequentially without a shared rollback guarantee.
 
 A `ManyToManyField` reads and writes its links through these methods of the relation:
 
@@ -407,6 +435,9 @@ of keys, another relation. `get_or_create()`/`update_or_create()` look among the
 object is created and added in the same transaction (an existing row that isn't a member is created again
 — a unique key then raises `IntegrityError`).
 
+A single flat tuple passed to `set((store, number))` is one composite key; a tuple of objects or key
+tuples is a collection of members.
+
 `set()` makes `objs` the relation's members in one transaction: it removes the members missing from
 `objs` (soft-deleting their through rows when the through model has `Meta.soft_delete_field`) and adds
 the new ones — with `through_defaults`, as `add()` does — while the through rows of members that stay are
@@ -416,8 +447,9 @@ left untouched, extra fields included. `clear=True` clears the whole relation fi
 `clear()` and `set()` only ever remove links to members the related model's default scope shows: a link
 to a soft-deleted row, to another tenant's row (`Meta.tenant_field`) or to a row a custom `Meta.manager`
 hides stays in place. `clear(all_tenants=True)` removes the links to every tenant's rows, with no tenant
-scope needed (see [Multi-tenancy](../soft-delete-versions-tenants/multi-tenancy.md)). `remove()` names
-its rows, so it also drops a link to a soft-deleted or `Meta.manager`-hidden one (another tenant's row is
+scope needed (see [Multi-tenancy](../soft-delete-versions-tenants/multi-tenancy.md)). `remove(instance)` names
+its row directly, so it also drops a link to a soft-deleted or `Meta.manager`-hidden one (another
+tenant's row is
 still rejected).
 
 `add()` checks against the database that the owner isn't soft-deleted and that every added row is shown
@@ -435,7 +467,19 @@ pair unique — a `UniqueConstraint` without a `condition` over its two relation
 `Meta.tenant_field` — a new row can't be written, so the soft-deleted row is restored instead, with the
 `through_defaults` given.
 
+Relation key conversion preserves the input order and repeated members. An instance's key writer
+receives that instance; a raw key's writer receives the related model class. Resolving raw keys to
+instances retains the converted keys for restoring the requested order. Through-model callable and
+async defaults are still evaluated separately for each new link, even when column writers are prepared
+once for the operation. `set()` checks explicit through defaults before modifying links, including
+when the requested membership needs no additions.
+
 ## <a id="genericforeignkeyfield"></a>`GenericForeignKeyField`
+
+A static saved-instance `default` of a generic relation captures its model identity and primary-key
+values when declared. It retains no source application or live instance; each prepared graph interprets
+those keys through its own target binding. A callable default runs at construction in the originating
+application and must return a compatible saved instance.
 
 A relation to a row of one of several models — a comment on a book, an author or an edition. It is an
 **exclusive arc of real foreign keys**: each target gets a branch, a nullable `ForeignKeyField` with a
@@ -479,8 +523,9 @@ or `swappable("SETTING")`. The branch name is the public name of the target: it 
 - renaming a target model changes neither the columns nor the `type`; renaming a branch is a
   `RenameField` of its column and a change of the `type` the API reports.
 
-The field itself has no column and is no entry of `Model._meta.fields_map` — its branches are;
-`Model._meta.generic_foreign_key_fields` lists it. `ConfigurationError` is raised when the model is
+The field itself has no column and is no entry of `apps.get_binding(Model).fields_map` — its branches are;
+`apps.get_binding(Model).generic_foreign_key_fields` lists it. `ConfigurationError` is raised when the model
+is
 declared for an empty dict, a branch name that isn't a Python identifier or is taken by another attribute
 of the model, one model named twice (an object of it couldn't tell its branch), `to_field=` (each branch
 references its target's primary key), `on_delete=SET_NULL` without `null=True`, `on_delete=SET_DEFAULT`
@@ -625,6 +670,14 @@ async for book in author.books: ...
 - A relation read off an instance that was never saved can't be queried (`QueryError`): there is no key
   the related rows could reference yet.
 
+`await author.books` returns a fresh list without filling this loaded-row cache; keep the returned
+list when synchronous access to that result is needed.
+
+A relation declaration changed by `.using()`, `.include_deleted()`, `.only_deleted()` or
+`.all_tenants()` has its own initially empty loaded-row cache. It neither consumes the instance's
+prefetched rows nor replaces them when iterated. A write through the declaration still invalidates
+the instance's original relation cache, and rollback invalidates it again if it was reloaded.
+
 The manager of a backward foreign key writes the relation too:
 
 ```python
@@ -646,6 +699,27 @@ removes the rows missing from its members and adds the new ones — for a non-nu
 adds; `clear=True` clears first. A `kwargs` value pointing the foreign key at another row than the parent
 raises `QueryError` in `create()`, `get_or_create()` and `update_or_create()`, as an object pointing it
 there does in `bulk_create()`.
+With `bulk=False`, the row's previous foreign key is checked by the update that clears it. A
+concurrent move to another parent is preserved. On a database that reports affected rows,
+`remove()` raises `DoesNotExist` for the moved row and `clear()` and `set()` skip it.
+Accepted key representations are compared after field normalization, so a UUID string can name the
+same parent as its UUID object. Reverse `bulk_create()` assigns parent keys when the write prepares;
+preparation/SQL failure, skipped conflicts and transaction rollback restore the original object keys.
+
+Relation writes invalidate prefetched members when they execute. In particular, constructing a
+`bulk_create()` query does not invalidate the relation before the query is awaited. Transaction
+rollback invalidates the members again through the client that performed the write; rebinding a
+connection alias does not move this callback to another transaction. A rolled-back reassignment
+restores foreign keys before the related objects that were loaded before the transaction.
+
+A deferred relation `bulk_create()` chooses its routed connection and current transaction when
+awaited, using the parent's saved connection as its normal fallback. Building it inside a
+transaction does not retain that transaction client after the transaction ends.
+
+Write queries derived from a relation retain its declared `include_deleted()`, `only_deleted()`
+and `all_tenants()` visibility. This applies to the member lookup of `get_or_create()` and
+`update_or_create()` and to a deferred reverse `bulk_create()`. It does not disable the related
+model manager's other row policies or change which model owns an M2M through table.
 
 ```python
 class Book(Model):
@@ -668,12 +742,12 @@ ForeignKeyRelation = ForeignKeyFieldInstance[TModel]
 
 `book.author` gives the loaded `Author` once the relation is loaded (`select_related()`,
 `prefetch_related()`, `prefetch_related_objects()`, `lazy=`, or an assignment), and an awaitable query
-otherwise — `await book.author` works either way for a related row that exists. A relation with no
-related row (a `NULL` foreign key, a reverse `OneToOneField` nobody points at, or one a
-`Select(extra_condition=...)` didn't match) reads differently depending on whether it was loaded: never
-loaded, it gives the falsy `NoneAwaitable` (importable from `hare.models`), and `await book.author`
-returns `None`; loaded, it is a plain `None` — test it with `book.author is None` (or look at
-`book.author_id`), and don't `await` it.
+otherwise — `await book.author` works either way for a related row that exists. An unloaded relation
+returns an awaitable that may return `None` when no related row exists. When an empty key is already
+known (for example, a `NULL` foreign key), this is the falsy `NoneAwaitable` (importable from
+`hare.models`). A reverse `OneToOneField` with a nonempty key needs a query to determine whether its
+row exists. A loaded empty relation is plain `None`, including a row excluded by
+`Select(extra_condition=...)`: test `book.author is None` and do not `await` that value.
 
 Filtering or assigning by an instance reads its referenced field(s) (`to_field`, the primary key by
 default); an instance loaded with `.only()`/`.defer()` without them raises `QueryError` — as do its
@@ -799,7 +873,8 @@ await Hare.init(config={**HARE_CONFIG, "swappable": {"USER_MODEL": "accounts.Use
   its `through=` too). At `init()` it resolves to the model the setting points at — the configured one,
   else the model declaring `Meta.swappable = "USER_MODEL"`. The field keeps the reference itself:
   `deconstruct()` returns it, so a migration file stores the setting, not the model it points at.
-- A default model its setting points away from is **swapped**: `Model._meta.swapped` holds the label of
+- A default model its setting points away from is **swapped**: `apps.get_binding(Model).swapped` holds the
+  label of
   the model used instead (`None` otherwise). It has no table — `Hare.generate_schemas()` and migrations
   skip it and drift ignores it — and every query or write through it (`User.objects.all()`,
   `User.objects.create(...)`) raises `ConfigurationError`:

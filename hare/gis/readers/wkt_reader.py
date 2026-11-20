@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import Any
 
 from hare.exceptions import ValidationError
 from hare.gis.constants import (
@@ -10,12 +10,9 @@ from hare.gis.constants import (
     WKT_TOKEN_PATTERN,
 )
 from hare.gis.enums import GeometryType
-from hare.gis.geometries.declarations import MultiLineString, MultiPoint, MultiPolygon
 from hare.gis.geometries.geometry import Geometry
 from hare.gis.geometries.geometry_collection import GeometryCollection
-from hare.gis.geometries.line_string import LineString
-from hare.gis.geometries.point import Point
-from hare.gis.geometries.polygon import Polygon
+from hare.gis.readers.constants import GEOMETRY_CLASSES
 
 
 class WktReader:
@@ -25,17 +22,6 @@ class WktReader:
     Args:
         text: The text after the SRID prefix.
     """
-
-    #: The class of each geometry type.
-    GEOMETRY_CLASSES: ClassVar[dict[GeometryType, type[Geometry]]] = {
-        GeometryType.POINT: Point,
-        GeometryType.LINESTRING: LineString,
-        GeometryType.POLYGON: Polygon,
-        GeometryType.MULTIPOINT: MultiPoint,
-        GeometryType.MULTILINESTRING: MultiLineString,
-        GeometryType.MULTIPOLYGON: MultiPolygon,
-        GeometryType.GEOMETRYCOLLECTION: GeometryCollection,
-    }
 
     def __init__(self, text: str) -> None:
         self.tokens = self.get_tokens(text)
@@ -140,7 +126,7 @@ class WktReader:
             raise ValueError("measured (M) coordinates are not supported")
         if self.peek() == "Z":
             self.take()
-        geometry_class = self.GEOMETRY_CLASSES[geometry_type]
+        geometry_class = GEOMETRY_CLASSES[geometry_type]
         if self.peek() == "EMPTY":
             self.take()
             return geometry_class.from_coordinates(())

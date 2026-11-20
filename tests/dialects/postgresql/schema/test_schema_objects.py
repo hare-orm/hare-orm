@@ -131,7 +131,7 @@ async def test_drift_reads_the_views_back(db_schema_objects):
         "CREATE OR REPLACE VIEW schema_object_paid_invoices AS "
         "SELECT id, amount FROM schema_object_invoice WHERE paid AND amount > 0"
     )
-    assert await get_operation_types() == ["AlterView"]
+    assert await get_operation_types() == ["AlterView", "SeparateDatabaseAndState"]
     await connection.execute_script(
         f"CREATE OR REPLACE VIEW schema_object_paid_invoices AS {row['definition'].rstrip().rstrip(';')}"
     )
@@ -141,7 +141,7 @@ async def test_drift_reads_the_views_back(db_schema_objects):
         "SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'schema_object_invoice_totals'"
     )
     await connection.execute_script(f'DROP INDEX "{index_row["indexname"]}"')
-    assert await get_operation_types() == ["AlterMaterializedView"]
+    assert await get_operation_types() == ["AlterMaterializedView", "SeparateDatabaseAndState"]
     await connection.execute_script(index_row["indexdef"])
     assert await get_operation_types() == []
 
@@ -171,22 +171,22 @@ async def test_drift_reads_the_functions_sequences_policies_grants_and_row_level
             "CREATE OR REPLACE FUNCTION schema_object_current_tenant() RETURNS integer LANGUAGE sql STABLE "
             "AS $$ SELECT 7 $$",
             function_row["definition"],
-            ["AlterFunction"],
+            ["AlterFunction", "SeparateDatabaseAndState"],
         ),
         (
             "ALTER SEQUENCE schema_object_invoice_number INCREMENT BY 10",
             "ALTER SEQUENCE schema_object_invoice_number INCREMENT BY 5",
-            ["AlterSequence"],
+            ["AlterSequence", "SeparateDatabaseAndState"],
         ),
         (
             "ALTER TABLE schema_object_invoice FORCE ROW LEVEL SECURITY",
             "ALTER TABLE schema_object_invoice NO FORCE ROW LEVEL SECURITY",
-            ["AlterRowLevelSecurity"],
+            ["AlterRowLevelSecurity", "SeparateDatabaseAndState"],
         ),
         (
             "ALTER POLICY schema_object_tenant_rows ON schema_object_invoice TO PUBLIC",
             f"ALTER POLICY schema_object_tenant_rows ON schema_object_invoice TO {READER_ROLE}",
-            ["AlterPolicy"],
+            ["AlterPolicy", "SeparateDatabaseAndState"],
         ),
         (
             f"REVOKE USAGE ON SEQUENCE schema_object_invoice_number FROM {READER_ROLE}",

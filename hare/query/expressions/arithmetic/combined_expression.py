@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from decimal import Decimal
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar
 
 from hare.dialects.enums import ParameterPosition
 from hare.exceptions import FieldError, QueryError
@@ -311,11 +310,7 @@ class CombinedExpression(CombinableExpression):
         """
         if field is not None and isinstance(GeneratedField.get_effective_field(field), JSONField):
             raise FieldError(JSON_ARITHMETIC_MESSAGE)
-        branch = (
-            ResultBranch(operand.value, None, is_literal=True)
-            if isinstance(operand, Value)
-            else ResultBranch(None, field, is_literal=False)
-        )
+        branch = ResultBranch.of(operand, field)
         value_type = OutputFieldCompatibility.get_value_type(branch)
         if value_type in ARITHMETIC_REFUSED_VALUE_TYPES:
             raise FieldError(f"Cannot use arithmetic on {value_type} - convert it to a number with Cast()")
@@ -412,7 +407,7 @@ class CombinedExpression(CombinableExpression):
             True for a number.
         """
         if isinstance(operand, Value):
-            return isinstance(operand.value, (int, float, Decimal)) and not isinstance(operand.value, bool)
+            return NumericTyping.get_literal_type(operand.value) is not None
         return NumericTyping.get_field_type(field) is not None
 
     def raise_if_text_literal_beside_number(
@@ -477,9 +472,7 @@ class CombinedExpression(CombinableExpression):
         if temporal_type is None:
             return literal.get_result(expression_context)
         if temporal_type is TemporalType.TIMEDELTA and interval_field is not None:
-            encoder: Callable[[Any], Any] | None = TemporalArithmetic.get_field_encoder(
-                interval_field, expression_context.dialect
-            )
+            encoder: Callable[[Any], Any] | None = expression_context.dialect.types.get_field_encoder(interval_field)
         else:
             encoder = TemporalArithmetic.get_literal_encoder(temporal_type, expression_context.dialect)
         return literal.get_encoded_result(expression_context, encoder)
@@ -552,9 +545,9 @@ class CombinedExpression(CombinableExpression):
         left_interval_field = self.get_interval_field(self.left, left)
         right_interval_field = self.get_interval_field(self.right, right)
         if left is None:
-            left = self._get_literal_result(cast("Value", self.left), right_interval_field, expression_context)
+            left = self._get_literal_result(self.left, right_interval_field, expression_context)  # type: ignore[arg-type]
         if right is None:
-            right = self._get_literal_result(cast("Value", self.right), left_interval_field, expression_context)
+            right = self._get_literal_result(self.right, left_interval_field, expression_context)  # type: ignore[arg-type]
         left_operand = self._get_operand(self.left, left, right_interval_field)
         right_operand = self._get_operand(self.right, right, left_interval_field)
         for operand in (left_operand, right_operand):

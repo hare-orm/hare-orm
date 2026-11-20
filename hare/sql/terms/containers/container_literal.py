@@ -20,6 +20,8 @@ class ContainerLiteral(ContainerFunction):
         alias: The alias.
     """
 
+    structure_attributes = ("field",)
+
     function_name: ClassVar[str] = "container_literal"
 
     def __init__(self, value: Any, field: Field[Any], alias: str | None = None) -> None:

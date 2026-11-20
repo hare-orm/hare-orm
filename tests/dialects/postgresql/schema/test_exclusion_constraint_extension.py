@@ -2,7 +2,6 @@
 extension - hare creates it the way it creates citext/vector for their fields."""
 
 import datetime as dt
-import os
 import sys
 import types
 
@@ -18,6 +17,7 @@ from hare.dialects.postgresql.fields.ranges import DateTimeRangeField, IntRangeF
 from hare.exceptions import IntegrityError
 from hare.models import Model
 from tests.utils.database_under_test import DatabaseUnderTest
+from tests.utils.model_bindings import ModelBindings
 
 MODULE_NAME = "tests._exclusion_constraint_extension_models"
 
@@ -47,8 +47,9 @@ class ExtensionEvent(Model):
 
 @pytest.mark.database_independent
 def test_gist_exclusion_over_a_scalar_column_requires_btree_gist():
+    apps = ModelBindings.prepare(ExtensionTeam, ExtensionEvent)
     fields_by_name = {
-        "team": ExtensionEvent._meta.fields_map["team"],
+        "team": apps.get_binding(ExtensionEvent).fields_map["team"],
         "during": DateTimeRangeField(),
         "label": fields.CharField(max_length=10),
         "span": IntRangeField(),
@@ -77,7 +78,7 @@ async def test_gist_exclusion_over_a_scalar_column_is_created_without_declaring_
     module.ExtensionEvent = ExtensionEvent  # type: ignore[attr-defined]
     sys.modules[MODULE_NAME] = module
 
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:").replace("\\{", "{").replace("\\}", "}")
+    db_url = DatabaseUnderTest.normalize_url_template(DatabaseUnderTest.get_url())
     # The models' range fields exist on PostgreSQL alone - another database refuses them when bound.
     if DatabaseUnderTest.get_dialect(db_url).name != "postgresql":
         pytest.skip("Capability dialect != postgres")

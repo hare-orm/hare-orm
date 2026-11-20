@@ -71,12 +71,12 @@ async def test_a_referencing_foreign_key_keeps_its_name(db_simple):
     empty = State()
     narrow, wide = get_state(10), get_state(30)
     initial = Migration(name="0001", app_label="models", operations=OperationGenerator(empty, narrow).generate())
-    state = await initial.apply(empty.clone(), schema_editor=get_editor(collect_sql=False))
+    state = await initial.apply(empty, schema_editor=get_editor(collect_sql=False))
     try:
         names = await get_foreign_key_names()
         widen = Migration(name="0002", app_label="models", operations=OperationGenerator(narrow, wide).generate())
         collecting_editor = get_editor(collect_sql=True)
-        await widen.apply(state.clone(), schema_editor=collecting_editor)
+        await widen.apply(state, schema_editor=collecting_editor)
         collected = [sql for sql in collecting_editor.collected_sql if "CONSTRAINT" in sql]
         running_editor = get_editor(collect_sql=False)
         ran: list[str] = []

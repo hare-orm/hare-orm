@@ -18,6 +18,7 @@ def IntEnumField(
     Args:
         enum_type: The enum class.
         description: The field's description - "name: value" lines by default.
-        kwargs: The arguments of every field (``null``, ``default``, ``db_index``...).
+        kwargs: The arguments of every field (``null``, ``default``, ``db_index``...). A primary key
+            is not generated unless ``generated=True`` is given; generation requires positive members.
     """
     return IntEnumFieldInstance(enum_type, description, **kwargs)  # type: ignore[return-value]

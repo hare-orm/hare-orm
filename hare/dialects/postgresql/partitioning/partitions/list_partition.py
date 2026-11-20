@@ -4,7 +4,6 @@ import dataclasses
 from collections.abc import Callable
 from typing import Any
 
-from hare.dialects.postgresql.partitioning.partitioning import Partitioning
 from hare.dialects.postgresql.partitioning.partitions.partition import Partition
 from hare.exceptions import ConfigurationError
 
@@ -26,7 +25,7 @@ class ListPartition(Partition):
         Raises:
             ConfigurationError: The name isn't letters, digits and underscores, or no value is given.
         """
-        Partitioning.check_partition_name(type(self).__name__, self.name)
+        super().__post_init__()
         values = tuple(self.values) if isinstance(self.values, (list, tuple, set, frozenset)) else (self.values,)
         if not values:
             raise ConfigurationError(f"ListPartition {self.name!r} needs at least one value")

@@ -6,11 +6,10 @@ from operator import attrgetter, is_
 from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import IncompleteInstanceError, QueryError
-from hare.models.write.returned_values import ReturnedValues
 
 if TYPE_CHECKING:
-    from hare.dialects.base.types.type_registry import TypeRegistry
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class BulkUpdateChecks:
@@ -18,18 +17,21 @@ class BulkUpdateChecks:
     and each has a primary key of its own, its ``Meta.optimistic_lock_field`` version loaded."""
 
     @staticmethod
-    def check_tenant_values_resolved(model: type[Model], objects: Sequence[Model]) -> None:
-        """Raises for an object whose ``Meta.tenant_field`` still waits for an async default - only
-        save() resolves one, so there is no value yet to compare with the active tenant.
+    def check_tenant_defaults_ready(binding: ModelBinding, objects: Sequence[Model]) -> None:
+        """Requires a tenant value before checking the object's tenant scope.
+
+        Pending defaults are evaluated after this check, so an async tenant default cannot
+        supply the value needed to compare the object with the active tenant.
 
         Args:
-            model: The model.
+            binding: The model binding.
             objects: The objects written.
 
         Raises:
             QueryError: An object's tenant value is an unresolved async default.
         """
-        tenant_field = model._meta.tenant_field
+        model = binding._model
+        tenant_field = binding.tenant_field
         pending_pks = [obj.pk for obj in objects if tenant_field in obj._await_when_save]
         if pending_pks:
             raise QueryError(
@@ -40,19 +42,20 @@ class BulkUpdateChecks:
             )
 
     @staticmethod
-    def check_primary_keys(model: type[Model], objects: Sequence[Model]) -> None:
+    def check_primary_keys(binding: ModelBinding, objects: Sequence[Model]) -> None:
         """Raises for an object without a primary key and for an object whose
         ``Meta.optimistic_lock_field`` wasn't loaded.
 
         Args:
-            model: The model.
+            binding: The model binding.
             objects: The objects written.
 
         Raises:
             QueryError: An object has no primary key.
             IncompleteInstanceError: An object lacks its optimistic lock field.
         """
-        primary_key_attribute = model._meta.primary_key_attribute
+        model = binding._model
+        primary_key_attribute = binding.primary_key_attribute
         try:
             # A key of one field read off each object at once - the pk property reads it one call deeper.
             pk_values = (
@@ -61,16 +64,16 @@ class BulkUpdateChecks:
                 else [obj.pk for obj in objects]
             )
         except AttributeError:
-            # A key never loaded reads as None through pk.
+            # Use the public key accessor when a direct key attribute is unavailable.
             pk_values = [obj.pk for obj in objects]
         if (
             any(any(part is None for part in pk) for pk in pk_values)
-            if model._meta.has_composite_primary_key
+            if binding.has_composite_primary_key
             else any(map(is_, pk_values, repeat(None)))
         ):
             raise QueryError("All bulk_update() objects must have a primary key set.")
         # The optimistic lock field is compared on every bulk_update() - it has to be loaded.
-        if optimistic_lock_field := model._meta.optimistic_lock_field:
+        if optimistic_lock_field := binding.optimistic_lock_field:
             missing_version = [obj.pk for obj in objects if not hasattr(obj, optimistic_lock_field)]
             if missing_version:
                 raise IncompleteInstanceError(
@@ -80,22 +83,22 @@ class BulkUpdateChecks:
                 )
 
     @staticmethod
-    def raise_if_row_written_twice(model: type[Model], objects: Sequence[Model], types: TypeRegistry) -> None:
+    def raise_if_row_written_twice(
+        binding: ModelBinding, objects: Sequence[Model], stored_pk_values: Sequence[tuple[Any, ...]]
+    ) -> None:
         """Raises for two objects of one row - their keys equal as the database stores them (an
         ``EmailField`` lowercases the domain): two VALUES rows for one row, which of them is written
         unspecified.
 
         Args:
-            model: The model.
+            binding: The model binding.
             objects: The objects written.
-            types: The type registry of the connection written to.
+            stored_pk_values: Primary keys read from this call's already converted rows.
 
         Raises:
             QueryError: Two objects have the same primary key.
         """
-        primary_key_names = model._meta.primary_key_attribute_names
-        primary_key_fields = [model._meta.fields_map[name] for name in primary_key_names]
-        stored_pk_values = ReturnedValues.get_stored_keys(types, primary_key_fields, primary_key_names, objects)
+        model = binding._model
         if len(set(stored_pk_values)) == len(stored_pk_values):
             return
         duplicate_pks: list[Any] = []

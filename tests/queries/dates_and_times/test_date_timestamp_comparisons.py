@@ -1,22 +1,17 @@
 """A date compared with a timestamp, and naive timestamps (use_timezone=False) in SQL conversions."""
 
 import datetime
-import os
-import uuid
 from typing import Any
 
 import pytest
 
 from hare import fields
 from hare.contrib.test.isolated_contexts import hare_test_context
+from hare.core.hare_context import HareContext
 from hare.query.expressions import F, Value
 from hare.query.functions import Cast, Concat
 from tests.shared_models.typed_row_models import TypedRow
-
-
-def get_test_db_url() -> str:
-    raw_db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:").replace("\\{", "{").replace("\\}", "}")
-    return raw_db_url.format(uuid.uuid4().hex) if "{}" in raw_db_url else raw_db_url
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 async def get_ids(**lookup: Any) -> list[int]:
@@ -30,7 +25,10 @@ async def get_ids(**lookup: Any) -> list[int]:
 )
 async def test_date_field_compares_with_timestamp_as_its_first_moment(use_timezone, zone):
     async with hare_test_context(
-        ["tests.shared_models.typed_row_models"], db_url=get_test_db_url(), use_timezone=use_timezone, timezone=zone
+        ["tests.shared_models.typed_row_models"],
+        db_url=DatabaseUnderTest.get_fresh_url(),
+        use_timezone=use_timezone,
+        timezone=zone,
     ):
         day = datetime.date(2020, 1, 2)
         moments = [
@@ -55,7 +53,10 @@ async def test_date_field_compares_with_timestamp_as_its_first_moment(use_timezo
 @pytest.mark.parametrize("zone", ["UTC", "Asia/Tokyo"])
 async def test_naive_timestamp_converts_as_its_wall_clock(zone):
     async with hare_test_context(
-        ["tests.shared_models.typed_row_models"], db_url=get_test_db_url(), use_timezone=False, timezone=zone
+        ["tests.shared_models.typed_row_models"],
+        db_url=DatabaseUnderTest.get_fresh_url(),
+        use_timezone=False,
+        timezone=zone,
     ):
         await TypedRow.objects.create(
             id=1,
@@ -72,7 +73,7 @@ async def test_naive_timestamp_converts_as_its_wall_clock(zone):
             joined=Concat("at", Value("|")),
         ).values_list("as_date", "as_text", "as_time", "from_text", "from_date", "joined")
         # The wall clock's text is its database's - SQLite's stored text, PostgreSQL's own.
-        is_sqlite = TypedRow._meta.connection.dialect.name == "sqlite"
+        is_sqlite = HareContext.require_current().apps.get_queryset(TypedRow).get_connection().dialect.name == "sqlite"
         text = "2020-01-02 01:04:05.500000" if is_sqlite else "2020-01-02 01:04:05.5"
         assert values == (
             datetime.date(2020, 1, 2),

@@ -60,13 +60,23 @@ class JsonFilterParser:
             path: The path, e.g. ``"tags__0"`` or ``"values__-1"``.
 
         Returns:
-            The path parts, every ASCII integer (``"0"``, ``"-1"``) turned into an ``int``.
+            The path parts, canonical ASCII integers (``"0"``, ``"-1"``) turned into an ``int``.
+            Labels with leading zeroes or negative zero keep their exact object-key spelling.
         """
         key_parts: list[str | int] = []
         for key_part in path.split("__"):
             digits = key_part.removeprefix("-")
-            key_parts.append(int(key_part) if digits.isascii() and digits.isdigit() else key_part)
+            is_index = JsonFilterParser.is_index_segment(key_part) and (key_part == "0" or not digits.startswith("0"))
+            key_parts.append(int(key_part) if is_index else key_part)
         return key_parts
+
+    @staticmethod
+    def is_index_segment(part: str | int) -> bool:
+        """Whether a path segment can index an array without changing its object-key spelling."""
+        if isinstance(part, int):
+            return True
+        digits = part.removeprefix("-")
+        return digits.isascii() and digits.isdigit()
 
     @staticmethod
     def get_field_path(field_term: Term, key_parts: list[str | int], *, as_text: bool = True) -> Term:

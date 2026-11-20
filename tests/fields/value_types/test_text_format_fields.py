@@ -399,8 +399,8 @@ async def test_autodetector_alters_a_char_field_into_a_format_field(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_alter_field_into_a_format_field_on_the_database(db_text_formats):
-    connection = Connections.get("models")
+async def test_alter_field_into_a_format_field_on_the_database(db_text_formats_module):
+    connection = db_text_formats_module.get_connection("models")
     literals = connection.dialect.literals
     table_name = "text_format_alter"
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
@@ -415,7 +415,7 @@ async def test_alter_field_into_a_format_field_on_the_database(db_text_formats):
         options={"table": table_name},
     )
     try:
-        await apply_operations("models", state, create_model, schema_editor=editor)
+        state = await apply_operations("models", state, create_model, schema_editor=editor)
         await connection.execute(
             f"INSERT INTO {literals.quote_identifier(table_name)} (id, email, slug) VALUES (1, 'a@example.com', 'a-b')"
         )
@@ -427,7 +427,7 @@ async def test_alter_field_into_a_format_field_on_the_database(db_text_formats):
         previous_state = state.clone()
         state = await migration.apply(state, dry_run=False, schema_editor=editor)
         altered_model = state.apps.get_model("models.AlterProfile")
-        assert isinstance(altered_model._meta.fields_map["email"], fields.EmailField)
+        assert isinstance(state.apps.get_binding(altered_model).fields_map["email"], fields.EmailField)
         rows = await connection.execute_dicts(f"SELECT id, email, slug FROM {literals.quote_identifier(table_name)}")
         assert rows == [{"id": 1, "email": "a@example.com", "slug": "a-b"}]
         await migration.unapply(previous_state, dry_run=False, schema_editor=editor)

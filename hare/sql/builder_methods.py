@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Callable
-from typing import Any, TypeVar, cast
+from functools import wraps
+from typing import Any, TypeVar
 
 TFunction = TypeVar("TFunction", bound=Callable[..., Any])
 TReturnValue = TypeVar("TReturnValue")
@@ -27,6 +28,7 @@ class BuilderMethods:
             The wrapped method, of the same type.
         """
 
+        @wraps(function)
         def copying_method(self: Any, *args: Any, **kwargs: Any) -> Any:
             self_copy = copy.copy(self) if getattr(self, "immutable", True) else self
             # The cached hash is dropped - the method is about to change the term.
@@ -34,7 +36,7 @@ class BuilderMethods:
             result = function(self_copy, *args, **kwargs)
             return self_copy if result is None else result
 
-        return cast("TFunction", copying_method)
+        return copying_method  # type: ignore[return-value]
 
     @staticmethod
     def ignore_copy(function: Callable[[TSelf, str], TReturnValue]) -> Callable[[TSelf, str], TReturnValue]:
@@ -48,6 +50,7 @@ class BuilderMethods:
             The wrapped ``__getattr__``.
         """
 
+        @wraps(function)
         def copy_protocol_ignoring_getattr(self: TSelf, name: str) -> TReturnValue:
             if name in {"__copy__", "__deepcopy__", "__getstate__", "__setstate__", "__getnewargs__"}:
                 raise AttributeError(f"{self.__class__.__name__!r} object has no attribute {name!r}")

@@ -52,7 +52,8 @@ class HStoreField(Field[dict[str, str | None]]):
             return partial(
                 Function, HSTORE_ARRAY_PATH_FUNCTIONS[segment]
             ), PostgresqlHStoreFieldLookups.TEXT_ARRAY_FIELD
-        if segment not in PostgresqlHStoreFieldLookups.get_lookup_names() and segment not in LOOKUP_NAMES:
+        lookups = PostgresqlHStoreFieldLookups.get_lookups()
+        if (not segment or segment not in lookups) and segment not in LOOKUP_NAMES:
             return partial(HStoreValueTerm, key=segment), PostgresqlHStoreFieldLookups.VALUE_FIELD
         return None
 
@@ -104,4 +105,5 @@ class HStoreField(Field[dict[str, str | None]]):
         try:
             return HStoreText.parse(value)
         except ValueError as error:
-            raise self.get_validation_error(error, value) from None
+            validation_error = self.get_validation_error(error, value)
+        raise validation_error

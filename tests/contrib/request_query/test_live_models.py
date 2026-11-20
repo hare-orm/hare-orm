@@ -1,18 +1,50 @@
-"""Request queries of models registered while the application runs: a class forgets its declaration
-and parameters with the models it reads, so a live model registered again is described as it is
-now, and a class of an unregistered model refuses to run."""
+"""Request queries retain explicit graph identity; templates prepare against the selected registry.
+
+Completed generations remain usable after publication of a replacement graph. New template
+preparation reads that graph, while removed models are absent from new registry lookups.
+"""
 
 import pytest
 import pytest_asyncio
 
 from hare import Hare, fields
 from hare.contrib.request_query import FilterField, RequestQuery
+from hare.contrib.request_query.constants import GENERATION_BUCKET_KEY
+from hare.contrib.request_query.declaration.declaration_builder import DeclarationBuilder
+from hare.contrib.request_query.declaration.request_query_registry import RequestQueryRegistry
+from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError
 from hare.models import Model
 from hare.query.enums import Lookup
 from tests.contrib.request_query.models import Author
 
 LIVE_TABLE = "rq_live_item"
+
+
+@pytest.mark.asyncio
+async def test_registration_during_declaration_build_rebuilds_all_filter_parameters(db_request_query, monkeypatch):
+    build_filter = DeclarationBuilder.build_filter
+    invalidated = False
+
+    def build_and_invalidate(builder, *args, **kwargs):
+        nonlocal invalidated
+        result = build_filter(builder, *args, **kwargs)
+        if not invalidated:
+            invalidated = True
+            RequestQueryRegistry.forget_parameters(builder.request_query_class)
+        return result
+
+    monkeypatch.setattr(DeclarationBuilder, "build_filter", build_and_invalidate)
+    query = RequestQuery.for_model(
+        Author,
+        filters=(
+            FilterField("id", lookups=(Lookup.EXACT,)),
+            FilterField("name", lookups=(Lookup.EXACT,)),
+        ),
+    )
+    assert invalidated
+    assert {item.name for item in query.describe_parameters()} >= {"id", "name"}
+    assert query.from_query_string("id=7&name=Anna").id == 7
 
 
 def build_item(class_name: str, **extra_fields: fields.Field) -> type[Model]:
@@ -41,7 +73,7 @@ async def live_table(db_request_query):
     registered: list[type[Model]] = []
     yield registered
     for model in registered:
-        if model._meta.is_bound:
+        if HareContext.require_current().apps.get_prepared_binding(model) is not None:
             Hare.unregister_live_models([model])
     await connection.execute_script(f"DROP TABLE IF EXISTS {LIVE_TABLE}")
 
@@ -61,26 +93,33 @@ async def test_a_live_model_registered_again_is_described_as_it_is_now(live_tabl
     item_query = RequestQuery.for_model(item, filters=(FilterField("rank", lookups=(Lookup.GTE,)),))
     assert [row.title for row in await item_query.from_query_string("rank__gte=2").fetch()] == ["second"]
 
+    with HareContext():
+        author_template = Author.objects.all()
+
     class AuthorByItemQuery(RequestQuery[Author]):
         class Meta:
-            queryset = Author.objects.all()
+            queryset = author_template
             filters = (FilterField("live_items__rank", lookups=(Lookup.GTE,), parameter="item_rank"),)
 
-    AuthorByItemQuery.prepare_parameters()
-    assert AuthorByItemQuery.model_fields["item_rank__gte"].annotation == int | None
+    original_schema = AuthorByItemQuery.prepare_parameters()
+    assert original_schema.model_fields["item_rank__gte"].annotation == int | None
     assert [row.name for row in await AuthorByItemQuery.from_query_string("item_rank__gte=2").fetch()] == ["Anna"]
 
+    retained = item_query.from_query_string("rank__gte=2")
+    retained_binding = item_query.get_declaration().queryset._binding
     Hare.unregister_live_models([item])
-    with pytest.raises(ConfigurationError, match="LiveItem, which was unregistered"):
-        item_query.from_query_string("rank__gte=2")
-    with pytest.raises(ConfigurationError, match="LiveItem, which was unregistered"):
-        item_query.get_declaration()
+    assert [row.title for row in await retained.fetch()] == ["second"]
+    assert item_query.get_declaration().queryset._binding is retained_binding
+    with pytest.raises(ConfigurationError, match="not registered"):
+        HareContext.require_current().apps.get_binding(item)
 
     item_with_text_rank = register(live_table, build_item("LiveItem", rank=fields.CharField(max_length=16, null=True)))
-    assert AuthorByItemQuery not in RequestQuery.prepared_classes
+    assert AuthorByItemQuery.get_cache_bucket().get(GENERATION_BUCKET_KEY) is None
     assert "item_rank__gte" not in AuthorByItemQuery.model_fields
-    AuthorByItemQuery.prepare_parameters()
-    assert AuthorByItemQuery.model_fields["item_rank__gte"].annotation == str | None
+    new_schema = AuthorByItemQuery.prepare_parameters()
+    assert new_schema is not original_schema
+    assert new_schema.model_fields["item_rank__gte"].annotation == str | None
+    assert original_schema.model_fields["item_rank__gte"].annotation == int | None
     new_query = RequestQuery.for_model(item_with_text_rank, filters=(FilterField("rank", lookups=(Lookup.GTE,)),))
     (rank_description,) = [item for item in new_query.describe_parameters() if item.name == "rank__gte"]
     assert rank_description.value_type is str
@@ -99,9 +138,12 @@ async def test_a_field_added_to_a_live_model_becomes_a_parameter(live_table):
     Hare.unregister_live_models([item])
     item_with_rank = register(live_table, build_item("LiveItem", rank=fields.IntField(null=True)))
     query_with_rank = RequestQuery.for_model(item_with_rank, filters=(FilterField("title"), FilterField("rank")))
-    assert query_with_rank.model_fields["rank"].annotation == int | None
-    with pytest.raises(ConfigurationError, match="which was unregistered"):
-        query_without_rank.describe_parameters()
+    assert query_with_rank.prepare_parameters().model_fields["rank"].annotation == int | None
+    assert "rank" not in {parameter.name for parameter in query_without_rank.describe_parameters()}
+    assert (
+        query_without_rank.get_declaration().queryset._binding
+        is not query_with_rank.get_declaration().queryset._binding
+    )
 
 
 @pytest.mark.asyncio

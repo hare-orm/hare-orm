@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from hare.ddl.enums import FunctionVolatility, GrantTarget, PolicyCommand, Privilege
+from hare.ddl.enums import FunctionVolatility, PolicyCommand, Privilege
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.ddl.schema_objects.database_function import DatabaseFunction
 from hare.ddl.schema_objects.database_sequence import DatabaseSequence
@@ -10,6 +10,7 @@ from hare.ddl.security.grant import Grant
 from hare.ddl.security.policy import Policy
 from hare.dialects.postgresql.constants import POSTGRESQL_PUBLIC_ROLE, POSTGRESQL_VOLATILITY_CODES
 from hare.fields.data.constants import INT64_MAX, INT64_MIN
+from hare.inspectdb.introspection.catalog_sql import CatalogSql
 
 
 class PostgresqlInspectedSchemaObjects:
@@ -91,42 +92,11 @@ class PostgresqlInspectedSchemaObjects:
         return grants, notes
 
     @staticmethod
-    def get_object_grants(rows: list[dict[str, Any]], target: GrantTarget) -> list[Grant]:
-        """The grants on the sequences or functions of a schema - one per object, role and grant option;
-        a privilege no ``Privilege`` names is left out.
-
-        Args:
-            rows: Their privilege rows - the object's name, the role, the privilege and the grant option.
-            target: Whether the objects are sequences or functions.
-
-        Returns:
-            The grants.
-        """
-        known_privileges = {privilege.value for privilege in Privilege}
-        privileges_by_grant: dict[tuple[str, str, bool], list[Privilege]] = {}
-        for row in rows:
-            privilege_name = str(row["privilege_type"]).lower()
-            if privilege_name in known_privileges:
-                key = (row["object_name"], row["role"], bool(row["is_grantable"]))
-                privileges_by_grant.setdefault(key, []).append(Privilege(privilege_name))
-        return [
-            Grant(
-                privileges=tuple(privileges),
-                roles=(role,),
-                on=target,
-                object_name=object_name,
-                with_grant_option=grantable,
-            )
-            for (object_name, role, grantable), privileges in privileges_by_grant.items()
-        ]
-
-    @staticmethod
-    def get_sequence(row: dict[str, Any], owned_by: str | None) -> DatabaseSequence:
+    def get_sequence(row: dict[str, Any]) -> DatabaseSequence:
         """A sequence - each setting PostgreSQL's default for it left out.
 
         Args:
-            row: Its row - start, increment, bounds, cycle and cache.
-            owned_by: The field owning it, None for none.
+            row: The sequence settings and its owning column from the catalog.
 
         Returns:
             The sequence.
@@ -146,7 +116,7 @@ class PostgresqlInspectedSchemaObjects:
             maximum=None if maximum == default_maximum else maximum,
             cycle=bool(row["cycle"]),
             cache=int(row["cache_size"]),
-            owned_by=owned_by,
+            owned_by=row["owner_column"],
         )
 
     @staticmethod
@@ -171,26 +141,12 @@ class PostgresqlInspectedSchemaObjects:
 
     @staticmethod
     def split_arguments(text: str) -> tuple[str, ...]:
-        """The arguments of a function's argument list - split at the commas outside parentheses: a type
-        takes them too (``numeric(10, 2)``).
+        """Split a function's arguments, preserving commas in parentheses, quotes and comments.
 
         Args:
-            text: The list, as ``pg_get_function_identity_arguments()`` writes it.
+            text: The declarations and defaults returned by ``pg_get_function_arguments()``.
 
         Returns:
             The arguments.
         """
-        arguments: list[str] = []
-        depth = 0
-        start = 0
-        for position, character in enumerate(text):
-            if character == "(":
-                depth += 1
-            elif character == ")":
-                depth -= 1
-            elif character == "," and depth == 0:
-                arguments.append(text[start:position].strip())
-                start = position + 1
-        if text[start:].strip():
-            arguments.append(text[start:].strip())
-        return tuple(arguments)
+        return tuple(argument for raw in CatalogSql.split_terms(text) if (argument := raw.strip()))

@@ -3,6 +3,7 @@
 import pytest
 
 from hare import fields
+from hare.core.apps.model_binding_graph import ModelBindingGraph
 from hare.exceptions import ConfigurationError
 from hare.models import Model
 
@@ -15,6 +16,8 @@ def test_ordering_error_message_normalizes_nested_relation_paths():
     above it (which correctly checks only the first "__"-segment) - a genuinely valid
     nested-relation ordering path (e.g. "related__name") got blamed in the error message
     alongside whatever field actually failed, even though it wasn't the problem."""
+
+    declaration_graph = ModelBindingGraph()
 
     class Related(Model):
         name = fields.CharField(max_length=10)
@@ -30,7 +33,7 @@ def test_ordering_error_message_normalizes_nested_relation_paths():
             ordering = ["related__name", "totally_bogus_field"]
 
     with pytest.raises(ConfigurationError) as exc_info:
-        _ = Main._meta.ordering
+        _ = declaration_graph.include(Main).ordering
     message = str(exc_info.value)
     assert "totally_bogus_field" in message
     assert "related__name" not in message

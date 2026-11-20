@@ -6,7 +6,7 @@ import contextvars
 import inspect
 from collections.abc import Awaitable, Callable, Sequence
 from types import TracebackType
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.contrib.notify.constants import (
@@ -17,7 +17,12 @@ from hare.contrib.notify.constants import (
 )
 from hare.core.connections.connections import Connections
 from hare.core.log import logger
+from hare.core.resource_completion import ResourceCompletion
 from hare.exceptions import ConfigurationError, UnSupportedError
+
+if TYPE_CHECKING:
+    from hare.core.connections.connection_handler import ConnectionHandler
+    from hare.dialects.base.client.database_client import DatabaseClient
 
 
 class NotificationListener:
@@ -27,7 +32,8 @@ class NotificationListener:
     (``Features.supports_listen_notify``) ``start()``/``run()`` refuse.
 
     Args:
-        connection_alias: The connection alias, resolved when listening starts.
+        connection: A client or alias, bound to its non-transactional client when listening starts.
+            Reconnects and resource cleanup retain that client's connection handler.
         channel: The channel to listen on.
         callback: Called with each notification's payload on the event loop's thread, with the
             starting code's contextvars. An async one runs as a tracked task that ``stop()``
@@ -45,7 +51,7 @@ class NotificationListener:
 
     def __init__(
         self,
-        connection_alias: str,
+        connection: str | DatabaseClient,
         channel: str,
         callback: Callable[[str], Awaitable[None] | None],
         *,
@@ -58,23 +64,25 @@ class NotificationListener:
                 f"NotificationListener channel must be a non-empty text without a null byte, got "
                 f"{ValueDescriptions.get_shown_value(channel)}"
             )
-        self.connection_alias = connection_alias
+        self.connection = connection
+        self._client: DatabaseClient | None = None
         self.channel = channel
         self.callback = callback
         self.reconnect_attempts = reconnect_attempts
         self.backoff: float | tuple[float, ...] = (
-            float(backoff) if isinstance(backoff, int | float) else tuple(float(delay) for delay in backoff)
+            float(backoff) if isinstance(backoff, (int, float)) else tuple(float(delay) for delay in backoff)
         )
         self.max_backoff_seconds = max_backoff_seconds
 
-        self._stopping = False
+        self._handler: ConnectionHandler | None = None
+        self._stop_task: asyncio.Task[None] | None = None
         #: Set by stop() - wakes run() from a health-check or backoff pause at once.
         self._stop_requested = asyncio.Event()
         #: The task run() executes in - whether start() created it or a caller awaits run() itself.
         self._run_task: asyncio.Task[None] | None = None
         #: Whether start() created the task run() executes in - stop() cancels only a task of its
         #: own, never the task of a caller awaiting run() itself.
-        self._owns_run_task = False
+        self._started_run_task = False
         #: Set once the first listening attempt has finished (either way) - start() waits on it.
         self._first_attempt_finished = asyncio.Event()
         self._connection: Any = None
@@ -97,21 +105,26 @@ class NotificationListener:
                 connection's configuration can't listen - behind a transaction pooler without
                 ``direct_host``.
         """
+        if self._stop_task is not None:
+            await ResourceCompletion.wait(self._stop_task)
         if self._run_task is not None and not self._run_task.done():
             return
         self._get_listen_method()
-        self._stopping = False
         self._stop_requested.clear()
         self._first_attempt_finished.clear()
         # Never through a transaction start() may be called in - it ends long before the listener.
-        task = Connections.current().create_task_outside_transactions(self.run())
+        task = self._handler.create_task_outside_transactions(self.run())  # type: ignore[union-attr]
         self._run_task = task
-        self._owns_run_task = True
+        self._started_run_task = True
         waiter = asyncio.create_task(self._first_attempt_finished.wait())
         try:
             await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        except BaseException:
+            await self.stop()
+            raise
         finally:
             waiter.cancel()
+            await ResourceCompletion.wait(asyncio.gather(waiter, return_exceptions=True))
         if task.done():
             # Raises what ended the loop at once - a configuration no listening runs on.
             task.result()
@@ -121,21 +134,41 @@ class NotificationListener:
         still-running async callbacks, waiting for all of it. The task ``start()`` created is
         cancelled; a ``run()`` a caller awaits itself returns, at once from a pause between
         checks or reconnects. Idempotent."""
-        self._stopping = True
+        if self._stop_task is not None and asyncio.current_task() in self._callback_tasks:
+            return
+        if self._stop_task is None:
+            self._stop_task = asyncio.create_task(self.stop_tasks(asyncio.current_task()))
+        task = self._stop_task
+        try:
+            await ResourceCompletion.wait(task)
+            await ResourceCompletion.wait(self._cancel_other_callback_tasks(asyncio.current_task()))
+        finally:
+            if task.done() and self._stop_task is task:
+                self._stop_task = None
+
+    def _cancel_other_callback_tasks(self, caller: asyncio.Task[Any] | None) -> asyncio.Future[list[Any]]:
+        """Cancel tracked callbacks except the caller and return their completion."""
+        tasks = [task for task in self._callback_tasks if task is not caller]
+        for task in tasks:
+            task.cancel()
+        return asyncio.gather(*tasks, return_exceptions=True)
+
+    async def stop_tasks(self, caller: asyncio.Task[Any] | None) -> None:
+        """Release the listener and callbacks without cancelling a callback that requested stop."""
         self._stop_requested.set()
         run_task, self._run_task = self._run_task, None
-        owns_run_task, self._owns_run_task = self._owns_run_task, False
-        if run_task is not None and run_task is not asyncio.current_task() and not run_task.done():
-            if owns_run_task:
+        started_run_task, self._started_run_task = self._started_run_task, False
+        run_results: Sequence[BaseException | None] = ()
+        if run_task is not None and run_task is not caller and not run_task.done():
+            if started_run_task:
                 run_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await run_task
-        callback_tasks = list(self._callback_tasks)
-        for callback_task in callback_tasks:
-            callback_task.cancel()
-        for callback_task in callback_tasks:
-            with contextlib.suppress(asyncio.CancelledError):
-                await callback_task
+            run_results = await asyncio.gather(run_task, return_exceptions=True)
+        await self._cancel_other_callback_tasks(caller)
+        if self._handler is not None:
+            self._handler.unregister_resource(self)
+        for result in run_results:
+            if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                raise result
 
     async def __aenter__(self) -> NotificationListener:
         await self.start()
@@ -156,7 +189,16 @@ class NotificationListener:
             UnSupportedError: The database has no listen/notify.
             ConfigurationError: The channel's name is longer than the database's names.
         """
-        connection = Connections.current().get_non_transactional(self.connection_alias)
+        if self._client is None:
+            connection = (
+                Connections.current().get_non_transactional(self.connection)
+                if isinstance(self.connection, str)
+                else self.connection
+            )
+            connection = connection.get_non_transactional_client()
+            self._client = connection
+            self._handler = connection.connection_handler or Connections.current()
+        connection = self._client
         if not connection.features.supports_listen_notify:
             raise UnSupportedError(
                 f"NotificationListener listens on channel {self.channel!r} - {connection.dialect.name} has no "
@@ -169,7 +211,7 @@ class NotificationListener:
                 f"NotificationListener channel takes at most {max_channel_bytes} bytes on "
                 f"{connection.dialect.name}, got {len(self.channel.encode())}"
             )
-        return cast("Callable[..., Awaitable[Any]]", cast("Any", connection).listen)
+        return connection.listen  # type: ignore[attr-defined]
 
     def _get_backoff_delay(self, attempt: int) -> float:
         """The delay before reconnect attempt number ``attempt`` (0-based)."""
@@ -191,8 +233,8 @@ class NotificationListener:
             ConfigurationError: The connection's configuration can't listen.
         """
         listen = self._get_listen_method()
+        self._handler.register_resource(self, self.stop)  # type: ignore[union-attr]
         self._run_task = asyncio.current_task()
-        self._stopping = False
         self._stop_requested.clear()
         # Captured here, in the task started by the caller, so callbacks run with the caller's
         # contextvars rather than whatever is ambient where the driver invokes them.
@@ -202,7 +244,7 @@ class NotificationListener:
             # Once it listened, a refused reconnect is the server's state, not the configuration: a database
             # dropped and made again - retried as any failure.
             has_listened = False
-            while not self._stopping:
+            while not self._stop_requested.is_set():
                 connection: Any = None
                 failure: str | None = None
                 try:
@@ -214,11 +256,12 @@ class NotificationListener:
                     # check: one that dies faster than that (idle-session timeout, a firewall
                     # killing it over and over) is as unhealthy as one that never connected.
                     survived_a_health_check = False
-                    while not self._stopping and not connection.is_closed():
+                    while not self._stop_requested.is_set() and not connection.is_closed():
                         await self.pause(HEALTH_CHECK_INTERVAL_SECONDS)
-                        survived_a_health_check = not self._stopping
-                    if self._stopping or survived_a_health_check:
-                        if not self._stopping:
+                        if not self._stop_requested.is_set() and not connection.is_closed():
+                            survived_a_health_check = True
+                    if self._stop_requested.is_set() or survived_a_health_check:
+                        if not self._stop_requested.is_set():
                             logger.warning(
                                 "NotificationListener: the listening connection for channel %r closed, reconnecting",
                                 self.channel,
@@ -226,8 +269,6 @@ class NotificationListener:
                         attempt = 0
                         continue
                     failure = "listener closed before becoming healthy"
-                except asyncio.CancelledError:
-                    raise
                 except ConfigurationError as error:
                     if not has_listened:
                         # No retry fixes the configuration.
@@ -260,6 +301,8 @@ class NotificationListener:
                 attempt += 1
         finally:
             self._first_attempt_finished.set()
+            if self._handler is not None and not self._callback_tasks:
+                self._handler.unregister_resource(self)
 
     async def pause(self, seconds: float) -> None:
         """Waits ``seconds``, or until ``stop()`` is called.
@@ -281,7 +324,7 @@ class NotificationListener:
     def _on_driver_notify(self, connection: Any, pid: int, channel: str, payload: str) -> None:
         """The driver-level ``listen()`` callback - both drivers invoke it on the event loop's
         thread; dispatches to ``callback`` inside the captured caller context."""
-        if self._stopping or self._callback_context is None:
+        if self._stop_requested.is_set() or self._callback_context is None:
             return
         self._callback_context.run(self._invoke_callback, payload)
 
@@ -300,6 +343,12 @@ class NotificationListener:
     def _on_callback_task_done(self, callback_task: asyncio.Future[Any]) -> None:
         """Forgets a finished async-callback task, logging its exception if it raised one."""
         self._callback_tasks.discard(callback_task)
+        if (
+            not self._callback_tasks
+            and self._handler is not None
+            and (self._run_task is None or self._run_task.done())
+        ):
+            self._handler.unregister_resource(self)
         if callback_task.cancelled():
             return
         exception = callback_task.exception()

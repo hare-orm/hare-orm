@@ -1,16 +1,13 @@
-//! `PgResult` - the rows of one result as the driver read them. Nothing in it is a Python object
-//! until it is read: the `rust.native.rows` readers build each attribute value straight from the
-//! value the driver read, and any other code reads it as a sequence of `PgRow`s, each built on
-//! first use.
+//! `PgResult` stores decoded database values. Positional reading builds Python tuples;
+//! named reading builds and retains each `PgRow` on first access.
 
 use std::sync::Arc;
 
 use pyo3::exceptions::PyIndexError;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyIterator, PyList, PySlice};
+use pyo3::types::{PyIterator, PyList, PySlice, PyTuple};
 
-use crate::pg::result_cell::ResultCell;
 use crate::pg::result_columns::ResultColumns;
 use crate::pg::result_data::ResultData;
 use crate::pg::row::PgRow;
@@ -33,26 +30,11 @@ impl PgResult {
         self.data.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
-    }
-
-    /// The value of column `column` of row `row` - None past the last row or column.
-    pub fn get_cell(&self, row: usize, column: usize) -> Option<ResultCell<'_>> {
-        self.data.get_cell(row, column)
-    }
-
     /// The `PgRow` of row `index`.
     pub fn get_row<'py>(&self, py: Python<'py>, index: usize) -> PyResult<Bound<'py, PgRow>> {
         let row_objects = self.row_objects.get_or_init(py, || (0..self.len()).map(|_| PyOnceLock::new()).collect());
         let row = row_objects[index].get_or_try_init(py, || {
-            let values = (0..self.data.get_width(index))
-                .map(|column| {
-                    let cell = self.data.get_cell(index, column).expect("a column of the row");
-                    cell.to_python(py).map(Bound::unbind)
-                })
-                .collect::<PyResult<Vec<_>>>()?;
-            Py::new(py, PgRow::new(self.columns.get_row_names(py).clone(), values))
+            Py::new(py, PgRow::from_values(py, self.columns.get_row_names(py).clone(), &self.data.rows[index])?)
         })?;
         Ok(row.bind(py).clone())
     }
@@ -66,6 +48,22 @@ impl PgResult {
 
 #[pymethods]
 impl PgResult {
+    /// Build positional tuples from the decoded values and return their column names,
+    /// including when the result has no rows.
+    fn positional<'py>(&self, py: Python<'py>) -> PyResult<(Bound<'py, PyList>, Bound<'py, PyTuple>)> {
+        let rows = PyList::empty(py);
+        for values in &self.data.rows {
+            rows.append(PyTuple::new(py, values.iter())?)?;
+        }
+        Ok((rows, PyTuple::new(py, self.columns.names())?))
+    }
+
+    /// The server's command completion count, including writes without RETURNING.
+    #[getter]
+    fn row_count(&self) -> Option<u64> {
+        self.data.row_count
+    }
+
     fn __len__(&self) -> usize {
         self.len()
     }

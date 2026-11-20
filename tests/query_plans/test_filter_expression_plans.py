@@ -139,6 +139,6 @@ async def test_a_field_reference_across_a_tenant_scoped_relation_keeps_a_plan_bi
         first = await matching()
     with Tenancy.scope(2):
         second = await matching()
-    assert len(StatementPlans.plans) > cache_size_before
+    assert StatementPlans.plans.entry_count > cache_size_before
     assert first == ["O1"]
     assert second == ["O2"]

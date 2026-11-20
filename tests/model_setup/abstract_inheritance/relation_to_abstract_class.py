@@ -1,11 +1,4 @@
-"""Companion models for tests/model_setup/abstract_inheritance/test_abstract_model_inheritance.py.
-
-ForeignKeyField's model_name= accepts either a string "app.Model" or a model CLASS OBJECT
-directly (see ForeignKeyFieldInstance.validate_model_name). The string form is safe against
-referencing an abstract model - Apps._discover_models() never registers abstract models under any
-app label, so "models.AbstractAttempt" raises a clear ConfigurationError. This module targets the
-class-object form instead.
-"""
+"""Models for checking rejection of a foreign key declared with an abstract class as its target."""
 
 from hare import fields
 from hare.models import Model

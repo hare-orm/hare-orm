@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.exceptions import OperationalError, QueryError
 from hare.query.expressions import F
 from hare.query.functions import (
@@ -48,7 +49,7 @@ async def test_slicing_functions(db):
     """SUBSTR is the database's own - SQLite counts a negative start from the end and takes a negative
     length as the characters before, PostgreSQL counts positions before 1 as empty and refuses it."""
     row = await CharFields.objects.create(id=1, char="héllo🎉")
-    is_sqlite = CharFields._meta.connection.dialect.name == "sqlite"
+    is_sqlite = HareContext.require_current().apps.get_queryset(CharFields).get_connection().dialect.name == "sqlite"
 
     assert await get_value(row, Left("char", 2)) == "hé"
     assert await get_value(row, Left("char", -2)) == "héll"
@@ -91,7 +92,7 @@ async def test_building_functions_follow_postgres(db):
 @pytest.mark.asyncio
 async def test_digests_of_the_utf8_text(db):
     row = await CharFields.objects.create(id=1, char="héllo")
-    connection = CharFields._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(CharFields).get_connection()
     if connection.dialect.name == "postgresql":
         await connection.execute_script("CREATE EXTENSION IF NOT EXISTS pgcrypto")
 

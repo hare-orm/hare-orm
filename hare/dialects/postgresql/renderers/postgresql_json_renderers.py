@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from hare.dialects.base.renderers.json_renderers import JsonRenderers
 from hare.dialects.postgresql.renderers.postgresql_temporal_renderers import PostgresqlTemporalRenderers
+from hare.query.filters.lookups.json.json_filter_parser import JsonFilterParser
 from hare.sql import functions
 from hare.sql.enums import JsonValueType
 from hare.sql.sql_context import SqlContext
@@ -23,8 +24,8 @@ class PostgresqlJsonRenderers(JsonRenderers):
             f"JSONB_BUILD_ARRAY({','.join(function.get_arg_sql(argument, sql_context) for argument in function.args)})"
         )
 
-    @classmethod
-    def render_json_value(cls, function: functions.JsonValue, sql_context: SqlContext) -> str:
+    @staticmethod
+    def render_json_value(function: functions.JsonValue, sql_context: SqlContext) -> str:
         """The value as it is - a naive timestamp as its wall clock."""
         term_sql = function.get_arg_sql(function.args[0], sql_context)
         if function.value_type != JsonValueType.DATETIME or function.is_aware:
@@ -48,10 +49,10 @@ class PostgresqlJsonRenderers(JsonRenderers):
         sql = criterion.json_column.get_sql(sql_context)
         for position, part in enumerate(criterion.path):
             is_last = position == len(criterion.path) - 1
-            if isinstance(part, int):
+            if JsonFilterParser.is_index_segment(part):
                 sql += f"{'#>>' if is_last and criterion.as_text else '#>'}'{{{part}}}'"
             else:
                 operator = "->>" if is_last and criterion.as_text else "->"
                 # A literal, not a parameter, so the expression matches an index on the same path.
-                sql += f"{operator}{sql_context.dialect.literals.get_string_literal_sql(part)}"
+                sql += f"{operator}{sql_context.dialect.literals.get_string_literal_sql(part)}"  # type: ignore[arg-type]
         return sql

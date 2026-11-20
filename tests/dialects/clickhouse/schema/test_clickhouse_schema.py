@@ -3,6 +3,7 @@ the schema editor - a column added, renamed, retyped and dropped, an index added
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.ddl.indexes.index import Index
 from hare.dialects.clickhouse.introspection.clickhouse_sql_parts import ClickhouseSqlParts
 from hare.fields.composite_primary_key import CompositePrimaryKey
@@ -30,7 +31,7 @@ from tests.utils.operations import apply_operations
 
 @pytest.mark.asyncio
 async def test_tables_are_created_with_their_engine_and_sort(clickhouse_db):
-    connection = Player._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Player).get_connection()
     rows = await connection.execute_dicts(
         "SELECT name, engine, sorting_key, partition_key, comment FROM system.tables "
         "WHERE database = currentDatabase() ORDER BY name"
@@ -47,7 +48,7 @@ async def test_tables_are_created_with_their_engine_and_sort(clickhouse_db):
 
 @pytest.mark.asyncio
 async def test_the_introspector_reads_the_tables(clickhouse_db):
-    connection = Player._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Player).get_connection()
     assert {"player", "team", "skill", "pageview"} <= set(await DatabaseCatalog.get_table_names(connection))
     assert await DatabaseCatalog.table_exists(connection, "player")
     assert not await DatabaseCatalog.table_exists(connection, "no_such_table")
@@ -70,7 +71,7 @@ async def get_columns(connection, table):
 
 @pytest.mark.asyncio
 async def test_migrations_create_change_and_drop_a_table(clickhouse_db):
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
     operations = [
@@ -82,26 +83,26 @@ async def test_migrations_create_change_and_drop_a_table(clickhouse_db):
         AddField(model_name="Article", name="subtitle", field=CharField(max_length=200, null=True)),
     ]
     for operation in operations:
-        await apply_operations("models", state, operation, schema_editor=editor)
+        state = await apply_operations("models", state, operation, schema_editor=editor)
     await connection.execute_script(
         'INSERT INTO "clickhouse_article" ("id", "title", "subtitle") VALUES (1, \'a\', \'b\')'
     )
     columns = await get_columns(connection, "clickhouse_article")
     assert columns["subtitle"].nullable
-    await apply_operations(
+    state = await apply_operations(
         "models", state, RenameField(model_name="Article", old_name="subtitle", new_name="lede"), schema_editor=editor
     )
-    await apply_operations(
+    state = await apply_operations(
         "models", state, AlterField(model_name="Article", name="title", field=TextField()), schema_editor=editor
     )
     assert await connection.execute_dicts('SELECT "title", "lede" FROM "clickhouse_article"') == [
         {"title": "a", "lede": "b"}
     ]
-    await apply_operations(
+    state = await apply_operations(
         "models", state, AddField(model_name="Article", name="views", field=IntField(default=7)), schema_editor=editor
     )
     assert await connection.execute_dicts('SELECT "views" FROM "clickhouse_article"') == [{"views": 7}]
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         AddIndex(model_name="Article", index=Index(fields=("views",), name="clickhouse_article_views")),
@@ -111,13 +112,23 @@ async def test_migrations_create_change_and_drop_a_table(clickhouse_db):
     # A plain one-column index is a field flag, as on the other databases.
     assert [index.name for index in article.column_indexes] == ["clickhouse_article_views"]
     assert [column.name for column in article.columns if column.has_index] == ["views"]
-    await apply_operations(
+    state = await apply_operations(
         "models", state, RemoveIndex(model_name="Article", name="clickhouse_article_views"), schema_editor=editor
     )
     (article,) = await DatabaseCatalog.inspect_tables(connection, ["clickhouse_article"])
     assert article.indexes == article.column_indexes == []
-    await apply_operations("models", state, RemoveField(model_name="Article", name="lede"), schema_editor=editor)
-    await apply_operations("models", state, RemoveField(model_name="Article", name="views"), schema_editor=editor)
+    state = await apply_operations(
+        "models",
+        state,
+        RemoveField(model_name="Article", name="lede"),
+        schema_editor=editor,
+    )
+    state = await apply_operations(
+        "models",
+        state,
+        RemoveField(model_name="Article", name="views"),
+        schema_editor=editor,
+    )
     assert set(await get_columns(connection, "clickhouse_article")) == {"id", "title"}
     await apply_operations("models", state, DeleteModel(name="Article"), schema_editor=editor)
     assert not await DatabaseCatalog.table_exists(connection, "clickhouse_article")
@@ -125,7 +136,7 @@ async def test_migrations_create_change_and_drop_a_table(clickhouse_db):
 
 @pytest.mark.asyncio
 async def test_an_added_column_takes_its_default_before_its_comment(clickhouse_db):
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
     operations = [
@@ -137,7 +148,7 @@ async def test_an_added_column_takes_its_default_before_its_comment(clickhouse_d
         AddField(model_name="Counter", name="count", field=IntField(db_default=3, description="how many")),
     ]
     for operation in operations:
-        await apply_operations("models", state, operation, schema_editor=editor)
+        state = await apply_operations("models", state, operation, schema_editor=editor)
     await connection.execute_script('INSERT INTO "clickhouse_counter" ("id") VALUES (1)')
     assert await connection.execute_dicts('SELECT "count" FROM "clickhouse_counter"') == [{"count": 3}]
     assert (await get_columns(connection, "clickhouse_counter"))["count"].description == "how many"
@@ -146,11 +157,11 @@ async def test_an_added_column_takes_its_default_before_its_comment(clickhouse_d
 
 @pytest.mark.asyncio
 async def test_rows_stored_before_a_column_was_added_keep_its_default_through_a_change_of_it(clickhouse_db):
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
     try:
-        await apply_operations(
+        state = await apply_operations(
             "models",
             state,
             CreateModel(
@@ -165,7 +176,7 @@ async def test_rows_stored_before_a_column_was_added_keep_its_default_through_a_
             AddField(model_name="Tally", name="count", field=IntField(db_default=3)),
             AlterField(model_name="Tally", name="count", field=IntField(db_default=9)),
         ):
-            await apply_operations("models", state, operation, schema_editor=editor)
+            state = await apply_operations("models", state, operation, schema_editor=editor)
         await connection.execute_script('INSERT INTO "clickhouse_tally" ("id") VALUES (2)')
         # The stored row got the default of the time it was added, as PostgreSQL writes it.
         assert await connection.execute_dicts('SELECT "id", "count" FROM "clickhouse_tally" ORDER BY "id"') == [
@@ -180,7 +191,7 @@ async def test_rows_stored_before_a_column_was_added_keep_its_default_through_a_
 async def test_an_indexed_column_changes_its_type_and_nullability(clickhouse_db):
     """ClickHouse refuses a MODIFY COLUMN of a column a data skipping index covers - the indexes are
     dropped around the change and created again."""
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
     operations = [
@@ -198,7 +209,7 @@ async def test_an_indexed_column_changes_its_type_and_nullability(clickhouse_db)
         AlterField(model_name="Sheet", name="code", field=BigIntField(default=0)),
     ]
     for operation in operations:
-        await apply_operations("models", state, operation, schema_editor=editor)
+        state = await apply_operations("models", state, operation, schema_editor=editor)
     (table,) = await DatabaseCatalog.inspect_tables(connection, ["clickhouse_sheet"])
     assert not table.column_indexes
     assert [(index.columns, index.index_type) for index in table.indexes] == [(["code", "label"], "")]
@@ -209,7 +220,7 @@ async def test_an_indexed_column_changes_its_type_and_nullability(clickhouse_db)
 async def test_an_index_added_or_dropped_with_a_type_change_is_created_once(clickhouse_db):
     """A change adding a column's index with its type dropped that index - not there yet - first, and
     created it twice; the change dropping it with the type failed the same way backwards."""
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
     operations = [
@@ -226,14 +237,14 @@ async def test_an_index_added_or_dropped_with_a_type_change_is_created_once(clic
         AlterField(model_name="Ledger", name="label", field=CharField(max_length=20)),
     ]
     for operation in operations:
-        await apply_operations("models", state, operation, schema_editor=editor)
+        state = await apply_operations("models", state, operation, schema_editor=editor)
     (table,) = await DatabaseCatalog.inspect_tables(connection, ["clickhouse_ledger"])
     assert sorted(index.columns for index in table.indexes + table.column_indexes) == [["code"], ["label"]]
     for operation in (
         AlterField(model_name="Ledger", name="code", field=CharField(max_length=10)),
         AlterField(model_name="Ledger", name="label", field=CharField(max_length=10)),
     ):
-        await apply_operations("models", state, operation, schema_editor=editor)
+        state = await apply_operations("models", state, operation, schema_editor=editor)
     (table,) = await DatabaseCatalog.inspect_tables(connection, ["clickhouse_ledger"])
     assert [index.columns for index in table.indexes + table.column_indexes] == [["label"]]
 
@@ -242,7 +253,7 @@ async def test_an_index_added_or_dropped_with_a_type_change_is_created_once(clic
 async def test_an_index_added_with_a_nullability_or_default_change_comes_after_the_column_change(clickhouse_db):
     """A change adding a column's index with its nullability or default created the index first, and
     ClickHouse then refused the MODIFY COLUMN of the indexed column."""
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
     operations = [
@@ -260,7 +271,7 @@ async def test_an_index_added_with_a_nullability_or_default_change_comes_after_t
     ]
     try:
         for operation in operations:
-            await apply_operations("models", state, operation, schema_editor=editor)
+            state = await apply_operations("models", state, operation, schema_editor=editor)
         (table,) = await DatabaseCatalog.inspect_tables(connection, ["clickhouse_tally"])
         assert sorted(index.columns for index in table.indexes + table.column_indexes) == [["count"], ["score"]]
         assert next(column for column in table.columns if column.name == "count").nullable
@@ -272,7 +283,7 @@ async def test_an_index_added_with_a_nullability_or_default_change_comes_after_t
 async def test_a_column_an_index_covers_is_removed_with_its_indexes(clickhouse_db):
     """ClickHouse drops no column a data skipping index covers - the removal failed, column and index
     left in place."""
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
     operations = [
@@ -289,7 +300,7 @@ async def test_a_column_an_index_covers_is_removed_with_its_indexes(clickhouse_d
         RemoveField(model_name="Tagged", name="code"),
     ]
     for operation in operations:
-        await apply_operations("models", state, operation, schema_editor=editor)
+        state = await apply_operations("models", state, operation, schema_editor=editor)
     (table,) = await DatabaseCatalog.inspect_tables(connection, ["clickhouse_tagged"])
     assert [column.name for column in table.columns] == ["id", "label", "note"]
     assert [index.columns for index in table.indexes + table.column_indexes] == [["label", "note"]]
@@ -297,7 +308,7 @@ async def test_a_column_an_index_covers_is_removed_with_its_indexes(clickhouse_d
 
 @pytest.mark.asyncio
 async def test_an_index_is_a_data_skipping_index(clickhouse_db):
-    connection = PageView._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(PageView).get_connection()
     await connection.execute_script(
         'CREATE INDEX "pageview_duration_idx" ON "pageview" ("duration_ms") TYPE minmax GRANULARITY 1'
     )
@@ -311,7 +322,7 @@ async def test_an_index_is_a_data_skipping_index(clickhouse_db):
 
 @pytest.mark.asyncio
 async def test_the_introspector_maps_a_type_by_its_whole_name(clickhouse_db):
-    connection = Player._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Player).get_connection()
     await connection.execute_script(
         "CREATE TABLE typed (id UInt64, small UInt8, medium UInt16, large UInt32, numbers Array(Int64), "
         "pairs Map(String, String), amount Decimal(12, 3), moment DateTime64(6, 'UTC'), day Date32, "
@@ -352,7 +363,7 @@ async def test_the_introspector_maps_an_enum_onto_the_enum_field_writing_it(clic
     """An enum column was read back as a CharField of its labels - not the enum the column holds."""
     from hare.dialects.clickhouse.types.clickhouse_enum_types import ClickhouseEnumTypes
 
-    connection = Player._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Player).get_connection()
     color_type = ClickhouseEnumTypes.get_enum_type(ClickhouseEnumTypes.get_label_numbers(["red", "dark blue"]))
     await connection.execute_script(
         f"CREATE TABLE enums (id UInt64, color {color_type}, level Enum8('LOW' = 1, 'HIGH' = 2), "
@@ -380,10 +391,10 @@ async def test_a_narrowing_that_would_lose_data_is_refused(clickhouse_db):
     from hare.fields import ArrayField, DecimalField, MapField, SmallIntField, TupleField
     from hare.migrations.exceptions import FieldNarrowingDataLossError
 
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -411,10 +422,10 @@ async def test_a_narrowing_that_would_lose_data_is_refused(clickhouse_db):
         ("by_name", MapField(CharField(max_length=10), TupleField([SmallIntField(), CharField(max_length=10)]))),
     ):
         with pytest.raises(FieldNarrowingDataLossError):
-            await apply_operations(
+            state = await apply_operations(
                 "models", state, AlterField(model_name="Narrow", name=name, field=narrowed_field), schema_editor=editor
             )
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         AlterField(model_name="Narrow", name="counts", field=ArrayField(ArrayField(BigIntField()))),
@@ -432,10 +443,10 @@ async def test_a_decimal_column_turned_into_an_integer_is_checked_against_its_ra
     from hare.fields import DecimalField
     from hare.migrations.exceptions import FieldNarrowingDataLossError
 
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -451,13 +462,13 @@ async def test_a_decimal_column_turned_into_an_integer_is_checked_against_its_ra
     )
     await connection.execute_script('INSERT INTO "clickhouse_amounts" VALUES (1, 5, 6.5)')
     with pytest.raises(FieldNarrowingDataLossError):
-        await apply_operations(
+        state = await apply_operations(
             "models", state, AlterField(model_name="Amounts", name="split", field=BigIntField()), schema_editor=editor
         )
-    await apply_operations(
+    state = await apply_operations(
         "models", state, AlterField(model_name="Amounts", name="whole", field=BigIntField()), schema_editor=editor
     )
-    await apply_operations(
+    state = await apply_operations(
         "models", state, AlterField(model_name="Amounts", name="whole", field=IntField()), schema_editor=editor
     )
     assert await connection.execute_dicts('SELECT "whole" FROM "clickhouse_amounts"') == [{"whole": 5}]
@@ -466,7 +477,7 @@ async def test_a_decimal_column_turned_into_an_integer_is_checked_against_its_ra
 
 @pytest.mark.asyncio
 async def test_a_column_made_nullable_reads_its_values_as_not_null(clickhouse_db):
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     if (await connection.get_server_version())[:2] < (26, 3):
         pytest.skip(
             "ClickHouse before 26.3 reads the NULL map a column made Nullable lacks in its stored parts as "
@@ -474,7 +485,7 @@ async def test_a_column_made_nullable_reads_its_values_as_not_null(clickhouse_db
         )
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -485,7 +496,7 @@ async def test_a_column_made_nullable_reads_its_values_as_not_null(clickhouse_db
         schema_editor=editor,
     )
     await connection.execute_script("INSERT INTO \"clickhouse_titled\" VALUES (1, 'a')")
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         AlterField(model_name="Titled", name="title", field=CharField(max_length=20, null=True)),
@@ -495,7 +506,7 @@ async def test_a_column_made_nullable_reads_its_values_as_not_null(clickhouse_db
         'SELECT count(*) AS null_count FROM "clickhouse_titled" WHERE "title" IS NULL'
     ) == [{"null_count": 0}]
     assert (await get_columns(connection, "clickhouse_titled"))["title"].nullable
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         AlterField(model_name="Titled", name="title", field=CharField(max_length=20)),
@@ -511,10 +522,10 @@ async def test_a_column_holding_null_is_not_made_not_null(clickhouse_db):
     the data by an UPDATE too."""
     from hare.exceptions import IntegrityError
 
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -529,14 +540,14 @@ async def test_a_column_holding_null_is_not_made_not_null(clickhouse_db):
     )
     await connection.execute_script('INSERT INTO "clickhouse_titled" VALUES (1, NULL)')
     with pytest.raises(IntegrityError, match="holds NULL"):
-        await apply_operations(
+        state = await apply_operations(
             "models",
             state,
             AlterField(model_name="Titled", name="title", field=CharField(max_length=20)),
             schema_editor=editor,
         )
     await connection.execute_script('ALTER TABLE "clickhouse_titled" UPDATE "title" = \'a\' WHERE 1')
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         AlterField(model_name="Titled", name="title", field=CharField(max_length=20)),
@@ -550,10 +561,10 @@ async def test_a_column_holding_null_is_not_made_not_null(clickhouse_db):
 async def test_a_column_changing_its_type_and_made_not_null_gets_the_default_in_its_null_rows(clickhouse_db):
     """The type change made the column non-Nullable first - the backfill of its NULL rows then found
     none, the parts kept their NULLs, and the column made nullable again read them back."""
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -568,7 +579,7 @@ async def test_a_column_changing_its_type_and_made_not_null_gets_the_default_in_
     )
     await connection.execute_script("INSERT INTO \"clickhouse_titled\" VALUES (1, NULL), (2, 'a')")
     for field in (CharField(max_length=60, default=""), CharField(max_length=60, null=True, default="")):
-        await apply_operations(
+        state = await apply_operations(
             "models", state, AlterField(model_name="Titled", name="title", field=field), schema_editor=editor
         )
     assert await connection.execute_dicts('SELECT "title" FROM "clickhouse_titled" ORDER BY "id"') == [
@@ -604,10 +615,10 @@ async def test_an_enum_column_follows_its_members(clickhouse_db):
     class NarrowerLevel(IntEnum):
         LOW = 1
 
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -625,13 +636,13 @@ async def test_an_enum_column_follows_its_members(clickhouse_db):
     # A member the rows hold can't be left out - the column would keep a number of no label.
     for name, narrowed_field in (("color", CharEnumField(NarrowerColor)), ("level", IntEnumField(NarrowerLevel))):
         with pytest.raises(FieldNarrowingDataLossError):
-            await apply_operations(
+            state = await apply_operations(
                 "models",
                 state,
                 AlterField(model_name="Painted", name=name, field=narrowed_field),
                 schema_editor=editor,
             )
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         AlterField(model_name="Painted", name="color", field=CharEnumField(WiderColor)),
@@ -647,7 +658,7 @@ async def test_an_enum_column_follows_its_members(clickhouse_db):
     await connection.execute_script(
         'ALTER TABLE "clickhouse_painted" DELETE WHERE "id" = 2 SETTINGS mutations_sync = 2'
     )
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         AlterField(model_name="Painted", name="level", field=IntEnumField(NarrowerLevel)),
@@ -660,7 +671,7 @@ async def test_an_enum_column_follows_its_members(clickhouse_db):
 async def test_a_backfill_fills_every_row(clickhouse_db):
     """A mutation reports no count of rows: the batches ended after the first one, and the rows
     beyond it kept their NULL."""
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
     operations = [
@@ -674,12 +685,12 @@ async def test_a_backfill_fills_every_row(clickhouse_db):
         ),
     ]
     for operation in operations:
-        await apply_operations("models", state, operation, schema_editor=editor)
+        state = await apply_operations("models", state, operation, schema_editor=editor)
     await connection.execute_script(
         'INSERT INTO "clickhouse_parcel" ("id", "code") SELECT number, if(number = 3, \'kept\', NULL) FROM numbers(7)'
     )
 
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         BackfillColumn(model_name="Parcel", field_name="code", value="x", batch_size=2),
@@ -698,7 +709,7 @@ async def test_a_relation_made_nullable_keeps_the_index_of_its_key_column(clickh
     """A data skipping index blocks a MODIFY COLUMN of the column it covers - the key column's index,
     the one over every key column of a relation to a composite key, is dropped for the change and
     created again."""
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
     key_fields = (
@@ -724,7 +735,7 @@ async def test_a_relation_made_nullable_keeps_the_index_of_its_key_column(clickh
     ]
     try:
         for operation in operations:
-            await apply_operations("models", state, operation, schema_editor=editor)
+            state = await apply_operations("models", state, operation, schema_editor=editor)
         (doc_ref,) = await DatabaseCatalog.inspect_tables(connection, ["clickhouse_doc_ref"])
     finally:
         await connection.execute_script(
@@ -742,10 +753,10 @@ async def test_drift_reports_a_primary_key_of_other_columns(clickhouse_db):
     from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
     from hare.migrations.drift import detect_drift
 
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -776,10 +787,10 @@ async def test_a_narrowing_after_a_deleted_row_that_wouldnt_fit(clickhouse_db):
     converted the deleted row too and failed (DECIMAL_OVERFLOW), the migration stuck."""
     from hare.fields import DecimalField
 
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -794,7 +805,7 @@ async def test_a_narrowing_after_a_deleted_row_that_wouldnt_fit(clickhouse_db):
     )
     await connection.execute_script('INSERT INTO "clickhouse_priced" VALUES (1, 1.5), (2, 9999999999.99)')
     await connection.execute_script('DELETE FROM "clickhouse_priced" WHERE "id" = 2')
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         AlterField(model_name="Priced", name="price", field=DecimalField(max_digits=5, decimal_places=2)),
@@ -811,10 +822,10 @@ async def test_a_narrowing_after_a_deleted_row_that_wouldnt_fit(clickhouse_db):
 async def test_a_column_made_not_null_after_a_deleted_null_row(clickhouse_db, db_default):
     """The NULL backfill reads no deleted row - the MODIFY COLUMN to NOT NULL then converted the deleted
     NULL too and failed (CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN), the migration stuck."""
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -830,7 +841,7 @@ async def test_a_column_made_not_null_after_a_deleted_null_row(clickhouse_db, db
     await connection.execute_script('INSERT INTO "clickhouse_counted" VALUES (1, 3), (2, NULL)')
     await connection.execute_script('DELETE FROM "clickhouse_counted" WHERE "id" = 2')
     not_null_field = IntField(default=0) if db_default is None else IntField(db_default=db_default)
-    await apply_operations(
+    state = await apply_operations(
         "models", state, AlterField(model_name="Counted", name="count", field=not_null_field), schema_editor=editor
     )
     assert await connection.execute_dicts('SELECT "id", "count" FROM "clickhouse_counted"') == [{"id": 1, "count": 3}]
@@ -849,16 +860,16 @@ async def test_an_index_no_migrate_could_apply_is_refused_before_one_is_written(
     from hare.exceptions import ConfigurationError, UnSupportedError
     from hare.migrations.operations import AddIndex
 
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     meta = SimpleNamespace(
-        connection=connection, full_name="models.Sorted", indexes=[Index(fields=["-number", "name"], name="sorted")]
+        _model=Team, full_name="models.Sorted", indexes=[Index(fields=["-number", "name"], name="sorted")]
     )
     with pytest.raises(ConfigurationError, match="direction"):
-        ModelConnectionChecks.raise_if_index_key_orders_unsupported(SimpleNamespace(_meta=meta))
+        ModelConnectionChecks.raise_if_index_key_orders_unsupported(meta, connection)
 
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -891,10 +902,10 @@ async def test_a_narrowing_of_clickhouse_specific_types_that_would_lose_data_is_
     from hare.fields import DateField, DatetimeField, FloatField
     from hare.migrations.exceptions import FieldNarrowingDataLossError
 
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -926,7 +937,7 @@ async def test_a_narrowing_of_clickhouse_specific_types_that_would_lose_data_is_
         ("huge", Int128Field()),
     ):
         with pytest.raises(FieldNarrowingDataLossError):
-            await apply_operations(
+            state = await apply_operations(
                 "models",
                 state,
                 AlterField(model_name="NarrowOwn", name=name, field=narrowed_field),
@@ -936,7 +947,7 @@ async def test_a_narrowing_of_clickhouse_specific_types_that_would_lose_data_is_
         ("stamp", ClickhouseDatetimeField(precision=3)),
         ("code", FixedStringField(length=6)),
     ):
-        await apply_operations(
+        state = await apply_operations(
             "models", state, AlterField(model_name="NarrowOwn", name=name, field=narrowed_field), schema_editor=editor
         )
     await apply_operations("models", state, DeleteModel(name="NarrowOwn"), schema_editor=editor)
@@ -950,7 +961,7 @@ async def test_a_column_change_keeps_what_the_rows_hold(clickhouse_db):
     from enum import IntEnum
 
     from hare.dialects.clickhouse.fields import FixedStringField
-    from hare.fields import ArrayField, IntEnumField, IntField
+    from hare.fields import ArrayField, IntEnumField, IntField, MapField, TextField
     from hare.migrations.exceptions import FieldNarrowingDataLossError
 
     class Level(IntEnum):
@@ -960,10 +971,10 @@ async def test_a_column_change_keeps_what_the_rows_hold(clickhouse_db):
     class NarrowerLevel(IntEnum):
         LOW = 1
 
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -973,6 +984,8 @@ async def test_a_column_change_keeps_what_the_rows_hold(clickhouse_db):
                 ("count", IntField()),
                 ("code", FixedStringField(length=8, null=True)),
                 ("numbers", ArrayField(IntField(null=True))),
+                ("counts", MapField(TextField(), IntField(null=True))),
+                ("groups", MapField(TextField(), ArrayField(IntField(null=True)))),
                 ("level", IntEnumField(Level, null=True)),
             ],
             options={"table": "clickhouse_kept"},
@@ -980,10 +993,12 @@ async def test_a_column_change_keeps_what_the_rows_hold(clickhouse_db):
         schema_editor=editor,
     )
     await connection.execute_script(
-        "INSERT INTO \"clickhouse_kept\" VALUES (1, 1, 'ab', [1, NULL], 'LOW'), (2, 2, NULL, [2], NULL), "
-        "(3, 3, 'abcd', [], 'LOW')"
+        'INSERT INTO "clickhouse_kept" VALUES '
+        "(1, 1, 'ab', [1, NULL], map('a', NULL), map('a', [1, NULL]), 'LOW'), "
+        "(2, 2, NULL, [2], map('b', 2), map('b', [2]), NULL), "
+        "(3, 3, 'abcd', [], map(), map(), 'LOW')"
     )
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         AlterField(model_name="Kept", name="code", field=FixedStringField(length=4, null=True)),
@@ -992,21 +1007,23 @@ async def test_a_column_change_keeps_what_the_rows_hold(clickhouse_db):
     codes = await connection.execute_dicts('SELECT id, "code" FROM "clickhouse_kept" ORDER BY id')
     codes_text = [row["code"].decode() if isinstance(row["code"], bytes) else row["code"] for row in codes]
     assert [code if code is None else code.rstrip("\x00") for code in codes_text] == ["ab", None, "abcd"]
-    with pytest.raises(FieldNarrowingDataLossError, match="NULL element"):
-        await apply_operations(
-            "models",
-            state,
-            AlterField(model_name="Kept", name="numbers", field=ArrayField(IntField())),
-            schema_editor=editor,
-        )
+    for name, narrowed in (
+        ("numbers", ArrayField(IntField())),
+        ("counts", MapField(TextField(), IntField())),
+        ("groups", MapField(TextField(), ArrayField(IntField()))),
+    ):
+        with pytest.raises(FieldNarrowingDataLossError, match="1 existing row.*NULL element"):
+            state = await apply_operations(
+                "models", state, AlterField(model_name="Kept", name=name, field=narrowed), schema_editor=editor
+            )
     assert await connection.execute_dicts('SELECT count(*) AS n FROM "clickhouse_kept"') == [{"n": 3}]
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         AlterField(model_name="Kept", name="level", field=IntEnumField(NarrowerLevel, null=True)),
         schema_editor=editor,
     )
-    await connection.execute_script("INSERT INTO \"clickhouse_kept\" VALUES (4, 4, NULL, [], 'LOW')")
+    await connection.execute_script("INSERT INTO \"clickhouse_kept\" VALUES (4, 4, NULL, [], map(), map(), 'LOW')")
     await apply_operations("models", state, DeleteModel(name="Kept"), schema_editor=editor)
 
 
@@ -1016,10 +1033,10 @@ async def test_a_dynamic_column_changes_its_max_types(clickhouse_db):
     cast its values to a Nullable Dynamic, which the server has no type of. A Dynamic holds any value."""
     from hare.dialects.clickhouse.fields import DynamicField
 
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -1035,7 +1052,7 @@ async def test_a_dynamic_column_changes_its_max_types(clickhouse_db):
     select_sql = 'SELECT id, toString("value") AS value FROM "clickhouse_loose" ORDER BY id'
     stored = await connection.execute_dicts(select_sql)
     for max_types in (1, 16, None, 0):
-        await apply_operations(
+        state = await apply_operations(
             "models",
             state,
             AlterField(model_name="Loose", name="value", field=DynamicField(max_types=max_types)),
@@ -1052,14 +1069,14 @@ async def test_a_nested_member_made_not_null_beside_a_null_is_refused(clickhouse
     from hare.fields import NestedField
     from hare.migrations.exceptions import FieldNarrowingDataLossError
 
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
 
     def nested(code_null: bool) -> NestedField:
         return NestedField({"code": CharField(max_length=10, null=code_null), "count": IntField(null=True)})
 
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -1073,13 +1090,13 @@ async def test_a_nested_member_made_not_null_beside_a_null_is_refused(clickhouse
         "INSERT INTO \"clickhouse_basket\" VALUES (1, [('a', 1), (NULL, 2)]), (2, []), (3, [('c', NULL)])"
     )
     with pytest.raises(FieldNarrowingDataLossError, match="1 existing row"):
-        await apply_operations(
+        state = await apply_operations(
             "models", state, AlterField(model_name="Basket", name="lines", field=nested(False)), schema_editor=editor
         )
     await connection.execute_script(
         'ALTER TABLE "clickhouse_basket" DELETE WHERE "id" = 1 SETTINGS mutations_sync = 2'
     )
-    await apply_operations(
+    state = await apply_operations(
         "models", state, AlterField(model_name="Basket", name="lines", field=nested(False)), schema_editor=editor
     )
     rows = await connection.execute_dicts('SELECT id, length("lines") AS n FROM "clickhouse_basket" ORDER BY id')

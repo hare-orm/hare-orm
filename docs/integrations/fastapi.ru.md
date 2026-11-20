@@ -27,7 +27,7 @@ class BookSchema(BaseModel):
 
 
 @app.get("/books", response_model=PageSchema[BookSchema])
-async def list_books(books: BookQuery = RequestQueryDependency.provide(BookQuery)) -> Page[Book]:
+async def list_books(books: BookQuery = app.request_query(BookQuery)) -> Page[Book]:
     return await books.page()
 ```
 
@@ -39,7 +39,8 @@ class HareFastAPI(FastAPI):
         self,
         *,
         hare_config: Mapping[str, Any] | HareConfig | str,
-        atomic_requests: bool | Sequence[str] = False,
+        hare_context: HareContext | None = None,
+        atomic_requests: bool | Iterable[str] = False,
         lifespan: Lifespan | None = None,
         health_routes: HealthRoutes | None = None,
         **kwargs: Any,
@@ -52,11 +53,13 @@ class HareFastAPI(FastAPI):
 - **Модели привязываются при создании приложения** (`Hare.bind_models()`, без подключения). FastAPI
   читает параметры маршрута при его объявлении, а параметры запроса из параметров —
   [`Meta.filters`](request-queries.ru.md#meta-filters), описания его фильтров — читаются из моделей.
-  Маршрутизатору, объявленному в модуле, который импортируется до создания приложения, нужен вызов
-  `Hare.bind_models(HARE_CONFIG)` до этого импорта.
+  Для отдельно объявленного маршрутизатора передайте явный офлайн-реестр:
+  `RequestQueryDependency.provide(QueryClass, apps=apps)`, где
+  `apps = Hare.bind_models(HARE_CONFIG)`. Результат `bind_models()` нужно передать зависимости:
+  сам вызов не меняет глобальные метаданные моделей.
 - **`HareContext`.** Открывается при запуске приложения, до его собственного `lifespan` — у которого база
-  уже есть, — и закрывается при остановке. Контекст — глобальный запасной, поэтому его видит каждый
-  запрос. При остановке `Hare.close_connections()` ещё и дожидается фоновых наблюдателей, которые ещё
+  уже есть, — и закрывается при остановке. Middleware активирует контекст приложения для каждого
+  запроса. При остановке `HareContext.close_connections()` ещё и дожидается фоновых наблюдателей, которые ещё
   работают.
 - **Запросы из параметров проверяются при запуске.** `RequestQuery.check_declarations()` выполняется, как
   только модели настроены: ошибочный [запрос из параметров](request-queries.ru.md) не даёт приложению
@@ -85,7 +88,7 @@ class HareFastAPI(FastAPI):
 
 ## <a id="request-queries-as-dependencies"></a>Запросы из параметров как зависимости
 
-`RequestQueryDependency.provide(QueryClass)` — это `Depends()`, который строит запрос из параметров
+`app.request_query(QueryClass)` — это `Depends()`, который строит запрос из параметров
 HTTP-запроса. Каждый параметр класса становится параметром маршрута, проверяется FastAPI и перечисляется
 в схеме OpenAPI с типом, значением по умолчанию, ограничениями, перечислением и описанием:
 
@@ -102,7 +105,7 @@ class ChapterQuery(RequestQuery[Chapter]):
 
 
 @app.get("/chapters/{pk}", response_model=ChapterSchema)
-async def get_chapter(chapter: ChapterQuery = RequestQueryDependency.provide(ChapterQuery)) -> Chapter:
+async def get_chapter(chapter: ChapterQuery = app.request_query(ChapterQuery)) -> Chapter:
     return await chapter.get()
 ```
 
@@ -110,6 +113,11 @@ async def get_chapter(chapter: ChapterQuery = RequestQueryDependency.provide(Cha
 получает сам HTTP-запрос: `query.request`, а также адреса `next` и `previous` для страницы. На значение,
 которое запрос отклоняет, — сортировку, которую он не разрешает, испорченный курсор, — отвечают так же,
 как FastAPI отвечает на неверный параметр.
+
+Для обычного приложения FastAPI используйте `RequestQueryDependency.provide(QueryClass, apps=apps)`,
+где `apps = Hare.bind_models(config)` явно выбирает метаданные до запуска. Зависимость читает
+из этого реестра только схему; при обработке запроса исходное объявление создаётся в области
+работающего приложения.
 
 ## <a id="responses"></a>Ответы
 
@@ -148,6 +156,12 @@ app = HareFastAPI(hare_config=HARE_CONFIG, health_routes=HealthRoutes(HealthChec
 ## <a id="tests"></a>Тесты
 
 С pytest-плагином hare тестируемое приложение работает на тестовых базах: запущенное в цикле событий теста
-(его lifespan, с клиентом httpx и `ASGITransport`), под `hare_app_db` оно берёт контекст теста, и его
+(его lifespan, с клиентом httpx и `ASGITransport`), с `hare_context=hare_app_db` оно берёт контекст теста, и
+его
 записи откатываются вместе с записями теста, — см. [Тесты приложения](../testing/setup.ru.md#application-tests).
 `TestClient` из Starlette запускает приложение в своём потоке — с ним берите `hare_app_transactional_db`.
+
+Явно переданный `hare_context` остаётся под управлением вызывающего кода: интеграция не инициализирует
+и не закрывает его. Без этого аргумента приложение создаёт и закрывает отдельный контекст.
+Запуск приложения не задаёт глобальный запасной контекст. В тестах передавайте фикстуру явно:
+`hare_context=hare_app_db` или `hare_context=hare_app_transactional_db`.

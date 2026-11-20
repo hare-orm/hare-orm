@@ -9,7 +9,7 @@ import shutil
 
 from hare.cli.context.cli_context import CLIContext
 from hare.cli.context.command_context import CommandContext
-from hare.cli.exceptions import CLIError, CLIUsageError
+from hare.cli.exceptions import CLIError
 from hare.core.connections.connections import Connections
 from hare.exceptions import UnSupportedError
 
@@ -31,10 +31,13 @@ class DatabaseShellCommands:
                 client isn't installed.
         """
         hare_config = CommandContext.load_config(cli_context)
-        if connection_alias is not None and connection_alias not in hare_config.connections:
-            raise CLIUsageError(f"Unknown connection alias: {connection_alias}")
+        if connection_alias is not None:
+            CommandContext.check_connection_alias(hare_config, connection_alias)
         opened_connection_alias = connection_alias or next(iter(hare_config.connections))
-        async with CommandContext.database_error_boundary(), CommandContext.hare_cli_context(hare_config.to_dict()):
+        async with (
+            CommandContext.database_error_boundary(),
+            CommandContext.hare_cli_context(hare_config, connect=False),
+        ):
             client = Connections.get(opened_connection_alias)
             try:
                 command = await client.get_shell_command()

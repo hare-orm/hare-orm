@@ -49,7 +49,7 @@ class Round(Function):
                 f"Round() precision must be between 0 and {DECIMAL_OUTPUT_FIELD_MAX_DIGITS}, got "
                 f"{ValueDescriptions.get_shown_text(precision)}"
             )
-        super().__init__(field)  # type: ignore[arg-type]
+        super().__init__(field)
         self.precision = precision
 
     def get_plan_options(self) -> tuple[Any, ...]:
@@ -63,6 +63,7 @@ class Round(Function):
 
         Args:
             field_object: The rounded value's field.
+            expression_context: SQL context for the expression, including its query, binding and connection.
 
         Returns:
             The field the rounded result is decoded through.

@@ -1,15 +1,11 @@
 from __future__ import annotations
 
 import abc
-import time
-import weakref
 from typing import TYPE_CHECKING
 
 from hare.exceptions import (
     TransactionManagementError,
 )
-from hare.instrumentation.observers.observers import Observers
-from hare.transactions.enums import TransactionEventType
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -23,15 +19,6 @@ class TransactionContext:
 
     client: TransactionClient
     _entered: bool = False
-
-    def _link_client(self, client: TransactionClient) -> None:
-        """Lets ``client`` release this context's resources as soon as its real COMMIT/ROLLBACK
-        has landed."""
-        client._transaction_context_reference = weakref.ref(self)
-
-    async def _release_resources(self) -> None:
-        """Hands back whatever this context acquired for its transaction - nothing by default.
-        Idempotent."""
 
     def _mark_entered(self) -> None:
         """Marks this context as used - a transaction context is single-use.
@@ -57,92 +44,39 @@ class TransactionContext:
     ) -> None: ...
 
     @staticmethod
-    def _record_transaction_begin(client: TransactionClient) -> None:
-        """Reports the BEGIN to the observers and stamps ``client._transaction_started_at`` - for a
-        top-level transaction only, never a savepoint.
-        """
-        client._transaction_started_at = time.perf_counter()
-        Observers.record_transaction(TransactionEventType.BEGIN, client.connection_alias, 0.0, None)
-
-    async def _apply_transaction_restrictions(self, client: TransactionClient) -> None:
-        """Applies ``client``'s read-only mode/statement timeout right after a top-level BEGIN,
-        ending the transaction through this context's own exit path if that fails.
-
-        Args:
-            client: the wrapper this context has just begun a transaction on.
-        """
-        try:
-            await client._apply_transaction_restrictions()
-        except BaseException as error:
-            await self.__aexit__(type(error), error, error.__traceback__)
-            raise
-
-    @staticmethod
-    async def _commit_or_rollback(
-        client: TransactionClient, exception_type: type[BaseException] | None, exception: BaseException | None = None
+    async def _roll_back_keeping_error(
+        client: TransactionClient, error: BaseException | None, *, after_failed_release: bool = False
     ) -> None:
-        """Commits, or rolls back when the block raised - the exit of every top-level transaction
-        context. ``client.commit()`` runs the ``on_commit()`` callbacks itself.
+        """Attach rollback failures to the active error. Cancellation of the caller propagates
+        after rollback cleanup, even when the block already raised.
 
         Args:
-            client: The transaction's client.
-            exception_type: The type of the exception the block raised, if any.
-            exception: The exception the block raised, if any. A failure while rolling back never
-                replaces it - it is logged and attached as a note.
-        """
-        if client._finalized:
-            return
-        if not exception_type:
-            try:
-                await client.commit()
-            except Exception as commit_error:
-                # A COMMIT that failed before reaching the server leaves the transaction open.
-                if not client._finalized and not client._shielded_operation_abandoned:
-                    await TransactionContext._roll_back_keeping_error(client, commit_error)
-                raise
-            return
-        await TransactionContext._roll_back_keeping_error(client, exception)
-
-    @staticmethod
-    async def _roll_back_keeping_error(client: TransactionClient, error: BaseException | None) -> None:
-        """Rolls ``client``'s transaction back while ``error`` is propagating - a failure doing so
-        is logged and attached to ``error`` as a note instead of replacing it.
-
-        Args:
-            client: the top-level transaction wrapper.
+            client: The transaction or savepoint being rolled back.
             error: the exception propagating out of the block, None when there is none.
+            after_failed_release: Whether the savepoint release already failed.
         Raises:
-            Exception: the rollback failure, when ``error`` is None.
+            BaseException: Caller cancellation, or the rollback failure when ``error`` is None.
         """
+        wait_cancelled = False
+
+        def mark_wait_cancelled() -> None:
+            nonlocal wait_cancelled
+            wait_cancelled = True
+
+        is_savepoint = client._savepoint_name is not None
+        rollback = client.savepoint_rollback if is_savepoint else client.rollback
         try:
-            await client.rollback()
-        except Exception as rollback_error:
-            if error is None:
+            await rollback(_on_wait_cancelled=mark_wait_cancelled)
+        except BaseException as rollback_error:
+            if wait_cancelled or error is None:
                 raise
-            if client._finalized:
-                # The ROLLBACK itself landed - only an on_rollback() callback failed.
+            if client.transaction_state.finished:
                 client.log.error("on_rollback() callback failed", exc_info=rollback_error)
-                error.add_note(f"on_rollback() callback failed after the rollback: {rollback_error!r}")
+                completed = "rolling back the savepoint" if is_savepoint else "the rollback"
+                error.add_note(f"on_rollback() callback failed after {completed}: {rollback_error!r}")
             else:
-                client.log.error("Rolling back the transaction failed", exc_info=rollback_error)
-                error.add_note(f"Rolling back the transaction also failed: {rollback_error!r}")
-
-    @staticmethod
-    def _report_release_failure(client: TransactionClient, in_flight: BaseException | None) -> None:
-        """Surfaces a failed release of the transaction's connection/lock without letting it
-        replace the exception already propagating out of the block.
-
-        Args:
-            client: The transaction's client.
-            in_flight: the exception already propagating out of this context, if any.
-
-        Raises:
-            Exception: the release failure, when nothing else is propagating.
-        """
-        release_failure = client._release_failure
-        if release_failure is None:
-            return
-        if in_flight is None:
-            raise release_failure
-        client.log.error("Releasing the transaction's connection failed", exc_info=release_failure)
-        in_flight.add_note(f"Releasing the transaction's connection also failed: {release_failure!r}")
+                action = "Rolling back the savepoint" if is_savepoint else "Rolling back the transaction"
+                if after_failed_release:
+                    action += " after its failed release"
+                client.log.error("%s failed", action, exc_info=rollback_error)
+                error.add_note(f"{action} also failed: {rollback_error!r}")

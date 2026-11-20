@@ -34,20 +34,6 @@ class Boolean(Comparator):
     XOR = "XOR"
 
 
-class JoinType(StrEnum):
-    """How a source is joined - the dialect's clauses write the keyword of each."""
-
-    INNER = "inner"
-    LEFT_OUTER = "left_outer"
-    #: Each row joined with the one row of the other table closest to it by an inequality, after
-    #: the equalities - or with NULLs when none is.
-    ASOF_LEFT = "asof_left"
-    #: Each row repeated with each element of an array of it - no row for an empty array, or (left) a
-    #: row with the element type's default.
-    ARRAY = "array"
-    LEFT_ARRAY = "left_array"
-
-
 class SetOperation(StrEnum):
     UNION = "UNION"
     UNION_ALL = "UNION ALL"

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -10,7 +10,6 @@ from hare.ddl import RawSQLTerm
 from hare.ddl.constraints import CheckConstraint, UniqueConstraint
 from hare.ddl.indexes import Index
 from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-from hare.dialects.base.schema.tables.table_comments import TableComments
 from hare.fields.field import Field
 from hare.fields.relations.fields import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
@@ -35,25 +34,11 @@ from hare.migrations.state.state import State
 from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
 from tests.utils.fake_client import FakeClient
+from tests.utils.model_bindings import ModelBindings
 from tests.utils.operations import apply_operations
+from tests.utils.schema_editor import TestSchemaEditor
 
 pytestmark = pytest.mark.database_independent
-
-
-class TestSchemaEditorTableComments(TableComments):
-    __test__ = False
-
-    def get_table_comment_sql(self, table: str, comment: str) -> str:
-        return ""
-
-    def get_column_comment_sql(self, table: str, column: str, comment: str) -> str:
-        return ""
-
-
-class TestSchemaEditor(BaseSchemaEditor):
-    __test__ = False
-
-    table_comments_class = TestSchemaEditorTableComments
 
 
 def make_model(
@@ -71,7 +56,7 @@ def make_model(
 
 
 def build_state(app_label: str, model: type) -> State:
-    return State(models={(app_label, model.__name__): ModelState.make_from_model(app_label, model)})
+    return State(models={(app_label, model.__name__): ModelState.make_from_declaration(app_label, model)})
 
 
 @pytest.mark.asyncio
@@ -187,7 +172,7 @@ async def test_m2m_through_model_migration_lifecycle_emits_no_extra_through_tabl
     state = State()
 
     # One migration - the relation's target and through model come with it.
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -223,13 +208,13 @@ async def test_m2m_through_model_migration_lifecycle_emits_no_extra_through_tabl
     client.executed.clear()
 
     person = state.apps.get_model("models.Person")
-    m2m_field = cast(ManyToManyFieldInstance, person._meta.fields_map["groups"])
+    m2m_field: ManyToManyFieldInstance = state.apps.get_binding(person).fields_map["groups"]
     assert m2m_field.through == "membership"
     assert m2m_field.forward_keys == ("group_id",)
     assert m2m_field.backward_keys == ("person_id",)
 
     # AddField on the through model itself (an ordinary extra column) - normal ADD COLUMN DDL.
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         AddField(model_name="Membership", name="note", field=fields.CharField(max_length=10, null=True)),
@@ -240,7 +225,12 @@ async def test_m2m_through_model_migration_lifecycle_emits_no_extra_through_tabl
 
     # Removing the M2M field itself must NOT drop the through model's table - it's still a real,
     # independently-tracked model.
-    await apply_operations("models", state, RemoveField(model_name="Person", name="groups"), schema_editor=editor)
+    state = await apply_operations(
+        "models",
+        state,
+        RemoveField(model_name="Person", name="groups"),
+        schema_editor=editor,
+    )
     assert client.executed == []
     client.executed.clear()
 
@@ -257,7 +247,7 @@ async def test_delete_model_with_m2m_through_model_does_not_redundantly_drop_thr
     editor = TestSchemaEditor(client)
     state = State()
 
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -442,7 +432,7 @@ async def test_create_model_names_the_unique_constraint_of_a_unique_field() -> N
 
     create_client = FakeClient("sql")
     create_editor = TestSchemaEditor(create_client)
-    await create_editor.create_model(OldModel)
+    await create_editor.create_model(ModelBindings.prepare(OldModel).get_binding(OldModel))
 
     assert len(create_client.executed) == 1
     assert create_client.executed[0] == (
@@ -609,7 +599,7 @@ async def test_run_sql_forward_and_backward() -> None:
     )
 
     # Forward
-    await apply_operations("models", state, op, schema_editor=editor)
+    state = await apply_operations("models", state, op, schema_editor=editor)
 
     assert len(client.executed) == 1
     assert client.executed[0] == 'CREATE INDEX "idx_widget_name" ON "widget" ("name")'

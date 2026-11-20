@@ -4,25 +4,301 @@ _NON_PRAGMA_KWARGS allowlist, not by having to
 remember every non-pragma kwarg at the .pop() call site."""
 
 import asyncio
+import gc
 import sqlite3
+import sys
+import threading
+import weakref
+from pathlib import Path
 from types import SimpleNamespace
 
+import aiosqlite
 import pytest
 
 from hare.contrib.test import requires_features
 from hare.core.config import HareConfig
 from hare.core.hare_context import HareContext
+from hare.dialects.base.client.enums import StatementForm
 from hare.dialects.base.client.transaction_lifecycle.transaction_ending import TransactionEnding
+from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
 from hare.dialects.sqlite.client import sqlite_client as sqlite_client_module
 from hare.dialects.sqlite.drivers.aiosqlite.client import (
     AiosqliteClient,
     AiosqliteClientWithRegexpSupport,
 )
-from hare.exceptions import DBConnectionError, IntegrityError, OperationalError, TransactionManagementError
+from hare.dialects.sqlite.drivers.aiosqlite.client.aiosqlite_transaction_client import AiosqliteTransactionClient
+from hare.exceptions import (
+    ConfigurationError,
+    DBConnectionError,
+    IntegrityError,
+    OperationalError,
+    TransactionManagementError,
+)
 from hare.instrumentation.declarations import QueryExecuted
 from hare.instrumentation.observers.observers import Observers
 from hare.transactions.transactions import Transactions
 from tests.shared_models.testmodels import Tournament
+
+
+@pytest.mark.sqlite_only
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows filenames cannot contain a colon")
+@pytest.mark.asyncio
+async def test_memory_database_deletion_preserves_same_named_filesystem_entry(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    sentinel = tmp_path / ":memory:"
+    sentinel.write_bytes(b"unrelated filesystem entry")
+    client = AiosqliteClient(file_path=":memory:", connection_alias="storage-memory")
+    try:
+        assert await client.execute_dicts("SELECT 7 AS value") == [{"value": 7}]
+        await client.db_delete()
+        assert sentinel.read_bytes() == b"unrelated filesystem entry"
+    finally:
+        await client.close()
+
+
+@pytest.mark.sqlite_only
+@pytest.mark.asyncio
+async def test_deletion_after_close_uses_the_opened_database_path(tmp_path, monkeypatch):
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    monkeypatch.chdir(first)
+    client = AiosqliteClient(file_path="storage.sqlite3", connection_alias="storage-file")
+    try:
+        await client.db_create()
+        await client.execute_script("CREATE TABLE sample(value int); INSERT INTO sample VALUES(7)")
+        await client.close()
+        await client.close()
+        unrelated = second / "storage.sqlite3"
+        unrelated.write_bytes(b"another directory's file")
+        monkeypatch.chdir(second)
+        await client.db_delete()
+        assert not (first / "storage.sqlite3").exists()
+        assert unrelated.read_bytes() == b"another directory's file"
+    finally:
+        await client.close()
+
+
+@pytest.mark.sqlite_only
+@pytest.mark.asyncio
+async def test_unopened_create_check_does_not_claim_a_later_file(tmp_path, monkeypatch):
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    monkeypatch.chdir(first)
+    client = AiosqliteClient(file_path="checked.sqlite3", connection_alias="storage-check")
+    await client.db_create()
+    (first / "checked.sqlite3").write_bytes(b"external first")
+    (second / "checked.sqlite3").write_bytes(b"external second")
+    monkeypatch.chdir(second)
+    await client.db_delete()
+    assert (first / "checked.sqlite3").read_bytes() == b"external first"
+    assert (second / "checked.sqlite3").read_bytes() == b"external second"
+    explicit = AiosqliteClient(file_path=first / "checked.sqlite3", connection_alias="explicit-delete")
+    await explicit.db_delete()
+    assert not (first / "checked.sqlite3").exists()
+    assert (second / "checked.sqlite3").read_bytes() == b"external second"
+
+
+@pytest.mark.sqlite_only
+@pytest.mark.asyncio
+async def test_uri_create_refuses_the_native_existing_target(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    identifier = "file:existing.sqlite3?mode=rwc"
+    try:
+        oracle = sqlite3.connect(identifier)
+    except sqlite3.Error:
+        pytest.skip("This native SQLite build cannot open this file identifier")
+    try:
+        oracle.execute("CREATE TABLE sample(value int)")
+        oracle.execute("INSERT INTO sample VALUES(7)")
+        oracle.commit()
+        filename = next(row[2] for row in oracle.execute("PRAGMA database_list") if row[1] == "main")
+    finally:
+        oracle.close()
+    target = Path(filename)
+    before = target.read_bytes()
+    client = AiosqliteClient(file_path=identifier, connection_alias="storage-uri")
+    try:
+        with pytest.raises(OperationalError, match="already exists"):
+            await client.db_create()
+        assert target.read_bytes() == before
+    finally:
+        await client.close()
+
+
+@pytest.mark.sqlite_only
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["open", "probe", "create"])
+async def test_cancelled_connection_acquisition_closes_the_late_native_handle(tmp_path, monkeypatch, operation):
+    monkeypatch.chdir(tmp_path)
+    started, release = asyncio.Event(), threading.Event()
+    wrappers, references, closed = [], [], []
+    loop = asyncio.get_running_loop()
+    original_connect = aiosqlite.connect
+    client = AiosqliteClient(
+        file_path="file:cancelled?mode=memory&cache=private"
+        if operation == "create"
+        else tmp_path / "cancelled.sqlite3",
+        connection_alias="cancelled-open",
+    )
+
+    class TrackedConnection(sqlite3.Connection):
+        def close(self):
+            closed.append(True)
+            return super().close()
+
+    def connecting(*args, **kwargs):
+        connection = original_connect(*args, **kwargs, factory=TrackedConnection, check_same_thread=False)
+        wrappers.append(connection)
+        original_connector = connection._connector
+
+        def opening():
+            loop.call_soon_threadsafe(started.set)
+            if not release.wait(5):
+                raise RuntimeError("connection acquisition was not released")
+            raw_connection = original_connector()
+            references.append(weakref.ref(raw_connection))
+            return raw_connection
+
+        connection._connector = opening
+        return connection
+
+    async def opening():
+        if operation == "open":
+            await client.create_connection(with_db=True)
+        elif operation == "probe":
+            await client._probe_storage_filename(client.filename)
+        else:
+            await client.db_create()
+
+    monkeypatch.setattr(aiosqlite, "connect", connecting)
+    collecting = gc.isenabled()
+    gc.disable()
+    task = asyncio.create_task(opening())
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        await client.close()
+        await asyncio.to_thread(wrappers[0]._thread.join, 5)
+        assert not wrappers[0]._thread.is_alive()
+        assert len(references) == 1
+        assert closed == [True]
+        native = references[0]()
+        if native is not None:
+            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                native.execute("SELECT 41+1")
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await client.close()
+        for reference in references:
+            native = reference()
+            if native is not None:
+                sqlite3.Connection.close(native)
+        if collecting:
+            gc.enable()
+
+
+@pytest.mark.sqlite_only
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["cancel", "repeated-cancel", "close-error"])
+async def test_interrupted_close_releases_the_client_slot_and_can_reopen(tmp_path, monkeypatch, failure):
+    client = AiosqliteClient(file_path=tmp_path / "closing.sqlite3", connection_alias="interrupted-close")
+    await client.execute_script("CREATE TABLE sample(value int); INSERT INTO sample VALUES(19)")
+    connection = client._connection
+    started, release = asyncio.Event(), asyncio.Event()
+    original_close = aiosqlite.Connection.close
+    intercepted = False
+
+    async def closing(candidate):
+        nonlocal intercepted
+        await original_close(candidate)
+        if candidate is connection and not intercepted:
+            intercepted = True
+            started.set()
+            await release.wait()
+            if failure == "close-error":
+                raise RuntimeError("reported after physical close")
+
+    monkeypatch.setattr(aiosqlite.Connection, "close", closing)
+    task = asyncio.create_task(client.close())
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        if failure != "close-error":
+            task.cancel()
+            if failure == "repeated-cancel":
+                await asyncio.sleep(0)
+                task.cancel()
+        release.set()
+        with pytest.raises(RuntimeError if failure == "close-error" else asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        assert client._connection is None
+        assert await client.execute_dicts("SELECT value FROM sample") == [{"value": 19}]
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await client.close()
+
+
+@requires_features(dialect="sqlite")
+@pytest.mark.asyncio
+async def test_cancelled_cursor_opening_closes_result_before_releasing_connection(db, monkeypatch):
+    started, release, closed = asyncio.Event(), threading.Event(), []
+    loop = asyncio.get_running_loop()
+    original_open = AiosqliteTransactionClient._execute_on_cursor
+    original_close = AiosqliteTransactionClient._close_cursor
+
+    def opening(connection, query, values):
+        cursor = original_open(connection, query, values)
+        loop.call_soon_threadsafe(started.set)
+        release.wait()
+        return cursor
+
+    def closing(connection, cursor):
+        original_close(connection, cursor)
+        closed.append(cursor)
+
+    monkeypatch.setattr(AiosqliteTransactionClient, "_execute_on_cursor", staticmethod(opening))
+    monkeypatch.setattr(AiosqliteTransactionClient, "_close_cursor", staticmethod(closing))
+    async with Transactions.atomic() as connection:
+        stream = connection.stream_batches("SELECT 1")
+        reading = asyncio.create_task(anext(stream))
+        try:
+            await started.wait()
+            reading.cancel()
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await reading
+        assert len(closed) == 1
+        assert (await connection.execute("SELECT 2", rows_by_position=True)).rows[0][0] == 2
+
+
+@pytest.mark.sqlite_only
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    (("true", 1), ("false", 0), ("yes", 1), ("no", 0), ("on", 1), ("off", 0), ("1", 1), ("0", 0), ("fast", 2)),
+)
+async def test_secure_delete_accepts_boolean_words_and_fast_in_urls(value, expected):
+    for spelling in {value, value.upper(), value.title()}:
+        config = DbUrlConfigGenerator.expand(f"sqlite+aiosqlite://:memory:?secure_delete={spelling}")
+        client = AiosqliteClient(connection_alias="default", **config["credentials"])
+        try:
+            _, rows = await client.execute("PRAGMA secure_delete")
+            assert rows[0]["secure_delete"] == expected
+        finally:
+            await client.close()
+
+
+@pytest.mark.database_independent
+def test_secure_delete_rejects_an_unknown_mode():
+    with pytest.raises(ConfigurationError, match="secure_delete"):
+        AiosqliteClient(file_path=":memory:", connection_alias="default", secure_delete="slow")
 
 
 @pytest.mark.database_independent
@@ -121,7 +397,7 @@ async def test_translate_exceptions_forwards_keyword_arguments():
     a TypeError at the wrapper, not just silently dropped the kwarg."""
     calls = []
 
-    @AiosqliteClient.translate_exceptions
+    @AiosqliteClient.translate_exceptions(StatementForm.SQL)
     async def fake_query(self, query, values=None):
         calls.append((query, values))
         return "ok"
@@ -130,6 +406,7 @@ async def test_translate_exceptions_forwards_keyword_arguments():
         SimpleNamespace(
             connection_alias="default",
             is_transaction_client=False,
+            runs_statement_options=AiosqliteClient.runs_statement_options,
             driver_errors=AiosqliteClient.driver_errors,
         ),
         "SELECT 1",
@@ -141,7 +418,7 @@ async def test_translate_exceptions_forwards_keyword_arguments():
 
 @pytest.mark.asyncio
 async def test_translate_exceptions_attaches_sql_and_params_on_failure():
-    @AiosqliteClient.translate_exceptions
+    @AiosqliteClient.translate_exceptions(StatementForm.SQL)
     async def execute(self, query, values=None):
         raise sqlite3.OperationalError("no such table: t")
 
@@ -150,6 +427,7 @@ async def test_translate_exceptions_attaches_sql_and_params_on_failure():
             SimpleNamespace(
                 connection_alias="default",
                 is_transaction_client=False,
+                runs_statement_options=AiosqliteClient.runs_statement_options,
                 driver_errors=AiosqliteClient.driver_errors,
                 _get_operational_error=AiosqliteClient._get_operational_error,
             ),
@@ -160,7 +438,7 @@ async def test_translate_exceptions_attaches_sql_and_params_on_failure():
     assert exc_info.value.sql == "SELECT * FROM t"
     assert exc_info.value.parameters == [1]
 
-    @AiosqliteClient.translate_exceptions
+    @AiosqliteClient.translate_exceptions(StatementForm.SQL)
     async def execute_described(self, query, values=None):
         raise sqlite3.IntegrityError("UNIQUE constraint failed")
 
@@ -169,6 +447,7 @@ async def test_translate_exceptions_attaches_sql_and_params_on_failure():
             SimpleNamespace(
                 connection_alias="default",
                 is_transaction_client=False,
+                runs_statement_options=AiosqliteClient.runs_statement_options,
                 driver_errors=AiosqliteClient.driver_errors,
                 _get_operational_error=AiosqliteClient._get_operational_error,
             ),
@@ -188,7 +467,7 @@ async def test_translate_exceptions_translates_the_rest_of_sqlite3_errors():
     wrong bind-parameter count or an unsupported bind type raised a raw
     sqlite3.ProgrammingError, invisible to any caller catching hare.exceptions.*."""
 
-    @AiosqliteClient.translate_exceptions
+    @AiosqliteClient.translate_exceptions(StatementForm.SQL)
     async def execute(self, query, values=None):
         raise sqlite3.ProgrammingError("Incorrect number of bindings supplied")
 
@@ -197,6 +476,7 @@ async def test_translate_exceptions_translates_the_rest_of_sqlite3_errors():
             SimpleNamespace(
                 connection_alias="default",
                 is_transaction_client=False,
+                runs_statement_options=AiosqliteClient.runs_statement_options,
                 driver_errors=AiosqliteClient.driver_errors,
                 _get_operational_error=AiosqliteClient._get_operational_error,
             ),
@@ -205,7 +485,7 @@ async def test_translate_exceptions_translates_the_rest_of_sqlite3_errors():
         )
     assert programming_exc_info.value.sql == "SELECT ?, ?"
 
-    @AiosqliteClient.translate_exceptions
+    @AiosqliteClient.translate_exceptions(StatementForm.SQL)
     async def execute_dicts(self, query, values=None):
         raise sqlite3.DataError("string or blob too big")
 
@@ -214,6 +494,7 @@ async def test_translate_exceptions_translates_the_rest_of_sqlite3_errors():
             SimpleNamespace(
                 connection_alias="default",
                 is_transaction_client=False,
+                runs_statement_options=AiosqliteClient.runs_statement_options,
                 driver_errors=AiosqliteClient.driver_errors,
                 _get_operational_error=AiosqliteClient._get_operational_error,
             ),
@@ -221,7 +502,7 @@ async def test_translate_exceptions_translates_the_rest_of_sqlite3_errors():
             values=None,
         )
 
-    @AiosqliteClient.translate_exceptions
+    @AiosqliteClient.translate_exceptions(StatementForm.SQL)
     async def execute_described(self, query, values=None):
         raise sqlite3.InternalError("cursor invalid")
 
@@ -230,6 +511,7 @@ async def test_translate_exceptions_translates_the_rest_of_sqlite3_errors():
             SimpleNamespace(
                 connection_alias="default",
                 is_transaction_client=False,
+                runs_statement_options=AiosqliteClient.runs_statement_options,
                 driver_errors=AiosqliteClient.driver_errors,
                 _get_operational_error=AiosqliteClient._get_operational_error,
             ),
@@ -237,7 +519,7 @@ async def test_translate_exceptions_translates_the_rest_of_sqlite3_errors():
             values=None,
         )
 
-    @AiosqliteClient.translate_exceptions
+    @AiosqliteClient.translate_exceptions(StatementForm.MANY)
     async def execute_many(self, query, values=None):
         raise sqlite3.NotSupportedError("not supported")
 
@@ -246,6 +528,7 @@ async def test_translate_exceptions_translates_the_rest_of_sqlite3_errors():
             SimpleNamespace(
                 connection_alias="default",
                 is_transaction_client=False,
+                runs_statement_options=AiosqliteClient.runs_statement_options,
                 driver_errors=AiosqliteClient.driver_errors,
                 _get_operational_error=AiosqliteClient._get_operational_error,
             ),
@@ -256,7 +539,7 @@ async def test_translate_exceptions_translates_the_rest_of_sqlite3_errors():
     # InterfaceError -> DBConnectionError, not OperationalError - mirrors AsyncpgClient's own
     # identical mapping for asyncpg.InterfaceError (both mean "this connection/cursor object
     # itself is no longer usable", not a problem with the query text).
-    @AiosqliteClient.translate_exceptions
+    @AiosqliteClient.translate_exceptions(StatementForm.SCRIPT)
     async def execute_script(self, query, values=None):
         raise sqlite3.InterfaceError("Cannot operate on a closed database")
 
@@ -265,6 +548,7 @@ async def test_translate_exceptions_translates_the_rest_of_sqlite3_errors():
             SimpleNamespace(
                 connection_alias="default",
                 is_transaction_client=False,
+                runs_statement_options=AiosqliteClient.runs_statement_options,
                 driver_errors=AiosqliteClient.driver_errors,
                 _get_operational_error=AiosqliteClient._get_operational_error,
             ),
@@ -277,7 +561,7 @@ async def test_translate_exceptions_translates_the_rest_of_sqlite3_errors():
     # live via a genuinely corrupted database file ("database disk image is malformed"), which
     # previously propagated completely untranslated despite meaning exactly the type of failure
     # application code most wants a catchable hare.exceptions.OperationalError for.
-    @AiosqliteClient.translate_exceptions
+    @AiosqliteClient.translate_exceptions(StatementForm.SQL)
     async def execute(self, query, values=None):
         raise sqlite3.DatabaseError("database disk image is malformed")
 
@@ -286,6 +570,7 @@ async def test_translate_exceptions_translates_the_rest_of_sqlite3_errors():
             SimpleNamespace(
                 connection_alias="default",
                 is_transaction_client=False,
+                runs_statement_options=AiosqliteClient.runs_statement_options,
                 driver_errors=AiosqliteClient.driver_errors,
                 _get_operational_error=AiosqliteClient._get_operational_error,
             ),
@@ -333,7 +618,7 @@ async def test_translate_exceptions_reports_an_untranslated_exception_to_hooks()
     class UnexpectedFailure(Exception):
         pass
 
-    @AiosqliteClient.translate_exceptions
+    @AiosqliteClient.translate_exceptions(StatementForm.SQL)
     async def execute(self, query, values=None):
         raise UnexpectedFailure("boom")
 
@@ -344,6 +629,7 @@ async def test_translate_exceptions_reports_an_untranslated_exception_to_hooks()
                 SimpleNamespace(
                     connection_alias="default",
                     is_transaction_client=False,
+                    runs_statement_options=AiosqliteClient.runs_statement_options,
                     driver_errors=AiosqliteClient.driver_errors,
                     _get_operational_error=AiosqliteClient._get_operational_error,
                 ),
@@ -369,7 +655,7 @@ async def test_translate_exceptions_works_for_commit_and_rollback_with_no_query_
     hare.exceptions.IntegrityError, not left as a raw sqlite3.IntegrityError - previously left as
     a known gap (SqliteTransactionClient.commit()/rollback() were never wrapped at all)."""
 
-    @AiosqliteClient.translate_exceptions
+    @AiosqliteClient.translate_exceptions(StatementForm.CONTROL)
     async def commit(self):
         raise sqlite3.IntegrityError("FOREIGN KEY constraint failed")
 
@@ -378,12 +664,13 @@ async def test_translate_exceptions_works_for_commit_and_rollback_with_no_query_
             SimpleNamespace(
                 connection_alias="default",
                 is_transaction_client=False,
+                runs_statement_options=AiosqliteClient.runs_statement_options,
                 driver_errors=AiosqliteClient.driver_errors,
                 _get_operational_error=AiosqliteClient._get_operational_error,
             )
         )
 
-    @AiosqliteClient.translate_exceptions
+    @AiosqliteClient.translate_exceptions(StatementForm.CONTROL)
     async def rollback(self):
         return "ok"
 
@@ -392,6 +679,7 @@ async def test_translate_exceptions_works_for_commit_and_rollback_with_no_query_
             SimpleNamespace(
                 connection_alias="default",
                 is_transaction_client=False,
+                runs_statement_options=AiosqliteClient.runs_statement_options,
                 driver_errors=AiosqliteClient.driver_errors,
                 _get_operational_error=AiosqliteClient._get_operational_error,
             )
@@ -403,11 +691,10 @@ async def test_translate_exceptions_works_for_commit_and_rollback_with_no_query_
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_translate_exceptions_does_not_attach_sql_for_non_query_methods():
-    """A function whose name isn't in QUERY_EXECUTING_METHOD_NAMES (e.g.
-    create_connection) doesn't have a (sql, params) signature at all - its first
+    """A declared control operation doesn't have a (sql, params) signature - its first
     positional arg after self shouldn't be misreported as sql."""
 
-    @AiosqliteClient.translate_exceptions
+    @AiosqliteClient.translate_exceptions(StatementForm.CONTROL)
     async def create_connection(self, with_db):
         raise sqlite3.OperationalError("boom")
 
@@ -416,6 +703,7 @@ async def test_translate_exceptions_does_not_attach_sql_for_non_query_methods():
             SimpleNamespace(
                 connection_alias="default",
                 is_transaction_client=False,
+                runs_statement_options=AiosqliteClient.runs_statement_options,
                 driver_errors=AiosqliteClient.driver_errors,
                 _get_operational_error=AiosqliteClient._get_operational_error,
             ),
@@ -437,7 +725,7 @@ async def test_translate_exceptions_fires_query_hook_on_success_and_failure():
     Observers.observe(QueryExecuted, hook)
     try:
 
-        @AiosqliteClient.translate_exceptions
+        @AiosqliteClient.translate_exceptions(StatementForm.SQL)
         async def execute(self, query, values=None):
             if query.startswith("FAIL"):
                 raise sqlite3.OperationalError("boom")
@@ -448,6 +736,7 @@ async def test_translate_exceptions_fires_query_hook_on_success_and_failure():
                 SimpleNamespace(
                     connection_alias="default",
                     is_transaction_client=False,
+                    runs_statement_options=AiosqliteClient.runs_statement_options,
                     driver_errors=AiosqliteClient.driver_errors,
                     _get_operational_error=AiosqliteClient._get_operational_error,
                 ),
@@ -465,6 +754,7 @@ async def test_translate_exceptions_fires_query_hook_on_success_and_failure():
                 SimpleNamespace(
                     connection_alias="default",
                     is_transaction_client=False,
+                    runs_statement_options=AiosqliteClient.runs_statement_options,
                     driver_errors=AiosqliteClient.driver_errors,
                     _get_operational_error=AiosqliteClient._get_operational_error,
                 ),
@@ -491,7 +781,7 @@ async def test_translate_exceptions_fires_query_hook_on_success_and_failure():
 async def test_translate_exceptions_logs_slow_query(caplog, monkeypatch):
     monkeypatch.setattr(Observers, "slow_query_threshold_ms", -1.0)
 
-    @AiosqliteClient.translate_exceptions
+    @AiosqliteClient.translate_exceptions(StatementForm.SQL)
     async def execute(self, query, values=None):
         return "ok"
 
@@ -500,6 +790,7 @@ async def test_translate_exceptions_logs_slow_query(caplog, monkeypatch):
             SimpleNamespace(
                 connection_alias="default",
                 is_transaction_client=False,
+                runs_statement_options=AiosqliteClient.runs_statement_options,
                 driver_errors=AiosqliteClient.driver_errors,
                 _get_operational_error=AiosqliteClient._get_operational_error,
             ),
@@ -629,7 +920,7 @@ async def test_close_after_timeout_fails_the_abandoned_transaction_with_hare_err
 @pytest.mark.asyncio
 async def test_a_null_byte_in_the_text_of_raw_sql_is_sqlites_to_refuse(db):
     """The text of raw SQL is sent as written - SQLite's driver refuses a null byte in it."""
-    connection = Tournament._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Tournament).get_connection()
     for run in (connection.execute, connection.execute_script):
         with pytest.raises(OperationalError, match="null character"):
             await run("SELECT 'a\x00b'")

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import FieldError, QueryError, UnSupportedError
 from hare.query.expressions.expression_result import ExpressionResult
 from hare.query.expressions.joins.named_columns import NamedColumns
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.query.expressions.subqueries.subquery import Subquery
 from hare.sql.builder.tables.lateral_query import LateralQuery
 from hare.sql.terms.criteria.true_criterion import TrueCriterion
@@ -12,9 +13,6 @@ from hare.sql.terms.criteria.true_criterion import TrueCriterion
 if TYPE_CHECKING:
     from hare.query.expressions.expression_context import ExpressionContext
     from hare.query.queryset.queryset import QuerySet
-    from hare.query.statements.awaitable_query import AwaitableQuery
-    from hare.sql import Table
-    from hare.sql.builder.tables.selectable import Selectable
 
 
 class Lateral(NamedColumns):
@@ -38,6 +36,8 @@ class Lateral(NamedColumns):
     Raises:
         QueryError: ``query`` isn't a ``values()``/``values_list()`` queryset.
     """
+
+    structure = ExpressionStructure(query_scope=True)
 
     def __init__(self, query: QuerySet[Any, Any]) -> None:
         # Local import: the queryset package imports this module.
@@ -67,23 +67,24 @@ class Lateral(NamedColumns):
             raise UnSupportedError(
                 f"Lateral {self.name!r} needs a LATERAL subquery, which {expression_context.dialect} doesn't have"
             )
-        subquery = Subquery(cast("AwaitableQuery[Any]", self.query))
+        subquery = Subquery(self.query)
         selected_names = subquery.get_selected_names() or []
         if path not in selected_names:
             raise FieldError(
                 f"Lateral {self.name!r} reads one of the columns its queryset selects ({', '.join(selected_names)}) "
                 f"as {self.name}__<column>, got {path!r}"
             )
-        lateral_query = LateralQuery(self.name, cast("Selectable", subquery.get_result(expression_context).term))
+        bound_subquery: Subquery = subquery.get_result(expression_context).term  # type: ignore[assignment]
+        lateral_query = LateralQuery(self.name, bound_subquery)  # type: ignore[arg-type]
         return ExpressionResult(
-            term=lateral_query.field(path),
-            joins=[(cast("Table", lateral_query), TrueCriterion())],
-            output_field=subquery.get_selected_field(path),
+            term=lateral_query.field(bound_subquery.get_selected_column_name(path)),
+            joins=[(lateral_query, TrueCriterion())],  # type: ignore[list-item]
+            output_field=bound_subquery.get_selected_field(path),
         )
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
         # The name read alone (an alias a path uses) is its JOIN - values() refuses to select it.
-        selected_names = Subquery(cast("AwaitableQuery[Any]", self.query)).get_selected_names() or []
+        selected_names = Subquery(self.query).get_selected_names() or []
         return self.get_path_result(selected_names[0], expression_context)
 
     def __repr__(self) -> str:

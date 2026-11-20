@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.migrations.autodetection.diffs.schema_object_diff import SchemaObjectDiff
 
@@ -36,7 +36,7 @@ class DeclaredSchemaObjectDiff(SchemaObjectDiff):
         return self.remove_operation_class(model_name, schema_object.name)  # type: ignore[call-arg]
 
     def get_rename_operation(self, old_object: Any, new_object: Any) -> HareOperation:
-        rename_operation_class = cast("type[HareOperation]", self.rename_operation_class)
+        rename_operation_class: type[HareOperation] = self.rename_operation_class  # type: ignore[assignment]
         return rename_operation_class(  # type: ignore[call-arg]
             self.new_state.name, old_object.name, new_object.name
         )

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import Enum
+from typing import Any, Self
 
 from hare.sql.constants import BRACKETED_CRITERION_DEPTH
 from hare.sql.enums import Comparator
@@ -11,6 +13,8 @@ from hare.sql.terms.term import Term
 
 class ComplexCriterion(BasicCriterion):
     """Two conditions joined by AND, OR or XOR."""
+
+    structure_attributes = ()
 
     def __init__(
         self,
@@ -27,6 +31,15 @@ class ComplexCriterion(BasicCriterion):
             left.depth if isinstance(left, ComplexCriterion) else 0,
             right.depth if isinstance(right, ComplexCriterion) else 0,
         )
+
+    def rebuild_structure(self, attributes: Mapping[str, Any]) -> Self:
+        """Recompute the rendering depth after replacing either child condition."""
+        rebuilt = super().rebuild_structure(attributes)
+        rebuilt.depth = 1 + max(
+            rebuilt.left.depth if isinstance(rebuilt.left, ComplexCriterion) else 0,
+            rebuilt.right.depth if isinstance(rebuilt.right, ComplexCriterion) else 0,
+        )
+        return rebuilt
 
     def get_sql(self, sql_context: SqlContext) -> str:
         left_context = sql_context.copy(subcriterion=self.needs_brackets(self.left))

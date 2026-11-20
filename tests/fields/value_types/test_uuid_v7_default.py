@@ -5,12 +5,12 @@ from __future__ import annotations
 
 import pytest
 
+from hare.declarations.declaration_value_serializer import DeclarationValueSerializer
+from hare.declarations.import_manager import ImportManager
 from hare.dialects.postgresql.constants import POSTGRESQL_DIALECT
 from hare.dialects.sqlite.constants import SQLITE_DIALECT
 from hare.exceptions import UnSupportedError
 from hare.fields.db_defaults import RandomHex, UuidV7
-from hare.migrations.writer.import_manager import ImportManager
-from hare.migrations.writer.migration_writer import MigrationWriter
 
 pytestmark = pytest.mark.database_independent
 
@@ -31,4 +31,4 @@ def test_it_is_a_value_and_a_migration_rebuilds_it():
     assert UuidV7() != RandomHex()
     assert len({UuidV7(), UuidV7()}) == 1
     imports = ImportManager()
-    assert MigrationWriter.render_value(UuidV7(), imports) == "UuidV7()"
+    assert DeclarationValueSerializer.render_value(UuidV7(), imports) == "UuidV7()"

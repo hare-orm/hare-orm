@@ -1,26 +1,28 @@
-use crate::asyncio::completion::future_into_py;
-use crate::pg::error::DriverError;
+use crate::asyncio::future_into_py;
+use crate::pg::error::{to_pyerr, DriverError};
 use crate::pg::first_row::FirstRow;
 use crate::pg::result::PgResult;
 use crate::pg::result_columns::ResultColumns;
 use crate::pg::result_data::ResultData;
 use crate::pg::value::Value;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use super::cursor_rows::CursorRows;
-use super::{stream_exhausted, tx_finished, Transaction};
+use super::{stream_exhausted, tx_finished};
 use pyo3::prelude::*;
 
 /// How many rows `__anext__()` fetches off the cursor at a time.
 const ITERATION_FETCH_SIZE: usize = 1000;
+const NO_CLOSE_REQUEST: u8 = 0;
+const CLOSED_EXPLICITLY: u8 = 1;
+const CLOSED_BY_TRANSACTION: u8 = 2;
 
 /// State backing one open `RowStreamIterator`.
 pub(super) struct OpenRowStream {
     pub(super) rows: CursorRows,
     pub(super) columns: Arc<ResultColumns>,
-    pub(super) connection_poisoned: Arc<AtomicBool>,
     /// An error met after rows already returned by `fetch_many()` - raised by the next fetch.
     pub(super) pending_error: Option<DriverError>,
 }
@@ -40,29 +42,37 @@ impl OpenRowStream {
 /// the transaction can drop its cursor's rows even while Python still holds the iterator.
 pub(super) struct RowStreamSlot {
     /// `None` once the stream is exhausted, has raised, or was closed.
-    pub(super) state: Mutex<Option<OpenRowStream>>,
-    /// Set by `close()`: a fetch in flight while it ran drops the stream once it finishes.
-    pub(super) close_requested: AtomicBool,
-    /// Set when the owning transaction ended while the stream was still open.
-    pub(super) closed_by_transaction_end: AtomicBool,
+    state: Mutex<Option<OpenRowStream>>,
+    /// A transaction's close takes priority over an explicit close.
+    close_reason: AtomicU8,
 }
 
 impl RowStreamSlot {
+    pub(super) fn new(state: OpenRowStream) -> Self {
+        Self { state: Mutex::new(Some(state)), close_reason: AtomicU8::new(NO_CLOSE_REQUEST) }
+    }
+
     /// Drops the stream now, or - while a fetch holds it - as soon as
     /// that fetch finishes.
     pub(super) fn close(&self, by_transaction_end: bool) {
-        if by_transaction_end {
-            self.closed_by_transaction_end.store(true, Ordering::Release);
-        }
-        self.close_requested.store(true, Ordering::Release);
+        let reason = if by_transaction_end { CLOSED_BY_TRANSACTION } else { CLOSED_EXPLICITLY };
+        self.close_reason.fetch_max(reason, Ordering::Release);
         if let Ok(mut state) = self.state.try_lock() {
             *state = None;
         }
     }
 
+    fn is_close_requested(&self) -> bool {
+        self.close_reason.load(Ordering::Acquire) != NO_CLOSE_REQUEST
+    }
+
+    fn is_closed_by_transaction_end(&self) -> bool {
+        self.close_reason.load(Ordering::Acquire) == CLOSED_BY_TRANSACTION
+    }
+
     /// What a fetch on a stream that is no longer open raises.
     fn closed_error(&self) -> PyErr {
-        if self.closed_by_transaction_end.load(Ordering::Acquire) {
+        if self.is_closed_by_transaction_end() {
             tx_finished()
         } else {
             stream_exhausted()
@@ -95,7 +105,7 @@ impl RowStreamIterator {
         let slot = self.slot.clone();
         future_into_py(py, async move {
             let mut guard = slot.state.lock().await;
-            if slot.close_requested.load(Ordering::Acquire) {
+            if slot.is_close_requested() {
                 *guard = None;
             }
             let Some(state) = guard.as_mut() else {
@@ -103,17 +113,16 @@ impl RowStreamIterator {
             };
             let next_values = state.next_values(ITERATION_FETCH_SIZE).await;
             let columns = state.columns.clone();
-            let connection_poisoned = state.connection_poisoned.clone();
             // The stream is unusable after an error or its end - drop it so a later __anext__()
             // gets a clean StopAsyncIteration instead of polling a finished stream again. A
             // close() that arrived while this fetch held the stream drops it now as well.
-            if !matches!(next_values, Some(Ok(_))) || slot.close_requested.load(Ordering::Acquire) {
+            if !matches!(next_values, Some(Ok(_))) || slot.is_close_requested() {
                 *guard = None;
             }
             drop(guard);
             match next_values {
-                Some(Ok(values)) => Ok(FirstRow { columns, values: Some(values) }),
-                Some(Err(error)) => Transaction::note_outcome(&connection_poisoned, Err(error)),
+                Some(Ok(values)) => Ok(FirstRow { columns, values }),
+                Some(Err(error)) => Err(to_pyerr(error)),
                 None => Err(stream_exhausted()),
             }
         })
@@ -125,14 +134,14 @@ impl RowStreamIterator {
         let slot = self.slot.clone();
         future_into_py(py, async move {
             let mut guard = slot.state.lock().await;
-            if slot.close_requested.load(Ordering::Acquire) {
+            if slot.is_close_requested() {
                 *guard = None;
             }
             let Some(state) = guard.as_mut() else {
-                if slot.closed_by_transaction_end.load(Ordering::Acquire) {
+                if slot.is_closed_by_transaction_end() {
                     return Err(tx_finished());
                 }
-                return Ok(PgResult::new(ResultColumns::none(), ResultData::Values(Vec::new())));
+                return Ok(PgResult::new(ResultColumns::none(), ResultData::from_rows(Vec::new())));
             };
             let mut batch = Vec::with_capacity(size.clamp(1, 1024));
             let mut failure = None;
@@ -155,15 +164,14 @@ impl RowStreamIterator {
                 }
             }
             let columns = state.columns.clone();
-            let connection_poisoned = state.connection_poisoned.clone();
-            if failure.is_some() || ended || slot.close_requested.load(Ordering::Acquire) {
+            if failure.is_some() || ended || slot.is_close_requested() {
                 *guard = None;
             }
             drop(guard);
             if let Some(error) = failure {
-                return Transaction::note_outcome(&connection_poisoned, Err(error));
+                return Err(to_pyerr(error));
             }
-            Ok(PgResult::new(columns, ResultData::Values(batch)))
+            Ok(PgResult::new(columns, ResultData::from_rows(batch)))
         })
     }
 }

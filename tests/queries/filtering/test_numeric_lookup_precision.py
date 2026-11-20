@@ -7,7 +7,7 @@ from decimal import Decimal
 import pytest
 
 from hare.exceptions import ValidationError
-from tests.shared_models.testmodels import IntFields
+from tests.shared_models.testmodels import BigIntFields, IntFields
 from tests.shared_models.testmodels_postgres import DecimalFields
 
 
@@ -78,6 +78,33 @@ async def test_int_field_range_with_non_integer_bounds(db):
     result = sorted([row.intnum async for row in IntFields.objects.filter(intnum__range=(1.5, 2.5))])
 
     assert result == [2]
+
+
+@pytest.mark.asyncio
+async def test_bigint_compares_decimal_bounds_without_going_through_a_float(db):
+    minimum = -(2**63)
+    maximum = 2**63 - 1
+    await BigIntFields.objects.bulk_create(
+        [
+            BigIntFields(id=number, intnum=number, intnum_null=value)
+            for number, value in enumerate((minimum, minimum + 1, 2**53, 2**53 + 1, maximum - 1, maximum, None), 1)
+        ]
+    )
+    queries = (
+        ("gt", Decimal("9223372036854775806.5"), [6]),
+        ("gte", Decimal("9007199254740992.5"), [4, 5, 6]),
+        ("lt", Decimal("-9223372036854775807.5"), [1]),
+        ("lte", Decimal("9007199254740992.5"), [1, 2, 3]),
+        ("range", (Decimal("9223372036854775806.5"), Decimal(maximum)), [6]),
+        ("range", (None, Decimal("-9223372036854775807.5")), [1]),
+    )
+    for lookup, value, expected in queries:
+        assert (
+            await BigIntFields.objects.filter(**{f"intnum_null__{lookup}": value})
+            .order_by("id")
+            .values_list("id", flat=True)
+            == expected
+        )
 
 
 async def _create_decimal_fields() -> None:

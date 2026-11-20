@@ -4,10 +4,20 @@ both drivers, whatever the bytes: UTF-8 text, bytes that aren't UTF-8, digits a 
 import pytest
 
 from hare.query.expressions import F, Value
-from hare.query.functions import JSONObject
+from hare.query.functions import JSONObject, Length
 from tests.dialects.clickhouse.models import Attachment
 
 VALUES = [b"", b"plain text", b"deadbeef", b"\x00\x01\xff", bytes(range(256)), "ünïcödé".encode()]
+
+
+@pytest.mark.asyncio
+async def test_binary_length_counts_bytes_in_columns_and_literals(clickhouse_db):
+    await Attachment.objects.create(id=1, content="é😀".encode())
+    await Attachment.objects.create(id=2, content=b"!")
+    rows = Attachment.objects.annotate(octets=Length("content"), literal_octets=Length(Value(b"\xff\x00")))
+
+    assert await rows.order_by("id").values_list("octets", "literal_octets") == [(6, 2), (1, 2)]
+    assert await rows.filter(octets=6).values_list("id", flat=True) == [1]
 
 
 @pytest.mark.asyncio

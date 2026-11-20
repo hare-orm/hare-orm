@@ -44,14 +44,6 @@ def test_connect_max_retries_and_backoff_from_credentials():
 
 
 @pytest.mark.requires("asyncpg")
-def test_pool_acquire_timeout_defaults_to_none():
-    """Backward compatibility: a caller that never set pool_acquire_timeout gets today's
-    behavior - acquire() waits indefinitely for a pool slot."""
-    client = _make_asyncpg_client()
-    assert client.pool_acquire_timeout is None
-
-
-@pytest.mark.requires("asyncpg")
 def test_pool_acquire_timeout_from_credentials_is_cast_to_float():
     client = _make_asyncpg_client(pool_acquire_timeout="2.5")
     assert client.pool_acquire_timeout == 2.5
@@ -213,3 +205,28 @@ def test_a_server_out_of_connections_is_a_failure_to_connect(client_class):
     )
     error = PostgresqlConnectErrors.get_error(client, TooManyClients("sorry, too many clients already"), True)
     assert isinstance(error, DBConnectionError)
+
+
+@pytest.mark.requires("asyncpg")
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("seconds", "expired"), [(None, False), (0.3, False), (0.3, True)])
+async def test_connection_timeouts_are_distinct_from_the_pool_deadline(monkeypatch, seconds, expired):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from hare.exceptions import PoolTimeoutError
+
+    client = _make_asyncpg_client(pool_acquire_timeout=seconds)
+    original = TimeoutError()
+    client._pool = SimpleNamespace(acquire=AsyncMock(side_effect=original))
+    deadline = MagicMock()
+    deadline.__aenter__ = AsyncMock(return_value=deadline)
+    deadline.__aexit__ = AsyncMock(return_value=False)
+    deadline.expired.return_value = expired
+    monkeypatch.setattr("asyncio.timeout", lambda timeout: deadline)
+    with pytest.raises(PoolTimeoutError if expired else TimeoutError) as caught:
+        await client._pool_acquire()
+    if not expired:
+        assert caught.value is original
+    assert client.pool_statistics.acquire_timeouts == int(expired)
+    assert client.pool_statistics.acquiring == 0

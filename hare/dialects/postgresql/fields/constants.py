@@ -44,7 +44,7 @@ POSTGRESQL_LTREE_PATH_FUNCTIONS = {"depth": "nlevel"}
 CLASS_NAME_WORD_BOUNDARY_PATTERN = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 
 #: Range path segments reading a bound, by the PostgreSQL function giving it.
-RANGE_BOUND_PATH_FUNCTIONS = {"startswith": "lower", "endswith": "upper"}
+RANGE_BOUND_PATH_FUNCTIONS: dict[str, str] = {Lookup.STARTSWITH: "lower", Lookup.ENDSWITH: "upper"}
 
 #: Range path segments reading a boolean property, each the PostgreSQL function of the same name.
 RANGE_FLAG_PATH_FUNCTIONS = frozenset({"isempty", "lower_inc", "lower_inf", "upper_inc", "upper_inf"})
@@ -55,18 +55,6 @@ RANGE_MAPPING_KEYS = frozenset({"lower", "upper", "lower_inc", "upper_inc", "is_
 MULTIRANGE_SPAN_PATH_SEGMENT = "span"
 
 MULTIRANGE_SPAN_PATH_FUNCTION = "range_merge"
-
-#: The methods a range field reads a value through - a subclass overriding one reads it in Python.
-RANGE_READING_METHOD_NAMES = (
-    "from_db_value",
-    "to_python",
-    "get_range",
-    "canonicalize",
-    "coerce_bound",
-    "get_python_bound",
-    "get_python_range",
-    "get_infinite_bound",
-)
 
 #: hstore path segments reading every key or value as a text array, by the PostgreSQL function.
 HSTORE_ARRAY_PATH_FUNCTIONS = {"keys": "akeys", "values": "avals"}
@@ -111,7 +99,6 @@ EXPORTED_MODULES = {
     "NaiveDatetimeField": "hare.dialects.postgresql.fields.naive_datetime_field",
     "NaiveTimeField": "hare.dialects.postgresql.fields.naive_time_field",
     "NativeEnumField": "hare.dialects.postgresql.fields.native_enum",
-    "PostGISField": "hare.dialects.postgresql.fields.postgis_field",
     "Range": "hare.dialects.postgresql.fields.ranges",
     "RangeField": "hare.dialects.postgresql.fields.ranges",
     "TSVectorField": "hare.dialects.postgresql.fields.ts_vector_field",

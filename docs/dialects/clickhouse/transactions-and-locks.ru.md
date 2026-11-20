@@ -69,4 +69,10 @@ ClickHouse не блокирует строк: `select_for_update()` даёт `U
 
 ClickHouse Keeper (`keeper_hosts`) хранит [блокировку миграций](../../migrations/migrations.ru.md#migration-lock)
 `migrate`, а удаление базы (`db_delete()`) удаляет её узлы там — [серии её ключей](models.ru.md#keys) и узел её
-блокировки; hare сам говорит с ним по протоколу ZooKeeper — библиотека для этого не ставится.
+блокировки. Для этих прямых сессий Keeper установите `hare-orm[clickhouse-keeper]`: соединением управляет
+Kazoo. Обычным запросам ClickHouse и серверному `generateSerialID` это дополнение не нужно.
+
+Блокировка остаётся фиксированным временным узлом `/hare/migrations/<escaped database>/migrate`.
+При приостановке или потере сессии Keeper область миграции прерывается с `DBConnectionError`;
+переподключение не восстанавливает владение и не возобновляет миграцию. Очистка сессии завершается
+до возврата отмены. Уже принятый ClickHouse DDL потеря сессии Keeper не откатывает.

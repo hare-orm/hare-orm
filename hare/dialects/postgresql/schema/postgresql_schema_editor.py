@@ -1,27 +1,29 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import cast
+from typing import Any
 
 from hare.ddl.indexes.index import Index
 from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-from hare.dialects.postgresql.partitioning.partitioning import Partitioning
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
+from hare.dialects.base.schema.plans.schema_statement import SchemaStatement
 from hare.dialects.postgresql.postgresql_table_options import PostgresqlTableOptions
 from hare.dialects.postgresql.schema.columns.postgresql_column_backfill import PostgresqlColumnBackfill
 from hare.dialects.postgresql.schema.columns.postgresql_column_narrowing_check import PostgresqlColumnNarrowingCheck
 from hare.dialects.postgresql.schema.columns.postgresql_column_type_changes import PostgresqlColumnTypeChanges
 from hare.dialects.postgresql.schema.constants import (
     POSTGRESQL_COLUMN_COMMENT_TEMPLATE,
-    POSTGRESQL_CONCURRENT_INDEX_CREATE_PATTERN,
+    POSTGRESQL_CONCURRENT_INDEX_CREATE_TEMPLATE,
+    POSTGRESQL_CONCURRENT_INDEX_DROP_TEMPLATE,
+    POSTGRESQL_CONCURRENT_UNIQUE_INDEX_CREATE_TEMPLATE,
     POSTGRESQL_EXCLUSION_CONSTRAINT_CREATE_TEMPLATE,
     POSTGRESQL_FUNCTION_DROP_IF_EXISTS_TEMPLATE,
     POSTGRESQL_GENERATED_PK_TEMPLATE,
-    POSTGRESQL_MATERIALIZED_VIEW_DROP_IF_EXISTS_TEMPLATE,
+    POSTGRESQL_GENERATED_SEQUENCE_TYPE_TEMPLATE,
     POSTGRESQL_ROLE_KEYWORDS,
-    POSTGRESQL_SAFE_ADD_CONSTRAINT_TEMPLATE,
+    POSTGRESQL_SAFE_ADD_CONSTRAINT_BODY,
     POSTGRESQL_SEQUENCE_DROP_IF_EXISTS_TEMPLATE,
     POSTGRESQL_TABLE_COMMENT_TEMPLATE,
-    POSTGRESQL_VIEW_DROP_IF_EXISTS_TEMPLATE,
 )
 from hare.dialects.postgresql.schema.constraints.postgresql_constraint_statements import PostgresqlConstraintStatements
 from hare.dialects.postgresql.schema.indexes.postgresql_index_statements import PostgresqlIndexStatements
@@ -32,6 +34,7 @@ from hare.dialects.postgresql.schema.runtime_statements.postgresql_tenant_condit
 from hare.dialects.postgresql.schema.schema_objects.postgresql_database_functions import PostgresqlDatabaseFunctions
 from hare.dialects.postgresql.schema.schema_objects.postgresql_enum_types import PostgresqlEnumTypes
 from hare.dialects.postgresql.schema.schema_objects.postgresql_extensions import PostgresqlExtensions
+from hare.dialects.postgresql.schema.schema_objects.postgresql_function_arguments import PostgresqlFunctionArguments
 from hare.dialects.postgresql.schema.schema_objects.postgresql_grants import PostgresqlGrants
 from hare.dialects.postgresql.schema.schema_objects.postgresql_materialized_views import PostgresqlMaterializedViews
 from hare.dialects.postgresql.schema.schema_objects.postgresql_row_level_security_policies import (
@@ -45,7 +48,9 @@ from hare.dialects.postgresql.schema.tables.postgresql_table_partitions import P
 from hare.dialects.postgresql.schema.tables.postgresql_table_rebuild import PostgresqlTableRebuild
 from hare.dialects.postgresql.schema.triggers.postgresql_trigger_statements import PostgresqlTriggerStatements
 from hare.exceptions import ConfigurationError
-from hare.models import Model
+from hare.fields.data.numeric.int_field import IntField
+from hare.fields.field import Field
+from hare.models.model_binding import ModelBinding
 from hare.sql.identifiers import Identifiers
 
 
@@ -64,13 +69,16 @@ class PostgresqlSchemaEditor(BaseSchemaEditor):
     index_statements_class = PostgresqlIndexStatements
     constraint_statements_class = PostgresqlConstraintStatements
     trigger_statements_class = PostgresqlTriggerStatements
+    views: PostgresqlViews
     views_class = PostgresqlViews
+    materialized_views: PostgresqlMaterializedViews
     materialized_views_class = PostgresqlMaterializedViews
     database_functions_class = PostgresqlDatabaseFunctions
     sequences_class = PostgresqlSequences
     row_level_security_policies_class = PostgresqlRowLevelSecurityPolicies
     grants_class = PostgresqlGrants
     enum_types_class = PostgresqlEnumTypes
+    enum_types: PostgresqlEnumTypes
     extensions_class = PostgresqlExtensions
     schemas_class = PostgresqlSchemas
     schemas: PostgresqlSchemas
@@ -79,7 +87,6 @@ class PostgresqlSchemaEditor(BaseSchemaEditor):
     tenant_conditions_class = PostgresqlTenantConditions
 
     INDEX_CREATE_TEMPLATE = "CREATE INDEX {exists}{index_name} ON {table_name} {index_type}({fields}){extra};"
-    SAFE_ADD_CONSTRAINT_TEMPLATE = POSTGRESQL_SAFE_ADD_CONSTRAINT_TEMPLATE
     UNIQUE_INDEX_CREATE_TEMPLATE = INDEX_CREATE_TEMPLATE.replace("INDEX", "UNIQUE INDEX")
     EXCLUSION_CONSTRAINT_CREATE_TEMPLATE = POSTGRESQL_EXCLUSION_CONSTRAINT_CREATE_TEMPLATE
     TABLE_COMMENT_TEMPLATE = POSTGRESQL_TABLE_COMMENT_TEMPLATE
@@ -91,8 +98,7 @@ class PostgresqlSchemaEditor(BaseSchemaEditor):
     RENAME_INDEX_TEMPLATE: str | None = "ALTER INDEX {old_name} RENAME TO {new_name}"
     RENAME_INDEX_IF_EXISTS_TEMPLATE: str | None = "ALTER INDEX IF EXISTS {old_name} RENAME TO {new_name}"
     TRIGGER_FUNCTION_CREATE_TEMPLATE = (
-        "CREATE FUNCTION {function_name}() RETURNS TRIGGER AS $trigger$\nBEGIN\n{body}\nEND;\n"
-        "$trigger$ LANGUAGE {language};"
+        "CREATE FUNCTION {function_name}() RETURNS TRIGGER AS {body} LANGUAGE {language};"
     )
     TRIGGER_FUNCTION_CREATE_OR_REPLACE_TEMPLATE = TRIGGER_FUNCTION_CREATE_TEMPLATE.replace(
         "CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1
@@ -116,156 +122,160 @@ class PostgresqlSchemaEditor(BaseSchemaEditor):
     RENAME_TRIGGER_TEMPLATE: str | None = "ALTER TRIGGER {old_name} ON {table} RENAME TO {new_name}"
     RENAME_TRIGGER_FUNCTION_TEMPLATE: str | None = "ALTER FUNCTION {function_name}() RENAME TO {new_function_name}"
 
-    def get_partitioned_options(self, model: type[Model]) -> PostgresqlTableOptions | None:
+    def get_anonymous_block_sql(self, body: str) -> str:
+        """Quote a generated block with the dialect literal renderer, without a colliding dollar delimiter."""
+        return f"DO {self.client.dialect.literals.get_string_literal_sql(body)}"
+
+    def get_safe_add_constraint_sql(self, statement: str) -> str:
+        return self.get_anonymous_block_sql(POSTGRESQL_SAFE_ADD_CONSTRAINT_BODY.format(statement=statement))
+
+    def get_partitioned_options(self, binding: ModelBinding) -> PostgresqlTableOptions | None:
         """The table options of a model whose table is partitioned.
 
         Args:
-            model: The model.
+            binding: The model.
 
         Returns:
             The options, None for a plain table.
         """
-        options = cast("PostgresqlTableOptions | None", model._meta.get_table_options(self.client.dialect))
+        options: PostgresqlTableOptions | None = binding.get_table_options(self.client.dialect)  # type: ignore[assignment]
         return options if options is not None and options.partitioning is not None else None
 
-    async def rename_table(self, model: type[Model], old_name: str, new_name: str) -> None:
-        """Renames a table and, for a partitioned one, its partitions - named after it.
+    def get_table_rename_plan(self, binding: ModelBinding, old_name: str, new_name: str) -> SchemaChangePlan:
+        """Prepare the table and partition renames before issuing any statement."""
+        plan = super().get_table_rename_plan(binding, old_name, new_name)
+        options = self.get_partitioned_options(binding)
+        if options is None or options.partitioning is None or old_name == new_name:
+            return plan
+        steps = list(plan.steps)
+        old_locations = options.partitioning.get_partition_locations(old_name, binding.schema)
+        new_locations = options.partitioning.get_partition_locations(new_name, binding.schema)
+        for name, (schema, old_partition) in old_locations.items():
+            _, new_partition = new_locations[name]
+            if old_partition != new_partition:
+                steps.append(SchemaStatement(self.get_table_rename_sql(old_partition, new_partition, schema)))
+        return SchemaChangePlan(tuple(steps))
 
-        Args:
-            model: The model.
-            old_name: The table's name.
-            new_name: Its new name.
-        """
-        await super().rename_table(model, old_name, new_name)
-        options = self.get_partitioned_options(model)
-        if options is None or old_name == new_name:
-            return
-        for partition_name in cast("Partitioning", options.partitioning).get_partition_names():
-            old_partition = Partitioning.get_partition_table_name(old_name, partition_name)
-            new_partition = Partitioning.get_partition_table_name(new_name, partition_name)
-            await self.run_sql(
-                self.RENAME_TABLE_TEMPLATE.format(
-                    old_table=self.qualify_table_name(old_partition, model._meta.schema),
-                    new_table=self.quote(new_partition),
-                )
-            )
+    def get_column_type_change_plan(
+        self, binding: ModelBinding, old_field: Field[Any], new_field: Field[Any], new_sql_type: str
+    ) -> SchemaChangePlan:
+        """Keep a generated integer key's owning sequence within the new integer range."""
+        plan = super().get_column_type_change_plan(binding, old_field, new_field, new_sql_type)
+        if not (old_field.generated and new_field.generated and isinstance(new_field, IntField)):
+            return plan
+        if new_sql_type not in {"SMALLINT", "INT", "INTEGER", "BIGINT"}:
+            return plan
+        literal = self.client.dialect.literals.get_string_literal_sql
+        sql = POSTGRESQL_GENERATED_SEQUENCE_TYPE_TEMPLATE.format(
+            table_literal=literal(self.get_model_table_sql(binding)),
+            column_literal=literal(new_field.source_field or new_field.model_field_name),
+            sql_type=new_sql_type,
+        )
+        return SchemaChangePlan((*plan.steps, SchemaStatement(sql, recovery=self.get_schema_recovery(binding))))
 
-    async def add_index(self, model: type[Model], index: Index, concurrently: bool = False) -> None:
-        """Creates an index. PostgreSQL can't build one concurrently on a partitioned table as a
-        whole: the index is created on the table alone, built concurrently on each partition and
-        attached, which makes the table's index valid once every partition has its own.
+    def get_add_index_plan(self, binding: ModelBinding, index: Index, concurrently: bool = False) -> SchemaChangePlan:
+        """Compile the entire index operation before executing its first statement.
 
-        Args:
-            model: The indexed model.
-            index: The index.
-            concurrently: Build it without blocking writes.
+        Concurrent creation on a partitioned table builds an empty parent index,
+        creates each partition index concurrently and attaches it. The sequence
+        requires a nontransactional migration and can leave an invalid parent or
+        completed child indexes on failure; it does not promise atomic creation.
         """
         if not concurrently:
-            await super().add_index(model, index)
-            return
-        options = self.get_partitioned_options(model)
-        if options is None:
-            await self.run_sql(
-                self._get_concurrent_index_create_sql(self.index_statements.get_index_create_sql(model, index))
-            )
-            return
-        schema = model._meta.schema
-        index_name = self.index_statements.index_name_for_model(model, index)
-        qualified_table = self.qualify_table_name(model._meta.db_table, schema)
-        await self.run_sql(
-            self.index_statements.get_index_create_sql(model, index, indexed_table_sql=f"ONLY {qualified_table}")
+            return super().get_add_index_plan(binding, index)
+        template = (
+            POSTGRESQL_CONCURRENT_UNIQUE_INDEX_CREATE_TEMPLATE
+            if index.unique
+            else POSTGRESQL_CONCURRENT_INDEX_CREATE_TEMPLATE
         )
-        for partition_name in cast("Partitioning", options.partitioning).get_partition_names():
-            partition_table = Partitioning.get_partition_table_name(model._meta.db_table, partition_name)
+        options = self.get_partitioned_options(binding)
+        if options is None:
+            return SchemaChangePlan(
+                (SchemaStatement(self.index_statements.get_index_create_sql(binding, index, template=template)),)
+            )
+        schema = binding.schema
+        index_name = self.index_statements.index_name_for_model(binding, index)
+        qualified_table = self.qualify_table_name(binding.db_table, schema)
+        statements = [
+            self.index_statements.get_index_create_sql(binding, index, indexed_table_sql=f"ONLY {qualified_table}")
+        ]
+        for partition_schema, partition_table in self.table_partitions.get_partition_locations(binding).values():
             partition_index_name = Identifiers.get_within_limit(f"{partition_table}_{index_name}")
-            partition_index_sql = self.index_statements.get_index_create_sql(
-                model, index, partition_index_name, self.qualify_table_name(partition_table, schema)
+            statements.append(
+                self.index_statements.get_index_create_sql(
+                    binding,
+                    index,
+                    partition_index_name,
+                    self.qualify_table_name(partition_table, partition_schema),
+                    template=template,
+                )
             )
-            await self.run_sql(self._get_concurrent_index_create_sql(partition_index_sql))
-            await self.run_sql(
+            statements.append(
                 f"ALTER INDEX {self.qualify_table_name(index_name, schema)} "
-                f"ATTACH PARTITION {self.qualify_table_name(partition_index_name, schema)}"
+                f"ATTACH PARTITION {self.qualify_table_name(partition_index_name, partition_schema)}"
             )
+        return SchemaChangePlan(tuple(SchemaStatement(sql) for sql in statements))
 
-    async def remove_index(self, model: type[Model], index: Index, concurrently: bool = False) -> None:
-        """Drops an index - the plain way on a partitioned table, whose index PostgreSQL can't
-        drop concurrently.
-
-        Args:
-            model: The indexed model.
-            index: The index.
-            concurrently: Drop it without blocking reads and writes.
-        """
-        drop_sql = self.index_statements.get_index_drop_sql(model, index)
-        if concurrently and self.get_partitioned_options(model) is None:
-            drop_sql = drop_sql.replace("DROP INDEX ", "DROP INDEX CONCURRENTLY ", 1)
-        await self.run_sql(drop_sql)
-
-    @staticmethod
-    def _get_concurrent_index_create_sql(index_sql: str) -> str:
-        """Returns a ``CREATE INDEX`` statement building the index without blocking writes.
-
-        Args:
-            index_sql: The plain statement.
-
-        Returns:
-            The statement.
-        """
-        return POSTGRESQL_CONCURRENT_INDEX_CREATE_PATTERN.sub(r"\1CONCURRENTLY ", index_sql, count=1)
-
-    async def delete_model(self, model: type[Model]) -> None:
-        """Drops the model's views first - they read the table - then the table, then its triggers'
-        functions, its own functions and its sequences: neither is owned by the table, so each
-        outlives DROP TABLE unless dropped too (a sequence owned by a column already went with it)."""
-        await self.drop_views_of_table(model)
-        await super().delete_model(model)
-        for trigger in model._meta.triggers:
-            qualified_function = self.qualify_table_name(trigger.function_name, model._meta.schema)
-            await self.run_sql(self.TRIGGER_FUNCTION_DROP_TEMPLATE.format(function_name=qualified_function))
-        for function in reversed(model._meta.functions):
-            await self.run_sql(
-                POSTGRESQL_FUNCTION_DROP_IF_EXISTS_TEMPLATE.format(
-                    function=self.qualify_object_name(model, function.name), arguments=", ".join(function.arguments)
-                )
+    def get_remove_index_plan(
+        self, binding: ModelBinding, index: Index, concurrently: bool = False
+    ) -> SchemaChangePlan:
+        """Compile ordinary removal for a partitioned parent, concurrent removal otherwise."""
+        if not concurrently or self.get_partitioned_options(binding) is not None:
+            return super().get_remove_index_plan(binding, index)
+        index.raise_if_not_droppable(self.client.features, self.client.dialect)
+        index_name = self.index_statements.index_name_for_model(binding, index)
+        return SchemaChangePlan(
+            (
+                SchemaStatement(
+                    POSTGRESQL_CONCURRENT_INDEX_DROP_TEMPLATE.format(
+                        name=self.qualify_table_name(index_name, binding.schema)
+                    )
+                ),
             )
-        for sequence in reversed(model._meta.sequences):
-            await self.run_sql(
-                POSTGRESQL_SEQUENCE_DROP_IF_EXISTS_TEMPLATE.format(
-                    sequence=self.qualify_object_name(model, sequence.name)
-                )
-            )
+        )
 
-    async def drop_views_of_table(self, model: type[Model]) -> None:
-        """Drops the views and materialized views a model declares, if they exist - before its
-        table is dropped."""
-        for materialized_view in reversed(model._meta.materialized_views):
-            await self.run_sql(
-                POSTGRESQL_MATERIALIZED_VIEW_DROP_IF_EXISTS_TEMPLATE.format(
-                    view=self.qualify_object_name(model, materialized_view.name)
-                )
+    def get_delete_model_plan(self, binding: ModelBinding) -> SchemaChangePlan:
+        """Prepare table removal and cleanup of functions and sequences surviving DROP TABLE."""
+        plan = super().get_delete_model_plan(binding)
+        statements = [
+            self.TRIGGER_FUNCTION_DROP_TEMPLATE.format(
+                function_name=self.qualify_table_name(trigger.function_name, binding.schema)
             )
-        for view in reversed(model._meta.views):
-            await self.run_sql(
-                POSTGRESQL_VIEW_DROP_IF_EXISTS_TEMPLATE.format(view=self.qualify_object_name(model, view.name))
+            for trigger in binding.triggers
+        ]
+        statements.extend(
+            POSTGRESQL_FUNCTION_DROP_IF_EXISTS_TEMPLATE.format(
+                function=self.qualify_object_name(binding, function.name),
+                arguments=PostgresqlFunctionArguments.get_identity_sql(function.arguments),
             )
+            for function in reversed(binding.functions)
+        )
+        statements.extend(
+            POSTGRESQL_SEQUENCE_DROP_IF_EXISTS_TEMPLATE.format(
+                sequence=self.qualify_object_name(binding, sequence.name)
+            )
+            for sequence in reversed(binding.sequences)
+        )
+        return SchemaChangePlan((*plan.steps, *(SchemaStatement(sql) for sql in statements)), before=plan.before)
 
-    def get_model_table_sql(self, model: type[Model]) -> str:
+    def get_model_table_sql(self, binding: ModelBinding) -> str:
         """The model's quoted table name, in its schema."""
-        return self.qualify_table_name(model._meta.db_table, model._meta.schema)
+        return self.qualify_table_name(binding.db_table, binding.schema)
 
     @staticmethod
-    def get_column_name(model: type[Model], field_name: str, owner: str) -> str:
+    def get_column_name(binding: ModelBinding, field_name: str, owner: str) -> str:
         """The column of a field a declared object names.
 
         Args:
-            model: The model.
+            binding: The model.
             field_name: The field's name.
             owner: What names it - for the message.
 
         Raises:
             ConfigurationError: The model has no field of a column of that name.
         """
-        column = model._meta.fields_db_projection.get(field_name)
+        model = binding._model
+        column = binding.fields_db_projection.get(field_name)
         if column is None:
             raise ConfigurationError(f"{owner} names {field_name!r}, which is no column field of {model.__name__}")
         return column

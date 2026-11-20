@@ -1,13 +1,42 @@
 import pytest
 
 from hare import fields
-from hare.contrib.test import requires_features
+from hare.contrib.test import hare_test_context, requires_features
+from hare.core.hare_context import HareContext
+from hare.dialects.base.types.type_mapping import TypeMapping
+from hare.dialects.base.types.type_registry import TypeRegistry
 from hare.dialects.postgresql.constants import POSTGRESQL_DIALECT
 from hare.exceptions import UnSupportedError, ValidationError
 from hare.fields import ArrayField
 from hare.query.filters.lookups.containers.container_value_encoders import ContainerValueEncoders
+from tests.fields.value_types.array_set_models import ArraySetRecord, CompositeArraySetRecord
 from tests.shared_models import testmodels_postgres as testmodels
 from tests.utils.database_under_test import DatabaseUnderTest
+
+pytestmark = pytest.mark.usefixtures("model_conversion_context")
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize(
+    "outer_name,inner_name", [("base", "base"), ("custom", "base"), ("custom", "custom"), ("custom", "other")]
+)
+@pytest.mark.parametrize(
+    "value", [[[1, 2], [3, 4]], [[1, 2], [3]], [[1, 2], None]], ids=["rectangular", "ragged", "mixed-null"]
+)
+def test_nested_array_subclasses_share_shape_validation(outer_name, inner_name, value):
+    class CustomArray(ArrayField):
+        pass
+
+    class OtherArray(ArrayField):
+        pass
+
+    array_types = {"base": ArrayField, "custom": CustomArray, "other": OtherArray}
+    field = array_types[outer_name](array_types[inner_name](fields.IntField(), null=True))
+    if value == [[1, 2], [3, 4]]:
+        assert POSTGRESQL_DIALECT.types.get_db_value(field, value, None) == value
+    else:
+        with pytest.raises(ValidationError, match="holds sub-arrays of one length at each depth"):
+            POSTGRESQL_DIALECT.types.get_db_value(field, value, None)
 
 
 @requires_features(dialect="postgresql")
@@ -62,14 +91,14 @@ def test_array_to_db_value_sorts_a_set_for_deterministic_order():
     """A plain set has no defined iteration order (PYTHONHASHSEED-dependent for str elements) -
     to_db_value used to store it in whatever order the set happened to iterate in, so the same
     logical set of values came back in a different column order across process runs."""
-    field = testmodels.ArrayFields._meta.fields_map["array_str"]
+    field = HareContext.require_current().apps.get_binding(testmodels.ArrayFields).fields_map["array_str"]
     assert field.to_db_value({"c", "a", "b"}, testmodels.ArrayFields) == ["a", "b", "c"]
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_array_field_validators_run_on_save(db_array_fields):
-    """ArrayField.to_db_value never called self.validate(value) (unlike PostGISField/RangeField
+    """ArrayField.to_db_value never called self.validate(value) (unlike PointField/RangeField
     in the same file) - array-level validators (e.g. a max-element-count check) were declared but
     silently never enforced on save."""
     with pytest.raises(ValidationError):
@@ -83,7 +112,7 @@ async def test_array_field_validators_run_on_save(db_array_fields):
 def test_range_field_to_db_value_wraps_wrong_shape():
     """RangeField.to_db_value's non-Range branch does `lower, upper = value` with no check that
     `value` actually unpacks to exactly 2 elements first - same unwrapped-exception bug class as
-    PostGISField's own identical unpacking pattern (tests/dialects/postgresql/column_types/test_postgis.py) and
+    PointField's own identical unpacking pattern (tests/dialects/postgresql/column_types/test_postgis.py) and
     every other field's own conversion step fixed this session."""
     from hare.dialects.postgresql.fields.ranges import IntRangeField
 
@@ -223,7 +252,7 @@ async def test_array_encoder_applies_base_field_to_db_value_per_element(db_array
     reached the driver as raw enum members instead of their already-coerced .value strings, even
     though storing that same array via create()/save() was already correctly coerced through
     ArrayField.to_db_value()."""
-    field = testmodels.ArrayFields._meta.fields_map["array_enum"]
+    field = HareContext.require_current().apps.get_binding(testmodels.ArrayFields).fields_map["array_enum"]
 
     encoded = ContainerValueEncoders.encode_container(
         [testmodels.Color.RED, testmodels.Color.BLUE], None, field, POSTGRESQL_DIALECT
@@ -402,7 +431,7 @@ async def test_equality_and_contains_lookups_work_on_a_generated_array_column(db
     2. Even after fixing (1), calling the SAME filter key twice with two DIFFERENT values (e.g.
        tags__contains=[1] then tags__contains=[9] below) hit QUERY_SHAPE_CACHE's cache-hit
        replay path on the second call - which stored the WRAPPED GeneratedField object itself
-       (not output_field) in its ArrayValueReference, so the replay's own array_encoder() call crashed
+       (not output_field) in its ContainerValueReference, so the replay's own array_encoder() call crashed
        on `field.base_field` (a GeneratedField genuinely has no such attribute) even though the
        FIRST call for the same key succeeded. __len/__isnull don't need either fix (they never
        reach get_db_field_type()/base_field), so this test specifically exercises the ones that
@@ -506,12 +535,11 @@ async def test_connection_survives_a_ragged_nested_array_insert_attempt(db_array
     wrong with it). The connection pool is pinned to a single connection here so every query in
     this test is provably the same physical connection (confirmed via pg_backend_pid()), not one
     the pool silently swapped out for a fresh one."""
-    import os
 
     from hare import Connections
     from hare.contrib.test.isolated_contexts import hare_test_context
 
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+    db_url = DatabaseUnderTest.get_url()
     if DatabaseUnderTest.get_dialect().name != "postgresql":
         pytest.skip("ArrayFields require PostgreSQL")
     pinned_pool_db_url = db_url + ("&" if "?" in db_url else "?") + "min_size=1&max_size=1"
@@ -703,3 +731,198 @@ def test_a_bulk_load_of_an_array_of_a_sized_type_is_refused_before_the_driver(ba
     assert column_type.endswith("[]")
     assert not parameters.supports_copy_column_type(column_type)
     assert parameters.supports_copy_column_type(parameters.get_copy_column_type(base_field))
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("count", [2, 8, 32])
+@pytest.mark.parametrize("operation", ["read", "write"])
+@pytest.mark.parametrize("dispatch", ["field", "mapping", "value_method", "selector", "child_hook", "binder"])
+def test_array_codecs_keep_custom_dispatch_nulls_and_callback_order(count, operation, dispatch, monkeypatch):
+    events = []
+
+    class RecordingInt(fields.IntField):
+        def to_db_value(self, value, instance):
+            events.append(("write", value, instance))
+            return super().to_db_value(value, instance)
+
+        def from_db_value(self, value):
+            events.append(("read", value))
+            return super().from_db_value(value)
+
+    class HookArray(ArrayField):
+        def encode_child(self, *args, **kwargs):
+            events.append(("child_write", args[1]))
+            return super().encode_child(*args, **kwargs)
+
+        def decode_child(self, *args, **kwargs):
+            events.append(("child_read", args[1]))
+            return super().decode_child(*args, **kwargs)
+
+    child = RecordingInt(null=True)
+    field = (HookArray if dispatch == "child_hook" else ArrayField)(child)
+    types = TypeRegistry()
+    if dispatch == "mapping":
+
+        def write(field, value, instance):
+            events.append(("mapped_write", value))
+            return field.to_db_value(value, instance)
+
+        def read(field, value):
+            events.append(("mapped_read", value))
+            return field.from_db_value(value)
+
+        types.register(RecordingInt, TypeMapping(to_db=write, to_python=read))
+    elif dispatch in {"value_method", "selector"}:
+        method_name = (
+            ("get_db_value" if operation == "write" else "get_python_value")
+            if dispatch == "value_method"
+            else ("get_db_converter" if operation == "write" else "get_python_converter")
+        )
+        original = getattr(types, method_name)
+
+        def tracked(*args):
+            events.append((method_name, *args))
+            return original(*args)
+
+        monkeypatch.setattr(types, method_name, tracked)
+    elif dispatch == "binder":
+        selector = "get_db_writer" if operation == "write" else "get_python_reader"
+        original = getattr(types, selector)
+
+        def bind(selected):
+            convert = original(selected)
+
+            def tracked(value, *arguments):
+                events.append(("bound", value, *arguments))
+                return convert(value, *arguments) + 100
+
+            return tracked
+
+        monkeypatch.setattr(types, selector, bind)
+    values = [None if index % 3 == 0 else index for index in range(count)]
+    if operation == "write":
+        expected = [
+            field.encode_child(child, value, None, types, f"numbers[{index}]") for index, value in enumerate(values)
+        ]
+    else:
+        expected = [field.decode_child(child, value, types) for value in values]
+    expected_events = list(events)
+    events.clear()
+    actual = (
+        field.encode_value(values, None, types, "numbers")
+        if operation == "write"
+        else field.decode_value(values, types)
+    )
+    assert actual == expected
+    assert events == expected_events
+    if dispatch == "binder":
+        assert actual == [None if value is None else value + 100 for value in values]
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("operation", ["read", "write"])
+def test_array_codec_stops_at_the_first_element_error(operation):
+    visited = []
+
+    class CheckedInt(fields.IntField):
+        def to_db_value(self, value, instance):
+            visited.append(value)
+            return super().to_db_value(value, instance)
+
+        def from_db_value(self, value):
+            visited.append(value)
+            if value == "bad":
+                raise ValueError("unreadable element")
+            return super().from_db_value(value)
+
+    field = ArrayField(CheckedInt())
+    values = [0, 1, 2, "bad", 4, 5, 6, 7]
+    with pytest.raises((ValidationError, ValueError)) as caught:
+        if operation == "write":
+            field.encode_value(values, None, TypeRegistry(), "numbers")
+        else:
+            field.decode_value(values, TypeRegistry())
+    assert visited == values[:4]
+    if operation == "write":
+        assert "numbers[3]" in str(caught.value)
+    else:
+        assert str(caught.value) == "unreadable element"
+
+
+@pytest.mark.database_independent
+def test_array_reader_retains_unsized_iterables_and_nested_conversion():
+    types = TypeRegistry()
+    field = ArrayField(fields.IntField(null=True))
+    values = (str(index) if index % 3 else None for index in range(12))
+    assert field.decode_value(values, types) == [index if index % 3 else None for index in range(12)]
+    nested = ArrayField(field)
+    assert nested.decode_value([[str(index)] * 8 for index in range(8)], types) == [[index] * 8 for index in range(8)]
+
+
+@pytest.mark.database_independent
+def test_array_codecs_do_not_require_custom_lists_to_report_their_length():
+    class NoTypeComparison(type):
+        def __eq__(cls, other):
+            raise AssertionError("Eligibility must not invoke custom class equality")
+
+    class UnsizedList(list, metaclass=NoTypeComparison):
+        def __len__(self):
+            raise AssertionError("The per-element path does not inspect collection length")
+
+    types = TypeRegistry()
+    field = ArrayField(fields.IntField())
+    values = UnsizedList(range(12))
+    assert field.decode_value(values, types) == list(range(12))
+    assert field.encode_value(values, None, types, "numbers") == list(range(12))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", [ArraySetRecord, CompositeArraySetRecord], ids=["single-key", "composite-key"])
+async def test_array_set_order_is_preserved_by_constructors_defaults_and_writes(model):
+    if not model._declaration.fields_map["numbers"].exists_on(DatabaseUnderTest.get_dialect()):
+        pytest.skip("The database has no ArrayField column type")
+    async with hare_test_context(["tests.fields.value_types.array_set_models"], db_url=DatabaseUnderTest.get_url()):
+        for index, (given, expected) in enumerate(
+            [
+                ({1, 6, 10}, [1, 6, 10]),
+                ([10, 1, 6], [10, 1, 6]),
+                ((10, 1, 6), [10, 1, 6]),
+                ({8, -1, 2}, [-1, 2, 8]),
+            ],
+            start=1,
+        ):
+            key = (
+                {"batch": 1, "number": index}
+                if HareContext.require_current().apps.get_binding(model).has_composite_primary_key
+                else {"id": index}
+            )
+            obj = await model.objects.create(**key, numbers=given, nested_numbers=[{1, 6, 10}, {2, 8, 11}])
+            assert obj.numbers == expected
+            assert obj.default_numbers == [1, 6, 10]
+            assert obj.nested_numbers == [[1, 6, 10], [2, 8, 11]]
+            loaded = await model.objects.get(pk=obj.pk)
+            assert (loaded.numbers, loaded.default_numbers, loaded.nested_numbers) == (
+                expected,
+                [1, 6, 10],
+                [[1, 6, 10], [2, 8, 11]],
+            )
+            await model.objects.filter(pk=obj.pk).update(numbers=given)
+            assert await model.objects.filter(pk=obj.pk).values_list("numbers", flat=True) == [expected]
+            key = (
+                {"batch": 2, "number": index}
+                if HareContext.require_current().apps.get_binding(model).has_composite_primary_key
+                else {"id": index + 10}
+            )
+            other = model(**key, numbers=given, nested_numbers=[{1, 6, 10}, {2, 8, 11}])
+            await model.objects.bulk_create([other], batch_size=1)
+            loaded = await model.objects.get(pk=other.pk)
+            assert (loaded.numbers, loaded.default_numbers, loaded.nested_numbers) == (
+                expected,
+                [1, 6, 10],
+                [[1, 6, 10], [2, 8, 11]],
+            )
+            loaded.numbers = given
+            await loaded.save(update_fields=["numbers"])
+            await model.objects.bulk_update([loaded], ["numbers"])
+            assert await model.objects.filter(pk=other.pk).values_list("numbers", flat=True) == [expected]
+            assert await model.objects.filter(numbers=given).count() >= 2

@@ -3,23 +3,15 @@ default tests.shared_models.testmodels, matching the convention in tests/dialect
 tests/fields/conftest.py.
 """
 
-import os
-
 import pytest_asyncio
 
 from hare.contrib.test import truncate_all_models
-from hare.contrib.test.isolated_contexts import hare_test_context
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 @pytest_asyncio.fixture(scope="module")
 async def db_outbox_module():
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    async with hare_test_context(
-        modules=["tests.contrib.outbox.models"],
-        db_url=db_url,
-        app_label="models",
-        connection_label="models",
-    ) as ctx:
+    async with DatabaseUnderTest.open_model_context(["tests.contrib.outbox.models"]) as ctx:
         yield ctx
 
 
@@ -34,13 +26,7 @@ async def db_outbox(db_outbox_module):
 
 @pytest_asyncio.fixture(scope="module")
 async def db_capture_module():
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    async with hare_test_context(
-        modules=["tests.contrib.outbox.capture_models"],
-        db_url=db_url,
-        app_label="models",
-        connection_label="models",
-    ) as ctx:
+    async with DatabaseUnderTest.open_model_context(["tests.contrib.outbox.capture_models"]) as ctx:
         yield ctx
 
 

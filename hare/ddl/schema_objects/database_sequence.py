@@ -5,7 +5,7 @@ from typing import Any
 
 from hare.classes.class_path import ClassPath
 from hare.classes.value_descriptions import ValueDescriptions
-from hare.ddl.constants import SEQUENCE_CACHE_MAX, SEQUENCE_VALUE_MAX, SEQUENCE_VALUE_MIN
+from hare.ddl.constants import SEQUENCE_VALUE_MAX, SEQUENCE_VALUE_MIN
 from hare.ddl.schema_objects.named_schema_object import NamedSchemaObject
 from hare.exceptions import ConfigurationError
 
@@ -28,7 +28,7 @@ class DatabaseSequence(NamedSchemaObject):
 
     Raises:
         ConfigurationError: A number isn't an integer within the 64-bit range, ``increment`` is 0,
-            ``cache`` is out of 1..``SEQUENCE_CACHE_MAX``, ``minimum`` isn't below ``maximum``,
+            ``cache`` isn't positive, ``minimum`` isn't below ``maximum``,
             ``start`` is outside them, or ``owned_by`` isn't a non-empty string.
     """
 
@@ -57,9 +57,9 @@ class DatabaseSequence(NamedSchemaObject):
                 )
         if self.increment == 0:
             raise ConfigurationError(f"DatabaseSequence {self.name!r}: increment can't be 0")
-        if not 1 <= self.cache <= SEQUENCE_CACHE_MAX:
+        if self.cache < 1:
             raise ConfigurationError(
-                f"DatabaseSequence {self.name!r}: cache must be within 1..{SEQUENCE_CACHE_MAX}, got "
+                f"DatabaseSequence {self.name!r}: cache must be positive, got "
                 f"{ValueDescriptions.get_shown_text(self.cache)}"
             )
         if self.minimum is not None and self.maximum is not None and self.minimum >= self.maximum:

@@ -1,15 +1,21 @@
+import datetime
+import sys
+import uuid
 from decimal import Decimal
+from types import ModuleType
 
 import pytest
 import pytest_asyncio
 
-from hare.contrib.test import requires_features
+from hare import Model, fields
+from hare.contrib.test import hare_test_context, requires_features
+from hare.core.hare_context import HareContext
 from hare.exceptions import (
     QueryError,
 )
 from hare.fields.database_default import DatabaseDefault
 from hare.models.instances.field_snapshot import FieldSnapshot
-from hare.query.expressions import F
+from hare.query.expressions import Case, F, When
 from hare.transactions.transactions import Transactions
 from tests.shared_models.testmodels import (
     DirtyTrackedChild,
@@ -21,6 +27,7 @@ from tests.shared_models.testmodels import (
     IntFields,
     SoftDeleteVersionedDirtyTracked,
 )
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 @pytest.mark.asyncio
@@ -262,14 +269,102 @@ async def test_nullable_field_none_to_value_is_dirty(db):
     assert dirty == {"nullable": (None, "set now")}
 
 
+@requires_features(supports_transactions=True)
+@pytest.mark.asyncio
+async def test_released_savepoint_preserves_json_baseline_for_outer_rollback(db):
+    class RollbackRequested(Exception):
+        pass
+
+    obj = await DirtyTrackedThing.objects.create(name="A", data={"items": [1]})
+    with pytest.raises(RollbackRequested):
+        async with Transactions.atomic():
+            obj.data["items"].append(2)
+            await obj.save(update_fields=["data"])
+            async with Transactions.atomic():
+                obj.data["items"].append(3)
+                await obj.save(update_fields=["data"])
+            assert obj.get_dirty_fields() == {}
+            raise RollbackRequested
+
+    assert (await DirtyTrackedThing.objects.get(pk=obj.pk)).data == {"items": [1]}
+    assert obj.data == {"items": [1, 2, 3]}
+    assert obj.get_dirty_fields() == {"data": ({"items": [1]}, {"items": [1, 2, 3]})}
+    await obj.save(changed_only=True)
+    assert (await DirtyTrackedThing.objects.get(pk=obj.pk)).data == {"items": [1, 2, 3]}
+    assert obj.get_dirty_fields() == {}
+
+
 @pytest.mark.asyncio
 async def test_partial_only_query_tracks_loaded_fields(db):
-    created = await DirtyTrackedThing.objects.create(name="A", count=0)
-    partial = await DirtyTrackedThing.objects.get(pk=created.pk).only("name")
+    class RollbackRequested(Exception):
+        pass
+
+    created = await DirtyTrackedThing.objects.create(name="A", count=0, nullable=None)
+    queryset = DirtyTrackedThing.objects.filter(pk=created.pk)
+    partial = await queryset.only("id", "count", "nullable").get()
 
     assert partial.get_dirty_fields() == {}
-    partial.name = "B"
-    assert partial.get_dirty_fields() == {"name": ("A", "B")}
+    assert partial.nullable is None
+    with pytest.raises(AttributeError):
+        _ = partial.name
+    partial.count = 9
+    with pytest.raises(RollbackRequested):
+        async with Transactions.atomic():
+            await partial.save(changed_only=True)
+            assert await queryset.values_list("name", "count", "nullable") == [("A", 9, None)]
+            assert partial.get_dirty_fields() == {}
+            raise RollbackRequested
+    assert await queryset.values_list("name", "count", "nullable") == [("A", 0, None)]
+    assert partial.get_dirty_fields() == {"count": (0, 9)}
+    await partial.save(changed_only=True)
+    assert await queryset.values_list("name", "count", "nullable") == [("A", 9, None)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("composite", [False, True], ids=["scalar", "composite"])
+@pytest.mark.parametrize("load", ["only", "defer", "all"])
+@pytest.mark.parametrize("field_name", ["title", "document", "binary", "identifier", "day"])
+async def test_null_assignment_to_an_unloaded_field_is_dirty_and_saved(monkeypatch, composite, load, field_name):
+    class Tracked(Model):
+        number = fields.IntField(primary_key=not composite, generated=False)
+        region = fields.IntField(default=7)
+        title = fields.TextField(null=True)
+        document = fields.JSONField(null=True)
+        binary = fields.BinaryField(null=True)
+        identifier = fields.UUIDField(null=True)
+        day = fields.DateField(null=True)
+        if composite:
+            pk = fields.CompositePrimaryKey("region", "number")
+
+        class Meta:
+            track_dirty_fields = True
+
+    module = ModuleType("tests._partial_nullable_dirty_fields")
+    module.__models__ = [Tracked]
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    async with hare_test_context([module.__name__], DatabaseUnderTest.get_url()):
+        initial = {
+            "title": "before",
+            "document": {"value": 1},
+            "binary": b"before",
+            "identifier": uuid.UUID(int=1),
+            "day": datetime.date(2024, 1, 2),
+        }
+        created = await Tracked.objects.create(number=1, **initial)
+        source = Tracked.objects.filter(pk=created.pk)
+        if load == "only":
+            source = source.only(*created._binding.primary_key_attribute_names)
+        elif load == "defer":
+            source = source.defer(field_name)
+        obj = await source.get()
+        assert obj.get_dirty_fields() == {}
+        assert hasattr(obj, field_name) is (load == "all")
+        setattr(obj, field_name, None)
+        assert obj.get_dirty_fields() == {field_name: (initial[field_name] if load == "all" else None, None)}
+        await obj.save(changed_only=True)
+        stored = await Tracked.objects.get(pk=created.pk)
+        assert getattr(stored, field_name) is None
+        assert obj.get_dirty_fields() == {}
 
 
 @pytest.mark.asyncio
@@ -285,7 +380,10 @@ async def test_relation_fields_excluded_from_dirty_tracking(db):
     their shadow *_id columns) are never included."""
     thing = await DirtyTrackedThing.objects.create(name="A", count=0)
     dirty_field_names = set(thing.get_dirty_fields().keys())
-    assert dirty_field_names.issubset(DirtyTrackedThing._meta.fields_map.keys() - DirtyTrackedThing._meta.fetch_fields)
+    assert dirty_field_names.issubset(
+        HareContext.require_current().apps.get_binding(DirtyTrackedThing).fields_map.keys()
+        - HareContext.require_current().apps.get_binding(DirtyTrackedThing).fetch_fields
+    )
 
 
 @pytest.mark.asyncio
@@ -419,14 +517,8 @@ async def test_dirty_tracking_with_composite_pk(db):
 async def file_db(tmp_path):
     """A real file-backed SQLite DB - Transactions.autonomous() opens a genuinely separate
     connection, and a fresh connection to `:memory:` is a completely separate, empty database."""
-    from hare.contrib.test.isolated_contexts import hare_test_context
-
     db_path = tmp_path / "dirty_tracking_autonomous_test.sqlite"
-    async with hare_test_context(
-        ["tests.shared_models.testmodels"],
-        db_url=f"sqlite+aiosqlite:///{db_path}?synchronous=OFF",
-        connection_label="models",
-    ) as ctx:
+    async with DatabaseUnderTest.open_file_model_context(db_path) as ctx:
         yield ctx
 
 
@@ -548,3 +640,83 @@ def test_a_nan_read_back_is_not_a_change(old_value, new_value, differ):
     """A NaN equals no value, itself too - a FloatField holding NaN was dirty right after it was read, and
     save() wrote it again with every field changed."""
     assert FieldSnapshot.values_differ(old_value, new_value) is differ
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("composite", (False, True), ids=("single-key", "composite-key"))
+@pytest.mark.parametrize("aliased", (False, True), ids=("logical-column", "physical-column"))
+@pytest.mark.parametrize(
+    "write_path", ("full-save", "partial-save", "partial-unloaded", "bulk-returning", "bulk-unloaded")
+)
+async def test_partial_writes_keep_recomputed_fields_clean(monkeypatch, composite, aliased, write_path):
+    class Tally(Model):
+        number = fields.IntField(primary_key=not composite, generated=False)
+        if composite:
+            revision = fields.IntField()
+            pk = fields.CompositePrimaryKey("number", "revision")
+        value = fields.IntField()
+        label = fields.TextField()
+        calculated = fields.GeneratedField(
+            F("value") + 10, output_field=fields.IntField(), source_field="calculated_col" if aliased else None
+        )
+
+        class Meta:
+            track_dirty_fields = True
+
+    module = ModuleType("tests._recomputed_dirty_fields")
+    module.__models__ = [Tally]
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    async with hare_test_context([module.__name__], DatabaseUnderTest.get_url()):
+        if write_path == "bulk-returning" and not Tally.get_connection().features.supports_returning:
+            pytest.skip("The dialect cannot return values from an update")
+        obj = await Tally.objects.create(number=1, **({"revision": 2} if composite else {}), value=2, label="a")
+        assert obj.get_dirty_fields() == {}
+        if write_path == "partial-unloaded":
+            primary_key = ["number", "revision"] if composite else ["number"]
+            obj = await Tally.objects.only(*primary_key, "value", "label").get(pk=obj.pk)
+        obj.value = 3
+        obj.label = "unsaved"
+        if write_path == "full-save":
+            await obj.save()
+        elif write_path in {"partial-save", "partial-unloaded"}:
+            await obj.save(update_fields=["value"])
+        else:
+            await Tally.objects.bulk_update([obj], fields=["value"], returning=write_path == "bulk-returning")
+        assert obj.get_dirty_fields() == ({} if write_path == "full-save" else {"label": ("a", "unsaved")})
+        assert await Tally.objects.get(pk=obj.pk).values_list("calculated", flat=True) == 13
+        if hasattr(obj, "calculated"):
+            assert obj.calculated == 13
+        else:
+            assert "calculated" not in obj._dirty_snapshot
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("aliased", (False, True), ids=("logical-column", "physical-column"))
+async def test_soft_delete_keeps_recomputed_fields_clean_without_accepting_unsaved_fields(monkeypatch, aliased):
+    class Tally(Model):
+        value = fields.IntField(source_field="stored_value")
+        label = fields.TextField()
+        removed = fields.DatetimeField(null=True, source_field="deleted_col")
+        calculated = fields.GeneratedField(
+            Case(When(removed__isnull=True, then=F("value") + 10), default=-F("value")),
+            output_field=fields.IntField(),
+            source_field="calculated_col" if aliased else None,
+        )
+
+        class Meta:
+            track_dirty_fields = True
+            soft_delete_field = "removed"
+
+    module = ModuleType("tests._recomputed_soft_delete_fields")
+    module.__models__ = [Tally]
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    async with hare_test_context([module.__name__], DatabaseUnderTest.get_url()):
+        obj = await Tally.objects.create(value=2, label="original")
+        obj.label = "unsaved"
+        await obj.delete()
+        assert obj.calculated == -2
+        assert await Tally.objects.include_deleted().get(pk=obj.pk).values_list("calculated", flat=True) == -2
+        assert obj.get_dirty_fields() == {"label": ("original", "unsaved")}
+        await obj.restore()
+        assert obj.calculated == 12
+        assert obj.get_dirty_fields() == {"label": ("original", "unsaved")}

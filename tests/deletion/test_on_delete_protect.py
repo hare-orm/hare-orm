@@ -5,6 +5,7 @@ import pytest_asyncio
 
 from hare.contrib.test import capture_queries, requires_features
 from hare.contrib.test.isolated_contexts import hare_test_context
+from hare.core.hare_context import HareContext
 from hare.dialects.sqlite.exceptions import SqliteTriggerRecursionLimitError
 from hare.exceptions import ConfigurationError, IntegrityError, ProtectedError
 from hare.fields import PROTECT
@@ -36,6 +37,7 @@ from tests.shared_models.testmodels import (
     TransitiveProtectTenantGuard,
     TransitiveProtectTenantMiddle,
 )
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 @pytest_asyncio.fixture
@@ -44,11 +46,7 @@ async def file_db(tmp_path):
     separate connection, and a fresh connection to `:memory:` is a completely separate, empty
     database (mirrors the same fixture in test_autonomous_transaction.py)."""
     db_path = tmp_path / "protect_autonomous_test.sqlite"
-    async with hare_test_context(
-        ["tests.shared_models.testmodels"],
-        db_url=f"sqlite+aiosqlite:///{db_path}?synchronous=OFF",
-        connection_label="models",
-    ) as ctx:
+    async with DatabaseUnderTest.open_file_model_context(db_path) as ctx:
         yield ctx
 
 
@@ -180,7 +178,7 @@ async def test_bulk_delete_unrelated_model_unaffected(db):
 @pytest.mark.asyncio
 async def test_protect_requires_no_null(db):
     """PROTECT doesn't need null=True (unlike SET_NULL) - the row is never actually nulled."""
-    assert ProtectedChild._meta.fields_map["parent"].on_delete == PROTECT  # type: ignore[attr-defined]
+    assert HareContext.require_current().apps.get_binding(ProtectedChild).fields_map["parent"].on_delete == PROTECT  # type: ignore[attr-defined]
 
 
 @pytest.mark.database_independent
@@ -365,15 +363,21 @@ async def test_transitive_protect_is_found_through_a_sibling_branch_without_prot
 
 @pytest.mark.asyncio
 async def test_transitive_protect_flag_only_set_for_models_with_a_protect_below_a_cascade(db):
-    assert DeletionGraph.has_transitive_protect(TransitiveProtectRoot)
-    assert DeletionGraph.has_transitive_protect(TransitiveProtectLooseRoot)
+    assert DeletionGraph.has_transitive_protect(HareContext.require_current().apps.get_binding(TransitiveProtectRoot))
+    assert DeletionGraph.has_transitive_protect(
+        HareContext.require_current().apps.get_binding(TransitiveProtectLooseRoot)
+    )
     # a direct PROTECT alone (check_protected's job) or a PROTECT that isn't below any CASCADE hop
     # doesn't count
-    assert DeletionGraph.has_protecting_relations(ProtectedParent)
-    assert not DeletionGraph.has_transitive_protect(ProtectedParent)
-    assert not DeletionGraph.has_transitive_protect(TransitiveProtectGuard)
-    assert not DeletionGraph.has_transitive_protect(TransitiveProtectLeafGuard)
-    assert not DeletionGraph.has_transitive_protect(DoubleFK)
+    assert DeletionGraph.has_protecting_relations(HareContext.require_current().apps.get_binding(ProtectedParent))
+    assert not DeletionGraph.has_transitive_protect(HareContext.require_current().apps.get_binding(ProtectedParent))
+    assert not DeletionGraph.has_transitive_protect(
+        HareContext.require_current().apps.get_binding(TransitiveProtectGuard)
+    )
+    assert not DeletionGraph.has_transitive_protect(
+        HareContext.require_current().apps.get_binding(TransitiveProtectLeafGuard)
+    )
+    assert not DeletionGraph.has_transitive_protect(HareContext.require_current().apps.get_binding(DoubleFK))
 
 
 @requires_features(supports_foreign_keys=True)
@@ -453,13 +457,17 @@ async def test_transitive_protect_ignores_protector_inside_the_same_cascade_tree
     protected_child = await TransitiveProtectSelfReferential.objects.create(name="protected", parent=root)
     await TransitiveProtectSelfReferential.objects.create(name="inside-guard", parent=root, guardian=protected_child)
 
-    await DeletionCollector.check_protected_transitively(TransitiveProtectSelfReferential, [root.pk], None)
+    await DeletionCollector.check_protected_transitively(
+        HareContext.require_current().apps.get_binding(TransitiveProtectSelfReferential), [root.pk], None
+    )
 
     outside_guard = await TransitiveProtectSelfReferential.objects.create(
         name="outside-guard", guardian=protected_child
     )
     with pytest.raises(ProtectedError) as exc_info:
-        await DeletionCollector.check_protected_transitively(TransitiveProtectSelfReferential, [root.pk], None)
+        await DeletionCollector.check_protected_transitively(
+            HareContext.require_current().apps.get_binding(TransitiveProtectSelfReferential), [root.pk], None
+        )
 
     assert exc_info.value.protected_objects == [outside_guard]
 
@@ -581,7 +589,7 @@ async def test_delete_with_inside_protector_leaves_the_transaction_open_for_ddl(
     events on Postgres and a later ALTER TABLE/TRUNCATE of the table in the same transaction failed
     ("cannot ALTER TABLE ... because it has pending trigger events"). The deferral now only lasts
     for the delete itself."""
-    table = TransitiveProtectSelfReferential._meta.db_table
+    table = HareContext.require_current().apps.get_binding(TransitiveProtectSelfReferential).db_table
     async with Transactions.atomic("models") as connection:
         root = await create_protected_tree(guard_is_descendant_of_protected)
         survivor = await TransitiveProtectSelfReferential.objects.create(name="survivor")
@@ -675,7 +683,7 @@ async def test_outside_protector_still_blocks_through_the_database_backstop(db, 
 async def test_delete_keeps_the_timing_of_a_user_deferred_constraint(db):
     """Only the PROTECT backstops are deferred and then made immediate again - a user's own
     DEFERRABLE INITIALLY DEFERRED constraint on a cascade-deleted row stays deferred to commit."""
-    table = TransitiveProtectSelfReferential._meta.db_table
+    table = HareContext.require_current().apps.get_binding(TransitiveProtectSelfReferential).db_table
     async with Transactions.atomic("models") as connection:
         await connection.execute(
             'CREATE TABLE "user_deferred_note" ("id" INTEGER PRIMARY KEY, "row_id" INTEGER '

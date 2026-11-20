@@ -20,6 +20,7 @@ class ClickhouseDatabase:
         self.http_port = CLICKHOUSE_HTTP_PORT
         self.native_port = CLICKHOUSE_NATIVE_PORT
         self.password = CLICKHOUSE_PASSWORD
+        self.created = False
 
     def execute(self, sql: str, database: str = "default") -> str:
         """Runs one statement over HTTP.
@@ -48,12 +49,13 @@ class ClickhouseDatabase:
         Returns:
             The server's version.
         """
+        version = (await asyncio.to_thread(self.execute, "SELECT version()")).strip()
         await asyncio.to_thread(self.execute, f"DROP DATABASE IF EXISTS `{self.name}`")
         await asyncio.to_thread(self.execute, f"CREATE DATABASE `{self.name}`")
-        return (await asyncio.to_thread(self.execute, "SELECT version()")).strip()
+        self.created = True
+        return version
 
     async def drop(self) -> None:
-        try:
-            await asyncio.to_thread(self.execute, f"DROP DATABASE IF EXISTS `{self.name}`")
-        except OSError as error:
-            print(f"(the database {self.name} stays: {error})")
+        """Drop the database, passing cleanup failures to the run's result collector."""
+        await asyncio.to_thread(self.execute, f"DROP DATABASE IF EXISTS `{self.name}`")
+        self.created = False

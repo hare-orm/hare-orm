@@ -1,5 +1,6 @@
 import pytest
 
+from hare.core.apps.model_binding_graph import ModelBindingGraph
 from tests.shared_models.testmodels import ManagerModel, ManagerModelExtra
 
 
@@ -8,13 +9,14 @@ def test_meta_manager_is_not_shared_between_abstract_base_subclasses():
     """ModelMeta.__new__ merges every abstract ancestor's Meta attributes into each concrete
     subclass's OWN Meta class dict (a plain dict update) - a Meta.manager declared on an
     abstract base used to end up as the LITERAL SAME Manager object on every concrete subclass
-    unless MetaInfo.__init__ gave each one its own copy. ModelMeta.__new__ then mutates
+    unless ModelBinding.__init__ gave each one its own copy. ModelMeta.__new__ then mutates
     manager._model = new_class in place, so the shared object's _model silently ended up
     pointing at whichever subclass was defined LAST - every earlier subclass's own manager
     (and thus .all()/.filter()/etc.) queried and hydrated as that last subclass instead of
     itself. Only reproducible with two subclasses that BOTH inherit the manager unmodified -
     unlike ManagerModel/ManagerModelExtra above, where ManagerModel declares its own
     Meta.manager, leaving only one real consumer of AbstractManagerModel's shared instance."""
+    declaration_graph = ModelBindingGraph()
     from hare import fields
     from hare.models import Model
     from hare.query.managers.manager import Manager
@@ -34,18 +36,19 @@ def test_meta_manager_is_not_shared_between_abstract_base_subclasses():
         class Meta:
             table = "meta_manager_second_child"
 
-    assert FirstChild._meta.manager is not SecondChild._meta.manager
-    assert FirstChild._meta.manager._model is FirstChild
-    assert SecondChild._meta.manager._model is SecondChild
+    assert declaration_graph.include(FirstChild).manager is not declaration_graph.include(SecondChild).manager
+    assert declaration_graph.include(FirstChild).manager._model is FirstChild
+    assert declaration_graph.include(SecondChild).manager._model is SecondChild
 
 
 @pytest.mark.database_independent
 def test_meta_manager_copy_preserves_custom_constructor_state():
-    """The per-subclass copy MetaInfo.__init__ now makes must preserve any extra instance state
+    """The per-subclass copy ModelBinding.__init__ now makes must preserve any extra instance state
     a custom Manager subclass's own __init__ sets on itself (e.g. StatusManager's queryset_cls
     above) - not just re-run the subclass's __init__ with no arguments, which would silently
     fall back to its own defaults and lose whatever the abstract base's Meta.manager was
     actually configured with."""
+    declaration_graph = ModelBindingGraph()
     from hare import fields
     from hare.models import Model
     from hare.query.managers.manager import Manager
@@ -70,8 +73,8 @@ def test_meta_manager_copy_preserves_custom_constructor_state():
         class Meta:
             table = "meta_manager_tagged_child"
 
-    assert TaggedChild._meta.manager.queryset_class is TaggedQuerySet
-    assert TaggedChild._meta.manager.tag == "tagged"
+    assert declaration_graph.include(TaggedChild).manager.queryset_class is TaggedQuerySet
+    assert declaration_graph.include(TaggedChild).manager.tag == "tagged"
     assert isinstance(TaggedChild.objects, TaggedQuerySet)
 
 

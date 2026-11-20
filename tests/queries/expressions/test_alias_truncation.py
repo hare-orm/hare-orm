@@ -8,7 +8,7 @@ from tests.shared_models.testmodels import (
 )
 
 # ============================================================================
-# Unit tests for LookupPaths._safe_alias
+# Identifier length is enforced in bytes before an alias is used in SQL.
 # ============================================================================
 
 

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from typing import Any
+from asyncio import Task, current_task
+from collections.abc import Generator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from hare.contrib.taskiq.constants import (
@@ -14,11 +18,60 @@ from hare.query.scopes.tenants.all_tenants import AllTenants
 from hare.query.scopes.tenants.model_tenants import ModelTenants
 from hare.query.scopes.tenants.tenant_values import TenantValues
 
+if TYPE_CHECKING:
+    from taskiq import AsyncBroker
+
 
 class TaskTenantLabels:
     """A tenant scope as the value of a task's label, and back - one tenant value as it is (a UUID as
     its text), several as ``{"any_of": [...]}``, every tenant as ``{"all": true}``, a scope given
     model by model as ``{"models": {"app.Model": ...}}``."""
+
+    _sending_labels: ContextVar[dict[Task[Any], dict[str, Any]] | None] = ContextVar(
+        "hare_taskiq_sending_labels", default=None
+    )
+
+    @classmethod
+    @contextmanager
+    def sending(cls, broker: AsyncBroker, labels: Mapping[str, Any]) -> Generator[None]:
+        """Keep captured tenant labels through Taskiq's string conversion for this send only.
+
+        Middleware restores only its configured tenant label after message preparation,
+        including an absent scope, so the relay's ambient scope cannot replace the sender's.
+        A child task inherits the context but cannot consume its sender's frame. Clearing
+        the frame on exit releases both the task and labels retained by inherited contexts.
+        """
+        from hare.contrib.taskiq.hare_taskiq_middleware import HareTaskiqMiddleware
+
+        overrides = {
+            middleware.tenant_label: labels.get(middleware.tenant_label)
+            for middleware in broker.middlewares
+            if isinstance(middleware, HareTaskiqMiddleware) and middleware.tenant_label is not None
+        }
+        sender = current_task()
+        frame = {sender: overrides} if sender is not None else {}
+        token = cls._sending_labels.set(frame)
+        try:
+            yield
+        finally:
+            frame.clear()
+            cls._sending_labels.reset(token)
+
+    @classmethod
+    def restore_sending_label(cls, tenant_label: str | None, labels: dict[str, Any]) -> bool:
+        """Restore this sender's captured label; leave other labels to ordinary Taskiq behavior."""
+        frame = cls._sending_labels.get()
+        if tenant_label is None or frame is None:
+            return False
+        try:
+            sender = current_task()
+        except RuntimeError:
+            return False
+        overrides = frame.get(sender) if sender is not None else None
+        if overrides is None or tenant_label not in overrides:
+            return False
+        labels[tenant_label] = overrides[tenant_label]
+        return True
 
     @staticmethod
     def get_label_value(scope: Any) -> Any:
@@ -35,14 +88,18 @@ class TaskTenantLabels:
                 is given for a model registered in no app (an abstract base model).
         """
         if type(scope) is ModelTenants:
+            from hare.core.hare_context import HareContext
+
+            apps = HareContext.require_current().apps
             label_values: dict[str, Any] = {}
             for model, model_scope in scope.scopes.items():
-                if model._meta.app is None:
+                binding = apps.get_binding(model)  # type: ignore[union-attr]
+                if binding.app is None:
                     raise UnSupportedError(
                         f"The tenant scope of {model.__name__} can't go into a task label - it is no model of an "
                         "app; give the scope for each model of an app instead"
                     )
-                label_values[model._meta.full_name] = TaskTenantLabels.get_label_value(model_scope)
+                label_values[binding.full_name] = TaskTenantLabels.get_label_value(model_scope)
             return {TENANT_LABEL_MODELS_KEY: label_values}
         if type(scope) is AllTenants:
             return {TENANT_LABEL_ALL_KEY: True}
@@ -83,7 +140,7 @@ class TaskTenantLabels:
             The scope, as ``Tenancy.scope()`` takes it.
 
         Raises:
-            ConfigurationError: A scope given model by model names a model no app registers.
+            ConfigurationError: A mapping label names no supported tenant-scope form.
         """
         if not isinstance(label_value, dict):
             return label_value

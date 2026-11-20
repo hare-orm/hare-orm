@@ -9,12 +9,10 @@ from pydantic import BaseModel
 from hare import fields
 from hare.contrib.pydantic import pydantic_model_creator
 from hare.contrib.test import hare_test_context
-from hare.exceptions import ConfigurationError
+from hare.exceptions import ConfigurationError, NoValuesFetched
 from hare.models import Model
 from hare.query.functions import Count
 from tests.contrib.frameworks.models import Chapter, Writer
-
-REQUIRES = ("pydantic",)
 
 pytestmark = pytest.mark.sqlite_only
 
@@ -71,7 +69,7 @@ async def test_an_annotation_and_an_attribute_are_read_and_a_missing_one_is_none
 
 
 @pytest.mark.asyncio
-async def test_a_related_value_is_flattened_and_none_for_a_relation_not_loaded():
+async def test_a_related_value_is_flattened_and_requires_its_relation_loaded():
     async with hare_test_context(MODELS, db_url=DB_URL):
         schema = pydantic_model_creator(Chapter, exclude=("writer",), related_values={"writer_name": "writer.name"})
         await create_rows()
@@ -79,7 +77,8 @@ async def test_a_related_value_is_flattened_and_none_for_a_relation_not_loaded()
         not_loaded = await Chapter.objects.get(number=1)
 
         assert schema.model_validate(loaded).model_dump()["writer_name"] == "anna"
-        assert schema.model_validate(not_loaded).model_dump()["writer_name"] is None
+        with pytest.raises(NoValuesFetched, match="Field 'writer' has not been fetched"):
+            schema.model_validate(not_loaded)
 
 
 @pytest.mark.asyncio

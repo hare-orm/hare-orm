@@ -22,9 +22,9 @@ from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.exceptions import NoValuesFetched, ValidationError
 from hare.fields import CASCADE, NO_ACTION, PROTECT, RESTRICT, SET_DEFAULT, SET_NULL
 from hare.fields.db_defaults import Now, RandomHex, SqlDefault
+from hare.fields.enums import RelationLoadStrategy
 from hare.fields.generated_field import GeneratedField
 from hare.models import Model
-from hare.models.tenancy.tenancy import Tenancy
 from hare.query.expressions.conditions.q import Q
 from hare.query.expressions.f import F
 from hare.query.functions import Coalesce, Lower
@@ -64,8 +64,9 @@ class Tournament(Model):
     uniquetogetherfieldswithfks: fields.ReverseRelation[UniqueTogetherFieldsWithFK]
     composite_owners: fields.ReverseRelation[CompositePkOwningFK]
 
-    class PydanticMeta:
-        exclude = ("minrelations", "uniquetogetherfieldswithfks", "composite_owners")
+    class Meta:
+        class pydantic:
+            exclude = ("minrelations", "uniquetogetherfieldswithfks", "composite_owners")
 
     def __str__(self):
         return self.name
@@ -115,8 +116,9 @@ class Event(Model):
 
 
 class ModelTestPydanticMetaBackwardRelations1(Model):
-    class PydanticMeta:
-        backward_relations = False
+    class Meta:
+        class pydantic:
+            backward_relations = False
 
 
 class ModelTestPydanticMetaBackwardRelations2(Model): ...
@@ -136,8 +138,9 @@ class ModelTestPydanticAnnotatedBackwardRel(Model):
 
     annotated_children: fields.ReverseRelation[ModelTestPydanticAnnotatedChild]
 
-    class PydanticMeta:
-        backward_relations = False
+    class Meta:
+        class pydantic:
+            backward_relations = False
 
 
 class ModelTestPydanticAnnotatedChild(Model):
@@ -228,8 +231,8 @@ class Team(Model):
     class Meta:
         ordering = ["id"]
 
-    class PydanticMeta:
-        exclude = ("minrelations",)
+        class pydantic:
+            exclude = ("minrelations",)
 
     def __str__(self):
         return self.name
@@ -371,7 +374,7 @@ class FloatFields(Model):
     floatnum_null = fields.FloatField(null=True)
 
 
-def raise_if_not_dict_or_list(value: dict | list):
+def raise_if_not_dict_or_list(value: dict[str, Any] | list[Any]):
     if not isinstance(value, (dict, list)):
         raise ValidationError("Value must be a dict or list.")
 
@@ -400,16 +403,16 @@ class JSONFields(Model):
     """
 
     id = fields.IntField(primary_key=True)
-    data = fields.JSONField()  # type: ignore # Test cases where generics are not provided
-    data_null = fields.JSONField[dict | list](null=True)
-    data_default = fields.JSONField[dict](default={"a": 1})
+    data = fields.JSONField()  # Test cases where generics are not provided
+    data_null = fields.JSONField[dict[str, Any] | list[Any]](null=True)
+    data_default = fields.JSONField[dict[str, Any]](default={"a": 1})
 
     # From Python 3.10 onwards, validator can be defined with staticmethod
-    data_validate = fields.JSONField[dict | list](null=True, validators=[raise_if_not_dict_or_list])
+    data_validate = fields.JSONField[dict[str, Any] | list[Any]](null=True, validators=[raise_if_not_dict_or_list])
 
     # Test cases where encoders are provided
-    data_decimal = fields.JSONField[dict | list](null=True, encoder=DecimalEncoder.dumps)
-    data_index = fields.JSONField[dict | list](null=True, encoder=IndexEncoder.dumps)
+    data_decimal = fields.JSONField[dict[str, Any] | list[Any]](null=True, encoder=DecimalEncoder.dumps)
+    data_index = fields.JSONField[dict[str, Any] | list[Any]](null=True, encoder=IndexEncoder.dumps)
 
 
 class UUIDFields(Model):
@@ -630,7 +633,7 @@ class Employee(Model):
     def __str__(self):
         return self.name
 
-    async def full_hierarchy__async_for(self, level=0):
+    async def full_hierarchy__async_for(self, level: int = 0) -> str:
         """
         Demonstrates ``async for` to fetch relations
 
@@ -648,7 +651,7 @@ class Employee(Model):
             text.append(await member.full_hierarchy__async_for(level + 1))
         return "\n".join(text)
 
-    async def full_hierarchy__fetch_related(self, level=0):
+    async def full_hierarchy__fetch_related(self, level: int = 0) -> str:
         """
         Demonstrates ``await .fetch_related`` to fetch relations
 
@@ -699,11 +702,11 @@ class Employee(Model):
     class Meta:
         ordering = ["id"]
 
-    class PydanticMeta:
-        computed = ["name_length", "team_size", "not_annotated"]
-        exclude = ["manager", "gets_talked_to"]
-        allow_cycles = True
-        max_recursion = 2
+        class pydantic:
+            computed = ["name_length", "team_size", "not_annotated"]
+            exclude = ["manager", "gets_talked_to"]
+            allow_cycles = True
+            max_recursion = 2
 
 
 class StraightFields(Model):
@@ -728,7 +731,7 @@ class StraightFields(Model):
         description="Line",
         on_delete=NO_ACTION,
     )
-    o2o_rev: fields.Field
+    o2o_rev: fields.Field[Any]
 
     rel_to: fields.ManyToManyRelation[StraightFields] = fields.ManyToManyField(
         "models.StraightFields",
@@ -778,7 +781,7 @@ class SourceFields(Model):
         description="Line",
         on_delete=NO_ACTION,
     )
-    o2o_rev: fields.Field
+    o2o_rev: fields.Field[Any]
 
     rel_to: fields.ManyToManyRelation[SourceFields] = fields.ManyToManyField(
         "models.SourceFields",
@@ -850,7 +853,7 @@ class LazyJoinedParent(Model):
 class LazyJoinedChild(Model):
     name = fields.TextField()
     parent: fields.ForeignKeyRelation[LazyJoinedParent] = fields.ForeignKeyField(
-        "models.LazyJoinedParent", related_name="children", lazy="joined"
+        "models.LazyJoinedParent", related_name="children", lazy=RelationLoadStrategy.JOINED
     )
 
 
@@ -863,7 +866,7 @@ class LazySelectParent(Model):
 class LazySelectChild(Model):
     name = fields.TextField()
     parent: fields.ForeignKeyRelation[LazySelectParent] = fields.ForeignKeyField(
-        "models.LazySelectParent", related_name="children", lazy="select"
+        "models.LazySelectParent", related_name="children", lazy=RelationLoadStrategy.SELECT
     )
 
 
@@ -886,7 +889,7 @@ class LazyJoinedCompositeOwnerChild(Model):
     b = fields.IntField()
     name = fields.TextField()
     parent: fields.ForeignKeyRelation[LazyJoinedParent] = fields.ForeignKeyField(
-        "models.LazyJoinedParent", related_name="composite_children", lazy="joined"
+        "models.LazyJoinedParent", related_name="composite_children", lazy=RelationLoadStrategy.JOINED
     )
 
     pk = fields.CompositePrimaryKey("a", "b")
@@ -909,7 +912,7 @@ class LazySelectSoftDeleteParent(Model):
 class LazySelectSoftDeleteChild(Model):
     name = fields.TextField()
     parent: fields.ForeignKeyRelation[LazySelectSoftDeleteParent] = fields.ForeignKeyField(
-        "models.LazySelectSoftDeleteParent", related_name="children", lazy="select"
+        "models.LazySelectSoftDeleteParent", related_name="children", lazy=RelationLoadStrategy.SELECT
     )
 
 
@@ -920,7 +923,7 @@ class LazyM2MRight(Model):
 class LazyM2MLeft(Model):
     name = fields.TextField()
     rights: fields.ManyToManyRelation[LazyM2MRight] = fields.ManyToManyField(
-        "models.LazyM2MRight", related_name="lefts", lazy="select"
+        "models.LazyM2MRight", related_name="lefts", lazy=RelationLoadStrategy.SELECT
     )
 
 
@@ -929,10 +932,14 @@ class LazySelectMentee(Model):
 
     name = fields.TextField()
     mentor: fields.ForeignKeyNullableRelation[LazySelectMentee] = fields.ForeignKeyField(
-        "models.LazySelectMentee", related_name="mentees", null=True, lazy="select", on_delete=SET_NULL
+        "models.LazySelectMentee",
+        related_name="mentees",
+        null=True,
+        lazy=RelationLoadStrategy.SELECT,
+        on_delete=SET_NULL,
     )
     skills: fields.ManyToManyRelation[LazyM2MRight] = fields.ManyToManyField(
-        "models.LazyM2MRight", related_name="skilled_mentees", lazy="select"
+        "models.LazyM2MRight", related_name="skilled_mentees", lazy=RelationLoadStrategy.SELECT
     )
 
 
@@ -1131,7 +1138,7 @@ class VersionedDirtyTrackedDocument(VersionedModel):
 
 class VersionedDocumentWithJson(VersionedModel):
     title = fields.TextField()
-    data = fields.JSONField[dict](default=dict)
+    data = fields.JSONField[dict[str, Any]](default=dict)
 
 
 class VersionedDocumentWithSoftDelete(VersionedModel):
@@ -2147,14 +2154,14 @@ class NumberSourceField(Model):
     number = fields.IntField(source_field="counter", default=0)
 
 
-class StatusQuerySet(QuerySet):
+class StatusQuerySet(QuerySet[Any, Any]):
     def active(self):
         return self.filter(status=1)
 
 
 class StatusManager(Manager):
-    def get_queryset(self):
-        return self.queryset_class(self._model)
+    def get_queryset(self, *, binding=None, context=None):
+        return self.queryset_class(self._model, binding=binding, context=context)  # type: ignore[arg-type]
 
 
 class AbstractManagerModel(Model):
@@ -2182,12 +2189,11 @@ class ManagerModelExtra(AbstractManagerModel):
     extra = fields.CharField(max_length=200)
 
 
-class ActiveManager(Manager):
-    """A default-scope Manager whose get_queryset() takes no parameters at all (unlike the base
-    one) and just chains one extra domain-specific filter onto super().get_queryset()."""
+class ActiveRows:
+    """The declared visibility predicate of active rows."""
 
-    def get_queryset(self):
-        return super().get_queryset().filter(is_active=True)
+    def get_condition(self, model, visibility):
+        return Q(is_active=True)
 
 
 class ActiveAuthor(Model):
@@ -2197,7 +2203,7 @@ class ActiveAuthor(Model):
     books: fields.ReverseRelation["ActiveAuthorBook"]
 
     class Meta:
-        manager = ActiveManager()
+        manager = Manager(scope=ActiveRows())
 
 
 class ActiveAuthorBook(Model):
@@ -2215,7 +2221,7 @@ class VersionedActiveDocument(VersionedModel):
     is_active = fields.BooleanField(default=True)
 
     class Meta:
-        manager = ActiveManager()
+        manager = Manager(scope=ActiveRows())
 
 
 class TenantActiveAuthor(Model):
@@ -2229,7 +2235,7 @@ class TenantActiveAuthor(Model):
     books: fields.ReverseRelation["TenantActiveAuthorBook"]
 
     class Meta:
-        manager = ActiveManager()
+        manager = Manager(scope=ActiveRows())
         tenant_field = "company_id"
         soft_delete_field = "deleted_at"
 
@@ -2294,12 +2300,12 @@ class ActiveAuthorTag(Model):
     books: fields.ManyToManyRelation[TenantActiveAuthorBook]
 
     class Meta:
-        manager = ActiveManager()
+        manager = Manager(scope=ActiveRows())
 
 
-class CrossRelationManager(Manager):
-    def get_queryset(self):
-        return super().get_queryset().filter(owner__is_active=True)
+class CrossRelationRows:
+    def get_condition(self, model, visibility):
+        return Q(owner__is_active=True)
 
 
 class CrossRelationScopedAuthor(Model):
@@ -2312,7 +2318,7 @@ class CrossRelationScopedAuthor(Model):
     )
 
     class Meta:
-        manager = CrossRelationManager()
+        manager = Manager(scope=CrossRelationRows())
 
 
 class CrossRelationScopedBook(Model):
@@ -2324,12 +2330,12 @@ class CrossRelationScopedBook(Model):
 
 
 class AnnotatedManager(Manager):
-    def get_queryset(self):
-        return super().get_queryset().annotate(shout=Coalesce("name", "name"))
+    def get_queryset(self, *, binding=None, context=None):
+        return super().get_queryset(binding=binding, context=context).annotate(shout=Coalesce("name", "name"))
 
 
 class AnnotatedScopedAuthor(Model):
-    """Default scope applies annotate() - has no JOIN ON equivalent."""
+    """A factory adds a selected annotation without declaring a row visibility predicate."""
 
     id = fields.IntField(primary_key=True)
     name = fields.CharField(max_length=50)
@@ -2556,7 +2562,9 @@ class WidgetTagMembership(Model):
     same constraint Django's own `through=` support has."""
 
     id = fields.IntField(primary_key=True)
-    widget = fields.ForeignKeyField("models.Widget", related_name="tag_membership_rows")
+    widget: fields.ForeignKeyRelation[Widget] = fields.ForeignKeyField(
+        "models.Widget", related_name="tag_membership_rows"
+    )
     tag = fields.ForeignKeyField(Tag, related_name="widget_membership_rows")
     weight = fields.IntField(db_default=1)
     weight_doubled = GeneratedField(expression=RawSQLTerm("weight * 2"), output_field=fields.IntField())
@@ -2590,7 +2598,9 @@ class SoftDeleteThroughMembership(Model):
 
     id = fields.IntField(primary_key=True)
     crew = fields.ForeignKeyField(SoftDeleteThroughCrew, related_name="membership_rows")
-    mate = fields.ForeignKeyField("models.SoftDeleteThroughMate", related_name="membership_rows")
+    mate: fields.ForeignKeyRelation[SoftDeleteThroughMate] = fields.ForeignKeyField(
+        "models.SoftDeleteThroughMate", related_name="membership_rows"
+    )
     deleted_at = fields.DatetimeField(null=True)
 
     class Meta:
@@ -2616,7 +2626,9 @@ class UniquePairMembership(Model):
 
     id = fields.IntField(primary_key=True)
     crew = fields.ForeignKeyField(UniquePairCrew, related_name="membership_rows")
-    mate = fields.ForeignKeyField("models.UniquePairMate", related_name="membership_rows")
+    mate: fields.ForeignKeyRelation[UniquePairMate] = fields.ForeignKeyField(
+        "models.UniquePairMate", related_name="membership_rows"
+    )
     role = fields.CharField(max_length=20, default="member")
     deleted_at = fields.DatetimeField(null=True)
 
@@ -2672,7 +2684,9 @@ class VersionedThroughLink(Model):
 
     id = fields.IntField(primary_key=True)
     owner = fields.ForeignKeyField(VersionedThroughOwner, related_name="link_rows")
-    target = fields.ForeignKeyField("models.VersionedThroughTarget", related_name="link_rows")
+    target: fields.ForeignKeyRelation[VersionedThroughTarget] = fields.ForeignKeyField(
+        "models.VersionedThroughTarget", related_name="link_rows"
+    )
     deleted_at = fields.DatetimeField(null=True)
     # db_default: left to the database when add() inserts a through row - the plain default=
     # variant is covered separately by DefaultsThroughLink.
@@ -2882,7 +2896,7 @@ class TenantActiveAuthorNote(Model):
     )
 
     class Meta:
-        manager = ActiveManager()
+        manager = Manager(scope=ActiveRows())
         tenant_field = "company_id"
         soft_delete_field = "deleted_at"
 
@@ -3758,29 +3772,28 @@ class BulkUpdateValuesAliasClash(Model):
         optimistic_lock_field = "version"
 
 
-class OwnerScopedManager(Manager):
+class OwnerScopedRows:
     """A default scope whose filter value is read from a runtime context value at query time."""
 
     current_owner: ClassVar[ContextVar[str | None]] = ContextVar("owner_scoped_manager_current_owner", default=None)
 
-    def get_queryset(self):
-        return super().get_queryset().filter(owner=OwnerScopedManager.current_owner.get())
+    def get_condition(self, model, visibility):
+        return Q(owner=OwnerScopedRows.current_owner.get())
 
 
-class OptionalOwnerScopedManager(Manager):
+class OptionalOwnerScopedRows:
     """Filters by the current owner only while one is set - the scope's shape changes per call."""
 
-    def get_queryset(self):
-        queryset = super().get_queryset()
-        owner = OwnerScopedManager.current_owner.get()
-        return queryset if owner is None else queryset.filter(owner=owner)
+    def get_condition(self, model, visibility):
+        owner = OwnerScopedRows.current_owner.get()
+        return None if owner is None else Q(owner=owner)
 
 
-class SharedOrOwnTenantManager(Manager):
+class SharedTenantRows:
     """Rows shared by every tenant (company_id NULL) plus the active tenant's own."""
 
-    def get_queryset(self):
-        return super().get_queryset().filter(Q(company_id__isnull=True) | Q(company_id=Tenancy.current.get()))
+    def get_condition(self, model, visibility):
+        return Q(company_id__isnull=True) | Q(company_id=visibility.tenant)
 
 
 class OwnerScopedLabel(Model):
@@ -3797,7 +3810,7 @@ class OwnerScopedSecret(Model):
     )
 
     class Meta:
-        manager = OwnerScopedManager()
+        manager = Manager(scope=OwnerScopedRows())
 
 
 class OptionalOwnerScopedSecret(Model):
@@ -3806,7 +3819,7 @@ class OptionalOwnerScopedSecret(Model):
     text = fields.CharField(max_length=100)
 
     class Meta:
-        manager = OptionalOwnerScopedManager()
+        manager = Manager(scope=OptionalOwnerScopedRows())
 
 
 class SharedOrOwnTemplate(Model):
@@ -3815,7 +3828,7 @@ class SharedOrOwnTemplate(Model):
     body = fields.CharField(max_length=100)
 
     class Meta:
-        manager = SharedOrOwnTenantManager()
+        manager = Manager(scope=SharedTenantRows())
 
 
 class OwnerScopedSecretRef(Model):
@@ -3851,11 +3864,13 @@ class OwnerScopedRoster(Model):
 
     id = fields.IntField(primary_key=True)
     team = fields.ForeignKeyField(OwnerScopedTeam, related_name="roster_rows")
-    player = fields.ForeignKeyField("models.OwnerScopedPlayer", related_name="roster_rows")
+    player: fields.ForeignKeyRelation[OwnerScopedPlayer] = fields.ForeignKeyField(
+        "models.OwnerScopedPlayer", related_name="roster_rows"
+    )
     owner = fields.CharField(max_length=50)
 
     class Meta:
-        manager = OwnerScopedManager()
+        manager = Manager(scope=OwnerScopedRows())
 
 
 class SlugTenantAccount(Model):
@@ -3917,19 +3932,27 @@ class RowPinLooseLink(Model):
     """A through model without a unique pair - it can link the same two rows twice."""
 
     id = fields.IntField(primary_key=True)
-    employee = fields.ForeignKeyField("models.RowPinEmployee", related_name="loose_link_rows")
-    label = fields.ForeignKeyField("models.RowPinLabel", related_name="loose_link_rows")
+    employee: fields.ForeignKeyRelation[RowPinEmployee] = fields.ForeignKeyField(
+        "models.RowPinEmployee", related_name="loose_link_rows"
+    )
+    label: fields.ForeignKeyRelation[RowPinLabel] = fields.ForeignKeyField(
+        "models.RowPinLabel", related_name="loose_link_rows"
+    )
 
 
 class RowPinTask(Model):
     id = fields.IntField(primary_key=True)
-    employee = fields.ForeignKeyField("models.RowPinEmployee", related_name="tasks")
+    employee: fields.ForeignKeyRelation[RowPinEmployee] = fields.ForeignKeyField(
+        "models.RowPinEmployee", related_name="tasks"
+    )
     hours = fields.IntField()
 
 
 class RowPinProject(Model):
     id = fields.IntField(primary_key=True)
-    department = fields.ForeignKeyField("models.RowPinDepartment", related_name="projects")
+    department: fields.ForeignKeyRelation[RowPinDepartment] = fields.ForeignKeyField(
+        "models.RowPinDepartment", related_name="projects"
+    )
     cost = fields.IntField()
 
 

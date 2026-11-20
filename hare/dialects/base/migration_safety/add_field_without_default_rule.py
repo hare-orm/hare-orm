@@ -32,7 +32,7 @@ class AddFieldWithoutDefaultRule(MigrationSafetyRule):
             or field.default is not None
             or context.dialect.schema_editor_class.column_backfill_class.is_auto_now_field(field)
             # A many-to-many relation adds a table, not a column.
-            or operation.name in field.model._meta.many_to_many_fields
+            or operation.name in field.get_binding().model_binding.many_to_many_fields  # type: ignore[union-attr]
         ):
             return None
         return context.get_risk(

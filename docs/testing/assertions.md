@@ -38,6 +38,10 @@ runs, not only once it exits. Every statement counts exactly once — model load
 each `bulk_create(use_copy=True)` batch (recorded as `COPY <table> (<columns>) FROM STDIN`) — even where
 one client method internally delegates to another.
 
+`using` selects a connection alias, including when given a client. The counter observes matching
+events in the block and its child tasks: independent and schema clients sharing that alias count too.
+It does not distinguish individual clients with the same alias.
+
 ## <a id="value-matchers"></a>Value matchers (`hare.contrib.test.conditions`)
 
 Not re-exported from the top-level `hare.contrib.test` package — import from the submodule directly:

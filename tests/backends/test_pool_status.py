@@ -7,11 +7,13 @@ import asyncio
 import contextlib
 import os
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 from hare import Connections
 from hare.contrib.test import requires_features
+from hare.dialects.base.client.pool.pool_statistics import PoolStatistics
 from hare.dialects.postgresql.client.constants import POOL_TIMEOUT_MESSAGE
 from hare.exceptions import DBConnectionError, PoolTimeoutError
 from hare.instrumentation import Observers
@@ -23,6 +25,29 @@ from tests.utils.waiting import wait_until
 
 #: The settings of a pool of one connection whose waits run out quickly.
 SINGLE_CONNECTION_SETTINGS = {"min_size": 1, "max_size": 1, "pool_acquire_timeout": 0.3}
+
+
+@pytest.mark.database_independent
+def test_completed_pool_measurements_are_counted_across_threads():
+    statistics = PoolStatistics(capacity=512)
+    notifications = []
+
+    def record(event, value):
+        notifications.append((event, value))
+
+    def measure(_number):
+        statistics.add_wait(0.25)
+        statistics.add_connect(0.125)
+        statistics.add_connect_failure()
+        statistics.add_timeout()
+
+    statistics.set_recorder(record)
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(measure, range(512)))
+    assert statistics.get_counts() == (0, 512, 128.0, 512, 512)
+    assert statistics.get_waits_since(0) == (512, [0.25] * 512, 0)
+    assert statistics.get_connects_since(0) == (512, [0.125] * 512, 0)
+    assert len(notifications) == 512 * 4
 
 
 def is_postgres() -> bool:
@@ -61,7 +86,7 @@ async def wait_for_waiting(client, count: int) -> None:
 
 @pytest.mark.asyncio
 @requires_features(supports_pool_status=True)
-async def test_the_connection_s_own_pool_is_reported(db):
+async def test_the_connection_s_own_pool_is_reported(db_simple):
     client = Connections.current().get_main("models")
     await client.execute_dicts("SELECT 1 AS one")
     status = client.get_pool_status()

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.dialects.clickhouse.functions.aggregates.parametric_aggregate_function import ParametricAggregateFunction
 from hare.dialects.clickhouse.functions.aggregates.parametric_analytic_function import ParametricAnalyticFunction
@@ -39,7 +39,7 @@ class ParametricAggregate(Aggregate, abstract=True):
         return function.distinct() if self.distinct else function
 
     def get_analytic_function(self, function: AggregateFunction) -> AnalyticFunction:
-        parametric_function = cast("ParametricAggregateFunction", function)
+        parametric_function: ParametricAggregateFunction = function  # type: ignore[assignment]
         analytic_function = ParametricAnalyticFunction(
             parametric_function.name, parametric_function.parameters, *parametric_function.args
         )

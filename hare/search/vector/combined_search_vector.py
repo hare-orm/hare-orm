@@ -5,14 +5,12 @@ from typing import ClassVar
 from hare.query.expressions import Expression, ExpressionContext, ExpressionResult
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
-from hare.search.constants import TEXT_SEARCH_CONFIGURATIONS_REQUIRED_FEATURE
-from hare.search.search_features import SearchFeatures
 from hare.search.vector.search_vector_combinable import SearchVectorCombinable
 
 
 class CombinedSearchVector(SearchVectorCombinable, Expression):
     """Two search vectors concatenated with ``+`` - needs
-    ``features.supports_text_search_configurations``.
+    ``features.text_search_operations.vector_concatenation``.
 
     Args:
         left: The left vector.
@@ -26,7 +24,4 @@ class CombinedSearchVector(SearchVectorCombinable, Expression):
         self.right = right
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
-        SearchFeatures.raise_if_unsupported(
-            expression_context, "SearchVector + SearchVector", TEXT_SEARCH_CONFIGURATIONS_REQUIRED_FEATURE
-        )
         return expression_context.dialect.text_search.get_combined_vector_result(self, expression_context)

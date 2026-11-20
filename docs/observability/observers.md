@@ -5,6 +5,7 @@ opens and closes, every row its writes change — so metrics, tracing, logging, 
 automations hook in without hare depending on any particular APM library.
 
 ```python
+from hare.core.apps.declarations import ModelReference
 from hare.instrumentation import Observers, QueryExecuted, RowsChanged, TransactionEvent
 
 class Observers:
@@ -14,7 +15,7 @@ class Observers:
         event_type: type,
         callback: TCallback,
         *,
-        models: Iterable[type[Model]] | None = None,
+        models: Iterable[ModelReference] | None = None,
     ) -> TCallback: ...
 
     @classmethod
@@ -23,7 +24,7 @@ class Observers:
         event_type: type,
         callback: ObserverCallback,
         *,
-        models: Iterable[type[Model]] | None = None,
+        models: Iterable[ModelReference] | None = None,
     ) -> None: ...
 
     # a `with` block
@@ -33,11 +34,13 @@ class Observers:
         event_type: type,
         callback: ObserverCallback,
         *,
-        models: Iterable[type[Model]] | None = None,
+        models: Iterable[ModelReference] | None = None,
     ) -> Generator[None]: ...
 
     @classmethod
-    def is_observed(cls, event_type: type, model: type[Model] | None = None) -> bool: ...
+    def is_observed(
+        cls, event_type: type, model: type[Model] | None = None, *, binding: ModelBinding | None = None
+    ) -> bool: ...
 
     @classmethod
     def wrap_queries(cls, wrapper: QueryWrapper) -> None: ...
@@ -54,7 +57,7 @@ There are three events, each a frozen dataclass:
 | Event | When | Attributes |
 |---|---|---|
 | `QueryExecuted` | Every query-executing call finished — `execute`, `execute_many`, `execute_script`, a bulk `COPY`, a stream — successful or not, on every connection, whatever the dialect and driver. | `sql` (with its [query tags](query-tags.md); `COPY <table> (<columns>) FROM STDIN` for a bulk load, `INSERT INTO <table> (<columns>) FORMAT Native` for one on ClickHouse), `parameters` (`None` when there are none to show), `duration_ms` (for a stream — until it was read to the end or closed), `error` (`None` on success), `connection_alias`. |
-| `TransactionEvent` | A real, top-level transaction began, committed or rolled back. | `type`, `connection_alias`, `duration_ms`, `error` — see [Transaction events](#transaction-events). |
+| `TransactionEvent` | A real, top-level transaction began, committed, rolled back or ended with an unknown outcome. | `type`, `connection_alias`, `duration_ms`, `error` — see [Transaction events](#transaction-events). |
 | `RowsChanged` | A committed write changed rows of a model. | `model`, `operation`, `pks`, `fields`, `connection_alias` — see [Row changes](#change-events). |
 
 ## <a id="observing"></a>Observing an event
@@ -74,15 +77,23 @@ callback again changes nothing for `QueryExecuted`/`TransactionEvent`; for `Rows
 models (see [Which models an observer hears](#which-models)). `unobserve()` of a callback that isn't
 registered does nothing.
 
+`is_observed(event_type, model)` checks whether an observer matches a model. Supply `binding=`
+when matching app-qualified subscriptions for a model bound to a specific registry.
+
 How an observer runs depends on the event and on whether it is a plain function or an `async def`:
+
+Each callback is called once. A plain function may also return an awaitable: that result is awaited
+in the same background queue as an async callback. Returning an already started task preserves that
+task's scheduling and context; return a coroutine to let Hare control its execution context and order.
 
 - **`QueryExecuted` and `TransactionEvent`, a plain function** — called right away, inline in the task
   that ran the query, before the query call returns: by the time the query's `await` finishes the
   observer has already seen it. Keep it cheap — it adds to the query's own latency.
 - **`QueryExecuted` and `TransactionEvent`, an `async def`** — runs **in the background**: a query call
   (`execute`, `Model.save()`, ...) never waits for it, however slow. One background task per event runs
-  every `async def` observer of that event together (`asyncio.gather`), so one slow observer doesn't add
-  to another's latency; on one event loop, an event's observers start only after the previous event's
+  every `async def` observer of that event together, so one slow observer doesn't add
+  to another's latency; within one Hare context and event loop, an event's observers start only after the
+  previous event's
   have finished, so they see events **in the order they happened**.
 - **`RowsChanged`** — every observer, plain or `async def`, runs once the write's transaction commits, in
   the task that committed it; an `async def` is awaited there (see
@@ -105,6 +116,8 @@ The background observers (`async def` observers of `QueryExecuted`/`TransactionE
 - **Fire no events themselves**: the queries and transactions a background observer runs reach no
   observer, so an audit observer that writes a row doesn't observe its own write and can't trigger itself
   forever.
+- Cancellation of one callback does not detach the other callbacks for that event. The dispatch
+  retains them until they finish; cancelling the dispatch waits for every callback's cleanup.
 - Are bounded: at most **1000** dispatches (one per event) wait or run at once. Past that — typically
   behind an observer that stopped finishing — new events aren't delivered to `async def` observers, with
   a warning when the backlog fills up and another (with the number dropped) once it drains.
@@ -146,12 +159,17 @@ class Observers:
     async def wait_for_pending(timeout_seconds: float | None = None) -> None: ...
 ```
 
-Since `async def` observers run in the background, one can still be mid-flight (e.g. flushing a metric to
-a remote collector) when your process wants to exit. `Hare.close_connections()` already calls this for
-you, waiting at most **10 s** — observers still running then are cancelled, with a warning, so a stuck
-observer can't block shutdown. Reach for it directly when you need every event delivered so far to be
-fully handled at some other point (e.g. asserting on an observer's effect in a test). `timeout_seconds`
-bounds the wait the same way; `None` waits as long as the observers run.
+Background queues, backlog limits and retained errors are separate for each Hare context and event
+loop. Without an active context, process observers use a separate loop queue. `wait_for_pending()`
+drains only the current scope, including its dispatches on other running loops.
+
+`Hare.close_connections()` drains that context's observers **before closing its pools**. It allows
+**10 s** for graceful completion, then cancels remaining dispatches and awaits their cleanup. Callbacks
+must cooperate with cancellation; the timeout bounds graceful waiting, not cancellation cleanup.
+Cancelling `Hare.close_connections()` or `HareContext.close_connections()` does not detach shutdown:
+observer delivery and pool release finish before cancellation reaches the caller.
+Call `wait_for_pending()` directly when every event delivered so far must be handled before proceeding.
+`timeout_seconds=None` waits for normal completion without initiating cancellation.
 
 ```python
 Observers.observe(QueryExecuted, ship_metric)  # an async def
@@ -163,6 +181,8 @@ Every background observer's exception is logged when it happens. The exceptions 
 call are also re-raised here — one on its own, several as an `ExceptionGroup`. Only the **100** most
 recent are kept (the group's message counts the older ones), and they are kept without the local
 variables of their traceback frames, so an observer that keeps failing can't grow memory without bound.
+The retained traceback preserves the callback's frames and excludes the internal dispatch frame
+that would otherwise retain the event and its query parameters.
 
 ## <a id="query-wrappers"></a>Wrapping every query: `QueryWrapper`
 
@@ -210,9 +230,8 @@ await Hare.init(config, slow_query_threshold_ms=200.0)
 ```
 
 This sets `Observers.slow_query_threshold_ms` process-wide (it isn't a per-`HareContext` setting) — read
-it directly if you need the current value. The value is a finite number of milliseconds from `0` to
-`86400000` (`0` logs every query); anything else raises `ConfigurationError`, and the threshold only
-changes once `init()` succeeds.
+it directly if you need the current value. The threshold is measured in milliseconds (`0` logs every
+query), and only changes once `init()` succeeds.
 
 ## <a id="transaction-events"></a>Transaction events
 
@@ -233,12 +252,13 @@ def log_transaction(event: TransactionEvent) -> None:
 Observers.observe(TransactionEvent, log_transaction)
 ```
 
-- `type` is `TransactionEventType.BEGIN`, `.COMMIT` or `.ROLLBACK`.
+- `type` is `TransactionEventType.BEGIN`, `.COMMIT`, `.ROLLBACK` or `.UNKNOWN`.
 - `duration_ms` is `0.0` for `BEGIN` (nothing to measure yet) and the transaction's own elapsed time for
-  `COMMIT`/`ROLLBACK`.
+  `COMMIT`/`ROLLBACK`/`UNKNOWN`.
 - `error` is `None` for `BEGIN` and for an ordinary `COMMIT`/`ROLLBACK`. A transaction whose connection
-  was lost is reported as a `ROLLBACK` carrying that connection error (when it broke while the `COMMIT`
-  was in flight, the `COMMIT` may still have landed, and no `on_commit()`/`on_rollback()` callback runs).
+  was lost before COMMIT is reported as a `ROLLBACK` carrying that connection error. If the connection
+  broke during COMMIT and confirmation is lost, the event is `UNKNOWN`: COMMIT may have landed, and
+  neither `on_commit()` nor `on_rollback()` runs.
   An observer that needs the cause of an ordinary rollback should wrap its own
   `async with Transactions.atomic():` block instead.
 - **Never fired for a savepoint** (a nested transaction opened while already inside another one) — only a
@@ -283,7 +303,7 @@ A `RowsChanged`:
 | `model` | The model whose rows changed. |
 | `operation` | `RowOperation.INSERT`, `UPDATE` or `DELETE` (`from hare.instrumentation import RowOperation`). |
 | `pks` | The primary keys of the changed rows; `None` when the ORM doesn't name them — see [below](#unnamed-pks). |
-| `fields` | The fields written. `None` when it isn't known: an insert, a `save()` without `update_fields`. |
+| `fields` | The fields the caller named, excluding automatic stamps, blind indexes and version bumps. `None` when the event has no explicit field list. |
 | `connection_alias` | The connection the write ran on. |
 
 ### <a id="unnamed-pks"></a>When pks is None
@@ -311,12 +331,12 @@ A row is named once, however many times it was given.
   it is removed. An observer of every model can't drop one model — `QueryError`, and it stays as it is:
   unobserve it without models to remove it.
 - A model is given by its class, its `"app.Model"` label or a `swappable()` setting
-  (`models=["library.Loan"]`). A class hears that class; a label hears the model registered under it in any
-  context, a model registered again while the application runs (`Hare.register_live_models()`) included —
-  that is a new class, so an observer of the old class doesn't hear it. A label is looked up in the
-  current context when one is set up, else when a context binds its models: a label naming no model
-  raises `ConfigurationError` there. `models=` for `QueryExecuted`/`TransactionEvent`, which aren't about a
-  model, is a `QueryError`.
+  (`models=["library.Loan"]`). A class hears that Python class and its subclasses; a label hears the
+  model registered under it in any context, including live registrations. Re-registering the same class
+  creates a new binding, while existing instances keep their earlier binding. Process-wide labels match
+  each event's originating binding; independent contexts need not contain those models. Context-local
+  labels are checked against their registry when available, or during its setup. Giving `models=` for
+  `QueryExecuted`/`TransactionEvent`, which aren't about a model, raises `QueryError`.
 - `Observers.is_observed(RowsChanged, Loan)` — whether any observer hears `Loan`. When none does, no
   event of a change of `Loan` is built or sent.
 
@@ -343,6 +363,9 @@ A row is named once, however many times it was given.
   observer listens. Both need the rows back from the statement (`RETURNING`) and a primary key: on a
   database without `RETURNING`, through `COPY`, or for a model without a primary key every row comes as
   an insert — plus, for an upsert, one update event of the `update_fields`.
+- `merge()` reports the actions that changed rows on PostgreSQL 17 and later, even when the
+  caller only asks for a count. PostgreSQL 15 and 16 report an affected-row count. If it is
+  positive, observers receive a notification for each action the branches could have taken.
 - The rows `on_delete` reached (whether the ORM or the database does it):
   - `CASCADE` — as deletes;
   - `SET_NULL` / `SET_DEFAULT` — as updates of the foreign key's field.

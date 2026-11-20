@@ -1,23 +1,28 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import copy
 from typing import TYPE_CHECKING, Any
 
 from hare.classes.value_descriptions import ValueDescriptions
+from hare.dialects.base.schema.plans.column_batch_backfill import ColumnBatchBackfill
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.exceptions import ConfigurationError
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.migrations.operations.model_bound_operation import ModelBoundOperation
 from hare.migrations.state.state import State
-from hare.models import Model
 
 if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
+    from hare.models.model_binding import ModelBinding
 
 
 class BackfillColumn(ModelBoundOperation):
-    """Fills an existing column in bounded batches instead of one UPDATE over the whole table - the
-    data step of expand-contract (add a nullable column, backfill it, then
-    ``AlterColumnNotNullSafe``), each in its own migration. Irreversible.
+    """Fill an existing column using the dialect's backfill strategy. Irreversible.
+
+    The dialect uses bounded UPDATE batches or one mutation over all matching rows;
+    ``batch_size`` does not limit the latter. The expand-contract data step adds
+    a nullable column, fills it, then uses ``AlterColumnNotNullSafe`` in separate migrations.
     """
 
     reversible = False
@@ -46,8 +51,11 @@ class BackfillColumn(ModelBoundOperation):
     def raise_if_unsupported(
         self, app_label: str, old_state: State, new_state: State, schema_editor: BaseSchemaEditor
     ) -> None:
-        model = self._model(new_state, app_label)
-        schema_editor.column_backfill.get_backfill_key_sql(model, self._get_column_field_name(model))
+        binding = self.get_model_binding(new_state, app_label)
+        schema_editor.column_backfill.get_backfill_key_sql(
+            binding,
+            self._get_column_field_name(binding),
+        )
 
     async def database_forward(
         self,
@@ -58,43 +66,49 @@ class BackfillColumn(ModelBoundOperation):
     ) -> None:
         if not state_editor:
             return
+        await self.get_backfill_plan(self.get_model_binding(new_state, app_label), state_editor).execute(state_editor)
 
-        model = self._model(new_state, app_label)
-        column_field_name = self._get_column_field_name(model)
-        db_field = model._meta.fields_db_projection[column_field_name]
-        quoted_key_columns = state_editor.column_backfill.get_backfill_key_sql(model, self.field_name)
-        qualified_table = state_editor.qualify_table_name(model._meta.db_table, model._meta.schema)
+    def get_backfill_plan(self, binding: ModelBinding, state_editor: BaseSchemaEditor) -> SchemaChangePlan:
+        """Prepare the batch statement and recovery without evaluating the value factory.
 
-        # A callable is evaluated once - every row gets the same value.
-        raw_value = self.value() if callable(self.value) else self.value
-        if column_field_name != self.field_name and isinstance(raw_value, Model):
-            raw_value = raw_value.pk
-        value = state_editor.client.dialect.types.get_db_value(
-            model._meta.fields_map[column_field_name], raw_value, model
-        )
+        Args:
+            binding: The model with the target column and backfill key.
+            state_editor: The dialect's schema editor.
 
-        # Two parameters bound to the same value - a positional placeholder can't be repeated.
-        parameters = [value, value]
+        Returns:
+            One runtime step holding the prepared SQL and a snapshot of the field.
+        """
+        model = binding._model
+        column_field_name = self._get_column_field_name(binding)
+        db_field = binding.fields_db_projection[column_field_name]
+        quoted_key_columns = state_editor.column_backfill.get_backfill_key_sql(binding, self.field_name)
+
         update_query = state_editor.column_backfill.get_backfill_batch_sql(
-            qualified_table, state_editor.quote(db_field), quoted_key_columns, self.batch_size
+            state_editor.get_row_change_table_sql(binding),
+            state_editor.quote(db_field),
+            quoted_key_columns,
+            self.batch_size,
         )
 
-        if state_editor.collect_sql:
-            state_editor.collected_sql.append(
-                f"{update_query}  -- params: {parameters!r}; repeated in batches of {self.batch_size} "
-                "rows until no NULLs remain"
+        return SchemaChangePlan(
+            (
+                ColumnBatchBackfill(
+                    update_query,
+                    model,
+                    copy(binding.fields_map[column_field_name]),
+                    self.value,
+                    column_field_name != self.field_name,
+                    state_editor.get_row_recovery(binding),
+                ),
             )
-            return
+        )
 
-        while await state_editor.run_parameterized_sql(update_query, parameters):
-            pass
-
-    def _get_column_field_name(self, model: type[Model]) -> str:
+    def _get_column_field_name(self, binding: ModelBinding) -> str:
         """Returns the field backing this operation's column - a foreign key's own key field when
         field_name names the relation itself.
 
         Args:
-            model: The model being backfilled.
+            binding: The model being backfilled.
 
         Returns:
             A field name present in the model's column projection.
@@ -102,9 +116,9 @@ class BackfillColumn(ModelBoundOperation):
         Raises:
             ConfigurationError: field_name is unknown or has no single backing column.
         """
-        if self.field_name in model._meta.fields_db_projection:
+        if self.field_name in binding.fields_db_projection:
             return self.field_name
-        field = model._meta.fields_map.get(self.field_name)
+        field = binding.fields_map.get(self.field_name)
         if isinstance(field, ForeignKeyFieldInstance) and len(field.source_fields) <= 1 and field.source_field:
             return field.source_field
         raise ConfigurationError(

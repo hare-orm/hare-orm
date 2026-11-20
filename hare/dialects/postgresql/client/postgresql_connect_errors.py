@@ -61,6 +61,7 @@ class PostgresqlConnectErrors:
         Returns:
             The text.
         """
+        reason = str(error) or type(error).__name__
         if with_db:
-            return POSTGRESQL_CONNECTION_FAILED_MESSAGE.format(database=client.database, error=error)
-        return POSTGRESQL_DEFAULT_DATABASE_CONNECTION_FAILED_MESSAGE.format(error=error)
+            return POSTGRESQL_CONNECTION_FAILED_MESSAGE.format(database=client.database, error=reason)
+        return POSTGRESQL_DEFAULT_DATABASE_CONNECTION_FAILED_MESSAGE.format(error=reason)

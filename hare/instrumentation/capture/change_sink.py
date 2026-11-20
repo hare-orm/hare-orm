@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from hare.instrumentation.capture.captured_change import CapturedChange
     from hare.instrumentation.enums import ChangePayload, RowOperation
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class ChangeSink(abc.ABC):
@@ -33,11 +34,11 @@ class ChangeSink(abc.ABC):
         """
 
     @abc.abstractmethod
-    def get_field_names(self, model: type[Model]) -> tuple[str, ...]:
+    def get_field_names(self, binding: ModelBinding) -> tuple[str, ...]:
         """The fields a change of the model holds - each a field written in the model's table.
 
         Args:
-            model: The model the sink is declared on.
+            binding: The binding of the model the sink is declared on.
 
         Returns:
             The field names.
@@ -55,20 +56,21 @@ class ChangeSink(abc.ABC):
         """
         return ()
 
-    def check_connection(self, connection: DatabaseClient) -> None:
+    def check_connection(self, binding: ModelBinding, connection: DatabaseClient) -> None:
         """Refuses a connection the sink can't write the changes of a write on - checked before the write runs,
         so a refusal leaves no row written without its changes. Accepts every connection by default.
 
         Args:
+            binding: The model binding declaring the change capture target.
             connection: The connection of the write.
         """
 
     @abc.abstractmethod
-    async def write(self, connection: DatabaseClient, model: type[Model], changes: list[CapturedChange]) -> None:
+    async def write(self, connection: DatabaseClient, binding: ModelBinding, changes: list[CapturedChange]) -> None:
         """Writes the changes of one write, in its transaction.
 
         Args:
             connection: The connection the write ran on - its transaction.
-            model: The written model.
+            binding: The written model binding.
             changes: The changed rows.
         """

@@ -210,6 +210,10 @@ def test_domain_name_validator_valid(value):
         "example-.com",
         "under_line.com",
         "💻.tech",
+        pytest.param("example.com\n", id="terminal-newline"),
+        pytest.param("example.com\n\n", id="two-terminal-newlines"),
+        pytest.param("exa\nmple.com", id="embedded-newline"),
+        pytest.param(None, id="none"),
     ],
 )
 def test_domain_name_validator_invalid(value):
@@ -225,23 +229,10 @@ def test_domain_name_validator_invalid_idn_disabled():
 
 
 @pytest.mark.database_independent
-@pytest.mark.parametrize("value", ["example.com\n", "example.com\n\n", "exa\nmple.com"])
-def test_domain_name_validator_rejects_embedded_newline(value):
-    with pytest.raises(InvalidDomainName):
-        validate_domain_name(value)
-
-
-@pytest.mark.database_independent
 def test_regex_validator_rejects_none():
     validator = RegexValidator(r"^\d+$", 0)
     with pytest.raises(ValidationError, match="Value must not be None"):
         validator(None)
-
-
-@pytest.mark.database_independent
-def test_domain_name_validator_rejects_none():
-    with pytest.raises(InvalidDomainName):
-        validate_domain_name(None)
 
 
 @pytest.mark.database_independent

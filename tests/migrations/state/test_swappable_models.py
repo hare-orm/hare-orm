@@ -23,9 +23,9 @@ import pytest
 
 from hare import Hare
 from hare.contrib.test.databases.model_truncation import truncate_all_models
+from hare.contrib.test.databases.test_database_config import TestDatabaseConfig as DatabaseConfig
 from hare.core.config import HareConfig
 from hare.core.hare_context import HareContext
-from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
 from hare.exceptions import ConfigurationError
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
 from hare.migrations import SwappableDependency, swappable_dependency
@@ -41,6 +41,7 @@ from hare.migrations.making.migration_maker import MigrationMaker
 from hare.migrations.writer import MigrationWriter
 from hare.models import swappable
 from tests.utils.database_under_test import DatabaseUnderTest
+from tests.utils.project_sources import ProjectSources
 
 PACKAGE_APP = "pkg"
 PROJECT_APP = "proj"
@@ -105,23 +106,17 @@ class SwappableProject:
 
     def write_package(self, *, with_migrations: bool = True) -> str:
         package = f"swappable_pkg_{uuid.uuid4().hex[:10]}"
-        package_dir = self.root / package
-        (package_dir / "migrations").mkdir(parents=True)
-        (package_dir / "__init__.py").write_text("", encoding="utf-8")
-        (package_dir / "models.py").write_text(PACKAGE_MODELS_SOURCE, encoding="utf-8")
-        (package_dir / "migrations" / "__init__.py").write_text("", encoding="utf-8")
+        sources = ProjectSources(self.root)
+        migrations_dir = sources.prepare_migrations(sources.write_package(package, PACKAGE_MODELS_SOURCE))
         if with_migrations:
             for migration_file in self.package_migration_files:
-                shutil.copy(migration_file, package_dir / "migrations" / migration_file.name)
+                shutil.copy(migration_file, migrations_dir / migration_file.name)
         return package
 
     def write_project(self, package: str, source: str = PROJECT_MODELS_SOURCE) -> str:
         project = f"swappable_proj_{uuid.uuid4().hex[:10]}"
-        project_dir = self.root / project
-        (project_dir / "migrations").mkdir(parents=True)
-        (project_dir / "__init__.py").write_text("", encoding="utf-8")
-        (project_dir / "models.py").write_text(source.format(package=package), encoding="utf-8")
-        (project_dir / "migrations" / "__init__.py").write_text("", encoding="utf-8")
+        sources = ProjectSources(self.root)
+        sources.prepare_migrations(sources.write_package(project, source.format(package=package)))
         return project
 
     @staticmethod
@@ -149,7 +144,7 @@ def get_connection_config(tmp_path: Path) -> Any:
     if not db_url or DatabaseUnderTest.is_file_database(db_url):
         scheme = (db_url or DatabaseUnderTest.DEFAULT_URL).split("://", 1)[0]
         db_url = f"{scheme}://{(tmp_path / 'swappable.sqlite3').as_posix()}"
-    return DbUrlConfigGenerator.expand(db_url, testing=True)
+    return DatabaseConfig.from_url(db_url).config
 
 
 def build_config(
@@ -353,8 +348,8 @@ async def test_default_model_stays_regular_without_the_setting_or_with_the_setti
         async with open_context(config, create_db=True, drop_db=True) as context:
             member_model = context.get_model(f"{PACKAGE_APP}.Member")
             consent_model = context.get_model(f"{PACKAGE_APP}.Consent")
-            assert member_model._meta.swapped is None
-            assert consent_model._meta.fields_map["member"].related_model is member_model  # type: ignore[attr-defined]
+            assert context.apps.get_binding(member_model).swapped is None
+            assert context.apps.get_binding(consent_model).fields_map["member"].related_model is member_model  # type: ignore[attr-defined]
             await context.generate_schemas()
             member = await member_model.objects.create(id=1, name="ann")
             await consent_model.objects.create(id=1, member=member)
@@ -373,12 +368,12 @@ async def test_swapped_default_model_has_no_table_and_refuses_queries(
         member_model = context.get_model(f"{PACKAGE_APP}.Member")
         account_model = context.get_model(f"{PROJECT_APP}.Account")
         consent_model = context.get_model(f"{PACKAGE_APP}.Consent")
-        assert member_model._meta.swapped == "proj.Account"
-        assert account_model._meta.swapped is None
+        assert context.apps.get_binding(member_model).swapped == "proj.Account"
+        assert context.apps.get_binding(account_model).swapped is None
         for field_name in ("member", "owner", "witnesses"):
-            assert consent_model._meta.fields_map[field_name].related_model is account_model  # type: ignore[attr-defined]
-        assert "consents" in account_model._meta.fields_map
-        assert "consents" not in member_model._meta.fields_map
+            assert context.apps.get_binding(consent_model).fields_map[field_name].related_model is account_model  # type: ignore[attr-defined]
+        assert "consents" in context.apps.get_binding(account_model).fields_map
+        assert "consents" not in context.apps.get_binding(member_model).fields_map
 
         message = "'pkg.Member' has been swapped for 'proj.Account' by the MEMBER_MODEL setting"
         with pytest.raises(ConfigurationError, match=message):
@@ -388,8 +383,8 @@ async def test_swapped_default_model_has_no_table_and_refuses_queries(
 
         await context.generate_schemas()
         table_names = await get_table_names(context)
-        assert account_model._meta.db_table in table_names
-        assert member_model._meta.db_table not in table_names
+        assert context.apps.get_binding(account_model).db_table in table_names
+        assert context.apps.get_binding(member_model).db_table not in table_names
         account = await account_model.objects.create(id=1, name="ann")
         consent = await consent_model.objects.create(id=1, member=account, owner=account)
         await consent.witnesses.add(account)
@@ -424,7 +419,7 @@ async def test_relation_fields_keep_the_swappable_reference(
     async with open_context(config, connect=False) as context:
         consent_model = context.get_model(f"{PACKAGE_APP}.Consent")
         for field_name in ("member", "owner", "witnesses"):
-            field = consent_model._meta.fields_map[field_name]
+            field = context.apps.get_binding(consent_model).fields_map[field_name]
             assert field.model_name == swappable(SETTING)  # type: ignore[attr-defined]
             _path, args, kwargs = field.deconstruct()
             assert kwargs.get("model_name", args[0] if args else None) == swappable(SETTING)
@@ -516,17 +511,24 @@ async def migrate_package_and_project(
         consent_model = context.get_model(f"{PACKAGE_APP}.Consent")
         target_model = account_model if swappable_settings else member_model
         table_names = await get_table_names(context)
-        assert target_model._meta.db_table in table_names
-        assert account_model._meta.db_table in table_names
-        assert (member_model._meta.db_table in table_names) is not bool(swappable_settings)
-        foreign_key_targets = await get_foreign_key_target_tables(context, consent_model._meta.db_table)
-        assert foreign_key_targets["member_id"] == target_model._meta.db_table
-        assert foreign_key_targets["owner_id"] == target_model._meta.db_table
-        through_table = consent_model._meta.fields_map["witnesses"].through  # type: ignore[attr-defined]
+        assert HareContext.require_current().apps.get_binding(target_model).db_table in table_names
+        assert context.apps.get_binding(account_model).db_table in table_names
+        assert (context.apps.get_binding(member_model).db_table in table_names) is not bool(swappable_settings)
+        foreign_key_targets = await get_foreign_key_target_tables(
+            context, context.apps.get_binding(consent_model).db_table
+        )
+        assert (
+            foreign_key_targets["member_id"] == HareContext.require_current().apps.get_binding(target_model).db_table
+        )
+        assert foreign_key_targets["owner_id"] == HareContext.require_current().apps.get_binding(target_model).db_table
+        through_table = context.apps.get_binding(consent_model).fields_map["witnesses"].through  # type: ignore[attr-defined]
         # Named by the field, whichever model the setting points at.
-        assert through_table == f"{consent_model._meta.db_table}_witnesses"
+        assert through_table == f"{context.apps.get_binding(consent_model).db_table}_witnesses"
         assert through_table in table_names
-        assert target_model._meta.db_table in (await get_foreign_key_target_tables(context, through_table)).values()
+        assert (
+            HareContext.require_current().apps.get_binding(target_model).db_table
+            in (await get_foreign_key_target_tables(context, through_table)).values()
+        )
 
         target = await target_model.objects.create(id=1, name="ann")
         consent = await consent_model.objects.create(id=1, member=target, owner=target)
@@ -542,7 +544,7 @@ async def migrate_package_and_project(
         await migrate(context, apps_config, (PROJECT_APP, ZERO_MIGRATION))
         table_names = await get_table_names(context)
         for model in (member_model, account_model, consent_model):
-            assert model._meta.db_table not in table_names
+            assert HareContext.require_current().apps.get_binding(model).db_table not in table_names
         assert through_table not in table_names
 
 
@@ -620,15 +622,19 @@ async def test_a_package_project_cycle_is_split_into_two_migrations(
         await migrate(context, apps_config)
         consent_model = context.get_model(f"{PACKAGE_APP}.Consent")
         account_model = context.get_model(f"{PROJECT_APP}.Account")
-        consent_targets = await get_foreign_key_target_tables(context, consent_model._meta.db_table)
-        account_targets = await get_foreign_key_target_tables(context, account_model._meta.db_table)
-        assert consent_targets["member_id"] == account_model._meta.db_table
-        assert account_targets["favorite_consent_id"] == consent_model._meta.db_table
+        consent_targets = await get_foreign_key_target_tables(
+            context, context.apps.get_binding(consent_model).db_table
+        )
+        account_targets = await get_foreign_key_target_tables(
+            context, context.apps.get_binding(account_model).db_table
+        )
+        assert consent_targets["member_id"] == context.apps.get_binding(account_model).db_table
+        assert account_targets["favorite_consent_id"] == context.apps.get_binding(consent_model).db_table
         await migrate(context, apps_config, (PACKAGE_APP, ZERO_MIGRATION))
         await migrate(context, apps_config, (PROJECT_APP, ZERO_MIGRATION))
         table_names = await get_table_names(context)
-        assert consent_model._meta.db_table not in table_names
-        assert account_model._meta.db_table not in table_names
+        assert context.apps.get_binding(consent_model).db_table not in table_names
+        assert context.apps.get_binding(account_model).db_table not in table_names
 
 
 @pytest.mark.asyncio
@@ -755,7 +761,10 @@ async def test_migration_state_knows_the_swapped_model_has_no_table(
         assert state.is_swapped_model(PACKAGE_APP, "Member")
         assert not state.is_swapped_model(PACKAGE_APP, "Consent")
         assert not state.is_swapped_model(PROJECT_APP, "Account")
-        assert sorted(model.__name__ for model in state.get_models_with_tables()) == ["Account", "Consent"]
+        assert sorted(binding._model.__name__ for binding in state.get_bindings_with_tables()) == [
+            "Account",
+            "Consent",
+        ]
 
 
 @pytest.mark.asyncio
@@ -778,7 +787,7 @@ async def test_truncate_all_models_skips_the_swapped_model(
 
         assert await account_model.objects.all().count() == 0
         assert await consent_model.objects.all().count() == 0
-        through_table = consent_model._meta.fields_map["witnesses"].through  # type: ignore[attr-defined]
+        through_table = context.apps.get_binding(consent_model).fields_map["witnesses"].through  # type: ignore[attr-defined]
         _count, rows = await context.connections.get(CONNECTION).execute(f"SELECT * FROM {through_table}")
         assert rows == []
 

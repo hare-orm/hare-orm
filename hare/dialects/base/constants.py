@@ -14,12 +14,6 @@ INDEX_NAME_FIELD_PREFIX_LENGTH = 7
 #: name (37 chars) fits a 63-byte identifier limit.
 INDEX_NAME_HASH_LENGTH = 12
 
-#: Characters whose presence marks a "field name" as an index expression, not a plain column.
-INDEX_EXPRESSION_MARKER_CHARS = ("(", ")", " ", '"', ".", ":")
-
-#: ASCII code point -> escaped replacement, layered onto the identity table by
-#: BaseSchemaEditor's comment-escaping logic.
-
 TRUE_STRINGS = frozenset({"true", "1", "yes", "on"})
 FALSE_STRINGS = frozenset({"false", "0", "no", "off"})
 
@@ -27,29 +21,6 @@ FALSE_STRINGS = frozenset({"false", "0", "no", "off"})
 #: A query-executing call taking at least this long gets one extra DEBUG-level log line - a
 #: generous default meant to flag genuinely slow queries, not every normal round-trip.
 SLOW_QUERY_THRESHOLD_MS = 500.0
-
-
-#: The client methods running a statement given as ``(query, values)`` - translate_exceptions
-#: attaches sql and parameters to an exception of these only. ``stream`` is observed by
-#: ``TransactionClient.stream()`` itself.
-QUERY_EXECUTING_METHOD_NAMES = frozenset(
-    {
-        "execute",
-        "execute_described",
-        "execute_many",
-        "execute_script",
-    }
-)
-
-#: Client methods ``DatabaseClient.translate_exceptions`` reports to the observers
-#: (``QueryExecuted``) and runs the query wrappers around - every query-executing method and the
-#: bulk load.
-OBSERVED_METHOD_NAMES = QUERY_EXECUTING_METHOD_NAMES | {"copy"}
-
-#: The client methods ``command_timeout`` bounds: the query-executing ones and the bulk load. Not
-#: begin/commit/rollback/savepoint - cancelling one leaves the transaction state unknown - nor
-#: stream.
-COMMAND_TIMEOUT_METHOD_NAMES = QUERY_EXECUTING_METHOD_NAMES | {"copy"}
 
 
 #: The dialect of plain SQL rendered for no particular database.

@@ -1,8 +1,9 @@
 use crate::pg::value::BoxError;
 use bytes::{BufMut, BytesMut};
+use num_bigint::BigUint;
 use tokio_postgres::types::IsNull;
 
-use super::*;
+use super::{NUMERIC_MAX_DISPLAY_SCALE, NUMERIC_MAX_INTEGER_DIGITS, NUMERIC_NEGATIVE_SIGN};
 
 /// A finite decimal number as `digits * 10^exponent` - no precision limit of its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,46 +68,16 @@ impl DecimalDigits {
             mantissa >>= 1;
             binary_exponent += 1;
         }
-        // Little-endian base-10^9 limbs.
-        let mut limbs: Vec<u64> = vec![
-            mantissa % 1_000_000_000,
-            mantissa / 1_000_000_000 % 1_000_000_000,
-            mantissa / 1_000_000_000_000_000_000,
-        ];
-        let multiply = |limbs: &mut Vec<u64>, factor: u64| {
-            let mut carry = 0u64;
-            for limb in limbs.iter_mut() {
-                let product = *limb * factor + carry;
-                *limb = product % 1_000_000_000;
-                carry = product / 1_000_000_000;
-            }
-            while carry > 0 {
-                limbs.push(carry % 1_000_000_000);
-                carry /= 1_000_000_000;
-            }
-        };
-        let (factor_base, mut remaining, exponent) = if binary_exponent >= 0 {
-            (2u64, binary_exponent, 0)
+        let mut coefficient = BigUint::from(mantissa);
+        let exponent = if binary_exponent >= 0 {
+            coefficient <<= binary_exponent as usize;
+            0
         } else {
             // m * 2^-k == m * 5^k * 10^-k
-            (5u64, -binary_exponent, binary_exponent)
+            coefficient *= BigUint::from(5u8).pow((-binary_exponent) as u32);
+            binary_exponent
         };
-        while remaining > 0 {
-            let step = remaining.min(13);
-            multiply(&mut limbs, factor_base.pow(step as u32));
-            remaining -= step;
-        }
-        let mut text = String::new();
-        for (index, limb) in limbs.iter().rev().enumerate() {
-            if index == 0 {
-                write!(text, "{limb}").expect("writing into a String never fails");
-            } else {
-                write!(text, "{limb:09}").expect("writing into a String never fails");
-            }
-        }
-        let mut digits: Vec<u8> = text.bytes().map(|byte| byte - b'0').collect();
-        let leading_zeros = digits.iter().take_while(|&&digit| digit == 0).count();
-        digits.drain(..leading_zeros);
+        let digits = coefficient.to_radix_be(10);
         DecimalDigits { negative, digits, exponent }
     }
 

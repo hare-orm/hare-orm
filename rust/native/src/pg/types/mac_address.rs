@@ -1,5 +1,7 @@
 //! `MACADDR`/`MACADDR8`.
 
+use std::fmt::Write as _;
+
 use crate::pg::value::{BoxError, Value};
 
 /// `MACADDR` (6 bytes) / `MACADDR8` (8 bytes) as colon-separated lowercase hex.
@@ -7,7 +9,14 @@ pub(crate) fn decode_macaddr(raw: &[u8]) -> Result<Value, BoxError> {
     if raw.len() != 6 && raw.len() != 8 {
         return Err(format!("invalid macaddr payload length {}", raw.len()).into());
     }
-    Ok(Value::Text(raw.iter().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(":")))
+    let mut text = String::with_capacity(raw.len() * 3 - 1);
+    for (index, byte) in raw.iter().enumerate() {
+        if index != 0 {
+            text.push(':');
+        }
+        write!(text, "{byte:02x}").expect("writing into a String never fails");
+    }
+    Ok(Value::Text(text))
 }
 
 #[cfg(test)]

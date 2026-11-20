@@ -3,6 +3,8 @@ from __future__ import annotations
 import abc
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.migrations.operations.dependencies.operation_dependency import OperationDependency
+from hare.migrations.operations.enums import DependencyType
 from hare.migrations.operations.model_bound_operation import ModelBoundOperation
 
 if TYPE_CHECKING:
@@ -16,7 +18,6 @@ class AddSchemaObject(ModelBoundOperation):
     type (``AddIndex``, ``AddConstraint``, ``AddTrigger``) gives its argument its own name."""
 
     object_type: ClassVar[type[SchemaObjectType]]
-    reads_old_state = False
 
     def __init__(self, model_name: str) -> None:
         self.model_name = model_name
@@ -33,6 +34,16 @@ class AddSchemaObject(ModelBoundOperation):
     def get_type_options(self) -> dict[str, Any]:
         """The type's options of this operation, handed to the schema editor - none by default."""
         return {}
+
+    def get_required_dependencies(self, app_label: str, state: State) -> list[OperationDependency]:
+        """The containing model and every structured field input must exist first."""
+        return [
+            OperationDependency.of_model(app_label, self.model_name, DependencyType.CREATED),
+            *(
+                OperationDependency.of_field(app_label, self.model_name, name, DependencyType.CREATED)
+                for name in sorted(self.object_type.get_referenced_field_names(self.schema_object))
+            ),
+        ]
 
     def check_can_run(self, state_editor: BaseSchemaEditor) -> None:
         """Refuses running the way this operation can't - nothing by default.
@@ -58,7 +69,12 @@ class AddSchemaObject(ModelBoundOperation):
 
     def state_forward(self, app_label: str, state: State) -> None:
         model_state = self.get_model_state(state, app_label, self.model_name)
-        self.object_type.update_objects(model_state, added=self.object_type.get_state_entry(self.schema_object))
+        self.object_type.update_objects(
+            model_state,
+            added=self.object_type.get_state_entry(
+                self.schema_object, state=state, app_label=app_label, model_name=self.model_name
+            ),
+        )
         state.mark_models_changed([(app_label, self.model_name)])
 
     async def database_forward(
@@ -73,7 +89,7 @@ class AddSchemaObject(ModelBoundOperation):
         self.check_can_run(state_editor)
         self.raise_if_table_options_unsupported(app_label, new_state, state_editor)
         await self.object_type.add(
-            state_editor, self._model(new_state, app_label), self.schema_object, **self.get_type_options()
+            state_editor, self.get_model_binding(new_state, app_label), self.schema_object, **self.get_type_options()
         )
 
     def raise_if_unsupported(
@@ -81,7 +97,7 @@ class AddSchemaObject(ModelBoundOperation):
     ) -> None:
         self.raise_if_table_options_unsupported(app_label, new_state, schema_editor)
         self.object_type.raise_if_object_unsupported(
-            schema_editor, self._model(new_state, app_label), self.schema_object
+            schema_editor, self.get_model_binding(new_state, app_label), self.schema_object
         )
 
     async def database_backward(
@@ -96,8 +112,8 @@ class AddSchemaObject(ModelBoundOperation):
         self.check_can_run(state_editor)
         await self.object_type.remove(
             state_editor,
-            self._model(old_state, app_label),
-            self._model(new_state, app_label),
+            self.get_model_binding(old_state, app_label),
+            self.get_model_binding(new_state, app_label),
             self.schema_object,
             **self.get_type_options(),
         )

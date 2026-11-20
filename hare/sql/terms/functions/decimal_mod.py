@@ -20,6 +20,9 @@ class DecimalMod(Function):
         alias: Optional alias for the term.
     """
 
+    structure_attributes = ("scale",)
+    has_repeatable_value = True
+
     def __init__(self, term: Term, modulus: Any, scale: int | None, alias: str | None = None) -> None:
         super().__init__("MOD", term, modulus, alias=alias)
         self.scale = scale

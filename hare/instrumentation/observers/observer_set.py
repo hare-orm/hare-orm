@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable
+from threading import Lock
 from typing import TYPE_CHECKING, Any, ClassVar
+from weakref import WeakKeyDictionary
 
 from hare.exceptions import QueryError
 from hare.fields.relations.swappable_model_reference import SwappableModelReference
@@ -10,7 +13,9 @@ from hare.instrumentation.observers.observer import Observer, ObserverCallback
 if TYPE_CHECKING:
     from hare.core.apps.apps import Apps
     from hare.core.apps.declarations import ModelReference
+    from hare.instrumentation.observers.observer_dispatcher import ObserverDispatcher
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class ObserverSet:
@@ -20,8 +25,41 @@ class ObserverSet:
     #: How many observers every set holds together - with none anywhere, an event costs nothing.
     total_count: ClassVar[int] = 0
 
-    def __init__(self) -> None:
+    def __init__(self, *, validate_model_labels: bool = True) -> None:
+        self.validate_model_labels = validate_model_labels
         self.observers_by_event_type: dict[type, dict[ObserverCallback, Observer]] = {}
+        # Live dispatch state, separate from observer registration and query caches.
+        self.dispatchers: WeakKeyDictionary[asyncio.AbstractEventLoop, ObserverDispatcher] = WeakKeyDictionary()
+        self.dispatch_lock = Lock()
+
+    def get_dispatcher(self) -> ObserverDispatcher:
+        """The background delivery queue of this scope on the calling event loop."""
+        from hare.instrumentation.observers.observer_dispatcher import ObserverDispatcher
+
+        loop = asyncio.get_running_loop()
+        # Read without the lock (one read, atomic under the GIL hare runs with); it guards the making.
+        dispatcher = self.dispatchers.get(loop)
+        if dispatcher is not None:
+            return dispatcher
+        with self.dispatch_lock:
+            dispatcher = self.dispatchers.get(loop)
+            if dispatcher is None:
+                dispatcher = self.dispatchers[loop] = ObserverDispatcher(loop)
+        return dispatcher
+
+    async def wait_for_pending(self, timeout_seconds: float | None) -> None:
+        """Drain every loop serving this scope, collecting failures without skipping a queue."""
+        with self.dispatch_lock:
+            dispatchers = tuple(self.dispatchers.values())
+        results = await asyncio.gather(
+            *(dispatcher.wait_for_pending(timeout_seconds) for dispatcher in dispatchers),
+            return_exceptions=True,
+        )
+        errors = [error for error in results if isinstance(error, BaseException)]
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise BaseExceptionGroup("Observer failures", errors)
 
     def add(self, event_type: type, callback: ObserverCallback, models: Iterable[ModelReference] | None) -> None:
         """Adds an observer. Adding a callback again adds the models to the ones it observes; an
@@ -35,9 +73,10 @@ class ObserverSet:
 
         Raises:
             QueryError: ``event_type`` isn't an event narrowed by model.
-            ConfigurationError: A label names no model of the current context, when one is set up.
+            ConfigurationError: A label is malformed, or a context-local subscription names no model
+                of the initialized current context.
         """
-        observed = ObserverSet.get_observed_models(event_type, models)
+        observed = ObserverSet.get_observed_models(event_type, models, validate_labels=self.validate_model_labels)
         observers = self.observers_by_event_type.setdefault(event_type, {})
         existing = observers.get(callback)
         if existing is None:
@@ -65,7 +104,7 @@ class ObserverSet:
         Raises:
             QueryError: The callback observes every event - it can only be removed entirely.
         """
-        observed = ObserverSet.get_observed_models(event_type, models)
+        observed = ObserverSet.get_observed_models(event_type, models, validate_labels=False)
         observers = self.observers_by_event_type.get(event_type, {})
         existing = observers.get(callback)
         if existing is None:
@@ -99,12 +138,15 @@ class ObserverSet:
             return []
         return [observer for observer in observers.values() if observer.observes(event)]
 
-    def observes(self, event_type: type, model: type[Model] | None = None) -> bool:
+    def observes(
+        self, event_type: type, model: type[Model] | None = None, *, binding: ModelBinding | None = None
+    ) -> bool:
         """Whether some observer gets events of ``event_type`` - of ``model``, when given.
 
         Args:
             event_type: The event type.
             model: The model of the events.
+            binding: The binding to match against each observer's subscription.
 
         Returns:
             True when such an observer exists.
@@ -114,26 +156,28 @@ class ObserverSet:
             return False
         if model is None:
             return True
-        return any(observer.observes_model(model) for observer in observers.values())
+        return any(observer.observes_model(model, binding=binding) for observer in observers.values())
 
     @staticmethod
     def get_observed_models(
-        event_type: type, models: Iterable[ModelReference] | None
+        event_type: type, models: Iterable[ModelReference] | None, *, validate_labels: bool = True
     ) -> tuple[frozenset[type[Model]], frozenset[str]] | None:
         """The models an observer is narrowed to - its classes apart from its labels. A ``swappable()``
-        setting is the label it points at in the current context; a label is looked up in the current
-        context when one is set up, else when a context binds its models.
+        setting is the label it points at in the current context. Context-local subscriptions
+        validate labels against their registry; process subscriptions retain valid labels for
+        independent applications without requiring them in the current registry.
 
         Args:
             event_type: The event type.
             models: The models, None for every event.
+            validate_labels: Require labels in the initialized current registry for a local subscription.
 
         Returns:
             The classes and the labels, None for every event.
 
         Raises:
             QueryError: ``event_type`` isn't an event narrowed by model.
-            ConfigurationError: A label names no model of the current context.
+            ConfigurationError: A label is malformed, or validation requires a missing local model.
         """
         if models is None:
             return None
@@ -152,7 +196,10 @@ class ObserverSet:
                 continue
             if isinstance(reference, SwappableModelReference):
                 reference = HareContext.require_current().swappable_label(reference.setting)
-            if apps is not None:
+            from hare.core.apps.apps import Apps
+
+            Apps.split_validated_reference(reference)
+            if apps is not None and validate_labels:
                 apps.get_model(reference)
             labels.add(reference)
         return frozenset(classes), frozenset(labels)

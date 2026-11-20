@@ -6,6 +6,7 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.core.routing.written_connections import WrittenConnections
 from hare.dialects.base.client.constants import (
     SHIELDED_CANCELLATION_WAIT_TIMEOUT_SECONDS,
     TRANSACTION_END_WAIT_TIMEOUT_SECONDS,
@@ -15,7 +16,7 @@ from hare.dialects.base.client.transaction_lifecycle.transaction_callbacks impor
 from hare.dialects.base.transactions.savepoints.savepoint_span import SavepointSpan, current_savepoint_span
 from hare.exceptions import TransactionManagementError
 from hare.instrumentation.observers.observers import Observers
-from hare.transactions.enums import TransactionEventType
+from hare.transactions.enums import TransactionEventType, TransactionOutcome, TransactionPhase
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.transaction_client import TransactionClient
@@ -30,24 +31,28 @@ class TransactionEnding:
     abandoned_operations: ClassVar[set[asyncio.Future[Any]]] = set()
 
     @staticmethod
-    async def end_top_level(client: TransactionClient, event: TransactionEventType) -> None:
+    async def end_top_level(
+        client: TransactionClient,
+        event: TransactionEventType,
+        *,
+        on_wait_cancelled: Callable[[], None] | None = None,
+    ) -> None:
         """Sends the real COMMIT/ROLLBACK of this top-level transaction and completes it: hands
         its resources back, runs the matching callbacks and records the event.
 
         Args:
             client: The transaction's client.
             event: ``COMMIT`` or ``ROLLBACK``.
+            on_wait_cancelled: Reports cancellation of the caller waiting for the operation.
 
         Raises:
             TransactionManagementError: The transaction never began, has ended, or can't commit.
         """
         if not client._has_begun():
             raise TransactionManagementError("Transaction is in invalid state")
-        if client._finalized:
+        if client.transaction_state.finished:
             raise TransactionManagementError(TRANSACTION_FINALISED_MESSAGE)
         is_commit = event is TransactionEventType.COMMIT
-        previous_pending = client._pending_top_level_operation
-        client._pending_top_level_operation = event
         landed_by_this_call = False
 
         async def end_and_finish() -> None:
@@ -59,7 +64,7 @@ class TransactionEnding:
                 client, give_up_on_timeout=is_commit
             )
             try:
-                if client._finalized:
+                if client.transaction_state.finished:
                     raise TransactionManagementError(TRANSACTION_FINALISED_MESSAGE)
                 in_flight = False
                 try:
@@ -74,7 +79,6 @@ class TransactionEnding:
                         await client._driver_rollback()
                 except BaseException as error:
                     if client._is_connection_lost(error):
-                        client._pending_top_level_operation = None
                         if not is_commit:
                             # The server rolls back a transaction whose connection is gone.
                             client.log.warning(
@@ -91,14 +95,13 @@ class TransactionEnding:
                             commit_outcome_unknown=in_flight and client._is_commit_outcome_unknown(error),
                         )
                     elif is_commit and client._is_commit_rejection(error):
-                        client._pending_top_level_operation = None
                         await client._after_rejected_commit(error)
                         await TransactionEnding.finish_after_failed_commit(client, error)
                     raise
                 landed_by_this_call = True
-                client._finalized = True
-                client._commit_landed = is_commit
-                client._pending_top_level_operation = None
+                client.transaction_state.finish(
+                    TransactionOutcome.COMMITTED if is_commit else TransactionOutcome.ROLLED_BACK
+                )
             finally:
                 TransactionEnding.stop_holding_transaction(client, span, span_token)
             await TransactionEnding.finish_top_level_operation(client, event)
@@ -107,20 +110,36 @@ class TransactionEnding:
 
         try:
             await TransactionEnding.run_shielded_from_cancellation(
-                end_and_finish(), on_landed=client._do_nothing, on_timeout=client._mark_top_level_operation_abandoned
+                end_and_finish(),
+                on_timeout=client._mark_top_level_operation_abandoned,
+                on_wait_cancelled=on_wait_cancelled,
             )
         except BaseException as error:
             if landed_by_this_call or not client._is_transaction_finished_error(error):
                 raise
-            # An earlier, interrupted call already ended the transaction - its callbacks run now.
-            client._finalized = True
-            client._commit_landed = previous_pending is TransactionEventType.COMMIT
-            client._pending_top_level_operation = None
-            if previous_pending is not None:
-                await TransactionEnding.run_shielded_from_cancellation(
-                    TransactionEnding.finish_top_level_operation(client, previous_pending),
-                    on_landed=client._do_nothing,
-                )
+            # A driver's "already finished" response proves only that its handle is closed.
+            # The previously requested operation is not evidence of what the server committed.
+            outcome = client.transaction_state.outcome
+            if outcome not in (TransactionOutcome.COMMITTED, TransactionOutcome.ROLLED_BACK):
+                outcome = TransactionOutcome.UNKNOWN
+            client.transaction_state.finish(outcome)
+            completed_event = (
+                TransactionEventType.COMMIT
+                if outcome is TransactionOutcome.COMMITTED
+                else TransactionEventType.ROLLBACK
+                if outcome is TransactionOutcome.ROLLED_BACK
+                else TransactionEventType.UNKNOWN
+            )
+            await TransactionEnding.run_shielded_from_cancellation(
+                TransactionEnding.finish_top_level_operation(
+                    client,
+                    completed_event,
+                    cause=error if isinstance(error, Exception) else None,
+                ),
+                on_wait_cancelled=on_wait_cancelled,
+            )
+            if completed_event is not event:
+                raise
 
     @staticmethod
     async def release_transaction_resources(client: TransactionClient) -> None:
@@ -141,21 +160,19 @@ class TransactionEnding:
         client: TransactionClient,
         event: TransactionEventType,
         *,
-        run_callbacks: bool = True,
         cause: Exception | None = None,
     ) -> None:
-        """Completes a real top-level COMMIT/ROLLBACK that has just landed: hands the
+        """Completes a real top-level transaction with a known or unknown outcome: hands the
         transaction's resources back, runs the matching callbacks as the outer level and records
         the instrumentation event whatever the callbacks did.
 
         Args:
             client: The transaction's client.
-            event: ``COMMIT`` or ``ROLLBACK``.
-            run_callbacks: False discards every callback without running it - for a transaction
-                whose outcome is unknown.
+            event: ``COMMIT``, ``ROLLBACK`` or ``UNKNOWN``.
             cause: the error that ended the transaction, reported in its ``TransactionEvent``.
         Raises:
-            Exception: the single callback failure, or an ExceptionGroup of several.
+            BaseException: The single callback failure, or a BaseExceptionGroup of several
+                (ExceptionGroup when all failures derive from Exception).
         """
         try:
             try:
@@ -166,7 +183,7 @@ class TransactionEnding:
             # are moot and discarded, never fired (and the other way round for a rollback).
             commit_entries, client._on_commit_callbacks = client._on_commit_callbacks, []
             rollback_entries, client._on_rollback_callbacks = client._on_rollback_callbacks, []
-            if not run_callbacks:
+            if event is TransactionEventType.UNKNOWN:
                 return
             if event is TransactionEventType.COMMIT:
                 if commit_entries:
@@ -175,7 +192,7 @@ class TransactionEnding:
                     )
             elif rollback_entries:
                 await TransactionCallbacks.run_callbacks_as_outer_level(
-                    client, [entry.callback for entry in rollback_entries], "on_rollback()"
+                    client, TransactionCallbacks.get_rollback_callbacks(rollback_entries), "on_rollback()"
                 )
         finally:
             TransactionEnding.record_transaction_end(client, event, cause)
@@ -190,7 +207,7 @@ class TransactionEnding:
             client: The transaction's client.
             commit_error: The exception the COMMIT raised.
         """
-        client._finalized = True
+        client.transaction_state.finish(TransactionOutcome.ROLLED_BACK)
         try:
             await TransactionEnding.finish_top_level_operation(client, TransactionEventType.ROLLBACK)
         except Exception as callback_error:
@@ -201,22 +218,27 @@ class TransactionEnding:
     async def finish_after_lost_connection(
         client: TransactionClient, error: BaseException, *, commit_outcome_unknown: bool
     ) -> None:
-        """Completes a top-level transaction whose connection was lost before its COMMIT/ROLLBACK
-        could land: the server rolls such a transaction back, so it is finalized and reported as
-        a ROLLBACK. A failing callback is logged and attached to ``error`` as a note.
+        """Release a lost connection while preserving whether its commit outcome is known.
+
+        A lost connection before COMMIT means rollback; loss during COMMIT may leave UNKNOWN.
+        The unknown event discards both callback lists without inventing a rollback result.
+        A failing callback is logged and attached to ``error`` as a note.
 
         Args:
             client: The transaction's client.
             error: the connection error, which stays the exception that propagates.
             commit_outcome_unknown: True when the connection broke while a COMMIT was in flight -
-                it may have landed, so no callback runs and the ROLLBACK event carries ``error``.
+                it may have landed, so no callback runs and the UNKNOWN event carries ``error``.
         """
-        client._finalized = True
-        client._commit_outcome_unknown = commit_outcome_unknown
+        client.transaction_state.finish(
+            TransactionOutcome.UNKNOWN if commit_outcome_unknown else TransactionOutcome.ROLLED_BACK
+        )
         cause = error if isinstance(error, Exception) else None
         try:
             await TransactionEnding.finish_top_level_operation(
-                client, TransactionEventType.ROLLBACK, run_callbacks=not commit_outcome_unknown, cause=cause
+                client,
+                TransactionEventType.UNKNOWN if commit_outcome_unknown else TransactionEventType.ROLLBACK,
+                cause=cause,
             )
         except Exception as callback_error:
             client.log.error("on_rollback() callback failed after the connection was lost", exc_info=callback_error)
@@ -242,7 +264,7 @@ class TransactionEnding:
         Raises:
             TransactionManagementError: The wait timed out and ``give_up_on_timeout`` is set.
         """
-        client._ending = True
+        client.transaction_state.phase = TransactionPhase.ENDING
         savepoint_lock = client._savepoint_lock
         parent_span = savepoint_lock.get_nearest_span_of_lock(current_savepoint_span.get())
         span: SavepointSpan | None
@@ -285,27 +307,46 @@ class TransactionEnding:
     async def run_shielded_from_cancellation(
         coroutine: Awaitable[Any],
         *,
-        on_landed: Callable[[], None],
+        on_landed: Callable[[], None] | None = None,
         on_timeout: Callable[[asyncio.Future[Any]], None] | None = None,
+        on_wait_cancelled: Callable[[], None] | None = None,
     ) -> Any:
         """Runs ``coroutine`` to completion even if the awaiting task is cancelled, calls ``on_landed``
-        once it finished without error, and only then lets the cancellation through - a
+        when supplied once it finished without error, and only then lets the cancellation through - a
         COMMIT/ROLLBACK can land on the server after its task was cancelled, and the bookkeeping
         must agree with the database.
 
         After a cancellation the wait is bounded (``SHIELDED_CANCELLATION_WAIT_TIMEOUT_SECONDS``): a
         dead server must not hang it. When the bound is hit the task is left running, ``on_timeout``
         gets it - to keep a resource the task may still use - and the cancellation goes through.
+        ``on_wait_cancelled`` is called only for cancellation of the waiter, even when the
+        operation itself can also raise ``CancelledError``.
 
         A coroutine starts eagerly, up to its first suspension. Returns the coroutine's result.
         """
+        operation_context = None
+        previous_writes = None
+        if WrittenConnections.is_recording:
+            if isinstance(coroutine, asyncio.Task):
+                operation_context = coroutine.get_context()
+            elif asyncio.iscoroutine(coroutine):
+                operation_context = contextvars.copy_context()
+            if operation_context is not None:
+                previous_writes = operation_context.get(WrittenConnections.current)
         if asyncio.iscoroutine(coroutine):
-            task: asyncio.Future[Any] = asyncio.Task(coroutine, loop=asyncio.get_running_loop(), eager_start=True)
+            task: asyncio.Future[Any] = asyncio.Task(
+                coroutine, loop=asyncio.get_running_loop(), eager_start=True, context=operation_context
+            )
             if task.done():
                 # Finished without suspending - nothing for a cancellation to interrupt.
-                result = task.result()
-                on_landed()
-                return result
+                try:
+                    result = task.result()
+                    if on_landed is not None:
+                        on_landed()
+                    return result
+                finally:
+                    if operation_context is not None:
+                        WrittenConnections.publish_from_context(operation_context, previous_writes)
         else:
             task = asyncio.ensure_future(coroutine)
         try:
@@ -313,12 +354,17 @@ class TransactionEnding:
             # an error it ends with after that isn't logged as one of a shielded future no one reads
             # - the cancellation goes through, the error is read below.
             await asyncio.wait([task])
-            return task.result()
         except asyncio.CancelledError:
+            if on_wait_cancelled is not None:
+                on_wait_cancelled()
             await TransactionEnding.wait_through_cancellations(task, on_timeout)
             raise
+        else:
+            return task.result()
         finally:
-            if task.done() and not task.cancelled() and task.exception() is None:
+            if task.done() and operation_context is not None:
+                WrittenConnections.publish_from_context(operation_context, previous_writes)
+            if task.done() and not task.cancelled() and task.exception() is None and on_landed is not None:
                 on_landed()
 
     @staticmethod

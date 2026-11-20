@@ -3,18 +3,13 @@ renamed in place: the table is remade with the column under its new name, its ro
 expressions read it by its new name; the columns other tables name after it are renamed too. A renamed
 model's table takes its indexes along, each named after the new table once."""
 
-import os
 import textwrap
 
 import pytest
 
 from tests.utils.cli_project_factory import project_factory  # noqa: F401
 
-
-@pytest.fixture(autouse=True)
-def skip_without_clickhouse():
-    if not os.getenv("HARE_TEST_DB", "").startswith("clickhouse"):
-        pytest.skip("runs against the ClickHouse test server - make test_clickhouse")
+pytestmark = pytest.mark.usefixtures("skip_without_clickhouse")
 
 
 async def make_rename_migration(project, renamed, new_name):

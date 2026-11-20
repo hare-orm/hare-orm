@@ -3,7 +3,11 @@ drops what each of them holds for it - nothing has to list the caches."""
 
 import gc
 import re
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, Event
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,23 +15,27 @@ from hare.core.caching.cache import Cache
 from hare.core.caching.caches import Caches
 from hare.core.caching.constants import ENV_STATEMENT_PLAN_CACHE_MAX_SIZE_PER_MODEL
 from hare.core.caching.model_cache import ModelCache
+from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError
-from hare.models import Model
+from hare.models.model_binding import ModelBinding
+from hare.models.write.instance_writer import InstanceWriter
+from hare.models.write.rules.enums import WriteType
+from hare.models.write.rules.row_write_rules import RowWriteRules
 from tests.shared_models.testmodels import Author, Book
+from tests.utils.model_bindings import ModelBindings
+
+pytestmark = pytest.mark.usefixtures("model_conversion_context")
 
 #: The model-keyed caches that are not ModelCache - each registered in Caches itself.
 #: Weak dictionaries that hold state, not something computed again when dropped.
 WEAK_STATE = {
-    # The fields a request query class had before its parameters were prepared - put back.
-    ("hare/contrib/request_query/request_query.py", "unprepared_fields"),
+    # The schema a request query class had before preparation, restored on invalidation.
     # The request query classes reading each model - what forgetting a model goes by.
-    ("hare/contrib/request_query/request_query.py", "classes_by_model"),
-    # The latest dispatch per event loop - the next one waits for it.
-    ("hare/instrumentation/observers/observer_dispatch.py", "weakref.WeakKeyDictionary()"),
-    # The topics of the outbox events each open transaction wrote - signalled once it commits.
+    ("hare/contrib/request_query/declaration/request_query_registry.py", "classes_by_model"),
+    # Active delivery queues/errors of each scope and loop, never recomputable cache entries.
+    ("hare/instrumentation/observers/observer_set.py", "self.dispatchers"),
+    # The outbox topics each open transaction will signal or has notified, tracked for rollback.
     ("hare/contrib/outbox/wakeups/outbox_wakeup.py", "self.pending_topics"),
-    # The topics each open transaction sent a NOTIFY of - one NOTIFY per topic and transaction.
-    ("hare/contrib/outbox/wakeups/listen_notify_wakeup.py", "self.notified_topics"),
     # A health check's readings of each pool at its previous run - what "since the last check" counts from.
     ("hare/health/health_check.py", "weakref.WeakKeyDictionary()"),
     # The cursors of each pool's measured waits and connects the pool metrics took.
@@ -36,44 +44,109 @@ WEAK_STATE = {
 
 REGISTERED_MODEL_KEYED_CACHES = {
     # Forgetting a model rebuilds the request query classes that read it.
-    ("hare/contrib/request_query/request_query.py", "classes_by_model"),
+    ("hare/contrib/request_query/declaration/request_query_registry.py", "classes_by_model"),
 }
+
+
+@pytest.mark.database_independent
+def test_write_rules_are_bounded_and_writer_observes_model_invalidation(monkeypatch):
+    cache = Cache(2)
+    monkeypatch.setattr(RowWriteRules, "RULES_CACHE", cache)
+    writer = object.__new__(InstanceWriter)
+    writer._binding = HareContext.require_current().apps.get_binding(Author)
+    try:
+        first = writer.get_update_rules(["name"], WriteType.UPDATE)
+        assert writer.get_update_rules(["name"], WriteType.UPDATE) is first
+        RowWriteRules.get(
+            HareContext.require_current().apps.get_binding(Author), WriteType.UPDATE, ["name"], "update()"
+        )
+        RowWriteRules.get(
+            HareContext.require_current().apps.get_binding(Author), WriteType.UPDATE, ["name"], "bulk_update()"
+        )
+        assert cache.get_bucket(HareContext.require_current().apps.get_binding(Author)).entry_count == 2
+        after_eviction = writer.get_update_rules(["name"], WriteType.UPDATE)
+        assert after_eviction is not first
+        Caches.forget_model_caches([HareContext.require_current().apps.get_binding(Author)])
+        assert cache.get_bucket(HareContext.require_current().apps.get_binding(Author)).entry_count == 0
+        after_invalidation = writer.get_update_rules(["name"], WriteType.UPDATE)
+        assert after_invalidation is not after_eviction
+        assert after_invalidation.field_names == first.field_names
+    finally:
+        cache.clear()
+        Caches.registered.remove(cache)
+
+
+@pytest.mark.database_independent
+def test_global_keys_do_not_infer_model_lifetime():
+    cache = Cache(2)
+    try:
+        cache[(Author, "key")] = "global"
+        model_bucket = cache.get_bucket(HareContext.require_current().apps.get_binding(Author))
+        model_bucket[("key",)] = "model"
+        cache.forget_model(HareContext.require_current().apps.get_binding(Author))
+        assert cache[(Author, "key")] == "global"
+        assert not model_bucket
+        assert list(cache) == [(Author, "key")]
+        assert len(cache) == cache.entry_count == 1
+    finally:
+        cache.clear()
+        Caches.registered.remove(cache)
+
+
+@pytest.mark.database_independent
+def test_cache_instances_do_not_share_storage_when_object_addresses_are_reused(monkeypatch):
+    monkeypatch.setattr("hare.core.caching.cache.id", lambda value: 1, raising=False)
+    holder = SimpleNamespace(cache_buckets={})
+    first = Cache()
+    second = Cache()
+    try:
+        first.set_value(holder, "first")
+        assert second.get_value(holder) is None
+        second.set_value(holder, "second")
+        second.clear()
+        assert first.get_value(holder) == "first"
+        assert second.get_value(holder) is None
+    finally:
+        first.clear()
+        second.clear()
+        Caches.registered.remove(first)
+        Caches.registered.remove(second)
 
 
 @pytest.mark.database_independent
 def test_a_model_cache_registers_itself_and_forgets_one_model():
     cache: ModelCache[str] = ModelCache()
     try:
-        assert cache in Caches.registered
-        cache[Author] = "author"
-        cache[Book] = "book"
-        Caches.forget_model_caches([Author])
-        assert dict(cache) == {Book: "book"}
+        assert cache.storage in Caches.registered
+        cache[HareContext.require_current().apps.get_binding(Author)] = "author"
+        cache[HareContext.require_current().apps.get_binding(Book)] = "book"
+        Caches.forget_model_caches([HareContext.require_current().apps.get_binding(Author)])
+        assert dict(cache) == {HareContext.require_current().apps.get_binding(Book): "book"}
     finally:
-        Caches.registered.remove(cache)
+        Caches.registered.remove(cache.storage)
 
 
 @pytest.mark.database_independent
 def test_a_cache_of_values_depending_on_other_models_is_dropped_whole():
     cache: ModelCache[str] = ModelCache(depends_on_other_models=True)
     try:
-        cache[Author] = "author"
-        cache[Book] = "book"
-        Caches.forget_model_caches([Author])
+        cache[HareContext.require_current().apps.get_binding(Author)] = "author"
+        cache[HareContext.require_current().apps.get_binding(Book)] = "book"
+        Caches.forget_model_caches([HareContext.require_current().apps.get_binding(Author)])
         assert dict(cache) == {}
     finally:
-        Caches.registered.remove(cache)
+        Caches.registered.remove(cache.storage)
 
 
 @pytest.mark.database_independent
 def test_forgetting_every_cache_drops_every_registered_one():
     cache: ModelCache[str] = ModelCache()
     try:
-        cache[Author] = "author"
+        cache[HareContext.require_current().apps.get_binding(Author)] = "author"
         Caches.forget_all_caches()
         assert dict(cache) == {}
     finally:
-        Caches.registered.remove(cache)
+        Caches.registered.remove(cache.storage)
 
 
 @pytest.mark.database_independent
@@ -85,7 +158,7 @@ def test_no_cache_is_made_by_hand():
     offenders = []
     for path in sorted(Path("hare").rglob("*.py")):
         relative_path = path.as_posix()
-        if relative_path == "hare/core/caching/cache.py":
+        if relative_path in {"hare/core/caching/cache.py", "hare/core/caching/cache_bucket.py"}:
             continue
         for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             if hand_made.search(line) and (relative_path, line.split(":")[0].strip()) not in WEAK_STATE:
@@ -94,16 +167,16 @@ def test_no_cache_is_made_by_hand():
 
 
 @pytest.mark.database_independent
-def test_a_model_bucket_is_a_plain_dict_dropped_with_the_model():
-    cache: Cache[str] = Cache(holds_sql=False, keyed_by_model=False)
+def test_a_model_bucket_is_invalidated_with_the_model():
+    cache: Cache[str] = Cache()
     try:
-        cache.get_model_bucket(Author)["key"] = "author"
-        cache.get_model_bucket(Book)["key"] = "book"
-        Caches.forget_model_caches([Author])
-        assert cache.get_model_bucket(Author) == {}
-        assert cache.get_model_bucket(Book) == {"key": "book"}
+        cache.get_bucket(HareContext.require_current().apps.get_binding(Author))["key"] = "author"
+        cache.get_bucket(HareContext.require_current().apps.get_binding(Book))["key"] = "book"
+        Caches.forget_model_caches([HareContext.require_current().apps.get_binding(Author)])
+        assert cache.get_bucket(HareContext.require_current().apps.get_binding(Author)) == {}
+        assert cache.get_bucket(HareContext.require_current().apps.get_binding(Book)) == {"key": "book"}
         Caches.forget_all_caches()
-        assert cache.get_model_bucket(Book) == {}
+        assert cache.get_bucket(HareContext.require_current().apps.get_binding(Book)) == {}
     finally:
         cache.clear()
         Caches.registered.remove(cache)
@@ -111,12 +184,12 @@ def test_a_model_bucket_is_a_plain_dict_dropped_with_the_model():
 
 @pytest.mark.database_independent
 def test_model_buckets_depending_on_other_models_are_dropped_together():
-    cache: Cache[str] = Cache(holds_sql=False, keyed_by_model=False, depends_on_other_models=True)
+    cache: Cache[str] = Cache(depends_on_other_models=True)
     try:
-        cache.get_model_bucket(Author)["key"] = "author"
-        cache.get_model_bucket(Book)["key"] = "book"
-        Caches.forget_model_caches([Author])
-        assert cache.get_model_bucket(Book) == {}
+        cache.get_bucket(HareContext.require_current().apps.get_binding(Author))["key"] = "author"
+        cache.get_bucket(HareContext.require_current().apps.get_binding(Book))["key"] = "book"
+        Caches.forget_model_caches([HareContext.require_current().apps.get_binding(Author)])
+        assert cache.get_bucket(HareContext.require_current().apps.get_binding(Book)) == {}
     finally:
         cache.clear()
         Caches.registered.remove(cache)
@@ -128,15 +201,15 @@ def test_an_owner_bucket_is_emptied_in_place():
         def __init__(self) -> None:
             self.cache_buckets: dict[int, dict[str, str]] = {}
 
-    cache: Cache[str] = Cache(holds_sql=False, keyed_by_model=False)
+    cache: Cache[str] = Cache()
     owner, other = Owner(), Owner()
     try:
-        bucket = cache.get_owner_bucket(owner)
-        other_bucket = cache.get_owner_bucket(other)
-        assert cache.get_owner_bucket(owner) is bucket
+        bucket = cache.get_bucket(owner)
+        other_bucket = cache.get_bucket(other)
+        assert cache.get_bucket(owner) is bucket
         bucket["key"] = "value"
         other_bucket["key"] = "other"
-        cache.forget_owner(owner)
+        cache.forget_holder(owner)
         assert bucket == {} and other_bucket == {"key": "other"}
         Caches.forget_all_caches()
         assert other_bucket == {}
@@ -146,44 +219,44 @@ def test_an_owner_bucket_is_emptied_in_place():
 
 @pytest.mark.database_independent
 def test_a_shared_bucket_is_emptied_in_place_and_gone_with_its_holders():
-    cache: Cache[str] = Cache(holds_sql=False, keyed_by_model=False, depends_on_other_models=True)
+    cache: Cache[str] = Cache(depends_on_other_models=True)
     try:
         bucket = cache.new_shared_bucket()
         bucket["key"] = "value"
-        Caches.forget_model_caches([Author])
+        Caches.forget_all_caches()
         assert bucket == {}
-        assert len(cache.shared_buckets) == 1
+        assert len(cache.buckets) == 1
         del bucket
         gc.collect()
-        assert len(cache.shared_buckets) == 0
+        assert len(cache.buckets) == 0
     finally:
         Caches.registered.remove(cache)
 
 
 @pytest.mark.database_independent
-def test_an_owner_value_is_set_back_to_none_when_dropped():
+def test_a_lifetime_value_is_absent_after_invalidation():
     class Owner:
         value: str | None = None
 
-    cache: Cache[str] = Cache(holds_sql=False, keyed_by_model=False, owner_attribute="value")
+    cache: Cache[str] = Cache()
     owner = Owner()
     try:
-        cache.set_owner_value(owner, "kept")
-        assert owner.value == "kept"
-        Caches.forget_model_caches([Author])
-        assert owner.value == "kept"
+        cache.set_value(owner, "kept")
+        assert cache.get_value(owner) == "kept"
+        Caches.forget_model_caches([HareContext.require_current().apps.get_binding(Author)])
+        assert cache.get_value(owner) == "kept"
         Caches.forget_all_caches()
-        assert owner.value is None
+        assert cache.get_value(owner) is None
     finally:
         Caches.registered.remove(cache)
 
 
 @pytest.mark.asyncio
-async def test_a_manager_keeps_its_queryset_until_models_change(db):
+async def test_graph_fact_invalidation_keeps_the_manager_declaration(db):
     queryset = Author.objects
     assert Author.objects is queryset
-    Caches.forget_model_caches([Book])
-    assert Author.objects is not queryset
+    Caches.forget_model_caches([HareContext.require_current().apps.get_binding(Book)])
+    assert Author.objects is queryset
 
 
 @pytest.mark.database_independent
@@ -191,21 +264,25 @@ def test_a_fact_is_computed_once_per_model_until_the_model_changes():
     calls = []
 
     @ModelCache.fact()
-    def get_table(model: type[Model]) -> str:
-        calls.append(model)
-        return model._meta.db_table
+    def get_table(binding: ModelBinding) -> str:
+        calls.append(binding._model)
+        return binding.db_table
 
     try:
-        assert get_table(Author) == get_table(Author) == Author._meta.db_table
+        assert (
+            get_table(HareContext.require_current().apps.get_binding(Author))
+            == get_table(HareContext.require_current().apps.get_binding(Author))
+            == HareContext.require_current().apps.get_binding(Author).db_table
+        )
         assert calls == [Author]
-        Caches.forget_model_caches([Book])
-        get_table(Author)
+        Caches.forget_model_caches([HareContext.require_current().apps.get_binding(Book)])
+        get_table(HareContext.require_current().apps.get_binding(Author))
         assert calls == [Author]
-        Caches.forget_model_caches([Author])
-        get_table(Author)
+        Caches.forget_model_caches([HareContext.require_current().apps.get_binding(Author)])
+        get_table(HareContext.require_current().apps.get_binding(Author))
         assert calls == [Author, Author]
     finally:
-        Caches.registered.remove(get_table.cache)
+        Caches.registered.remove(get_table.cache.storage)
 
 
 @pytest.mark.database_independent
@@ -228,17 +305,21 @@ def test_every_model_keyed_cache_is_registered():
 def test_a_cache_dropped_with_another_is_dropped_whenever_that_one_drops_entries():
     source: Cache[str] = Cache()
     dependent: Cache[str] = Cache(dropped_with=source)
+    other_apps = ModelBindings.prepare(*HareContext.require_current().apps.get_models_iterable())
+    other_binding = other_apps.get_binding(Book)
+    dependent.get_bucket(other_binding)[("key",)] = "other graph"
     try:
-        source[(Author, "key")] = "author"
-        dependent[(Book, "key")] = "book"
-        source.forget_model(Author)
-        assert dependent.get((Book, "key")) is None
-        dependent[(Book, "key")] = "book"
+        source.get_bucket(HareContext.require_current().apps.get_binding(Author))[("key",)] = "author"
+        dependent.get_bucket(HareContext.require_current().apps.get_binding(Book))[("key",)] = "book"
+        source.forget_model(HareContext.require_current().apps.get_binding(Author))
+        assert dependent.get_bucket(other_binding)[("key",)] == "other graph"
+        assert dependent.get_bucket(HareContext.require_current().apps.get_binding(Book)).get(("key",)) is None
+        dependent.get_bucket(HareContext.require_current().apps.get_binding(Book))[("key",)] = "book"
         source.clear()
-        assert dependent.get((Book, "key")) is None
-        dependent[(Book, "key")] = "book"
-        Caches.forget_model_caches([Author])
-        assert dependent.get((Book, "key")) is None
+        assert dependent.get_bucket(HareContext.require_current().apps.get_binding(Book)).get(("key",)) is None
+        dependent.get_bucket(HareContext.require_current().apps.get_binding(Book))[("key",)] = "book"
+        Caches.forget_model_caches([HareContext.require_current().apps.get_binding(Author)])
+        assert dependent.get_bucket(HareContext.require_current().apps.get_binding(Book)).get(("key",)) is None
     finally:
         source.clear()
         Caches.registered.remove(source)
@@ -262,13 +343,184 @@ def test_a_cache_size_within_the_bounds_is_taken(monkeypatch):
 
 
 @pytest.mark.database_independent
-def test_a_plain_bucket_is_emptied_once_full():
+def test_bucket_eviction_preserves_recent_entries():
     """A model's plain bucket grew with every key of a JSON value a filter named - keys from data."""
+    from hare.core.caching.cache_bucket import CacheBucket
     from hare.core.caching.constants import MAX_PLAIN_BUCKET_ENTRIES
 
-    bucket: dict[str, int] = {}
+    bucket = CacheBucket[int](MAX_PLAIN_BUCKET_ENTRIES)
     for number in range(MAX_PLAIN_BUCKET_ENTRIES):
-        assert Cache.set_bounded(bucket, f"data__k{number}", number) == number
+        assert bucket.store(f"data__k{number}", number) == number
     assert len(bucket) == MAX_PLAIN_BUCKET_ENTRIES
-    Cache.set_bounded(bucket, "data__past", -1)
-    assert bucket == {"data__past": -1}
+    bucket.store("data__past", -1)
+    assert bucket["data__past"] == -1
+    assert len(bucket) == MAX_PLAIN_BUCKET_ENTRIES
+    assert "data__k0" not in bucket
+    assert bucket["data__k1"] == 1
+
+
+@pytest.mark.database_independent
+def test_a_hit_read_without_the_lock_keeps_its_value_when_cleared_meanwhile():
+    """A read takes no lock: an invalidation in the middle of a hit doesn't wait for it, and the hit
+    still returns the value it read - its LRU reorder finds the entry gone."""
+    from hare.core.caching.cache_bucket import CacheBucket
+
+    reading, release = Event(), Event()
+    completed = []
+
+    class PausedEntries(OrderedDict):
+        def get(self, key, default=None):
+            value = super().get(key, default)
+            reading.set()
+            assert release.wait(10), "reader watchdog"
+            completed.append("read")
+            return value
+
+        def clear(self):
+            completed.append("clear")
+            super().clear()
+
+    bucket = CacheBucket(2)
+    bucket["value"] = 7
+    bucket.entries = PausedEntries(bucket.entries)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        reader = executor.submit(bucket.get, "value")
+        try:
+            assert reading.wait(10), "reader start watchdog"
+            executor.submit(bucket.clear).result(timeout=10)
+        finally:
+            release.set()
+        assert reader.result(timeout=10) == 7
+    assert completed == ["clear", "read"]
+    assert not bucket
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("replace_existing", [False, True])
+def test_cache_bound_holds_while_a_writer_publishes_an_entry(replace_existing):
+    from hare.core.caching.cache_bucket import CacheBucket
+
+    published, release = Event(), Event()
+
+    class PausedEntries(OrderedDict):
+        def __setitem__(self, key, value):
+            super().__setitem__(key, value)
+            if value == 10:
+                published.set()
+                assert release.wait(10), "writer watchdog"
+
+    bucket = CacheBucket[int](2)
+    bucket[0] = 0
+    bucket[1] = 1
+    bucket.entries = PausedEntries(bucket.entries)
+    key = 1 if replace_existing else 2
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        writer = executor.submit(bucket.store, key, 10)
+        try:
+            assert published.wait(10), "writer start watchdog"
+            assert len(bucket) == bucket.entry_count == 2
+            assert set(bucket) == ({0, 1} if replace_existing else {1, 2})
+            assert bucket.peek(key) == 10
+        finally:
+            release.set()
+        assert writer.result(timeout=10) == 10
+
+
+@pytest.mark.database_independent
+def test_lock_free_reads_survive_concurrent_evictions_and_clears():
+    """Readers hitting a bucket while other threads store past its bound and clear it get the stored
+    value or the default - never an error of a reorder, an iteration or a count racing a write."""
+    from hare.core.caching.cache_bucket import CacheBucket
+
+    bucket = CacheBucket[int](4)
+    start = Barrier(4)
+
+    def read(worker):
+        start.wait(timeout=10)
+        for number in range(3000):
+            key = number % 8
+            assert bucket.get(key) in (None, key)
+            if number % 50 == 0:
+                assert len(bucket) <= 4
+                assert all(isinstance(entry_key, int) for entry_key in bucket)
+
+    def write(worker):
+        start.wait(timeout=10)
+        for number in range(3000):
+            bucket[number % 8] = number % 8
+            if number % 97 == 0:
+                bucket.clear()
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [
+            executor.submit(read, 0),
+            executor.submit(read, 1),
+            executor.submit(write, 2),
+            executor.submit(write, 3),
+        ]
+        for future in futures:
+            future.result(timeout=60)
+    assert bucket.entry_count <= 4
+
+
+@pytest.mark.database_independent
+def test_concurrent_cache_users_share_bounded_holder_storage():
+    holder = SimpleNamespace()
+    cache = Cache(7)
+    start = Barrier(4)
+
+    def use_cache(worker):
+        start.wait(timeout=10)
+        bucket = cache.get_bucket(holder)
+        for number in range(80):
+            assert cache.get_bucket(holder) is bucket
+            key = (worker, number % 8)
+            bucket[key] = number
+            assert bucket.get(key) in (None, number)
+            if number % 17 == 0:
+                cache.clear()
+        return bucket
+
+    try:
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            buckets = list(executor.map(use_cache, range(4)))
+        assert all(bucket is buckets[0] for bucket in buckets)
+        assert cache.entry_count <= 7
+        cache.clear()
+        assert cache.get_bucket(holder) is buckets[0]
+        assert not buckets[0]
+    finally:
+        cache.clear()
+        Caches.registered.remove(cache)
+
+
+@pytest.mark.database_independent
+def test_peek_reads_a_value_without_moving_it_in_the_lru_order():
+    cache: Cache[str] = Cache(2)
+    holder = SimpleNamespace()
+    bucket = cache.get_bucket(holder)
+    bucket["first"] = "a"
+    bucket["second"] = "b"
+
+    assert bucket.peek("first") == "a"
+    assert bucket.peek("missing", "default") == "default"
+    bucket["third"] = "c"
+
+    assert "first" not in bucket
+    assert list(bucket) == ["second", "third"]
+
+
+@pytest.mark.database_independent
+def test_a_model_value_missed_makes_no_bucket_and_a_stored_one_reads_back():
+    cache = ModelCache()
+    assert (
+        cache.storage.get_model_value(HareContext.require_current().apps.get_binding(Author), "missing") == "missing"
+    )
+    assert cache.storage.bucket_id not in HareContext.require_current().apps.get_binding(Author).cache_buckets
+
+    cache[HareContext.require_current().apps.get_binding(Author)] = "kept"
+
+    assert cache.storage.get_model_value(HareContext.require_current().apps.get_binding(Author)) == "kept"
+    assert cache.get(HareContext.require_current().apps.get_binding(Author)) == "kept"
+    del cache[HareContext.require_current().apps.get_binding(Author)]

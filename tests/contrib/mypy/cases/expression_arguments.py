@@ -1,7 +1,7 @@
 """Expressions taking other expressions: a subquery of a queryset, a Case whose branches are any expression -
 as the docs write them."""
 
-from hare.query.expressions import Case, Exists, F, OuterReference, Subquery, Value, When
+from hare.query.expressions import Case, Exists, F, OuterReference, Q, Subquery, Value, When
 from tests.contrib.mypy.models import Label, Volume
 
 
@@ -20,3 +20,16 @@ async def nested() -> None:
 
 async def common_table() -> None:
     Volume.objects.with_cte("titled", Volume.objects.filter(title__startswith="A").values("id"))
+
+
+async def condition_values() -> None:
+    condition = Q(price__gte=4)
+    Volume.objects.annotate(affordable=condition).first()
+    Volume.objects.alias(affordable=condition).get(id=1)
+    Volume.objects.values(affordable=condition).first()
+    Volume.objects.values_list(affordable=condition).get(id=1)
+    Volume.objects.first().annotate(affordable=condition)
+    Volume.objects.get(id=1).alias(affordable=condition)
+    Volume.objects.first().values(affordable=condition)
+    Volume.objects.get(id=1).values_list(affordable=condition)
+    Volume.objects.first().prefetch_related(None)

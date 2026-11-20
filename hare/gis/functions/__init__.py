@@ -23,6 +23,7 @@ from hare.gis.functions.declarations import (
     SymmetricDifference,
     Union,
 )
+from hare.gis.functions.dwithin import DWithin
 from hare.gis.functions.simplify import Simplify
 from hare.gis.functions.transform import Transform
 
@@ -31,6 +32,7 @@ __all__ = [
     "Length",
     "Perimeter",
     "Distance",
+    "DWithin",
     "Centroid",
     "Envelope",
     "PointOnSurface",

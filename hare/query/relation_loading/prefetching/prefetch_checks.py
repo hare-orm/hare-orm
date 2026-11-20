@@ -27,10 +27,11 @@ class PrefetchChecks:
         Raises:
             QueryError: The queryset is of another model.
         """
-        if related_queryset.model is not field_object.related_model:
+        related_model = field_object.related_model
+        if related_queryset.model is not related_model:
             raise QueryError(
                 f"Prefetch({field!r}, queryset=...) queryset must be built from "
-                f"{field_object.related_model.__name__} (this relation's related model), got "
+                f"{related_model.__name__} (this relation's related model), got "
                 f"{related_queryset.model.__name__} - a through-model queryset isn't supported here."
             )
 

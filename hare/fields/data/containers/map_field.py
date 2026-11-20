@@ -5,6 +5,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import ConfigurationError, ValidationError
+from hare.fields.constants import SENSITIVE_VALUE_PLACEHOLDER
 from hare.fields.data.constants import MAP_VALUE_TYPE
 from hare.fields.data.containers.constants import (
     ARRAY_LENGTH_PATH_SEGMENT,
@@ -20,8 +21,7 @@ from hare.fields.field import Field
 from hare.query.enums import Lookup, LookupValueShape
 
 if TYPE_CHECKING:
-    from hare.dialects.base.types.type_registry import TypeRegistry
-    from hare.models import Model
+    from hare.fields.data.containers.container_value_converters import ContainerValueConverters
     from hare.query.filters.lookups.field_lookup import FieldLookup
     from hare.sql.terms.term import Term
 
@@ -90,40 +90,53 @@ class MapField(ContainerField):
     def get_child_fields(self) -> tuple[Field[Any], ...]:
         return self.key_field, self.value_field
 
+    def get_snapshot_comparison_value(self, value: Any) -> Any:
+        """Preserve map equality while exposing each held document's comparison value."""
+        if value is None:
+            return None
+        return {key: self.value_field.get_snapshot_comparison_value(item) for key, item in value.items()}
+
     def get_held_steps(self) -> tuple[tuple[tuple[HeldValueStep, int | None], Field[Any]], ...]:
         return ((HeldValueStep.KEY, None), self.key_field), ((HeldValueStep.VALUE, None), self.value_field)
 
-    def encode_value(
-        self, value: Any, instance: type[Model] | Model | None, types: TypeRegistry | None, path: str
-    ) -> Any:
-        if not isinstance(value, Mapping):
-            raise ValidationError(f"{path}: expected a dict, got {self.get_value_for_message(value)}")
-        encoded = MapValue()
-        for key, item in value.items():
-            key_path = f"{path}[{key!r}]"
-            if key is None:
-                raise ValidationError(f"{key_path}: a map key is never None")
-            encoded[self.encode_child(self.key_field, key, instance, types, key_path)] = self.encode_child(
-                self.value_field, item, instance, types, key_path
-            )
-        return encoded
+    def _prepare_encoder(self, types: ContainerValueConverters | None) -> Callable[..., Any]:
+        encode_key = self.get_child_encoder(self.key_field, types)
+        encode_item = self.get_child_encoder(self.value_field, types)
 
-    def decode_value(self, value: Any, types: TypeRegistry | None) -> Any:
-        items = value.items() if isinstance(value, Mapping) else value
-        return {
-            self.decode_child(self.key_field, key, types): self.decode_child(self.value_field, item, types)
-            for key, item in items
-        }
+        def encode_value(value: Any, instance: Any, path: str) -> Any:
+            if not isinstance(value, Mapping):
+                raise ValidationError(f"{path}: expected a dict, got {self.get_value_for_message(value)}")
+            encoded = MapValue()
+            for key, item in value.items():
+                key_path = f"{path}[{SENSITIVE_VALUE_PLACEHOLDER if self.key_field.sensitive else repr(key)}]"
+                if key is None:
+                    raise ValidationError(f"{key_path}: a map key is never None")
+                encoded_key = encode_key(key, instance, key_path)
+                encoded[encoded_key] = encode_item(item, instance, key_path)
+            return encoded
+
+        return encode_value
+
+    def _prepare_decoder(self, types: ContainerValueConverters | None) -> Callable[[Any], Any]:
+        read_key = self.get_child_decoder(self.key_field, types)
+        read_item = self.get_child_decoder(self.value_field, types)
+
+        def decode_value(value: Any) -> Any:
+            items = value.items() if isinstance(value, Mapping) else value
+            return {read_key(key): read_item(item) for key, item in items}
+
+        return decode_value
 
     def normalize_value(self, value: Any, path: str) -> Any:
         if not isinstance(value, Mapping):
             return value
-        return {
-            self.normalize_child(self.key_field, key, f"{path}[{key!r}]"): self.normalize_child(
-                self.value_field, item, f"{path}[{key!r}]"
+        normalized = {}
+        for key, item in value.items():
+            key_path = f"{path}[{SENSITIVE_VALUE_PLACEHOLDER if self.key_field.sensitive else repr(key)}]"
+            normalized[self.normalize_child(self.key_field, key, key_path)] = self.normalize_child(
+                self.value_field, item, key_path
             )
-            for key, item in value.items()
-        }
+        return normalized
 
     def get_lookups(self) -> dict[str, FieldLookup]:
         # Local import: the lookups import the fields package.
@@ -167,7 +180,7 @@ class MapField(ContainerField):
         if segment in LOOKUP_NAMES:
             return None
         try:
-            key = self.key_field.from_db_value(segment)
+            key = self.key_field.get_path_key_value(segment)
             self.key_field.to_db_value(key, None)
         except ValidationError:
             return None
@@ -184,4 +197,4 @@ class MapField(ContainerField):
         return None
 
     def get_python_type(self) -> Any:
-        return dict[self.get_child_python_type(self.key_field), self.get_child_python_type(self.value_field)]  # type: ignore[misc]
+        return dict[self.key_field.get_annotation(), self.value_field.get_annotation()]  # type: ignore[misc]

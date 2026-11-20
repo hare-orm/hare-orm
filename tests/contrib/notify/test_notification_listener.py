@@ -251,12 +251,15 @@ async def test_start_is_idempotent(db_simple):
 
 @requires_features(dialect="sqlite")
 @pytest.mark.asyncio
-async def test_gives_up_after_reconnect_attempts_with_backoff(db_simple):
-    """Runs on SQLite with fake notification channels whose connection is dead on arrival."""
+@pytest.mark.parametrize("closes_during_check", [False, True])
+async def test_gives_up_after_reconnect_attempts_with_backoff(db_simple, closes_during_check):
+    """Connections dying before their first completed health check exhaust the reconnect budget."""
 
     class DeadOnArrivalConnection:
+        closed = not closes_during_check
+
         def is_closed(self) -> bool:
-            return True
+            return self.closed
 
         async def close(self) -> None:
             return None
@@ -271,7 +274,10 @@ async def test_gives_up_after_reconnect_attempts_with_backoff(db_simple):
     sleeps: list[float] = []
 
     async def fast_pause(self: NotificationListener, delay: float) -> None:
-        sleeps.append(delay)
+        if self._connection is not None and not self._connection.is_closed():
+            self._connection.closed = True
+        else:
+            sleeps.append(delay)
 
     listener = NotificationListener(
         CONNECTION_ALIAS, "dead_on_arrival", Collector(), reconnect_attempts=3, backoff=(0.1, 0.2)

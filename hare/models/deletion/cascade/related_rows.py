@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
+from hare.core.connections.model_connection_choice import ModelConnectionChoice
+from hare.core.hare_context import HareContext
 from hare.fields.relations.fields.backward_foreign_key_relation import BackwardForeignKeyRelation
 from hare.fields.relations.fields.declarations import BackwardOneToOneRelation
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
@@ -24,6 +26,7 @@ from hare.sql.terms.criteria.criterion import Criterion
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset.queryset import QuerySet
 
 
@@ -33,15 +36,18 @@ class RelatedRows:
     batches within the backend's bind-parameter ceiling."""
 
     @staticmethod
-    def get_connection_for(model: type[Model], connection: DatabaseClient | None) -> DatabaseClient | None:
-        """``connection`` when ``model`` lives on its connection - the query then stays inside the delete's
-        transaction - else None: a model on another connection uses its own.
+    def get_connection_for(
+        binding: ModelBinding, connection: DatabaseClient | None, *, source_model: type[Model]
+    ) -> DatabaseClient | None:
+        """Retain the source's exact client for a model sharing its configured route.
+
+        A deletion's root model supplies required provenance through every traversal
+        and write. Another model's route is never inferred from an already overridden
+        alias. A genuinely different configured route retains its normal selection.
         """
-        if connection is None:
-            return None
-        if connection.connection_alias == model.get_routed_connection(for_write=True).connection_alias:
-            return connection
-        return None
+        return ModelConnectionChoice.get_related_write_client(
+            HareContext.require_current(), binding, binding.graph.get_binding(source_model), connection
+        )
 
     @staticmethod
     async def get_rows_pointing_at(
@@ -51,6 +57,7 @@ class RelatedRows:
         *,
         primary_keys_only: bool = False,
         lock: bool = False,
+        source_model: type[Model],
     ) -> list[Any]:
         """Every row on the far side of ``backward_field`` (soft-deleted ones included) whose
         shadow FK column(s) hold any of ``target_values`` - split into several lookups when the
@@ -66,10 +73,13 @@ class RelatedRows:
             primary_keys_only: Return just each row's primary key (a tuple for a composite pk)
                 instead of full instances.
             lock: Lock the rows read until the transaction ends (``get_pointing_querysets()``).
+            source_model: The root model, used to choose whether this operation shares the cascade's connection.
         """
-        primary_key_attribute_names = backward_field.related_model._meta.primary_key_attribute_names
+        primary_key_attribute_names = backward_field.get_related_binding().primary_key_attribute_names
         rows: list[Any] = []
-        for query in RelatedRows.get_pointing_querysets(backward_field, target_values, connection, lock=lock):
+        for query in RelatedRows.get_pointing_querysets(
+            backward_field, target_values, connection, lock=lock, source_model=source_model
+        ):
             if primary_keys_only:
                 rows.extend(
                     await query.values_list(*primary_key_attribute_names, flat=len(primary_key_attribute_names) == 1)
@@ -85,6 +95,7 @@ class RelatedRows:
         connection: DatabaseClient | None,
         *,
         lock: bool = False,
+        source_model: type[Model],
     ) -> list[QuerySet[Any]]:
         """Querysets over the rows on the far side of ``backward_field`` (every tenant, soft-deleted
         ones included, bypassing ``Meta.manager``) whose shadow FK column(s) hold any of
@@ -99,18 +110,21 @@ class RelatedRows:
                 or every model when None, uses its own.
             lock: Lock the rows read until the transaction ends (``SELECT ... FOR UPDATE``) - the rows
                 of a model on ``connection`` when it is a transaction of a database locking rows.
+            source_model: The root model, used to choose whether this operation shares the cascade's connection.
 
         Returns:
             The querysets - none when no value can match.
         """
         target_values = [value for value in target_values if not RelatedRows.has_null_component(value)]
-        related_model = backward_field.related_model
-        related_connection = RelatedRows.get_connection_for(related_model, connection)
+        related_binding = backward_field.get_related_binding()
+        related_connection = RelatedRows.get_connection_for(related_binding, connection, source_model=source_model)
         column_count = len(backward_field.relation_fields)
         querysets: list[QuerySet[Any]] = []
-        lookup_connection = related_connection or related_model.get_connection(for_write=False)
+        lookup_connection = related_connection or ModelConnectionChoice.get(
+            HareContext.require_current(), related_binding, False
+        )
         for batch in RelatedRows.split_into_batches(target_values, lookup_connection, column_count):
-            base_query = RelatedRows.get_base_queryset(related_model)
+            base_query = RelatedRows.get_base_queryset(related_binding)
             if column_count == 1:
                 query = base_query.filter(**{f"{backward_field.relation_field}__in": batch}).using(related_connection)
             else:
@@ -145,6 +159,8 @@ class RelatedRows:
         root_pks: list[Any],
         connection: DatabaseClient | None,
         value_names: list[str],
+        *,
+        source_model: type[Model],
     ) -> list[tuple[Any, ...]] | None:
         """Every row below the root rows through ``backward_field``, a relation of a model onto itself
         by its single-column primary key, at any depth (every tenant, soft-deleted ones included) -
@@ -155,27 +171,31 @@ class RelatedRows:
             root_pks: Primary keys of the root rows.
             connection: The connection the delete runs on.
             value_names: The fields read of each row.
+            source_model: The root model, used to choose whether this operation shares the cascade's connection.
 
         Returns:
             The values of each row; None when the roots don't fit one query, the model's default
             scope would hide some of the rows, or the database's recursive query can't end a cycle.
         """
-        model = backward_field.related_model
-        model_connection = RelatedRows.get_connection_for(model, connection)
-        lookup_connection = model_connection or model.get_connection(for_write=False)
+        related_binding = backward_field.get_related_binding()
+        model_connection = RelatedRows.get_connection_for(related_binding, connection, source_model=source_model)
+        lookup_connection = model_connection or ModelConnectionChoice.get(
+            HareContext.require_current(), related_binding, False
+        )
         root_pks = [pk for pk in root_pks if pk is not None]
         if not root_pks or len(RelatedRows.split_into_batches(root_pks, lookup_connection, 1)) > 1:
             return None
         if not lookup_connection.features.supports_recursive_union_distinct:
             return None
-        queryset = RelatedRows.include_soft_deleted(RelatedRows.get_base_queryset(model)).using(model_connection)
-        if RowScopes.of(model).get_condition(queryset._visibility) is not None:
+        queryset = RelatedRows.include_soft_deleted(RelatedRows.get_base_queryset(related_binding)).using(
+            model_connection
+        )
+        if RowScopes.of(related_binding).get_condition(queryset._visibility) is not None:
             return None
-        meta = model._meta
-        table = meta.basetable
+        table = related_binding.basetable
         tree = Table(DELETION_TREE_CTE_NAME)
-        pk_column = meta.db_pk_column
-        parent_column = meta.fields_db_projection[backward_field.relation_field]
+        pk_column = related_binding.db_pk_column
+        parent_column = related_binding.fields_db_projection[backward_field.relation_field]
         query_class = lookup_connection.query_class
         roots = query_class.from_(table).select(table[pk_column]).where(table[parent_column].isin(root_pks))
         below = (
@@ -192,22 +212,24 @@ class RelatedRows:
 
     @staticmethod
     async def get_target_values(
-        model: type[Model],
+        binding: ModelBinding,
         foreign_key_field: ForeignKeyFieldInstance[Any],
         pks: list[Any],
         connection: DatabaseClient | None,
+        *,
+        source_model: type[Model],
     ) -> list[Any]:
         """The values the FK's key column(s) store for the given primary keys - the keys themselves
         unless ``to_field=`` names other columns, which takes a lookup. A composite target gives a
         tuple per row.
         """
         to_field_names = tuple(to_field.model_field_name for to_field in foreign_key_field.to_field_instances)
-        if to_field_names == model._meta.primary_key_attribute_names:
+        if to_field_names == binding.primary_key_attribute_names:
             return pks
         query = RelatedRows.include_soft_deleted(
-            RelatedRows.get_base_queryset(model)
+            RelatedRows.get_base_queryset(binding)
             .filter(pk__in=pks)
-            .using(RelatedRows.get_connection_for(model, connection))
+            .using(RelatedRows.get_connection_for(binding, connection, source_model=source_model))
         )
         return [
             value
@@ -245,7 +267,7 @@ class RelatedRows:
         return target_value is None
 
     @staticmethod
-    def get_base_queryset(related_model: type[Model]) -> QuerySet[Any]:
+    def get_base_queryset(related_binding: ModelBinding) -> QuerySet[Any]:
         """The queryset every relation check starts from: every tenant's rows, through the base manager
         - a row referencing the deleted one exists whatever tenant is active and whatever a custom
         manager hides. On a database keeping no key unique two tenants' rows share a key - the active
@@ -254,43 +276,50 @@ class RelatedRows:
         # Local import: the tenancy module imports the deletion package.
         from hare.models.tenancy.tenancy import Tenancy
 
-        keeps_keys_unique = related_model.get_routed_connection(
-            for_write=True
+        keeps_keys_unique = ModelConnectionChoice.get_metadata_connection(
+            HareContext.require_current(), related_binding, for_write=True
         ).dialect.features.supports_unique_constraints
-        all_tenants = keeps_keys_unique or Tenancy.get_scope(related_model) is None
-        return cast(
-            "QuerySet[Any]",
-            RowScopes.get_base_queryset(related_model, RowVisibility(all_tenants=all_tenants)),
-        )
+        all_tenants = keeps_keys_unique or Tenancy.get_scope(related_binding) is None
+        return RowScopes.get_base_queryset(related_binding, RowVisibility(all_tenants=all_tenants))
 
     @staticmethod
     def include_soft_deleted(queryset: QuerySet[Any]) -> QuerySet[Any]:
         """The queryset with soft-deleted rows included - a soft-deleted row still references the
         deleted one.
         """
-        if queryset.model._meta.soft_delete_field:
+        model_binding: ModelBinding = queryset._binding  # type: ignore[assignment]
+        if model_binding.soft_delete_field:
             return queryset.include_deleted()
         return queryset
 
     @staticmethod
-    async def get_soft_deleted_pks(model: type[Model], pks: list[Any], connection: DatabaseClient | None) -> set[Any]:
+    async def get_soft_deleted_pks(
+        binding: ModelBinding,
+        pks: list[Any],
+        connection: DatabaseClient | None,
+        *,
+        source_model: type[Model],
+    ) -> set[Any]:
         """The subset of ``pks`` whose ``model`` rows are already soft-deleted.
 
         Args:
-            model: A model with ``Meta.soft_delete_field``.
+            binding: A model with ``Meta.soft_delete_field``.
             pks: Primary keys to check.
             connection: The connection the delete runs on - every lookup against a model on that
                 connection runs on it, inside its transaction; a model on another connection,
                 or every model when None, uses its own.
+            source_model: The root model, used to choose whether this operation shares the cascade's connection.
         """
-        soft_delete_field = cast("str", model._meta.soft_delete_field)
-        primary_key_attribute_names = model._meta.primary_key_attribute_names
-        model_connection = RelatedRows.get_connection_for(model, connection)
-        lookup_connection = model_connection or model.get_connection(for_write=False)
+        soft_delete_field: str = binding.soft_delete_field  # type: ignore[assignment]
+        primary_key_attribute_names = binding.primary_key_attribute_names
+        model_connection = RelatedRows.get_connection_for(binding, connection, source_model=source_model)
+        lookup_connection = model_connection or ModelConnectionChoice.get(
+            HareContext.require_current(), binding, False
+        )
         soft_deleted_pks: set[Any] = set()
         for batch in RelatedRows.split_into_batches(pks, lookup_connection, len(primary_key_attribute_names)):
             query = (
-                RelatedRows.get_base_queryset(model)
+                RelatedRows.get_base_queryset(binding)
                 .include_deleted()
                 .filter(pk__in=batch, **{f"{soft_delete_field}__isnull": False})
                 .using(model_connection)
@@ -302,28 +331,35 @@ class RelatedRows:
 
     @staticmethod
     async def lock_soft_delete_values(
-        model: type[Model], pks: list[Any], connection: DatabaseClient | None
+        binding: ModelBinding,
+        pks: list[Any],
+        connection: DatabaseClient | None,
+        *,
+        source_model: type[Model],
     ) -> dict[Any, datetime.datetime | None]:
         """Locks the ``model`` rows ``pks`` until the running transaction ends and reads their
         ``Meta.soft_delete_field`` values - a concurrent soft delete of the same rows waits here
         and then sees them already deleted. A database locking no row reads them unlocked.
 
         Args:
-            model: A model with ``Meta.soft_delete_field``.
+            binding: A model with ``Meta.soft_delete_field``.
             pks: Primary keys to lock.
             connection: Connection of the running transaction.
+            source_model: The root model, used to choose whether this operation shares the cascade's connection.
 
         Returns:
             ``{pk: soft-delete value}`` for every row that exists.
         """
-        soft_delete_field = cast("str", model._meta.soft_delete_field)
-        primary_key_attribute_names = model._meta.primary_key_attribute_names
+        soft_delete_field: str = binding.soft_delete_field  # type: ignore[assignment]
+        primary_key_attribute_names = binding.primary_key_attribute_names
         pk_column_count = len(primary_key_attribute_names)
-        lookup_connection = RelatedRows.get_connection_for(model, connection) or model.get_connection(for_write=True)
+        lookup_connection = RelatedRows.get_connection_for(
+            binding, connection, source_model=source_model
+        ) or ModelConnectionChoice.get(HareContext.require_current(), binding, True)
         soft_delete_values: dict[Any, datetime.datetime | None] = {}
         for batch in RelatedRows.split_into_batches(pks, lookup_connection, pk_column_count):
             query = (
-                RelatedRows.get_base_queryset(model).include_deleted().filter(pk__in=batch).using(lookup_connection)
+                RelatedRows.get_base_queryset(binding).include_deleted().filter(pk__in=batch).using(lookup_connection)
             )
             if lookup_connection.features.supports_select_for_update:
                 query = query.select_for_update(no_key=True)
@@ -335,38 +371,42 @@ class RelatedRows:
     @staticmethod
     def get_foreign_key_value(row: Model, foreign_key_field: ForeignKeyFieldInstance[Any]) -> Any:
         """The value ``row`` stores in ``foreign_key_field``'s shadow column(s) - a tuple for a composite FK."""
-        if len(foreign_key_field.source_fields) == 1:
-            return getattr(row, cast("str", foreign_key_field.source_field))
-        return tuple(getattr(row, source_field) for source_field in foreign_key_field.source_fields)
+        source_fields = foreign_key_field.source_fields
+        if len(source_fields) == 1:
+            return getattr(row, foreign_key_field.source_field)  # type: ignore[arg-type]
+        return tuple(getattr(row, source_field) for source_field in source_fields)
 
     @staticmethod
     async def get_pks_by_target_values(
-        model: type[Model],
+        binding: ModelBinding,
         foreign_key_field: ForeignKeyFieldInstance[Any],
         pks: list[Any],
         connection: DatabaseClient | None,
+        *,
+        source_model: type[Model],
     ) -> dict[Any, Any]:
         """Maps the values ``foreign_key_field`` stores for the ``model`` rows ``pks`` back to their pks.
 
         Args:
-            model: The model ``foreign_key_field`` points at.
+            binding: The model ``foreign_key_field`` points at.
             foreign_key_field: The FK/O2O field.
             pks: Primary keys of the ``model`` rows.
             connection: The connection the delete runs on - every lookup against a model on that
                 connection runs on it, inside its transaction; a model on another connection,
                 or every model when None, uses its own.
+            source_model: The root model, used to choose whether this operation shares the cascade's connection.
 
         Returns:
             ``{stored value: pk}`` - a tuple key for a composite FK.
         """
         to_field_names = tuple(to_field.model_field_name for to_field in foreign_key_field.to_field_instances)
-        primary_key_attribute_names = model._meta.primary_key_attribute_names
+        primary_key_attribute_names = binding.primary_key_attribute_names
         if to_field_names == primary_key_attribute_names or not pks:
             return {pk: pk for pk in pks}
         query = RelatedRows.include_soft_deleted(
-            RelatedRows.get_base_queryset(model)
+            RelatedRows.get_base_queryset(binding)
             .filter(pk__in=pks)
-            .using(RelatedRows.get_connection_for(model, connection))
+            .using(RelatedRows.get_connection_for(binding, connection, source_model=source_model))
         )
         pk_by_target_value = {}
         for values in await query.values_list(*primary_key_attribute_names, *to_field_names):
@@ -382,38 +422,39 @@ class RelatedRows:
 
     @staticmethod
     def get_through_row_criteria(
-        model: type[Model],
+        binding: ModelBinding,
         many_to_many_field: ManyToManyFieldInstance[Any],
         pks: list[Any],
         connection: DatabaseClient | None,
+        *,
+        source_model: type[Model],
     ) -> tuple[DatabaseClient, Table, list[Criterion]]:
         """Selects the auto-generated through-table rows linking ``many_to_many_field`` to any ``model`` row
         in ``pks``, one criterion per batch that fits the backend's bind-parameter ceiling.
 
         Args:
-            model: The model ``many_to_many_field`` is reached from.
+            binding: The model ``many_to_many_field`` is reached from.
             many_to_many_field: The M2M relation.
             pks: Primary keys of the ``model`` rows.
             connection: The connection the delete runs on - used when the through table's owning model
                 lives on it; otherwise, or when None, that model's own write connection.
+            source_model: The root model, used to choose whether this operation shares the cascade's connection.
 
         Returns:
             ``(the through table's connection, the through table, criteria)``.
         """
-        owning_model = many_to_many_field.related_model if many_to_many_field._generated else model
-        chosen_connection = RelatedRows.get_connection_for(owning_model, connection) or owning_model.get_connection(
-            for_write=True
-        )
+        model = binding._model
+        through_model = many_to_many_field.related_model if many_to_many_field._generated else model
+        declaring_binding = binding.graph.get_binding(through_model)
+        chosen_connection = RelatedRows.get_connection_for(
+            declaring_binding, connection, source_model=source_model
+        ) or ModelConnectionChoice.get(HareContext.require_current(), declaring_binding, True)
         through_table = Table(many_to_many_field.through, schema=many_to_many_field.through_schema)
         backward_columns = [through_table[column_name] for column_name in many_to_many_field.backward_keys]
-        pk_fields = model._meta.pk_fields if model._meta.has_composite_primary_key else (model._meta.pk,)
-        pk_value_rows = [
-            tuple(
-                chosen_connection.dialect.types.get_db_value(pk_field, pk_component, model)
-                for pk_field, pk_component in zip(pk_fields, pk if len(pk_fields) > 1 else (pk,), strict=True)
-            )
-            for pk in pks
-        ]
+        pk_fields = binding.pk_fields
+        pk_value_rows = KeyColumns.write_rows(
+            pk_fields, (pk if len(pk_fields) > 1 else (pk,) for pk in pks), chosen_connection.dialect.types, model
+        )
         criteria = [
             KeyColumns.row_is_in(backward_columns, batch)
             for batch in RelatedRows.split_into_batches(pk_value_rows, chosen_connection, len(backward_columns))

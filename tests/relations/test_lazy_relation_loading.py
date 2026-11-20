@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from hare.contrib.test import capture_queries
+from hare.core.apps.model_binding_graph import ModelBindingGraph
 from hare.exceptions import NoValuesFetched
 from hare.query.expressions import Q
 from hare.query.relation_loading.select import Select
@@ -100,7 +101,7 @@ async def test_defer_related_opts_out_of_select_default(db):
     await LazySelectChild.objects.create(name="Child", parent=parent)
 
     fetched = await LazySelectParent.objects.filter(name="Parent").defer_related("children").first()
-    with pytest.raises(Exception):  # noqa: B017 - NoValuesFetched, accessing an un-prefetched reverse relation
+    with pytest.raises(NoValuesFetched):
         list(fetched.children)
 
 
@@ -133,6 +134,7 @@ def test_lazy_accepts_relation_load_strategy_enum_member():
     """lazy= is typed as RelationLoadStrategy (a StrEnum, matching OnDelete's own pattern) rather
     than a bare Literal["joined", "select"] - passing the real enum member must work exactly like
     the equivalent plain string, not just be silently tolerated by duck typing."""
+    declaration_graph = ModelBindingGraph()
     from hare import fields
     from hare.fields import RelationLoadStrategy
     from hare.models import Model
@@ -142,8 +144,8 @@ def test_lazy_accepts_relation_load_strategy_enum_member():
             "models.LazyJoinedParent", lazy=RelationLoadStrategy.JOINED, null=True
         )
 
-    assert LazyEnumField._meta.fields_map["parent"].lazy == RelationLoadStrategy.JOINED
-    assert LazyEnumField._meta.fields_map["parent"].lazy == "joined"
+    assert declaration_graph.include(LazyEnumField).fields_map["parent"].lazy == RelationLoadStrategy.JOINED
+    assert declaration_graph.include(LazyEnumField).fields_map["parent"].lazy == "joined"
 
 
 @pytest.mark.asyncio
@@ -339,3 +341,17 @@ async def test_refresh_from_db_reloads_lazy_select_fk_and_m2m(db):
     await fetched.refresh_from_db(fields=["mentor_id"])
 
     assert fetched.mentor.name == "old"
+
+
+@pytest.mark.parametrize(
+    ("parent_class", "child_class"),
+    [(LazyJoinedParent, LazyJoinedChild), (LazySelectParent, LazySelectChild)],
+)
+@pytest.mark.asyncio
+async def test_a_lazy_relation_loads_on_every_repeated_get(db, parent_class, child_class):
+    parent = await parent_class.objects.create(name="Parent")
+    child = await child_class.objects.create(name="Child", parent=parent)
+    for _ in range(3):
+        fetched = await child_class.objects.get(pk=child.pk)
+        assert isinstance(fetched.parent, parent_class)
+        assert fetched.parent.name == "Parent"

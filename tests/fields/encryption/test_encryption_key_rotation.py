@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import pytest
 
+from hare.contrib.test import requires_features
 from hare.core.connections.connections import Connections
 from hare.exceptions import (
     ConfigurationError,
@@ -13,6 +14,8 @@ from hare.exceptions import (
     QueryError,
 )
 from hare.fields.encrypted.field_encryption import FieldEncryption
+from hare.models.tenancy.tenancy import Tenancy
+from hare.query.statements.write.bulk.bulk_update_query import BulkUpdateQuery
 from tests.fields.models_encrypted import EncryptedOwner, EncryptedRecord
 
 OLD_SECRET = "old-field-encryption-secret"
@@ -56,6 +59,45 @@ async def test_the_key_changes_without_losing_data(db_encrypted_fields):
     FieldEncryption.configure(OLD_SECRET)
     with pytest.raises(DecryptionError, match="different key"):
         await EncryptedRecord.objects.get(id=1)
+
+
+@requires_features(supports_transactions=True)
+@pytest.mark.requires("encryption")
+@pytest.mark.asyncio
+async def test_rotation_keeps_completed_batches_and_can_continue_after_failure(db_encrypted_fields, monkeypatch):
+    FieldEncryption.configure(OLD_SECRET)
+    for record_id in (1, 2, 3):
+        await EncryptedRecord.objects.create(id=record_id, secret=f"secret {record_id}")
+    before = await fetch_raw_secrets()
+    FieldEncryption.configure(NEW_SECRET, previous_keys=[OLD_SECRET])
+    write_batch = BulkUpdateQuery._execute_bound
+    written = 0
+
+    async def fail_after_writing_the_second_batch(query):
+        nonlocal written
+        result = await write_batch(query)
+        written += 1
+        if written == 2:
+            raise RuntimeError("second rotation batch failed")
+        return result
+
+    with Tenancy.scope(7):
+        active_scope = Tenancy.current.get()
+        with monkeypatch.context() as patch:
+            patch.setattr(BulkUpdateQuery, "_execute_bound", fail_after_writing_the_second_batch)
+            with pytest.raises(RuntimeError, match="second rotation batch failed"):
+                await FieldEncryption.reencrypt(EncryptedRecord, batch_size=1)
+        assert Tenancy.current.get() is active_scope
+        after = await fetch_raw_secrets()
+        assert after[0] != before[0]
+        assert after[1:] == before[1:]
+        assert await FieldEncryption.reencrypt(EncryptedRecord, batch_size=1) == 3
+    FieldEncryption.configure(NEW_SECRET)
+    assert await EncryptedRecord.objects.order_by("id").values_list("secret", flat=True) == [
+        "secret 1",
+        "secret 2",
+        "secret 3",
+    ]
 
 
 @pytest.mark.database_independent

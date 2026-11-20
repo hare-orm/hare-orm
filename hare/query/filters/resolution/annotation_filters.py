@@ -9,6 +9,7 @@ from hare.exceptions import QueryError
 from hare.fields.data.temporal.time_delta_field import TimeDeltaField
 from hare.fields.field import Field
 from hare.fields.generated_field import GeneratedField
+from hare.query.constants import PLAN_CACHE_MISS
 from hare.query.expressions.expression import Expression
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
@@ -17,6 +18,7 @@ from hare.query.expressions.value_references.list_parameter_value_reference impo
 from hare.query.expressions.value_references.list_value_reference import ListValueReference
 from hare.query.expressions.value_references.literal_value_reference import LiteralValueReference
 from hare.query.filters.resolution.filter_values import FilterValues
+from hare.sql.terms.criteria.basic_criterion import BasicCriterion
 from hare.sql.terms.criteria.criterion import Criterion
 from hare.sql.terms.term import Term
 from hare.sql.terms.values.value_wrapper import ValueWrapper
@@ -48,15 +50,40 @@ class AnnotationFilters:
         if isinstance(value, Term):
             if parameter_converter is None or not any(node is value for node in criterion.find_(Term)):
                 return None
-            if len(value.find_(ValueWrapper)) != 1:
+            value_wrappers = value.find_(ValueWrapper)
+            if len(value_wrappers) != 1:
                 return None
             return LiteralValueReference(
-                value.find_(ValueWrapper)[0], partial(FilterValues.get_converted_term_parameter, parameter_converter)
+                value_wrappers[0], partial(AnnotationFilters._get_converted_term_parameter, parameter_converter)
             )
-        value_wrappers = [node for node in criterion.find_(ValueWrapper) if node.value is value]
-        if len(value_wrappers) != 1:
+        if (
+            isinstance(criterion, BasicCriterion)
+            and isinstance(criterion.right, ValueWrapper)
+            and criterion.right.value is value
+        ):
+            return LiteralValueReference(criterion.right, parameter_converter)
+        value_wrapper = FilterValues.get_unique_value_wrapper(criterion, value)
+        if value_wrapper is None:
             return None
-        return LiteralValueReference(value_wrappers[0], parameter_converter)
+        return LiteralValueReference(value_wrapper, parameter_converter)
+
+    @staticmethod
+    def _get_converted_term_parameter(parameter_converter: Callable[[Any], Any], value: Any) -> Any:
+        """The one parameter of the term a value of a filter on an annotation converts into.
+
+        Args:
+            parameter_converter: The conversion.
+            value: The value.
+
+        Returns:
+            The parameter's value; ``PLAN_CACHE_MISS`` - of no type a plan binds - when the value
+            converts into anything else.
+        """
+        term = parameter_converter(value)
+        if not isinstance(term, Term):
+            return PLAN_CACHE_MISS
+        value_wrappers = term.find_(ValueWrapper)
+        return value_wrappers[0].value if len(value_wrappers) == 1 else PLAN_CACHE_MISS
 
     @staticmethod
     def encode_annotation_filter_value(
@@ -148,8 +175,7 @@ class AnnotationFilters:
                 "and SQL does not allow filtering on window functions directly. Filter a "
                 ".values()/.values_list() query instead, which applies the filter to the query "
                 "wrapped in a subquery, e.g. "
-                # <pk field>, not 'pk': .values() doesn't take the `pk` alias.
-                f"Model.objects.filter(pk__in=Subquery(queryset.filter({key}=...).values(<pk field>)))."
+                f'Model.objects.filter(pk__in=Subquery(queryset.filter({key}=...).values("pk"))).'
             )
 
     @staticmethod
@@ -185,7 +211,7 @@ class AnnotationFilters:
         field_lookup: FieldLookup,
         annotation_output_field: Field[Any] | None,
         value: Any,
-    ) -> tuple[Callable[[Any], Any] | None, Field[Any] | None]:
+    ) -> tuple[Callable[[Any], Any] | None, Field[Any] | None, Callable[..., Any] | None]:
         """How the value of a filter on an annotation becomes the bound one - the same conversion
         for a later value.
 
@@ -196,49 +222,57 @@ class AnnotationFilters:
             value: The value given.
 
         Returns:
-            The conversion, None for a value bound as it is; and the field the lookup's own
-            encoder converts by, None when no encoder does.
+            The conversion (None for a value bound as given), the field of a lookup encoder
+            and that encoder itself. The last two are None for field-only conversion.
         """
         if annotation_output_field is None or isinstance(value, Term):
-            return None, None
-        if field_lookup.value_encoder is not None:
+            return None, None, None
+        if field_lookup.value_encoder is not None or field_lookup.value_encoder_builder is not None:
             # A field-aware lookup takes an encoded value, as for a model field. The field-blind
             # __in/__isnull entries get the raw value.
             encoder_field = GeneratedField.get_effective_field(annotation_output_field)
-            return partial(
-                AnnotationFilters.encode_annotation_filter_value,
-                field_lookup.value_encoder,
-                expression_context.model,
+            value_encoder = field_lookup.get_value_encoder(encoder_field, expression_context.dialect)
+            assert value_encoder is not None  # nosec B101
+            return (
+                partial(
+                    AnnotationFilters.encode_annotation_filter_value,
+                    value_encoder,
+                    expression_context.model,
+                    encoder_field,
+                    expression_context.dialect,
+                ),
                 encoder_field,
-                expression_context.dialect,
-            ), encoder_field
+                value_encoder,
+            )
         if FilterValues.is_container_field(annotation_output_field):
             # An array/JSON/range lookup with no value_encoder of its own (`__contains` of an aggregate
             # collecting JSON) binds the value in the field's stored form, as the plain-field branch does.
-            return partial(
-                expression_context.dialect.types.get_lookup_value,
-                annotation_output_field,
-                instance=expression_context.model,
-            ), None
+            return (
+                expression_context.dialect.types.get_lookup_encoder(annotation_output_field, expression_context.model),
+                None,
+                None,
+            )
         if isinstance(annotation_output_field, TimeDeltaField) and isinstance(value, timedelta):
             # A comparison operator with no value_encoder of its own binds the raw value - a
             # timedelta is stored as whole microseconds, and no driver accepts it as a parameter
             # for that column type (`.annotate(span=F("end") - F("start")).filter(span__gt=...)`).
-            return partial(
-                expression_context.dialect.types.get_db_value,
-                TemporalArithmetic.TIMEDELTA_OUTPUT_FIELD,
-                instance=None,
-            ), None
+            return (
+                expression_context.dialect.types.get_field_encoder(TemporalArithmetic.TIMEDELTA_OUTPUT_FIELD),
+                None,
+                None,
+            )
         if value is not None:
             # A comparison operator with no value_encoder of its own binds the value as the
             # annotation's field takes a value of a filter on it - an int of an integer, a naive
             # datetime in the configured zone, a date's string parsed.
-            return partial(
-                expression_context.dialect.types.get_lookup_value,
-                GeneratedField.get_effective_field(annotation_output_field),
-                instance=expression_context.model,
-            ), None
-        return None, None
+            return (
+                expression_context.dialect.types.get_lookup_encoder(
+                    GeneratedField.get_effective_field(annotation_output_field), expression_context.model
+                ),
+                None,
+                None,
+            )
+        return None, None, None
 
     @staticmethod
     def get_value_reference(
@@ -247,7 +281,7 @@ class AnnotationFilters:
         operator: Callable[..., Any],
         raw_value: Any,
         value: Any,
-        field_lookup: FieldLookup,
+        value_encoder: Callable[..., Any] | None,
         encoder_field: Field[Any] | None,
         parameter_converter: Callable[[Any], Any] | None,
     ) -> LiteralValueReference | ListValueReference | ListParameterValueReference | None:
@@ -259,7 +293,7 @@ class AnnotationFilters:
             operator: The operator that built it.
             raw_value: The value given.
             value: The value bound.
-            field_lookup: The lookup.
+            value_encoder: The selected lookup encoder used to convert the value.
             encoder_field: The field the lookup's own encoder converted the value by, None for none.
             parameter_converter: How the given value became the bound one, None for as it is.
 
@@ -270,10 +304,10 @@ class AnnotationFilters:
             return None
         if not isinstance(raw_value, (list, tuple, set)):
             return AnnotationFilters.get_annotation_value_reference(criterion, value, parameter_converter)
-        if field_lookup.value_encoder is None or encoder_field is None:
+        if value_encoder is None or encoder_field is None:
             return None
         list_reference = FilterValues.get_value_reference(
-            expression_context, criterion, operator, raw_value, value, encoder_field, field_lookup.value_encoder
+            expression_context, criterion, operator, raw_value, value, encoder_field, value_encoder
         )
         if isinstance(list_reference, (ListValueReference, ListParameterValueReference)):
             return list_reference

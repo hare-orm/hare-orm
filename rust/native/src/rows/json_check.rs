@@ -2,10 +2,16 @@
 //! value before writing it, done natively: every node of a nested payload was an `isinstance`
 //! chain in Python, the bulk of a JSON write's cost.
 
+use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyFloat, PyInt, PyList, PyTuple};
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 
-use crate::codecs::json::MAXIMUM_DEPTH;
+/// The enum base class, imported only when a non-JSON scalar needs inspection.
+static ENUM_TYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+/// Maximum container nesting accepted by the JSON field.
+const MAXIMUM_DEPTH: usize = 254;
 
 /// The value holds nothing a JSON column can't store, and no int outside orjson's range.
 const STORABLE: u8 = 0;
@@ -38,10 +44,10 @@ pub fn check_json_storable<'py>(py: Python<'py>, value: Bound<'py, PyAny>) -> Py
             if let Some(problem) = enter_container(&mut open_containers, &item, pending.len()) {
                 return Ok((problem, py.None().into_bound(py)));
             }
-            for key in dict.keys() {
+            for (key, _) in dict.iter() {
                 pending.push(key);
             }
-            for dict_value in dict.values() {
+            for (_, dict_value) in dict.iter() {
                 pending.push(dict_value);
             }
         } else if let Ok(list) = item.cast::<PyList>() {
@@ -62,8 +68,17 @@ pub fn check_json_storable<'py>(py: Python<'py>, value: Bound<'py, PyAny>) -> Py
             if !item.extract::<f64>()?.is_finite() {
                 return Ok((NON_FINITE_FLOAT, item));
             }
-        } else if item.is_instance_of::<PyInt>() && item.extract::<i64>().is_err() && item.extract::<u64>().is_err() {
-            has_long_integer = true;
+        } else if item.is_instance_of::<PyInt>() {
+            if item.extract::<i64>().is_err() && item.extract::<u64>().is_err() {
+                has_long_integer = true;
+            }
+        } else if !item.is_none() && !item.is_instance_of::<PyString>() {
+            let enum_type = ENUM_TYPE.get_or_try_init(py, || -> PyResult<_> {
+                Ok(py.import("enum")?.getattr(intern!(py, "Enum"))?.unbind())
+            })?;
+            if item.is_instance(enum_type.bind(py))? {
+                pending.push(item.getattr(intern!(py, "value"))?);
+            }
         }
     }
     let code = if has_long_integer { STORABLE_WITH_LONG_INTEGER } else { STORABLE };

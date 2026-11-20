@@ -1,6 +1,7 @@
 import pytest
 
 from hare.contrib.test.isolated_contexts import hare_test_context
+from hare.core.hare_context import HareContext
 from hare.ddl.constraints import CheckConstraint, UniqueConstraint
 from hare.exceptions import ConfigurationError
 from hare.models.deletion.cascade.deletion_graph import DeletionGraph
@@ -31,8 +32,18 @@ async def test_mutual_cascade_cycle_across_two_siblings_of_abstract_base():
     ):
         from tests.model_setup.abstract_inheritance.mutual_cascade_cycle import CrossLinkNodeA, CrossLinkNodeB
 
-        assert DeletionGraph.has_self_cascading_constrained_relations(CrossLinkNodeA) is True
-        assert DeletionGraph.has_self_cascading_constrained_relations(CrossLinkNodeB) is True
+        assert (
+            DeletionGraph.has_self_cascading_constrained_relations(
+                HareContext.require_current().apps.get_binding(CrossLinkNodeA)
+            )
+            is True
+        )
+        assert (
+            DeletionGraph.has_self_cascading_constrained_relations(
+                HareContext.require_current().apps.get_binding(CrossLinkNodeB)
+            )
+            is True
+        )
 
 
 @pytest.mark.asyncio
@@ -41,7 +52,7 @@ async def test_tenant_field_from_abstract_base_scopes_both_siblings_independentl
     inherit Meta.tenant_field = "company_id" from the same abstract base. Tenancy.scope() is a
     single process-wide contextvar shared by design across every tenant-scoped model - checks
     this still filters BOTH siblings correctly and simultaneously, and that per-subclass
-    MetaInfo.tenant_field doesn't get corrupted/aliased in a way that makes one sibling see the
+    ModelBinding.tenant_field doesn't get corrupted/aliased in a way that makes one sibling see the
     other's rows."""
     async with hare_test_context(
         modules=["tests.model_setup.abstract_inheritance.tenant_field"],
@@ -52,10 +63,12 @@ async def test_tenant_field_from_abstract_base_scopes_both_siblings_independentl
         from hare.models.tenancy.tenancy import Tenancy
         from tests.model_setup.abstract_inheritance.tenant_field import TenantSiblingX, TenantSiblingY
 
-        assert TenantSiblingX._meta.tenant_field == "company_id"
-        assert TenantSiblingY._meta.tenant_field == "company_id"
-        # Independent MetaInfo instances, not the same object aliased across siblings.
-        assert TenantSiblingX._meta is not TenantSiblingY._meta
+        assert HareContext.require_current().apps.get_binding(TenantSiblingX).tenant_field == "company_id"
+        assert HareContext.require_current().apps.get_binding(TenantSiblingY).tenant_field == "company_id"
+        # Independent ModelBinding instances, not the same object aliased across siblings.
+        assert HareContext.require_current().apps.get_binding(
+            TenantSiblingX
+        ) is not HareContext.require_current().apps.get_binding(TenantSiblingY)
 
         await TenantSiblingX.objects.all_tenants().bulk_create(
             [TenantSiblingX(company_id=1, name="x1a"), TenantSiblingX(company_id=2, name="x2a")]
@@ -175,13 +188,24 @@ async def test_multiple_inheritance_from_two_unrelated_abstract_bases_merges_bot
 
         model = getattr(importlib.import_module(companion_module), model_name)
 
-        unique_constraints = [c for c in model._meta.constraints if isinstance(c, UniqueConstraint)]
+        unique_constraints = [
+            c
+            for c in HareContext.require_current().apps.get_binding(model).constraints
+            if isinstance(c, UniqueConstraint)
+        ]
         assert {tuple(c.fields) for c in unique_constraints} == {("qty",), ("price",)}
-        assert {c.name for c in model._meta.constraints if isinstance(c, CheckConstraint)} == {
+        assert {
+            c.name
+            for c in HareContext.require_current().apps.get_binding(model).constraints
+            if isinstance(c, CheckConstraint)
+        } == {
             "qty_nonneg",
             "price_nonneg",
         }
-        assert {index.fields[0] for index in model._meta.indexes} == {"qty", "price"}
+        assert {index.fields[0] for index in HareContext.require_current().apps.get_binding(model).indexes} == {
+            "qty",
+            "price",
+        }
 
         from hare.exceptions import IntegrityError
 
@@ -216,8 +240,8 @@ async def test_diamond_inheritance_non_overriding_base_does_not_shadow_overridin
     ):
         from tests.model_setup.abstract_inheritance.diamond_mro import DiamondConcrete
 
-        assert DiamondConcrete._meta.db_table == "from_mixin2"
-        assert DiamondConcrete._meta.fields_map["shared"].max_length == 99
+        assert HareContext.require_current().apps.get_binding(DiamondConcrete).db_table == "from_mixin2"
+        assert HareContext.require_current().apps.get_binding(DiamondConcrete).fields_map["shared"].max_length == 99
 
         alias = next(iter(Connections.current().db_config))
         sql = Connections.get(alias).get_schema_sql(safe=True)
@@ -233,11 +257,7 @@ async def test_diamond_inheritance_non_overriding_base_does_not_shadow_overridin
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_fk_model_name_as_abstract_class_object_is_rejected():
-    """Apps._get_related_model() used to validate a class-object model_name differently from a
-    string one - a string reference to an abstract model ("models.AbstractAttemptBase") is
-    caught (abstract models are never registered in self.apps), but a class-object reference
-    bypassed the app registry lookup entirely, going on to crash with a raw AttributeError deep
-    inside relation setup instead of a clear ConfigurationError at the point of the mistake."""
+    """A relation to an abstract model class is refused with ConfigurationError."""
     with pytest.raises(ConfigurationError, match="abstract"):
         async with hare_test_context(
             modules=["tests.model_setup.abstract_inheritance.relation_to_abstract_class"],
@@ -259,7 +279,7 @@ async def test_trigger_name_inherited_unchanged_from_abstract_base_raises():
     names occupy the same per-(connection, schema) namespace as indexes/constraints, not a
     per-table one - _generate_schemas=False since the guard fires at registration time, before
     any real DDL runs."""
-    with pytest.raises(ConfigurationError, match="constraint/index named 'trg_shared_touch'"):
+    with pytest.raises(ConfigurationError, match="more than one object named 'trg_shared_touch'"):
         async with hare_test_context(
             modules=["tests.model_setup.abstract_inheritance.trigger_collision"],
             db_url="sqlite+aiosqlite://:memory:",

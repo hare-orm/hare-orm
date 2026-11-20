@@ -7,6 +7,7 @@ import datetime
 import pytest
 
 from hare.contrib.test import capture_queries
+from hare.core.hare_context import HareContext
 from hare.models.deletion.cascade.deletion_collector import DeletionCollector
 from hare.models.deletion.cascade.deletion_plan import DeletionPlan
 from hare.models.enums import DeletionAction
@@ -25,12 +26,21 @@ async def create_tree(model) -> None:
             model(
                 id=row_id,
                 name=f"row-{row_id}",
-                **(deleted_at if model._meta.soft_delete_field and row_id in DELETED_ALREADY else {}),
+                **(
+                    deleted_at
+                    if HareContext.require_current().apps.get_binding(model).soft_delete_field
+                    and row_id in DELETED_ALREADY
+                    else {}
+                ),
             )
             for row_id in TREE
         ]
     )
-    rows = model.objects.include_deleted() if model._meta.soft_delete_field else model.objects.all()
+    rows = (
+        model.objects.include_deleted()
+        if HareContext.require_current().apps.get_binding(model).soft_delete_field
+        else model.objects.all()
+    )
     for row_id, parent_id in TREE.items():
         await rows.filter(id=row_id).update(parent_id=parent_id)
 
@@ -44,7 +54,7 @@ async def collect(model, root_action: DeletionAction | None, *, walks_tree: bool
         monkeypatch.setattr(DeletionCollector, "_collect_tree_through_self", not_walked)
     try:
         return await DeletionCollector(model.get_connection(), root_action=root_action, reads_versions=True).collect(
-            model, [1]
+            HareContext.require_current().apps.get_binding(model), [1]
         )
     finally:
         monkeypatch.undo()

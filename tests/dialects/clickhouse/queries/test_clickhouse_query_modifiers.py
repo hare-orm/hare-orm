@@ -139,8 +139,7 @@ async def test_limit_by_keeps_rows_per_group(readings):
     # Row 1's last version has the even value 1000.
     by_expression = Reading.objects.final().order_by("id").limit_by(1, F("value") % 2)
     assert await by_expression.values_list("id", flat=True) == [1, 3]
-    with pytest.raises(QueryError, match="aggregate"):
-        await queryset.aggregate(total=Sum("value"))
+    assert await queryset.aggregate(total=Sum("value")) == {"total": 2490}
     with pytest.raises(QueryError, match=r"limit_by\(\) changes how rows are read"):
         await Reading.objects.limit_by(2, "sensor").update(value=1)
     for arguments in ((-1, "sensor"), (True, "sensor"), (1,), (1, 2)):

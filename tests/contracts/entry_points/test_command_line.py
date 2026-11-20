@@ -2,18 +2,15 @@
 temporary folder gets its migration from ``makemigrations``, the SQL of it from ``sqlmigrate`` and its tables
 from ``migrate``, and a second ``makemigrations`` finds nothing to do."""
 
-import contextlib
 import importlib
-import io
 import sys
 import textwrap
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-from hare.cli import hare_cli as cli_module
 from hare.cli.plugins.cli_command_registry import CLICommandRegistry
+from tests.utils.cli_commands import CliCommands
 
 pytestmark = [pytest.mark.database_independent, pytest.mark.asyncio]
 
@@ -27,15 +24,6 @@ class Widget(Model):
     id = fields.IntField(primary_key=True)
     name = fields.CharField(max_length=50)
 """
-
-
-async def run_cli(arguments: list[str]) -> SimpleNamespace:
-    """Runs the command line, giving its exit code and output."""
-    stdout = io.StringIO()
-    stderr = io.StringIO()
-    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-        exit_code = await cli_module.HareCLI.run_cli_async(arguments)
-    return SimpleNamespace(exit_code=exit_code, output=stdout.getvalue() + stderr.getvalue())
 
 
 async def test_a_project_is_migrated_by_the_command_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -56,14 +44,14 @@ async def test_a_project_is_migrated_by_the_command_line(tmp_path: Path, monkeyp
     importlib.invalidate_caches()
     configuration = ["-c", f"{PROJECT_PREFIX}_settings.HARE_ORM"]
     try:
-        made = await run_cli([*configuration, "makemigrations", "app"])
+        made = await CliCommands.run([*configuration, "makemigrations", "app"])
         assert made.exit_code == 0, made.output
-        sql = await run_cli([*configuration, "sqlmigrate", "app", "0001"])
+        sql = await CliCommands.run([*configuration, "sqlmigrate", "app", "0001"])
         assert sql.exit_code == 0, sql.output
         assert "CREATE TABLE" in sql.output
-        migrated = await run_cli([*configuration, "migrate"])
+        migrated = await CliCommands.run([*configuration, "migrate"])
         assert migrated.exit_code == 0, migrated.output
-        again = await run_cli([*configuration, "makemigrations", "app"])
+        again = await CliCommands.run([*configuration, "makemigrations", "app"])
         assert again.exit_code == 0, again.output
         assert not list((package / "migrations").glob("0002_*.py"))
     finally:

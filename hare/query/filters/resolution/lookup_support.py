@@ -30,7 +30,7 @@ class LookupSupport:
             or AnnotationFilters.get_annotation_name(expression_context, key) is not None
         ):
             return
-        lookup_info = expression_context.model._meta.get_lookup_info(key)
+        lookup_info = expression_context.binding.get_lookup_info(key)
         dialect = expression_context.dialect
         lookup_name = f"__{lookup_info.lookup}" if lookup_info.lookup else "equality"
         if dialect.filter_operators.supports_lookup(lookup_info):
@@ -50,7 +50,6 @@ class LookupSupport:
                 f"{expression_context.connection.connection_alias!r} connection: the {lookup_name} lookup needs "
                 f"features.{required_feature}, which the connection doesn't have"
             )
-        lookup_name = f"__{lookup_info.lookup}" if lookup_info.lookup else "equality"
         if not dialect.filter_operators.has_columns_of(lookup_info):
             reason = "the dialect has no column type for its field"
         elif lookup_info.requires_extension is not None and not dialect.features.supports_extensions:
@@ -74,7 +73,7 @@ class LookupSupport:
         Returns:
             The error.
         """
-        meta = expression_context.model._meta
+        meta = expression_context.binding
         allowed = sorted(meta.fields | meta.fetch_fields | set(expression_context.annotations))
         path_prefix = expression_context.select_related_path_prefix
         full_key = f"{path_prefix}__{key}" if path_prefix else key

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from hare.contrib.test.queries.query_counter import QueryCounter
 from hare.core.hare_context import HareContext
@@ -15,11 +15,13 @@ if TYPE_CHECKING:
 
 @asynccontextmanager
 async def capture_queries(using: str | DatabaseClient | None = None) -> AsyncGenerator[QueryCounter]:
-    """Counts every query hare sends to ``using`` from the block and the tasks it starts - every
-    ``QueryExecuted`` of the connection, bulk loads included.
+    """Count statements with the selected alias from the block and the tasks it starts.
+
+    A client selects its alias, not its identity: independent and schema clients sharing
+    the alias also count. Every matching ``QueryExecuted`` counts, bulk loads included.
 
     Args:
-        using: A connection alias or client - the current context's default connection by default.
+        using: A connection alias or a client supplying it; the current context's default otherwise.
 
     Example::
 
@@ -27,8 +29,8 @@ async def capture_queries(using: str | DatabaseClient | None = None) -> AsyncGen
             await Event.objects.all().select_related("tournament")
         assert counter.count == 1
     """
-    connection = cast(
-        "DatabaseClient", using if hasattr(using, "execute") else HareContext.require_current().get_connection(using)
+    connection: DatabaseClient = (
+        using if hasattr(using, "execute") else HareContext.require_current().get_connection(using)  # type: ignore[assignment]
     )
     counter = QueryCounter(connection.connection_alias)
     with Observers.observing(QueryExecuted, counter.record):

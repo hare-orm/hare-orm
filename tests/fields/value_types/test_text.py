@@ -1,5 +1,6 @@
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.exceptions import ValidationError
 from hare.fields import TextField
 from hare.transactions.transactions import Transactions
@@ -22,7 +23,10 @@ async def test_a_null_byte_is_the_databases_to_store(db):
     """SQLite keeps a null byte in text; PostgreSQL refuses it - a ValidationError, as for a refused
     value, not an OperationalError: on a write, an update and a filter alike."""
     value = "a\x00b"
-    if testmodels.TextFields._meta.connection.dialect.name != "postgresql":
+    if (
+        HareContext.require_current().apps.get_queryset(testmodels.TextFields).get_connection().dialect.name
+        != "postgresql"
+    ):
         created = await testmodels.TextFields.objects.create(text=value)
         assert (await testmodels.TextFields.objects.get(id=created.id)).text == value
         return

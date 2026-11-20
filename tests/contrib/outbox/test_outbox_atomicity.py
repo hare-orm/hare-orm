@@ -42,3 +42,19 @@ async def test_publish_commits_with_the_enclosing_transaction(db_outbox):
 async def test_publish_outside_a_transaction_still_persists_immediately(db_outbox):
     event = await DemoOutboxEvent.enqueue(topic="widget.created", payload={})
     assert await DemoOutboxEvent.objects.get(id=event.id) is not None
+
+
+@pytest.mark.database_independent
+def test_enqueue_validation_calls_the_event_models_public_hooks(monkeypatch):
+    calls = []
+
+    def check_keys(topic, idempotency_key, ordering_key):
+        calls.append(("keys", topic, idempotency_key, ordering_key))
+
+    def check_headers(headers):
+        calls.append(("headers", headers))
+
+    monkeypatch.setattr(DemoOutboxEvent, "validate_keys", staticmethod(check_keys))
+    monkeypatch.setattr(DemoOutboxEvent, "validate_headers", staticmethod(check_headers))
+    DemoOutboxEvent.validate_enqueue_options("book.updated", "event", "book", {"trace": "request"}, None)
+    assert calls == [("keys", "book.updated", "event", "book"), ("headers", {"trace": "request"})]

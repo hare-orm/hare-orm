@@ -1,13 +1,18 @@
 """inspectdb on SQLite, which keeps any declared type as written: sizes no field takes (DECIMAL(5, 10),
-NUMERIC(0), VARCHAR(0)) failed the whole inspection, and a primary key column declared without NOT NULL
-became a nullable key field the generated model couldn't be imported with. A DECIMAL or NUMERIC column
+NUMERIC(0), VARCHAR(0)) failed the whole inspection. A composite primary key without NOT NULL retains
+SQLite's nullable columns in a keyless model with a diagnostic. A DECIMAL or NUMERIC column
 holds an integer or a REAL on SQLite - a FloatField, whatever its size."""
+
+from types import ModuleType
 
 import pytest
 
+from hare import Hare
 from hare.contrib.test import hare_test_context
+from hare.core.apps.model_binding_graph import ModelBindingGraph
 from hare.core.connections.connections import Connections
-from hare.inspectdb import SchemaInspector
+from hare.inspectdb import ModelFactory, SchemaInspector
+from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
 
 pytestmark = pytest.mark.sqlite_only
 
@@ -30,10 +35,11 @@ TABLES = {
         ("numeric_of_no_digits", "v = fields.FloatField(null=True)"),
         ("text_of_no_length", "v = fields.TextField(null=True)"),
         ("spaced_size", "v = fields.FloatField(null=True)"),
-        ("nullable_key", "a = fields.IntField()\n    b = fields.TextField()"),
+        ("nullable_key", "a = fields.IntField(null=True)\n    b = fields.TextField(null=True)"),
     ],
 )
 async def test_a_declared_size_is_read_as_a_field_takes_it(table: str, expected: str) -> None:
+    declaration_graph = ModelBindingGraph()
     async with hare_test_context(
         ["tests.shared_models.testmodels"], db_url="sqlite+aiosqlite://:memory:", connection_label="models"
     ):
@@ -43,3 +49,21 @@ async def test_a_declared_size_is_read_as_a_field_takes_it(table: str, expected:
         assert expected in source
         namespace: dict[str, object] = {}
         exec(source, namespace)  # noqa: S102 - the generated module imports
+        if table == "nullable_key":
+            assert "primary_key = None" in source
+            assert "nullable composite PRIMARY KEY ('a', 'b')" in source
+            assert "will not recreate the database's PRIMARY KEY" in source
+            table_info = await DatabaseCatalog.inspect_table(connection, table)
+            factory_model = ModelFactory.from_table_info(table_info, "sqlite", app_label="models")
+            for model in (namespace["NullableKey"], factory_model):
+                assert declaration_graph.include(model).primary_key_attribute == ()
+                assert set(declaration_graph.include(model).fields_map) == {"a", "b", "v"}
+                module = ModuleType("inspected_nullable_key")
+                module.__models__ = [model]
+                apps = Hare.bind_models(
+                    {
+                        "connections": {"default": "sqlite+aiosqlite://:memory:"},
+                        "apps": {"models": {"models": [module], "default_connection": "default"}},
+                    }
+                )
+                assert apps.new(model, a=None, b=None, v=1).a is None

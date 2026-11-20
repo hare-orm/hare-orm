@@ -11,6 +11,9 @@ class LengthValidator(Validator):
     elements of an array field)."""
 
     types = (str, list, tuple, bytes)
+    #: The types a value is taken as a sized one by without the ``isinstance`` check - its subclasses
+    #: go through that check.
+    exact_types = frozenset(types)
 
     def _validate_type(self, value: Any) -> None:
         if not isinstance(value, self.types):

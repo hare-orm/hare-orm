@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar
 
+from hare.dialects.base.clauses.enums import JoinType
 from hare.sql.builder.tables.aliased_query import AliasedQuery
-from hare.sql.enums import JoinType
 
 if TYPE_CHECKING:
     from hare.sql.builder.tables.selectable import Selectable

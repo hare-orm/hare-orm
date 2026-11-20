@@ -19,8 +19,6 @@ from tests.contracts.generated_field_contract import GeneratedFieldContract
 from tests.contracts.sample_database import SampleDatabase
 from tests.utils.database_under_test import DatabaseUnderTest
 
-REQUIRES = ("request-query",)
-
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("annotation", (list[int | None], list[None], list[Literal[None]]))
@@ -117,7 +115,7 @@ async def test_a_request_filtering_by_a_field_finds_the_row_holding_the_value(co
     models = await SampleDatabase.create(contract_database, sample)
     row_model = models[-1]
     rows = await SampleDatabase.create_rows(row_model, sample)
-    filters = (FilterField(SAMPLED_FIELD_NAME, lookups=(Lookup.EXACT,)),)
+    filters = (FilterField(SAMPLED_FIELD_NAME, lookups=(Lookup.EXACT, Lookup.ISNULL)),)
 
     if sample.request_filter_refused:
         with pytest.raises(ConfigurationError, match="takes any value"):
@@ -127,6 +125,10 @@ async def test_a_request_filtering_by_a_field_finds_the_row_holding_the_value(co
     descriptions = {description.name: description for description in query_class.describe_parameters()}
     assert descriptions[SAMPLED_FIELD_NAME].lookup == Lookup.EXACT
     request_values = sample.request_values if sample.request_values is not None else sample.values
-    for row, value in zip(rows, request_values, strict=True):
-        found = await query_class(**{SAMPLED_FIELD_NAME: value}).fetch()
-        assert row.pk in [found_row.pk for found_row in found], value
+    for position, value in zip(range(len(rows)), request_values, strict=True):
+        parameters = {f"{SAMPLED_FIELD_NAME}__isnull": True} if value is None else {SAMPLED_FIELD_NAME: value}
+        found = await query_class(**parameters).fetch()
+        expected = sorted(
+            row.pk for row, written in zip(rows, sample.values, strict=True) if written == sample.values[position]
+        )
+        assert sorted(found_row.pk for found_row in found) == expected, value

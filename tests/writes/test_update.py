@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from hare.contrib.test import capture_queries, requires_features
+from hare.core.hare_context import HareContext
 from hare.exceptions import (
     FieldError,
     OperationalError,
@@ -18,7 +19,6 @@ from hare.exceptions import (
 from hare.models.write.instance_writer import InstanceWriter
 from hare.query.expressions import Case, F, Function, OuterReference, Q, Subquery, Value, When
 from hare.query.functions import Coalesce, Sum, Upper
-from hare.query.rows.native.hydrate_accelerator import HydrateAccelerator
 from hare.query.statements.building.query_conditions import QueryConditions
 from hare.query.statements.write.bulk.bulk_write_batches import BulkWriteBatches
 from hare.sql.terms import Function as HareSqlFunction
@@ -365,19 +365,10 @@ async def test_bulk_update_uses_serialize_instances_for_set_values(db):
             "hare.query.statements.write.bulk.bulk_write_batches.BulkWriteBatches.serialize_instances",
             wraps=BulkWriteBatches.serialize_instances,
         ) as spied_serialize,
-        patch(
-            "hare.query.statements.write.bulk.bulk_write_batches.BulkWriteBatches.write_statement_parameters",
-            wraps=BulkWriteBatches.write_statement_parameters,
-        ) as spied_parameters,
     ):
         rows_affected = await Tournament.objects.bulk_update(objs, fields=["name"])
     assert rows_affected == 2
-    # One batch serialization: the driver's own parameters where it binds them, else Python rows.
-    written_by_driver = (
-        Tournament.get_connection().features.binds_written_parameters and HydrateAccelerator.module is not None
-    )
-    spied_parameters.assert_called_once()
-    assert spied_serialize.call_count == (0 if written_by_driver else 1)
+    spied_serialize.assert_called_once()
     assert (await Tournament.objects.get(pk=objs[0].pk)).name == "0"
     assert (await Tournament.objects.get(pk=objs[1].pk)).name == "1"
 
@@ -606,7 +597,7 @@ async def test_get_update_sql_materializes_update_fields_once(db):
     for the cache key and the SET-clause loop would silently produce a SET
     clause with 0 fields the moment caching is involved."""
     await Tournament.objects.create(name="1")
-    executor = InstanceWriter(Tournament, Tournament.get_connection())
+    executor = InstanceWriter(HareContext.require_current().apps.get_binding(Tournament), Tournament.get_connection())
 
     sql, _parameter_layout = executor.get_update_sql(iter(["name"]), None)
     assert "SET" in sql

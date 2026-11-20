@@ -5,12 +5,14 @@ import contextvars
 import logging
 import operator
 import os
-from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from collections.abc import Awaitable, Callable, Coroutine
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from rust.native.pool import PoolStatistics, set_pool_metrics_enabled
 
+from hare.classes.deferred_import import DeferredImport
 from hare.dialects.base.client.connect_failure_reports import ConnectFailureReports
+from hare.dialects.base.client.enums import StatementForm
 from hare.dialects.base.results.described_result import DescribedResult
 from hare.dialects.base.results.statement_result import StatementResult
 from hare.dialects.postgresql.client.constants import (
@@ -19,7 +21,6 @@ from hare.dialects.postgresql.client.constants import (
 from hare.dialects.postgresql.client.pool_timeouts import PoolTimeouts
 from hare.dialects.postgresql.client.postgresql_client import PostgresqlClient
 from hare.dialects.postgresql.client.postgresql_connect_errors import PostgresqlConnectErrors
-from hare.dialects.postgresql.client.transaction_pooler import TransactionPooler
 from hare.dialects.postgresql.constants import (
     POSTGRES_SERVER_VERSION_NUMBER_COLUMN,
     POSTGRES_SERVER_VERSION_NUMBER_SQL,
@@ -36,7 +37,6 @@ from hare.dialects.postgresql.drivers.rust_pg.constants import (
     RUST_PG_HOST_ENVIRONMENT_VARIABLE,
     RUST_PG_MESSAGE_ENCODING_ERROR_MESSAGE,
     RUST_PG_MISSING_PASSWORD_MESSAGE,
-    RUST_PG_PROTOCOL_MAX_BIND_PARAMETERS,
     RUST_PG_USER_ENVIRONMENT_VARIABLE,
 )
 from hare.exceptions import (
@@ -59,6 +59,11 @@ if TYPE_CHECKING:
 class RustPgClient(PostgresqlClient):
     """The PostgreSQL client of hare's Rust driver (``rust.native``)."""
 
+    #: ``RustPgTransactionClient`` - imported at its first read, as its module imports this one.
+    transaction_client_class: ClassVar[DeferredImport[type[RustPgTransactionClient]]] = DeferredImport(
+        "hare.dialects.postgresql.drivers.rust_pg.client.rust_pg_transaction_client", "RustPgTransactionClient"
+    )
+
     row_to_dict = staticmethod(operator.methodcaller("to_dict"))
     driver_name = "postgresql"
     _pool: pg.Client | None
@@ -74,7 +79,7 @@ class RustPgClient(PostgresqlClient):
     )
     # The driver's execute_many() sends one Sync per row and doesn't get cheaper per row as a batch
     # grows - bulk_create() sends one multi-row INSERT per chunk on this driver.
-    features = PostgresqlClient.features.replace(execute_many_scales_poorly=True, binds_written_parameters=True)
+    features = PostgresqlClient.features.replace(execute_many_scales_poorly=True)
     # The driver's one connection failure type - a failed connect and a lost connection alike.
     RETRYABLE_CONNECT_EXCEPTIONS = (pg.ConnectionError,)
     #: Whether the driver follows ``PoolMetrics`` - told once, by the first client made.
@@ -131,8 +136,6 @@ class RustPgClient(PostgresqlClient):
 
     async def create_connection(self, with_db: bool) -> None:
         self.raise_if_root_certificate_unusable(self.extra.get("ssl_root_cert"))
-        if self.schema:
-            self.server_settings["search_path"] = self.schema
 
         # Unset connection settings fall back the way libpq (and so asyncpg) resolves them - the
         # PG* environment variables, then the OS user and localhost - since the driver itself
@@ -255,6 +258,8 @@ class RustPgClient(PostgresqlClient):
     def get_driver_error(self, error: Exception, call_arguments: tuple[Any, ...]) -> Exception | None:
         if isinstance(error, pg.IntegrityViolationError):
             return IntegrityError(error)
+        if isinstance(error, pg.TooManyParametersError):
+            return TooManyParametersError(error)
         # A statement reached a transaction whose COMMIT/ROLLBACK already took its connection - or
         # one in a state that refuses it.
         if isinstance(error, (pg.InvalidTransactionStateError, pg.TransactionFinishedError)):
@@ -265,36 +270,14 @@ class RustPgClient(PostgresqlClient):
             if isinstance(error, pg.ConnectFailedError):
                 # The pool grew inside the driver and its new connection failed to open.
                 ConnectFailureReports.record(self, error, counted=True)
-            return self.get_connection_error_translation(error, call_arguments)
+            if RUST_PG_MESSAGE_ENCODING_ERROR_MESSAGE in str(error):
+                return OperationalError(error)
+            return DBConnectionError(error)
         if isinstance(error, (pg.QueryError, pg.ConversionError)):
             # A serialization failure or a deadlock (SQLSTATE 40001/40P01) is a TransactionRetryError.
             return self._get_operational_error(error)
         # pg.InvalidCatalogError isn't translated - db_delete() handles it.
         return None
-
-    @staticmethod
-    def get_connection_error_translation(error: Exception, call_arguments: tuple[Any, ...]) -> Exception:
-        """The hare exception for a ``pg.ConnectionError`` - a statement tokio-postgres failed to
-        encode never left the client, so it is a query error, not a lost connection.
-
-        Args:
-            error: The driver's exception.
-            call_arguments: The failed call's positional arguments (query text, bind values).
-
-        Returns:
-            TooManyParametersError for an encoding failure of a statement binding more parameters
-            than the protocol carries, OperationalError for any other encoding failure,
-            DBConnectionError otherwise.
-        """
-        if RUST_PG_MESSAGE_ENCODING_ERROR_MESSAGE not in str(error):
-            return DBConnectionError(error)
-        if any(
-            isinstance(argument, (list, tuple, pg.PgParameters, pg.PgParameterRows))
-            and len(argument) > RUST_PG_PROTOCOL_MAX_BIND_PARAMETERS
-            for argument in call_arguments
-        ):
-            return TooManyParametersError(error)
-        return OperationalError(error)
 
     async def db_delete(self) -> None:
         try:
@@ -305,10 +288,8 @@ class RustPgClient(PostgresqlClient):
         await self.close()
 
     def _get_transaction_client(self) -> RustPgTransactionClient:
-        # Imported here: the modules import each other.
-        from hare.dialects.postgresql.drivers.rust_pg.client.rust_pg_transaction_client import RustPgTransactionClient
 
-        return RustPgTransactionClient(self)
+        return RustPgClient.transaction_client_class(self)
 
     async def _run_statement(self, make_call: Callable[[Any], Awaitable[Any]]) -> Any:
         """Runs one statement on the pool, created on first use.
@@ -324,7 +305,7 @@ class RustPgClient(PostgresqlClient):
         while True:
             if self.discarded and (successor := self.get_successor()) is not None:
                 # Discarded by a repeated Hare.init() - the statement runs on the client replacing it.
-                return await cast("RustPgClient", successor)._run_statement(make_call)
+                return await successor._run_statement(make_call)  # type: ignore[attr-defined]
             pool = self._pool
             # A pool another task still sets up is waited for.
             if pool is None or self.opening_task is not None:
@@ -368,11 +349,8 @@ class RustPgClient(PostgresqlClient):
         connection dies. For a subscription that reconnects use
         ``hare.contrib.notify.NotificationListener``.
         """
-        self.raise_if_channel_unusable(channel)
-        if self.transaction_pooling:
-            # A LISTEN holds its session - on the server itself, past the transaction pooler.
-            return await TransactionPooler.get_direct_client(self).listen(channel, callback)
-        pool = await self._get_open_pool()
+        client = self._get_listen_client(channel)
+        pool = await client._get_open_pool()
         loop = asyncio.get_running_loop()
         context = contextvars.copy_context()
 
@@ -385,13 +363,16 @@ class RustPgClient(PostgresqlClient):
 
         return await pool.listen(channel, dispatch_to_loop)
 
-    @PostgresqlClient.translate_exceptions
-    async def execute_many(self, query: str, values: list[Any]) -> None:
+    @PostgresqlClient.translate_exceptions(StatementForm.MANY)
+    async def execute_many(self, query: str, values: list[Any], *, built_sql: bool = False) -> None:
         if self.log.isEnabledFor(logging.DEBUG):
             self.log.debug("%s: %s", query, values)
-        await self._run_statement(lambda executor: executor.execute_many(query, values))
+        await self._run_statement(lambda executor: executor.execute_many(query, values, built_sql=built_sql))
 
-    @PostgresqlClient.translate_exceptions
+    def _execute_many_built(self, query: str, values: list[list[Any]], **options: Any) -> Coroutine[Any, Any, None]:
+        return self.execute_many(query, values, built_sql=True, **options)
+
+    @PostgresqlClient.translate_exceptions(StatementForm.BULK_LOAD)
     async def copy(
         self,
         table: str,
@@ -401,8 +382,9 @@ class RustPgClient(PostgresqlClient):
         schema: str | None = None,
     ) -> None:
         """Loads ``records`` into ``table`` through the COPY protocol, on a pool connection of its own
-        - a transaction's client runs it on the transaction's connection. Only hare's core scalar
-        field types: COPY BINARY needs each column's type declared.
+        - a transaction's client runs it on the transaction's connection, so rows commit or roll back
+        with it, including a savepoint's rollback. Only hare's core scalar field types: COPY BINARY
+        needs each column's type declared.
         """
         self.log.debug("COPY %s(%s): %d record(s)", table, columns, len(records))
         await self._run_statement(
@@ -411,7 +393,7 @@ class RustPgClient(PostgresqlClient):
             )
         )
 
-    @PostgresqlClient.translate_exceptions
+    @PostgresqlClient.translate_exceptions(StatementForm.SQL)
     async def execute(
         self,
         query: str,
@@ -419,44 +401,43 @@ class RustPgClient(PostgresqlClient):
         *,
         returns_rows: bool | None = None,
         rows_by_position: bool = False,
+        retry_read: bool = False,
+        built_sql: bool = False,
     ) -> StatementResult:
         values = values or []
         if self.log.isEnabledFor(logging.DEBUG):
             self.log.debug("%s: %s", query, values)
-        if returns_rows is None:
-            returns_rows = not self._is_write_without_returning(query)
-        if not returns_rows:
-            rows_affected = await self._run_statement(lambda executor: executor.execute(query, values))
+        if returns_rows is False:
+            rows_affected = await self._run_statement(
+                lambda executor: executor.execute(query, values, built_sql=built_sql)
+            )
             return StatementResult(rows_affected, [])
-        pool = self._pool
-        if pool is not None and not self.is_transaction_client and self.opening_task is None:
-            # Straight on the pool - _run_statement()'s path outside a transaction.
-            try:
-                rows = await pool.fetch_all(query, values)
-            except pg.PoolClosedError:
-                # No statement reached the server - it runs on the pool open now, or on the client
-                # replacing this one.
-                if self.get_successor() is None and (self._pool is pool or self.discarded):
-                    raise
-                rows = await self._run_statement(lambda executor: executor.fetch_all(query, values))
-        else:
-            rows = await self._run_statement(lambda executor: executor.fetch_all(query, values))
-        return StatementResult(len(rows), rows)
+        rows = await self._run_statement(lambda executor: executor.fetch_all(query, values, built_sql=built_sql))
+        if rows_by_position:
+            positional_rows, column_names = rows.positional()
+            return StatementResult(rows.row_count, positional_rows, column_names=column_names)
+        return StatementResult(rows.row_count, rows)
 
-    @PostgresqlClient.translate_exceptions
+    def _execute_built(
+        self, query: str, values: list[Any] | None = None, **options: Any
+    ) -> Coroutine[Any, Any, StatementResult]:
+        return self.execute(query, values, built_sql=True, **options)
+
+    @PostgresqlClient.translate_exceptions(StatementForm.SQL)
     async def execute_described(self, query: str, values: list[Any] | None = None) -> DescribedResult:
         values = values or []
         if self.log.isEnabledFor(logging.DEBUG):
             self.log.debug("%s: %s", query, values)
-        if self._is_write_without_returning(query):
-            rows_affected = await self._run_statement(lambda executor: executor.execute(query, values))
-            return DescribedResult(columns=(), rows=(), row_count=rows_affected)
         columns, rows = await self._run_statement(lambda executor: executor.fetch_all_described(query, values))
-        return DescribedResult(
-            columns=tuple(columns), rows=tuple(tuple(row.values()) for row in rows), row_count=len(rows)
-        )
+        positional_rows, _ = rows.positional()
+        return DescribedResult(columns=tuple(columns), rows=tuple(positional_rows), row_count=rows.row_count)
 
-    @PostgresqlClient.translate_exceptions
+    async def invalidate_schema_cache(self) -> None:
+        """Expire prepared statements and physical types across the existing pool without I/O."""
+        if self._pool is not None:
+            self._pool.invalidate_schema_cache()
+
+    @PostgresqlClient.translate_exceptions(StatementForm.SCRIPT)
     async def execute_script(self, query: str) -> None:
         # In a transaction, on its own pinned connection - another pool connection would wait
         # forever on a lock the transaction holds (a TRUNCATE ... CASCADE).

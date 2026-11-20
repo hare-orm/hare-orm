@@ -2,7 +2,6 @@
 whole-digits bound past its own digits, which the server refused (DECIMAL_OVERFLOW) - every such migration
 failed, whatever the rows held."""
 
-import os
 import textwrap
 
 import pytest
@@ -16,10 +15,7 @@ class Note(Model):
 """
 
 
-@pytest.fixture(autouse=True)
-def skip_without_clickhouse():
-    if not os.getenv("HARE_TEST_DB", "").startswith("clickhouse"):
-        pytest.skip("runs against the ClickHouse test server - make test_clickhouse")
+pytestmark = pytest.mark.usefixtures("skip_without_clickhouse")
 
 
 @pytest.mark.asyncio

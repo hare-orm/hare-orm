@@ -10,13 +10,14 @@ from tests.contracts.hare_registry import HareRegistry
 
 pytestmark = pytest.mark.database_independent
 
+ALL_DOCUMENTED_IMPORTS = DocumentedImports.get_all()
 DOCUMENTED_IMPORTS = [
-    documented for documented in DocumentedImports.get_all() if HareRegistry.is_installed(documented.module)
+    documented for documented in ALL_DOCUMENTED_IMPORTS if HareRegistry.is_installed(documented.module)
 ]
 
 
 def test_the_documentation_has_imports_to_check():
-    assert len(DocumentedImports.get_all()) > 100
+    assert len(ALL_DOCUMENTED_IMPORTS) > 100
 
 
 @pytest.mark.parametrize(

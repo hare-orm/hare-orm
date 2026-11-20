@@ -75,7 +75,7 @@ def test_an_inherited_meta_attribute_is_checked_too():
 def test_an_option_an_extension_allows_is_taken():
     from hare.contrib.versioning import VersionedModel  # noqa: F401 - allows new_version_excluded_fields
 
-    assert define_model({"new_version_excluded_fields": ("name",)})._meta.abstract
+    assert define_model({"new_version_excluded_fields": ("name",)})._declaration.abstract
 
 
 @pytest.mark.parametrize(
@@ -97,6 +97,13 @@ def test_an_option_given_a_value_of_another_type_is_refused(option, value, messa
 @pytest.mark.database_independent
 def test_options_of_their_own_types_are_taken():
     model = define_model({"table": "defined", "ordering": ["name"], "extensions": ("citext",), "managed": False})
-    assert (model._meta.db_table, model._meta.extensions, model._meta.managed) == ("defined", ("citext",), False)
+    assert (
+        model._declaration.meta.table,
+        model._declaration.meta.extensions,
+        model._declaration.meta.managed,
+    ) == ("defined", ("citext",), False)
     model = define_model({"table": None, "schema": None, "indexes": ["name"]})
-    assert (model._meta.schema, model._meta.indexes) == (None, (["name"],))
+    assert (
+        model._declaration.meta.schema,
+        model._declaration.meta.indexes,
+    ) == (None, (("name",),))

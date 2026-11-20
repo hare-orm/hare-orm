@@ -17,7 +17,6 @@ from hare.fields.data.numeric import IntField
 from hare.fields.data.text import CharField
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
 from hare.migrations import operations as ops
-from hare.migrations.drift import detect_drift
 from hare.migrations.writer import MigrationWriter
 from tests.migrations.round_trips.test_round_trip_real_db import APP_LABEL, RoundTrip, build_live_state, build_model
 from tests.utils.model_source_generator import ModelSourceGenerator
@@ -115,7 +114,7 @@ async def test_include_migrates_and_has_no_drift(db_isolated_no_schema):
         },
     )
     await round_trip.migrate_to(book)
-    assert (await detect_drift(round_trip.connection, build_live_state(book), [APP_LABEL])).operations == []
+    assert (await round_trip.get_drift(build_live_state(book))).operations == []
     definitions = await round_trip.get_index_definitions("inc_book")
     if round_trip.dialect == "postgresql":
         assert "INCLUDE (title)" in definitions["inc_book_long"]
@@ -139,7 +138,7 @@ async def test_include_migrates_and_has_no_drift(db_isolated_no_schema):
     )
     assert await round_trip.migrate_to(changed)
     assert round_trip.get_pending_operations(changed) == []
-    assert (await detect_drift(round_trip.connection, build_live_state(changed), [APP_LABEL])).operations == []
+    assert (await round_trip.get_drift(build_live_state(changed))).operations == []
 
 
 @requires_features(supports_unique_constraints=True)
@@ -190,7 +189,7 @@ async def test_nulls_distinct_and_deferrable_exclusion(db_isolated_no_schema):
         },
     )
     await round_trip.migrate_to(book, slot)
-    assert (await detect_drift(round_trip.connection, build_live_state(book, slot), [APP_LABEL])).operations == []
+    assert (await round_trip.get_drift(build_live_state(book, slot))).operations == []
 
     connection = round_trip.connection
     insert_book = 'INSERT INTO "inc_book" ("id", "pages", "title", "shelf") VALUES ($1, 1, $2, $3)'
@@ -218,6 +217,4 @@ async def test_nulls_distinct_and_deferrable_exclusion(db_isolated_no_schema):
         {"constraints": [ExclusionConstraint(name="inc_slot_overlap", expressions=(("room", "="), ("during", "&&")))]},
     )
     assert await round_trip.migrate_to(book, changed_slot)
-    assert (
-        await detect_drift(round_trip.connection, build_live_state(book, changed_slot), [APP_LABEL])
-    ).operations == []
+    assert (await round_trip.get_drift(build_live_state(book, changed_slot))).operations == []

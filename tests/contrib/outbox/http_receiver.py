@@ -1,6 +1,9 @@
 """An HTTP server of the webhook tests."""
 
 import asyncio
+from contextlib import suppress
+
+from hare.core.resource_completion import ResourceCompletion
 
 
 class HttpReceiver:
@@ -13,8 +16,29 @@ class HttpReceiver:
         self.location = location
         self.requests: list[tuple[dict[str, str], bytes]] = []
         self.server: asyncio.Server | None = None
+        self.handlers: dict[asyncio.Task[None], asyncio.StreamWriter] = {}
+        self.closing = False
+
+    def accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        self.handlers[asyncio.create_task(self.handle(reader, writer))] = writer
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            if not self.closing:
+                await self.respond(reader, writer)
+        except (asyncio.IncompleteReadError, ConnectionError):
+            # A client may disconnect before sending its complete request or reading the reply.
+            pass
+        finally:
+            await ResourceCompletion.wait(self.close_writer(writer))
+
+    @staticmethod
+    async def close_writer(writer: asyncio.StreamWriter) -> None:
+        writer.close()
+        with suppress(ConnectionError):
+            await writer.wait_closed()
+
+    async def respond(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         head = await reader.readuntil(b"\r\n\r\n")
         headers = {}
         for line in head.decode().split("\r\n")[1:]:
@@ -29,14 +53,38 @@ class HttpReceiver:
         head += "connection: close\r\n\r\n"
         writer.write(head.encode() + response_body)
         await writer.drain()
-        writer.close()
 
     async def __aenter__(self) -> str:
-        self.server = await asyncio.start_server(self.handle, "127.0.0.1", 0)
+        self.server = await asyncio.start_server(self.accept, "127.0.0.1", 0)
         port = self.server.sockets[0].getsockname()[1]
         return f"http://127.0.0.1:{port}/events"
 
     async def __aexit__(self, *exc_info: object) -> None:
         assert self.server is not None
+        self.closing = True
         self.server.close()
-        await self.server.wait_closed()
+        await ResourceCompletion.wait(self.close_handlers())
+
+    async def close_handlers(self) -> None:
+        """Drain all accepted handlers, including callbacks queued before the listener closed."""
+        assert self.server is not None
+        errors = []
+        while True:
+            handlers, self.handlers = self.handlers, {}
+            for handler, writer in handlers.items():
+                # A task cancelled before its first step cannot execute its finally block.
+                writer.close()
+                handler.cancel()
+            results = await asyncio.gather(
+                *handlers, *(self.close_writer(writer) for writer in handlers.values()), return_exceptions=True
+            )
+            errors.extend(
+                result
+                for result in results
+                if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError)
+            )
+            await self.server.wait_closed()
+            if not self.handlers:
+                break
+        if errors:
+            raise BaseExceptionGroup("HTTP receiver handlers failed", errors)

@@ -1,21 +1,22 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.dialects.base.clauses.constants import JOIN_KEYWORDS
 from hare.dialects.base.clauses.enums import MergeAction, MergeMatch
 from hare.exceptions import UnSupportedError
 
 if TYPE_CHECKING:
+    from hare.dialects.base.clauses.enums import JoinType
     from hare.dialects.base.clauses.merge_when_sql import MergeWhenSql
     from hare.dialects.base.dialect import Dialect
     from hare.dialects.base.features import Features
     from hare.sql.builder.queries.query_builder import QueryBuilder
     from hare.sql.builder.returned_value import ReturnedValue
-    from hare.sql.enums import JoinType, SetOperation
+    from hare.sql.builder.update_from_values import UpdateFromValues
+    from hare.sql.enums import SetOperation
     from hare.sql.sql_context import SqlContext
-    from hare.sql.tables.table import Table
     from hare.sql.terms.criteria.like import Like
 
 
@@ -29,6 +30,12 @@ class QueryClauses:
 
     #: The keyword of each join the dialect writes.
     join_keywords: ClassVar[Mapping[str, str]] = JOIN_KEYWORDS
+
+    @staticmethod
+    def get_tagged_statement_sql(sql: str, comment: str) -> str:
+        """Append an escaped query comment, separated from a possible final line comment."""
+        separator = "\n" if "--" in sql[sql.rfind("\n") + 1 :] else " "
+        return f"{sql}{separator}/*{comment}*/"
 
     def __init__(self, dialect: Dialect) -> None:
         """
@@ -118,7 +125,7 @@ class QueryClauses:
             The source as written - a dialect of such a database writes an aliased table so that
             its name is the enclosing query's.
         """
-        return cast("str", source.get_sql(sql_context))
+        return source.get_sql(sql_context)
 
     def get_joined_source_sql(self, source: Any, sql_context: SqlContext) -> str:
         """A table or query a subquery joins, on a database whose table alias doesn't hide the
@@ -132,7 +139,7 @@ class QueryClauses:
             The source as written - a dialect of such a database writes an aliased table so that
             its name is the enclosing query's.
         """
-        return cast("str", source.get_sql(sql_context))
+        return source.get_sql(sql_context)
 
     def get_main_table_suffix_sql(self, builder: QueryBuilder, sql_context: SqlContext) -> str:
         """What follows the first table of ``FROM`` - its sample (``sample()``,
@@ -352,7 +359,7 @@ class QueryClauses:
         on_sql: str,
         whens: Sequence[MergeWhenSql],
         returned: Sequence[ReturnedValue],
-        action_alias_sql: str,
+        action_alias_sql: str | None,
     ) -> str:
         """A ``MERGE`` statement.
 
@@ -362,8 +369,8 @@ class QueryClauses:
             source_alias_sql: The quoted name the source is read under.
             on_sql: The condition matching a source row to a target row.
             whens: The ``WHEN`` branches, in order.
-            returned: The values each written row returns, none for no ``RETURNING``.
-            action_alias_sql: The quoted name the action that wrote a row is returned under, first.
+            returned: The additional values each written row returns.
+            action_alias_sql: The quoted name for the action, or None for no ``RETURNING``.
 
         Returns:
             The statement.
@@ -418,13 +425,13 @@ class QueryClauses:
             return "DELETE"
         return f"INSERT ({', '.join(when.columns_sql)}) VALUES ({', '.join(when.values_sql)})"
 
-    def get_merge_returning_sql(self, returned: Sequence[ReturnedValue], action_alias_sql: str) -> str:
+    def get_merge_returning_sql(self, returned: Sequence[ReturnedValue], action_alias_sql: str | None) -> str:
         """The ``RETURNING`` of a ``MERGE``, with its leading space - the action that wrote the row,
         then the values.
 
         Args:
-            returned: The values, none for no ``RETURNING``.
-            action_alias_sql: The quoted name the action that wrote the row is returned under.
+            returned: The additional values.
+            action_alias_sql: The quoted name for the action, or None for no ``RETURNING``.
 
         Returns:
             The clause, ``""`` when nothing is returned.
@@ -432,7 +439,7 @@ class QueryClauses:
         Raises:
             UnSupportedError: Values are returned - ISO SQL's ``MERGE`` has no ``RETURNING``.
         """
-        if returned:
+        if action_alias_sql is not None:
             raise UnSupportedError(f"MERGE ... RETURNING has no SQL for the {self.dialect} dialect")
         return ""
 
@@ -556,9 +563,7 @@ class QueryClauses:
 
         if builder._joins or builder._from or builder._orderbys or builder._limit is not None:
             raise UnSupportedError(f"An UPDATE joining other tables has no SQL for the {self.dialect} dialect")
-        querystring = QuerySqlRendering.with_sql(builder._with, sql_context) if builder._with else ""
-        querystring += QuerySqlRendering.update_sql(builder, sql_context)
-        querystring += QuerySqlRendering.set_sql(builder, sql_context)
+        querystring = QuerySqlRendering.update_sql(builder, sql_context)
         if builder._wheres:
             querystring += QuerySqlRendering.where_sql(builder, sql_context)
         return querystring
@@ -575,7 +580,7 @@ class QueryClauses:
         """
         if cast_type is None:
             return placeholder_template
-        return f"CAST({placeholder_template} AS {cast_type.upper()})"
+        return f"CAST({placeholder_template} AS {cast_type})"
 
     def get_insert_rows_source_sql(
         self, table_sql: str, rows_source_sql: str, returned: Sequence[ReturnedValue]
@@ -596,7 +601,7 @@ class QueryClauses:
         """The select list giving the columns of a ``VALUES`` table their names.
 
         Args:
-            column_names: The names, in column order.
+            column_names: The already quoted names, in column order.
 
         Returns:
             The select list.
@@ -625,39 +630,51 @@ class QueryClauses:
         condition_sql = " WHERE 1 = 0" if matches_no_row else ""
         return f"(SELECT {columns_sql} FROM (VALUES {', '.join(row_sqls)}) AS {alias_sql}{condition_sql})"  # nosec B608
 
-    def get_update_from_values_sql(
+    def get_values_join_sql(
         self,
-        *,
-        with_sql: str,
-        table: Table,
-        table_sql: str,
-        assignments: Sequence[tuple[str, str]],
-        values_columns_sql: str,
-        values_sql: str,
-        values_alias_sql: str,
-        matches: Sequence[tuple[str, str]],
-        condition_sql: str | None,
-        returned: Sequence[ReturnedValue],
+        source_sql: str,
+        inputs_sql: str,
+        source_alias: str,
+        input_alias: str,
+        ordinal: str,
+        columns: Sequence[tuple[str, str]],
     ) -> str:
-        """An ``UPDATE`` writing each row of a ``VALUES`` table into the table row it matches.
+        """Join prepared input rows to a prepared selection, treating two NULL keys as equal.
+
+        Column pairs name the selection's output and the corresponding input column.
+        All identifiers pass through the dialect's quoting rules; the returned ordinal
+        lets the caller restore the input order without changing the row reader.
+        """
+        quote = self.dialect.literals.quote_identifier
+        comparisons = []
+        for source_column, input_column in columns:
+            left = quote(source_alias) + "." + quote(source_column)
+            right = quote(input_alias) + "." + quote(input_column)
+            comparisons.append(f"({left} = {right} OR ({left} IS NULL AND {right} IS NULL))")
+        return (
+            f"SELECT {quote(source_alias)}.*, {quote(input_alias)}.{quote(ordinal)} "  # nosec B608
+            f"FROM ({source_sql}) AS {quote(source_alias)} "
+            f"JOIN {inputs_sql} AS {quote(input_alias)} ON {' AND '.join(comparisons)}"
+        )
+
+    def get_update_from_values_sql(
+        self, *, write: UpdateFromValues, with_sql: str, values_sql: str, sql_context: SqlContext
+    ) -> str:
+        """Render an UPDATE from structural assignments and already-bound input rows.
 
         Args:
-            with_sql: The ``WITH`` clause, or an empty string.
-            table: The updated table.
-            table_sql: Its SQL.
-            assignments: ``(column, value SQL)`` per assigned column.
-            values_columns_sql: The select list naming the ``VALUES`` table's columns.
-            values_sql: The rows of the ``VALUES`` table.
-            values_alias_sql: The alias of the ``VALUES`` table.
-            matches: ``(table column SQL, VALUES column SQL)`` pairs a row is matched by.
-            condition_sql: A further condition on the updated rows, or None.
-            returned: The returned values, as ``get_returning_sql()`` takes them.
+            write: Unquoted identifiers, input-row positions, expression trees, matching
+                keys and optional filter. Raw SQL in a tree remains opaque.
+            with_sql: The WITH clause, or an empty string.
+            values_sql: The bound rows, rendered in the dialect's value syntax.
+            sql_context: The shared rendering and parameter-binding context.
 
         Returns:
-            The statement.
+            The complete statement. A dialect chooses qualification and row addressing
+            before rendering; it never recovers either by parsing SQL fragments.
 
         Raises:
-            UnSupportedError: ISO SQL's ``UPDATE`` reads no other table.
+            UnSupportedError: The dialect has no UPDATE from a row source.
         """
         raise UnSupportedError(f"An UPDATE from a VALUES table has no SQL for the {self.dialect} dialect")
 

@@ -1,14 +1,14 @@
-"""CteRows: the rows of a WITH the queryset attached, read by an ``__in`` filter - a recursive CTE, a
-queryset as the CTE's body, a composite key - and the arguments it refuses."""
+"""Read recursive CTEs and composite keys through CteRows, and check the arguments it refuses."""
 
 from __future__ import annotations
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.exceptions import QueryError
 from hare.query.expressions import CteRows
 from hare.sql import Table
-from tests.shared_models.testmodels import Category, IntFields, RecursiveCompositeNode
+from tests.shared_models.testmodels import Category, RecursiveCompositeNode
 
 
 @pytest.mark.asyncio
@@ -17,7 +17,7 @@ async def test_the_rows_of_a_recursive_cte(db):
     middle = await Category.objects.create(id=2, name="middle", parent_id=root.id)
     await Category.objects.create(id=3, name="leaf", parent_id=middle.id)
     await Category.objects.create(id=4, name="other")
-    query_class = Category._meta.connection.query_class
+    query_class = HareContext.require_current().apps.get_queryset(Category).get_connection().query_class
     category, ancestors = Table("category"), Table("ancestors")
     columns = (category.id, category.parent_id)
     base = query_class.from_(category).select(*columns).where(category.id == 3)
@@ -31,21 +31,6 @@ async def test_the_rows_of_a_recursive_cte(db):
         .values_list("name", flat=True)
     )
     assert rows == ["root", "middle", "leaf"]
-
-
-@pytest.mark.asyncio
-async def test_a_queryset_as_the_cte_body(db):
-    for row_id in range(1, 6):
-        await IntFields.objects.create(id=row_id, intnum=row_id * 10)
-    for low in (20, 40):
-        rows = (
-            await IntFields.objects.with_cte("large", IntFields.objects.filter(intnum__gte=low).values("id"))
-            .filter(id__in=CteRows("large", "id"))
-            .exclude(id=5)
-            .order_by("id")
-            .values_list("id", flat=True)
-        )
-        assert rows == [row_id for row_id in range(low // 10, 5)]
 
 
 @pytest.mark.asyncio

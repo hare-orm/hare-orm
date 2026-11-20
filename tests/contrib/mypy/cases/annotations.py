@@ -3,8 +3,8 @@
 from decimal import Decimal
 from typing import Any, assert_type
 
-from hare.query.expressions import Value
-from hare.query.functions import Count, Sum
+from hare.query.expressions import F, Value
+from hare.query.functions import Count, Length, Sum
 from hare.query.queryset import QuerySet
 from tests.contrib.mypy.models import Volume, Writer
 
@@ -24,7 +24,9 @@ async def annotated(writer: Writer) -> None:
     Volume.selection.annotate(label_count=Count("labels")).priced().filter(label_count=1)
     Volume.selection.annotate(label_count=Count("labels")).values("title", "label_count").filter(label_count=1)
     Volume.selection.annotate(label_count=Count("labels")).values_list("title", flat=True).filter(label_count=1)
-    queryset.filter(label_count="many")  # E: Argument "label_count" to "filter" of "QuerySet" has incompatible type "str"
+    queryset.filter(
+        label_count="many",  # E: Argument "label_count" to "filter" of "QuerySet" has incompatible type "str"
+    )
     Volume.objects.filter(label_count=1)  # E: Unknown filter param 'label_count'
     Volume.selection.priced().filter(label_count=1)  # E: Unknown filter param 'label_count'
     aliased = await Volume.objects.alias(label_count=Count("labels")).values()
@@ -34,3 +36,14 @@ async def annotated(writer: Writer) -> None:
 
 def helper(queryset: QuerySet[Volume, Volume, Any]) -> None:
     queryset.filter(computed=1).order_by("computed")
+
+
+async def lengths() -> None:
+    rows = await Volume.objects.annotate(
+        title_length=Length("title"),
+        shelf_length=Length("shelf__label"),
+        shelf_expression_length=Length(F("shelf__label")),
+    ).values("title_length", "shelf_length", "shelf_expression_length")
+    assert_type(rows[0]["title_length"], int)
+    assert_type(rows[0]["shelf_length"], int | None)
+    assert_type(rows[0]["shelf_expression_length"], int | None)

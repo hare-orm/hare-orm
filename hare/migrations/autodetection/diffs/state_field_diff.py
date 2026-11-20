@@ -3,28 +3,25 @@ from __future__ import annotations
 from copy import copy
 from typing import TYPE_CHECKING, Any
 
-from hare.classes.comparable_values import ComparableValues
-from hare.ddl.constraints.exclusion_constraint import ExclusionConstraint
-from hare.ddl.constraints.unique_constraint import UniqueConstraint
 from hare.exceptions import ConfigurationError
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.migrations.autodetection.rename_questions import RenameQuestions
 from hare.migrations.autodetection.state_signatures import StateSignatures
+from hare.migrations.constants import RELATION_FIELDS
+from hare.migrations.messages import GENERATED_FIELD_PRESERVATION_HINT
 from hare.migrations.operations import (
-    AddConstraint,
     AddField,
-    AddIndex,
     AlterField,
     HareOperation,
     RemoveField,
     RenameField,
 )
 from hare.migrations.state.model_state import ModelState
-from hare.models.enums import ModelOption
 
 if TYPE_CHECKING:
     from hare.fields.field import Field
+    from hare.migrations.state.state import State
 
 
 class StateFieldDiff:
@@ -32,60 +29,36 @@ class StateFieldDiff:
     renamed and altered fields."""
 
     def __init__(
-        self, old_state: ModelState, new_state: ModelState, rename_questions: RenameQuestions | None = None
+        self,
+        old_state: ModelState,
+        new_state: ModelState,
+        rename_questions: RenameQuestions | None = None,
+        *,
+        schema_states: tuple[State, State] | None = None,
     ) -> None:
         self.old_state = old_state
         self.new_state = new_state
         self.rename_questions = rename_questions or RenameQuestions()
+        self.schema_states = schema_states
         #: Advisories about an AddField/RemoveField pair that may be an unrecognized rename -
         #: printed by makemigrations, never changing the operations.
         self.warnings: list[str] = []
         #: Advisories that a generated field turned into a plain one loses its computed values -
         #: printed under their own header.
         self.data_loss_warnings: list[str] = []
+        #: Original names of columns dropped and recreated rather than altered in place.
+        self.recreated_field_names: set[str] = set()
 
-    def _generated_field_recreate_operations(self, field_name: str, field: Field[Any]) -> list[HareOperation]:
-        # The field's own index comes back with its AddField - its flag.
-        operations: list[HareOperation] = []
-        old_indexes = StateSignatures.normalize_indexes(self.old_state.get_option_list(ModelOption.INDEXES))
-        new_indexes = StateSignatures.normalize_indexes(self.new_state.get_option_list(ModelOption.INDEXES))
-        old_index_sigs = {StateSignatures.get_index_signature(index) for index in old_indexes}
-        for index in new_indexes:
-            if StateSignatures.get_index_signature(index) not in old_index_sigs:
-                continue
-            if field_name in index.fields or field_name in index.include:
-                operations.append(AddIndex(model_name=self.new_state.name, index=index))
-
-        old_constraints = StateSignatures.normalize_constraints(
-            self.old_state.get_option_list(ModelOption.CONSTRAINTS)
-        )
-        new_constraints = StateSignatures.normalize_constraints(
-            self.new_state.get_option_list(ModelOption.CONSTRAINTS)
-        )
-        old_constraint_keys = {ComparableValues.get_declaration_key(constraint) for constraint in old_constraints}
-        for constraint in new_constraints:
-            if ComparableValues.get_declaration_key(constraint) not in old_constraint_keys:
-                continue
-            if (
-                isinstance(constraint, UniqueConstraint)
-                and field_name in constraint.fields
-                or isinstance(constraint, ExclusionConstraint)
-                and field_name in constraint.get_read_field_names()
-            ):
-                operations.append(AddConstraint(model_name=self.new_state.name, constraint=constraint))
-
-        return operations
-
-    @staticmethod
     def get_comparable_signatures(
-        old_field: Field[Any], new_field: Field[Any]
+        self, name: str, old_field: Field[Any], new_field: Field[Any]
     ) -> tuple[dict[str, object], dict[str, object]]:
-        """The signatures of one field's two definitions, reduced to what both of them know.
+        """Compare relation targets by their effective columns in each historical graph.
 
-        A relation replayed from a hand-written migration may leave ``to_field`` unset, meaning
-        the target's primary key - only an explicit value on both sides can differ.
+        An omitted target means the primary key, not an unknown arbitrary column. Without
+        a schema graph an explicit target is retained rather than assumed equivalent.
 
         Args:
+            name: The field name in the two model states.
             old_field: The field's previous definition.
             new_field: The field's new definition.
 
@@ -94,9 +67,21 @@ class StateFieldDiff:
         """
         old_signature = StateSignatures.get_field_signature(old_field)
         new_signature = StateSignatures.get_field_signature(new_field)
-        if old_signature.get("to_field") is None or new_signature.get("to_field") is None:
-            old_signature.pop("to_field", None)
-            new_signature.pop("to_field", None)
+        if isinstance(old_field, ForeignKeyFieldInstance) and isinstance(new_field, ForeignKeyFieldInstance):
+            old_target = old_signature.get("to_field")
+            new_target = new_signature.get("to_field")
+            if old_target is None and new_target is None:
+                old_signature.pop("to_field", None)
+                new_signature.pop("to_field", None)
+            elif self.schema_states is not None and (old_target is None or new_target is None):
+                for schema_state, model_state, signature in zip(
+                    self.schema_states,
+                    (self.old_state, self.new_state),
+                    (old_signature, new_signature),
+                    strict=True,
+                ):
+                    relation = schema_state.apps.get_binding(f"{model_state.app}.{model_state.name}").fields_map[name]
+                    signature["to_field"] = relation.to_field_names  # type: ignore[attr-defined]
         return old_signature, new_signature
 
     def _append_narrowing_data_loss_warning(
@@ -183,32 +168,81 @@ class StateFieldDiff:
         common_names = sorted(set(old_fields) & set(new_fields))
         self._raise_if_fields_swap_columns(common_names)
         self._add_altered_fields(common_names, operations, generated_field_removals, generated_field_additions)
+        self._recreate_generated_dependents(
+            removed_fields, operations, generated_field_removals, generated_field_additions
+        )
         self._warn_about_possible_renames(added_fields, removed_fields)
 
         # A removed relation goes first: an added relation to the same target model would
         # otherwise collide with its still-registered backward accessor.
-        relation_classes = (ForeignKeyFieldInstance, ManyToManyFieldInstance)
         operations.extend(
             RemoveField(model_name=self.new_state.name, name=name)
             for name in sorted(removed_fields)
-            if isinstance(old_fields[name], relation_classes)
+            if isinstance(old_fields[name], RELATION_FIELDS)
         )
 
         for name in sorted(added_fields):
             new_field = new_fields[name]
             operations.append(AddField(model_name=self.new_state.name, name=name, field=new_field))
-            # A field's index=True needs no AddIndex here - the model state carries its implicit
-            # index, and the index diff adds it.
+            # AddField creates the field's index too; no separate AddIndex is needed here.
 
         operations.extend(generated_field_additions)
 
         operations.extend(
             RemoveField(model_name=self.new_state.name, name=name)
             for name in sorted(removed_fields)
-            if not isinstance(old_fields[name], relation_classes)
+            if not isinstance(old_fields[name], RELATION_FIELDS)
         )
 
         return [*generated_field_removals, *operations]
+
+    def _recreate_generated_dependents(
+        self,
+        removed_fields: set[str],
+        operations: list[HareOperation],
+        removals: list[HareOperation],
+        additions: list[HareOperation],
+    ) -> None:
+        """Include every computed column that prevents dropping a recreated input column."""
+        if not self.recreated_field_names:
+            return
+        inputs = {
+            name: field.get_generated_from_field_names()
+            for name, field in self.old_state.fields.items()
+            if field.generated and name not in self.recreated_field_names
+        }
+        frontier = self.recreated_field_names.copy()
+        dependents: list[str] = []
+        while frontier:
+            frontier = {name for name, dependencies in inputs.items() if not frontier.isdisjoint(dependencies)}
+            dependents.extend(name for name in inputs if name in frontier)
+            for name in frontier:
+                del inputs[name]
+        if not dependents:
+            return
+
+        model_name = self.new_state.name
+        renamed = {
+            operation.old_name: operation.new_name for operation in operations if isinstance(operation, RenameField)
+        }
+        new_fields = self.new_state.fields
+        retained: set[str] = set()
+        for name in dependents:
+            removals.append(RemoveField(model_name=model_name, name=name))
+            removed_fields.discard(name)
+            new_name = renamed.get(name, name)
+            if new_name in new_fields:
+                retained.add(new_name)
+                self.recreated_field_names.add(name)
+                additions.append(AddField(model_name=model_name, name=new_name, field=new_fields[new_name]))
+        operations[:] = [
+            operation
+            for operation in operations
+            if not (
+                (isinstance(operation, RenameField) and operation.new_name in retained)
+                or (isinstance(operation, AlterField) and operation.name in retained)
+            )
+        ]
 
     def _takes_column_back(self, new_name: str, new_field: Field[Any], removed_fields: set[str]) -> bool:
         """Whether an added field without a source_field takes by its name the column a removed field
@@ -222,7 +256,7 @@ class StateFieldDiff:
         Returns:
             Whether a removed field's source_field names the added field's column.
         """
-        if isinstance(new_field, (ManyToManyFieldInstance, ForeignKeyFieldInstance)):
+        if isinstance(new_field, RELATION_FIELDS):
             return False
         old_fields = self.old_state.fields
         new_column = ModelState.get_field_db_column(new_name, new_field)
@@ -263,11 +297,16 @@ class StateFieldDiff:
             is_direct_relation = isinstance(new_field, ForeignKeyFieldInstance)
             # A rename is trusted only when the added field's source_field names the removed field's
             # column - its type may change in the same edit - or when the added field takes back, by its
-            # name, the column a removed field held under a source_field of its own.
-            if new_source_field is None and not self._takes_column_back(new_name, new_field, removed_fields):
-                # A many-to-many field has no column; it and a forward relation are matched by their
-                # rename signature - otherwise the through table would be dropped and created again.
-                if isinstance(new_field, (ManyToManyFieldInstance, ForeignKeyFieldInstance)):
+            # name, the column a removed field held under a source_field of its own. A direct relation
+            # can also take over its default <name>_id column from a scalar field.
+            if (
+                new_source_field is None
+                and not is_direct_relation
+                and not self._takes_column_back(new_name, new_field, removed_fields)
+            ):
+                # A many-to-many field has no column; match its rename signature
+                # rather than dropping and recreating its through table.
+                if isinstance(new_field, ManyToManyFieldInstance):
                     self._try_add_relation_rename(new_name, new_field, added_fields, removed_fields, operations)
                 continue
             # Unambiguous on both sides: exactly one added and one removed field claim the column,
@@ -297,29 +336,13 @@ class StateFieldDiff:
                         field=new_field,
                     )
                 )
-            elif not (old_field.pk or new_field.pk) and (old_field.generated or new_field.generated):
-                # A generated column whose type changes too is dropped and created under the new
-                # name. Not an auto-increment primary key, which also counts as generated -
-                # recreating it would break the foreign keys to it.
-                generated_field_removals.append(RemoveField(model_name=self.new_state.name, name=old_name))
-                generated_field_additions.append(
-                    AddField(model_name=self.new_state.name, name=new_name, field=new_field)
-                )
-                generated_field_additions.extend(self._generated_field_recreate_operations(new_name, new_field))
-                if old_field.generated and not new_field.generated:
-                    # The generated column's values are dropped with it - nothing carries over.
-                    self.data_loss_warnings.append(
-                        f"Model {self.new_state.name}: renaming generated field {old_name!r} to "
-                        f"{new_name!r} while also turning it into a plain field will DROP its "
-                        f"already-computed values - RemoveField+AddField has no way to carry them "
-                        "over. Add a BackfillColumn (or RunPython) step after this migration if "
-                        "the old computed values need to be preserved in the new column."
-                    )
-            else:
+            elif not self._recreate_changed_generated_field(
+                old_name, new_name, old_field, new_field, generated_field_removals, generated_field_additions
+            ):
                 # Renamed first onto a field keeping the old type: RenameField writes the full
                 # target field into the state, and the AlterField after it would see no change.
                 intermediate_field = copy(old_field)
-                intermediate_field.source_field = new_source_field
+                intermediate_field.source_field = new_column
                 operations.append(
                     RenameField(
                         model_name=self.new_state.name,
@@ -333,6 +356,35 @@ class StateFieldDiff:
             removed_fields.remove(old_name)
             added_fields.remove(new_name)
             self._add_blind_index_rename(old_name, new_name, added_fields, removed_fields, operations)
+
+    def _recreate_changed_generated_field(
+        self,
+        old_name: str,
+        new_name: str,
+        old_field: Field[Any],
+        new_field: Field[Any],
+        removals: list[HareOperation],
+        additions: list[HareOperation],
+    ) -> bool:
+        """Queue replacement of a changed generated column and report loss of computed values."""
+        # Auto-increment primary keys count as generated, but recreating them breaks their references.
+        if old_field.pk or new_field.pk or not (old_field.generated or new_field.generated):
+            return False
+        model_name = self.new_state.name
+        self.recreated_field_names.add(old_name)
+        removals.append(RemoveField(model_name=model_name, name=old_name))
+        additions.append(AddField(model_name=model_name, name=new_name, field=new_field))
+        if old_field.generated and not new_field.generated:
+            action = (
+                f"turning generated field {old_name!r} into a plain field"
+                if old_name == new_name
+                else f"renaming generated field {old_name!r} to {new_name!r} while also turning it into a plain field"
+            )
+            self.data_loss_warnings.append(
+                f"Model {model_name}: {action} will DROP its already-computed values - "
+                f"RemoveField+AddField has no way to carry them over. {GENERATED_FIELD_PRESERVATION_HINT}"
+            )
+        return True
 
     def _raise_if_fields_swap_columns(self, common_names: list[str]) -> None:
         """Refuses fields swapping columns with each other - that would need a temporary third name.
@@ -395,7 +447,7 @@ class StateFieldDiff:
             old_field = old_fields[name]
             for old_name, new_name in field_renames:
                 old_field = old_field.with_renamed_generated_from_field(old_name, new_name)
-            old_sig, new_sig = self.get_comparable_signatures(old_field, new_fields[name])
+            old_sig, new_sig = self.get_comparable_signatures(name, old_field, new_fields[name])
             if old_sig != new_sig:
                 new_field = new_fields[name]
                 old_is_foreign_key = isinstance(old_field, ForeignKeyFieldInstance)
@@ -412,33 +464,18 @@ class StateFieldDiff:
                         "migratable. Split it into two migrations by hand instead: remove the "
                         "old field in one migration, then add the new field in a separate one."
                     )
-                # Not an auto-increment primary key, which also counts as generated.
-                if not (old_field.pk or new_field.pk) and (old_field.generated or new_field.generated):
-                    generated_field_removals.append(RemoveField(model_name=self.new_state.name, name=name))
-                    generated_field_additions.append(
-                        AddField(model_name=self.new_state.name, name=name, field=new_field)
+                if self._recreate_changed_generated_field(
+                    name, name, old_field, new_field, generated_field_removals, generated_field_additions
+                ):
+                    continue
+                self._append_narrowing_data_loss_warning(name, old_field, new_field)
+                if old_is_foreign_key and old_sig.get("to_field") != new_sig.get("to_field"):
+                    self.data_loss_warnings.append(
+                        f"Model {self.new_state.name}: field {name!r} now references another target "
+                        "column (to_field). Stored key values can't be translated, so the migration "
+                        "refuses to apply while any row stores one - migrate those rows by hand."
                     )
-                    generated_field_additions.extend(self._generated_field_recreate_operations(name, new_field))
-                    if old_field.generated and not new_field.generated:
-                        # Same data-loss risk as the rename-detected branch above, just without a
-                        # rename involved - see that branch's own comment for why only this
-                        # direction (not plain->generated) needs the warning.
-                        self.data_loss_warnings.append(
-                            f"Model {self.new_state.name}: turning generated field {name!r} into "
-                            "a plain field will DROP its already-computed values - RemoveField+"
-                            "AddField has no way to carry them over. Add a BackfillColumn (or "
-                            "RunPython) step after this migration if the old computed values need "
-                            "to be preserved in the new column."
-                        )
-                else:
-                    self._append_narrowing_data_loss_warning(name, old_field, new_field)
-                    if old_is_foreign_key and old_sig.get("to_field") != new_sig.get("to_field"):
-                        self.data_loss_warnings.append(
-                            f"Model {self.new_state.name}: field {name!r} now references another target "
-                            "column (to_field). Stored key values can't be translated, so the migration "
-                            "refuses to apply while any row stores one - migrate those rows by hand."
-                        )
-                    operations.append(AlterField(model_name=self.new_state.name, name=name, field=new_field))
+                operations.append(AlterField(model_name=self.new_state.name, name=name, field=new_field))
 
     def _get_rename_candidates(self, added_fields: set[str], removed_fields: set[str]) -> list[tuple[str, str]]:
         """The (removed, added) field pairs that may be a rename moving the column - the one added and
@@ -500,16 +537,7 @@ class StateFieldDiff:
                 self.new_state.app, self.new_state.name, old_name, new_name
             ):
                 continue
-            operations.append(
-                RenameField(
-                    model_name=self.new_state.name,
-                    old_name=old_name,
-                    new_name=new_name,
-                    field=self.new_state.fields[new_name],
-                )
-            )
-            removed_fields.discard(old_name)
-            added_fields.discard(new_name)
+            self._add_field_rename(old_name, new_name, added_fields, removed_fields, operations)
             self._add_blind_index_rename(old_name, new_name, added_fields, removed_fields, operations)
 
     def _add_blind_index_rename(
@@ -530,36 +558,44 @@ class StateFieldDiff:
             removed_fields: The names of the removed fields left - the old index is taken out.
             operations: The operations, a RenameField of the index added.
         """
-        old_index_name = next(
-            (
-                name
-                for name, field in self.old_state.fields.items()
-                if getattr(field, "blind_index_source_field_name", None) == old_name
-            ),
-            None,
-        )
-        new_index_name = next(
-            (
-                name
-                for name, field in self.new_state.fields.items()
-                if getattr(field, "blind_index_source_field_name", None) == new_name
-            ),
-            None,
-        )
+        old_index_name = self._get_blind_index_name(self.old_state, old_name)
+        new_index_name = self._get_blind_index_name(self.new_state, new_name)
         if old_index_name is None or new_index_name is None:
             return
         if old_index_name not in removed_fields or new_index_name not in added_fields:
             return
+        self._add_field_rename(old_index_name, new_index_name, added_fields, removed_fields, operations)
+
+    @staticmethod
+    def _get_blind_index_name(state: ModelState, source_name: str) -> str | None:
+        return next(
+            (
+                name
+                for name, field in state.fields.items()
+                if getattr(field, "blind_index_source_field_name", None) == source_name
+            ),
+            None,
+        )
+
+    def _add_field_rename(
+        self,
+        old_name: str,
+        new_name: str,
+        added_fields: set[str],
+        removed_fields: set[str],
+        operations: list[HareOperation],
+    ) -> None:
+        """Record an accepted rename and consume its participants."""
         operations.append(
             RenameField(
                 model_name=self.new_state.name,
-                old_name=old_index_name,
-                new_name=new_index_name,
-                field=self.new_state.fields[new_index_name],
+                old_name=old_name,
+                new_name=new_name,
+                field=self.new_state.fields[new_name],
             )
         )
-        removed_fields.discard(old_index_name)
-        added_fields.discard(new_index_name)
+        removed_fields.discard(old_name)
+        added_fields.discard(new_name)
 
     def _warn_about_possible_renames(self, added_fields: set[str], removed_fields: set[str]) -> None:
         """Warns about each added field declared exactly as one removed one - a rename moving the column,

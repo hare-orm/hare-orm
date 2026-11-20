@@ -10,6 +10,8 @@ from typing import Any, Literal, get_args
 import pytest
 
 from hare import Connections
+from hare.contrib.test import capture_queries
+from hare.core.hare_context import HareContext
 from hare.exceptions import FieldError, IntegrityError, NoValuesFetched, QueryError, ValidationError
 from hare.fields.relations.fields import ForeignKeyFieldInstance
 from hare.models.tenancy.tenancy import Tenancy
@@ -38,7 +40,7 @@ from tests.fields.relations.models_generic_fk import (
 
 @pytest.mark.asyncio
 async def test_the_branches_are_foreign_keys(db_generic_fk):
-    meta = Comment._meta
+    meta = HareContext.require_current().apps.get_binding(Comment)
     assert set(meta.generic_foreign_key_fields) == {"target"}
     for branch_name in ("post", "photo", "article_version"):
         branch = meta.fields_map[branch_name]
@@ -59,6 +61,67 @@ async def test_create_and_read(db_generic_fk):
     connection = Connections.get("models")
     sql = connection.dialect.schema_editor_class(connection).table_creation.get_create_schema_sql()
     assert "target_exclusive_arc" in sql
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key_field", ["article_version_version", "post_id"])
+async def test_refresh_of_a_generic_key_column_reloads_all_branches(db_generic_fk, key_field):
+    post = await Post.objects.create(id=1, title="post")
+    article = await ArticleVersion.objects.create(article=7, version=2)
+    comment = await Comment.objects.create(target=post, text="original")
+    await Comment.objects.filter(pk=comment.pk).update(target=article, text="changed")
+
+    await comment.refresh_from_db(fields=[key_field])
+
+    assert (comment.post_id, comment.article_version_article, comment.article_version_version) == (None, 7, 2)
+    assert await comment.target == article
+    assert comment.text == "original"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_shape", ("post", "article_version"), ids=("single-key", "composite-key"))
+@pytest.mark.parametrize("input_form", ("model", "dict"))
+@pytest.mark.parametrize("saved", (False, True), ids=("unsaved", "saved"))
+async def test_construct_keeps_every_generic_key_without_relation_checks(
+    db_generic_fk, target_shape, input_form, saved
+):
+    target = (
+        Post.construct(id=0, title="target", _saved_in_db=saved)
+        if target_shape == "post"
+        else ArticleVersion.construct(article=0, version=2, _saved_in_db=saved)
+    )
+    value = target if input_form == "model" else Comment.target.get_key_values(target)
+    async with capture_queries() as queries:
+        obj = Comment.construct(id=1, text="constructed", target=value)
+    assert queries.count == 0
+    expected = (0, None, None, None) if target_shape == "post" else (None, None, 0, 2)
+    assert (obj.post_id, obj.photo_id, obj.article_version_article, obj.article_version_version) == expected
+    if input_form == "model":
+        assert obj.target is target
+    assert not obj._saved_in_db
+
+
+@pytest.mark.asyncio
+async def test_construct_can_clear_a_required_generic_relation_without_changing_normal_validation(db_generic_fk):
+    async with capture_queries() as queries:
+        obj = Comment.construct(id=1, target=None)
+    assert queries.count == 0
+    assert obj.target is None
+    assert (obj.post_id, obj.photo_id, obj.article_version_article, obj.article_version_version) == (
+        None,
+        None,
+        None,
+        None,
+    )
+    with pytest.raises(QueryError, match="doesn't take None"):
+        Comment(id=2, target=None)
+
+
+@pytest.mark.asyncio
+async def test_construct_keeps_raw_generic_key_values_without_field_conversion(db_generic_fk):
+    obj = Comment.construct(id=1, target={"type": "article_version", "article": "raw", "version": "value"})
+    assert (obj.article_version_article, obj.article_version_version) == ("raw", "value")
+    assert (obj.post_id, obj.photo_id) == (None, None)
 
 
 @pytest.mark.asyncio
@@ -425,14 +488,18 @@ async def test_two_generic_relations_sharing_a_target(db_generic_fk):
 
 @pytest.mark.asyncio
 async def test_a_unique_constraint_naming_the_field_is_one_per_branch(db_generic_fk):
-    names = {constraint.name for constraint in Like._meta.constraints}
-    assert {"one_like_liked_post", "one_like_liked_photo", "target_exclusive_arc"} <= names
-    plain_indexes = [index for index in Like._meta.indexes if isinstance(index, tuple)]
+    names = {constraint.name for constraint in HareContext.require_current().apps.get_binding(Like).constraints}
+    assert {"one_like_10_liked_post", "one_like_11_liked_photo", "target_exclusive_arc"} <= names
+    plain_indexes = [
+        index for index in HareContext.require_current().apps.get_binding(Like).indexes if isinstance(index, tuple)
+    ]
     assert plain_indexes == [("author", "liked_post"), ("author", "liked_photo")]
-    named_indexes = [index for index in Like._meta.indexes if not isinstance(index, tuple)]
+    named_indexes = [
+        index for index in HareContext.require_current().apps.get_binding(Like).indexes if not isinstance(index, tuple)
+    ]
     assert [(index.name, list(index.fields)) for index in named_indexes] == [
-        ("recent_likes_liked_post", ["liked_post", "id"]),
-        ("recent_likes_liked_photo", ["liked_photo", "id"]),
+        ("recent_likes_10_liked_post", ["liked_post", "id"]),
+        ("recent_likes_11_liked_photo", ["liked_photo", "id"]),
     ]
     assert [index.field_orders for index in named_indexes] == [["", "DESC"], ["", "DESC"]]
     if not Connections.get("models").features.supports_unique_constraints:
@@ -547,8 +614,7 @@ async def test_request_query_filters_by_target_and_type(db_generic_fk):
             pagination = None
 
     await make_comments()
-    CommentRequestQuery.prepare_parameters()
-    fields_by_name = CommentRequestQuery.model_fields
+    fields_by_name = CommentRequestQuery.prepare_parameters().model_fields
     assert get_args(fields_by_name["target__type"].annotation)[0] == Literal["post", "photo", "article_version"]
 
     async def ids_of(**parameters: Any) -> list[int]:

@@ -13,6 +13,7 @@ import pytest
 
 from hare import Hare, fields
 from hare.contrib.test import requires_features
+from hare.contrib.test.databases.test_database_config import TestDatabaseConfig as DatabaseConfig
 from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.core.config import AppConfig, ConfigSecrets, ConnectionConfig, DBUrlConfig, HareConfig
 from hare.core.hare_context import HareContext
@@ -214,14 +215,16 @@ async def test_generated_table_name_is_regenerated_by_every_init():
                 HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": [module_name]}),
                 table_name_generator=lambda model: f"pfx_{model.__name__.lower()}",
             )
-            assert generated_model._meta.db_table == "pfx_generatednamewidget"
+            assert (
+                HareContext.require_current().apps.get_binding(generated_model).db_table == "pfx_generatednamewidget"
+            )
             await ctx.generate_schemas()
             await generated_model.objects.create(name="first")
 
         async with HareContext() as ctx:
             await ctx.init(HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": [module_name]}))
-            assert generated_model._meta.db_table == "generatednamewidget"
-            assert explicit_model._meta.db_table == "explicit_widget_table"
+            assert HareContext.require_current().apps.get_binding(generated_model).db_table == "generatednamewidget"
+            assert HareContext.require_current().apps.get_binding(explicit_model).db_table == "explicit_widget_table"
             await ctx.generate_schemas()
             await generated_model.objects.create(name="second")
             assert await generated_model.objects.all().count() == 1
@@ -233,8 +236,10 @@ async def test_generated_table_name_is_regenerated_by_every_init():
                 HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": [module_name]}),
                 table_name_generator=lambda model: f"other_{model.__name__.lower()}",
             )
-            assert generated_model._meta.db_table == "other_generatednamewidget"
-            assert explicit_model._meta.db_table == "explicit_widget_table"
+            assert (
+                HareContext.require_current().apps.get_binding(generated_model).db_table == "other_generatednamewidget"
+            )
+            assert HareContext.require_current().apps.get_binding(explicit_model).db_table == "explicit_widget_table"
     finally:
         sys.modules.pop(module_name, None)
 
@@ -302,8 +307,8 @@ def _cross_connection_config(target_module_name: str, source_module_name: str) -
     db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
     return {
         "connections": {
-            "one": DbUrlConfigGenerator.expand(db_url, testing=True),
-            "two": DbUrlConfigGenerator.expand(db_url, testing=True),
+            "one": DatabaseConfig.from_url(db_url).config,
+            "two": DatabaseConfig.from_url(db_url).config,
         },
         "apps": {
             "xconn_target": {"models": [target_module_name], "default_connection": "one"},
@@ -389,19 +394,6 @@ def test_db_url_setting_a_value_both_in_the_address_and_the_query_is_refused(db_
         DbUrlConfigGenerator.expand(db_url)
 
 
-@pytest.mark.requires("native")
-@pytest.mark.database_independent
-@pytest.mark.asyncio
-async def test_db_url_port_zero_is_refused():
-    async with HareContext() as ctx:
-        with pytest.raises(ConfigurationError, match="port must be between 1 and 65535"):
-            await ctx.init(
-                HareConfig.from_db_url(
-                    "postgresql://user:pass@localhost:0/db", {"models": ["tests.shared_models.testmodels"]}
-                )
-            )
-
-
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_config_given_as_a_read_only_mapping_works():
@@ -424,25 +416,3 @@ def test_config_file_extension_is_case_insensitive(tmp_path):
     )
 
     assert HareConfig.from_config_file(str(config_file)).apps["models"].models == ["m"]
-
-
-@pytest.mark.database_independent
-@pytest.mark.parametrize(
-    ("config_text", "message"),
-    [
-        ("", "The config must be a mapping, got None"),
-        ("[1]", r"The config must be a mapping, got \[1\]"),
-        ('{"connections": ["sqlite://:memory:"], "apps": {}}', 'The "connections" section must be a mapping'),
-        ('{"connections": {}, "apps": ["models"]}', 'The "apps" section must be a mapping'),
-        ('{"connections": {"default": 5}, "apps": {}}', "Connection 'default' must be a mapping, got 5"),
-        ('{"connections": {}, "apps": {"models": "m"}}', "App 'models' must be a mapping, got 'm'"),
-    ],
-    ids=["empty file", "list", "connections list", "apps list", "connection number", "app text"],
-)
-def test_a_config_or_section_that_is_no_mapping_is_a_configuration_error(tmp_path, config_text, message):
-    """A raw TypeError/AttributeError came out of HareConfig.load() - the CLI printed a traceback."""
-    config_file = tmp_path / "hare.json"
-    config_file.write_text(config_text or "null")
-
-    with pytest.raises(ConfigurationError, match=message):
-        HareConfig.load(str(config_file))

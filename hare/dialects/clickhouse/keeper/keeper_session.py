@@ -1,247 +1,224 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import struct
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, TypeVar
 
-from hare.dialects.clickhouse.keeper.constants import (
-    KEEPER_CLOSE_SESSION_OPERATION,
-    KEEPER_CREATE_OPERATION,
-    KEEPER_DELETE_OPERATION,
-    KEEPER_EXISTS_OPERATION,
-    KEEPER_GET_CHILDREN_OPERATION,
-    KEEPER_NO_ERROR,
-    KEEPER_NO_NODE_ERROR,
-    KEEPER_PING_OPERATION,
-    KEEPER_PING_REQUEST_ID,
-    KEEPER_PINGS_PER_SESSION_TIMEOUT,
-    KEEPER_SESSION_TIMEOUT_MILLISECONDS,
-    KEEPER_WATCH_EVENT_REQUEST_ID,
-)
-from hare.dialects.clickhouse.keeper.keeper_codec import KeeperCodec
-from hare.exceptions import DBConnectionError, OperationalError
+from hare.core.connections.messages import CONNECTION_RELEASE_FAILED
+from hare.core.resource_completion import ResourceCompletion
+from hare.dialects.clickhouse.keeper.constants import KEEPER_SESSION_TIMEOUT
+from hare.exceptions import ConfigurationError, DBConnectionError, OperationalError
+
+if TYPE_CHECKING:
+    from kazoo.client import KazooClient
+
+TResult = TypeVar("TResult")
 
 
 class KeeperSession:
-    """A session of ClickHouse Keeper on a connection of its own: each request answered by its id - several
-    can be on their way at once - the deletion of a node watched, pings keeping the session. The server
-    deletes the ephemeral nodes of the session as it closes or is lost."""
+    """An asyncio boundary around Kazoo's session and fixed-node operations.
+
+    Blocking library calls retain their worker until completion, even during cancellation.
+    After a connected session becomes suspended or lost, this adapter is terminal: it
+    stops the client rather than accepting Kazoo's reconnect as restored lock ownership.
+    """
 
     def __init__(self, addresses: tuple[tuple[str, int], ...], connect_timeout: float) -> None:
-        """
-        Args:
-            addresses: The hosts and ports of the Keeper servers - the first taking the session holds it.
-            connect_timeout: Seconds a server may take to open the session.
-        """
+        """Store Keeper addresses and the connection establishment timeout in seconds."""
         self.addresses = addresses
         self.connect_timeout = connect_timeout
-        self._reader: asyncio.StreamReader | None = None
-        self._writer: asyncio.StreamWriter | None = None
-        #: The replies awaited, by request id.
-        self._replies: dict[int, asyncio.Future[tuple[int, bytes]]] = {}
-        #: The deletions awaited, by node path.
-        self._deletions: dict[str, asyncio.Future[None]] = {}
-        self._next_request_id = 1
-        self._tasks: list[asyncio.Task[None]] = []
-        #: Why the session ended - None while it holds.
-        self.end_error: Exception | None = None
+        self._client: KazooClient | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._connected = False
+        self._workers: set[asyncio.Task[Any]] = set()
+        self._deletions: set[asyncio.Event] = set()
+        self._close_task: asyncio.Task[None] | None = None
+        self.end_error: DBConnectionError | None = None
+        #: Installed only while a migration's critical scope is active, on the event loop.
+        self.on_end: Callable[[], None] | None = None
 
     async def open(self) -> None:
-        """Opens the session on the first server taking it.
+        """Open a session; a failed or cancelled start releases all library resources.
 
         Raises:
-            DBConnectionError: No server took it.
+            ConfigurationError: The optional ``clickhouse-keeper`` extra is missing.
+            DBConnectionError: No Keeper server accepted the session.
         """
-        failures: list[str] = []
-        for host, port in self.addresses:
-            writer: asyncio.StreamWriter | None = None
+        try:
+            from kazoo.client import KazooClient
+        except ImportError as error:
+            raise ConfigurationError("ClickHouse Keeper requires pip install hare-orm[clickhouse-keeper]") from error
+
+        self._loop = asyncio.get_running_loop()
+        self._client = KazooClient(
+            hosts=",".join(f"{host}:{port}" for host, port in self.addresses),
+            timeout=KEEPER_SESSION_TIMEOUT,
+            randomize_hosts=False,
+        )
+        self._client.add_listener(self.state_changed)
+        try:
+            # Start owns its handshake timeout. Do not race stop against start_async's setup.
+            await ResourceCompletion.wait(asyncio.to_thread(self._client.start, self.connect_timeout))
+            self.check()
+        except BaseException as error:
             try:
-                reader, opened_writer = await asyncio.wait_for(
-                    asyncio.open_connection(host, port), self.connect_timeout
-                )
-                writer = opened_writer
-                opened_writer.write(KeeperCodec.get_connect_request(KEEPER_SESSION_TIMEOUT_MILLISECONDS))
-                await opened_writer.drain()
-                payload = await asyncio.wait_for(self.read_frame(reader), self.connect_timeout)
-            except (OSError, TimeoutError, asyncio.IncompleteReadError) as error:
-                failures.append(f"{host}:{port}: {error!r}")
-                if writer is not None:
-                    writer.close()
-                continue
-            session_timeout_milliseconds, _session_id = KeeperCodec.read_connect_reply(payload)
-            if session_timeout_milliseconds <= 0:
-                failures.append(f"{host}:{port}: the session was refused")
-                opened_writer.close()
-                continue
-            self._reader, self._writer = reader, opened_writer
-            ping_interval = session_timeout_milliseconds / 1000 / KEEPER_PINGS_PER_SESSION_TIMEOUT
-            self._tasks = [asyncio.create_task(self.read_replies()), asyncio.create_task(self.ping(ping_interval))]
-            return
-        raise DBConnectionError(f"No ClickHouse Keeper server opened a session ({'; '.join(failures)})")
+                await self.close()
+            except BaseException as release_error:
+                if release_error is error:
+                    raise
+                raise BaseExceptionGroup(CONNECTION_RELEASE_FAILED, [error, release_error]) from None
+            if isinstance(error, Exception):
+                raise DBConnectionError(f"No ClickHouse Keeper server opened a session: {error!r}") from error
+            raise
 
-    @staticmethod
-    async def read_frame(reader: asyncio.StreamReader) -> bytes:
-        """Reads a frame of the connection.
+    def state_changed(self, state: str) -> None:
+        """Dispatch a Kazoo thread's state event to the owning asyncio loop."""
+        assert self._loop is not None  # nosec B101 - listener registered by open()
+        self._loop.call_soon_threadsafe(self.receive_state, state)
 
-        Args:
-            reader: The connection.
+    def receive_state(self, state: str) -> None:
+        """Remember the first connection; all later uncertainty permanently ends ownership."""
+        from kazoo.protocol.states import KazooState
 
-        Returns:
-            The frame's payload.
-        """
-        (size,) = struct.unpack("!i", await reader.readexactly(4))
-        return await reader.readexactly(size)
+        if state == KazooState.CONNECTED:
+            self._connected = True
+        elif self._connected:
+            self.end(DBConnectionError(f"The ClickHouse Keeper session is {state.lower()}"))
 
-    async def read_replies(self) -> None:
-        """Hands each reply to the request it answers, and each watch event to the deletion awaited."""
-        reader = self._reader
-        assert reader is not None  # nosec B101 - set by open()
-        try:
-            while True:
-                payload = await self.read_frame(reader)
-                request_id, error_code = KeeperCodec.read_reply_header(payload)
-                if request_id == KEEPER_WATCH_EVENT_REQUEST_ID:
-                    # Any change of a watched node ends the wait - the waiter looks again.
-                    _event_type, path = KeeperCodec.read_watch_event(payload)
-                    deletion = self._deletions.pop(path, None)
-                    if deletion is not None and not deletion.done():
-                        deletion.set_result(None)
-                    continue
-                if request_id == KEEPER_PING_REQUEST_ID:
-                    continue
-                reply = self._replies.pop(request_id, None)
-                if reply is not None and not reply.done():
-                    reply.set_result((error_code, payload[16:]))
-        except (OSError, asyncio.IncompleteReadError) as error:
-            self.end(DBConnectionError(f"The ClickHouse Keeper session was lost: {error!r}"))
+    def check(self) -> None:
+        """Reject work after the session has ended, including after an automatic reconnect."""
+        if self.end_error is not None:
+            raise self.end_error
 
-    async def ping(self, interval: float) -> None:
-        """Pings the server so it keeps the session.
-
-        Args:
-            interval: Seconds between pings.
-        """
-        writer = self._writer
-        assert writer is not None  # nosec B101 - set by open()
-        try:
-            while True:
-                await asyncio.sleep(interval)
-                writer.write(KeeperCodec.get_request(KEEPER_PING_REQUEST_ID, KEEPER_PING_OPERATION, b""))
-                await writer.drain()
-        except OSError as error:
-            self.end(DBConnectionError(f"The ClickHouse Keeper session was lost: {error!r}"))
-
-    def end(self, error: Exception) -> None:
-        """Ends the session: every request and wait still open fails with the error.
-
-        Args:
-            error: Why the session ended.
-        """
+    def end(self, error: DBConnectionError) -> None:
+        """Wake waiters, interrupt the live migration scope, and schedule one terminal close."""
         if self.end_error is not None:
             return
         self.end_error = error
-        for reply in self._replies.values():
-            if not reply.done():
-                reply.set_exception(error)
-        for deletion in self._deletions.values():
-            if not deletion.done():
-                deletion.set_exception(error)
-        self._replies.clear()
-        self._deletions.clear()
-        if self._writer is not None:
-            self._writer.close()
+        for deletion in self._deletions:
+            deletion.set()
+        if self.on_end is not None:
+            self.on_end()
+        self.start_close()
 
-    async def send(self, operation: int, body: bytes) -> tuple[int, bytes]:
-        """Sends a request and awaits its reply.
+    async def run(self, operation: Callable[..., TResult], *args: Any, **kwargs: Any) -> TResult:
+        """Drain a library call; preserve node outcomes and translate other Keeper failures."""
+        from kazoo.exceptions import (
+            AuthFailedError,
+            ConnectionLoss,
+            KazooException,
+            NodeExistsError,
+            NoNodeError,
+            NotEmptyError,
+            SessionExpiredError,
+            ZookeeperStoppedError,
+        )
 
-        Args:
-            operation: The operation.
-            body: The operation's arguments.
+        self.check()
+        worker = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
+        self._workers.add(worker)
+        try:
+            result = await ResourceCompletion.wait(
+                worker, on_cancel=lambda error: self.end(DBConnectionError("The Keeper operation was cancelled"))
+            )
+            self.check()
+            return result
+        except (NoNodeError, NodeExistsError, NotEmptyError):
+            self.check()
+            raise
+        except (AuthFailedError, ConnectionLoss, SessionExpiredError, ZookeeperStoppedError, OSError) as error:
+            failure = DBConnectionError(f"The ClickHouse Keeper session was lost: {error!r}")
+            self.end(failure)
+            raise self.end_error or failure from error
+        except KazooException as error:
+            self.check()
+            raise OperationalError(f"ClickHouse Keeper refused the request: {error!r}") from error
+        finally:
+            self._workers.discard(worker)
 
-        Returns:
-            The error code and the rest of the reply.
+    async def create(self, path: str) -> bool:
+        """Create the fixed ephemeral lock and missing persistent parents; False if already held."""
+        from kazoo.exceptions import NodeExistsError
 
-        Raises:
-            DBConnectionError: The session ended.
-        """
-        if self.end_error is not None:
-            raise self.end_error
-        writer = self._writer
-        assert writer is not None  # nosec B101 - set by open()
-        request_id = self._next_request_id
-        self._next_request_id += 1
-        reply: asyncio.Future[tuple[int, bytes]] = asyncio.get_running_loop().create_future()
-        self._replies[request_id] = reply
-        writer.write(KeeperCodec.get_request(request_id, operation, body))
-        await writer.drain()
-        return await reply
+        assert self._client is not None  # nosec B101 - operations follow open()
+        try:
+            await self.run(self._client.create, path, ephemeral=True, makepath=True)
+        except NodeExistsError:
+            return False
+        return True
 
-    async def create(self, path: str, flags: int) -> int:
-        """Creates an empty node.
+    async def delete(self, path: str) -> None:
+        """Delete an empty node; leave absent nodes and nodes still holding children alone."""
+        from kazoo.exceptions import NoNodeError, NotEmptyError
 
-        Args:
-            path: The node's path.
-            flags: Whether the node is ephemeral.
-
-        Returns:
-            The error code.
-        """
-        error_code, _reply = await self.send(KEEPER_CREATE_OPERATION, KeeperCodec.get_create_body(path, flags))
-        return error_code
-
-    async def delete(self, path: str) -> int:
-        """Deletes a node of any version.
-
-        Args:
-            path: The node's path.
-
-        Returns:
-            The error code.
-        """
-        error_code, _reply = await self.send(KEEPER_DELETE_OPERATION, KeeperCodec.get_delete_body(path))
-        return error_code
+        assert self._client is not None  # nosec B101 - operations follow open()
+        try:
+            await self.run(self._client.delete, path)
+        except (NoNodeError, NotEmptyError):
+            pass
 
     async def get_children(self, path: str) -> list[str]:
-        """The names of a node's children.
+        """Return child names, or an empty list when the parent does not exist."""
+        from kazoo.exceptions import NoNodeError
 
-        Args:
-            path: The node's path.
-
-        Returns:
-            The names - none for no node.
-
-        Raises:
-            OperationalError: Keeper refused the request.
-        """
-        error_code, reply = await self.send(KEEPER_GET_CHILDREN_OPERATION, KeeperCodec.get_children_body(path))
-        if error_code == KEEPER_NO_NODE_ERROR:
+        assert self._client is not None  # nosec B101 - operations follow open()
+        try:
+            return await self.run(self._client.get_children, path)
+        except NoNodeError:
             return []
-        if error_code != KEEPER_NO_ERROR:
-            raise OperationalError(f"ClickHouse Keeper refused the children of {path!r}: error {error_code}")
-        return KeeperCodec.read_children(reply)
 
     async def wait_for_deletion(self, path: str) -> None:
-        """Waits until a node is deleted or changed - at once when there is none.
+        """Wait for a node change, or return immediately if it already disappeared."""
+        assert self._client is not None and self._loop is not None  # nosec B101 - operations follow open()
+        loop = self._loop
+        deletion = asyncio.Event()
+        self._deletions.add(deletion)
+        try:
+            exists = await self.run(
+                self._client.exists,
+                path,
+                watch=lambda event: loop.call_soon_threadsafe(deletion.set),
+            )
+            if exists is not None:
+                await deletion.wait()
+            self.check()
+        finally:
+            self._deletions.discard(deletion)
 
-        Args:
-            path: The node's path.
-        """
-        deletion = self._deletions.get(path)
-        if deletion is None or deletion.done():
-            deletion = self._deletions[path] = asyncio.get_running_loop().create_future()
-        error_code, _reply = await self.send(KEEPER_EXISTS_OPERATION, KeeperCodec.get_exists_body(path))
-        if error_code == KEEPER_NO_NODE_ERROR:
-            self._deletions.pop(path, None)
-            return
-        await deletion
+    def start_close(self) -> asyncio.Task[None]:
+        """Keep one cleanup task so concurrent closes and repeated cancellation share it."""
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self.close_session())
+            # Loss can close an idle session before its owner next awaits close(). Retrieve
+            # the result now to avoid an orphaned failure; close() still re-raises it.
+            self._close_task.add_done_callback(lambda task: None if task.cancelled() else task.exception())
+        return self._close_task
 
     async def close(self) -> None:
-        """Closes the session - the server deletes its ephemeral nodes."""
-        if self.end_error is None:
-            with contextlib.suppress(DBConnectionError, OSError, TimeoutError):
-                await asyncio.wait_for(self.send(KEEPER_CLOSE_SESSION_OPERATION, b""), self.connect_timeout)
-            self.end(DBConnectionError("The ClickHouse Keeper session is closed"))
-        for task in self._tasks:
-            task.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
-        self._tasks = []
+        """Stop the library, close its handles and drain pending calls before returning."""
+        await ResourceCompletion.wait(self.start_close())
+
+    async def close_session(self) -> None:
+        """Run terminal cleanup once; callbacks and operations cannot revive this session."""
+        self.end(DBConnectionError("The ClickHouse Keeper session is closed"))
+        try:
+            if self._client is not None:
+                await asyncio.to_thread(self.stop_client)
+        finally:
+            if self._workers:
+                await asyncio.gather(*self._workers, return_exceptions=True)
+
+    def stop_client(self) -> None:
+        """Remove callbacks, stop the session and release handles even if stopping fails."""
+        assert self._client is not None  # nosec B101 - checked by close_session()
+        self._client.remove_listener(self.state_changed)
+        errors = []
+        for operation in (self._client.stop, self._client.close):
+            try:
+                operation()
+            except BaseException as error:
+                errors.append(error)
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise BaseExceptionGroup(CONNECTION_RELEASE_FAILED, errors)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import ValidationError
 from hare.fields.data.containers.container_field import ContainerField
@@ -8,16 +8,14 @@ from hare.sql.terms.containers import ArrayElementTerm, ContainerLiteral
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
-    from hare.fields.data.containers.array_field import ArrayField
-    from hare.fields.data.containers.map_field import MapField
     from hare.fields.field import Field
     from hare.models import Model
 
 
 class ContainerValueEncoders:
     """The encoders of container lookups' values - each called as ``(value, model, field, dialect)``:
-    a container value is written as the dialect writes the field's column, held values each through
-    its own field."""
+    values use the registry's lookup conversion, including held fields' custom lookup hooks.
+    Container literals retain their declared SQL type."""
 
     @staticmethod
     def get_held_value_term(field: Field[Any], value: Any, obj: Model, dialect: Dialect) -> Any:
@@ -33,7 +31,7 @@ class ContainerValueEncoders:
         Returns:
             The value or its term.
         """
-        db_value = dialect.types.get_db_value(field, value, obj)
+        db_value = dialect.types.get_lookup_value(field, value, obj)
         if isinstance(field, ContainerField) and db_value is not None:
             return ContainerLiteral(db_value, field)
         return db_value
@@ -45,7 +43,7 @@ class ContainerValueEncoders:
         Raises:
             ValidationError: The value isn't of the container's shape, or a held value is refused.
         """
-        db_value = dialect.types.get_db_value(field, value, obj)
+        db_value = dialect.types.get_lookup_value(field, value, obj)
         if db_value is None:
             raise ValidationError(f"{field.model_field_name}: expected a value to compare with, got None")
         return ContainerLiteral(db_value, field)
@@ -62,7 +60,7 @@ class ContainerValueEncoders:
         if not isinstance(value, (tuple, list)) or len(value) != 2:
             raise ValidationError(f"{field.model_field_name}__item expects an (index, value) pair")
         index, item_value = value
-        base_field = cast("ArrayField", field).base_field
+        base_field = field.base_field  # type: ignore[attr-defined]
         return (
             ArrayElementTerm.get_validated_index(index),
             ContainerValueEncoders.get_held_value_term(base_field, item_value, obj, dialect),
@@ -77,7 +75,7 @@ class ContainerValueEncoders:
         """
         if value is None:
             raise ValidationError(f"{field.model_field_name}: a map key is never None")
-        return dialect.types.get_db_value(cast("MapField", field).key_field, value, obj)
+        return dialect.types.get_lookup_value(field.key_field, value, obj)  # type: ignore[attr-defined]
 
     @staticmethod
     def encode_map_keys(value: Any, obj: Model, field: Field[Any], dialect: Dialect) -> list[Any]:

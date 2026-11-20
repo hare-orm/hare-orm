@@ -3,16 +3,19 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.schema.columns.column_backfill import ColumnBackfill
+from hare.dialects.base.schema.plans.enums import SchemaEffect
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
+from hare.dialects.base.schema.plans.schema_statement import SchemaStatement
 from hare.dialects.clickhouse.schema.constants import (
-    CLICKHOUSE_APPLY_DELETED_MASK_TEMPLATE,
     CLICKHOUSE_MATERIALIZE_COLUMN_TEMPLATE,
     CLICKHOUSE_NOT_NULL_WITH_DEFAULT_TEMPLATE,
     CLICKHOUSE_TYPE_EMPTY_VALUE_SQL,
 )
 
 if TYPE_CHECKING:
+    from hare.dialects.clickhouse.schema.clickhouse_schema_editor import ClickhouseSchemaEditor
     from hare.fields.field import Field
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class ClickhouseColumnBackfill(ColumnBackfill):
@@ -22,6 +25,7 @@ class ClickhouseColumnBackfill(ColumnBackfill):
     rows the value they got, as on PostgreSQL."""
 
     __slots__ = ()
+    editor: ClickhouseSchemaEditor
 
     def get_backfill_batch_sql(
         self, qualified_table: str, quoted_column: str, quoted_key_columns: list[str], batch_size: int
@@ -49,16 +53,15 @@ class ClickhouseColumnBackfill(ColumnBackfill):
             ),
         )
 
-    def get_not_null_sql(
+    def get_not_null_plan(
         self,
-        model: type[Model],
+        binding: ModelBinding,
         field: Field[Any],
-        qualified_table: str,
         column: str,
         sql_type: str,
         *,
         column_has_db_default: bool,
-    ) -> str:
+    ) -> SchemaChangePlan:
         """The ALTER making a column NOT NULL - ClickHouse 25.12+ refuses it to a column with no DEFAULT
         for its NULL rows: the field's ``db_default`` is given with the change, else the type's empty
         value, dropped again by a second ALTER (one can't drop a DEFAULT another change of it adds).
@@ -67,21 +70,21 @@ class ClickhouseColumnBackfill(ColumnBackfill):
         backfill before it reads no deleted row - a NULL left in one would fail the change halfway.
         """
         editor = self.editor
-        apply_deleted_mask_sql = CLICKHOUSE_APPLY_DELETED_MASK_TEMPLATE.format(table=qualified_table)
+        mask_step = editor.get_apply_deleted_mask_statement(binding)
         if column_has_db_default:
-            not_null_sql = super().get_not_null_sql(
-                model, field, qualified_table, column, sql_type, column_has_db_default=column_has_db_default
+            plan = super().get_not_null_plan(
+                binding, field, column, sql_type, column_has_db_default=column_has_db_default
             )
-            return ";\n".join((apply_deleted_mask_sql, not_null_sql))
+            return SchemaChangePlan((mask_step, *plan.steps))
         if field.has_db_default():
-            default_sql = editor.column_definitions.get_field_db_default_sql(field, model)
+            default_sql = editor.column_definitions.get_field_db_default_sql(field, binding)
         else:
             type_name = editor.client.dialect.literals.get_string_literal_sql(sql_type)
             default_sql = CLICKHOUSE_TYPE_EMPTY_VALUE_SQL.format(type_name=type_name)
         statements = [
-            apply_deleted_mask_sql,
-            editor.ALTER_FIELD_TEMPLATE.format(
-                table=qualified_table,
+            editor.get_column_change_sql(
+                binding,
+                editor.ALTER_FIELD_TEMPLATE,
                 changes=CLICKHOUSE_NOT_NULL_WITH_DEFAULT_TEMPLATE.format(
                     column=column, sql_type=sql_type, default=default_sql
                 ),
@@ -89,18 +92,35 @@ class ClickhouseColumnBackfill(ColumnBackfill):
         ]
         if not field.has_db_default():
             statements.append(
-                editor.ALTER_FIELD_TEMPLATE.format(
-                    table=qualified_table, changes=editor.ALTER_FIELD_DROP_DEFAULT_TEMPLATE.format(column=column)
+                editor.get_column_change_sql(
+                    binding,
+                    editor.ALTER_FIELD_TEMPLATE,
+                    changes=editor.ALTER_FIELD_DROP_DEFAULT_TEMPLATE.format(column=column),
                 )
             )
-        return ";\n".join(statements)
+        recovery = editor.get_schema_recovery(binding)
+        return SchemaChangePlan(
+            (
+                mask_step,
+                *(SchemaStatement(sql, recovery=recovery) for sql in statements),
+            )
+        )
 
-    async def keep_added_column_default(self, model: type[Model], field: Field[Any], db_field: str) -> None:
+    def get_added_column_default_plan(
+        self, binding: ModelBinding, field: Field[Any], db_field: str
+    ) -> SchemaChangePlan:
+        """Store the added column's default so later changes cannot alter existing rows."""
         if not field.has_db_default():
-            return
-        await self.editor.run_sql(
-            CLICKHOUSE_MATERIALIZE_COLUMN_TEMPLATE.format(
-                table=self.editor.qualify_table_name(model._meta.db_table, model._meta.schema),
-                column=self.editor.quote(db_field),
+            return SchemaChangePlan(())
+        return SchemaChangePlan(
+            (
+                SchemaStatement(
+                    CLICKHOUSE_MATERIALIZE_COLUMN_TEMPLATE.format(
+                        table=self.editor.get_row_change_table_sql(binding),
+                        column=self.editor.quote(db_field),
+                    ),
+                    frozenset({SchemaEffect.BACKFILL_ROWS}),
+                    recovery=self.editor.get_row_recovery(binding),
+                ),
             )
         )

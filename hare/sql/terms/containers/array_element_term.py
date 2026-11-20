@@ -26,6 +26,8 @@ class ArrayElementTerm(ContainerFunction):
         ValidationError: ``index`` isn't an int in range.
     """
 
+    structure_attributes = ("element_field", "index")
+
     function_name: ClassVar[str] = "array_element"
 
     def __init__(

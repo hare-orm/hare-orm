@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.classes.deferred_import import DeferredImport
 from hare.query.plans.description.plan_context import PlanContext
 
 if TYPE_CHECKING:
-    from hare.models import Model
-    from hare.query.expressions.conditions.q import Q
+    from hare.core.hare_context import HareContext
+    from hare.models.model_binding import ModelBinding
+    from hare.query.scopes.row_scopes import RowScopes
     from hare.query.scopes.row_visibility import RowVisibility
 
 
@@ -18,7 +20,7 @@ class ScopeValueSource:
     JOIN it is folded into.
 
     Attributes:
-        model: The joined model.
+        binding: The joined model's binding.
         visibility: The visibility the scope was read with, its tenant left to the active one
             unless the query pinned one - the plan key holds the rest.
         structure: The structure of the scope's condition when it was recorded, None when the
@@ -26,30 +28,15 @@ class ScopeValueSource:
         value_count: The number of its values.
     """
 
-    model: type[Model]
+    binding: ModelBinding
     visibility: RowVisibility
     structure: Any
     value_count: int
 
-    @staticmethod
-    def get_condition_values(condition: Q | None, structure: Any) -> list[Any] | None:
-        """The values of a condition of the structure it was recorded with.
+    #: The scope class imports plan descriptions, so it is loaded on first use.
+    row_scopes_class: ClassVar[DeferredImport[type[RowScopes]]]
 
-        Args:
-            condition: The condition now, None for none.
-            structure: Its structure when it was recorded, None when there was none.
-
-        Returns:
-            The values, None when the condition has another structure now.
-        """
-        if condition is None:
-            return [] if structure is None else None
-        description = condition.get_plan_description(PlanContext.EMPTY)
-        if description is None or description.structure != structure:
-            return None
-        return description.values
-
-    def get_values(self) -> list[Any] | None:
+    def get_values(self, *, application_context: HareContext | None = None) -> list[Any] | None:
         """The values of the scope as the current context makes it.
 
         Returns:
@@ -60,8 +47,15 @@ class ScopeValueSource:
         Raises:
             QueryError: The model is tenant-scoped and no tenant is active.
         """
-        # Local import: the scopes package imports the plans package.
-        from hare.query.scopes.row_scopes import RowScopes
+        condition = self.row_scopes_class.of(self.binding).get_condition(self.visibility)
+        if condition is None:
+            return [] if self.structure is None else None
+        description = condition.get_plan_description(
+            PlanContext(binding=self.binding, application_context=application_context)
+        )
+        if description is None or description.structure != self.structure:
+            return None
+        return description.values
 
-        condition = RowScopes.of(self.model).get_condition(self.visibility.get_for_active_tenant())
-        return self.get_condition_values(condition, self.structure)
+
+DeferredImport("hare.query.scopes.row_scopes", "RowScopes").install_on(ScopeValueSource, "row_scopes_class")

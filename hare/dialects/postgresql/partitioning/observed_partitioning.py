@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import decimal
+import hashlib
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -8,50 +10,29 @@ from hare.dialects.postgresql.enums import PartitionStrategy, RangeBound
 from hare.dialects.postgresql.partitioning.constants import (
     BOUND_VALUE_READERS_BY_COLUMN_TYPE,
     HASH_BOUND_PATTERN,
+    HASH_PARTITION_NAME_TEMPLATE,
     LIST_BOUND_PATTERN,
+    PARTITION_NAME_PATTERN,
     PARTITION_STRATEGY_BY_CATALOG_CODE,
     PARTITION_VALUE_NOT_SET,
     PARTITIONS_DIFFER_TEMPLATE,
-    POSTGRESQL_TYPE_ARGUMENTS_PATTERN,
     RANGE_BOUND_PATTERN,
 )
 from hare.dialects.postgresql.partitioning.hash_partitioning import HashPartitioning
 from hare.dialects.postgresql.partitioning.list_partitioning import ListPartitioning
 from hare.dialects.postgresql.partitioning.partitioning import Partitioning
+from hare.dialects.postgresql.partitioning.partitions.default_partition import DefaultPartition
 from hare.dialects.postgresql.partitioning.partitions.list_partition import ListPartition
 from hare.dialects.postgresql.partitioning.partitions.range_partition import RangePartition
 from hare.dialects.postgresql.partitioning.range_partitioning import RangePartitioning
+from hare.dialects.postgresql.types.postgresql_physical_type import PostgresqlPhysicalType
 from hare.exceptions import ConfigurationError
+from hare.inspectdb.introspection.catalog_sql import CatalogSql
 
 
 class ObservedPartitioning:
     """Reads how a table is partitioned off the PostgreSQL catalog - what ``inspectdb`` writes as
     ``PostgresqlTableOptions(partitioning=...)`` and ``hare drift`` compares with the declared one."""
-
-    @staticmethod
-    def split_values(text: str) -> list[str]:
-        """Splits the list of a bound (``'a', 'b''c', 3``) into its literals.
-
-        Args:
-            text: The list's text, without its parentheses.
-
-        Returns:
-            The literals, each as written.
-        """
-        values: list[str] = []
-        current: list[str] = []
-        in_string = False
-        for character in text:
-            if character == "'":
-                in_string = not in_string
-            if character == "," and not in_string:
-                values.append("".join(current).strip())
-                current = []
-            else:
-                current.append(character)
-        if current or values:
-            values.append("".join(current).strip())
-        return values
 
     @staticmethod
     def read_value(literal: str, column_type: str) -> Any:
@@ -72,7 +53,7 @@ class ObservedPartitioning:
         if text.startswith("'"):
             # 'it''s'::text - the literal, then a cast PostgreSQL may write after it.
             text = text[1 : text.rindex("'")].replace("''", "'")
-        base_type = POSTGRESQL_TYPE_ARGUMENTS_PATTERN.sub("", column_type).strip()
+        base_type = PostgresqlPhysicalType.from_sql(column_type).without_modifiers
         if base_type == "boolean":
             return text.lower() in {"true", "t"}
         reader = BOUND_VALUE_READERS_BY_COLUMN_TYPE.get(base_type)
@@ -90,7 +71,7 @@ class ObservedPartitioning:
         Returns:
             The values.
         """
-        literals = ObservedPartitioning.split_values(text)
+        literals = [term.strip() for term in CatalogSql.split_terms(text)] if text else []
         if len(column_types) == 1:
             return tuple(ObservedPartitioning.read_value(literal, column_types[0]) for literal in literals)
         return tuple(
@@ -110,7 +91,10 @@ class ObservedPartitioning:
         Returns:
             The name.
         """
-        return partition_table_name.removeprefix(f"{table_name}_")
+        name = partition_table_name.removeprefix(f"{table_name}_")
+        if re.fullmatch(PARTITION_NAME_PATTERN, name):
+            return name
+        return "partition_" + hashlib.sha256(partition_table_name.encode()).hexdigest()[:16]
 
     @staticmethod
     def build(table_name: str, rows: Sequence[Mapping[str, Any]]) -> Partitioning | None:
@@ -135,26 +119,46 @@ class ObservedPartitioning:
             return None
         strategy = PARTITION_STRATEGY_BY_CATALOG_CODE.get(first_row["strategy"])
         partition_rows = [row for row in rows if row["partition_table"] is not None]
-        default_partition: str | None = None
+        default_partition: DefaultPartition | str | None = None
         partitions: list[Any] = []
         moduli: set[int] = set()
+        hash_locations: list[tuple[int, str | None, str | None]] = []
         try:
             for row in partition_rows:
-                name = ObservedPartitioning.get_partition_name(table_name, row["partition_table"])
+                physical_table = row["partition_table"]
+                physical_schema = row.get("partition_schema")
+                schema = None if physical_schema == row.get("parent_schema") else physical_schema
+                name = ObservedPartitioning.get_partition_name(table_name, physical_table)
+                table = (
+                    None
+                    if physical_table == Partitioning.get_partition_table_name(table_name, name)
+                    else physical_table
+                )
                 bound = row["bound"]
                 if bound == "DEFAULT":
-                    default_partition = name
+                    default_partition = DefaultPartition(name, table=table, schema=schema) if table or schema else name
                 elif strategy == PartitionStrategy.HASH and (match := HASH_BOUND_PATTERN.fullmatch(bound)):
                     moduli.add(int(match["modulus"]))
+                    remainder = int(match["remainder"])
+                    hash_name = HASH_PARTITION_NAME_TEMPLATE.format(remainder=remainder)
+                    table = (
+                        None
+                        if physical_table == Partitioning.get_partition_table_name(table_name, hash_name)
+                        else physical_table
+                    )
+                    if table is not None or schema is not None:
+                        hash_locations.append((remainder, schema, table))
                 elif strategy == PartitionStrategy.LIST and (match := LIST_BOUND_PATTERN.fullmatch(bound)):
                     values = ObservedPartitioning.read_values(match["values"], column_types)
-                    partitions.append(ListPartition(name, values=values))
+                    partitions.append(ListPartition(name, values=values, table=table, schema=schema))
                 elif strategy == PartitionStrategy.RANGE and (match := RANGE_BOUND_PATTERN.fullmatch(bound)):
                     partitions.append(
                         RangePartition(
                             name,
                             from_values=ObservedPartitioning.read_values(match["from_values"], column_types),
                             to_values=ObservedPartitioning.read_values(match["to_values"], column_types),
+                            table=table,
+                            schema=schema,
                         )
                     )
                 else:
@@ -162,7 +166,9 @@ class ObservedPartitioning:
             if strategy == PartitionStrategy.HASH:
                 if len(moduli) != 1 or moduli != {len(partition_rows)}:
                     return None
-                return HashPartitioning(fields=key_columns, partition_count=len(partition_rows))
+                return HashPartitioning(
+                    fields=key_columns, partition_count=len(partition_rows), locations=tuple(sorted(hash_locations))
+                )
             if strategy == PartitionStrategy.LIST:
                 return ListPartitioning(
                     fields=key_columns, partitions=tuple(partitions), default_partition=default_partition

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Self
 
 from hare.dialects.base.literals.constants import SQL_NULL_BYTE, SQL_NULL_BYTE_MESSAGE
 from hare.exceptions import ValidationError
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
+    from hare.dialects.base.features import Features
+    from hare.sql.builder.tables.declarations import SourceBinding
     from hare.sql.terms.parameters.parameterizer import Parameterizer
 
 
@@ -36,6 +40,7 @@ class SqlContext:
     quote_char: str
     alias_quote_char: str
     dialect: Dialect
+    features: Features | None = None
     as_keyword: bool = False
     subquery: bool = False
     with_alias: bool = False
@@ -49,6 +54,12 @@ class SqlContext:
     wraps_negated_criteria: bool = False
     names_dialect_terms: bool = False
     connection_functions: list[str] | None = field(default=None, compare=False)
+    source_aliases: Mapping[SourceBinding, str] = field(default_factory=lambda: MappingProxyType({}), compare=False)
+
+    @property
+    def effective_features(self) -> Features:
+        """Connection capabilities for this statement, or dialect capabilities without one."""
+        return self.features if self.features is not None else self.dialect.features
 
     @staticmethod
     def quote_text(value: Any, quote_char: str | None) -> str:
@@ -125,14 +136,7 @@ class SqlContext:
         as_keyword = " AS " if self.as_keyword else " "
         return f"{sql}{as_keyword}{self.quote_alias(alias)}"
 
-    def __copy__(self) -> SqlContext:
-        # A shallow __dict__ copy without copy.copy()'s generic path - this runs for every rendered
-        # node.
-        new_context = type(self).__new__(type(self))
-        new_context.__dict__.update(self.__dict__)
-        return new_context
-
-    def copy(self, **kwargs: Any) -> SqlContext:
+    def copy(self, **kwargs: Any) -> Self:
         """A copy with the fields given changed - the context itself when they change nothing.
 
         Args:

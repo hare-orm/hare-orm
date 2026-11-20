@@ -5,12 +5,13 @@ import pytest
 import pytest_asyncio
 
 from hare.contrib import test
+from hare.core.hare_context import HareContext
 from hare.exceptions import DoesNotExist, FieldError, QueryError, UnSupportedError
 from hare.query.expressions import F, Q
 from tests.shared_models.testmodels import JSONFields
 
 
-async def get_by_data_filter(obj, **kwargs) -> JSONFields:
+async def get_by_data_filter(**kwargs) -> JSONFields:
     return await JSONFields.objects.get(data__filter=kwargs)
 
 
@@ -45,11 +46,11 @@ async def json_obj(db):
 
 @pytest.mark.asyncio
 async def test_json_in(json_obj):
-    assert await get_by_data_filter(json_obj, val__in=["word1", "word2"]) == json_obj
-    assert await get_by_data_filter(json_obj, val__not_in=["word3", "word4"]) == json_obj
+    assert await get_by_data_filter(val__in=["word1", "word2"]) == json_obj
+    assert await get_by_data_filter(val__not_in=["word3", "word4"]) == json_obj
 
     with pytest.raises(DoesNotExist):
-        await get_by_data_filter(json_obj, val__in=["doesnotexist"])
+        await get_by_data_filter(val__in=["doesnotexist"])
 
 
 @pytest.mark.asyncio
@@ -58,11 +59,11 @@ async def test_json_numeric_in(json_obj):
     Decimal)`, always False for is_in/not_in's list-shaped value - int_val__in=[123, 456] crashed
     outright (asyncpg tried to bind an int against the JSON path's ->>'...' text extraction),
     where int_val__gte=100 (same field, a scalar comparison operator) already worked."""
-    assert await get_by_data_filter(json_obj, int_val__in=[123, 456]) == json_obj
-    assert await get_by_data_filter(json_obj, int_val__not_in=[999, 888]) == json_obj
+    assert await get_by_data_filter(int_val__in=[123, 456]) == json_obj
+    assert await get_by_data_filter(int_val__not_in=[999, 888]) == json_obj
 
     with pytest.raises(DoesNotExist):
-        await get_by_data_filter(json_obj, int_val__in=[999, 888])
+        await get_by_data_filter(int_val__in=[999, 888])
 
 
 @pytest.mark.asyncio
@@ -73,71 +74,71 @@ async def test_json_bool_comparisons(json_obj):
     parameter, and every one of these crashed outright with "operator does not exist: text =
     boolean" (or "numeric >= boolean" for the __gte case, since a comparison operator forced a
     numeric cast regardless of the value's actual type)."""
-    assert await get_by_data_filter(json_obj, bool_val=True) == json_obj
-    assert await get_by_data_filter(json_obj, bool_val__not=False) == json_obj
-    assert await get_by_data_filter(json_obj, bool_val__in=[True]) == json_obj
-    assert await get_by_data_filter(json_obj, bool_val__gte=True) == json_obj
+    assert await get_by_data_filter(bool_val=True) == json_obj
+    assert await get_by_data_filter(bool_val__not=False) == json_obj
+    assert await get_by_data_filter(bool_val__in=[True]) == json_obj
+    assert await get_by_data_filter(bool_val__gte=True) == json_obj
 
     with pytest.raises(DoesNotExist):
-        await get_by_data_filter(json_obj, bool_val=False)
+        await get_by_data_filter(bool_val=False)
 
 
 @pytest.mark.asyncio
 async def test_json_defaults(json_obj):
-    assert await get_by_data_filter(json_obj, val__not="word2") == json_obj
-    assert await get_by_data_filter(json_obj, val__isnull=False) == json_obj
-    assert await get_by_data_filter(json_obj, val__not_isnull=True) == json_obj
+    assert await get_by_data_filter(val__not="word2") == json_obj
+    assert await get_by_data_filter(val__isnull=False) == json_obj
+    assert await get_by_data_filter(val__not_isnull=True) == json_obj
 
 
 @pytest.mark.asyncio
 async def test_json_int_comparisons(json_obj):
-    assert await get_by_data_filter(json_obj, int_val=123) == json_obj
-    assert await get_by_data_filter(json_obj, int_val__gt=100) == json_obj
-    assert await get_by_data_filter(json_obj, int_val__gte=100) == json_obj
-    assert await get_by_data_filter(json_obj, int_val__lt=200) == json_obj
-    assert await get_by_data_filter(json_obj, int_val__lte=200) == json_obj
-    assert await get_by_data_filter(json_obj, int_val__range=[100, 200]) == json_obj
+    assert await get_by_data_filter(int_val=123) == json_obj
+    assert await get_by_data_filter(int_val__gt=100) == json_obj
+    assert await get_by_data_filter(int_val__gte=100) == json_obj
+    assert await get_by_data_filter(int_val__lt=200) == json_obj
+    assert await get_by_data_filter(int_val__lte=200) == json_obj
+    assert await get_by_data_filter(int_val__range=[100, 200]) == json_obj
 
     with pytest.raises(DoesNotExist):
-        await get_by_data_filter(json_obj, int_val__gt=1000)
+        await get_by_data_filter(int_val__gt=1000)
 
 
 @pytest.mark.asyncio
 async def test_json_float_comparisons(json_obj):
-    assert await get_by_data_filter(json_obj, float_val__gt=100.0) == json_obj
-    assert await get_by_data_filter(json_obj, float_val__gte=100.0) == json_obj
-    assert await get_by_data_filter(json_obj, float_val__lt=200.0) == json_obj
-    assert await get_by_data_filter(json_obj, float_val__lte=200.0) == json_obj
-    assert await get_by_data_filter(json_obj, float_val__range=[100.0, 200.0]) == json_obj
+    assert await get_by_data_filter(float_val__gt=100.0) == json_obj
+    assert await get_by_data_filter(float_val__gte=100.0) == json_obj
+    assert await get_by_data_filter(float_val__lt=200.0) == json_obj
+    assert await get_by_data_filter(float_val__lte=200.0) == json_obj
+    assert await get_by_data_filter(float_val__range=[100.0, 200.0]) == json_obj
 
     with pytest.raises(DoesNotExist):
-        await get_by_data_filter(json_obj, int_val__gt=1000.0)
+        await get_by_data_filter(int_val__gt=1000.0)
 
 
 @pytest.mark.asyncio
 async def test_json_string_comparisons(json_obj):
-    assert await get_by_data_filter(json_obj, val__contains="ord") == json_obj
-    assert await get_by_data_filter(json_obj, val__icontains="OrD") == json_obj
-    assert await get_by_data_filter(json_obj, val__startswith="wor") == json_obj
-    assert await get_by_data_filter(json_obj, val__istartswith="wOr") == json_obj
-    assert await get_by_data_filter(json_obj, val__endswith="rd1") == json_obj
-    assert await get_by_data_filter(json_obj, val__iendswith="Rd1") == json_obj
-    assert await get_by_data_filter(json_obj, val__iexact="wOrD1") == json_obj
+    assert await get_by_data_filter(val__contains="ord") == json_obj
+    assert await get_by_data_filter(val__icontains="OrD") == json_obj
+    assert await get_by_data_filter(val__startswith="wor") == json_obj
+    assert await get_by_data_filter(val__istartswith="wOr") == json_obj
+    assert await get_by_data_filter(val__endswith="rd1") == json_obj
+    assert await get_by_data_filter(val__iendswith="Rd1") == json_obj
+    assert await get_by_data_filter(val__iexact="wOrD1") == json_obj
 
     with pytest.raises(DoesNotExist):
-        await get_by_data_filter(json_obj, val__contains="doesnotexist")
+        await get_by_data_filter(val__contains="doesnotexist")
 
 
 @pytest.mark.asyncio
 async def test_date_comparisons(json_obj):
-    assert await get_by_data_filter(json_obj, date_val=datetime(1970, 1, 1, 12, 36, 59, 123456)) == json_obj
-    assert await get_by_data_filter(json_obj, date_val__year=1970) == json_obj
-    assert await get_by_data_filter(json_obj, date_val__month=1) == json_obj
-    assert await get_by_data_filter(json_obj, date_val__day=1) == json_obj
-    assert await get_by_data_filter(json_obj, date_val__hour=12) == json_obj
-    assert await get_by_data_filter(json_obj, date_val__minute=36) == json_obj
-    assert await get_by_data_filter(json_obj, date_val__second=59) == json_obj
-    assert await get_by_data_filter(json_obj, date_val__microsecond=123456) == json_obj
+    assert await get_by_data_filter(date_val=datetime(1970, 1, 1, 12, 36, 59, 123456)) == json_obj
+    assert await get_by_data_filter(date_val__year=1970) == json_obj
+    assert await get_by_data_filter(date_val__month=1) == json_obj
+    assert await get_by_data_filter(date_val__day=1) == json_obj
+    assert await get_by_data_filter(date_val__hour=12) == json_obj
+    assert await get_by_data_filter(date_val__minute=36) == json_obj
+    assert await get_by_data_filter(date_val__second=59) == json_obj
+    assert await get_by_data_filter(date_val__microsecond=123456) == json_obj
 
 
 @pytest.mark.asyncio
@@ -149,7 +150,6 @@ async def test_json_date_range(json_obj):
     invalid-numeric-syntax error against a date-shaped JSON string."""
     assert (
         await get_by_data_filter(
-            json_obj,
             date_val__range=[datetime(1970, 1, 1, 0, 0, 0), datetime(1970, 1, 2, 0, 0, 0)],
         )
         == json_obj
@@ -157,49 +157,48 @@ async def test_json_date_range(json_obj):
 
     with pytest.raises(DoesNotExist):
         await get_by_data_filter(
-            json_obj,
             date_val__range=[datetime(1971, 1, 1, 0, 0, 0), datetime(1971, 1, 2, 0, 0, 0)],
         )
 
 
 @pytest.mark.asyncio
 async def test_json_list(json_obj):
-    assert await get_by_data_filter(json_obj, int_list__0__gt=0) == json_obj
-    assert await get_by_data_filter(json_obj, int_list__0__lt=2) == json_obj
+    assert await get_by_data_filter(int_list__0__gt=0) == json_obj
+    assert await get_by_data_filter(int_list__0__lt=2) == json_obj
 
     with pytest.raises(DoesNotExist):
-        await get_by_data_filter(json_obj, int_list__0__range=(20, 30))
+        await get_by_data_filter(int_list__0__range=(20, 30))
 
 
 @pytest.mark.asyncio
 async def test_nested(json_obj):
-    assert await get_by_data_filter(json_obj, nested__val="word2") == json_obj
-    assert await get_by_data_filter(json_obj, nested__int_val=456) == json_obj
-    assert await get_by_data_filter(json_obj, nested__date_val=datetime(1970, 1, 1, 12, 36, 59, 123456)) == json_obj
-    assert await get_by_data_filter(json_obj, nested__val__icontains="orD") == json_obj
-    assert await get_by_data_filter(json_obj, nested__int_val__gte=400) == json_obj
-    assert await get_by_data_filter(json_obj, nested__date_val__year=1970) == json_obj
-    assert await get_by_data_filter(json_obj, nested__date_val__month=1) == json_obj
-    assert await get_by_data_filter(json_obj, nested__date_val__day=1) == json_obj
-    assert await get_by_data_filter(json_obj, nested__date_val__hour=12) == json_obj
-    assert await get_by_data_filter(json_obj, nested__date_val__minute=36) == json_obj
-    assert await get_by_data_filter(json_obj, nested__date_val__second=59) == json_obj
-    assert await get_by_data_filter(json_obj, nested__date_val__microsecond=123456) == json_obj
-    assert await get_by_data_filter(json_obj, nested__val__iexact="wOrD2") == json_obj
-    assert await get_by_data_filter(json_obj, nested__int_val__lt=500) == json_obj
-    assert await get_by_data_filter(json_obj, nested__date_val__year=1970) == json_obj
-    assert await get_by_data_filter(json_obj, nested__date_val__month=1) == json_obj
-    assert await get_by_data_filter(json_obj, nested__date_val__day=1) == json_obj
-    assert await get_by_data_filter(json_obj, nested__date_val__hour=12) == json_obj
-    assert await get_by_data_filter(json_obj, nested__date_val__minute=36) == json_obj
-    assert await get_by_data_filter(json_obj, nested__date_val__second=59) == json_obj
-    assert await get_by_data_filter(json_obj, nested__date_val__microsecond=123456) == json_obj
-    assert await get_by_data_filter(json_obj, nested__val__iexact="wOrD2") == json_obj
+    assert await get_by_data_filter(nested__val="word2") == json_obj
+    assert await get_by_data_filter(nested__int_val=456) == json_obj
+    assert await get_by_data_filter(nested__date_val=datetime(1970, 1, 1, 12, 36, 59, 123456)) == json_obj
+    assert await get_by_data_filter(nested__val__icontains="orD") == json_obj
+    assert await get_by_data_filter(nested__int_val__gte=400) == json_obj
+    assert await get_by_data_filter(nested__date_val__year=1970) == json_obj
+    assert await get_by_data_filter(nested__date_val__month=1) == json_obj
+    assert await get_by_data_filter(nested__date_val__day=1) == json_obj
+    assert await get_by_data_filter(nested__date_val__hour=12) == json_obj
+    assert await get_by_data_filter(nested__date_val__minute=36) == json_obj
+    assert await get_by_data_filter(nested__date_val__second=59) == json_obj
+    assert await get_by_data_filter(nested__date_val__microsecond=123456) == json_obj
+    assert await get_by_data_filter(nested__val__iexact="wOrD2") == json_obj
+    assert await get_by_data_filter(nested__int_val__lt=500) == json_obj
+    assert await get_by_data_filter(nested__date_val__year=1970) == json_obj
+    assert await get_by_data_filter(nested__date_val__month=1) == json_obj
+    assert await get_by_data_filter(nested__date_val__day=1) == json_obj
+    assert await get_by_data_filter(nested__date_val__hour=12) == json_obj
+    assert await get_by_data_filter(nested__date_val__minute=36) == json_obj
+    assert await get_by_data_filter(nested__date_val__second=59) == json_obj
+    assert await get_by_data_filter(nested__date_val__microsecond=123456) == json_obj
+    assert await get_by_data_filter(nested__val__iexact="wOrD2") == json_obj
 
 
 @pytest.mark.asyncio
 async def test_nested_nested(json_obj):
-    assert await get_by_data_filter(json_obj, nested__nested__val="word3") == json_obj
+    assert await get_by_data_filter(nested__nested__val="word3") == json_obj
 
 
 @pytest.mark.asyncio
@@ -839,7 +838,7 @@ async def test_a_path_comparison_is_the_databases_and_filter_follows_the_value_t
 
     # jsonb orders a boolean above a number, a string below; SQLite's json_extract() reads true as 1
     # and orders text above every number.
-    is_sqlite = JSONFields._meta.connection.dialect.name == "sqlite"
+    is_sqlite = HareContext.require_current().apps.get_queryset(JSONFields).get_connection().dialect.name == "sqlite"
     assert await ids(data__v__gt=10) == ([number.id, text.id] if is_sqlite else [number.id, boolean.id])
     assert await get_ids_by_data_filter(v__gt=10) == [number.id]
     assert await ids(data__at__gt=date(2024, 1, 1)) == [number.id, boolean.id, text.id]
@@ -899,7 +898,7 @@ async def test_json_path_annotation_takes_the_whole_field_container_lookups(db):
     assert await matching(picked__has_key="c") == [object_row.id]
     assert await matching(picked__has_keys=["c", "d"]) == [object_row.id]
     assert await matching(picked__has_any_keys=["x", "d"]) == [object_row.id]
-    if JSONFields._meta.connection.dialect.name != "sqlite":
+    if HareContext.require_current().apps.get_queryset(JSONFields).get_connection().dialect.name != "sqlite":
         # SQLite's JSON has no containment.
         assert await matching(picked__contained_by={"c": 1, "d": [1, 2], "e": 0}) == [object_row.id]
     assert await matching(picked__filter={"d__1": 2}) == [object_row.id]

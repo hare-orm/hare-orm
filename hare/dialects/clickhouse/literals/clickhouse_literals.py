@@ -12,6 +12,7 @@ from enum import Enum
 from typing import Any, ClassVar
 
 from hare.classes.value_descriptions import ValueDescriptions
+from hare.ddl.enums import SchemaNamespace, SchemaPartType
 from hare.dialects.base.literals.constants import SQL_NULL_BYTE, SQL_NULL_BYTE_VALUE_MESSAGE
 from hare.dialects.base.literals.sql_literals import SqlLiterals
 from hare.dialects.clickhouse.client.declarations import ClickhouseValueSet
@@ -43,6 +44,21 @@ class ClickhouseLiterals(SqlLiterals):
 
     writes_bound_values: ClassVar[bool] = True
 
+    def get_schema_object_key(
+        self, object_type: SchemaPartType, schema: str | None, table: str, name: str
+    ) -> tuple[SchemaNamespace, str | None, str | None, str] | None:
+        """Compare only objects sharing a physical name scope on this database."""
+        if object_type is SchemaPartType.INDEX:
+            return self._get_schema_object_key(SchemaNamespace.INDEX, schema, table, name)
+        if object_type in (
+            SchemaPartType.TABLE,
+            SchemaPartType.VIEW,
+            SchemaPartType.MATERIALIZED_VIEW,
+            SchemaPartType.DICTIONARY,
+        ):
+            return self._get_schema_object_key(SchemaNamespace.RELATION, schema, None, name)
+        return None
+
     def quote_identifier(self, name: str) -> str:
         # A backslash escapes the next character of a quoted name - doubled, it is itself.
         return super().quote_identifier(name.replace(CLICKHOUSE_BACKSLASH, CLICKHOUSE_ESCAPED_BACKSLASH))
@@ -61,9 +77,6 @@ class ClickhouseLiterals(SqlLiterals):
 
     def get_array_literal_sql(self, element_sqls: Sequence[str]) -> str:
         return f"[{','.join(element_sqls)}]"
-
-    def get_boolean_literal_sql(self, value: bool) -> str:
-        return "true" if value else "false"
 
     def get_literal_writers(self) -> dict[type, Callable[[Any], str]]:
         return {
@@ -284,7 +297,7 @@ class ClickhouseLiterals(SqlLiterals):
         column_type_sql = self.get_string_literal_sql(value.column_type)
         if value.value is None:
             value_sql = "NULL"
-        elif isinstance(value.value, list | dict) and not value.value:
+        elif isinstance(value.value, (list, dict)) and not value.value:
             value_sql = f"defaultValueOfTypeName({column_type_sql})"
         else:
             value_sql = f"CAST({self.get_literal_sql(value.value)}, {column_type_sql})"

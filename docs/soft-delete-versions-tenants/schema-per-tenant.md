@@ -62,10 +62,17 @@ class Invoice(Model):           # one table in each tenant's schema
   raises `ProtectedError` before anything is written. `restore(cascade=True)` brings back the rows
   deleted with it in every tenant's schema, and `delete_preview()` counts and lists them all. The
   transaction visits the schemas one by one (a `SET LOCAL search_path`), so the delete reads the list of
-  tenant schemas and costs a few statements per tenant. A hard delete the database's own `ON DELETE`
+  tenant schemas and costs a few statements per tenant. Each visit uses a separate savepoint client;
+  the enclosing wrappers keep their schema, and exceptions restore the previous context by rollback.
+  This atomicity applies to that database connection, not to writes routed to other databases. A hard delete
+  the database's own `ON DELETE`
   carries out in every schema visits none — only for a `PROTECT` relation, a `db_constraint=False` one,
   captured changes or an overridden `delete()` of a tenant's model. A schema without a model's table
   (made before its migration) holds no row of it and is passed over.
+  An explicit shared client passed through `using=` retains its actual schema even inside
+  a tenant scope; the schema visits still cover every tenant. Comparing a related model's
+  connection alias or capabilities does not select the ambient tenant's client. Ordinary
+  transactions still reject a change of tenant schema within the transaction.
 - A `Meta.tenant_schema` model on a connection without `tenant_schema_template` raises
   `ConfigurationError` on its first query and when its tables are created.
 
@@ -104,7 +111,10 @@ schema doesn't exist raises `ConfigurationError` naming it, until the schema is 
 
 Inside `Tenancy.scope(tenant)` of a single tenant, every query of the connection runs on a client of that
 tenant's schema: its connections have the search path `tenant_<tenant>, public` (the connection's own
-`schema` setting in place of `public` when given). A tenant's model reads and writes its tenant's table;
+`schema` setting in place of `public` when given). With an explicit `search_path`, the tenant schema
+is prepended to that path. `schema` remains one exact shared-schema name, including any commas or
+quotes in it; see [Schema and search path](../dialects/postgresql/connecting.md#search-path).
+A tenant's model reads and writes its tenant's table;
 a shared model is found in `public` through the same search path — joins between the two
 (`select_related("customer")`) are ordinary joins.
 
@@ -123,11 +133,17 @@ with Tenancy.scope(7):
   scope is entered); values naming the same schema (`7` and `"7"`) are the same tenant here too.
   A scope naming different schemas for the connection's tenant models raises `QueryError` on a query
   of the connection — it works in one schema.
-- A tenant's model queried with no scope, a scope of several tenants (`Tenancy.any_of(...)`),
+- Without an explicitly selected tenant client, a tenant's model queried with no scope, a scope of
+  several tenants (`Tenancy.any_of(...)`),
   `Tenancy.ALL`, or a scope given model by model naming none of the connection's tenant models raises
   `QueryError` — its table is reached inside a scope of a single tenant. A shared model works in every
   one of them, through the connection's own client.
-- A queryset runs in the schema of the tenant active when it is awaited, as a `Meta.tenant_field` model's
+- An explicit `.using(alias/client)` or `using=` on an instance or relation must also select a
+  tenant-schema client. Select the connection inside `Tenancy.scope(...)`, or pass a client already
+  bound to one tenant's schema. A shared client is refused before SQL, including for embedded
+  queries; explicitly selecting a connection does not disable the model's tenant checks.
+- A queryset without a pinned client runs in the schema of the tenant active when it is awaited, as a
+  `Meta.tenant_field` model's
   queryset filters by that tenant: built inside `Tenancy.scope("acme")` and awaited inside
   `Tenancy.scope(7)`, it reads `tenant_7`; awaited with no scope, it raises `QueryError`. The queries it
   runs then (`prefetch_related()`, a subquery) use the same schema, as for a

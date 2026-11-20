@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.migrations.operations.hare_operation import HareOperation
 from hare.migrations.state.state import State
@@ -53,23 +54,34 @@ class AlterModelSchema(HareOperation):
     ) -> None:
         if not state_editor:
             return
-        old_model = old_state.apps.get_model(f"{app_label}.{self.name}")
-        new_model = new_state.apps.get_model(f"{app_label}.{self.name}")
-        if (old_model._meta.schema or None) == (new_model._meta.schema or None):
+        old_binding = old_state.apps.get_binding(f"{app_label}.{self.name}")
+        new_binding = new_state.apps.get_binding(f"{app_label}.{self.name}")
+        if (old_binding.schema or None) == (new_binding.schema or None):
             return
-        state_editor.schemas.raise_if_model_unmovable(old_model)
-        await state_editor.schemas.move_table_to_schema(
-            new_model._meta.db_table, old_model._meta.schema, new_model._meta.schema
+        state_editor.schemas.raise_if_model_unmovable(old_binding)
+        steps = list(
+            state_editor.schemas.get_table_schema_move_plan(
+                new_binding.db_table,
+                old_binding.schema,
+                new_binding.schema,
+            ).steps
         )
         # A partition is a table of its own, left where it is by the move of the table it is of.
-        for partition_table_name in state_editor.table_partitions.get_partition_table_names(old_model):
-            await state_editor.schemas.move_table_to_schema(
-                partition_table_name, old_model._meta.schema, new_model._meta.schema
+        old_locations = state_editor.table_partitions.get_partition_locations(old_binding)
+        new_locations = state_editor.table_partitions.get_partition_locations(new_binding)
+        for name, (partition_schema, partition_table) in old_locations.items():
+            new_partition_schema, _ = new_locations[name]
+            steps.extend(
+                state_editor.schemas.get_table_schema_move_plan(
+                    partition_table,
+                    partition_schema,
+                    new_partition_schema,
+                ).steps
             )
         # An automatic M2M through table lives in the schema of the model declaring the relation.
-        for field_name in sorted(new_model._meta.many_to_many_fields):
-            old_field = old_model._meta.fields_map.get(field_name)
-            new_field = new_model._meta.fields_map[field_name]
+        for field_name in sorted(new_binding.many_to_many_fields):
+            old_field = old_binding.fields_map.get(field_name)
+            new_field = new_binding.fields_map[field_name]
             if (
                 not isinstance(old_field, ManyToManyFieldInstance)
                 or not isinstance(new_field, ManyToManyFieldInstance)
@@ -78,22 +90,41 @@ class AlterModelSchema(HareOperation):
                 or new_field.through_model is not None
             ):
                 continue
-            await state_editor.schemas.move_table_to_schema(
-                old_field.through, old_field.through_schema, new_field.through_schema
+            steps.extend(
+                state_editor.schemas.get_table_schema_move_plan(
+                    old_field.through, old_field.through_schema, new_field.through_schema
+                ).steps
             )
-        old_schema, new_schema = old_model._meta.schema, new_model._meta.schema
+        old_schema, new_schema = (
+            old_binding.schema,
+            new_binding.schema,
+        )
         # The objects the model declares live in its schema - each dialect part moves its own.
-        old_meta = old_model._meta
-        for view in old_meta.views:
-            await state_editor.views.move_to_schema(old_model, view, old_schema, new_schema)
-        for materialized_view in old_meta.materialized_views:
-            await state_editor.materialized_views.move_to_schema(old_model, materialized_view, old_schema, new_schema)
-        for function in old_meta.functions:
-            await state_editor.database_functions.move_to_schema(old_model, function, old_schema, new_schema)
-        for sequence in old_meta.sequences:
-            await state_editor.sequences.move_to_schema(old_model, sequence, old_schema, new_schema)
-        for trigger in old_meta.triggers:
-            await state_editor.trigger_statements.move_trigger_to_schema(old_model, trigger, old_schema, new_schema)
+        for view in old_binding.views:
+            steps.extend(state_editor.views.get_schema_move_plan(old_binding, view, old_schema, new_schema).steps)
+        for materialized_view in old_binding.materialized_views:
+            steps.extend(
+                state_editor.materialized_views.get_schema_move_plan(
+                    old_binding, materialized_view, old_schema, new_schema
+                ).steps
+            )
+        for function in old_binding.functions:
+            steps.extend(
+                state_editor.database_functions.get_schema_move_plan(
+                    old_binding, function, old_schema, new_schema
+                ).steps
+            )
+        for sequence in old_binding.sequences:
+            steps.extend(
+                state_editor.sequences.get_schema_move_plan(old_binding, sequence, old_schema, new_schema).steps
+            )
+        for trigger in old_binding.triggers:
+            steps.extend(
+                state_editor.trigger_statements.get_trigger_schema_move_plan(
+                    old_binding, trigger, old_schema, new_schema
+                ).steps
+            )
+        await SchemaChangePlan(tuple(steps)).execute(state_editor)
 
     async def database_forward(
         self,

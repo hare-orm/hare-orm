@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from copy import copy
 from typing import TYPE_CHECKING, Any
 
@@ -15,7 +16,7 @@ from hare.query.generic_foreign_keys.constants import (
 from hare.query.generic_foreign_keys.generic_foreign_key_paths import GenericForeignKeyPaths
 
 if TYPE_CHECKING:
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class GenericForeignKeyFilters:
@@ -25,11 +26,11 @@ class GenericForeignKeyFilters:
     (``comment__target__type``)."""
 
     @staticmethod
-    def get_branch_q(model: type[Model], key: str, value: Any) -> Q | None:
+    def get_branch_q(binding: ModelBinding, key: str, value: Any) -> Q | None:
         """The condition over the branches a filter on a generic foreign key stands for.
 
         Args:
-            model: The model the filter is resolved on.
+            binding: The model the filter is resolved on.
             key: The filter key.
             value: Its value.
 
@@ -39,7 +40,7 @@ class GenericForeignKeyFilters:
         Raises:
             FieldError: A lookup the field doesn't have.
         """
-        filter_parts = GenericForeignKeyPaths.get_filter_parts(model, key)
+        filter_parts = GenericForeignKeyPaths.get_filter_parts(binding, key)
         if filter_parts is None:
             return None
         relation_path, generic_field, compares_type, lookup = filter_parts
@@ -82,9 +83,11 @@ class GenericForeignKeyFilters:
         )
 
     @staticmethod
-    def get_never_q(prefix: str, generic_field: GenericForeignKeyFieldInstance[Any]) -> Q:
-        """A condition no row meets."""
-        return Q(**{f"{prefix}{generic_field.branch_names[0]}__in": []})
+    def _combine_branches(prefix: str, generic_field: GenericForeignKeyFieldInstance[Any], conditions: list[Q]) -> Q:
+        """Match any assembled branch, or no row when there are no branches."""
+        if not conditions:
+            return Q(**{f"{prefix}{generic_field.branch_names[0]}__in": []})
+        return conditions[0] if len(conditions) == 1 else Q.with_connector(Connector.OR, *conditions)
 
     @staticmethod
     def get_type_q(prefix: str, generic_field: GenericForeignKeyFieldInstance[Any], types: list[Any]) -> Q:
@@ -105,9 +108,7 @@ class GenericForeignKeyFilters:
         ]
         if None in types:
             conditions.append(GenericForeignKeyFilters.get_isnull_q(prefix, generic_field, True))
-        if not conditions:
-            return GenericForeignKeyFilters.get_never_q(prefix, generic_field)
-        return conditions[0] if len(conditions) == 1 else Q.with_connector(Connector.OR, *conditions)
+        return GenericForeignKeyFilters._combine_branches(prefix, generic_field, conditions)
 
     @staticmethod
     def get_objects_q(prefix: str, generic_field: GenericForeignKeyFieldInstance[Any], values: list[Any]) -> Q:
@@ -124,7 +125,7 @@ class GenericForeignKeyFilters:
         Raises:
             ValidationError: An object isn't of a target model.
         """
-        values_by_branch: dict[str, list[Any]] = {}
+        values_by_branch: defaultdict[str, list[Any]] = defaultdict(list)
         conditions: list[Q] = []
         for value in values:
             if value is None:
@@ -133,14 +134,14 @@ class GenericForeignKeyFilters:
                 # {"type": "post", "id": 1} - the key columns of its branch; a key with a None part, like
                 # an object's, is no row's.
                 column_values = generic_field.get_column_values(value)
-                branch = generic_field.model._meta.fields_map[value[GENERIC_FOREIGN_KEY_TYPE_FIELD]]
+                branch = generic_field._binding.fields_map[value[GENERIC_FOREIGN_KEY_TYPE_FIELD]]
                 key_values = {column: column_values[column] for column in branch.source_fields}  # type: ignore[attr-defined]
                 if None not in key_values.values():
                     conditions.append(
                         Q(**{f"{prefix}{column}": key_value for column, key_value in key_values.items()})
                     )
                 continue
-            values_by_branch.setdefault(generic_field.get_branch_of(value), []).append(value)
+            values_by_branch[generic_field.get_branch_of(value)].append(value)
         conditions.extend(
             Q(**{f"{prefix}{branch_name}": branch_values[0]})
             if len(branch_values) == 1
@@ -149,28 +150,25 @@ class GenericForeignKeyFilters:
         )
         if None in values:
             conditions.append(GenericForeignKeyFilters.get_isnull_q(prefix, generic_field, True))
-        if not conditions:
-            return GenericForeignKeyFilters.get_never_q(prefix, generic_field)
-        return conditions[0] if len(conditions) == 1 else Q.with_connector(Connector.OR, *conditions)
+        return GenericForeignKeyFilters._combine_branches(prefix, generic_field, conditions)
 
     @staticmethod
-    def rewrite_q(model: type[Model], condition: Q) -> Q:
+    def rewrite_q(binding: ModelBinding, condition: Q) -> Q:
         """A ``Q`` tree with every filter naming a generic foreign key turned into its condition over
         the branches.
 
         Args:
-            model: The model the condition is resolved on.
+            binding: The model the condition is resolved on.
             condition: The condition.
 
         Returns:
             The rewritten copy - ``condition`` itself when nothing names a generic foreign key.
         """
-        # Loops and list comprehensions, not generators: this runs for every condition of a filter
-        # once any model declares a generic foreign key.
-        if condition.children:
-            children = [GenericForeignKeyFilters.rewrite_q(model, child) for child in condition.children]
+        source_children = condition.children
+        if source_children:
+            children = [GenericForeignKeyFilters.rewrite_q(binding, child) for child in source_children]
             changed = False
-            for child, original in zip(children, condition.children, strict=True):
+            for child, original in zip(children, source_children, strict=True):
                 if child is not original:
                     changed = True
                     break
@@ -181,13 +179,10 @@ class GenericForeignKeyFilters:
             return rewritten
         if not condition.filters:
             return condition
-        declared_names = GenericForeignKeyFieldInstance.declared_names
         branch_conditions = {
             key: branch_q
             for key, value in condition.filters.items()
-            # Checked here first: most keys name no generic foreign key.
-            if (key in declared_names or ("__" in key and not declared_names.isdisjoint(key.split("__"))))
-            and (branch_q := GenericForeignKeyFilters.get_branch_q(model, key, value)) is not None
+            if (branch_q := GenericForeignKeyFilters.get_branch_q(binding, key, value)) is not None
         }
         if not branch_conditions:
             return condition
@@ -203,14 +198,14 @@ class GenericForeignKeyFilters:
 
     @staticmethod
     def rewrite_arguments(
-        model: type[Model], conditions: tuple[Any, ...], kwargs: dict[str, Any]
+        binding: ModelBinding, conditions: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> tuple[tuple[Any, ...], dict[str, Any]]:
         """The arguments of ``filter()``/``exclude()``/``get()`` with every filter naming a generic
         foreign key turned into its condition over the branches - such a keyword argument becomes
         a ``Q`` argument.
 
         Args:
-            model: The queryset's model.
+            binding: The queryset's model.
             conditions: The ``Q``/``Exists`` arguments.
             kwargs: The keyword filters.
 
@@ -218,13 +213,19 @@ class GenericForeignKeyFilters:
             The conditions and the keyword filters - the ones given when nothing names a generic
             foreign key.
         """
-        if not GenericForeignKeyFieldInstance.declared_names:
-            return conditions, kwargs
+        if not conditions and not binding.generic_foreign_key_fields:
+            has_nested_path = False
+            for key in kwargs:
+                if "__" in key:
+                    has_nested_path = True
+                    break
+            if not has_nested_path:
+                return conditions, kwargs
         changed = False
         rewritten_conditions = conditions
         if conditions:
             rewritten_list = [
-                GenericForeignKeyFilters.rewrite_q(model, condition) if isinstance(condition, Q) else condition
+                GenericForeignKeyFilters.rewrite_q(binding, condition) if isinstance(condition, Q) else condition
                 for condition in conditions
             ]
             for rewritten, original in zip(rewritten_list, conditions, strict=True):
@@ -232,19 +233,18 @@ class GenericForeignKeyFilters:
                     changed = True
                     rewritten_conditions = tuple(rewritten_list)
                     break
-        declared_names = GenericForeignKeyFieldInstance.declared_names
-        branch_conditions: list[Q] = []
-        plain_kwargs: dict[str, Any] = {}
+        branch_conditions: list[Q] | None = None
+        plain_kwargs = kwargs
         for key, value in kwargs.items():
-            branch_q = (
-                GenericForeignKeyFilters.get_branch_q(model, key, value)
-                if key in declared_names or ("__" in key and not declared_names.isdisjoint(key.split("__")))
-                else None
-            )
-            if branch_q is None:
-                plain_kwargs[key] = value
-            else:
+            branch_q = GenericForeignKeyFilters.get_branch_q(binding, key, value)
+            if branch_q is not None:
+                if branch_conditions is None:
+                    branch_conditions = []
+                    plain_kwargs = kwargs.copy()
                 branch_conditions.append(branch_q)
-        if not branch_conditions and not changed:
-            return conditions, kwargs
+                del plain_kwargs[key]
+        if branch_conditions is None:
+            if not changed:
+                return conditions, kwargs
+            return rewritten_conditions, kwargs
         return (*rewritten_conditions, *branch_conditions), plain_kwargs

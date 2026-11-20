@@ -14,9 +14,7 @@ class ClickhouseQueryTemplates:
     placeholder: a statement's text is scanned for its placeholders once, not on every run."""
 
     #: The format string and the index of the value of each ``{}``, by the statement's text.
-    templates: ClassVar[Cache[tuple[str, tuple[int, ...]]]] = Cache(
-        CLICKHOUSE_QUERY_TEMPLATE_CACHE_MAX_SIZE, holds_sql=False, keyed_by_model=False
-    )
+    templates: ClassVar[Cache[tuple[str, tuple[int, ...]]]] = Cache(CLICKHOUSE_QUERY_TEMPLATE_CACHE_MAX_SIZE)
 
     @classmethod
     def get_inlined_query(cls, query: str, values: Sequence[Any], get_literal_sql: Callable[[Any], str]) -> str:

@@ -1,6 +1,6 @@
-checkfiles = hare/ tests/ conftest.py mkdocs_hooks/
+checkfiles = hare/ tests/ conftest.py mkdocs_hooks/ .github/scripts/
 # The tests of the static types (assert_type) are checked too - at run time assert_type checks nothing.
-mypy_checkfiles = hare/ conftest.py mkdocs_hooks/ tests/queries/values/test_values_list_types.py tests/queries/retrieval/test_get_exceptions.py
+mypy_checkfiles = hare/ conftest.py mkdocs_hooks/ .github/scripts/ tests/queries/values/test_values_list_types.py tests/queries/retrieval/test_get_exceptions.py
 py_warn = PYTHONDEVMODE=1
 pytest_opts = -n auto --tb=native -q --durations=25 --verify-plans
 # The tests marked database_independent read no test database - the mypy plugin's runs, the stubs,
@@ -52,14 +52,10 @@ clickhouse_no_core_dumps = --ulimit core=0
 test_container_logs = --log-opt max-size=20m --log-opt max-file=2
 
 # HARE_TEST_DB's "\{\}" is a literal, backslash-escaped "{}" placeholder - conftest.py's
-# _resolve_db_url() and DbUrlConfigGenerator.expand() both unescape it once and fill it with a
+# _get_test_database_url() and DbUrlConfigGenerator.expand() both unescape it once and fill it with a
 # fresh per-run UUID, so parallel/repeated test runs never collide on the same throwaway database
-# name (see _resolve_db_url()'s own docstring for the real "database does not exist" CI bug this
-# fixed). MSYS2_ENV_CONV_EXCL is required here specifically for Windows Git Bash: without it, MSYS
-# silently mangles "\{\}" into "/{/}" before Python ever sees it (verified directly - breaks
-# test_postgres_asyncpg and test_postgres_rust identically); harmless no-op on real Linux/macOS
-# shells, where this whole variable is simply unrecognized.
-test_db_env = MSYS2_ENV_CONV_EXCL=HARE_TEST_DB HARE_TEST_DB
+# name. The fixture fills it before sharing the URL with test modules.
+test_db_env = HARE_TEST_DB
 
 help:
 	@echo  "Hare ORM development makefile"
@@ -94,7 +90,6 @@ help:
 	@echo  "    matrix_venvs       Creates the virtualenvs of the matrix runs MATRIX_OPTIONS choose - .venv-<python>-<environment>[-<driver extra>]"
 	@echo  "    test_environment   Runs the tests of ENVIRONMENT (tests/matrix SUITE_ENVIRONMENTS) on HARE_TEST_DB in its virtualenv"
 	@echo  "    sqlite_versions    Downloads and prepares the matrix SQLite versions for each matrix Python"
-	@echo  "    spatialite         Downloads SpatiaLite for the SpatiaLite tests (Windows) and prints their variables"
 	@echo  "    test_clickhouse_up / test_clickhouse_down  Starts / removes the ClickHouse test server (ports 8124, 9124)"
 	@echo  "    test_clickhouse    Runs the ClickHouse dialect's tests over HTTP and over the native protocol"
 	@echo  "    test_clickhouse_cluster_up / test_clickhouse_cluster_down  Starts / removes the two-server ClickHouse cluster (ports 8126-8127, 9126-9127)"
@@ -102,22 +97,22 @@ help:
 	@echo  "    test_matrix        Runs every suite on every Python x server version of the matrix, prints a table"
 	@echo  "    lowest_dependencies_venv  Creates .venv-lowest: Python LOWEST_DEPENDENCIES_PYTHON (3.12), hare's direct dependencies at their lowest versions"
 	@echo  "    test_lowest_dependencies  Runs the suite in .venv-lowest on SQLite and Postgres via both drivers"
-	@echo  "    build_native       Builds rust.native (the rust_pg driver, row codecs) for this OS into rust/ (needs a Rust toolchain)"
+	@echo  "    build_native       Builds rust.native (the rust_pg driver, value helpers) for this OS into rust/ (needs a Rust toolchain)"
 	@echo  "    build_native_linux Builds the Linux rust.native of every matrix Python into rust/ in Docker"
-	@echo  "    build_native_windows Builds the Windows rust.native of every matrix Python (.venv-3.X-core) into rust/"
-	@echo  "    build_native_macos Builds the macOS rust.native (universal2) of every matrix Python (.venv-3.X-core) into rust/"
 	@echo  "    rust_check         Runs cargo fmt --check, clippy and the Rust unit tests"
 	@echo  "    test_postgres_rust Runs the test suite against Postgres via the rust_pg driver"
-	@echo  "    testall / ci       Runs check + test_database_independent, test_sqlite, test_postgres_asyncpg"
+	@echo  "    testall            Runs test_database_independent, test_sqlite, test_postgres_asyncpg"
+	@echo  "    ci                 Runs check and the testall suites"
 	@echo  "    docs               Builds the docs into site/, failing on a broken link or anchor"
 	@echo  "    build              Builds the sdist/wheel into dist/"
-	@echo  "    publish            Builds and uploads to PyPI via twine"
 
 up:
 	poetry lock
 
+compatible_extra_options = $(or $(shell poetry run python -m tests.matrix.matrix_catalog extras --prefix=--extras=),$(error Cannot read compatible extras))
+
 deps:
-	poetry install --all-extras --with pyright-cli,pytz $(options)
+	poetry install $(compatible_extra_options) --with pyright-cli,pytz $(options)
 
 
 # check/style/lint/codeqc are pure code-quality checks (formatting, types, security) - none of
@@ -144,17 +139,19 @@ _check:
 # and their shell scripts through shellcheck. The default runs the pinned actionlint image, which
 # carries shellcheck; `make actionlint ACTIONLINT=actionlint` runs an installed binary instead.
 actionlint_image = rhysd/actionlint:1.7.12
-ACTIONLINT ?= MSYS_NO_PATHCONV=1 docker run --rm -v "$(CURDIR)":/repo -w /repo $(actionlint_image)
+ACTIONLINT ?= docker run --rm -v "$(CURDIR)":/repo -w /repo $(actionlint_image)
 actionlint:
 	$(ACTIONLINT) -color
 
 style: deps
+	"$(MAKE)" _style
+
+_style:
 	poetry run ruff format $(checkfiles)
 	poetry run ruff check --fix $(checkfiles)
 
-lint: deps _lint
-_lint:
-	"$(MAKE)" style
+lint: deps
+	"$(MAKE)" _style
 	"$(MAKE)" _codeqc
 
 codeqc: deps _codeqc
@@ -184,7 +181,7 @@ test_timing:
 # whole suite behaves identically with or without it otherwise, so running every test a second
 # time here just to exercise this one query param buys nothing.
 test_sqlite_regexp:
-	$(py_warn) HARE_TEST_DB=sqlite+aiosqlite://:memory:?install_regexp_functions=True poetry run pytest $(pytest_opts) tests/queries/filtering/test_posix_regex_filter.py tests/backends/test_sqlite_client.py
+	$(py_warn) HARE_TEST_DB=sqlite+aiosqlite://:memory:?install_regexp_functions=True poetry run pytest $(pytest_opts) $(call matrix_catalog,paths.sqlite_regexp)
 
 # A new poetry project adding hare-orm from this checkout as its dependency (tests/package/test_version.py).
 test_poetry_add:
@@ -251,8 +248,8 @@ test_pgbouncer:
 # The ClickHouse test server (hare.dialects.clickhouse) - its HTTP interface on port 8124 and its
 # native protocol on 9124 (the benchmark's SQLAlchemy and Django participants use it), the
 # default user's password HARE_CLICKHOUSE_PASS. The server is its own ClickHouse Keeper (port 9182 on
-# the host) with transactions on (tests/docker/clickhouse). test_clickhouse runs the dialect's own tests:
-# the shared test models have keys the database generates, which ClickHouse doesn't.
+# the host) with transactions on (tests/docker/clickhouse). test_clickhouse uses the catalog selection:
+# dialect tests, contract matrices and selected field tests. Other shared models require unsupported constraints.
 clickhouse_image = hare-orm-test-clickhouse:25.8
 clickhouse_container = hare-orm-test-clickhouse
 HARE_CLICKHOUSE_PASS ?= clickhouse
@@ -265,11 +262,11 @@ test_clickhouse_up:
 test_clickhouse_down:
 	docker rm -f $(clickhouse_container)
 
-# Over both drivers: clickhouse-connect on the HTTP interface, clickhouse-driver on the native protocol. The
+# Over compatible drivers: clickhouse-connect on HTTP, clickhouse-driver on the native protocol. The
 # connections name the server's Keeper, so a test database's key series are deleted with it.
 test_clickhouse:
-	$(py_warn) $(test_db_env)="clickhouse+clickhouse-connect://default:$(HARE_CLICKHOUSE_PASS)@127.0.0.1:8124/test_\{\}?keeper_hosts=127.0.0.1:9182" poetry run pytest $(pytest_postgres_opts) tests/dialects/clickhouse tests/contracts tests/fields/value_types/test_ordered_values.py tests/fields/value_types/test_ip_address_text_lookups.py tests/fields/value_types/test_ip_address_zones.py
-	$(py_warn) $(test_db_env)="clickhouse+clickhouse-driver://default:$(HARE_CLICKHOUSE_PASS)@127.0.0.1:9124/test_\{\}?keeper_hosts=127.0.0.1:9182" poetry run pytest $(pytest_postgres_opts) tests/dialects/clickhouse tests/contracts tests/fields/value_types/test_ordered_values.py tests/fields/value_types/test_ip_address_text_lookups.py tests/fields/value_types/test_ip_address_zones.py
+	$(py_warn) $(test_db_env)="clickhouse+clickhouse-connect://default:$(HARE_CLICKHOUSE_PASS)@127.0.0.1:8124/test_\{\}?keeper_hosts=127.0.0.1:9182" poetry run pytest $(pytest_postgres_opts) $(call matrix_catalog,paths.clickhouse)
+	$(if $(filter --extras=clickhouse-driver,$(compatible_extra_options)),$(py_warn) $(test_db_env)="clickhouse+clickhouse-driver://default:$(HARE_CLICKHOUSE_PASS)@127.0.0.1:9124/test_\{\}?keeper_hosts=127.0.0.1:9182" poetry run pytest $(pytest_postgres_opts) $(call matrix_catalog,paths.clickhouse),@echo "Skipping ClickHouse TCP: its extra is unavailable on this Python; CI checks it on a compatible Python.")
 
 # The ClickHouse test cluster (tests/docker/clickhouse_cluster): two servers on a network of their own,
 # one shard of two replicas (hare_replicated) and two shards (hare_sharded), the first server the
@@ -289,7 +286,7 @@ test_clickhouse_cluster_down:
 
 test_clickhouse_cluster:
 	$(py_warn) HARE_TEST_CLICKHOUSE_CLUSTER_DB="clickhouse+clickhouse-connect://default:$(HARE_CLICKHOUSE_PASS)@127.0.0.1:8126/test_cluster_\{\}?cluster=hare_sharded" poetry run pytest $(pytest_postgres_opts) tests/dialects/clickhouse/cluster
-	$(py_warn) HARE_TEST_CLICKHOUSE_CLUSTER_DB="clickhouse+clickhouse-driver://default:$(HARE_CLICKHOUSE_PASS)@127.0.0.1:9126/test_cluster_\{\}?cluster=hare_sharded" poetry run pytest $(pytest_postgres_opts) tests/dialects/clickhouse/cluster
+	$(if $(filter --extras=clickhouse-driver,$(compatible_extra_options)),$(py_warn) HARE_TEST_CLICKHOUSE_CLUSTER_DB="clickhouse+clickhouse-driver://default:$(HARE_CLICKHOUSE_PASS)@127.0.0.1:9126/test_cluster_\{\}?cluster=hare_sharded" poetry run pytest $(pytest_postgres_opts) tests/dialects/clickhouse/cluster,@echo "Skipping ClickHouse TCP: its extra is unavailable on this Python; CI checks it on a compatible Python.")
 
 # The test matrix (tests/matrix): every Python of matrix_python_versions (each its own
 # .venv-<version>), every SQLite of tests/sqlite_versions, every PostgreSQL of matrix_postgres_versions
@@ -304,30 +301,29 @@ test_clickhouse_cluster:
 # test_db_matrix_up matrix_postgres_versions=16`, `make test_matrix MATRIX_OPTIONS="--python 3.13 --suite
 # asyncpg-16"`. Every run has the tests of one environment of tests/matrix SUITE_ENVIRONMENTS - the
 # extras its tests require, nothing else optional - in a virtualenv of its own.
-matrix_python_versions = 3.12 3.13 3.14
-matrix_postgres_versions = 14 15 16 17 18
+# The catalog is readable before installing dependencies. Override its interpreter if needed.
+matrix_catalog_python ?= python
+matrix_ports = $(matrix_catalog_python) -m tests.matrix.matrix_ports
+matrix_catalog = $(or $(shell $(matrix_catalog_python) -m tests.matrix.matrix_catalog $(1)),$(error Cannot read matrix catalog $(1)))
+matrix_python_versions = $(call matrix_catalog,versions.python)
+matrix_postgres_versions = $(call matrix_catalog,versions.postgres)
 # Each minor version from the oldest hare supports.
-matrix_pgbouncer_versions = 1.22 1.23 1.24 1.25 1.26
+matrix_pgbouncer_versions = $(call matrix_catalog,versions.pgbouncer)
 # The PgBouncer image of each version, pinned: the newest patch release of the minor version.
-matrix_pgbouncer_images = \
-	1.22=edoburu/pgbouncer:1.22.1-p0@sha256:7f39cf2f872c8d9a0bb0e6a5440c3bf5814036eccf284102870ab08e2603a2c7 \
-	1.23=edoburu/pgbouncer:v1.23.1-p3@sha256:377dec3c0e4a66a1077ec043e16a26ed5702a6d954011a7983a1457c2e070b1d \
-	1.24=edoburu/pgbouncer:v1.24.1-p1@sha256:3db3d7223e93af52b4116f642951a1a5fa44702a88c2a59cf7562cac19320c9e \
-	1.25=edoburu/pgbouncer:v1.25.2-p0@sha256:7d7a27d9e90985cab5cf42256f5c13a3120baa4b055b69df37beb272b89b2340 \
-	1.26=edoburu/pgbouncer:v1.26.1-p0@sha256:488422e38cff912895d0d65d8963fcd306e6ac589a724398b6eb8e294e94d624
+matrix_pgbouncer_images = $(call matrix_catalog,images.pgbouncer)
 # Each version with a server image from the oldest hare supports.
-matrix_clickhouse_versions = 25.8 25.10 25.12 26.3 26.7 26.8 26.9
+matrix_clickhouse_versions = $(call matrix_catalog,versions.clickhouse)
 # The oldest version of each broker hare supports and the newest one.
-matrix_redis_versions = 7.2 8.10
-matrix_rabbitmq_versions = 4.0 4.3
-matrix_kafka_versions = 3.9 4.3
+matrix_redis_versions = $(call matrix_catalog,versions.redis)
+matrix_rabbitmq_versions = $(call matrix_catalog,versions.rabbitmq)
+matrix_kafka_versions = $(call matrix_catalog,versions.kafka)
 # Kafka's images are tagged by patch release only - the newest one of each minor version.
-matrix_kafka_images = 3.9=apache/kafka:3.9.2 4.3=apache/kafka:4.3.1
+matrix_kafka_images = $(call matrix_catalog,images.kafka)
 # The SQLite versions sqlite_versions prepares - empty for every one of tests/sqlite_versions, newest
 # for the newest one.
 matrix_sqlite_versions =
-# The interpreter matrix_venvs creates the virtualenvs from - empty for `py -X.Y` on Windows and
-# `pythonX.Y` elsewhere; a path only makes sense with one --python in MATRIX_OPTIONS.
+# The interpreter matrix_venvs creates the virtualenvs from - empty for `pythonX.Y`; a path only makes
+# sense with one --python in MATRIX_OPTIONS.
 matrix_interpreter =
 # Options of tests/matrix/matrix_runner.py: --python, --suite, --environment, --workers, --jobs,
 # --print-failed-logs, --newest.
@@ -335,9 +331,10 @@ MATRIX_OPTIONS ?=
 
 test_db_matrix_up:
 	for version in $(matrix_postgres_versions); do \
+		port=$$($(matrix_ports) postgres "$$version") || exit 1; \
 		docker build -t hare-orm-test-postgres:$$version --build-arg PG_MAJOR=$$version tests/docker/postgres || exit 1; \
 		docker start hare-orm-test-db-$$version 2>/dev/null || docker run -d $(test_container_logs) --name hare-orm-test-db-$$version \
-			--restart unless-stopped --tmpfs $(test_db_data_dir):$(test_db_data_tmpfs_options) $(test_db_memory) -p 54$$version:5432 -e POSTGRES_USER=$(HARE_POSTGRES_USER) \
+			--restart unless-stopped --tmpfs $(test_db_data_dir):$(test_db_data_tmpfs_options) $(test_db_memory) -p $$port:5432 -e POSTGRES_USER=$(HARE_POSTGRES_USER) \
 			-e POSTGRES_PASSWORD=$(HARE_POSTGRES_PASS) hare-orm-test-postgres:$$version -c fsync=off \
 			-c synchronous_commit=off -c full_page_writes=off -c max_prepared_transactions=64 \
 			-c max_connections=400 -c shared_buffers=256MB $(test_db_wal_options) || exit 1; \
@@ -363,10 +360,11 @@ test_pgbouncer_matrix_up:
 		image=$$(for entry in $(matrix_pgbouncer_images); do [ "$${entry%%=*}" = "$$version" ] && echo "$${entry#*=}"; done); \
 		[ -n "$$image" ] || { echo "No PgBouncer image for $$version in matrix_pgbouncer_images"; exit 1; }; \
 		docker build -t hare-orm-test-pgbouncer:$$version --build-arg PGBOUNCER_IMAGE=$$image tests/docker/pgbouncer || exit 1; \
-		port=1$$(printf %02d $${version#*.})$$postgres; \
+		ports=$$($(matrix_ports) pgbouncer "$$version" "$$postgres") || exit 1; \
+		set -- $$ports; \
 		docker start hare-orm-test-pgbouncer-$$version-$$postgres 2>/dev/null || docker run -d $(test_container_logs) \
 			--name hare-orm-test-pgbouncer-$$version-$$postgres --add-host=host.docker.internal:host-gateway \
-			-p $$port:6432 -e PGBOUNCER_SERVER_PORT=54$$postgres hare-orm-test-pgbouncer:$$version || exit 1; \
+			-p "$$1:6432" -e PGBOUNCER_SERVER_PORT="$$2" hare-orm-test-pgbouncer:$$version || exit 1; \
 	done
 
 test_pgbouncer_matrix_down:
@@ -376,10 +374,11 @@ test_pgbouncer_matrix_down:
 # on 3YYMM, its native protocol on 4YYMM and its Keeper on 6YYMM - 32508, 42508, 62508 for 25.8.
 test_clickhouse_matrix_up:
 	for version in $(matrix_clickhouse_versions); do \
-		digits=$$(printf %02d%02d $${version%%.*} $${version#*.}); \
+		host_ports=$$($(matrix_ports) clickhouse "$$version") || exit 1; \
+		set -- $$host_ports; \
 		docker build -t hare-orm-test-clickhouse:$$version --build-arg CLICKHOUSE_VERSION=$$version tests/docker/clickhouse || exit 1; \
 		docker start hare-orm-test-clickhouse-$$version 2>/dev/null || docker run -d $(test_container_logs) --name hare-orm-test-clickhouse-$$version \
-			$(clickhouse_data_tmpfs) $(clickhouse_memory) -p 3$$digits:8123 -p 4$$digits:9000 -p 6$$digits:9181 \
+			$(clickhouse_data_tmpfs) $(clickhouse_memory) -p "$$2:8123" -p "$$3:9000" -p "$$5:9181" \
 			-e CLICKHOUSE_PASSWORD=$(HARE_CLICKHOUSE_PASS) --ulimit nofile=262144:262144 $(clickhouse_no_core_dumps) hare-orm-test-clickhouse:$$version || exit 1; \
 	done
 	for version in $(matrix_clickhouse_versions); do \
@@ -394,12 +393,13 @@ test_clickhouse_matrix_down:
 # gives it; the first one's HTTP interface on 5YYMM, its native protocol on 2YYMM - 52508, 22508 for 25.8.
 test_clickhouse_cluster_matrix_up:
 	for version in $(matrix_clickhouse_versions); do \
-		digits=$$(printf %02d%02d $${version%%.*} $${version#*.}); \
+		host_ports=$$($(matrix_ports) clickhouse "$$version") || exit 1; \
+		set -- $$host_ports; \
 		docker network create hare-orm-test-clickhouse-cluster-$$version 2>/dev/null || true; \
 		for node in $(clickhouse_cluster_nodes); do \
 			docker build -t hare-orm-test-clickhouse-node$$node:$$version --build-arg CLICKHOUSE_VERSION=$$version \
 				--build-arg NODE=node$$node tests/docker/clickhouse_cluster || exit 1; \
-			if [ $$node = 1 ]; then ports="-p 5$$digits:8123 -p 2$$digits:9000"; else ports=; fi; \
+			if [ $$node = 1 ]; then ports="-p $$4:8123 -p $$1:9000"; else ports=; fi; \
 			docker start hare-orm-test-clickhouse-$$version-node$$node 2>/dev/null || docker run -d $(test_container_logs) \
 				--name hare-orm-test-clickhouse-$$version-node$$node --hostname hare-orm-test-clickhouse-node$$node \
 				--network hare-orm-test-clickhouse-cluster-$$version --network-alias hare-orm-test-clickhouse-node$$node \
@@ -423,19 +423,19 @@ test_clickhouse_cluster_matrix_down:
 # hare-orm-test-rabbitmq-<version>, hare-orm-test-kafka-<version>.
 test_brokers_matrix_up:
 	for version in $(matrix_redis_versions); do \
-		port=16$${version%%.*}$$(printf %02d $${version#*.}); \
+		port=$$($(matrix_ports) broker redis "$$version") || exit 1; \
 		docker start hare-orm-test-redis-$$version 2>/dev/null || docker run -d $(test_container_logs) --name hare-orm-test-redis-$$version \
 			--tmpfs /data:rw,size=256m -p $$port:6379 redis:$$version-alpine || exit 1; \
 	done
 	for version in $(matrix_rabbitmq_versions); do \
-		port=15$${version%%.*}$$(printf %02d $${version#*.}); \
+		port=$$($(matrix_ports) broker rabbitmq "$$version") || exit 1; \
 		docker start hare-orm-test-rabbitmq-$$version 2>/dev/null || docker run -d $(test_container_logs) --name hare-orm-test-rabbitmq-$$version \
 			--tmpfs /var/lib/rabbitmq:rw,size=512m -p $$port:5672 rabbitmq:$$version-management-alpine || exit 1; \
 	done
 	for version in $(matrix_kafka_versions); do \
 		image=$$(for entry in $(matrix_kafka_images); do [ "$${entry%%=*}" = "$$version" ] && echo "$${entry#*=}"; done); \
 		[ -n "$$image" ] || { echo "No Kafka image for $$version in matrix_kafka_images"; exit 1; }; \
-		port=19$${version%%.*}$$(printf %02d $${version#*.}); \
+		port=$$($(matrix_ports) broker kafka "$$version") || exit 1; \
 		docker start hare-orm-test-kafka-$$version 2>/dev/null || docker run -d $(test_container_logs) --name hare-orm-test-kafka-$$version \
 			--tmpfs /tmp/kraft-combined-logs:rw,size=1g -p $$port:$$port \
 			-e KAFKA_NODE_ID=1 -e KAFKA_PROCESS_ROLES=broker,controller \
@@ -458,7 +458,7 @@ test_brokers_matrix_down:
 	for version in $(matrix_kafka_versions); do docker rm -f hare-orm-test-kafka-$$version; done
 
 # The virtualenvs of the matrix runs MATRIX_OPTIONS choose, one per Python, environment and database
-# driver - `py -X.Y` on Windows, `pythonX.Y` elsewhere, matrix_interpreter when given.
+# driver - `pythonX.Y`, matrix_interpreter when given.
 matrix_venvs:
 	poetry run python -m tests.matrix.matrix_runner --virtualenvs $(MATRIX_OPTIONS) \
 		$(if $(matrix_interpreter),--interpreter "$(matrix_interpreter)")
@@ -476,36 +476,30 @@ test_environment:
 # environment, which every SQLite suite has.
 sqlite_versions:
 	for version in $(matrix_python_versions); do \
-		if [ -x .venv-$$version-all/Scripts/python.exe ]; then python=.venv-$$version-all/Scripts/python.exe; \
-		else python=.venv-$$version-all/bin/python; fi; \
-		$$python -m tests.sqlite_versions.download_sqlite_versions $(matrix_sqlite_versions) || exit 1; \
+		.venv-$$version-all/bin/python -m tests.sqlite_versions.download_sqlite_versions $(matrix_sqlite_versions) || exit 1; \
 	done
-
-# SpatiaLite for the SpatiaLite tests on Windows, downloaded into tests/spatialite/ - prints only the
-# environment variables pointing the tests at it (CI appends them to $GITHUB_ENV). Linux and macOS
-# install it from their packages.
-spatialite:
-	@python=.venv-$(firstword $(matrix_python_versions))-core/Scripts/python.exe; \
-	if [ ! -x $$python ]; then python=.venv-$(firstword $(matrix_python_versions))-core/bin/python; fi; \
-	$$python -m tests.spatialite.download_spatialite
 
 test_matrix:
 	$(py_warn) poetry run python -m tests.matrix.matrix_runner $(MATRIX_OPTIONS)
 
-# hare's direct dependencies - the [project] dependencies and every extra - at the lowest versions
+# hare's direct dependencies - [project] dependencies and compatible extras - at the lowest versions
 # their declared bounds allow, on Python LOWEST_DEPENDENCIES_PYTHON (each matrix Python in CI), resolved
 # by uv (`--resolution lowest-direct`) into their own virtualenv; the test tools at their poetry.lock
 # versions (tests/lowest_dependencies/locked_tool_requirements.py). LOWEST_DEPENDENCIES_VENV puts the
 # virtualenv elsewhere.
 LOWEST_DEPENDENCIES_PYTHON ?= 3.12
 LOWEST_DEPENDENCIES_VENV ?= .venv-lowest
-lowest_dependencies_python = $(LOWEST_DEPENDENCIES_VENV)/$(if $(filter Windows_NT,$(OS)),Scripts/python.exe,bin/python)
+lowest_dependencies_python = $(LOWEST_DEPENDENCIES_VENV)/bin/python
 
 lowest_dependencies_venv:
 	rm -rf "$(LOWEST_DEPENDENCIES_VENV)"
 	uv venv --python $(LOWEST_DEPENDENCIES_PYTHON) "$(LOWEST_DEPENDENCIES_VENV)"
-	"$(lowest_dependencies_python)" -m tests.lowest_dependencies.locked_tool_requirements > "$(LOWEST_DEPENDENCIES_VENV)/test-tools.in"
-	uv pip compile pyproject.toml "$(LOWEST_DEPENDENCIES_VENV)/test-tools.in" --all-extras --resolution lowest-direct \
+	uv run --no-project --isolated --python "$(lowest_dependencies_python)" \
+		--with "poetry==$(call matrix_catalog,tools.poetry)" \
+		--with "poetry-plugin-export==$(call matrix_catalog,tools.poetry_export)" \
+		python -m tests.lowest_dependencies.locked_tool_requirements > "$(LOWEST_DEPENDENCIES_VENV)/test-tools.in"
+	extra_options=$$("$(lowest_dependencies_python)" -m tests.matrix.matrix_catalog extras --prefix=--extra=) && \
+	uv pip compile pyproject.toml "$(LOWEST_DEPENDENCIES_VENV)/test-tools.in" $$extra_options --resolution lowest-direct \
 		--python "$(lowest_dependencies_python)" --output-file "$(LOWEST_DEPENDENCIES_VENV)/requirements.txt"
 	uv pip install --python "$(lowest_dependencies_python)" -r "$(LOWEST_DEPENDENCIES_VENV)/requirements.txt"
 	uv pip install --python "$(lowest_dependencies_python)" --no-deps -e .
@@ -513,63 +507,39 @@ lowest_dependencies_venv:
 # The whole suite in that virtualenv, on SQLite and on the test Postgres server (test_db_up) via both
 # drivers - rust_pg needs rust.native for Python 3.12 in rust/.
 test_lowest_dependencies:
-	$(py_warn) HARE_TEST_DB=sqlite+aiosqlite://:memory: "$(lowest_dependencies_python)" -m pytest -n auto --tb=native -q
-	$(py_warn) $(test_db_env)="postgresql+asyncpg://$(HARE_POSTGRES_USER):$(HARE_POSTGRES_PASS)@$(HARE_POSTGRES_HOST):$(HARE_POSTGRES_PORT)/test_\{\}" "$(lowest_dependencies_python)" -m pytest -n $(HARE_POSTGRES_WORKERS) --tb=native -q -m "not database_independent"
-	$(py_warn) $(test_db_env)="postgresql://$(HARE_POSTGRES_USER):$(HARE_POSTGRES_PASS)@$(HARE_POSTGRES_HOST):$(HARE_POSTGRES_PORT)/test_\{\}" "$(lowest_dependencies_python)" -m pytest -n $(HARE_POSTGRES_WORKERS) --tb=native -q -m "not database_independent"
+	$(py_warn) HARE_TEST_DB=sqlite+aiosqlite://:memory: "$(lowest_dependencies_python)" -m pytest $(pytest_opts)
+	$(py_warn) $(test_db_env)="postgresql+asyncpg://$(HARE_POSTGRES_USER):$(HARE_POSTGRES_PASS)@$(HARE_POSTGRES_HOST):$(HARE_POSTGRES_PORT)/test_\{\}" "$(lowest_dependencies_python)" -m pytest $(pytest_postgres_opts)
+	$(py_warn) $(test_db_env)="postgresql://$(HARE_POSTGRES_USER):$(HARE_POSTGRES_PASS)@$(HARE_POSTGRES_HOST):$(HARE_POSTGRES_PORT)/test_\{\}" "$(lowest_dependencies_python)" -m pytest $(pytest_postgres_opts)
 
 test_postgres_asyncpg:
 	$(py_warn) $(test_db_env)="postgresql+asyncpg://$(HARE_POSTGRES_USER):$(HARE_POSTGRES_PASS)@$(HARE_POSTGRES_HOST):$(HARE_POSTGRES_PORT)/test_\{\}" poetry run pytest $(pytest_postgres_opts)
 
-# rust.native (rust/native/) - the rust_pg driver, the row readers/writers and the field codecs - is
+# rust.native (rust/native/) - the rust_pg driver, value helpers and SQLite functions - is
 # a maturin project, not a poetry dependency. `maturin develop` installs it into poetry's venv; the
 # build is then copied flat into rust/, where the checkout and the wheel import it from (`rust` is a
 # namespace package, so a stale flat file would otherwise shadow the fresh build).
-#
-# PYO3_USE_RAW_DYLIB=0: Windows raw-dylib linking does not resolve the private CPython symbol the crate
-# declares itself (_PyDict_NewPresized).
 build_native:
-	rm -f rust/native*.so rust/native*.pyd
-	PYO3_USE_RAW_DYLIB=0 poetry run maturin develop --release --manifest-path rust/native/Cargo.toml
+	rm -f rust/native*.so
+	poetry run maturin develop --release --manifest-path rust/native/Cargo.toml
 	cp rust/native/python/rust/native*.* rust/
 
 # The Linux extension of every matrix Python (rust/native.cpython-3XX-x86_64-linux-gnu.so), built in
-# the maturin image (manylinux2014, glibc 2.17+) - what CI's Linux jobs run, and how a Windows or
-# macOS checkout gets it. Everything runs inside the container, which also takes the extensions out
-# of the wheels and removes them, so no file the container's root owns is left to delete outside it.
+# the maturin image (manylinux2014, glibc 2.17+) - what CI's Linux jobs run. Everything runs inside
+# the container, which also takes the extensions out of the wheels and removes them, so no file the
+# container's root owns is left to delete outside it.
+# Match the extension builder used by wheel CI and the local Poetry environment.
 build_native_linux:
-	rm -f rust/native*-linux-gnu.so
-	MSYS_NO_PATHCONV=1 docker run --rm -v "$(CURDIR)":/io -w /io --entrypoint sh ghcr.io/pyo3/maturin -c \
+	maturin_version=$$(python3 .github/scripts/locked_tool_versions.py maturin) && \
+	rm -f rust/native*-linux-gnu.so && \
+	docker run --rm -v "$(CURDIR)":/io -w /io --entrypoint sh "ghcr.io/pyo3/maturin:v$$maturin_version" -c \
 		"maturin build --release --manifest-path rust/native/Cargo.toml --interpreter $(addprefix python,$(matrix_python_versions)) --out rust/native/wheels \
 		&& python$(lastword $(matrix_python_versions)) .github/scripts/extract_native_extensions.py rust/native/wheels \
 		&& rm -rf rust/native/wheels"
 
-# The interpreters build_native_windows and build_native_macos build for - the .venv-<version> of
-# every matrix Python; CI passes the runner's own Pythons.
-native_interpreters ?= $(foreach version,$(matrix_python_versions),.venv-$(version)-core/$(if $(filter Windows_NT,$(OS)),Scripts/python.exe,bin/python))
-
-# The Windows extension of every matrix Python (rust/native.cp3XX-win_amd64.pyd) - what CI's Windows
-# jobs run. Only the Windows files are replaced; the Linux and macOS ones stay. A build `maturin
-# develop` left in rust/native/python is removed: on the venv's path it would shadow these for a
-# script run outside the repository.
-build_native_windows:
-	rm -f rust/native*.pyd rust/native/python/rust/native*.pyd
-	PYO3_USE_RAW_DYLIB=0 poetry run maturin build --release --manifest-path rust/native/Cargo.toml 		$(foreach interpreter,$(native_interpreters),--interpreter '$(interpreter)') --out rust/native/wheels
-	poetry run python .github/scripts/extract_native_extensions.py rust/native/wheels
-	rm -rf rust/native/wheels
-
-# The macOS extension of every matrix Python (rust/native.cpython-3XX-darwin.so), one universal2 file
-# for Apple silicon and Intel Macs - what CI's macOS jobs run. Only the macOS files are replaced.
-build_native_macos:
-	rm -f rust/native*-darwin.so rust/native/python/rust/native*.so
-	rustup target add aarch64-apple-darwin x86_64-apple-darwin
-	poetry run maturin build --release --target universal2-apple-darwin --manifest-path rust/native/Cargo.toml 		$(foreach interpreter,$(native_interpreters),--interpreter '$(interpreter)') --out rust/native/wheels
-	poetry run python .github/scripts/extract_native_extensions.py rust/native/wheels
-	rm -rf rust/native/wheels
-
 rust_check:
 	cd rust/native && cargo fmt --check
 	cd rust/native && cargo clippy --all-targets -- -D warnings
-	cd rust/native && PYO3_USE_RAW_DYLIB=0 cargo test --no-default-features
+	cd rust/native && cargo test --no-default-features
 
 # The whole suite, as test_postgres_asyncpg - the driver decodes every value the ORM reads.
 test_postgres_rust:
@@ -592,6 +562,3 @@ build: deps
 	rm -fR dist/
 	poetry build
 	poetry run twine check dist/*
-
-publish: build
-	poetry run twine upload dist/*

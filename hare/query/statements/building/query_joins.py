@@ -1,23 +1,23 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
-from hare.exceptions import FieldError, QueryError
 from hare.fields.relations.fields.relational_field import RelationalField
 from hare.query.enums import Lookup
-from hare.query.expressions import ExpressionContext, F, Q
+from hare.query.expressions import F, Q
 from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import AggregatedMultiValuedPaths
 from hare.query.expressions.expression_result import TableCriterionTuple
 from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
 from hare.query.lookup_info.lookup_paths import LookupPaths
-from hare.query.plans.recording.plan_recording import PlanRecording
 from hare.query.statements.constants import NULL_REJECTING_LOOKUP_SUFFIXES
 from hare.sql import JoinType, Table
 
 if TYPE_CHECKING:
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.statements.awaitable_query import AwaitableQuery
+    from hare.sql.builder.queries.query_builder import QueryBuilder
 
 
 class QueryJoins:
@@ -52,35 +52,12 @@ class QueryJoins:
             related_field,
             related_field_name,
             visibility=query._visibility,
+            extra_condition=extra_condition,
             dialect=query.dialect,
             connection=query._connection,
+            value_wrapper_references=value_wrapper_references,
+            application_context=query._context,
         )
-        if extra_condition is not None:
-            related_table, join_criterion = joins[-1]
-            # Recorded into the query's own references by SelectRelatedJoins.join_select_related(), whose values the
-            # description holds; folded anywhere else, as a condition of the JOIN.
-            records_join_condition = value_wrapper_references is None and PlanRecording.is_recording()
-            if records_join_condition:
-                value_wrapper_references = []
-            modifier = extra_condition.get_result(
-                ExpressionContext(
-                    model=related_field.related_model,
-                    dialect=query.dialect,
-                    connection=query._connection,
-                    table=related_table,
-                    annotations={},
-                    value_wrapper_references=value_wrapper_references,
-                )
-            )
-            if modifier.joins:
-                raise QueryError(
-                    "Select(relation, extra_condition=...) only supports direct fields of the related model, "
-                    "not a further relation"
-                )
-            if modifier.where_criterion:
-                joins[-1] = (related_table, join_criterion & modifier.where_criterion)
-            if records_join_condition:
-                PlanRecording.record_join_condition(cast("RecordedValueReferences", value_wrapper_references))
         for join in joins:
             QueryJoins.join_table(query, join)
         return joins[-1][0]
@@ -93,72 +70,23 @@ class QueryJoins:
         Args:
             query: The query.
         """
-        query._joined_tables = []
-        query._joined_tables_set = set()
-        query._annotation_expression_terms = {}
+        query._joined_tables = set()
+        query._annotation_expression_results = {}
         query._expression_term_references = {}
         query._annotation_ordering_terms = {}
 
     @staticmethod
-    def join_table(query: AwaitableQuery[Any], table_criterio_tuple: TableCriterionTuple) -> None:
-        if table_criterio_tuple[0] not in query._joined_tables_set:
-            query.query = query.query.join(table_criterio_tuple[0], how=JoinType.LEFT_OUTER).on(
-                table_criterio_tuple[1]
-            )
-            query._joined_tables.append(table_criterio_tuple[0])
-            query._joined_tables_set.add(table_criterio_tuple[0])
+    def join_table(query: AwaitableQuery[Any], join: TableCriterionTuple) -> None:
+        query.query = QueryJoins.with_join(query.query, query._joined_tables, join)
 
     @staticmethod
-    def join_table_with_forwarded_fields(
-        query: AwaitableQuery[Any],
-        model: type[Model],
-        table: Table,
-        field: str,
-        forwarded_fields: str,
-        path: str | None = None,
-    ) -> tuple[Table, str]:
-        """Joins every relation of a dotted path to the query, hop by hop.
-
-        Args:
-            query: The query.
-            model: The model the path starts at.
-            table: Its table.
-            field: The first relation.
-            forwarded_fields: The rest of the path.
-            path: The path up to this hop.
-
-        Returns:
-            The table the path ends at, and the field read there.
-        """
-        # The dotted relation path up to this hop - the key a Select(relation, extra_condition=...)
-        # is kept under.
-        if path is None:
-            path = field
-        if field in model._meta.fields_db_projection and not forwarded_fields:
-            return table, model._meta.fields_db_projection[field]
-
-        if field in model._meta.fields_db_projection and forwarded_fields:
-            raise FieldError(f"Field {field!r} for model {model.__name__!r} is not relation")
-
-        if field in query.model._meta.fetch_fields and not forwarded_fields:
-            raise QueryError(f"Selecting relation {field!r} is not possible, select concrete field on related model")
-
-        field_object = cast("RelationalField[Model]", model._meta.fields_map.get(field))
-        if not field_object:
-            raise FieldError(f"Unknown field {path!r}: {model.__name__} has no field {field!r}")
-
-        extra_condition = query._select_related_extra_conditions.get(path)
-        table = QueryJoins.join_table_by_field(query, table, field, field_object, extra_condition)
-        field, __, forwarded_fields_ = forwarded_fields.partition("__")
-
-        return QueryJoins.join_table_with_forwarded_fields(
-            query,
-            model=field_object.related_model,
-            table=table,
-            field=field,
-            forwarded_fields=forwarded_fields_,
-            path=f"{path}__{field}",
-        )
+    def with_join(builder: QueryBuilder, joined_tables: set[Table], join: TableCriterionTuple) -> QueryBuilder:
+        """Add a left join once, preserving the order in the SQL builder."""
+        table, criterion = join
+        if table not in joined_tables:
+            builder = builder.join(table, how=JoinType.LEFT_OUTER).on(criterion)
+            joined_tables.add(table)
+        return builder
 
     @staticmethod
     def apply_effective_basetable(query: AwaitableQuery[Any]) -> None:
@@ -170,8 +98,9 @@ class QueryJoins:
             query: The query.
         """
         effective_table = query._effective_basetable()
-        if effective_table != query.model._meta.basetable:
-            query.query = query.query.replace_table(query.model._meta.basetable, effective_table)
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
+        if effective_table != model_binding.basetable:
+            query.query = query.query.replace_table(model_binding.basetable, effective_table)
 
     @staticmethod
     def get_field_lookups(query: AwaitableQuery[Any], field_names: Iterable[str]) -> list[str]:
@@ -208,10 +137,11 @@ class QueryJoins:
         Returns:
             The lookups.
         """
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
         return [
             field_name
             for field_name, _order in query._apply_default_ordering(query._orderings)
-            if field_name not in query._annotations and field_name not in query.model._meta.ordering_expressions
+            if field_name not in query._annotations and field_name not in model_binding.ordering_expressions
         ]
 
     @staticmethod
@@ -226,15 +156,11 @@ class QueryJoins:
         Returns:
             The field lookups, without a lookup suffix.
         """
-        conditions_by_generation: dict[int, list[tuple[str, Any]]] = {}
-        for q_object in query._q_objects:
-            conditions_by_generation.setdefault(q_object._filter_call_generation, []).extend(
-                query._get_top_level_conditions(q_object)
-            )
+        conditions_by_generation = query._get_top_level_conditions_by_generation()
         first_generation_by_path: dict[str, int] = {}
         for q_object in query._q_objects:
             for key, _value in query._get_top_level_conditions(q_object, including_alternatives=True):
-                for path in AggregatedMultiValuedPaths.get_multi_valued_paths(query.model, key):
+                for path in AggregatedMultiValuedPaths.get_multi_valued_paths(query._binding, key):  # type: ignore[arg-type]
                     first_generation = first_generation_by_path.get(path)
                     if first_generation is None or q_object._filter_call_generation < first_generation:
                         first_generation_by_path[path] = q_object._filter_call_generation
@@ -244,7 +170,7 @@ class QueryJoins:
                 lookup = QueryJoins.get_null_rejected_lookup(key, value)
                 if lookup is None:
                     continue
-                paths = AggregatedMultiValuedPaths.get_multi_valued_paths(query.model, lookup)
+                paths = AggregatedMultiValuedPaths.get_multi_valued_paths(query._binding, lookup)  # type: ignore[arg-type]
                 if paths and first_generation_by_path.get(paths[-1]) == generation:
                     non_null_lookups.add(lookup)
         return non_null_lookups

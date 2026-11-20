@@ -1,8 +1,8 @@
 """End-to-end regression test for a fixed (non-templated) sqlite `hare_test_context(db_url=...)`
-under real pytest-xdist workers - see DbUrlConfigGenerator.expand()'s own xdist-worker-suffix logic
+under real pytest-xdist workers - see TestDatabaseConfig.from_url()'s own xdist-worker-suffix logic
 in hare/backends/base/config_generator.py.
 
-This spawns a real `pytest -n 2` subprocess (rather than asserting on DbUrlConfigGenerator.expand()
+This spawns a real `pytest -n 2` subprocess (rather than asserting on TestDatabaseConfig.from_url()
 directly, as tests/backends/test_db_url.py already does) because the bug only reproduces with two
 actual OS processes racing for the same sqlite file - a single-process test can't observe
 sqlite3.OperationalError("database is locked") from cross-process contention.
@@ -51,7 +51,7 @@ _WORKER_TEST_MODULE = textwrap.dedent(
 def test_fixed_sqlite_path_survives_real_xdist_run(tmp_path):
     """Before the fix: every worker's `hare_test_context(db_url="sqlite+aiosqlite:///<fixed path>")` call
     hits the SAME literal file, and this subprocess run fails with sqlite3.OperationalError
-    ("database is locked"). After the fix, DbUrlConfigGenerator.expand() folds the
+    ("database is locked"). After the fix, TestDatabaseConfig.from_url() folds the
     PYTEST_XDIST_WORKER id into the path automatically, so each worker gets its own file and the
     run passes."""
     shared_db_path = (tmp_path / "fixed_shared.db").as_posix()

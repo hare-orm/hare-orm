@@ -9,5 +9,7 @@ from hare.sql.functions.statistic import Statistic
 class StdDev(Statistic):
     """The sample standard deviation - ``STDDEV``."""
 
+    structure_attributes = ()
+
     def __init__(self, term: Any, alias: str | None = None) -> None:
         super().__init__("STDDEV_SAMP", term, alias=alias)

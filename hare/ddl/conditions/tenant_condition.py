@@ -9,7 +9,7 @@ from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclass(frozen=True)
@@ -31,11 +31,11 @@ class TenantCondition(DialectCondition):
         """The condition as it is - it names no field."""
         return self
 
-    def get_condition_sql(self, model: type[Model], client: DatabaseClient) -> str:
+    def get_condition_sql(self, binding: ModelBinding, client: DatabaseClient) -> str:
         """The predicate written into a policy of ``model``'s table.
 
         Args:
-            model: The model the policy belongs to.
+            binding: The model the policy belongs to.
             client: The client of the database the DDL runs on.
 
         Returns:
@@ -45,27 +45,26 @@ class TenantCondition(DialectCondition):
             ConfigurationError: The model has no ``Meta.tenant_field``.
             UnSupportedError: The database has no row level security.
         """
-        meta = model._meta
-        if meta.tenant_field is None:
+        model = binding._model
+        if binding.tenant_field is None:
             raise ConfigurationError(f"{model.__name__}: TenantCondition needs Meta.tenant_field")
-        field = meta.fields_map[meta.tenant_field]
-        quoted_column = client.dialect.literals.quote_identifier(meta.fields_db_projection[meta.tenant_field])
+        field = binding.fields_map[binding.tenant_field]
+        quoted_column = client.dialect.literals.quote_identifier(binding.fields_db_projection[binding.tenant_field])
         return client.dialect.schema_editor_class.tenant_conditions_class.get_tenant_condition_sql(
             quoted_column,
             field.get_column_type(client.dialect),
-            client.dialect.literals.get_string_literal_sql(TenantCondition.get_table_key(model)),
+            client.dialect.literals.get_string_literal_sql(TenantCondition.get_table_key(binding)),
         )
 
     @staticmethod
-    def get_table_key(model: type[Model]) -> str:
+    def get_table_key(binding: ModelBinding) -> str:
         """The name a transaction gives a table's tenants under in a scope given model by model - the
         table's, after its ``Meta.schema`` when it has one: a table of one schema is not another's.
 
         Args:
-            model: The model of the table.
+            binding: The model of the table.
 
         Returns:
             The name.
         """
-        meta = model._meta
-        return f"{meta.schema}.{meta.db_table}" if meta.schema else meta.db_table
+        return f"{binding.schema}.{binding.db_table}" if binding.schema else binding.db_table

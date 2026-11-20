@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from hare.core.config import HareConfig
+from hare.core.hare import Hare
 from hare.stubs.stub_writer import StubWriter
 from hare.typing_info.bound_models import BoundModels
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
 
 CONFIG = {
     "connections": {"default": "sqlite+aiosqlite://:memory:"},
@@ -24,6 +30,5 @@ POSTGRESQL_MODELS_STUB_PATH = ("tests", "contrib", "mypy", "postgresql_models.py
 REPOSITORY_PATH = Path(__file__).resolve().parents[2]
 
 
-def write_stubs(output_directory: Path) -> Path:
-    StubWriter(BoundModels(HareConfig.load(CONFIG)), output_directory, 2).write()
-    return output_directory.joinpath(*STUB_PATH)
+def write_stubs(output_directory: Path, config: Mapping[str, Any] | HareConfig, *, relation_depth: int = 2) -> None:
+    StubWriter(BoundModels(Hare.bind_models(HareConfig.load(config))), output_directory, relation_depth).write()

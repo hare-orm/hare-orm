@@ -2,50 +2,36 @@ from pathlib import Path
 
 import pytest
 
-from hare import Hare
 from hare.core.config import AppConfig, ConnectionConfig, HareConfig
 from hare.migrations.api.sqlmigrate import sqlmigrate
 from hare.migrations.exceptions import UnknownMigrationError
+from tests.utils.project_sources import ProjectSources
 
 pytestmark = pytest.mark.database_independent
-
-
-def _sqlite_config(**app_kwargs) -> HareConfig:
-    return HareConfig(
-        connections={
-            "default": ConnectionConfig(
-                engine="sqlite+aiosqlite",
-                credentials={"file_path": ":memory:"},
-            )
-        },
-        apps={
-            "models": AppConfig(models=["tests.shared_models.testmodels"], default_connection="default", **app_kwargs)
-        },
-    )
 
 
 @pytest.mark.asyncio
 async def test_sqlmigrate_unknown_app_label():
     with pytest.raises(UnknownMigrationError, match="Unknown app label"):
-        await sqlmigrate(config=_sqlite_config(), app_label="ghost", migration_name="0001_initial")
+        await sqlmigrate(
+            config=HareConfig.from_db_url(
+                "sqlite+aiosqlite://:memory:", {"models": ["tests.shared_models.testmodels"]}
+            ),
+            app_label="ghost",
+            migration_name="0001_initial",
+        )
 
 
 @pytest.mark.asyncio
 async def test_sqlmigrate_missing_migration():
     with pytest.raises(UnknownMigrationError, match="Cannot find migration .0001_initial."):
-        try:
-            await sqlmigrate(config=_sqlite_config(), app_label="models", migration_name="0001_initial")
-        finally:
-            await Hare.close_connections()
-
-
-def _write_migration_package(tmp_path: Path, app_label: str) -> str:
-    package_dir = tmp_path / app_label
-    migrations_dir = package_dir / "migrations"
-    migrations_dir.mkdir(parents=True, exist_ok=True)
-    (package_dir / "__init__.py").write_text("", encoding="ascii")
-    (migrations_dir / "__init__.py").write_text("", encoding="ascii")
-    return f"{app_label}.migrations"
+        await sqlmigrate(
+            config=HareConfig.from_db_url(
+                "sqlite+aiosqlite://:memory:", {"models": ["tests.shared_models.testmodels"]}
+            ),
+            app_label="models",
+            migration_name="0001_initial",
+        )
 
 
 def _write_empty_models_module(tmp_path: Path, app_label: str) -> str:
@@ -61,8 +47,8 @@ def _write_migration(
     name: str,
     dependencies: list[tuple[str, str]] | None = None,
 ) -> str:
-    module_path = _write_migration_package(tmp_path, app_label)
-    migrations_dir = tmp_path / app_label / "migrations"
+    migrations_dir = ProjectSources(tmp_path).prepare_migrations(tmp_path / app_label)
+    module_path = f"{app_label}.migrations"
     content = "\n".join(
         [
             "from hare import migrations",
@@ -81,8 +67,8 @@ def _write_migration(
 def _write_create_model_migration(
     tmp_path: Path, app_label: str, model_name: str, table_name: str, *, atomic: bool = True
 ) -> str:
-    module_path = _write_migration_package(tmp_path, app_label)
-    migrations_dir = tmp_path / app_label / "migrations"
+    migrations_dir = ProjectSources(tmp_path).prepare_migrations(tmp_path / app_label)
+    module_path = f"{app_label}.migrations"
     content = "\n".join(
         [
             "from hare import migrations",
@@ -125,12 +111,9 @@ async def test_sqlmigrate_wraps_an_atomic_migration_in_begin_commit(tmp_path: Pa
         },
     )
 
-    try:
-        sql = await sqlmigrate(config=config, app_label="atomic_app", migration_name="0001_initial")
-        assert sql[0] == "BEGIN;"
-        assert sql[-1] == "COMMIT;"
-    finally:
-        await Hare.close_connections()
+    sql = await sqlmigrate(config=config, app_label="atomic_app", migration_name="0001_initial")
+    assert sql[0] == "BEGIN;"
+    assert sql[-1] == "COMMIT;"
 
 
 @pytest.mark.asyncio
@@ -151,12 +134,9 @@ async def test_sqlmigrate_does_not_wrap_a_non_atomic_migration(tmp_path: Path, m
         },
     )
 
-    try:
-        sql = await sqlmigrate(config=config, app_label="nonatomic_app", migration_name="0001_initial")
-        assert "BEGIN;" not in sql
-        assert "COMMIT;" not in sql
-    finally:
-        await Hare.close_connections()
+    sql = await sqlmigrate(config=config, app_label="nonatomic_app", migration_name="0001_initial")
+    assert "BEGIN;" not in sql
+    assert "COMMIT;" not in sql
 
 
 @pytest.mark.asyncio
@@ -179,8 +159,5 @@ async def test_sqlmigrate_resolves_cross_app_migration_dependency(tmp_path: Path
         },
     )
 
-    try:
-        sql = await sqlmigrate(config=config, app_label="blog_app", migration_name="0001_initial")
-        assert sql == []
-    finally:
-        await Hare.close_connections()
+    sql = await sqlmigrate(config=config, app_label="blog_app", migration_name="0001_initial")
+    assert sql == []

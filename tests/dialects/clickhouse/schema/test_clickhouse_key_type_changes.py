@@ -3,18 +3,13 @@ table is remade with it - and no column a data skipping index reads - the index 
 change and created again; the relation columns storing its values take the type, a NULL among them
 kept."""
 
-import os
 import textwrap
 
 import pytest
 
 from tests.utils.cli_project_factory import project_factory  # noqa: F401
 
-
-@pytest.fixture(autouse=True)
-def skip_without_clickhouse():
-    if not os.getenv("HARE_TEST_DB", "").startswith("clickhouse"):
-        pytest.skip("runs against the ClickHouse test server - make test_clickhouse")
+pytestmark = pytest.mark.usefixtures("skip_without_clickhouse")
 
 
 @pytest.mark.asyncio

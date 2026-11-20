@@ -5,8 +5,6 @@ from hare.exceptions import NoValuesFetched
 from hare.models.tenancy.tenancy import Tenancy
 from tests.shared_models.testmodels import Event, SoftDeleteVersioned, TenantScopedTag, Tournament
 
-REQUIRES = ("pydantic",)
-
 
 @pytest.mark.asyncio
 async def test_only_partial_load_field_without_a_default_raises_validation_error(db):

@@ -14,7 +14,7 @@ from starlette.background import BackgroundTask
 
 from hare import Hare
 from hare.contrib.frameworks import PageSchema, RequestTransaction
-from hare.contrib.frameworks.fastapi import HareExceptionHandlers, HareFastAPI, RequestQueryDependency
+from hare.contrib.frameworks.fastapi import HareExceptionHandlers, HareFastAPI
 from hare.contrib.request_query import (
     FilterField,
     InPath,
@@ -31,7 +31,6 @@ from tests.contrib.frameworks.models import Chapter, Writer
 from tests.contrib.frameworks.queries import NamedWriterQuery
 
 # FastAPI's test client runs on httpx.
-REQUIRES = ("fastapi", "http")
 
 pytestmark = pytest.mark.sqlite_only
 
@@ -108,20 +107,20 @@ def build_app(**options: Any) -> HareFastAPI:
     app.add_exception_handler(TeapotError, answer_teapot)
 
     @app.get("/writers", response_model=PageSchema[WriterSchema])
-    async def list_writers(writers: WriterQuery = RequestQueryDependency.provide(WriterQuery)) -> Any:
+    async def list_writers(writers: WriterQuery = app.request_query(WriterQuery)) -> Any:
         return await writers.page()
 
     @app.get("/chapters/{pk}", response_model=ChapterSchema)
-    async def one_chapter(chapter: ChapterQuery = RequestQueryDependency.provide(ChapterQuery)) -> Any:
+    async def one_chapter(chapter: ChapterQuery = app.request_query(ChapterQuery)) -> Any:
         return await chapter.get()
 
     @app.get("/chapters", response_model=list[ChapterSchema])
-    async def list_chapters(chapters: ChaptersQuery = RequestQueryDependency.provide(ChaptersQuery)) -> Any:
+    async def list_chapters(chapters: ChaptersQuery = app.request_query(ChaptersQuery)) -> Any:
         return await chapters.fetch()
 
     @app.get("/named-writers")
     async def named_writers(
-        writers: NamedWriterQuery = RequestQueryDependency.provide(NamedWriterQuery),
+        writers: NamedWriterQuery = app.request_query(NamedWriterQuery),
     ) -> list[str]:
         return [writer.name for writer in await writers.fetch()]
 
@@ -354,6 +353,40 @@ def test_a_mounted_application_answers_orm_errors_with_the_hare_handlers_given_t
     assert (missing.status_code, missing.json()) == (404, {"detail": "Not Found"})
 
 
+@pytest.mark.parametrize("already_served", [False, True])
+def test_a_mounted_app_rolls_back_handled_exceptions_without_rolling_back_plain_responses(already_served):
+    app = build_app(atomic_requests=True)
+    mounted = FastAPI(exception_handlers=HareExceptionHandlers.get_handlers())
+
+    @mounted.post("/forbidden")
+    async def forbidden():
+        await Writer.objects.create(name="mounted forbidden")
+        raise HTTPException(403, "Forbidden")
+
+    @mounted.post("/missing")
+    async def missing():
+        await Writer.objects.create(name="mounted missing")
+        return await Writer.objects.get(name="nobody")
+
+    @mounted.post("/conflict")
+    async def conflict():
+        await Writer.objects.create(name="mounted response")
+        return JSONResponse({"detail": "Conflict"}, status_code=409)
+
+    if already_served:
+        with TestClient(mounted) as child_client:
+            assert child_client.get("/openapi.json").status_code == 200
+    intermediate = FastAPI()
+    intermediate.mount("/mounted", mounted)
+    app.mount("/sub", intermediate)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        assert client.post("/sub/mounted/forbidden").status_code == 403
+        assert client.post("/sub/mounted/missing").status_code == 404
+        assert client.post("/sub/mounted/conflict").status_code == 409
+        assert client.post("/writers/later").status_code == 201
+        assert names(client) == ["anna", "boris", "carl", "later", "mounted response"]
+
+
 def test_without_atomic_requests_a_failed_request_keeps_its_writes():
     with TestClient(build_app(), raise_server_exceptions=False) as client:
         assert client.post("/writers/emil/fail").status_code == 500
@@ -386,16 +419,17 @@ def test_an_error_of_the_whole_query_is_answered_with_422():
 
 
 def test_a_request_query_built_for_a_model_is_a_dependency():
-    Hare.bind_models(config=CONFIG)
+    apps = Hare.bind_models(config=CONFIG)
     built_writer_query = RequestQuery.for_model(
         Writer,
+        apps=apps,
         filters=(FilterField("name", lookups=(Lookup.IN,)),),
         ordering=OrderingConfig(default=("name",)),
     )
     app = build_app()
 
     @app.get("/built-writers", response_model=PageSchema[WriterSchema])
-    async def built_writers(writers: Any = RequestQueryDependency.provide(built_writer_query)) -> Any:
+    async def built_writers(writers: Any = app.request_query(built_writer_query)) -> Any:
         return await writers.page()
 
     with TestClient(app) as client:

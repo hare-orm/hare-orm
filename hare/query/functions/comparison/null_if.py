@@ -7,6 +7,8 @@ from hare.query.expressions.compatibility.output_field_compatibility import Outp
 from hare.query.expressions.compatibility.result_branch import ResultBranch
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
+from hare.query.expressions.structure.enums import ArgumentRole
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.query.expressions.value import Value
 from hare.query.functions.comparison.function_arguments import FunctionArguments
 from hare.sql.terms.functions.function import Function as SqlFunction
@@ -16,6 +18,10 @@ from hare.sql.terms.term import Term
 class NullIf(Function):
     """NULL when the value equals ``other``, the value otherwise: ``NullIf("discount", 0)``. A string
     ``other`` is text - pass a field as ``F("other")``."""
+
+    structure = ExpressionStructure(
+        positions=((0, ArgumentRole.FIELD),), keywords=(("expression", ArgumentRole.FIELD),)
+    )
 
     populate_field_object = True
 

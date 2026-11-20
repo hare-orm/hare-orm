@@ -1,65 +1,54 @@
 from __future__ import annotations
 
-import dataclasses
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from hare.fields.field import Field
-from hare.query.filters.lookups.value_encoders import ValueEncoders
+from hare.query.plans.statement.parameter_slot import ParameterSlot
 from hare.sql.terms.parameters.list_parameter import ListParameter
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.models import Model
-    from hare.query.expressions.value_references.value_reference_types import ParameterValues
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ListParameterValueReference:
     """A plan value reference of an ``__in``/``__not_in`` list the dialect binds as one parameter
     (``ListParameter``): a plan binds a list of any length through it - the plan key holds no
-    length for such a list.
+    length for such a list. Publication replaces the temporary ``ListParameter`` source with
+    its immutable parameter slot and retains the encoder required by the dialect. Only
+    published references, with both a slot and an encoder, are bound.
     """
 
-    list_parameter: ListParameter
+    list_parameter: ListParameter | None
     field: Field[Any]
     value_encoder: Callable[..., list[Any]]
-    #: The id of the term whose parameter holds the list.
-    parameter_source_id: int = dataclasses.field(init=False)
-    #: Whether the values are encoded as ``ValueEncoders.encode_list()`` encodes them.
-    encodes_plain_list: bool = dataclasses.field(init=False)
+    parameter_slot: ParameterSlot | None = None
+    parameter_encoder: Callable[[list[Any]], Any] | None = None
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "parameter_source_id", id(self.list_parameter.get_parameter_source()))
-        object.__setattr__(self, "encodes_plain_list", self.value_encoder is ValueEncoders.encode_list)
-
-    def get_parameter_values(self, value: Any, model: type[Model], dialect: Dialect) -> ParameterValues | None:
+    def bind(self, parameters: list[Any], value: Any, model: type[Model], dialect: Dialect) -> bool:
         """The parameter of a new list - encoded the way the recorded one was, all of it in one
         parameter.
 
         Args:
+            parameters: The parameter buffer of this execution, filled in place.
             value: The new list.
             model: The model queried.
             dialect: The dialect the query runs on.
 
         Returns:
-            The parameter, or None for a value that isn't a list, or a list the parameter can't
-            carry the way it carries the recorded one.
+            True when the prepared SQL shape accepts the value; False requests a fresh build.
+            Conversion and validation errors propagate to the caller.
         """
         if not isinstance(value, (list, tuple, set)):
-            return None
+            return False
         # A None in the list is an IS NULL test the plan's text holds - only the other values bind.
-        if self.encodes_plain_list:
-            encoded_values, holds_no_term = ValueEncoders.encode_bound_list(value, model, self.field, dialect)
-        else:
-            encoded_values = [
-                encoded_value
-                for encoded_value in self.value_encoder(value, model, self.field, dialect)
-                if encoded_value is not None
-            ]
-            holds_no_term = False
-        parameter = self.list_parameter.get_parameter(encoded_values, holds_no_term=holds_no_term)
+        encoded_values = self.value_encoder(value, model, self.field, dialect)
+        if any(element is None for element in encoded_values):
+            encoded_values = [element for element in encoded_values if element is not None]
+        parameter = self.parameter_encoder(encoded_values)  # type: ignore[misc]
         if parameter is None:
-            return None
-        return [(self.parameter_source_id, parameter, False)]
+            return False
+        return self.parameter_slot.bind(parameters, parameter, False)  # type: ignore[union-attr]

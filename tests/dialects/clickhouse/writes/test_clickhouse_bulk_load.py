@@ -12,6 +12,7 @@ import uuid
 import pytest
 
 from hare.contrib.test import capture_queries  # noqa: E402
+from hare.dialects.clickhouse.client.clickhouse_insert_values import ClickhouseInsertValues
 from hare.dialects.clickhouse.constants import CLICKHOUSE_DIALECT  # noqa: E402
 from hare.dialects.clickhouse.drivers.clickhouse_connect.client.clickhouse_connect_client import (  # noqa: E402
     ClickhouseConnectClient,
@@ -21,8 +22,7 @@ from hare.exceptions import (
     ValidationError,  # noqa: E402
 )
 from tests.dialects.clickhouse.models import Player, Team  # noqa: E402
-
-REQUIRES = ("clickhouse-connect",)
+from tests.utils.model_bindings import ModelBindings
 
 PLAYER_FIELDS = ("name", "team_id", "score", "rating", "joined", "born", "active", "notes", "data")
 PLAYER_INSERT = (
@@ -119,7 +119,7 @@ def test_plain_columns_are_inserted_as_they_are():
         (1, 1.5, True, decimal.Decimal("2.50"), key, datetime.date(1960, 5, 6), "a", None),
         (2, None, False, decimal.Decimal("3"), None, None, "", "b"),
     ]
-    assert ClickhouseConnectClient._get_inserted_columns(records) == [
+    assert ClickhouseInsertValues.get_columns(ClickhouseConnectClient, records) == [
         (1, 2),
         (1.5, None),
         (True, False),
@@ -134,7 +134,7 @@ def test_plain_columns_are_inserted_as_they_are():
 @pytest.mark.database_independent
 def test_a_uuid_is_written_as_the_uuid_itself():
     key = uuid.UUID("6f1e5a0e-0000-4000-8000-000000000001")
-    write = CLICKHOUSE_DIALECT.types.get_db_writer(Team._meta.fields_map["id"])
+    write = CLICKHOUSE_DIALECT.types.get_db_writer(ModelBindings.prepare(Team).get_binding(Team).fields_map["id"])
     assert write(key, Team) is key
     assert write(str(key), Team) == key
     assert type(write(str(key), Team)) is uuid.UUID
@@ -148,7 +148,7 @@ def test_a_uuid_is_written_as_the_uuid_itself():
 def test_a_naive_moment_is_inserted_as_its_utc_wall_clock():
     naive = datetime.datetime(2024, 1, 2, 3, 4, 5, 6)
     aware = datetime.datetime(2024, 1, 2, 3, 4, 5, 6, tzinfo=datetime.timezone(datetime.timedelta(hours=3)))
-    assert ClickhouseConnectClient._get_inserted_columns([(naive,), (aware,), (None,)]) == [
+    assert ClickhouseInsertValues.get_columns(ClickhouseConnectClient, [(naive,), (aware,), (None,)]) == [
         [naive.replace(tzinfo=datetime.UTC), aware, None]
     ]
 
@@ -166,12 +166,12 @@ def test_a_naive_moment_is_inserted_as_its_utc_wall_clock():
     ],
 )
 def test_a_value_is_inserted_as_its_literal_writes_it(value, inserted):
-    assert ClickhouseConnectClient._get_inserted_columns([(value,), (None,)]) == [[inserted, None]]
+    assert ClickhouseInsertValues.get_columns(ClickhouseConnectClient, [(value,), (None,)]) == [[inserted, None]]
 
 
 @pytest.mark.database_independent
 def test_text_beside_bytes_is_inserted_as_bytes():
-    assert ClickhouseConnectClient._get_inserted_columns([(b"\x01",), ("текст",), (None,)]) == [
+    assert ClickhouseInsertValues.get_columns(ClickhouseConnectClient, [(b"\x01",), ("текст",), (None,)]) == [
         [b"\x01", "текст".encode(), None]
     ]
 
@@ -180,7 +180,7 @@ def test_text_beside_bytes_is_inserted_as_bytes():
 @pytest.mark.parametrize("records", [[("a\x00b",)], [("a\x00b",), (None,)], [(["a\x00b"],)]])
 def test_a_null_byte_is_refused(records):
     with pytest.raises(ValidationError, match="null byte"):
-        ClickhouseConnectClient._get_inserted_columns(records)
+        ClickhouseInsertValues.get_columns(ClickhouseConnectClient, records)
 
 
 def run_in_new_process(script: str) -> None:
@@ -227,7 +227,7 @@ def test_a_driver_registered_first_takes_no_scheme_of_hares_own_driver():
         try:
             DialectRegistry.register_driver(TakingDriver())
         except ConfigurationError as error:
-            assert "already taken" in str(error), str(error)
+            assert "already registered or reserved" in str(error), str(error)
         else:
             raise AssertionError("the scheme of hare's own driver was taken")
         assert DialectRegistry.get_driver("postgresql+asyncpg").name == "postgresql+asyncpg"

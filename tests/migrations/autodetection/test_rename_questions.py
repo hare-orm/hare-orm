@@ -14,9 +14,9 @@ from hare.fields.encrypted import EncryptedTextField
 from hare.fields.field import Field
 from hare.migrations.autodetection.operation_generator import OperationGenerator
 from hare.migrations.autodetection.rename_questions import RenameQuestions
-from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state import State
 from hare.models import Model
+from tests.migrations.autodetection.models import make_model
 
 pytestmark = pytest.mark.database_independent
 
@@ -34,21 +34,8 @@ class RecordedRenameQuestions(RenameQuestions):
         return self.answer
 
 
-def make_model(
-    model_name: str, app_label: str = "shop", table: str | None = None, **model_fields: Field
-) -> type[Model]:
-    attributes: dict[str, Any] = {"id": fields.IntField(primary_key=True), **model_fields}
-    meta_options = {"app": app_label} if table is None else {"app": app_label, "table": table}
-    attributes["Meta"] = type("Meta", (), meta_options)
-    return type(model_name, (Model,), attributes)
-
-
 def build_state(*models: type[Model]) -> State:
-    state = State()
-    for model in models:
-        app_label = model.Meta.app  # type: ignore[attr-defined]
-        state.models[(app_label, model.__name__)] = ModelState.make_from_model(app_label, model)
-    return state
+    return State.from_models(models)
 
 
 def get_types(operations: list[Any]) -> list[str]:
@@ -144,8 +131,8 @@ def test_a_model_renamed_with_a_field_added_is_not_asked_about() -> None:
 @pytest.mark.parametrize("answer", [True, False])
 def test_a_model_moved_to_another_app_with_its_table_is_asked_about_once(answer: bool) -> None:
     rename_questions = RecordedRenameQuestions(answer)
-    old_state = build_state(make_model("Tag", "blog", table="tag", name=fields.CharField(max_length=20)))
-    new_state = build_state(make_model("Tag", "catalog", table="tag", name=fields.CharField(max_length=20)))
+    old_state = build_state(make_model("Tag", table="tag", app_label="blog", name=fields.CharField(max_length=20)))
+    new_state = build_state(make_model("Tag", table="tag", app_label="catalog", name=fields.CharField(max_length=20)))
 
     operations = OperationGenerator(old_state, new_state, rename_questions=rename_questions).generate()
 

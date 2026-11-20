@@ -94,7 +94,7 @@ async def test_create_and_remove_collation(db_isolated_no_schema):
     round_trip = RoundTrip(db_isolated_no_schema.get_connection())
     await round_trip.migrate_to(build_model("Book", "nv_book", book_fields()))
     create = ops.CreateCollation("nv_case_insensitive", "und-u-ks-level2", provider="icu", deterministic=False)
-    before = round_trip.tracked_state.clone()
+    before = round_trip.tracked_state
     migration = Migration(name="0099_collation", app_label=APP_LABEL)
     migration.operations = [create]
     round_trip.tracked_state = await migration.apply(
@@ -120,7 +120,7 @@ async def test_create_and_remove_collation(db_isolated_no_schema):
         ops.CreateCollation("nv_case_insensitive", "und-u-ks-level2", provider="icu", deterministic=False),
         ops.RemoveCollation("nv_case_insensitive", "und-u-ks-level2", provider="icu", deterministic=False),
     ]
-    await remove.apply(before.clone(), dry_run=False, schema_editor=round_trip.editor)
+    await remove.apply(before, dry_run=False, schema_editor=round_trip.editor)
     collations = await connection.execute_dicts(
         "SELECT collname FROM pg_collation WHERE collname = 'nv_case_insensitive'"
     )

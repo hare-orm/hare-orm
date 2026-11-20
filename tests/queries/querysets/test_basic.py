@@ -1,5 +1,6 @@
 import pytest
 
+from hare.core.hare_context import HareContext
 from tests.shared_models.testmodels import OldStyleModel, Tournament
 
 
@@ -32,5 +33,5 @@ async def test_basic_oldstyle(db):
     obj = await OldStyleModel.objects.create(external_id=123)
     assert obj.pk
 
-    assert OldStyleModel._meta.fields_map["id"].pk
-    assert OldStyleModel._meta.fields_map["external_id"].index
+    assert HareContext.require_current().apps.get_binding(OldStyleModel).fields_map["id"].pk
+    assert HareContext.require_current().apps.get_binding(OldStyleModel).fields_map["external_id"].index

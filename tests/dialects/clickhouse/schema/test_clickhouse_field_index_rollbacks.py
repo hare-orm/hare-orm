@@ -1,7 +1,6 @@
 """A field added with an index of its own on ClickHouse: the AddField creates the index with the column,
 and rolling it back drops the index once, before the column - ClickHouse drops no column an index covers."""
 
-import os
 import textwrap
 
 import pytest
@@ -14,10 +13,7 @@ class Note(Model):
 """
 
 
-@pytest.fixture(autouse=True)
-def skip_without_clickhouse():
-    if not os.getenv("HARE_TEST_DB", "").startswith("clickhouse"):
-        pytest.skip("runs against the ClickHouse test server - make test_clickhouse")
+pytestmark = pytest.mark.usefixtures("skip_without_clickhouse")
 
 
 @pytest.mark.asyncio

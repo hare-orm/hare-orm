@@ -24,6 +24,7 @@ DESCRIBE_SCRIPT = textwrap.dedent(
     from hare.core.config import HareConfig
     from hare.core.hare_context import HareContext
     from hare.fields import Field
+    from hare.models.model_binding import ModelBinding
 
     mode, db_url, module, cases = json.loads(sys.argv[1])
 
@@ -33,6 +34,8 @@ DESCRIBE_SCRIPT = textwrap.dedent(
             return f"{owner}.{value.model_field_name}"
         if isinstance(value, type):
             return value.__name__
+        if isinstance(value, ModelBinding):
+            return value._model.__name__
         if isinstance(value, enum.Enum):
             return value.value
         if dataclasses.is_dataclass(value):
@@ -50,24 +53,24 @@ DESCRIBE_SCRIPT = textwrap.dedent(
         return value
 
     def describe_model(model_name, keys, orderings):
-        model = HareContext.get_current().get_model(f"models.{model_name}") if mode == "full" else None
-        if model is None:
-            module_object = __import__(module, fromlist=[model_name])
-            model = getattr(module_object, model_name)
+        current = HareContext.get_current()
+        registry = apps if current is None else current.apps
+        binding = registry.get_binding(f"models.{model_name}")
+        queryset = registry.get_queryset(f"models.{model_name}")
         return {
-            "lookups": {key: describe(model._meta.get_lookup_info(key)) for key in keys},
-            "queryset_lookups": {key: describe(model.objects.all().get_lookup_info(key)) for key in keys},
-            "orderings": {name: describe(model._meta.get_ordering_info(name)) for name in orderings},
+            "lookups": {key: describe(binding.get_lookup_info(key)) for key in keys},
+            "queryset_lookups": {key: describe(queryset.get_lookup_info(key)) for key in keys},
+            "orderings": {name: describe(binding.get_ordering_info(name)) for name in orderings},
         }
 
     def describe_all():
         return {model_name: describe_model(model_name, keys, orderings) for model_name, keys, orderings in cases}
 
     if mode == "early_app":
-        Hare.bind_models(HareConfig.from_db_url(db_url, {"models": [module]}))
+        apps = Hare.bind_models(HareConfig.from_db_url(db_url, {"models": [module]}))
         result = describe_all()
     elif mode == "early":
-        Hare.bind_models(HareConfig.from_db_url(db_url, {"models": [module]}))
+        apps = Hare.bind_models(HareConfig.from_db_url(db_url, {"models": [module]}))
         result = describe_all()
         result["current_context"] = HareContext.get_current() is not None
 

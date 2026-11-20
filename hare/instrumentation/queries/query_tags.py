@@ -1,4 +1,4 @@
-"""Sqlcommenter-style tags appended to the SQL as a comment - a database's statement statistics, plan
+"""Sqlcommenter-style tags placed in SQL comments by the dialect - a database's statement statistics, plan
 logs and slow-query logs can tell the call site.
 """
 
@@ -10,22 +10,17 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING
 from urllib.parse import quote
 
+from hare.dialects.base.clauses.query_clauses import QueryClauses
 from hare.exceptions import ConfigurationError
-from hare.instrumentation.constants import (
-    BLOCK_COMMENT_END,
-    BLOCK_COMMENT_START,
-    INSERT_KEYWORD,
-    INSERT_KEYWORD_LENGTH,
-    LINE_COMMENT_START,
-)
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
 
 
 class QueryTags:
-    """Tags the SQL statements executed inside a ``QueryTags.scope()`` block with a trailing
-    sqlcommenter-style comment."""
+    """Tags SQL statements inside a ``QueryTags.scope()`` block with a sqlcommenter-style comment.
+
+    The dialect chooses its placement, preserving the statement syntax."""
 
     #: The tags active for the current task, or None if none are set - a plain dict, not this
     #: ContextVar mutated in place, so a nested scope() block can restore the OUTER block's tags
@@ -65,8 +60,8 @@ class QueryTags:
     @classmethod
     @contextmanager
     def scope(cls, **tags: str) -> Generator[None]:
-        """Tags every statement of the block with the given pairs, as a trailing comment (``with
-        QueryTags.scope(application="billing"):``). A nested block has only its own tags.
+        """Tags every statement of the block with the given pairs in a comment placed by its dialect
+        (``with QueryTags.scope(application="billing"):``). A nested block has only its own tags.
         """
         token = cls.set(tags)
         try:
@@ -76,10 +71,9 @@ class QueryTags:
 
     @classmethod
     def append(cls, sql: str, dialect: Dialect | None = None) -> str:
-        """Appends the current tags to ``sql`` as a trailing comment - per the spec, never prepended,
-        but on an INSERT of a database reading what follows its VALUES as data
-        (``Features.reads_trailing_comment_of_insert`` off), which takes it first. Returns ``sql``
-        itself without tags.
+        """Format current tags and let the dialect place the comment without parsing SQL.
+
+        Without a dialect the comment is appended. No tags returns the original string.
 
         Args:
             sql: The statement.
@@ -95,39 +89,5 @@ class QueryTags:
         comment = ",".join(
             f"{quote(str(key), safe='')}='{quote(str(value), safe='')}'" for key, value in sorted(tags.items())
         )
-        if (
-            dialect is not None
-            and not dialect.features.reads_trailing_comment_of_insert
-            and cls.starts_with_insert(sql)
-        ):
-            return f"/*{comment}*/ {sql}"
-        # On a line of its own after a line comment, which would take it in.
-        separator = "\n" if LINE_COMMENT_START in sql[sql.rfind("\n") + 1 :] else " "
-        return f"{sql}{separator}/*{comment}*/"
-
-    @staticmethod
-    def starts_with_insert(sql: str) -> bool:
-        """Whether a statement is an INSERT - the comments it starts with skipped.
-
-        Args:
-            sql: The statement.
-
-        Returns:
-            True for an INSERT.
-        """
-        position = 0
-        while True:
-            while position < len(sql) and sql[position].isspace():
-                position += 1
-            if sql.startswith(LINE_COMMENT_START, position):
-                line_end = sql.find("\n", position)
-                if line_end == -1:
-                    return False
-                position = line_end + 1
-            elif sql.startswith(BLOCK_COMMENT_START, position):
-                comment_end = sql.find(BLOCK_COMMENT_END, position + len(BLOCK_COMMENT_START))
-                if comment_end == -1:
-                    return False
-                position = comment_end + len(BLOCK_COMMENT_END)
-            else:
-                return sql[position : position + INSERT_KEYWORD_LENGTH].upper() == INSERT_KEYWORD
+        clauses = dialect.clauses if dialect is not None else QueryClauses
+        return clauses.get_tagged_statement_sql(sql, comment)

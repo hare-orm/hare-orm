@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
-from hare.query.expressions import CombinedExpression, Exists, F, Q
+from hare.query.expressions import Exists, Expression, Q
 from hare.query.expressions.compatibility.constants import NON_NUMBER_VALUE_TYPES
 from hare.query.functions.aggregates.statistic_result_aggregate import StatisticResultAggregate
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 from hare.sql import functions
+from hare.sql.terms.term import Term
 
 
 class StatisticAggregate(StatisticResultAggregate):
@@ -26,7 +27,7 @@ class StatisticAggregate(StatisticResultAggregate):
 
     def __init__(
         self,
-        field: str | F | CombinedExpression,
+        field: str | Expression | Term,
         sample: bool = False,
         distinct: bool = False,
         _filter: Q | Exists | None = None,

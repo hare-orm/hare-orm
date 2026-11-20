@@ -4,6 +4,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any, ClassVar
 
+from hare.dialects.base.types.result_literal_binding import ResultLiteralBinding
 from hare.dialects.enums import ParameterPosition
 from hare.exceptions import ConfigurationError, FieldError, QueryError
 from hare.fields.data.json.json_field import JSONField
@@ -12,28 +13,25 @@ from hare.fields.field import Field
 from hare.fields.generated_field import GeneratedField
 from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import AggregatedMultiValuedPaths
 from hare.query.expressions.arithmetic.combinable_expression import CombinableExpression
-from hare.query.expressions.arithmetic.combined_expression import CombinedExpression
+from hare.query.expressions.bound_expression import BoundExpression
 from hare.query.expressions.compatibility.constants import TEXT_VALUE_TYPE
 from hare.query.expressions.compatibility.output_field_compatibility import OutputFieldCompatibility
 from hare.query.expressions.compatibility.result_branch import ResultBranch
-from hare.query.expressions.constants import FIELD_TYPED_LITERAL_TYPES, NO_CAST_SQL_TYPES
 from hare.query.expressions.dialect_expressions import DialectExpressions
 from hare.query.expressions.enums import TemporalType
 from hare.query.expressions.expression import Expression
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
-from hare.query.expressions.f import F
 from hare.query.expressions.joins.named_join import NamedJoin
 from hare.query.expressions.numeric.numeric_typing import NumericTyping
+from hare.query.expressions.structure.enums import ArgumentRole
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.query.expressions.temporal.temporal_arithmetic import TemporalArithmetic
 from hare.query.expressions.value import Value
-from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
-from hare.query.lookup_info.lookup_paths import LookupPaths
+from hare.query.lookup_info.bound_lookup_path import BoundLookupPath
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
-from hare.query.plans.description.term_plan_descriptions import TermPlanDescriptions
 from hare.query.plans.enums import PlanPartType
 from hare.sql.functions.cast import Cast
-from hare.sql.functions.numeric_cast import NumericCast
 from hare.sql.functions.text.collate import Collate
 from hare.sql.terms.functions.function import Function as HareSqlFunction
 from hare.sql.terms.term import Term
@@ -52,7 +50,9 @@ class Function(CombinableExpression):
         QueryError: The number of arguments isn't one the function takes.
     """
 
-    __slots__ = ("field", "field_object", "default_values")
+    structure = ExpressionStructure(positions=((0, ArgumentRole.FIELD),), keywords=(("field", ArgumentRole.FIELD),))
+
+    __slots__ = ("field", "default_values")
 
     database_function: type[HareSqlFunction] = HareSqlFunction
     #: The SQL function's name - set, the function renders as ``NAME(arguments...)`` through
@@ -79,10 +79,9 @@ class Function(CombinableExpression):
         ("get_plan_options", PlanPartType.KEY_METHOD),
         ("field", PlanPartType.FIELD),
         ("default_values", PlanPartType.ARGUMENTS),
-        ("field_object", PlanPartType.NONE),
     )
 
-    def __init__(self, field: str | F | CombinedExpression | Function | Term, *default_values: Any) -> None:
+    def __init__(self, field: str | Expression | Term, *default_values: Any) -> None:
         least, most = self.default_value_counts
         if len(default_values) < least or (most is not None and len(default_values) > most):
             if most is None:
@@ -93,7 +92,6 @@ class Function(CombinableExpression):
                 expected = f"{least + 1} to {most + 1}"
             raise QueryError(f"{type(self).__name__}() takes {expected} argument(s), got {len(default_values) + 1}")
         self.field = field
-        self.field_object: Field[Any] | None = None
         self.default_values = default_values
 
     def get_result_literals(self) -> list[Any]:
@@ -132,8 +130,6 @@ class Function(CombinableExpression):
         if isinstance(named_join := expression_context.annotations.get(main_name), NamedJoin):
             # A path through a named JOIN - a FilteredRelation's related field, a Lateral's column.
             result = named_join.get_path_result(path, expression_context)
-            if self.populate_field_object:
-                self.field_object = result.output_field
             return result
         # A bare name of another annotation resolves like F() of it.
         if field in expression_context.annotations:
@@ -142,68 +138,76 @@ class Function(CombinableExpression):
             # (values()/values_list() re-register an annotation under its positional alias).
             if annotation is not self and field not in expression_context.annotation_names_in_progress:
                 expression_context.annotation_names_in_progress.add(field)
-                annotation_output_field: Field[Any] | None = None
                 try:
-                    if isinstance(annotation, Term) and not isinstance(annotation, Expression):
-                        term = annotation
-                    else:
-                        referenced_result = annotation.get_result(expression_context)
-                        term = referenced_result.term
-                        # The referenced annotation's own value type, as F(field) would decode it.
-                        annotation_output_field = annotation.get_value_field(referenced_result)
+                    return Expression._get_referenced_annotation_value(annotation, expression_context)
                 finally:
                     expression_context.annotation_names_in_progress.discard(field)
-                if self.populate_field_object:
-                    self.field_object = annotation_output_field
-                return ExpressionResult(term=term, output_field=annotation_output_field)
             # The name is the annotation currently being resolved (annotate(price=Sum("price"))):
             # it can only mean the real model field of the same name; without one it is a cycle.
-            if field.partition("__")[0] not in expression_context.model._meta.fields_map:
+            if field.partition("__")[0] not in expression_context.binding.fields_map:
                 raise QueryError(
                     f"Circular annotation reference detected: {field!r} depends on itself "
                     "(directly or through another annotation)"
                 )
         if (tracker := AggregatedMultiValuedPaths.get_from(expression_context)) is not None:
-            tracker.record_lookup(expression_context.model, field, expression_context.select_related_path_prefix)
-        term, joins, output_field = LookupPaths.get_nested_field(
-            expression_context.model,
-            expression_context.table,
-            field,
-            visibility=expression_context.visibility,
-            select_related_extra_conditions=expression_context.select_related_extra_conditions,
-            dialect=expression_context.dialect,
-            connection=expression_context.connection,
-        )
-        if self.populate_field_object:
-            self.field_object = output_field
-        return ExpressionResult(term=term, joins=joins, output_field=output_field)
+            tracker.record_lookup(expression_context.binding, field, expression_context.select_related_path_prefix)
+        return BoundLookupPath.bind(expression_context, field).get_result()
 
-    def _get_argument(
-        self, expression_context: ExpressionContext, value: Any, *, treat_str_as_field: bool
-    ) -> ExpressionResult:
-        if isinstance(value, Value):
-            # A bool/Decimal/date/datetime literal decodes through its own type - Round(Value(
-            # Decimal("1.555")), 2) is a Decimal, not the float a database may give.
-            result = value.get_result(expression_context)
-            return ExpressionResult(
-                term=result.term, joins=result.joins, output_field=Value.get_literal_output_field(value.value)
+    def _prepare_argument(
+        self,
+        context: ExpressionContext,
+        value: Any,
+        *,
+        attribute: str,
+        index: int | None = None,
+        field_name: bool = False,
+    ) -> BoundExpression:
+        """Bind non-literal arguments once; keep literal origins until their encoder is chosen."""
+        if field_name and isinstance(value, str):
+            result = self._get_nested_field(context, value)
+            return BoundExpression(
+                self,
+                attribute,
+                value,
+                ResultBranch(value, result.output_field, is_literal=False),
+                result,
+                index,
             )
-        if isinstance(value, Expression):
-            # The type of the value the argument computes, not the field its own argument had -
-            # Max(Length("name")) is an integer, not text.
-            result = value.get_result(expression_context)
-            return ExpressionResult(term=result.term, joins=result.joins, output_field=value.get_value_field(result))
-        if isinstance(value, Term):
-            return ExpressionResult(term=value)
-        if isinstance(value, str) and treat_str_as_field:
-            return self._get_nested_field(expression_context, value)
-        if (encoder := Value.get_literal_encoder(value, expression_context.dialect)) is not None:
-            # A timedelta/UUID/dict literal is bound in its field's stored form.
-            return ExpressionResult(term=ValueWrapper(encoder(value)))
-        if type(value) is int and (cast_sql_type := Value.get_cast_sql_type(value, NO_CAST_SQL_TYPES)):
-            # An integer beyond the one a database reads a bare literal as.
-            return ExpressionResult(term=Cast(ValueWrapper(value), cast_sql_type))
-        return ExpressionResult(term=value)
+        return BoundExpression.prepare_argument(self, attribute, value, context, index=index)
+
+    def _lower_main_argument(
+        self,
+        context: ExpressionContext,
+        argument: BoundExpression,
+        output_field: Field[Any] | None,
+    ) -> ExpressionResult:
+        """Select conversion before lowering; let the post-hook step type the returned term."""
+        if not argument.branch.is_literal:
+            return argument.lower(context)
+        encoder = context.dialect.types.get_result_literal_encoder(output_field, argument.branch.value, context.model)
+        if encoder is None:
+            encoder = Value.get_literal_encoder(argument.branch.value, context.dialect)
+        if encoder is None or output_field is None:
+            return argument.lower(context, encoder=encoder)
+        return argument.lower(context, binding=ResultLiteralBinding(encoder, output_field, None))
+
+    def _lower_default_argument(
+        self,
+        context: ExpressionContext,
+        argument: BoundExpression,
+        encoding_argument: ExpressionResult,
+        output_field: Field[Any] | None,
+    ) -> ExpressionResult:
+        """Keep the default encoder hook authoritative, selecting and applying it once."""
+        if not argument.branch.is_literal:
+            return argument.lower(context)
+        encoder = self._get_default_literal_encoder(argument.branch.value, encoding_argument, context)
+        if encoder is None or output_field is None:
+            return argument.lower(context, encoder=encoder)
+        binding = ResultLiteralBinding(
+            encoder, output_field, context.dialect.parameters.get_result_literal_cast_type(output_field)
+        )
+        return argument.lower(context, binding=binding)
 
     def _get_collation_argument(self, argument: ExpressionResult) -> ExpressionResult:
         """Drops an argument's explicit collation unless this function keeps it.
@@ -272,16 +276,16 @@ class Function(CombinableExpression):
         EncryptedFieldBase.raise_if_encrypted(field_object, f"{type(self).__name__}()")
 
     def _cast_literal_argument(
-        self, expression_context: ExpressionContext, function_arg: ExpressionResult, argument: Any
+        self, expression_context: ExpressionContext, function_arg: ExpressionResult
     ) -> ExpressionResult:
-        """Types a bare literal main argument where the dialect says nothing around it does - of a function
-        returning one of its arguments, a literal bound in its field type's stored form
-        (``FIELD_TYPED_LITERAL_TYPES``) as that type's column.
+        """Type a bare main literal after the overridable main lowering has returned its value field.
+
+        Functions selecting an argument retain that field's parameter representation;
+        other literals use their inferred type. No conversion is selected or applied here.
 
         Args:
             expression_context: Carries the model whose database decides the dialect.
             function_arg: The resolved main argument.
-            argument: The main argument as given.
 
         Returns:
             `function_arg`, or a copy whose term is the cast literal.
@@ -290,24 +294,16 @@ class Function(CombinableExpression):
         if isinstance(term, Term) and not isinstance(term, ValueWrapper):
             return function_arg
         literal = term.value if isinstance(term, ValueWrapper) else term
-        given_literal = argument.value if isinstance(argument, Value) else argument
-        if (
-            self.returns_an_argument
-            and isinstance(given_literal, FIELD_TYPED_LITERAL_TYPES)
-            and function_arg.output_field is not None
-        ):
-            # The text a UUID or a dict is bound as - as their column, or COALESCE() finds no type of both.
-            cast_sql_type = expression_context.dialect.parameters.get_field_parameter_cast_type(
+        if self.returns_an_argument and function_arg.output_field is not None:
+            cast_sql_type = expression_context.dialect.parameters.get_result_literal_cast_type(
                 function_arg.output_field
             )
-            if cast_sql_type is None:
-                return function_arg
-            # The type as the dialect names it - Cast() writes a bare name upper-cased.
-            return ExpressionResult(
-                term=Cast(term, LiteralValue(cast_sql_type)),
-                joins=function_arg.joins,
-                output_field=function_arg.output_field,
-            )
+            if cast_sql_type is not None:
+                return ExpressionResult(
+                    term=Cast(term, LiteralValue(cast_sql_type)),
+                    joins=function_arg.joins,
+                    output_field=function_arg.output_field,
+                )
         typed_term = Value.get_typed_term(
             term, literal, ParameterPosition.FUNCTION_ARGUMENT, expression_context.dialect
         )
@@ -369,49 +365,49 @@ class Function(CombinableExpression):
             The term, the joins and the output field.
         """
 
-        DialectExpressions.raise_if_dialect_lacks(self, expression_context.dialect)
-        function_arg = self._get_collation_argument(
-            self._get_argument(expression_context, self.field, treat_str_as_field=True)
+        DialectExpressions.raise_if_dialect_lacks(
+            self, expression_context.dialect, checks_admission=expression_context.checks_dialect_admission
         )
-        if isinstance(self.field, Term) and not isinstance(self.field, Expression):
-            # A SQL term built by hand binds its values as its description lists them.
-            TermPlanDescriptions.record(self.field, expression_context.value_wrapper_references)
+        main = self._prepare_argument(expression_context, self.field, attribute="field", field_name=True)
+        defaults = [
+            self._prepare_argument(expression_context, value, attribute="default_values", index=index)
+            for index, value in enumerate(self.default_values)
+        ]
+        common_field = None
+        if self.returns_an_argument:
+            branches = [main.branch, *(value.branch for value in defaults)]
+            OutputFieldCompatibility.raise_if_value_types_mix(branches, f"{type(self).__name__}()")
+            common_field = OutputFieldCompatibility.get_common_output_field(branches)
+        function_arg = self._get_collation_argument(self._lower_main_argument(expression_context, main, common_field))
         self._raise_if_encrypted_argument(self.field, function_arg)
         self._raise_if_argument_type_refused(self.field, function_arg)
-        function_arg = self._cast_literal_argument(expression_context, function_arg, self.field)
+        function_arg = self._cast_literal_argument(expression_context, function_arg)
         if TEXT_VALUE_TYPE in self.refused_argument_value_types and NumericTyping.is_enum_field(
             function_arg.output_field
         ):
             # A function of numbers takes an integer enum's column by its number.
             function_arg.term = expression_context.dialect.renderers.get_enum_number_term(function_arg.term)
         function_arg = self._wrap_argument(expression_context, function_arg)
+        encoding_argument = (
+            ExpressionResult(term=function_arg.term, output_field=common_field)
+            if common_field is not None
+            else function_arg
+        )
         default_results = [
-            self._get_default_argument(expression_context, value, function_arg) for value in self.default_values
+            self._get_collation_argument(
+                self._lower_default_argument(
+                    expression_context,
+                    value,
+                    encoding_argument,
+                    common_field if self.returns_an_argument else None,
+                )
+            )
+            for value in defaults
         ]
-        function_arg = self._get_literal_beside_json_column(expression_context, function_arg, default_results)
         for default_value, default_result in zip(self.default_values, default_results, strict=True):
             self._raise_if_encrypted_argument(default_value, default_result)
         default_terms = self._get_default_terms(function_arg, default_results, expression_context)
         term = self._get_function_term(function_arg, default_terms)
-        # A raw default value is wrapped inside the SQL function's constructor, not through Value -
-        # recorded here. Skipped when the term's arguments aren't [field, *default_values].
-        if expression_context.value_wrapper_references is not None and len(term.args) == 1 + len(self.default_values):
-            for index, (original_default, wrapped_arg) in enumerate(
-                zip(self.default_values, term.args[1:], strict=True)
-            ):
-                if isinstance(wrapped_arg, NumericCast | Cast):
-                    wrapped_arg = wrapped_arg.args[0]
-                if isinstance(original_default, Term) and not isinstance(original_default, Expression):
-                    TermPlanDescriptions.record(original_default, expression_context.value_wrapper_references)
-                elif not isinstance(original_default, (Expression, Term)) and isinstance(wrapped_arg, ValueWrapper):
-                    ExpressionArguments.record_literal(
-                        expression_context.value_wrapper_references,
-                        self,
-                        "default_values",
-                        wrapped_arg,
-                        self._get_default_literal_encoder(original_default, function_arg, expression_context),
-                        index,
-                    )
         term = self._get_result_term(term, function_arg, default_results, expression_context)
         joins = function_arg.joins
         for value in default_results:
@@ -425,11 +421,25 @@ class Function(CombinableExpression):
 
         if self.populate_field_object and (result_output_field := result.output_field):
             coerced_output_field = self._coerce_output_field(result_output_field, expression_context)
-            self.field_object = coerced_output_field
             # A new result carrying the coerced field - the query reads the output field off the
             # result.
             result = ExpressionResult(term=result.term, joins=result.joins, output_field=coerced_output_field)
 
+        return self._finalize_result(result, function_arg, expression_context)
+
+    def _finalize_result(
+        self, result: ExpressionResult, function_arg: ExpressionResult, expression_context: ExpressionContext
+    ) -> ExpressionResult:
+        """Finish SQL adaptation after the output field has been selected and coerced.
+
+        Args:
+            result: The function term, joins and final output field.
+            function_arg: The bound first argument, retaining its original value field.
+            expression_context: The context of this build.
+
+        Returns:
+            The adapted result. Per-build information stays on these results, not the declaration.
+        """
         return result
 
     def get_plan_options(self) -> tuple[Any, ...]:
@@ -470,32 +480,6 @@ class Function(CombinableExpression):
         """
         return function_arg.output_field
 
-    def _get_default_argument(
-        self, expression_context: ExpressionContext, value: Any, function_arg: ExpressionResult
-    ) -> ExpressionResult:
-        """Resolves one default value - a literal bound with ``_get_default_literal_encoder()``.
-
-        Args:
-            expression_context: The context the function is resolved in.
-            value: The default value.
-            function_arg: The resolved main argument.
-
-        Returns:
-            The resolved value.
-        """
-        if (
-            not isinstance(value, (Expression, Term, str))
-            and (encoder := self._get_default_literal_encoder(value, function_arg, expression_context)) is not None
-        ):
-            # A date/time/timedelta/UUID/dict literal is bound in its stored form.
-            return ExpressionResult(term=ValueWrapper(encoder(value)))
-        if isinstance(value, Value) and self.binds_as_main_field(value.value, function_arg):
-            result = value.get_encoded_result(
-                expression_context, self._get_default_literal_encoder(value.value, function_arg, expression_context)
-            )
-            return ExpressionResult(term=result.term, joins=result.joins)
-        return self._get_collation_argument(self._get_argument(expression_context, value, treat_str_as_field=False))
-
     def _get_default_literal_encoder(
         self, value: Any, function_arg: ExpressionResult, expression_context: ExpressionContext
     ) -> Callable[[Any], Any] | None:
@@ -513,52 +497,19 @@ class Function(CombinableExpression):
         """
         if self.binds_as_main_field(value, function_arg):
             main_field: Field[Any] = function_arg.output_field  # type: ignore[assignment]
-            return TemporalArithmetic.get_field_encoder(main_field, expression_context.dialect)
-        return Value.get_literal_encoder(value, expression_context.dialect)
-
-    def _get_literal_beside_json_column(
-        self,
-        expression_context: ExpressionContext,
-        function_arg: ExpressionResult,
-        default_results: list[ExpressionResult],
-    ) -> ExpressionResult:
-        """A literal main argument of a function returning one of its arguments, beside a JSON column among
-        the default values, bound as that column's JSON - a text, a number or a list would be bound as itself,
-        which the column then holds as no JSON, or a database finds no type of both.
-
-        Args:
-            expression_context: The context the function is resolved in.
-            function_arg: The resolved main argument.
-            default_results: The resolved default values.
-
-        Returns:
-            `function_arg`, or the literal encoded by the JSON column's field.
-
-        Raises:
-            ValidationError: The column's field refuses the literal.
-        """
-        if not self.returns_an_argument:
-            return function_arg
-        literal = self.field.value if isinstance(self.field, Value) else self.field
-        if literal is None or isinstance(literal, (Expression, Term, str)) and not isinstance(self.field, Value):
-            return function_arg
-        json_field = next(
-            (
-                result.output_field
-                for value, result in zip(self.default_values, default_results, strict=True)
-                if not isinstance(value, Value) and Function.is_json_field(result.output_field)
-            ),
-            None,
-        )
-        if json_field is None or Function.is_json_field(function_arg.output_field):
-            return function_arg
-        encoded = TemporalArithmetic.get_field_encoder(json_field, expression_context.dialect)(literal)
-        term: Term = ValueWrapper(encoded)
+            return expression_context.dialect.types.get_field_encoder(main_field)
+        literal_encoder = Value.get_literal_encoder(value, expression_context.dialect)
         if (
-            cast_sql_type := expression_context.dialect.parameters.get_field_parameter_cast_type(json_field)
-        ) is not None:
-            term = Cast(term, LiteralValue(cast_sql_type))
-        return ExpressionResult(term=term, joins=function_arg.joins, output_field=json_field)
+            self.returns_an_argument
+            and (
+                encoder := expression_context.dialect.types.get_result_literal_encoder(
+                    function_arg.output_field, value, expression_context.model
+                )
+            )
+            is not None
+        ):
+            return encoder
+        return literal_encoder
 
     @staticmethod
     def is_json_field(field: Field[Any] | None) -> bool:

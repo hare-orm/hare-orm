@@ -9,7 +9,7 @@ from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclass(frozen=True)
@@ -57,18 +57,18 @@ class EnumMembersCondition(DialectCondition):
         """
         return replace(self, field=new_name) if self.field == old_name else self
 
-    def get_condition_sql(self, model: type[Model], client: DatabaseClient) -> str:
+    def get_condition_sql(self, binding: ModelBinding, client: DatabaseClient) -> str:
         """The predicate written into a table of ``model``.
 
         Args:
-            model: The model the constraint belongs to.
+            binding: The model the constraint belongs to.
             client: The client of the database the DDL runs on.
 
         Returns:
             The SQL predicate, made by the dialect's schema editor.
         """
         literals = client.dialect.literals
-        [column_name] = model._meta.get_column_names((self.field,))
+        [column_name] = binding.get_column_names((self.field,))
         return client.dialect.schema_editor_class.constraint_statements_class.get_enum_members_check_sql(
             literals.quote_identifier(column_name), [literals.get_literal_sql(value) for value in self.values]
         )

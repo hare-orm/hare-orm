@@ -4,7 +4,6 @@ from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.connection.connection_option import ConnectionOption
 from hare.dialects.base.connection.connection_options import ConnectionOptions
-from hare.dialects.dialect_registry import DialectRegistry
 from hare.dialects.enums import ConnectionOptionType
 from hare.dialects.postgresql.connection.postgresql_driver import PostgresqlDriver
 from hare.dialects.postgresql.constants import POSTGRES_CONNECTION_OPTIONS, POSTGRES_PORT_OPTION
@@ -35,8 +34,8 @@ class RustPgDriver(PostgresqlDriver):
             from hare.dialects.postgresql.drivers.rust_pg.client.rust_pg_client import RustPgClient
         except ImportError as error:
             raise ConfigurationError(
-                "The postgresql engine needs the rust.native extension, which is not built: build it "
-                "(`make build_native`) or use the postgresql+asyncpg engine."
+                "The postgresql engine - hare's native driver - runs on Linux and macOS; on Windows use the "
+                "postgresql+asyncpg engine."
             ) from error
         return RustPgClient
 
@@ -63,4 +62,4 @@ class RustPgDriver(PostgresqlDriver):
         return {"ssl_mode": mode}
 
 
-DialectRegistry.register_driver(RustPgDriver())
+extension = RustPgDriver.get_contribution

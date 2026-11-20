@@ -32,6 +32,38 @@ def make_broker(**middleware_options: Any) -> InMemoryBroker:
     return broker
 
 
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+async def test_captured_sending_labels_do_not_override_a_child_task_or_the_next_send():
+    broker = make_broker()
+
+    @broker.task(task_name="inspect_captured_label")
+    async def inspect_label():
+        return TaskTenantLabels.get_label_value(Tenancy.current.get())
+
+    with Tenancy.scope(99):
+        with TaskTenantLabels.sending(broker, {"tenant": {"any_of": [1, 2]}}):
+            direct = await (await inspect_label.kiq()).wait_result(timeout=5)
+            assert not direct.is_err and direct.return_value == {"any_of": [1, 2]}
+            child = await asyncio.create_task(inspect_label.kiq())
+            result = await child.wait_result(timeout=5)
+            assert not result.is_err and result.return_value == 99
+        result = await (await inspect_label.kiq()).wait_result(timeout=5)
+        assert not result.is_err and result.return_value == 99
+        assert Tenancy.current.get() == 99
+
+
+@pytest.mark.database_independent
+def test_task_transaction_iterators_are_shared_with_the_worker_lifecycle():
+    names = ["default", "reports"]
+    worker = HareTaskiq(InMemoryBroker(), {}, atomic_tasks=(name for name in names))
+    names.append("later")
+    assert worker.lifecycle.transaction_connection_names == ("default", "reports")
+    assert worker.middleware.transaction_connection_names == ("default", "reports")
+    middleware = HareTaskiqMiddleware(lifecycle=worker.lifecycle, atomic_tasks=iter(["other"]))
+    assert middleware.transaction_connection_names == ("other",)
+
+
 @pytest.mark.asyncio
 async def test_a_task_runs_tagged_with_its_name_and_id_in_its_tenant(db_taskiq):
     broker = make_broker()
@@ -316,6 +348,58 @@ async def test_a_task_sent_through_the_outbox_keeps_the_tenant_of_its_sender(db_
     # The relay sends it outside any tenant scope.
     await tasks.get_relay().poll_once()
     assert sorted(tenants) == [7, 9]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope_type", ["many", "all", "models"])
+async def test_outbox_delivery_keeps_structured_tenant_labels(db_taskiq, scope_type):
+    broker = make_broker()
+    tasks = TaskiqDelivery(broker, model=TaskiqOutboxEvent)
+    for number in (1, 2, 3):
+        await TenantTaskNote.objects.all_tenants().create(id=number, company_id=number)
+    scope = {
+        "many": Tenancy.any_of(1, 2),
+        "all": Tenancy.ALL,
+        "models": {TenantTaskNote: Tenancy.any_of(1, 2)},
+    }[scope_type]
+    expected = [1, 2, 3] if scope_type == "all" else [1, 2]
+    seen = []
+
+    @broker.task(task_name="read_structured_tenant_scope")
+    async def read_tenants(record=False):
+        values = await TenantTaskNote.objects.order_by("id").values_list("company_id", flat=True)
+        if record:
+            seen.append(values)
+        return values
+
+    with Tenancy.scope(scope):
+        direct = await (await read_tenants.kiq()).wait_result(timeout=5)
+        assert not direct.is_err and direct.return_value == expected
+        event = await tasks.kiq_on_commit(read_tenants, record=True)
+    assert isinstance(event.payload["labels"]["tenant"], dict)
+    with Tenancy.scope(99):
+        await tasks.deliver(event)
+        assert Tenancy.current.get() == 99
+    assert seen == [expected]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("labels", [None, {"tenant": None}], ids=["absent", "explicit-none"])
+async def test_outbox_delivery_does_not_inherit_the_relays_tenant_for_an_unscoped_sender(db_taskiq, labels):
+    broker = make_broker()
+    tasks = TaskiqDelivery(broker, model=TaskiqOutboxEvent)
+    seen = []
+
+    @broker.task(task_name="remember_unscoped_sender")
+    async def remember_sender():
+        seen.append(Tenancy.current.get())
+
+    assert Tenancy.current.get() is None
+    event = await tasks.kiq_on_commit(remember_sender, labels=labels)
+    with Tenancy.scope(99):
+        await tasks.deliver(event)
+        assert Tenancy.current.get() == 99
+    assert seen == [None]
 
 
 @pytest.mark.asyncio

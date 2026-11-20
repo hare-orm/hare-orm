@@ -3,33 +3,20 @@ queryset's order - PostgreSQL only, refused before the query is sent elsewhere."
 
 from __future__ import annotations
 
-import os
-
 import pytest
 import pytest_asyncio
 
 from hare.contrib.test import RollbackIsolation
-from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.dialects.postgresql.functions.array import ArraySubquery
 from hare.exceptions import QueryError, UnSupportedError
 from hare.query.expressions import OuterReference
 from tests.relations.prefetch_slices_models import Label, Novel, Writer
+from tests.relations.test_prefetch_slices import slices_database as array_database  # noqa: F401
 from tests.utils.database_under_test import DatabaseUnderTest
 
 
-@pytest_asyncio.fixture(scope="module")
-async def array_database():
-    async with hare_test_context(
-        modules=["tests.relations.prefetch_slices_models"],
-        db_url=os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:"),
-        app_label="models",
-        connection_label="models",
-    ) as context:
-        yield context
-
-
 @pytest_asyncio.fixture
-async def writers(array_database):
+async def writers(array_database):  # noqa: F811
     async with RollbackIsolation(array_database):
         anna = await Writer.objects.create(id=1, name="anna")
         await Writer.objects.create(id=2, name="boris")
@@ -77,3 +64,22 @@ async def test_array_subquery_takes_one_column():
         await Writer.objects.annotate(titles=ArraySubquery(novels_of_writer("title", "rating")))
     with pytest.raises(QueryError, match="one column"):
         await Writer.objects.annotate(titles=ArraySubquery(Novel.objects.filter(writer=OuterReference("pk"))))
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("writers")
+async def test_reused_array_subquery_keeps_both_annotation_names():
+    if DatabaseUnderTest.get_dialect().name != "postgresql":
+        pytest.skip("ArraySubquery requires PostgreSQL")
+    titles = ArraySubquery(novels_of_writer("title"))
+    first = titles.as_("first")
+    second = titles.as_("second")
+    assert first.alias == "first"
+    assert second.alias == "second"
+    assert titles.alias is None
+    for _ in range(2):
+        rows = await Writer.objects.annotate(first=titles, second=titles).order_by("id").values("first", "second")
+        assert rows == [
+            {"first": ["n2", "n3", "n1"], "second": ["n2", "n3", "n1"]},
+            {"first": [], "second": []},
+        ]

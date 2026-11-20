@@ -16,15 +16,19 @@ from hare.query.expressions import F, Q
 from hare.query.managers.manager import Manager
 from hare.query.queryset import QuerySet
 from hare.query.relation_loading import Prefetch, Select, prefetch_related_objects
+from hare.query.scopes.row_scope_provider import RowScopeProvider
+from hare.query.scopes.row_visibility import RowVisibility
 from hare.transactions.transactions import Transactions
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 
 __all__ = [
     "BackwardForeignKeyRelation",
     "BackwardOneToOneRelation",
     "Model",
     "Manager",
+    "RowScopeProvider",
+    "RowVisibility",
     "QuerySet",
     "Q",
     "F",

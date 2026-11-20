@@ -8,7 +8,7 @@ import pytest
 
 from hare import Hare
 from hare.contrib.test import requires_features, topological_sort_models, truncate_all_models
-from tests.multiple_connections.test_two_databases import (
+from tests.multiple_connections.conftest import (
     two_databases,  # noqa: F401 - used as a fixture by parameter name
 )
 from tests.shared_models import multi_database_models
@@ -22,15 +22,15 @@ from tests.shared_models.testmodels import Employee, Event, MinRelation, Reporte
 @pytest.mark.asyncio
 async def test_topological_sort_children_before_parents(db):
     """Event (FK→Tournament) must come before Tournament in delete order."""
-    sorted_models = topological_sort_models([Tournament, Event])
+    sorted_models = topological_sort_models([Tournament, Event], Hare.apps)
     assert sorted_models.index(Event) < sorted_models.index(Tournament)
 
 
 @pytest.mark.asyncio
 async def test_topological_sort_input_order_independent(db):
     """Result must be the same regardless of input order."""
-    order_a = topological_sort_models([Tournament, Event])
-    order_b = topological_sort_models([Event, Tournament])
+    order_a = topological_sort_models([Tournament, Event], Hare.apps)
+    order_b = topological_sort_models([Event, Tournament], Hare.apps)
     assert order_a == order_b
 
 
@@ -45,14 +45,14 @@ async def test_topological_sort_input_order_independent(db):
 )
 @pytest.mark.asyncio
 async def test_topological_sort_of_a_lone_model(db, model_class):
-    assert topological_sort_models([model_class]) == [model_class]
+    assert topological_sort_models([model_class], Hare.apps) == [model_class]
 
 
 @pytest.mark.asyncio
 async def test_topological_sort_all_models(db):
     """Sorting all registered models succeeds and includes every model."""
     all_models = list(Hare.apps.get_models_iterable())
-    sorted_models = topological_sort_models(all_models)
+    sorted_models = topological_sort_models(all_models, Hare.apps)
     assert set(sorted_models) == set(all_models)
 
 
@@ -67,7 +67,7 @@ async def test_topological_sort_all_models(db):
 )
 @pytest.mark.asyncio
 async def test_topological_sort_puts_a_child_before_its_parents(db, child_class, parent_classes):
-    sorted_models = topological_sort_models([*parent_classes, child_class])
+    sorted_models = topological_sort_models([*parent_classes, child_class], Hare.apps)
     for parent_class in parent_classes:
         assert sorted_models.index(child_class) < sorted_models.index(parent_class)
 

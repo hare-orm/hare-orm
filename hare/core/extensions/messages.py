@@ -1,0 +1,8 @@
+DIALECT_CONFLICT_MESSAGE = "Another dialect named {name!r} is already registered or reserved"
+DRIVER_CONFLICT_MESSAGE = "A driver name or DB_URL scheme {name!r} is already registered or reserved"
+IDENTIFIER_LIMIT_MESSAGE = "Dialect {name!r} keeps names within {limit} bytes; hare requires {required} bytes"
+URL_SCHEME_MESSAGE = "Invalid DB_URL scheme {scheme!r}"
+METHOD_NAME_MESSAGE = "A dialect's QuerySet method cannot be named {name!r}: it is private or already defined"
+METHOD_CONDITION_MESSAGE = "The QuerySet method {name!r} must declare the same takes_condition for every dialect"
+EXTENSION_CYCLE_MESSAGE = "Recursive extension loading: {name}"
+EXTENSION_REGISTRATION_MESSAGE = "Extension factories must return declarations, without publishing registrations"

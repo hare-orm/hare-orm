@@ -3,8 +3,6 @@ values given model by model: each model reads and writes inside its own part of 
 through relations, M2M, prefetches, bulk writes, cascades and restores too."""
 
 import asyncio
-import os
-import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -18,6 +16,7 @@ from hare.exceptions import ConfigurationError, DoesNotExist, QueryError
 from hare.models.tenancy.tenancy import Tenancy
 from hare.query.functions import Count
 from hare.query.relation_loading.prefetching.prefetch import Prefetch
+from hare.query.scopes.tenants.model_tenants import ModelTenants
 from tests.tenancy.tenant_scope_models import (
     ScopeCustomer,
     ScopeFaq,
@@ -34,20 +33,16 @@ from tests.tenancy.tenant_scope_models import (
     ScopeShopOrder,
     ScopeTag,
 )
+from tests.utils.database_under_test import DatabaseUnderTest
 
 STORES = ("msk", "kzn", "spb")
 TWO_STORES = Tenancy.any_of("msk", "kzn")
 
 
-def get_test_db_url() -> str:
-    raw_db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:").replace("\\{", "{").replace("\\}", "}")
-    return raw_db_url.format(uuid.uuid4().hex) if "{}" in raw_db_url else raw_db_url
-
-
 @pytest_asyncio.fixture(scope="module")
 async def tenant_scope_context() -> AsyncGenerator[Any]:
     async with hare_test_context(
-        ["tests.tenancy.tenant_scope_models"], db_url=get_test_db_url(), connection_label="models"
+        ["tests.tenancy.tenant_scope_models"], db_url=DatabaseUnderTest.get_fresh_url(), connection_label="models"
     ) as ctx:
         yield ctx
 
@@ -118,47 +113,65 @@ def test_a_scope_by_model_names_tenant_models(tenant_scope_context):
 @pytest.mark.database_independent
 def test_a_scope_by_model_takes_a_model_by_its_label(tenant_scope_context):
     with Tenancy.scope({"models.ScopeOrder": "msk", ScopeFaq: Tenancy.ALL}):
-        assert Tenancy.get_scope(ScopeOrder) == "msk"
-        assert Tenancy.get_scope(ScopeFaq) is Tenancy.ALL
+        assert Tenancy.get_scope(HareContext.require_current().apps.get_binding(ScopeOrder)) == "msk"
+        assert Tenancy.get_scope(HareContext.require_current().apps.get_binding(ScopeFaq)) is Tenancy.ALL
     with pytest.raises(ConfigurationError, match="No model with name 'Missing'"):
         Tenancy.set({"models.Missing": "msk"})
 
 
 @pytest.mark.database_independent
 def test_get_scope(tenant_scope_context):
-    assert Tenancy.get_scope(ScopeOrder) is None
+    assert Tenancy.get_scope(HareContext.require_current().apps.get_binding(ScopeOrder)) is None
     with Tenancy.scope("msk"):
-        assert Tenancy.get_scope(ScopeOrder) == "msk"
-        assert Tenancy.get_scope(ScopeFaq) == "msk"
-        assert Tenancy.get_scope(ScopeShop) is None
+        assert Tenancy.get_scope(HareContext.require_current().apps.get_binding(ScopeOrder)) == "msk"
+        assert Tenancy.get_scope(HareContext.require_current().apps.get_binding(ScopeFaq)) == "msk"
+        assert Tenancy.get_scope(HareContext.require_current().apps.get_binding(ScopeShop)) is None
     with Tenancy.scope(TWO_STORES):
-        assert Tenancy.get_scope(ScopeOrder) is TWO_STORES
+        assert Tenancy.get_scope(HareContext.require_current().apps.get_binding(ScopeOrder)) is TWO_STORES
     with Tenancy.scope(Tenancy.any_of("msk")):
-        assert Tenancy.get_scope(ScopeOrder) == "msk"
+        assert Tenancy.get_scope(HareContext.require_current().apps.get_binding(ScopeOrder)) == "msk"
     with Tenancy.scope(Tenancy.ALL):
-        assert Tenancy.get_scope(ScopeOrder) is Tenancy.ALL
+        assert Tenancy.get_scope(HareContext.require_current().apps.get_binding(ScopeOrder)) is Tenancy.ALL
     with Tenancy.scope({ScopeOrder: TWO_STORES, ScopeSalesSummary: 2, ScopeFaq: Tenancy.ALL, ScopeTag: ["msk"][0]}):
-        assert Tenancy.get_scope(ScopeOrder) is TWO_STORES
-        assert Tenancy.get_scope(ScopeSalesSummary) == 2
-        assert Tenancy.get_scope(ScopeFaq) is Tenancy.ALL
-        assert Tenancy.get_scope(ScopeCustomer) is None
+        assert Tenancy.get_scope(HareContext.require_current().apps.get_binding(ScopeOrder)) is TWO_STORES
+        assert Tenancy.get_scope(HareContext.require_current().apps.get_binding(ScopeSalesSummary)) == 2
+        assert Tenancy.get_scope(HareContext.require_current().apps.get_binding(ScopeFaq)) is Tenancy.ALL
+        assert Tenancy.get_scope(HareContext.require_current().apps.get_binding(ScopeCustomer)) is None
         with Tenancy.scope({ScopeCustomer: Tenancy.any_of("north")}):
-            assert Tenancy.get_scope(ScopeCustomer) == "north"
-            assert Tenancy.get_scope(ScopeOrder) is None
+            assert Tenancy.get_scope(HareContext.require_current().apps.get_binding(ScopeCustomer)) == "north"
+            assert Tenancy.get_scope(HareContext.require_current().apps.get_binding(ScopeOrder)) is None
         with Tenancy.scope("kzn"):
-            assert Tenancy.get_scope(ScopeSalesSummary) == "kzn"
-        assert Tenancy.get_scope(ScopeOrder) is TWO_STORES
-    assert Tenancy.get_scope(ScopeOrder) is None
+            assert Tenancy.get_scope(HareContext.require_current().apps.get_binding(ScopeSalesSummary)) == "kzn"
+        assert Tenancy.get_scope(HareContext.require_current().apps.get_binding(ScopeOrder)) is TWO_STORES
+    assert Tenancy.get_scope(HareContext.require_current().apps.get_binding(ScopeOrder)) is None
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("mapped_fallback", [False, True])
+def test_scope_overrides_preserve_distinct_fallbacks(tenant_scope_context, mapped_fallback):
+    fallbacks = (
+        [ModelTenants({ScopeFaq: value}) for value in ("north", "south")] if mapped_fallback else ["north", "south"]
+    )
+    scopes = [ModelTenants({ScopeOrder: Tenancy.ALL}, fallback=fallback) for fallback in fallbacks]
+    faq_binding = tenant_scope_context.apps.get_binding(ScopeFaq)
+    assert [scope.get_for_model(faq_binding) for scope in scopes] == ["north", "south"]
+    assert scopes[0] != scopes[1]
+    indexed_scopes = {scopes[0]: "north", scopes[1]: "south"}
+    assert len(indexed_scopes) == 2
+    equivalent = ModelTenants({ScopeOrder: Tenancy.ALL}, fallback=fallbacks[0])
+    assert equivalent == scopes[0]
+    assert hash(equivalent) == hash(scopes[0])
+    assert indexed_scopes[equivalent] == "north"
 
 
 @pytest.mark.database_independent
 def test_a_model_takes_the_entry_of_its_class_then_of_a_base_class(tenant_scope_context):
     with Tenancy.scope({ScopeInvoice.__mro__[1]: "msk"}):
-        assert Tenancy.get_scope(ScopeInvoice) == "msk"
-        assert Tenancy.get_scope(ScopeReceipt) == "msk"
+        assert Tenancy.get_scope(HareContext.require_current().apps.get_binding(ScopeInvoice)) == "msk"
+        assert Tenancy.get_scope(HareContext.require_current().apps.get_binding(ScopeReceipt)) == "msk"
     with Tenancy.scope({ScopeInvoice.__mro__[1]: "msk", ScopeReceipt: Tenancy.ALL}):
-        assert Tenancy.get_scope(ScopeInvoice) == "msk"
-        assert Tenancy.get_scope(ScopeReceipt) is Tenancy.ALL
+        assert Tenancy.get_scope(HareContext.require_current().apps.get_binding(ScopeInvoice)) == "msk"
+        assert Tenancy.get_scope(HareContext.require_current().apps.get_binding(ScopeReceipt)) is Tenancy.ALL
 
 
 @pytest.mark.parametrize(
@@ -594,14 +607,24 @@ async def test_a_foreign_key_tenant_field(tenant_scope_context):
 async def test_a_composite_primary_key_and_relations_to_it(stores):
     with Tenancy.scope({ScopePair: TWO_STORES, ScopePairNote: "a"}):
         assert sorted(await ScopePair.objects.values_list("store", flat=True)) == ["kzn", "msk"]
+        all_pairs = ScopePair.objects.all_tenants().order_by("store", "number").values_list("store", "number", "title")
+        assert await all_pairs == [("kzn", 1, "pair-kzn"), ("msk", 1, "pair-msk"), ("spb", 1, "pair-spb")]
         pair = await ScopePair.objects.get(pk=("kzn", 1))
         pair.title = "renamed"
         await pair.save()
         with pytest.raises(DoesNotExist):
             await ScopePair.objects.get(pk=("spb", 1))
-        note = await ScopePairNote.objects.create(id=1, pair=pair, text="in scope")
+        note = await pair.notes.create(id=1, text="in scope")
         assert note.group == "a"
+        assert await ScopePairNote.objects.all_tenants().values_list("id", "group", "pair", "text") == [
+            (1, "a", ("kzn", 1), "in scope")
+        ]
         spb_pair = await ScopePair.objects.all_tenants().get(pk=("spb", 1))
+        pair.title = "bulk update"
+        await ScopePair.objects.bulk_update([pair], fields=["title"])
+        assert await all_pairs == [("kzn", 1, "bulk update"), ("msk", 1, "pair-msk"), ("spb", 1, "pair-spb")]
+        pair.title = "renamed"
+        await pair.save()
         with pytest.raises(QueryError, match="a relation can't cross tenants"):
             await ScopePairNote.objects.create(id=2, pair=spb_pair)
         assert await ScopePairNote.objects.filter(pair__title="renamed").count() == 1
@@ -693,7 +716,9 @@ async def test_a_router_sees_the_scope_of_the_query(stores):
 
     class RecordingRouter:
         def db_for_read(self, model: Any) -> str:
-            seen.append((Tenancy.current.get(), Tenancy.get_scope(model)))
+            seen.append(
+                (Tenancy.current.get(), Tenancy.get_scope(HareContext.require_current().apps.get_binding(model)))
+            )
             return "models"
 
         def db_for_write(self, model: Any) -> str:
@@ -718,7 +743,10 @@ async def test_a_router_sees_the_scope_of_the_query(stores):
         router.init_routers([])
     assert seen[0] == ("msk", "msk")
     assert seen[1] == (TWO_STORES, TWO_STORES)
-    assert seen[2][1] == 2 and seen[2][0].get_for_model(ScopeOrder) is TWO_STORES
+    assert (
+        seen[2][1] == 2
+        and seen[2][0].get_for_model(HareContext.require_current().apps.get_binding(ScopeOrder)) is TWO_STORES
+    )
     assert seen[3] == ("spb", "spb")
 
 

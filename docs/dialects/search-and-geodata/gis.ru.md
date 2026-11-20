@@ -58,6 +58,9 @@ SRID и координатам:
 число, незамкнутое кольцо, член другого типа дают `ValidationError`, как и коллекции геометрий,
 вложенные глубже 100 уровней. Координаты M не поддерживаются.
 
+Внутреннее кольцо полигона должно быть непустым и замкнутым; пустое даёт `ValidationError`.
+Сам `Polygon()` по-прежнему обозначает пустой полигон.
+
 У каждой геометрии есть:
 
 - `wkt` — её well-known text без SRID (`POINT Z (1 2 3)`), `ewkt` — с ним (`SRID=4326;POINT (1 2)`);
@@ -116,6 +119,8 @@ class GeometryField:
 поля, с его числом координат и его SRID; иначе `ValidationError` до выполнения запроса. Геометрия в
 другом SRID при записи не преобразуется — преобразуйте её заранее или храните в колонке её SRID. Значения
 читаются объектами `Geometry` со своим SRID.
+У самостоятельной аннотации `Value(Point(...))` нет поля, задающего систему координат: она сохраняет
+SRID геометрии, в том числе его отсутствие.
 
 ### <a id="geography"></a>geometry или geography
 
@@ -200,6 +205,7 @@ await Store.objects.filter(location__x__gte=37.5).values_list("location__y", fla
 | `Area(geometry)` | float — квадратные метры на geography, единицы SRID на geometry |
 | `Length(geometry)`, `Perimeter(geometry)` | float — длина линии, длина колец полигона |
 | `Distance(geometry, other)` | float — кратчайшее расстояние |
+| `DWithin(geometry, other, distance)` | bool — расстояние не больше радиуса; радиус может быть выражением |
 | `Centroid`, `PointOnSurface` | точка — центр масс, точка заведомо на геометрии |
 | `Envelope`, `Boundary`, `ConvexHull` | ограничивающий прямоугольник, граница, выпуклая оболочка |
 | `Buffer(geometry, distance)` | область в пределах `distance` (отрицательное сжимает полигон) |
@@ -220,8 +226,25 @@ await City.objects.annotate(km=Distance("center", moscow) / 1000).order_by("km")
 await Parcel.objects.annotate(square_meters=Area(Transform("shape", 3857)))
 ```
 
+Геометрические функции описывают результат независимо от исходной колонки: буфер точки — область,
+центроид — точка. Чтение результата и фильтрация его аннотации используют форму, размерность и тип
+geometry/geography именно результата. Правила размерности остаются нативными: PostGIS `Centroid`
+возвращает x/y, а `PointOnSurface` может сохранить z линии. Если функция допускает и x/y, и x/y/z,
+литерал в `Case` или `Coalesce` не приводится принудительно к x/y. При записи исходной колонки её
+объявленные форма и размерность по-прежнему обязательны.
+
+Явный `Value(Point(1, 2))` сохраняет неизвестную систему координат (`srid=None`) на PostgreSQL и
+SQLite, в том числе во вложенных функциях, сохраняющих SRID, и фильтрах по результату. SRID поля по
+умолчанию ему не присваивается. Присваивание той же точки объявленному `PointField()` по-прежнему
+назначает SRID этого поля, как описано выше.
+
 Геометрический результат читается как `Geometry`; расстояние `Buffer`, допуск `Simplify` и SRID
 `Transform` проверяются при создании функции (`ValidationError`).
+
+Вложенные операции сохраняют тип и SRID каждого геометрического аргумента, включая литералы и
+аннотации. `Transform` передаёт внешнему выражению целевой SRID. Вычисляемая геометрическая колонка
+использует метаданные `output_field`: вычисляемый geography сохраняет географические единицы
+расстояния при передаче другой пространственной функции.
 
 [`after_cursor()`](../../querying/queryset-methods.ru.md) не принимает сортировку по аннотации, поэтому
 для строк, упорядоченных по расстоянию, он бросает `FieldError`. Следующую страницу читайте фильтром по
@@ -233,6 +256,12 @@ from hare.query.expressions import Q
 nearest = City.objects.annotate(km=Distance("center", moscow) / 1000).order_by("km", "id")
 next_page = await nearest.filter(Q(km__gt=last.km) | Q(km=last.km, id__gt=last.id)).limit(20)
 ```
+
+`DWithin` использует тот же пространственный предикат диалекта, что и `__dwithin`.
+На PostgreSQL это `ST_DWithin` с поддержкой пространственного индекса. Для geography
+радиус задаётся в метрах, для geometry — в единицах SRID; километры умножайте на 1000 явно.
+Настройки типа колонки сохраняются: `PointField(geography=True, srid=4326)` и
+`PointField()` объявляют разные физические типы. Координаты существующих колонок не переставляются.
 
 ## <a id="aggregates"></a>Агрегаты
 
@@ -267,7 +296,7 @@ DB_URL = "sqlite+aiosqlite://db.sqlite3?load_spatialite=true"
 | Настройка | Что задаёт |
 |---|---|
 | `load_spatialite` | `true` загружает SpatiaLite в каждое соединение — `Features.supports_spatial` |
-| `spatialite_path` | Библиотека: имя, которое находит загрузчик системы (`mod_spatialite`, по умолчанию — `libsqlite3-mod-spatialite` в Debian/Ubuntu, `libspatialite` в Homebrew), или путь. В Windows путь с каталогом загружает из этого каталога и библиотеки, нужные SpatiaLite (GEOS, PROJ, ...) |
+| `spatialite_path` | Библиотека: имя, которое находит загрузчик системы (`mod_spatialite`, по умолчанию — `libsqlite3-mod-spatialite` в Debian/Ubuntu, `libspatialite` в Homebrew), или путь. Её зависимости (GEOS, PROJ, ...) должны находиться системным загрузчиком библиотек |
 | `spatialite_proj_database` | Путь к `proj.db` библиотеки PROJ, который читает преобразование между SRID, — нужен, когда PROJ не находит свой (сборка для Windows кладёт его рядом с библиотекой) |
 | `spatialite_metadata` | Пространственные метаданные, которые hare создаёт в базе без них: `wgs84` (по умолчанию), `full` или `none` — см. [`spatialite_metadata`](#spatialite-metadata) |
 
@@ -372,7 +401,7 @@ GeoJSON, WKT/EWKT, (E)WKB или `Geometry`, сериализуется объе
 другим SRID отклоняется (GeoJSON, в который она сериализуется, SRID не хранит), а геометрия без SRID
 получает SRID поля. `inspectdb` читает колонку PostGIS с типом и SRID как подходящее поле
 (`geometry(PolygonZ,3857)` -> `PolygonField(srid=3857, dimensions=3)`); колонка `geography(Point,4326)`
-остаётся [`PostGISField`](../postgresql/fields.ru.md#postgisfield) с кортежем `(latitude, longitude)`, а
+читается как `PointField(geography=True)` со значением `Point(longitude, latitude)`, а
 колонка без типа и SRID или с координатами M — неоднозначный `TextField`. Таблицы и представления
 расширения — `spatial_ref_sys`, `geometry_columns`, `geography_columns` из PostGIS — не принадлежат
 моделям: `inspectdb` и проверка расхождений их не видят, как и пространственные метаданные SpatiaLite.

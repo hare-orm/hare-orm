@@ -31,17 +31,17 @@ class ConnectionOptions:
         return sorted(self.by_name)
 
     def read(self, settings: dict[str, Any], defaults: Mapping[str, Any] | None = None) -> dict[str, Any]:
-        """Takes the known settings out of ``settings`` and checks them.
+        """Take known settings out of ``settings`` and parse their configured values.
 
         Args:
             settings: The configured settings; the known ones are removed.
             defaults: Values of the settings left unset - used as given, unchecked.
 
         Returns:
-            Every known setting that is set or has a default, checked.
+            Every supplied setting or default, with text converted and SQL values checked.
 
         Raises:
-            ConfigurationError: A value isn't allowed for its setting.
+            ConfigurationError: Text, a choice/callback or a direct SQL value is invalid.
         """
         values: dict[str, Any] = dict(defaults or {})
         for name, option in self.by_name.items():

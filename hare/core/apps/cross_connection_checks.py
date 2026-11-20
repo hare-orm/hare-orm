@@ -27,14 +27,15 @@ class CrossConnectionChecks:
         """
         for app in apps.apps.values():
             for model in app.values():
-                meta = model._meta
+                meta = apps.get_binding(model)
                 for field_name in (*meta.foreign_key_fields, *meta.one_to_one_fields, *meta.many_to_many_fields):
                     relation_field = meta.fields_map[field_name]
                     is_generated = getattr(relation_field, "_generated", False)
                     if is_generated or not getattr(relation_field, "db_constraint", False):
                         continue
                     related_model, _ = RelationLinking.get_related_model(apps, relation_field.model_name)  # type: ignore[attr-defined]
-                    related_connection = related_model._meta.default_connection
+                    related_binding = apps.get_binding(related_model)
+                    related_connection = related_binding.default_connection
                     if (
                         meta.default_connection is None
                         or related_connection is None
@@ -42,7 +43,8 @@ class CrossConnectionChecks:
                     ):
                         continue
                     raise ConfigurationError(
-                        f'Relation "{meta.full_name}.{field_name}" points at {related_model._meta.full_name!r}, which '
+                        f'Relation "{meta.full_name}.{field_name}" points at '
+                        f"{related_binding.full_name!r}, which "
                         f"lives on connection {related_connection!r} while {meta.full_name!r} lives on "
                         f"{meta.default_connection!r} - a database foreign key constraint can't span two "
                         "databases. Declare the field with db_constraint=False."
@@ -62,14 +64,16 @@ class CrossConnectionChecks:
         """
         for app in apps.apps.values():
             for model in app.values():
-                meta = model._meta
+                meta = apps.get_binding(model)
                 needs = meta.change_capture_needs
                 for written_model in needs.sink.get_written_models() if needs is not None else ():
-                    written_connection = written_model._meta.default_connection
+                    written_binding = apps.get_binding(written_model)
+                    written_connection = written_binding.default_connection
                     if meta.default_connection is None or written_connection in (None, meta.default_connection):
                         continue
                     raise ConfigurationError(
-                        f"{meta.full_name!r} captures its changes into {written_model._meta.full_name!r}, which lives "
+                        f"{meta.full_name!r} captures its changes into {written_binding.full_name!r}, "
+                        f"which lives "
                         f"on connection {written_connection!r} while {meta.full_name!r} lives on "
                         f"{meta.default_connection!r} - the changes have to be written in the transaction of the "
                         "write, on its connection."

@@ -2,7 +2,6 @@
 own scale, an address from its text, an enum member, a cast to a Dynamic or a Variant: the server keeps
 the literal as written, and drift reported the column changed after every migrate."""
 
-import os
 import textwrap
 
 import pytest
@@ -38,10 +37,7 @@ class Reading(Model):
 """
 
 
-@pytest.fixture(autouse=True)
-def skip_without_clickhouse():
-    if not os.getenv("HARE_TEST_DB", "").startswith("clickhouse"):
-        pytest.skip("runs against the ClickHouse test server - make test_clickhouse")
+pytestmark = pytest.mark.usefixtures("skip_without_clickhouse")
 
 
 @pytest.mark.asyncio

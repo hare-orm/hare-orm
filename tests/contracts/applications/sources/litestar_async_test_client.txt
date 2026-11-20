@@ -10,9 +10,11 @@ async def create_note(note_id: int) -> None:
     await Note.objects.create(id=note_id, text="written by the application")
 
 
-application = Litestar([create_note], plugins=[HarePlugin("plugin_settings.HARE_ORM")])
+def create_application(context):
+    return Litestar([create_note], plugins=[HarePlugin("plugin_settings.HARE_ORM", hare_context=context)])
 
 
-async def write_through_application(note_id):
+async def write_through_application(note_id, context):
+    application = create_application(context)
     async with AsyncTestClient(app=application) as client:
         assert (await client.post(f"/notes/{note_id}")).status_code == 201

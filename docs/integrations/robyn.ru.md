@@ -3,6 +3,9 @@
 `hare.contrib.frameworks.robyn` подключает hare к приложению [Robyn](https://robyn.tech). Ставится вместе
 с дополнительным пакетом `robyn` (Robyn 0.88, pydantic).
 
+Интеграция с Robyn 0.88 требует Python 3.12–3.14: у этой версии Robyn нет wheel-пакета
+для Python 3.15. Поддержка ядром Python 3.15 не снимает это ограничение.
+
 ```python
 from pydantic import BaseModel, ConfigDict
 
@@ -39,7 +42,8 @@ class HareRobyn(Robyn):
         file_object: str,
         *,
         hare_config: Mapping[str, Any] | HareConfig | str,
-        atomic_requests: bool | Sequence[str] = False,
+        hare_context: HareContext | None = None,
+        atomic_requests: bool | Iterable[str] = False,
         openapi: OpenAPI | None = None,
         health_routes: HealthRoutes | None = None,
         **kwargs: Any,
@@ -51,8 +55,9 @@ class HareRobyn(Robyn):
 
 - **`HareContext`.** Модели привязываются при создании приложения; контекст открывается при запуске
   рабочего процесса — до собственного `startup_handler` приложения — и закрывается при его остановке,
-  после собственного `shutdown_handler`. Контекст — глобальный запасной, поэтому его видит каждый запрос.
-  При остановке `Hare.close_connections()` ещё и дожидается фоновых наблюдателей, которые ещё работают.
+  после собственного `shutdown_handler`. Обработчики запросов, middleware, авторизация и WebSocket
+  явно активируют контекст приложения.
+  При остановке `HareContext.close_connections()` ещё и дожидается фоновых наблюдателей, которые ещё работают.
 - **Запросы из параметров проверяются при запуске.** `RequestQuery.check_declarations()` выполняется, как
   только модели настроены: ошибочный [запрос из параметров](request-queries.ru.md) не даёт процессу
   запуститься.
@@ -110,6 +115,10 @@ app.include_router(chapters)
 Схема OpenAPI (`HareOpenAPI`, по умолчанию — схема приложения) перечисляет каждый параметр запроса —
 параметр строки запроса или параметр пути для отмеченного `InPath()` — с типом, ограничениями,
 перечислением и описанием.
+
+Имена параметров следуют входным alias Pydantic и настройкам модели. Для `AliasChoices` схема
+показывает первое допустимое входное имя; остальные варианты также принимает разбор запроса.
+Alias сериализации не переименовывает входной параметр.
 
 ## <a id="responses"></a>Ответы
 
@@ -173,3 +182,8 @@ app = HareRobyn(__file__, hare_config=HARE_CONFIG, health_routes=HealthRoutes(He
 `hare_app_transactional_db`: приложение берёт контекст теста, его записи фиксируются, а все таблицы
 очищаются в конце теста, — см. [Тесты приложения](../testing/setup.ru.md#application-tests). Нужна
 серверная база или файл SQLite.
+
+Явно переданный `hare_context` остаётся под управлением вызывающего кода: интеграция не инициализирует
+и не закрывает его. Без этого аргумента приложение создаёт и закрывает отдельный контекст.
+Запуск приложения не задаёт глобальный запасной контекст. В тестах передавайте фикстуру явно:
+`hare_context=hare_app_db` или `hare_context=hare_app_transactional_db`.

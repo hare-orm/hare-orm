@@ -1,5 +1,4 @@
-"""The cursors of a cursor pagination: the ordering values of a boundary row, readable only by the
-query that made them."""
+"""Boundary ordering values checked against the selected ordering and its value types."""
 
 from __future__ import annotations
 
@@ -7,14 +6,15 @@ import base64
 import binascii
 import dataclasses
 import json
-from typing import Any, ClassVar, get_origin, is_typeddict
+from typing import TYPE_CHECKING, Any, ClassVar
 
-from pydantic import ConfigDict, TypeAdapter, ValidationError
 from pydantic_core import to_jsonable_python
 
 from hare.contrib.request_query.enums import CursorDirection
-from hare.contrib.request_query.paginations.constants import CURSOR_SCALAR_TYPES
-from hare.core.caching.cache import Cache
+from hare.contrib.request_query.paginations.cursor_values import CursorValues
+
+if TYPE_CHECKING:
+    from hare.fields.field import Field
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -31,20 +31,28 @@ class Cursor:
     ordering: tuple[str, ...]
     values: tuple[Any, ...]
 
-    scalar_adapters: ClassVar[Cache[TypeAdapter[Any]]] = Cache(
-        len(CURSOR_SCALAR_TYPES), holds_sql=False, keyed_by_model=False
-    )
+    value_converters: ClassVar[CursorValues] = CursorValues()
 
-    def encode(self) -> str:
+    def encode(self, fields: tuple[Field[Any] | None, ...] | None = None) -> str:
         """The cursor as URL-safe text.
+
+        Args:
+            fields: Ordering field metadata for reversible values, including nested enum members.
+                Omit it for cursors whose values already have a reversible JSON representation.
 
         Returns:
             Base64 of the cursor's JSON, without padding.
         """
+        values = self.values
+        if fields is not None:
+            values = tuple(
+                value if field is None or value is None else self.value_converters.get_db_writer(field)(value, None)
+                for field, value in zip(fields, values, strict=True)
+            )
         payload = {
             "direction": self.direction.value,
             "ordering": list(self.ordering),
-            "values": to_jsonable_python(list(self.values), bytes_mode="base64"),
+            "values": to_jsonable_python(list(values), bytes_mode="base64"),
         }
         text = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         return base64.urlsafe_b64encode(text).rstrip(b"=").decode("ascii")
@@ -55,7 +63,7 @@ class Cursor:
 
         Args:
             text: The cursor.
-            value_types: The type of each ordering value, None to keep a value as JSON gives it.
+            value_types: The field or Python type of each ordering value; None keeps its JSON value.
             accepts_null: Whether each ordering value can be NULL.
 
         Returns:
@@ -82,29 +90,9 @@ class Cursor:
             if raw_value is None or value_type is None:
                 values.append(raw_value)
                 continue
+            read = cls.value_converters.get_reader(value_type)
             try:
-                adapter: TypeAdapter[Any]
-                if any(value_type is scalar_type for scalar_type in CURSOR_SCALAR_TYPES):
-                    cached_adapter = cls.scalar_adapters.get((value_type,))
-                    if cached_adapter is None:
-                        cached_adapter = (
-                            TypeAdapter(bytes, config=ConfigDict(val_json_bytes="base64"))
-                            if value_type is bytes
-                            else TypeAdapter(value_type)
-                        )
-                        cls.scalar_adapters[(value_type,)] = cached_adapter
-                    values.append(cached_adapter.validate_python(raw_value))
-                    continue
-                if get_origin(value_type) in (list, dict, tuple) or is_typeddict(value_type):
-                    # A wrapper carries the byte encoding into containers, including a named
-                    # tuple's TypedDict, which can't take TypeAdapter's config directly.
-                    adapter = TypeAdapter(
-                        list.__class_getitem__(value_type), config=ConfigDict(val_json_bytes="base64")
-                    )
-                    values.append(adapter.validate_python([raw_value])[0])
-                    continue
-                adapter = TypeAdapter(value_type)
-                values.append(adapter.validate_python(raw_value))
-            except ValidationError as error:
+                values.append(read(raw_value))
+            except (ValueError, TypeError, KeyError) as error:
                 raise ValueError("not a cursor of this query") from error
         return cls(direction=direction, ordering=ordering, values=tuple(values))

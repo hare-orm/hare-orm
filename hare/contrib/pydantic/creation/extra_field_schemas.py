@@ -11,7 +11,7 @@ from hare.exceptions import ConfigurationError
 if TYPE_CHECKING:
     from hare.contrib.pydantic.creation.pydantic_model_creator import PydanticModelCreator
     from hare.fields.field import Field
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class ExtraFieldSchemas:
@@ -23,7 +23,7 @@ class ExtraFieldSchemas:
 
     @staticmethod
     def raise_if_wrong(
-        model: type[Model],
+        binding: ModelBinding,
         extra_fields: Mapping[str, Any],
         related_values: Mapping[str, str],
         taken_names: set[str],
@@ -31,7 +31,7 @@ class ExtraFieldSchemas:
         """Refuses a declaration of the model's own schema that names nothing it can hold.
 
         Args:
-            model: The model.
+            binding: The model binding.
             extra_fields: The extra fields, by name or path.
             related_values: The related values, by name or path.
             taken_names: The names the schema has already - fields, relations, computed fields.
@@ -41,12 +41,13 @@ class ExtraFieldSchemas:
                 taken or declared twice, or a related value's path goes through what is no relation to one
                 row or ends at no value field.
         """
+        model = binding._model
         declared: set[str] = set()
         for option, names in (("extra_fields", extra_fields), ("related_values", related_values)):
             for path in names:
                 relation_name, _, rest = path.partition(".")
                 if rest:
-                    field = model._meta.fields_map.get(relation_name)
+                    field = binding.fields_map.get(relation_name)
                     if field is None or field.relation_type is None:
                         raise ConfigurationError(
                             f"pydantic_model_creator({model.__name__}, {option}=...): {path!r} - {relation_name!r} "
@@ -61,7 +62,7 @@ class ExtraFieldSchemas:
                 declared.add(path)
         for name, value_path in related_values.items():
             if "." not in name:
-                ExtraFieldSchemas.get_related_value_field(model, name, value_path)
+                ExtraFieldSchemas.get_related_value_field(binding, name, value_path)
 
     @staticmethod
     def get_shown_related_values(creator: PydanticModelCreator) -> dict[str, str]:
@@ -81,19 +82,18 @@ class ExtraFieldSchemas:
         }
         if not creator._exclude_sensitive:
             return related_values
-        model = creator._model_class
         return {
             name: value_path
             for name, value_path in related_values.items()
-            if not ExtraFieldSchemas.get_related_value_field(model, name, value_path).sensitive
+            if not ExtraFieldSchemas.get_related_value_field(creator._binding, name, value_path).sensitive
         }
 
     @staticmethod
-    def get_related_value_field(model: type[Model], name: str, value_path: str) -> Field[Any]:
+    def get_related_value_field(binding: ModelBinding, name: str, value_path: str) -> Field[Any]:
         """The field of a related row a related value reads.
 
         Args:
-            model: The model the value is declared on.
+            binding: The binding of the model the value is declared on.
             name: The value's name.
             value_path: The path of the related field.
 
@@ -104,17 +104,18 @@ class ExtraFieldSchemas:
             ConfigurationError: The path goes through what is no relation to one row, or ends at no value
                 field.
         """
+        model = binding._model
         *relation_names, field_name = value_path.split(".")
         related_model = model
         for relation_name in relation_names:
-            field = related_model._meta.fields_map.get(relation_name)
+            field = binding.graph.get_binding(related_model).fields_map.get(relation_name)
             if field is None or field.relation_type is None or field.relation_type in TO_MANY_RELATION_TYPES:
                 raise ConfigurationError(
                     f"pydantic_model_creator({model.__name__}, related_values=...): {name!r} - {relation_name!r} is "
                     f"no relation of {related_model.__name__} to one row"
                 )
             related_model = field.related_model  # type: ignore[attr-defined]
-        value_field = related_model._meta.fields_map.get(field_name)
+        value_field = binding.graph.get_binding(related_model).fields_map.get(field_name)
         if not relation_names or value_field is None or value_field.relation_type is not None:
             raise ConfigurationError(
                 f"pydantic_model_creator({model.__name__}, related_values=...): {name!r} - {value_path!r} names no "
@@ -135,14 +136,13 @@ class ExtraFieldSchemas:
         """
         if creator._exclude_read_only:
             return
-        model = creator._model_class
         extra_fields = creator.meta.model_extra_fields
         related_values = ExtraFieldSchemas.get_shown_related_values(creator)
         for name, annotation in extra_fields.items():
             if creator.meta.selects(name):
                 creator._properties[name] = (annotation | None, PydanticField(default=None))
         for name, value_path in related_values.items():
-            annotation = ExtraFieldSchemas.get_related_value_field(model, name, value_path).get_annotation()
+            annotation = ExtraFieldSchemas.get_related_value_field(creator._binding, name, value_path).get_annotation()
             alias = AliasChoices(name, AliasPath(*value_path.split(".")))
             creator._properties[name] = (annotation | None, PydanticField(default=None, validation_alias=alias))
         if creator.meta.sort_alphabetically and (extra_fields or related_values):

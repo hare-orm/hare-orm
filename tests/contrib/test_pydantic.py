@@ -1,19 +1,26 @@
+import asyncio
 import copy
+import gc
 import typing
 import uuid
+import weakref
+from types import ModuleType
 from typing import Any
 
 import pytest
 import pytest_asyncio
-from pydantic import ConfigDict, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, PrivateAttr, ValidationError, field_validator, model_validator
 
-from hare import fields, prefetch_related_objects
+from hare import Hare, fields, prefetch_related_objects
 from hare.contrib.pydantic import (
     PydanticModel,
     pydantic_model_creator,
     pydantic_queryset_creator,
 )
 from hare.contrib.pydantic.creation.pydantic_model_creator import PydanticModelCreator
+from hare.core.caching.cache import Cache
+from hare.core.caching.caches import Caches
+from hare.core.hare_context import HareContext
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.exceptions import ConfigurationError, NoValuesFetched, QueryError
 from hare.models import Model
@@ -46,8 +53,9 @@ from tests.shared_models.testmodels import (
 )
 from tests.shared_models.testmodels_postgres import ValidatorModel
 from tests.shared_models.testmodels_pydantic import CamelCaseAliasPerson, PydanticJSONFields
+from tests.utils.model_bindings import ModelBindings
 
-REQUIRES = ("pydantic",)
+pytestmark = pytest.mark.usefixtures("model_conversion_context")
 
 
 # Fixtures for TestPydantic
@@ -892,7 +900,7 @@ async def test_from_queryset_single_reads_one_row(db, pydantic_setup):
     Event_Pydantic = pydantic_setup["Event_Pydantic"]
     event = pydantic_setup["event"]
     assert (await Event_Pydantic.from_queryset_single(Event.objects.get(event_id=event.event_id))).name == event.name
-    with pytest.raises(DoesNotExist, match="reads no Event row"):
+    with pytest.raises(DoesNotExist, match="reads no row"):
         await Event_Pydantic.from_queryset_single(Event.objects.filter(event_id=-1).first())
     with pytest.raises(QueryError, match=r"from_queryset\(\) takes that"):
         await Event_Pydantic.from_queryset_single(Event.objects.all())
@@ -1268,22 +1276,18 @@ def test_json_field_nullable_without_default_is_optional():
 
 
 def test_override_default_model_config_by_config_class(db):
-    """Pydantic meta's config_class should be able to override default config."""
-    # Save original value to restore after test
-    original_value = CamelCaseAliasPerson.PydanticMeta.model_config.get("from_attributes")
-    try:
-        # Set class pydantic config's from_attributes to False
-        CamelCaseAliasPerson.PydanticMeta.model_config["from_attributes"] = False
+    """A model's declared config overrides PydanticModel defaults without mutating another model."""
 
-        ModelPydantic = pydantic_model_creator(CamelCaseAliasPerson, name="AutoAliasPersonOverriddenORMMode")
+    class Person(CamelCaseAliasPerson):
+        class Meta:
+            class pydantic:
+                model_config = ConfigDict(from_attributes=False)
 
-        assert ModelPydantic.model_config["from_attributes"] is False
-    finally:
-        # Restore original value to avoid polluting other tests
-        if original_value is None:
-            CamelCaseAliasPerson.PydanticMeta.model_config.pop("from_attributes", None)
-        else:
-            CamelCaseAliasPerson.PydanticMeta.model_config["from_attributes"] = original_value
+    from tests.utils.model_bindings import ModelBindings
+
+    schema = pydantic_model_creator(Person, apps=ModelBindings.prepare(Person))
+    assert schema.model_config["from_attributes"] is False
+    assert pydantic_model_creator(CamelCaseAliasPerson).model_config["from_attributes"] is True
 
 
 def test_override_meta_pydantic_config_by_model_creator(db):
@@ -1312,7 +1316,7 @@ def test_config_classes_merge_all_configs(db):
     # Should set min_anystr_length from pydantic_model_creator's config
     assert ModelPydantic.model_config["str_min_length"] == model_config["str_min_length"]
     # Should set title from model PydanticMeta's config
-    assert ModelPydantic.model_config["title"] == CamelCaseAliasPerson.PydanticMeta.model_config["title"]
+    assert ModelPydantic.model_config["title"] == CamelCaseAliasPerson.Meta.pydantic.model_config["title"]
     # Should set orm_mode from base pydantic model configuration
     assert ModelPydantic.model_config["from_attributes"] == PydanticModel.model_config["from_attributes"]
 
@@ -1352,18 +1356,17 @@ def test_model_config_only_diff_gets_a_distinct_class_name(db):
     assert base_again.__name__ != with_validators.__name__
 
 
-def test_computed_field_order_does_not_affect_cache_key(db):
-    """A computed=(...) tuple is the same logical config regardless of element order - two calls
-    differing only in that order should hit the MODEL_INDEX cache and return the same class,
-    not silently build (and hash-cache) two distinct model classes for one config."""
+def test_computed_field_order_follows_the_schema_ordering_policy(db):
     a = pydantic_model_creator(Employee, computed=("name_length", "team_size"))
     b = pydantic_model_creator(Employee, computed=("team_size", "name_length"))
 
-    assert a is b
+    assert a is not b
+    assert tuple(a.model_computed_fields) == ("name_length", "team_size")
+    assert tuple(b.model_computed_fields) == ("team_size", "name_length")
 
-    # A genuinely different config (sort_alphabetically) must still miss the cache - the fix
-    # must not broaden order-insensitivity beyond the computed tuple specifically.
     c = pydantic_model_creator(Employee, computed=("name_length", "team_size"), sort_alphabetically=True)
+    d = pydantic_model_creator(Employee, computed=("team_size", "name_length"), sort_alphabetically=True)
+    assert c is d
     assert a is not c
 
 
@@ -1392,8 +1395,18 @@ def test_two_distinct_classes_from_the_same_factory_get_distinct_schemas(db):
     assert WidgetA.__module__ == WidgetB.__module__
     assert WidgetA.__qualname__ == WidgetB.__qualname__
 
-    SchemaA = pydantic_model_creator(WidgetA)
-    SchemaB = pydantic_model_creator(WidgetB)
+    first_module = ModuleType("tests.widgets_first")
+    first_module.__models__ = [WidgetA]
+    second_module = ModuleType("tests.widgets_second")
+    second_module.__models__ = [WidgetB]
+    first_apps = Hare.bind_models(
+        {"connections": {"default": "sqlite+aiosqlite://:memory:"}, "apps": {"widgets": {"models": [first_module]}}}
+    )
+    second_apps = Hare.bind_models(
+        {"connections": {"default": "sqlite+aiosqlite://:memory:"}, "apps": {"widgets": {"models": [second_module]}}}
+    )
+    SchemaA = pydantic_model_creator(WidgetA, apps=first_apps)
+    SchemaB = pydantic_model_creator(WidgetB, apps=second_apps)
 
     assert SchemaA is not SchemaB
     assert SchemaB.source_model is WidgetB
@@ -1412,15 +1425,17 @@ def test_two_distinct_classes_from_the_same_factory_get_distinct_schemas(db):
     ],
 )
 @pytest.mark.database_independent
-def test_a_model_index_evicts_its_oldest_entry_past_max_size(monkeypatch, index_name, creator, name_suffix):
+def test_a_model_index_evicts_its_oldest_entry_past_max_size(request, monkeypatch, index_name, creator, name_suffix):
     """MODEL_INDEX used to be a plain dict - every distinct pydantic_model_creator() config ever
     called added a permanent entry, growing unbounded for the life of the process. Now a bounded
     LRU, like QUERYSET_MODEL_INDEX: shrink the limit to 2 for this test and confirm the oldest of 3
     distinct configs gets evicted, while a config touched again (move_to_end on hit) survives past
     ones that would otherwise have been older."""
-    model_index = getattr(PydanticModelCreator, index_name)
-    monkeypatch.setattr(model_index, "max_size", 2)
-    model_index.clear()
+    storage = Cache(2)
+    request.addfinalizer(lambda: Caches.registered.remove(storage))
+    request.addfinalizer(storage.clear)
+    monkeypatch.setattr(PydanticModelCreator, index_name, storage)
+    model_index = storage.get_bucket(HareContext.require_current().apps.get_binding(IntFields))
 
     # IntFields (no relational fields) - pydantic_model_creator() recurses into related models'
     # own configurations too (Address has a relation, which would add its own extra MODEL_INDEX
@@ -1456,7 +1471,14 @@ def test_pydantic_queryset_creator_caches_identical_calls(db):
     second = pydantic_queryset_creator(Address)
 
     assert first is second
-    assert len(PydanticModelCreator.QUERYSET_MODEL_INDEX) == 1
+    assert (
+        len(
+            PydanticModelCreator.QUERYSET_MODEL_INDEX.get_bucket(
+                HareContext.require_current().apps.get_binding(Address)
+            )
+        )
+        == 1
+    )
 
 
 def test_pydantic_queryset_creator_distinct_configs_get_distinct_classes(db):
@@ -1490,7 +1512,11 @@ def test_exclude_readonly_excludes_a_non_pk_generated_field():
         name = fields.CharField(max_length=50)
         computed_total = fields.IntField(generated=True)
 
-    ModelPydantic = pydantic_model_creator(GeneratedFieldModel, exclude_readonly=True, name="GeneratedFieldCreate")
+    prepared_models = ModelBindings.prepare(GeneratedFieldModel)
+
+    ModelPydantic = pydantic_model_creator(
+        GeneratedFieldModel, apps=prepared_models, exclude_readonly=True, name="GeneratedFieldCreate"
+    )
 
     assert "computed_total" not in ModelPydantic.model_fields
     assert "name" in ModelPydantic.model_fields
@@ -1524,7 +1550,11 @@ def test_array_field_annotation_keeps_element_type():
         id = fields.IntField(primary_key=True)
         tags = ArrayField(base_field=fields.CharField(max_length=50))
 
-    ModelPydantic = pydantic_model_creator(ArrayFieldPydanticModel, name="ArrayFieldPydanticModel")
+    prepared_models = ModelBindings.prepare(ArrayFieldPydanticModel)
+
+    ModelPydantic = pydantic_model_creator(
+        ArrayFieldPydanticModel, apps=prepared_models, name="ArrayFieldPydanticModel"
+    )
 
     assert ModelPydantic.model_fields["tags"].annotation == list[str]
     assert ModelPydantic.model_json_schema()["properties"]["tags"]["items"] == {"type": "string"}
@@ -1540,7 +1570,9 @@ def test_array_elements_are_checked_by_their_field():
         tags = ArrayField(base_field=fields.CharField(max_length=5))
         scores = ArrayField(base_field=fields.SmallIntField(null=True), null=True)
 
-    schema = pydantic_model_creator(BoundedArrayPydanticModel, name="BoundedArrayPydanticModel")
+    prepared_models = ModelBindings.prepare(BoundedArrayPydanticModel)
+
+    schema = pydantic_model_creator(BoundedArrayPydanticModel, apps=prepared_models, name="BoundedArrayPydanticModel")
     assert schema.model_validate({"id": 1, "tags": ["abcde"], "scores": [None, -32768]}).scores == [None, -32768]
     for payload, message in (
         ({"tags": ["abcdef"]}, r"tags\[0\]: Length of 'abcdef' 6 > 5"),
@@ -1566,9 +1598,13 @@ def test_tenant_field_is_not_required_in_generated_schemas():
         class Meta:
             tenant_field = "company_id"
 
-    ReadSchema = pydantic_model_creator(TenantFieldPydanticModel, name="TenantFieldPydanticModelRead")
+    prepared_models = ModelBindings.prepare(TenantFieldPydanticModel)
+
+    ReadSchema = pydantic_model_creator(
+        TenantFieldPydanticModel, apps=prepared_models, name="TenantFieldPydanticModelRead"
+    )
     CreateSchema = pydantic_model_creator(
-        TenantFieldPydanticModel, exclude_readonly=True, name="TenantFieldPydanticModelCreate"
+        TenantFieldPydanticModel, apps=prepared_models, exclude_readonly=True, name="TenantFieldPydanticModelCreate"
     )
 
     assert ReadSchema.model_fields["company_id"].is_required() is False
@@ -1586,37 +1622,30 @@ def test_vector_field_annotation_keeps_element_type():
         id = fields.IntField(primary_key=True)
         embedding = VectorField(dimensions=3)
 
-    ModelPydantic = pydantic_model_creator(VectorFieldPydanticModel, name="VectorFieldPydanticModel")
+    prepared_models = ModelBindings.prepare(VectorFieldPydanticModel)
+
+    ModelPydantic = pydantic_model_creator(
+        VectorFieldPydanticModel, apps=prepared_models, name="VectorFieldPydanticModel"
+    )
 
     assert ModelPydantic.model_fields["embedding"].annotation == list[float]
     assert ModelPydantic.model_json_schema()["properties"]["embedding"]["items"] == {"type": "number"}
 
 
 @pytest.mark.database_independent
-def test_postgis_field_annotation_keeps_element_type():
-    """PostGISField.field_type is plain, unparameterized `tuple` (same root cause as VectorField/
-    ArrayField above) - the generated pydantic field collapsed to bare `tuple` (accepting any
-    array of anything) instead of tuple[float, float] for a (latitude, longitude) column."""
-    from hare.dialects.postgresql.fields.postgis_field import PostGISField
-
-    class PostGISFieldPydanticModel(Model):
-        id = fields.IntField(primary_key=True)
-        location = PostGISField()
-
-    ModelPydantic = pydantic_model_creator(PostGISFieldPydanticModel, name="PostGISFieldPydanticModel")
-
-    assert ModelPydantic.model_fields["location"].annotation == tuple[float, float]
-
-
-@pytest.mark.database_independent
-def test_geometry_field_is_a_geo_json_geometry():
+@pytest.mark.parametrize("geography", [False, True])
+def test_geometry_field_is_a_geo_json_geometry(geography):
     from hare.gis import Point, PointField, Polygon
 
     class GeometryFieldPydanticModel(Model):
         id = fields.IntField(primary_key=True)
-        location = PointField()
+        location = PointField(geography=geography)
 
-    ModelPydantic = pydantic_model_creator(GeometryFieldPydanticModel, name="GeometryFieldPydanticModel")
+    prepared_models = ModelBindings.prepare(GeometryFieldPydanticModel)
+
+    ModelPydantic = pydantic_model_creator(
+        GeometryFieldPydanticModel, apps=prepared_models, name="GeometryFieldPydanticModel"
+    )
 
     model = ModelPydantic.model_validate({"id": 1, "location": {"type": "Point", "coordinates": [1, 2]}})
     # A GeoJSON geometry has no SRID - it takes the field's, as the field reads it.
@@ -1672,13 +1701,13 @@ async def test_cycle_schema(db, pydantic_cycle_setup):
     Employee_Pydantic = pydantic_cycle_setup["Employee_Pydantic"]
     assert Employee_Pydantic.model_json_schema() == {
         "$defs": {
-            "Employee_rl3b2axgk3wkp53r_leaf": {
+            "Employee_rno3jut74pjeykkg_leaf": {
                 "additionalProperties": False,
                 "properties": {
                     "id": {"maximum": 2147483647, "minimum": -2147483648, "title": "Id", "type": "integer"},
                     "name": {"maxLength": 50, "title": "Name", "type": "string"},
                     "talks_to": {
-                        "items": {"$ref": "#/$defs/Employee_mmb5pmc22dxml5sl_leaf"},
+                        "items": {"$ref": "#/$defs/Employee_6nwkmdq7g2cvragx_leaf"},
                         "title": "Talks To",
                         "type": "array",
                     },
@@ -1692,7 +1721,7 @@ async def test_cycle_schema(db, pydantic_cycle_setup):
                         "title": "Manager Id",
                     },
                     "team_members": {
-                        "items": {"$ref": "#/$defs/Employee_mmb5pmc22dxml5sl_leaf"},
+                        "items": {"$ref": "#/$defs/Employee_6nwkmdq7g2cvragx_leaf"},
                         "title": "Team Members",
                         "type": "array",
                     },
@@ -1701,7 +1730,7 @@ async def test_cycle_schema(db, pydantic_cycle_setup):
                 "title": "Employee",
                 "type": "object",
             },
-            "Employee_mmb5pmc22dxml5sl_leaf": {
+            "Employee_6nwkmdq7g2cvragx_leaf": {
                 "additionalProperties": False,
                 "properties": {
                     "id": {"maximum": 2147483647, "minimum": -2147483648, "title": "Id", "type": "integer"},
@@ -1726,7 +1755,7 @@ async def test_cycle_schema(db, pydantic_cycle_setup):
             "id": {"maximum": 2147483647, "minimum": -2147483648, "title": "Id", "type": "integer"},
             "name": {"maxLength": 50, "title": "Name", "type": "string"},
             "talks_to": {
-                "items": {"$ref": "#/$defs/Employee_rl3b2axgk3wkp53r_leaf"},
+                "items": {"$ref": "#/$defs/Employee_rno3jut74pjeykkg_leaf"},
                 "title": "Talks To",
                 "type": "array",
             },
@@ -1737,7 +1766,7 @@ async def test_cycle_schema(db, pydantic_cycle_setup):
                 "title": "Manager Id",
             },
             "team_members": {
-                "items": {"$ref": "#/$defs/Employee_rl3b2axgk3wkp53r_leaf"},
+                "items": {"$ref": "#/$defs/Employee_rno3jut74pjeykkg_leaf"},
                 "title": "Team Members",
                 "type": "array",
             },
@@ -1909,13 +1938,13 @@ async def test_computed_field_schema(db, pydantic_computed_setup):
     Employee_Pydantic = pydantic_computed_setup["Employee_Pydantic"]
     assert Employee_Pydantic.model_json_schema(mode="serialization") == {
         "$defs": {
-            "Employee_rl3b2axgk3wkp53r_leaf": {
+            "Employee_rno3jut74pjeykkg_leaf": {
                 "additionalProperties": False,
                 "properties": {
                     "id": {"maximum": 2147483647, "minimum": -2147483648, "title": "Id", "type": "integer"},
                     "name": {"maxLength": 50, "title": "Name", "type": "string"},
                     "talks_to": {
-                        "items": {"$ref": "#/$defs/Employee_mmb5pmc22dxml5sl_leaf"},
+                        "items": {"$ref": "#/$defs/Employee_6nwkmdq7g2cvragx_leaf"},
                         "title": "Talks To",
                         "type": "array",
                     },
@@ -1929,7 +1958,7 @@ async def test_computed_field_schema(db, pydantic_computed_setup):
                         "title": "Manager Id",
                     },
                     "team_members": {
-                        "items": {"$ref": "#/$defs/Employee_mmb5pmc22dxml5sl_leaf"},
+                        "items": {"$ref": "#/$defs/Employee_6nwkmdq7g2cvragx_leaf"},
                         "title": "Team Members",
                         "type": "array",
                     },
@@ -1953,7 +1982,7 @@ async def test_computed_field_schema(db, pydantic_computed_setup):
                 "title": "Employee",
                 "type": "object",
             },
-            "Employee_mmb5pmc22dxml5sl_leaf": {
+            "Employee_6nwkmdq7g2cvragx_leaf": {
                 "additionalProperties": False,
                 "properties": {
                     "id": {"maximum": 2147483647, "minimum": -2147483648, "title": "Id", "type": "integer"},
@@ -1993,7 +2022,7 @@ async def test_computed_field_schema(db, pydantic_computed_setup):
             "id": {"maximum": 2147483647, "minimum": -2147483648, "title": "Id", "type": "integer"},
             "name": {"maxLength": 50, "title": "Name", "type": "string"},
             "talks_to": {
-                "items": {"$ref": "#/$defs/Employee_rl3b2axgk3wkp53r_leaf"},
+                "items": {"$ref": "#/$defs/Employee_rno3jut74pjeykkg_leaf"},
                 "title": "Talks To",
                 "type": "array",
             },
@@ -2004,7 +2033,7 @@ async def test_computed_field_schema(db, pydantic_computed_setup):
                 "title": "Manager Id",
             },
             "team_members": {
-                "items": {"$ref": "#/$defs/Employee_rl3b2axgk3wkp53r_leaf"},
+                "items": {"$ref": "#/$defs/Employee_rno3jut74pjeykkg_leaf"},
                 "title": "Team Members",
                 "type": "array",
             },
@@ -2686,7 +2715,7 @@ def test_generated_field_not_required_in_read_schema():
     entirely instead (see test_exclude_readonly_excludes_a_non_pk_generated_field)."""
     from tests.fields.models_generated_field import PricedItem
 
-    ReadSchema = pydantic_model_creator(PricedItem, name="PricedItemRead")
+    ReadSchema = pydantic_model_creator(PricedItem, apps=ModelBindings.prepare(PricedItem), name="PricedItemRead")
 
     assert ReadSchema.model_fields["total"].is_required() is False
     assert ReadSchema.model_json_schema()["properties"]["total"]["readOnly"] is True
@@ -2834,7 +2863,9 @@ def test_generated_field_json_output_field_accepts_a_json_scalar():
         payload = fields.JSONField[dict](default=dict)
         computed = GeneratedField(expression=RawSQLTerm("payload"), output_field=fields.JSONField())
 
-    ModelPydantic = pydantic_model_creator(GenJsonScalarModel, name="GenJsonScalarModelRead")
+    prepared_models = ModelBindings.prepare(GenJsonScalarModel)
+
+    ModelPydantic = pydantic_model_creator(GenJsonScalarModel, apps=prepared_models, name="GenJsonScalarModelRead")
 
     validated = ModelPydantic.model_validate({"id": 1, "payload": {}, "computed": 42})
     assert validated.computed == 42
@@ -2869,7 +2900,11 @@ def test_generated_field_enum_output_field_keeps_enum_validation():
             output_field=fields.CharEnumField(Status, max_length=10),  # type: ignore[arg-type]
         )
 
-    ModelPydantic = pydantic_model_creator(GenEnumOutputFieldModel, name="GenEnumOutputFieldModelRead")
+    prepared_models = ModelBindings.prepare(GenEnumOutputFieldModel)
+
+    ModelPydantic = pydantic_model_creator(
+        GenEnumOutputFieldModel, apps=prepared_models, name="GenEnumOutputFieldModelRead"
+    )
 
     assert ModelPydantic.model_fields["computed_status"].annotation is Status
     validated = ModelPydantic.model_validate({"id": 1, "flag": "x", "computed_status": "active"})
@@ -2896,8 +2931,8 @@ def test_multiple_inheritance_from_two_unrelated_abstract_bases_merges_both_pyda
         class Meta:
             abstract = True
 
-        class PydanticMeta:
-            exclude = ("secret_a",)
+            class pydantic:
+                exclude = ("secret_a",)
 
     class PydanticMetaAbstractB(Model):
         name = fields.CharField(max_length=20, null=True)
@@ -2905,11 +2940,11 @@ def test_multiple_inheritance_from_two_unrelated_abstract_bases_merges_both_pyda
         class Meta:
             abstract = True
 
+            class pydantic:
+                computed = ("double_name",)
+
         def double_name(self) -> str:
             return (self.name or "") * 2
-
-        class PydanticMeta:
-            computed = ("double_name",)
 
     # mypy flags the two bases' independently-declared Meta/PydanticMeta classes as
     # incompatible - correct at the type level (neither is a subtype of the other), but both
@@ -2921,8 +2956,9 @@ def test_multiple_inheritance_from_two_unrelated_abstract_bases_merges_both_pyda
     class PydanticMetaChildBFirst(PydanticMetaAbstractB, PydanticMetaAbstractA):  # type: ignore[misc]
         id = fields.IntField(primary_key=True)
 
+    prepared_models = ModelBindings.prepare(PydanticMetaChildAFirst, PydanticMetaChildBFirst)
     for model in (PydanticMetaChildAFirst, PydanticMetaChildBFirst):
-        schema = pydantic_model_creator(model, name=f"{model.__name__}Read")
+        schema = pydantic_model_creator(model, apps=prepared_models, name=f"{model.__name__}Read")
         assert "secret_a" not in schema.model_fields
         assert "double_name" in schema.model_computed_fields
 
@@ -3036,6 +3072,156 @@ async def test_computed_property_and_cached_property(db):
         "name_upper": "ABC",
         "name_length": 3,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cached", (False, True), ids=("first-read", "already-cached"))
+async def test_computed_schema_reads_the_orm_property_descriptor(db, cached):
+    schema_class = pydantic_model_creator(
+        Tag, include=("id", "name", "name_upper", "name_length"), computed=("name_upper", "name_length")
+    )
+    obj = await Tag.objects.create(name="abc")
+    if cached:
+        assert obj.name_length == 3
+    obj.name = "longer"
+    expected_length = 3 if cached else 6
+    schema = schema_class.model_validate(obj)
+    assert schema.model_dump() == {
+        "id": obj.id,
+        "name": "longer",
+        "name_upper": "LONGER",
+        "name_length": expected_length,
+    }
+    assert obj.__dict__["name_length"] == expected_length
+
+
+@pytest.mark.asyncio
+async def test_computed_schema_reads_a_cached_property_without_its_unloaded_dependency(db):
+    obj = await Tag.objects.create(name="abc")
+    partial = await Tag.objects.only("id").get(pk=obj.pk)
+    partial.name_length = 17
+    schema_class = pydantic_model_creator(Tag, include=("id", "name_length"), computed=("name_length",))
+    assert schema_class.model_validate(partial).model_dump() == {"id": obj.id, "name_length": 17}
+
+
+def test_computed_schema_keeps_cached_property_semantics_for_plain_payloads(db):
+    schema_class = pydantic_model_creator(Tag, include=("name", "name_length"), computed=("name_length",))
+    schema = schema_class.model_validate({"name": "abc"})
+    assert schema.name_length == 3
+    schema.name = "longer"
+    assert schema.model_dump() == {"name": "longer", "name_length": 3}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("partial", (False, True), ids=("full", "partial"))
+async def test_computed_fields_keep_the_orm_source_during_inherited_validators(db, partial):
+    obj = await Tag.objects.create(name="abc")
+    if partial:
+        obj = await Tag.objects.only("id").get(pk=obj.pk)
+        obj.name_length = 17
+        expected = 17
+    else:
+        assert obj.name_length == 3
+        obj.name = "longer"
+        expected = 3
+    schema_class = pydantic_model_creator(Tag, include=("id", "name_length"), computed=("name_length",))
+
+    class InspectComputed(BaseModel):
+        _seen: int = PrivateAttr(default=-1)
+
+        @model_validator(mode="after")
+        def inspect_computed(self) -> typing.Self:
+            self._seen = self.name_length
+            return self
+
+    class CheckingSchema(schema_class, InspectComputed):
+        pass
+
+    schema = CheckingSchema.model_validate(obj)
+    assert schema._seen == expected
+    assert schema.model_dump() == {"id": obj.id, "name_length": expected}
+
+
+def test_nested_validation_keeps_plain_payloads_apart_from_the_enclosing_orm_source(db):
+    obj = Tag(id=1, name="abc")
+    assert obj.name_length == 3
+    obj.name = "longer"
+    schema_class = pydantic_model_creator(Tag, include=("id", "name", "name_length"), computed=("name_length",))
+
+    class InspectNested(BaseModel):
+        @model_validator(mode="after")
+        def inspect_nested(self) -> typing.Self:
+            if self.name != "payload":
+                assert PydanticModel._get_orm_source(self) is obj
+                nested = type(self).model_validate({"id": 2, "name": "payload"})
+                assert nested.name_length == 7
+                assert PydanticModel._get_orm_source(nested) is None
+                constructed = type(self).model_construct(id=3, name="constructed")
+                assert constructed.name_length == 11
+                assert PydanticModel._get_orm_source(constructed) is None
+                assert PydanticModel._get_orm_source(self) is obj
+            return self
+
+    class CheckingSchema(schema_class, InspectNested):
+        pass
+
+    previous = PydanticModel._orm_validation_source.get()
+    assert CheckingSchema.model_validate(obj).name_length == 3
+    assert PydanticModel._orm_validation_source.get() is previous
+
+
+def test_validation_errors_restore_the_enclosing_orm_source(db):
+    schema_class = pydantic_model_creator(Tag, include=("id", "name", "name_length"), computed=("name_length",))
+    obj = Tag(id=1, name="abc")
+
+    class RejectingSchema(schema_class):
+        @model_validator(mode="after")
+        def reject_value(self) -> typing.Self:
+            assert self.name_length == 3
+            raise ValueError("rejected computed value")
+
+    previous = PydanticModel._orm_validation_source.get()
+    with pytest.raises(ValidationError, match="rejected computed value"):
+        RejectingSchema.model_validate(obj)
+    assert PydanticModel._orm_validation_source.get() is previous
+    assert schema_class.model_validate({"id": 2, "name": "payload"}).name_length == 7
+
+
+@pytest.mark.asyncio
+async def test_tasks_started_by_validators_do_not_retain_the_completed_orm_source(db):
+    schema_class = pydantic_model_creator(Tag, include=("id", "name_length"), computed=("name_length",))
+    release = asyncio.Event()
+    tasks = []
+
+    class StartTask(BaseModel):
+        @model_validator(mode="after")
+        def start_task(self) -> typing.Self:
+            assert PydanticModel._orm_validation_source.get() is not None
+
+            async def read_after_validation():
+                await release.wait()
+                source = PydanticModel._orm_validation_source.get()
+                return None if source is None else source.obj
+
+            tasks.append(asyncio.create_task(read_after_validation()))
+            return self
+
+    class TaskSchema(schema_class, StartTask):
+        pass
+
+    try:
+        obj = Tag(id=1, name="abc")
+        reference = weakref.ref(obj)
+        schema = TaskSchema.model_validate(obj)
+        assert schema.name_length == 3
+        del schema, obj
+        gc.collect()
+        assert reference() is None
+        release.set()
+        assert await tasks[0] is None
+    finally:
+        release.set()
+        await asyncio.gather(*tasks)
 
 
 def test_queryset_creator_name_only_names_the_list_model(db):

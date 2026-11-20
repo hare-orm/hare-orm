@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import math
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from typing_extensions import TypeVar
 
@@ -10,7 +9,6 @@ from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import ConfigurationError, ValidationError
 from hare.fields.constants import JSON_FIELD_TYPE_PACKAGE_MESSAGE, SENSITIVE_VALUE_PLACEHOLDER
 from hare.fields.data.constants import (
-    JSON_CIRCULAR_REFERENCE_CHECK_CONTAINERS,
     JSON_CIRCULAR_REFERENCE_MESSAGE,
     JSON_CIRCULAR_REFERENCE_PROBLEM,
     JSON_LONG_INTEGER_PROBLEM,
@@ -18,14 +16,14 @@ from hare.fields.data.constants import (
     JSON_NESTED_TOO_DEEPLY_MESSAGE,
     JSON_NESTED_TOO_DEEPLY_PROBLEM,
     JSON_NON_FINITE_FLOAT_PROBLEM,
+    JSON_PLAIN_PYTHON_VALUE_TYPES,
     JSON_VALUE_TYPE,
-    ORJSON_INTEGER_MAX,
-    ORJSON_INTEGER_MIN,
 )
 from hare.fields.data.json.json_codec import JsonCodec
 from hare.fields.field import Field
 from hare.fields.json_values import JsonValues
 from hare.lazy_loading.pydantic_classes import PydanticClasses
+from hare.native.native_modules import NativeModules
 
 if TYPE_CHECKING:
     from hare.fields.data.json.json_path_field import JSONPathField
@@ -43,13 +41,14 @@ JsonLoadsFunction = Callable[[str | bytes], Any]
 
 
 class JSONField(Field[T]):
-    """A JSON field holding a dict or list - ``JSONField[dict[str, str]]`` for type checkers. orjson is
-    used when installed.
+    """A field holding a JSON value - ``JSONField[dict[str, str]]`` for type checkers.
+
+    The default codec uses the required orjson dependency and preserves integers beyond its range.
 
     Args:
         encoder: The JSON encoder.
         decoder: The JSON decoder.
-        field_type: A pydantic model the value is validated into.
+        field_type: A declared type accepted by pydantic TypeAdapter, used to validate and restore values.
     """
 
     field_type = dict[str, Any] | list[Any]
@@ -97,6 +96,10 @@ class JSONField(Field[T]):
         if type_adapter is not None and value is not None:
             return type_adapter.dump_python(value, mode="json")
         return JsonValues.get_json_value(value)
+
+    def get_snapshot_comparison_value(self, value: Any) -> Any:
+        """Compare a typed document's JSON representation instead of its object's equality."""
+        return self.get_json_value(value) if self.declared_value_type is not None else value
 
     def _get_constructor_argument_value(self, name: str) -> Any:
         # The class's own field_type is the value type of an undeclared document, not an argument.
@@ -187,9 +190,8 @@ class JSONField(Field[T]):
             raise ValidationError(f"{self.get_field_label()}: {nesting_message}")
 
     def check_storable_value(self, value: Any) -> bool:
-        """Checks a decoded JSON value (however deeply nested) for anything a JSON column can't
-        store - a null byte is always escaped away by the encoder (so it can't be spotted in the
-        encoded text), and orjson silently writes NaN/Infinity as ``null``.
+        """Checks finite numbers, cycles and nesting depth before encoding, and identifies integers
+        needing the exact encoder. This rejects NaN/Infinity before orjson can turn them into ``null``.
 
         Args:
             value: A decoded JSON value - dict, list, str, or any other JSON-scalar type.
@@ -201,102 +203,81 @@ class JSONField(Field[T]):
             ValidationError: A float is NaN/Infinity, a list or dict holds itself, or containers nest
                 more than ``JSON_MAXIMUM_NESTING`` deep.
         """
-        storable_value_checker = JsonCodec.storable_value_checker
-        if storable_value_checker is not None:
-            problem, non_finite_float = storable_value_checker(value)
-            if problem == JSON_CIRCULAR_REFERENCE_PROBLEM:
-                raise ValidationError(f"{self.get_field_label()}: {JSON_CIRCULAR_REFERENCE_MESSAGE}")
-            if problem == JSON_NESTED_TOO_DEEPLY_PROBLEM:
-                raise ValidationError(f"{self.get_field_label()}: {JSON_NESTED_TOO_DEEPLY_MESSAGE}")
-            if problem == JSON_NON_FINITE_FLOAT_PROBLEM:
-                raise ValidationError(
-                    f"{self.get_field_label()}: value {self.get_value_for_message(non_finite_float)} is not a finite "
-                    "number, which JSON can't store"
-                )
-            return problem == JSON_LONG_INTEGER_PROBLEM
-        has_long_integer = False
-        # A value holding itself never ends the walk - past this many containers its nesting is
-        # checked once; a smaller value pays one count per container. A deep list or dict is refused
-        # by the encoder itself, a deep tuple ends the process in orjson - checked on the first one.
-        containers_left = JSON_CIRCULAR_REFERENCE_CHECK_CONTAINERS
-        tuples_unchecked = True
-        pending_values = [value]
-        while pending_values:
-            item = pending_values.pop()
-            if isinstance(item, dict):
-                containers_left -= 1
-                if not containers_left:
-                    self.raise_if_nested_wrongly(value)
-                pending_values.extend(item.keys())
-                pending_values.extend(item.values())
-            elif isinstance(item, list):
-                containers_left -= 1
-                if not containers_left:
-                    self.raise_if_nested_wrongly(value)
-                pending_values.extend(item)
-            elif isinstance(item, tuple):
-                containers_left -= 1
-                if tuples_unchecked or not containers_left:
-                    tuples_unchecked = False
-                    self.raise_if_nested_wrongly(value)
-                pending_values.extend(item)
-            elif isinstance(item, float):
-                if not math.isfinite(item):
-                    raise ValidationError(
-                        f"{self.get_field_label()}: value {self.get_value_for_message(item)} is not a finite "
-                        "number, which JSON can't store"
-                    )
-            elif isinstance(item, int) and not ORJSON_INTEGER_MIN <= item <= ORJSON_INTEGER_MAX:
-                has_long_integer = True
-        return has_long_integer
+        problem, non_finite_float = JsonCodec.storable_value_checker(value)
+        if not problem:
+            return False
+        if problem == JSON_LONG_INTEGER_PROBLEM:
+            return True
+        if problem == JSON_CIRCULAR_REFERENCE_PROBLEM:
+            raise ValidationError(f"{self.get_field_label()}: {JSON_CIRCULAR_REFERENCE_MESSAGE}")
+        if problem == JSON_NESTED_TOO_DEEPLY_PROBLEM:
+            raise ValidationError(f"{self.get_field_label()}: {JSON_NESTED_TOO_DEEPLY_MESSAGE}")
+        if problem == JSON_NON_FINITE_FLOAT_PROBLEM:
+            raise ValidationError(
+                f"{self.get_field_label()}: value {self.get_value_for_message(non_finite_float)} is not a finite "
+                "number, which JSON can't store"
+            )
+        return False
 
-    def encode_value(self, value: Any) -> str:
-        """Encodes a non-None value of a JSONField without a declared ``field_type`` into the text
-        written to the column.
+    def prepare_value(self, value: Any) -> tuple[Any, bool]:
+        """Normalize and validate a document before its storage encoder runs.
 
-        Args:
-            value: A dict, list, str, number or pydantic model.
+        Declared types validate first. Their Python representation is checked before
+        JSON serialization can replace a non-finite number with null. Custom encoders
+        receive that Python representation, while the default encoder receives the
+        JSON representation. Plain values, including strings and bytes, are passed
+        to a custom encoder unchanged.
 
         Returns:
-            The JSON text.
+            The prepared value and whether it contains an integer requiring exact
+            encoding beyond the optional encoder's integer range.
 
         Raises:
-            ValidationError: The value can't be stored or isn't JSON serializable.
+            ValidationError: The type, nesting or a numeric value is invalid.
         """
-        is_pydantic_model = PydanticClasses.is_model_instance(value)
-        native_encoder = JsonCodec.native_encoder
-        if not is_pydantic_model and native_encoder is not None and self.encoder is JsonCodec.dumps:
-            # The text orjson writes, checked on the same pass; any other value takes the paths below.
-            text = native_encoder(value)
-            if text is not None:
-                return text
-        storable_value_checker = JsonCodec.storable_value_checker
-        if (
-            not is_pydantic_model
-            and storable_value_checker is not None
-            and self.encoder is JsonCodec.dumps
-            and JsonCodec.orjson is not None
+        if not self.declared_value_type and (
+            type(value) in JSON_PLAIN_PYTHON_VALUE_TYPES or not PydanticClasses.is_model_instance(value)
         ):
-            # The usual value under the default encoder: one native check, then orjson. Anything
-            # the check or orjson objects to takes the full path below, which says what's wrong.
-            problem, _non_finite_float = storable_value_checker(value)
-            if not problem:
-                try:
-                    return JsonCodec.orjson.dumps(value).decode()
-                except (TypeError, ValueError):
-                    pass
-        has_long_integer = self.check_storable_value(value.model_dump() if is_pydantic_model else value)
+            return value, self.check_storable_value(value)
+        adapter = self.get_value_type_adapter()
+        typed_value = self.validate_declared_type(value) if adapter is not None else value
+        is_pydantic_model = adapter is None and PydanticClasses.is_model_instance(typed_value)
+        if adapter is not None:
+            python_value = adapter.dump_python(typed_value)
+        elif is_pydantic_model:
+            python_value = typed_value.model_dump()
+        else:
+            python_value = typed_value
+        has_long_integer = self.check_storable_value(python_value)
+        if self.encoder is JsonCodec.dumps:
+            if adapter is not None:
+                prepared = adapter.dump_python(typed_value, mode="json")
+            elif is_pydantic_model:
+                prepared = typed_value.model_dump(mode="json")
+            else:
+                prepared = python_value
+            if prepared is not python_value:
+                has_long_integer = self.check_storable_value(prepared)
+        else:
+            prepared = python_value
+        return prepared, has_long_integer
 
-        if is_pydantic_model:
-            if self.encoder is JsonCodec.dumps:
-                return value.model_dump_json()
-            # self.encoder may be a custom json encoder
-            value = value.model_dump()
+    def encode_value(self, value: Any) -> str:
+        """Prepare a non-null document, then encode it through the selected codec.
 
+        Custom encoder exceptions are converted to the field's sensitive-safe error.
+        """
+        # Missing schema dependencies are configuration errors, before value handling.
+        if self.declared_value_type:
+            self.get_value_type_adapter()
         try:
-            return self.get_encoder(has_long_integer)(value)
+            prepared, has_long_integer = self.prepare_value(value)
+            return self.get_encoder(has_long_integer)(prepared)
+        except ValidationError:
+            raise
         except Exception as error:
-            # A deep list or dict - the encoder's own refusal - is named as the native check names it.
+            # A codec can reject deep containers before the Python fast walk
+            # reaches its full nesting check. Keep the native and Python contract.
             self.raise_if_nested_wrongly(value)
             validation_error = self.get_validation_error(
                 error,
@@ -322,29 +303,7 @@ class JSONField(Field[T]):
         instance: type[Model] | Model | None,
     ) -> str | None:
         self.validate(value)
-        if value is None:
-            return None
-
-        type_adapter = self.get_value_type_adapter()
-        if type_adapter is None:
-            return self.encode_value(value)
-
-        # Checked against field_type before writing. The JSON-mode dump is written; the python-mode
-        # one still holds the NaN/Infinity floats.
-        typed_value = self.validate_declared_type(value)
-        self.check_storable_value(type_adapter.dump_python(typed_value, mode="json"))
-        self.check_storable_value(type_adapter.dump_python(typed_value))
-        try:
-            if self.encoder is JsonCodec.dumps:
-                return cast("str", type_adapter.dump_json(typed_value).decode())
-            return self.encoder(type_adapter.dump_python(typed_value))
-        except Exception as error:
-            validation_error = self.get_validation_error(
-                error,
-                value,
-                f"{self.model_field_name}: value {self.get_value_for_message(value)} is not JSON serializable.",
-            )
-        raise validation_error
+        return None if value is None else self.encode_value(value)
 
     def from_db_value(
         self, value: T | str | bytes | dict[str, Any] | list[Any] | None
@@ -370,15 +329,28 @@ class JSONField(Field[T]):
                 )
             if validation_error is not None:
                 raise validation_error
+            value = data
 
-            return self.validate_declared_type(data)
-
+        # A document of no declared type is read as decoded - validate_declared_type() keeps it so.
+        if not self.declared_value_type:
+            return value  # type: ignore[return-value]
         return self.validate_declared_type(value)
+
+    def get_db_value_reader(self) -> Callable[[Any], Any]:
+        # This class's from_db_value() with the default decoder and no declared type is read natively -
+        # the decoder it calls, its error for a text that isn't JSON.
+        if (
+            type(self).from_db_value is JSONField.from_db_value
+            and self.decoder is JsonCodec.loads
+            and not self.declared_value_type
+        ):
+            return NativeModules.rows.JsonColumnReader(self.from_db_value)
+        return super().get_db_value_reader()
 
     def get_assign_normalized_types(self) -> frozenset[type]:
         if self.declared_value_type is not None:
             return frozenset()
-        return frozenset({dict, list, str, bytes, int, float, bool})
+        return self._get_unchanged_assign_types(JSONField.to_python, dict, list, str, bytes, int, float, bool)
 
     def to_python(
         self, value: T | dict[str, Any] | list[Any] | str | bytes | None

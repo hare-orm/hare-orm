@@ -4,21 +4,46 @@ from enum import StrEnum
 
 
 class DistributedTransactionResolution(StrEnum):
-    """What a stale prepared transaction found by
-    ``DistributedCoordinator.detect_stale_prepared_transactions()`` needs - ``hare distributed-recover``
-    issues exactly this against it."""
+    """The action proposed by ``DistributedRecovery.run()`` for a prepared transaction.
+
+    The recovery service applies it only with ``finish=True``; the CLI uses the same service.
+    """
 
     COMMIT = "commit"
     ROLLBACK = "rollback"
 
 
 class TransactionEventType(StrEnum):
-    """A real, top-level transaction lifecycle event - never fired for a savepoint (nested
-    transaction) begin/release/rollback, only for the outermost transaction on a connection."""
+    """A top-level transaction lifecycle event, including an uncertain ending.
+
+    Never fired for a savepoint begin/release/rollback. UNKNOWN reports lost confirmation
+    of an in-flight commit and must not be interpreted as a rollback.
+    """
 
     BEGIN = "begin"
     COMMIT = "commit"
     ROLLBACK = "rollback"
+    UNKNOWN = "unknown"
+
+
+class TransactionPhase(StrEnum):
+    """Local execution phase, independent of a server's durable outcome."""
+
+    NEW = "new"
+    ACTIVE = "active"
+    ENDING = "ending"
+    FINISHED = "finished"
+
+
+class TransactionOutcome(StrEnum):
+    """Known result of a transaction or savepoint; UNKNOWN never implies rollback."""
+
+    PENDING = "pending"
+    COMMITTED = "committed"
+    ROLLED_BACK = "rolled_back"
+    PREPARED = "prepared"
+    RELEASED = "released"
+    UNKNOWN = "unknown"
 
 
 class IsolationLevel(StrEnum):

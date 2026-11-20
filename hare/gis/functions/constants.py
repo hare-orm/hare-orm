@@ -8,8 +8,7 @@ from hare.fields.data.numeric.float_field import FloatField
 from hare.fields.data.numeric.int_field import IntField
 from hare.fields.data.text import TextField
 
-#: The shared fields the functions' results are read through - the statement plans hold output
-#: fields weakly.
+#: Reusable fields for decoding the spatial functions' results.
 MEASURE_FIELD = FloatField()
 COUNT_FIELD = IntField()
 FLAG_FIELD = BooleanField()

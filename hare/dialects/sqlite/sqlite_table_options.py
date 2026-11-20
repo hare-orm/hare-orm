@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from hare.ddl.table_options import TableOptions
 from hare.dialects.sqlite.server_versions import SQLITE_STRICT_SERVER_VERSION
@@ -15,8 +15,7 @@ from hare.exceptions import ConfigurationError, UnSupportedError
 if TYPE_CHECKING:
     from hare.dialects.base.features import Features
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-    from hare.dialects.sqlite.declarations import SqliteFeatures
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclasses.dataclass(frozen=True)
@@ -37,14 +36,14 @@ class SqliteTableOptions(TableOptions):
     without_rowid: bool = False
     strict: bool = False
 
-    def raise_if_unsupported(self, model: type[Model], features: Features) -> None:
+    def raise_if_unsupported(self, binding: ModelBinding, features: Features) -> None:
         """Rejects ``without_rowid`` for a table without a primary key or with one the database
         generates - a ``WITHOUT ROWID`` table stores its rows in the primary key's index and has no
         rowid to number rows with, so SQLite refuses both - and ``strict`` on a SQLite older than
         3.37.
 
         Args:
-            model: The model.
+            binding: The model.
             features: The features of the connection the table is created on.
 
         Raises:
@@ -52,29 +51,28 @@ class SqliteTableOptions(TableOptions):
                 generated one.
             UnSupportedError: ``strict`` is set and the connection has no ``STRICT`` tables.
         """
-        if self.without_rowid and not model._meta.has_primary_key:
+        model = binding._model
+        if self.without_rowid and not binding.has_primary_key:
             raise ConfigurationError(
                 f"{model.__name__}: SqliteTableOptions(without_rowid=True) needs a primary key - the model "
                 "declares Meta.primary_key = None."
             )
-        primary_key_attribute = model._meta.primary_key_attribute
-        pk_field = (
-            model._meta.fields_map.get(primary_key_attribute) if isinstance(primary_key_attribute, str) else None
-        )
+        primary_key_attribute = binding.primary_key_attribute
+        pk_field = binding.fields_map.get(primary_key_attribute) if isinstance(primary_key_attribute, str) else None
         if self.without_rowid and pk_field is not None and pk_field.generated:
             raise ConfigurationError(
                 f"{model.__name__}: SqliteTableOptions(without_rowid=True) needs a primary key the "
                 f"database doesn't generate - declare {primary_key_attribute!r} with generated=False, or use another "
                 "primary key."
             )
-        if self.strict and not cast("SqliteFeatures", features).supports_strict_tables:
+        if self.strict and not features.supports_strict_tables:  # type: ignore[attr-defined]
             minimum_version = ".".join(map(str, SQLITE_STRICT_SERVER_VERSION))
             raise UnSupportedError(
                 f"{model.__name__}: SqliteTableOptions(strict=True) needs SQLite {minimum_version} or later - "
                 "the connection's SQLite has no STRICT tables (features.supports_strict_tables)."
             )
 
-    def get_create_suffix_sql(self, model: type[Model], editor: BaseSchemaEditor) -> str:
+    def get_create_suffix_sql(self, binding: ModelBinding, editor: BaseSchemaEditor) -> str:
         options = []
         if self.strict:
             options.append(SQLITE_STRICT_TABLE_OPTION)
@@ -88,6 +86,6 @@ class SqliteTableOptions(TableOptions):
         if not self.strict:
             return column_type
         # Local import: the introspector reads into hare's models, whose modules import this one.
-        from hare.dialects.sqlite.sqlite_introspector import SqliteIntrospector
+        from hare.dialects.sqlite.types.sqlite_physical_type import SqlitePhysicalType
 
-        return SQLITE_STRICT_COLUMN_TYPES[SqliteIntrospector.get_type_affinity(column_type)]
+        return SQLITE_STRICT_COLUMN_TYPES[SqlitePhysicalType.from_sql(column_type).affinity]

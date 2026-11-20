@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.sql.builder_methods import BuilderMethods
 from hare.sql.order import Order
 from hare.sql.sql_context import SqlContext
-from hare.sql.terms.node import Node, TNode
+from hare.sql.terms.node import Node
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -18,6 +18,14 @@ from hare.sql.terms.functions.aggregate_function import AggregateFunction
 class AnalyticFunction(AggregateFunction):
     """A window function - ``name(...) OVER (PARTITION BY ... ORDER BY ...)``."""
 
+    structure_attributes: ClassVar[tuple[str, ...]] = (
+        "_include_over",
+        "_orderbys",
+        "_partition",
+        "value_field",
+        "value_holds_null",
+    )
+
     is_aggregate = False
     is_analytic = True
     #: Whether the column type of the value it reads holds NULL - a dialect making the value nullable to
@@ -29,10 +37,8 @@ class AnalyticFunction(AggregateFunction):
 
     def __init__(self, name: str, *args: Any, **kwargs: Any) -> None:
         super().__init__(name, *args, **kwargs)
-        self._filters: list[Any] = []
         self._partition: list[Any] = []
         self._orderbys: list[tuple[Field, Order | None]] = []
-        self._include_filter = False
         self._include_over = False
 
     def __copy__(self) -> Self:
@@ -43,14 +49,14 @@ class AnalyticFunction(AggregateFunction):
         new_term._orderbys = list(self._orderbys)
         return new_term
 
-    def nodes_(self) -> Iterator[TNode]:
-        yield from super().nodes_()
+    def get_children(self) -> Iterator[Node]:
+        yield from super().get_children()
         for partition_term in self._partition:
             if isinstance(partition_term, Node):
-                yield from partition_term.nodes_()
+                yield partition_term
         for ordering_term, __ in self._orderbys:
             if isinstance(ordering_term, Node):
-                yield from ordering_term.nodes_()
+                yield ordering_term
 
     @BuilderMethods.builder
     def over(self, *terms: Any) -> Self:

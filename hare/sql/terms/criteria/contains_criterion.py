@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 from hare.sql.builder_methods import BuilderMethods
 from hare.sql.sql_context import SqlContext
-from hare.sql.terms.node import TNode
+from hare.sql.terms.node import Node
 from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
@@ -17,6 +17,8 @@ from hare.sql.terms.criteria.criterion import Criterion
 
 class ContainsCriterion(Criterion):
     """``term IN (...)``, or ``NOT IN``, of a list or a subquery."""
+
+    structure_attributes = ("_is_negated", "container", "term")
 
     def __init__(self, term: Any, container: Term, alias: str | None = None) -> None:
         """A wrapper for an "IN" criterion.
@@ -34,10 +36,9 @@ class ContainsCriterion(Criterion):
         self.container = container
         self._is_negated = False
 
-    def nodes_(self) -> Iterator[TNode]:
-        yield self  # type:ignore[misc]
-        yield from self.term.nodes_()
-        yield from self.container.nodes_()
+    def get_children(self) -> Iterator[Node]:
+        yield self.term
+        yield self.container
 
     @property
     def is_aggregate(self) -> bool | None:  # type:ignore[override]

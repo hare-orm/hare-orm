@@ -13,7 +13,6 @@ from hare.dialects.postgresql.functions.aggregates import (
 from hare.dialects.postgresql.functions.array import ArraySubquery
 from hare.dialects.postgresql.functions.ltree import Subpath
 from hare.dialects.postgresql.functions.random_uuid import RandomUUID
-from hare.dialects.postgresql.functions.spatial import STDistance, STDWithin
 from hare.dialects.postgresql.functions.statistics import (
     Corr,
     CovarPop,
@@ -60,8 +59,6 @@ __all__ = [
     "RegrSXY",
     "RegrSYY",
     "RegrSlope",
-    "STDWithin",
-    "STDistance",
     "StringAgg",
     "Subpath",
     "TransactionNow",
@@ -74,7 +71,7 @@ __all__ = [
 ]
 
 # The functions only PostgreSQL has - a query on another database refuses each before any SQL.
-DialectExpressions.register(
+DialectExpressions.declare(
     PostgresqlDialect,
     (
         ArraySubquery,
@@ -97,8 +94,6 @@ DialectExpressions.register(
         RegrSXY,
         RegrSYY,
         RegrSlope,
-        STDWithin,
-        STDistance,
         StringAgg,
         Subpath,
         TransactionNow,

@@ -5,9 +5,10 @@ from typing import Any, ClassVar
 
 from hare.exceptions import UnSupportedError
 from hare.fields.field import Field
+from hare.fields.generated_field import GeneratedField
+from hare.gis.constants import SPATIAL_LOOKUP_REQUIRED_FEATURE
 from hare.gis.enums import SpatialFunctionType
 from hare.gis.fields.geometry_field import GeometryField
-from hare.gis.spatial_features import SpatialFeatures
 from hare.gis.terms.spatial_aggregate_function import SpatialAggregateFunction
 from hare.query.expressions import Aggregate, ExpressionContext, ExpressionResult
 
@@ -35,7 +36,7 @@ class SpatialAggregate(Aggregate):
     def _wrap_argument(
         self, expression_context: ExpressionContext, function_arg: ExpressionResult
     ) -> ExpressionResult:
-        SpatialFeatures.raise_if_unsupported(expression_context, type(self).__name__)
+        expression_context.require_connection_feature(type(self).__name__, SPATIAL_LOOKUP_REQUIRED_FEATURE)
         connection = expression_context.connection
         if self.order_by and connection is not None and not connection.features.supports_ordered_aggregates:
             raise UnSupportedError(
@@ -44,6 +45,8 @@ class SpatialAggregate(Aggregate):
                 "(features.supports_ordered_aggregates)"
             )
         argument_field = function_arg.output_field
+        if argument_field is not None:
+            argument_field = GeneratedField.get_effective_field(argument_field)
         if isinstance(argument_field, GeometryField) and argument_field.geography:
             raise UnSupportedError(f"{type(self).__name__} aggregates geometry columns, not a geography")
         return super()._wrap_argument(expression_context, function_arg)
@@ -51,6 +54,7 @@ class SpatialAggregate(Aggregate):
     def _coerce_output_field(self, field_object: Field[Any], expression_context: ExpressionContext) -> Field[Any]:
         if self.value_field is not None:
             return self.value_field
+        field_object = GeneratedField.get_effective_field(field_object)
         output_field_maker = type(self).output_field_maker
         if output_field_maker is not None and isinstance(field_object, GeometryField):
             return output_field_maker(field_object)

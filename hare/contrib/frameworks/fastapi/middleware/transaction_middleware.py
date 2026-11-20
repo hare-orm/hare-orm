@@ -18,7 +18,7 @@ class TransactionMiddleware:
 
     Args:
         app: The application.
-        connection_aliases: The connections, None for the default one.
+        connection_aliases: The connections; a None entry uses automatic transaction connection selection.
     """
 
     def __init__(self, app: ASGIApp, connection_aliases: tuple[str | None, ...]) -> None:

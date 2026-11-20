@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from collections.abc import Iterator
+from typing import TYPE_CHECKING
 
 from hare.dialects.base.client.constants import TRANSACTION_BEGIN_ABANDONED_MESSAGE
 from hare.dialects.base.client.transaction_lifecycle.transaction_ending import TransactionEnding
@@ -25,14 +26,7 @@ class PendingStatements:
         """
         top_level_transaction = client._outer_transaction or client
         if top_level_transaction._begin_pending:
-            if top_level_transaction._shielded_begin_abandoned_task is not None:
-                raise TransactionManagementError(TRANSACTION_BEGIN_ABANDONED_MESSAGE)
-            # Shielded for the reason PendingStatements.send_pending_begin() gives.
-            await TransactionEnding.run_shielded_from_cancellation(
-                top_level_transaction._driver_send_begin(),
-                on_landed=top_level_transaction._mark_begin_sent,
-                on_timeout=top_level_transaction._mark_begin_operation_abandoned,
-            )
+            await PendingStatements.send_pending_begin(top_level_transaction)
         if top_level_transaction._pending_savepoints:
             await PendingStatements.send_pending_savepoints(client)
 
@@ -61,24 +55,31 @@ class PendingStatements:
         outermost first - right before a statement that holds its turn on the savepoint lock, so
         every open savepoint encloses it. Each is shielded: a SAVEPOINT landing after the awaiting
         task was cancelled would leave one more savepoint on the connection than the savepoint lock
-        tracks.
+        tracks. The caller starts the outer transaction before entering this method.
 
         Args:
             client: The transaction's client.
         """
+        for nested_client in PendingStatements.get_pending_savepoints(client):
+            await TransactionEnding.run_shielded_from_cancellation(
+                nested_client._driver_savepoint(nested_client._savepoint_name),  # type: ignore[arg-type]
+                on_landed=nested_client._drop_pending_savepoint,
+            )
+
+    @staticmethod
+    def get_pending_savepoints(client: TransactionClient) -> Iterator[TransactionClient]:
+        """The unsent savepoints enclosing this call, outermost first.
+
+        Iteration snapshots the pending list because each confirmed SAVEPOINT removes
+        its client. Only savepoints enclosing the current span are sent, never a sibling's.
+        """
         current_span = current_savepoint_span.get()
-        if current_span is None:
-            return
-        # Only the savepoints the calling context runs in - a statement without a span of its own
-        # (a stream's fetch) may run beside a sibling's savepoint.
-        for nested_client in list(client._get_top_level_transaction()._pending_savepoints):
-            savepoint_span = nested_client._savepoint_span
-            if (
-                nested_client._savepoint_pending
-                and savepoint_span is not None
-                and current_span.is_within(savepoint_span)
-            ):
-                await TransactionEnding.run_shielded_from_cancellation(
-                    nested_client._driver_savepoint(cast("str", nested_client._savepoint_name)),
-                    on_landed=nested_client._drop_pending_savepoint,
-                )
+        if current_span is not None:
+            for nested_client in tuple(client._get_top_level_transaction()._pending_savepoints):
+                savepoint_span = nested_client._savepoint_span
+                if (
+                    nested_client._savepoint_pending
+                    and savepoint_span is not None
+                    and current_span.is_within(savepoint_span)
+                ):
+                    yield nested_client

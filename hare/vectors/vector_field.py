@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.classes.value_descriptions import ValueDescriptions
@@ -71,9 +72,10 @@ class VectorField(Field[list[float]]):
                 f"{self.model_field_name}: expected a vector of {self.dimensions} dimension(s), got {len(value)}"
             )
         for index, element in enumerate(value):
-            shown_element = self.get_value_for_message(element)
             if isinstance(element, (str, bytes, bool)):
-                raise ValidationError(f"{self.model_field_name}[{index}]: expected a number, got {shown_element}")
+                raise ValidationError(
+                    f"{self.model_field_name}[{index}]: expected a number, got {self.get_value_for_message(element)}"
+                )
             validation_error = None
             try:
                 element_float = float(element)
@@ -82,15 +84,20 @@ class VectorField(Field[list[float]]):
                 element_float = VECTOR_ELEMENT_MAX * 2
             except (TypeError, ValueError) as error:
                 validation_error = self.get_validation_error(
-                    error, element, f"{self.model_field_name}[{index}]: expected a number, got {shown_element}"
+                    error,
+                    element,
+                    f"{self.model_field_name}[{index}]: expected a number, got {self.get_value_for_message(element)}",
                 )
             if validation_error is not None:
                 raise validation_error
             if not math.isfinite(element_float):
-                raise ValidationError(f"{self.model_field_name}[{index}]: {shown_element} is not a finite number")
+                raise ValidationError(
+                    f"{self.model_field_name}[{index}]: {self.get_value_for_message(element)} is not a finite number"
+                )
             if abs(element_float) > VECTOR_ELEMENT_MAX:
                 raise ValidationError(
-                    f"{self.model_field_name}[{index}]: {shown_element} is out of range for a vector element (float32)"
+                    f"{self.model_field_name}[{index}]: {self.get_value_for_message(element)} "
+                    "is out of range for a vector element (float32)"
                 )
 
     def to_db_value(self, value: Sequence[float] | None, instance: type[Model] | Model | None) -> list[float] | None:
@@ -110,7 +117,12 @@ class VectorField(Field[list[float]]):
 
     @staticmethod
     def encode_nearby_value(
-        value: tuple[Sequence[float], float], model: type[Model] | Model, field: Field[Any], dialect: Dialect
+        value: tuple[Sequence[float], float],
+        model: type[Model] | Model,
+        field: Field[Any],
+        _dialect: Dialect,
+        *,
+        writer: Callable[[Any, Any], Any],
     ) -> tuple[Any, float]:
         """Converts ``(query_vector, max_distance)`` - the vector the way the dialect stores the field.
 
@@ -127,7 +139,12 @@ class VectorField(Field[list[float]]):
             raise ValidationError(
                 f"{field.model_field_name}__nearby: the distance must be a finite number, got {max_distance!r}"
             )
-        return dialect.types.get_db_value(field, query_vector, model), float(max_distance)
+        return writer(query_vector, model), float(max_distance)
+
+    @staticmethod
+    def get_nearby_encoder(field: Field[Any], dialect: Dialect) -> Callable[..., Any]:
+        """Prepare the vector writer while retaining the lookup's pair and distance checks."""
+        return partial(VectorField.encode_nearby_value, writer=dialect.types.get_db_writer(field))
 
     @staticmethod
     def get_nearby_criterion(term: Term, value: tuple[Any, float]) -> Term:
@@ -143,8 +160,8 @@ class VectorField(Field[list[float]]):
         distance of the vector."""
         return FieldLookup(
             VectorField.get_nearby_criterion,
-            VectorField.encode_nearby_value,
             required_feature=VECTOR_SEARCH_REQUIRED_FEATURE,
+            value_encoder_builder=VectorField.get_nearby_encoder,
         )
 
     #: The field's own lookup, declared with the class - no query is built before it exists.

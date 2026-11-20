@@ -72,13 +72,6 @@ async def test_latest_and_earliest(latest_earliest_data, method_name, expected_b
 # ============================================================================
 
 
-@pytest_asyncio.fixture
-async def scores_data(db):
-    """intnum 1..5 with intnum_null 1, NULL, 2, 3, NULL."""
-    for number, score in [(1, 1), (2, None), (3, 2), (4, 3), (5, None)]:
-        await IntFields.objects.create(intnum=number, intnum_null=score)
-
-
 @pytest.mark.parametrize(
     ("method_name", "extreme", "reversed_extreme"),
     [

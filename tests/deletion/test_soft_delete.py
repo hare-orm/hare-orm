@@ -1,5 +1,4 @@
 import asyncio
-import os
 import sys
 import types
 
@@ -129,7 +128,7 @@ async def test_restore_requires_soft_delete_configured(db):
 @pytest.mark.asyncio
 async def test_restore_unpersisted_raises(db):
     parent = SoftDeleteParent(name="Not saved")
-    with pytest.raises(Exception):  # noqa: B017 - OperationalError, just needs .pk unset
+    with pytest.raises(QueryError, match="unpersisted"):
         await parent.restore()
 
 
@@ -600,7 +599,7 @@ async def test_m2m_set_null_soft_delete_keeps_through_row(db):
     peer = await SoftDeleteM2MPeer.objects.create(name="Peer")
     await parent.nullable_peers.add(peer)
 
-    field = SoftDeleteM2MSetNullParent._meta.fields_map["nullable_peers"]
+    field = HareContext.require_current().apps.get_binding(SoftDeleteM2MSetNullParent).fields_map["nullable_peers"]
     through_table = field.through
     backward_column = field.backward_keys[0]
     forward_column = field.forward_keys[0]
@@ -753,7 +752,7 @@ async def test_bulk_delete_m2m_only_relation_keeps_set_null_through_row(db):
     peer = await SoftDeleteM2MPeer.objects.create(name="Peer")
     await parent.nullable_peers.add(peer)
 
-    field = SoftDeleteM2MSetNullParent._meta.fields_map["nullable_peers"]
+    field = HareContext.require_current().apps.get_binding(SoftDeleteM2MSetNullParent).fields_map["nullable_peers"]
     through_table = field.through
     backward_column = field.backward_keys[0]
     forward_column = field.forward_keys[0]
@@ -800,10 +799,10 @@ async def test_bulk_delete_m2m_only_relation_still_enforces_protect(db):
     ],
 )
 def test_a_soft_delete_field_of_no_nullable_datetime_is_refused(db, model_class, field_name):
-    """Unit-tests MetaInfo's own validation directly - going through a full Hare.init() app
+    """Unit-tests ModelBinding's own validation directly - going through a full Hare.init() app
     registration just to exercise this one validation branch would require a whole separate
     fixture module for a config-time check that doesn't depend on that machinery at all."""
-    meta = model_class._meta
+    meta = HareContext.require_current().apps.get_binding(model_class)
     original = meta.soft_delete_field
     meta.soft_delete_field = field_name
     try:
@@ -826,14 +825,7 @@ async def file_db(tmp_path):
     database. Mirrors the ambient HARE_TEST_DB when it's already a real (Postgres) URL, so a
     Postgres-only test can get a real Postgres "models" connection - falls back to a real
     file-backed SQLite DB otherwise."""
-    from hare.contrib.test.isolated_contexts import hare_test_context
-
-    db_url = os.getenv("HARE_TEST_DB")
-    if not db_url or DatabaseUnderTest.is_file_database(db_url):
-        scheme = (db_url or DatabaseUnderTest.DEFAULT_URL).split("://", 1)[0]
-        db_path = tmp_path / "soft_delete_autonomous_test.sqlite"
-        db_url = f"{scheme}:///{db_path}?synchronous=OFF"
-    async with hare_test_context(["tests.shared_models.testmodels"], db_url=db_url, connection_label="models") as ctx:
+    async with DatabaseUnderTest.open_persistent_model_context(tmp_path / "soft_delete_autonomous_test.sqlite") as ctx:
         yield ctx
 
 
@@ -864,6 +856,21 @@ async def test_restore_bumps_optimistic_lock_field_on_same_model(db):
     refreshed = await SoftDeleteVersioned.objects.get(pk=obj.pk)
     assert refreshed.deleted_at is None
     assert refreshed.version == 2
+
+
+@pytest.mark.asyncio
+async def test_an_old_deleted_instance_cannot_delete_a_restored_row(db):
+    obj = await SoftDeleteVersioned.objects.create(name="A")
+    await obj.delete()
+    old = await SoftDeleteVersioned.objects.include_deleted().get(pk=obj.pk)
+    await obj.restore()
+
+    with pytest.raises(StaleObjectError):
+        await old.delete()
+
+    live = await SoftDeleteVersioned.objects.get(pk=obj.pk)
+    assert live.deleted_at is None
+    assert live.version == obj.version
 
 
 @pytest.mark.asyncio

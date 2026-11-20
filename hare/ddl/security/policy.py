@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.classes.class_path import ClassPath
 from hare.ddl.conditions.constraint_condition import ConstraintCondition
@@ -51,9 +51,7 @@ class Policy(NamedSchemaObject):
             raise ConfigurationError(
                 f"Policy {self.name!r}: command must be one of {', '.join(PolicyCommand)}, got {self.command!r}"
             )
-        if not isinstance(cast("object", self.roles), (list, tuple)) or not all(
-            isinstance(role, str) and role for role in self.roles
-        ):
+        if not isinstance(self.roles, (list, tuple)) or not all(isinstance(role, str) and role for role in self.roles):
             raise ConfigurationError(
                 f"Policy {self.name!r}: roles must be a sequence of role names, got {self.roles!r}"
             )

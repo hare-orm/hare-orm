@@ -105,6 +105,42 @@ async def test_the_value_at_an_extremum(quotes):
 
 
 @pytest.mark.asyncio
+async def test_reprojecting_a_grouped_native_expression_keeps_its_groups(quotes):
+    prices = (
+        Quote.objects.values("symbol")
+        .annotate(
+            last_price=ArgMax("price", "quoted_at"),
+            spread=Quantiles("quoted_at", 0, 1, exact=True),
+            price_spread=Quantiles("price", 0, 1, exact=True),
+            wrapped=Abs(ArgMax("price", "quoted_at")),
+        )
+        .order_by("symbol")
+    )
+    assert await prices.values_list("last_price", flat=True) == [decimal.Decimal("6.00"), decimal.Decimal("1.00")]
+    assert await prices.values("spread") == [{"spread": [10, 30]}, {"spread": [15, 25]}]
+    assert await prices.values_list("wrapped", flat=True) == [decimal.Decimal("6.00"), decimal.Decimal("1.00")]
+    expected = [
+        (decimal.Decimal("6.00"), [decimal.Decimal("5.00"), decimal.Decimal("7.00")]),
+        (decimal.Decimal("1.00"), [decimal.Decimal("1.00"), decimal.Decimal("1.00")]),
+    ]
+    selected = prices.values_list("last_price", "price_spread", named=True)
+    rows = await selected
+    assert [row._fields for row in rows] == [("last_price", "price_spread")] * 2
+    assert rows == expected
+    assert [row async for row in selected.iterator(chunk_size=1)] == expected
+
+
+@pytest.mark.asyncio
+async def test_summaries_keep_groups_when_ordering_by_a_native_aggregate_alias(quotes):
+    groups = Quote.objects.values("symbol").annotate(last_price=ArgMax("price", "quoted_at")).order_by("last_price")
+
+    assert await groups.count() == 2
+    assert await groups.exists()
+    assert await groups[1:2].count() == 1
+    assert not await groups[2:].exists()
+
+
+@pytest.mark.asyncio
 async def test_values_collected_into_arrays(quotes):
     rows = await (
         Quote.objects.values("symbol")

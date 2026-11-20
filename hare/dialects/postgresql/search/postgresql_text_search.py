@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from hare.classes.value_descriptions import ValueDescriptions
+from hare.dialects.base.search.enums import TextSearchOperation
 from hare.dialects.base.search.text_search import TextSearch
 from hare.dialects.postgresql.fields.ts_vector_field import TSVectorField
 from hare.dialects.postgresql.search.constants import (
     POSTGRESQL_HEADLINE_OPTION_NAMES,
     POSTGRESQL_INTEGER_RANGE,
     POSTGRESQL_RANK_LABEL_WEIGHT_COUNT,
+    POSTGRESQL_SEARCH_CONFIG_SQL_TYPE,
     POSTGRESQL_SEARCH_QUERY_OPERATORS,
     SEARCH_TYPE_FUNCTIONS,
 )
@@ -24,6 +26,7 @@ from hare.fields.generated_field import GeneratedField
 from hare.numbers.finite_numbers import FiniteNumbers
 from hare.query.expressions import Expression, ExpressionContext, ExpressionResult, F
 from hare.query.expressions.expression_result import TableCriterionTuple
+from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
 from hare.query.lookup_info.lookup_paths import LookupPaths
 from hare.search.search_arguments import SearchArguments
 from hare.search.vector.search_vector import SearchVector
@@ -35,7 +38,7 @@ from hare.sql.terms.values.literal_value import LiteralValue
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.search import CombinedSearchQuery, CombinedSearchVector, SearchHeadline, SearchQuery, SearchRank
     from hare.search.types import HeadlineOptionValue, VectorInput
 
@@ -44,12 +47,23 @@ class PostgresqlTextSearch(TextSearch):
     """PostgreSQL's full-text search - tsvectors (``TO_TSVECTOR``), tsqueries (``PLAINTO_TSQUERY``
     and its kin), ``TS_RANK``/``TS_RANK_CD`` and ``TS_HEADLINE``."""
 
+    @staticmethod
+    def get_config_result(
+        expression: SearchVector | SearchQuery | SearchHeadline, expression_context: ExpressionContext
+    ) -> ExpressionResult:
+        """Bind literal and expression configurations using PostgreSQL's regconfig type."""
+        result = SearchArguments.get_result(expression, "config", expression_context)
+        return ExpressionResult(
+            term=Cast(result.term, LiteralValue(POSTGRESQL_SEARCH_CONFIG_SQL_TYPE)), joins=result.joins
+        )
+
     def get_query_result(self, query: SearchQuery, expression_context: ExpressionContext) -> ExpressionResult:
-        value_result = SearchArguments.get_result(query, "value", expression_context, treat_str_as_field=False)
+        self.check_query(query, expression_context)
+        value_result = SearchArguments.get_result(query, "value", expression_context)
         joins = value_result.joins
         config_term = None
         if query.config is not None:
-            config_result = SearchArguments.get_result(query, "config", expression_context, treat_str_as_field=False)
+            config_result = self.get_config_result(query, expression_context)
             config_term = config_result.term
             joins = ExpressionResult.dedup_joins(joins, config_result.joins)
         term: Term = TsQueryFunction(SEARCH_TYPE_FUNCTIONS[query.search_type], value_result.term, config_term)
@@ -68,9 +82,10 @@ class PostgresqlTextSearch(TextSearch):
         return ExpressionResult(term=term, joins=ExpressionResult.dedup_joins(left.joins, right.joins))
 
     def get_vector_result(self, vector: SearchVector, expression_context: ExpressionContext) -> ExpressionResult:
+        self.check_vector(vector, expression_context)
         expression_results = [
-            SearchArguments.get_result(vector, "expressions", expression_context, treat_str_as_field=True, index=index)
-            for index in range(len(vector.expressions))
+            ExpressionArguments.get_field_result(vector, "expressions", expression, expression_context, index)
+            for index, expression in enumerate(vector.expressions)
         ]
         terms: list[Term] = []
         for expression, expression_result in zip(vector.expressions, expression_results, strict=True):
@@ -97,7 +112,7 @@ class PostgresqlTextSearch(TextSearch):
 
         args = [combined]
         if vector.config is not None:
-            config_result = SearchArguments.get_result(vector, "config", expression_context, treat_str_as_field=False)
+            config_result = self.get_config_result(vector, expression_context)
             args = [config_result.term, combined]
             joins = ExpressionResult.dedup_joins(joins, config_result.joins)
 
@@ -112,9 +127,7 @@ class PostgresqlTextSearch(TextSearch):
                 weight_term: Term = LiteralValue(f"'{TsWeight(vector.weight.upper()).value}'")
                 weight_joins: list[TableCriterionTuple] = []
             else:
-                weight_result = SearchArguments.get_result(
-                    vector, "bound_weight", expression_context, treat_str_as_field=False
-                )
+                weight_result = SearchArguments.get_result(vector, "bound_weight", expression_context)
                 # Cast through TEXT, so a bound parameter is typed as text rather than "char"
                 # (which a driver can't bind from a str).
                 weight_term = Cast(Cast(weight_result.term, "TEXT"), LiteralValue('"char"'))
@@ -127,6 +140,9 @@ class PostgresqlTextSearch(TextSearch):
     def get_combined_vector_result(
         self, vector: CombinedSearchVector, expression_context: ExpressionContext
     ) -> ExpressionResult:
+        self.require_operation(
+            expression_context, TextSearchOperation.VECTOR_CONCATENATION, "SearchVector + SearchVector"
+        )
         left = vector.left.get_result(expression_context)
         right = vector.right.get_result(expression_context)
         # Each side is already a NULL-safe TO_TSVECTOR(...) - SearchVector guards its own sources with
@@ -139,31 +155,30 @@ class PostgresqlTextSearch(TextSearch):
         )
 
     @staticmethod
-    def names_a_stored_tsvector_field(name: str, model: type[Model]) -> bool:
+    def names_a_stored_tsvector_field(name: str, binding: ModelBinding) -> bool:
         """Whether a field name - possibly across a relation - is a stored ``TSVectorField``
         column, a ``GeneratedField`` of one included.
 
         Args:
             name: The field name.
-            model: The model the name starts from.
+            binding: The model the name starts from.
 
         Returns:
             True for such a column; False for a path that doesn't resolve.
         """
         try:
-            terminal_field = LookupPaths.expand_expression(model, name)[-1]
+            _, terminal_field = LookupPaths.get_expression_path(binding, name)
         except FieldError:
             return False
-        effective_field = terminal_field.output_field if isinstance(terminal_field, GeneratedField) else terminal_field
-        return isinstance(effective_field, TSVectorField)
+        return isinstance(GeneratedField.get_effective_field(terminal_field), TSVectorField)
 
     def get_rank_result(self, rank: SearchRank, expression_context: ExpressionContext) -> ExpressionResult:
-        self.raise_if_rank_arguments_refused(rank)
+        self.check_rank(rank, expression_context)
         vector_expression: VectorInput
         if isinstance(rank.vector, (Expression, Term)):
             vector_expression = rank.vector
         elif isinstance(rank.vector, str) and self.names_a_stored_tsvector_field(
-            rank.vector, expression_context.model
+            rank.vector, expression_context.binding
         ):
             # A stored tsvector column is used as is - TO_TSVECTOR() takes no tsvector.
             vector_expression = F(rank.vector)
@@ -176,21 +191,28 @@ class PostgresqlTextSearch(TextSearch):
             if isinstance(vector_expression, Term) and not isinstance(vector_expression, Expression)
             else vector_expression.get_result(expression_context)
         )
-        query_result = SearchArguments.get_result(rank, "query_argument", expression_context, treat_str_as_field=False)
+        query_result = SearchArguments.get_result(rank, "query_argument", expression_context)
 
         args = [vector_result.term, query_result.term]
         joins = ExpressionResult.dedup_joins(vector_result.joins, query_result.joins)
 
         if rank.bound_weights is not None:
             weights_result = SearchArguments.get_result(
-                rank, "bound_weights", expression_context, treat_str_as_field=False, binds_whole=True
+                rank,
+                "bound_weights",
+                expression_context,
+                binds_whole=True,
+                literal_check=self.check_rank_weights,
             )
             args = [weights_result.term, *args]
             joins = ExpressionResult.dedup_joins(joins, weights_result.joins)
 
         if rank.normalization is not None:
             normalization_result = SearchArguments.get_result(
-                rank, "normalization", expression_context, treat_str_as_field=False
+                rank,
+                "normalization",
+                expression_context,
+                literal_check=self.check_rank_normalization,
             )
             args.append(normalization_result.term)
             joins = ExpressionResult.dedup_joins(joins, normalization_result.joins)
@@ -200,17 +222,8 @@ class PostgresqlTextSearch(TextSearch):
         return ExpressionResult(term=term, joins=joins, output_field=FloatField())
 
     @staticmethod
-    def raise_if_rank_arguments_refused(rank: SearchRank) -> None:
-        """Refuses label weights ``ts_rank()`` takes no array of, and a normalization it takes no bitmask of.
-
-        Args:
-            rank: The rank.
-
-        Raises:
-            ConfigurationError: Weights other than four finite numbers - of the labels D, C, B and A - or a
-                normalization that isn't an integer of 32 bits.
-        """
-        weights = rank.bound_weights
+    def check_rank_weights(weights: Any) -> None:
+        """Check each literal weight array, including later values bound to a stored plan."""
         if weights is not None and not isinstance(weights, (str, Expression, Term)):
             if (
                 not isinstance(weights, Sequence)
@@ -221,7 +234,10 @@ class PostgresqlTextSearch(TextSearch):
                     f"SearchRank weights must be {POSTGRESQL_RANK_LABEL_WEIGHT_COUNT} numbers - the weights of the "
                     f"D, C, B and A labels - or field weights by name, got {weights!r}"
                 )
-        normalization = rank.normalization
+
+    @staticmethod
+    def check_rank_normalization(normalization: Any) -> None:
+        """Check the normalization bitmask on both initial and prepared binding."""
         if normalization is None or isinstance(normalization, (Expression, Term)):
             return
         if (
@@ -235,20 +251,17 @@ class PostgresqlTextSearch(TextSearch):
             )
 
     def get_headline_result(self, headline: SearchHeadline, expression_context: ExpressionContext) -> ExpressionResult:
-        expression_result = SearchArguments.get_result(
-            headline, "expression", expression_context, treat_str_as_field=True
+        self.check_headline(headline, expression_context)
+        expression_result = ExpressionArguments.get_field_result(
+            headline, "expression", headline.expression, expression_context
         )
-        query_result = SearchArguments.get_result(
-            headline, "query_argument", expression_context, treat_str_as_field=False
-        )
+        query_result = SearchArguments.get_result(headline, "query_argument", expression_context)
 
         args = [expression_result.term, query_result.term]
         joins = ExpressionResult.dedup_joins(expression_result.joins, query_result.joins)
 
         if headline.config is not None:
-            config_result = SearchArguments.get_result(
-                headline, "config", expression_context, treat_str_as_field=False
-            )
+            config_result = self.get_config_result(headline, expression_context)
             args = [config_result.term, *args]
             joins = ExpressionResult.dedup_joins(joins, config_result.joins)
 

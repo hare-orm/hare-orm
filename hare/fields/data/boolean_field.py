@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 
 from hare.exceptions import ValidationError
-from hare.fields.enums import NativeWriteCheck
 from hare.fields.field import Field
 from hare.fields.narrowing.enum_values_limit import EnumValuesLimit
 
@@ -20,6 +20,7 @@ class BooleanField(Field[TBool]):
 
     field_type = bool
     SQL_TYPE = "BOOL"
+    keeps_native_db_values = True
 
     @overload
     def __init__(self: BooleanField[bool], *, null: Literal[False] = False, **kwargs: Any) -> None: ...
@@ -29,8 +30,6 @@ class BooleanField(Field[TBool]):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-
-    native_write_check = NativeWriteCheck.NOTHING
 
     def get_narrowing_limit(self, old_field: Field[Any]) -> NarrowingLimit | None:
         # Imported here: the modules import each other.
@@ -45,6 +44,9 @@ class BooleanField(Field[TBool]):
         if value is not None and type(value) is not bool:
             self.raise_if_not_boolean(value)
         return super().to_db_value(value, instance)
+
+    def get_assign_normalized_types(self) -> frozenset[type]:
+        return self._get_unchanged_assign_types(BooleanField.to_python, self.field_type)
 
     def to_python(self, value: Any) -> Any:
         if value is not None and type(value) is not bool:
@@ -66,3 +68,9 @@ class BooleanField(Field[TBool]):
             ValidationError: Always.
         """
         raise ValidationError(f"{self.model_field_name}: expected a bool, got {type(value).__name__}")
+
+    def get_unchanged_write_types(self, converter: Callable[..., Any] | None) -> tuple[type, ...] | None:
+        # This class's to_db_value() writes a bool as it is.
+        if converter is None and type(self).to_db_value is BooleanField.to_db_value:
+            return (bool,)
+        return None

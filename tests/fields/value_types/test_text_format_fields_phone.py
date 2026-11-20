@@ -7,8 +7,6 @@ from hare import fields
 from tests.fields.value_types.models_text_formats_phone import RegionalContact
 from tests.utils.database_under_test import DatabaseUnderTest
 
-REQUIRES = ("phone",)
-
 
 @pytest.mark.asyncio
 async def test_every_write_path_normalizes_a_regional_number(db_text_formats):

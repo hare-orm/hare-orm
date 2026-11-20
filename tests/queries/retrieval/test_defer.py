@@ -94,14 +94,6 @@ async def test_defer_forward_relation_name_defers_its_key(db):
 # ============================================================================
 
 
-@pytest_asyncio.fixture
-async def tournament_with_events(db):
-    tournament = await Tournament.objects.create(name="Tournament A", desc="Description A")
-    event1 = await Event.objects.create(name="Event 1", tournament=tournament)
-    event2 = await Event.objects.create(name="Event 2", tournament=tournament)
-    return tournament, event1, event2
-
-
 @pytest.mark.asyncio
 async def test_defer_advanced_exclude(db, tournament_with_events):
     tournament, event1, event2 = tournament_with_events
@@ -219,16 +211,6 @@ async def test_only_with_select_related_relation_not_named_in_only(db, event_wit
 # ============================================================================
 # Combined with prefetch_related, including M2M
 # ============================================================================
-
-
-@pytest_asyncio.fixture
-async def event_with_participants(db):
-    tournament = await Tournament.objects.create(name="Tournament A", desc="Description A")
-    event = await Event.objects.create(name="Event 1", tournament=tournament)
-    team_a = await Team.objects.create(name="Team A")
-    team_b = await Team.objects.create(name="Team B")
-    await event.participants.add(team_a, team_b)
-    return event, team_a, team_b
 
 
 @pytest.mark.asyncio

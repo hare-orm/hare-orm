@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import re
 
+from hare.ddl.enums import SchemaPartType
+from hare.inspectdb.enums import CatalogDiagnosticCode
+from hare.sql.order import Order
+
 #: Dotted path of the field class a JSON column maps to.
 JSON_FIELD_PATH = "hare.fields.data.json.JSONField"
 
@@ -21,7 +25,7 @@ FOREIGN_KEY_NO_ACTION = "NO ACTION"
 FOREIGN_KEY_DEFERRAL_TEMPLATE = "DEFERRABLE INITIALLY {initially}"
 
 
-#: Private sentinel kwarg keys ColumnTypeMapper.map_column_type() returns alongside real field
+#: Private sentinel kwarg keys SchemaIntrospector.map_column_type() returns alongside real field
 #: kwargs - popped before the kwargs ever reach a field constructor.
 BASE_FIELD_SENTINEL_KWARG = "__base_field"
 AMBIGUOUS_REASON_SENTINEL_KWARG = "__ambiguous_reason"
@@ -35,14 +39,9 @@ INSPECTED_ENUM_MODULE_NAME = "hare.inspectdb.generation.inspected_enums"
 ENUM_MEMBER_NAME_PATTERN = re.compile(r"\W+")
 
 
-#: The keywords of a trigger's event clause (``insert or update of col``) - uppercased on
-#: introspection, while the column names after ``OF`` keep their own spelling.
-TRIGGER_EVENT_KEYWORD_RE = re.compile(r"\b(?:INSERT|UPDATE|DELETE|TRUNCATE|OR|OF)\b", re.IGNORECASE)
-
-
 #: An index key's order when it places NULLs as its direction does by default (last ascending, first
 #: descending) - declarable as a plain or ``"-"``-prefixed field name.
-DEFAULT_KEY_ORDERS = frozenset({"ASC NULLS LAST", "DESC NULLS FIRST"})
+DEFAULT_KEY_ORDERS = frozenset({Order.ASC, Order.DESC, Order.ASC_NULLS_LAST, Order.DESC_NULLS_FIRST})
 
 INT_LITERAL_RE = re.compile(r"^-?\d+$")
 FLOAT_LITERAL_RE = re.compile(r"^-?\d+\.\d+$")
@@ -51,10 +50,55 @@ FLOAT_LITERAL_RE = re.compile(r"^-?\d+\.\d+$")
 QUOTED_STRING_RE = re.compile(r"^'((?:[^']|'')*)'$")
 
 
-QUOTED_IDENTIFIER_RE = re.compile(r'"(?:[^"]|"")*"')
-
-#: A run of whitespace - collapsed to one space.
-WHITESPACE_RUN_PATTERN = re.compile(r"\s+")
-
 #: Two underscores or more in a row - a field name holds one at most, ``__`` separating a lookup path.
 UNDERSCORE_RUN_PATTERN = re.compile("_{2,}")
+
+CATALOG_IDENTIFIER_QUOTES = ('"', "`", "[")
+
+CATALOG_SCHEMA_MEMBERS = frozenset(
+    {"schema", "target_schema", "enum_type_schema", "domain_schema", "collation_schema"}
+)
+CATALOG_SQL_MEMBERS = frozenset(
+    {
+        "sql",
+        "column_default",
+        "default_expression",
+        "expr",
+        "type",
+        "generation_expression",
+        "term_sqls",
+        "trigger_def",
+        "qual",
+        "with_check",
+        "key_definition",
+        "key_types",
+        "bound",
+        "query",
+        "body",
+        "arguments",
+        "identity_arguments",
+        "returns",
+        "condition_sql",
+        "expression_terms",
+        "generated_expression",
+        "db_type",
+        "full_type",
+    }
+)
+CATALOG_SQL_POSITIONAL_DECLARATIONS = frozenset(
+    {
+        "hare.ddl.raw_sql_term.RawSQLTerm",
+        "hare.fields.db_defaults.sql_default.SqlDefault",
+    }
+)
+
+CATALOG_DIAGNOSTIC_PART_TYPES = {
+    CatalogDiagnosticCode.GENERATED_COLUMN: SchemaPartType.COLUMN,
+    CatalogDiagnosticCode.FOREIGN_KEY: SchemaPartType.FOREIGN_KEY,
+    CatalogDiagnosticCode.INDEX: SchemaPartType.INDEX,
+    CatalogDiagnosticCode.EXCLUSION_CONSTRAINT: SchemaPartType.CONSTRAINT,
+    CatalogDiagnosticCode.CHECK_CONSTRAINT: SchemaPartType.CONSTRAINT,
+    CatalogDiagnosticCode.TRIGGER: SchemaPartType.TRIGGER,
+    CatalogDiagnosticCode.PARTITIONING: SchemaPartType.UNPARSED_PARTITIONING,
+    CatalogDiagnosticCode.GRANT: SchemaPartType.GRANT,
+}

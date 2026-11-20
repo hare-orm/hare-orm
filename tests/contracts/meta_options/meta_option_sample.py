@@ -4,7 +4,7 @@ import dataclasses
 from collections.abc import Callable
 from typing import Any
 
-import pytest
+from tests.contracts.contract_parameters import ContractParameters
 
 
 @dataclasses.dataclass(frozen=True)
@@ -40,5 +40,4 @@ class MetaOptionSample:
         Returns:
             The parameter, named after the option.
         """
-        requirement_marks = [pytest.mark.requires(*self.requires)] if self.requires else []
-        return pytest.param(self, id=self.option, marks=[*requirement_marks, *marks])
+        return ContractParameters.make(self, self.option, self.requires, *marks)

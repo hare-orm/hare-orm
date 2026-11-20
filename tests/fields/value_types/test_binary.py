@@ -1,5 +1,6 @@
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.exceptions import FieldError, IntegrityError
 from hare.fields import BinaryField
 from hare.transactions.transactions import Transactions
@@ -44,8 +45,12 @@ async def test_a_unique_and_an_indexed_binary_field(db):
     assert await model.objects.filter(tag__in=[b"a", b"z"]).values_list("id", flat=True) == [1]
     assert await model.objects.filter(id=1).update(tag=b"c") == 1
     assert await model.objects.get(id=1).values_list("tag", flat=True) == b"c"
-    indexed_columns = {tuple(index.fields) for index in model._meta.indexes} | {
-        (field_name,) for field_name, field in model._meta.fields_map.items() if field.index or field.unique
+    indexed_columns = {
+        tuple(index.fields) for index in HareContext.require_current().apps.get_binding(model).indexes
+    } | {
+        (field_name,)
+        for field_name, field in HareContext.require_current().apps.get_binding(model).fields_map.items()
+        if field.index or field.unique
     }
     assert ("digest",) in indexed_columns and ("tag",) in indexed_columns
 

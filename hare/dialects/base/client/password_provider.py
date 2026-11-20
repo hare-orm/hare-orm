@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import inspect
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from hare.core.log import db_client_logger
+from hare.core.resource_completion import ResourceCompletion
 from hare.dialects.base.connection.constants import DEFAULT_PASSWORD_REFRESH_SECONDS
 from hare.exceptions import ConfigurationError
 
@@ -20,11 +20,18 @@ class PasswordProvider:
     Args:
         get_password: The function.
         refresh_seconds: How long a password is used before the function is asked again.
+
+    Raises:
+        ConfigurationError: The refresh interval is not greater than zero, which would
+            make the background refresh loop run without waiting.
     """
 
     __slots__ = ("get_password", "refresh_seconds", "password", "fetched_at", "_fetch_lock", "_refresh_task")
 
     def __init__(self, get_password: Callable[[], str | Awaitable[str]], refresh_seconds: float) -> None:
+        # A nonpositive interval would turn background refreshing into a busy loop.
+        if not refresh_seconds > 0:
+            raise ConfigurationError("password_refresh_seconds must be greater than 0")
         self.get_password = get_password
         self.refresh_seconds = refresh_seconds
         #: The last password the function gave - None before the first one, or after a refusal.
@@ -91,8 +98,8 @@ class PasswordProvider:
         same time.
 
         Args:
-            stale_password: The password the caller found too old or refused; a fetch that already
-                replaced it while the caller waited is used as it is.
+            stale_password: The password the caller found too old or refused; a fetch completed
+                while this caller waited is reused even if the provider returned the same text.
 
         Returns:
             The password.
@@ -100,8 +107,9 @@ class PasswordProvider:
         Raises:
             ConfigurationError: The function gave no password.
         """
+        fetched_at = self.fetched_at
         async with self._fetch_lock:
-            if self.password is not None and self.password != stale_password:
+            if self.password is not None and (self.password != stale_password or self.fetched_at != fetched_at):
                 return self.password
             password = self.get_password()
             if inspect.isawaitable(password):
@@ -138,7 +146,9 @@ class PasswordProvider:
         refresh_task = self._refresh_task
         if refresh_task is None:
             return
-        self._refresh_task = None
         refresh_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await refresh_task
+        try:
+            await ResourceCompletion.wait(asyncio.gather(refresh_task, return_exceptions=True))
+        finally:
+            if self._refresh_task is refresh_task:
+                self._refresh_task = None

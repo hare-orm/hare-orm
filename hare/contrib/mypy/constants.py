@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import inspect
+from inspect import _ParameterKind as ParameterType
+
 from mypy.errorcodes import ErrorCode
+from mypy.nodes import ARG_NAMED, ARG_NAMED_OPT, ARG_OPT, ARG_POS, ARG_STAR, ARG_STAR2, ArgKind as ArgumentType
 
 from hare.contrib.mypy.enums import AnnotationTypeRule
 
@@ -24,8 +28,6 @@ BOOL_FULLNAME = "builtins.bool"
 TRUE_FULLNAME = "builtins.True"
 FALSE_FULLNAME = "builtins.False"
 
-#: The model instance attribute holding its key value.
-PRIMARY_KEY_ATTRIBUTE_NAME = "pk"
 
 #: The queryset methods whose keyword arguments are filter keys.
 FILTER_METHOD_NAMES = frozenset({"filter", "exclude", "get", "get_or_create", "update_or_create"})
@@ -40,11 +42,12 @@ NAME_METHOD_NAMES = frozenset({"order_by", "only", "defer", "select_related", "b
 #: Where the plugin keeps the annotations of a queryset whose class doesn't pass the annotations type
 #: parameter on - a key no attribute can be named.
 HIDDEN_ANNOTATIONS_ATTRIBUTE = "hare annotations"
+HIDDEN_SELECTION_ATTRIBUTE = "hare values selection"
 
 #: The type of an annotation by the class of its expression.
 ANNOTATION_TYPE_RULES = {
     "hare.query.functions.aggregates.count.Count": AnnotationTypeRule.INT,
-    "hare.query.functions.text.length.Length": AnnotationTypeRule.INT,
+    "hare.query.functions.text.length.Length": AnnotationTypeRule.NULL_PROPAGATING_INT,
     "hare.query.expressions.subqueries.exists.Exists": AnnotationTypeRule.BOOL,
     "hare.query.functions.aggregates.sum.Sum": AnnotationTypeRule.OPTIONAL_PATH_VALUE,
     "hare.query.functions.aggregates.declarations.Min": AnnotationTypeRule.OPTIONAL_PATH_VALUE,
@@ -55,8 +58,6 @@ ANNOTATION_TYPE_RULES = {
 
 #: The ``[tool.hare]`` setting naming the modules imported before the models are bound.
 MYPY_IMPORTS_SETTING = "mypy_imports"
-#: What separates the parts of a filter key or a field path.
-LOOKUP_SEPARATOR = "__"
 PYPROJECT_FILE_NAME = "pyproject.toml"
 
 MODELS_NOT_LOADED_MESSAGE = "hare: the models can't be loaded for type checking - {error}"
@@ -67,12 +68,6 @@ CONFIG_NOT_SET_MESSAGE = (
 UNSUPPORTED_LOOKUP_MESSAGE = "Filter param {key!r}: {model}.{path} has no lookup {lookup!r} on the {dialect} database"
 UNSUPPORTED_FIELD_MESSAGE = "Filter param {key!r}: {field} has no column type on the {dialect} database"
 UNKNOWN_NAME_MESSAGE = "{method}(): {model} has no field {name!r}"
-MULTI_VALUED_RELATION_MESSAGE = (
-    "select_related() can't follow {name!r} on {model} - it can hold many related rows (a reverse ForeignKey or a "
-    "ManyToManyField); use prefetch_related() instead"
-)
-NOT_RELATION_MESSAGE = "select_related() field {name!r} on {model} is not a relation"
-RELATION_NOT_FOUND_MESSAGE = "select_related() relation {name!r} for {model} not found"
 RELATION_FIELD_NAME_MESSAGE = "{method}(): {model}.{name} is a relation holding many rows - it can't be {action}"
 NOT_DIRECT_FIELD_MESSAGE = (
     "defer(): {model}.{name} is a relation holding many rows - only direct fields and forward relations can be "
@@ -80,3 +75,13 @@ NOT_DIRECT_FIELD_MESSAGE = (
 )
 UNKNOWN_WRITE_NAME_MESSAGE = "{model} has no field {name!r} to set"
 MANY_ROWS_RELATION_WRITE_MESSAGE = "{model}.{name} is a relation holding many rows - it can't be set"
+REFUSED_UPDATE_NAME_MESSAGE = "{model}.{name} can't be assigned by update()"
+
+#: mypy's argument type of each type of parameter, required and with a default.
+ARGUMENT_TYPES: dict[ParameterType, tuple[ArgumentType, ArgumentType]] = {
+    inspect.Parameter.POSITIONAL_ONLY: (ARG_POS, ARG_OPT),
+    inspect.Parameter.POSITIONAL_OR_KEYWORD: (ARG_POS, ARG_OPT),
+    inspect.Parameter.KEYWORD_ONLY: (ARG_NAMED, ARG_NAMED_OPT),
+    inspect.Parameter.VAR_POSITIONAL: (ARG_STAR, ARG_STAR),
+    inspect.Parameter.VAR_KEYWORD: (ARG_STAR2, ARG_STAR2),
+}

@@ -3,8 +3,10 @@ from __future__ import annotations
 import datetime
 from contextlib import nullcontext
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.core.connections.model_connection_choice import ModelConnectionChoice
+from hare.core.hare_context import HareContext
 from hare.core.routing.written_connections import WrittenConnections
 from hare.exceptions import ConfigurationError, IntegrityError, ProtectedError, StaleObjectError, UnSupportedError
 from hare.fields.enums import OnDelete
@@ -12,9 +14,13 @@ from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFi
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.instrumentation.capture.captured_write import CapturedWrite
 from hare.instrumentation.enums import RowOperation
+from hare.models.deletion.cascade.cascade_policy import CascadePolicy
+from hare.models.deletion.cascade.declarations import PreparedDeletionWave
 from hare.models.deletion.cascade.deletion_collector import DeletionCollector
 from hare.models.deletion.cascade.deletion_graph import DeletionGraph
 from hare.models.deletion.cascade.deletion_plan import DeletionPlan, RowKey
+from hare.models.deletion.cascade.deletion_scope import DeletionScope
+from hare.models.deletion.cascade.prepared_deletion import PreparedDeletion
 from hare.models.deletion.cascade.related_rows import RelatedRows
 from hare.models.deletion.cascade.tenant_schema_visits import TenantSchemaVisits
 from hare.models.deletion.constants import HANDED_OVER_ACTIONS, RESTRICTING_ON_DELETE_ACTIONS
@@ -30,6 +36,7 @@ if TYPE_CHECKING:
     from hare.fields.relations.fields.backward_foreign_key_relation import BackwardForeignKeyRelation
     from hare.fields.relations.fields.declarations import BackwardOneToOneRelation
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset.queryset import QuerySet
     from hare.query.queryset.relations.many_to_many_relation import ManyToManyRelation
 
@@ -37,7 +44,8 @@ if TYPE_CHECKING:
 class CascadeDeletion:
     """Carries out the ``on_delete`` cascade below root rows of one model: collects the plan, checks
     PROTECT/RESTRICT, then writes it - one statement per relation and batch. Every write shares one
-    deletion time; the caller runs the cascade in one transaction.
+    deletion time; writes on the caller's connection share its transaction where supported.
+    Other connections and non-transactional clients do not share that rollback guarantee.
 
     Args:
         model: The model of the root rows.
@@ -60,13 +68,13 @@ class CascadeDeletion:
     #: The root rows of every cascade running in this context, each with the set of its cascade's
     #: roots reached again - a row handed over to an overridden ``delete()`` or ``QuerySet.delete()``
     #: is left to the delete already removing it, or a cycle of such models hands it back forever.
-    rows_being_deleted: ClassVar[ContextVar[dict[RowKey, set[Any]] | None]] = ContextVar(
+    rows_being_deleted: ClassVar[ContextVar[dict[tuple[Any, ...], set[Any]] | None]] = ContextVar(
         "hare_cascade_rows_being_deleted", default=None
     )
 
     def __init__(
         self,
-        model: type[Model],
+        binding: ModelBinding,
         connection: DatabaseClient | None,
         *,
         only_unconstrained: bool,
@@ -76,10 +84,10 @@ class CascadeDeletion:
         root_instance: Model | None = None,
         writes_tenant_rows_only: bool = False,
     ) -> None:
-        self.model = model
+        self._binding = binding
         self.writes_tenant_rows_only = writes_tenant_rows_only
         self.connection = connection
-        self.only_unconstrained = only_unconstrained
+        self.policy = CascadePolicy(only_unconstrained, hands_over_rows=True, tenant_rows_only=writes_tenant_rows_only)
         self.persist_as_hard_delete = persist_as_hard_delete
         self.bottom_up_persist = bottom_up_persist
         self.deleted_at = deleted_at or CascadeDeletion.get_deleted_at()
@@ -89,6 +97,11 @@ class CascadeDeletion:
         self.row_versions: dict[RowKey, Any] = {}
         #: Every row the cascade reaches from the roots - read once a guarding row turns up.
         self.reachable_keys: frozenset[RowKey] | None = None
+
+    @property
+    def model(self) -> type[Model]:
+        """The class of the cascade's root rows."""
+        return self._binding._model
 
     @staticmethod
     def get_deleted_at() -> datetime.datetime:
@@ -124,7 +137,7 @@ class CascadeDeletion:
             IntegrityError: ``RESTRICT``/``NO_ACTION`` rows point at a row the cascade reaches.
         """
         cascade_deletion = CascadeDeletion(
-            type(obj),
+            obj._binding,
             connection,
             only_unconstrained=only_unconstrained,
             persist_as_hard_delete=persist_as_hard_delete,
@@ -156,7 +169,12 @@ class CascadeDeletion:
         token = CascadeDeletion.active_deleted_at.set(self.deleted_at)
         # A row a delete further up removes already stays that delete's.
         rows_token = CascadeDeletion.rows_being_deleted.set(
-            {(self.model, pk): roots_reached_again for pk in root_pks}
+            {
+                DeletionScope.get_row_identity(
+                    self._binding, pk, self.connection, source_model=self.model
+                ): roots_reached_again
+                for pk in root_pks
+            }
             | (CascadeDeletion.rows_being_deleted.get() or {})
         )
         try:
@@ -166,7 +184,12 @@ class CascadeDeletion:
             CascadeDeletion.rows_being_deleted.reset(rows_token)
             CascadeDeletion.active_deleted_at.reset(token)
         if (reached_keys := DeletionCollector.reached_keys_collector.get()) is not None:
-            reached_keys.update(plan.get_keys())
+            reached_keys.update(
+                DeletionScope.get_row_identity(
+                    self._binding.graph.get_binding(model), pk, self.connection, source_model=self.model
+                )
+                for model, pk in plan.get_keys()
+            )
         return plan.roots_reached_again | roots_reached_again
 
     async def _run_in_other_tenant_schemas(self, root_pks: list[Any]) -> None:
@@ -182,44 +205,47 @@ class CascadeDeletion:
             IntegrityError: ``RESTRICT``/``NO_ACTION`` rows point at a row the delete removes.
         """
         if self.writes_tenant_rows_only or not TenantSchemaVisits.visits_schemas(
-            self.model, self.connection, leaves_constrained=self.persist_as_hard_delete and self.only_unconstrained
+            self._binding,
+            self.connection,
+            leaves_constrained=self.persist_as_hard_delete and self.policy.only_unconstrained,
         ):
             return
-        connection = cast("DatabaseClient", self.connection)
+        connection: DatabaseClient = self.connection  # type: ignore[assignment]
         for schema_name, tenant in await TenantSchemaVisits.get_other_schemas(connection):
-            async with TenantSchemaVisits.visit(connection, schema_name, tenant):
-                await DeletionCollector.check_protected(self.model, root_pks, connection)
+            async with TenantSchemaVisits.visit(connection, schema_name, tenant) as scope:
+                await DeletionCollector.check_protected(self._binding, root_pks, scope.connection)
                 if self.persist_as_hard_delete:
-                    await DeletionCollector.check_protected_transitively(self.model, root_pks, connection)
+                    await DeletionCollector.check_protected_transitively(self._binding, root_pks, scope.connection)
                 await CascadeDeletion(
-                    self.model,
-                    connection,
-                    only_unconstrained=self.only_unconstrained,
+                    self._binding,
+                    scope.connection,
+                    only_unconstrained=self.policy.only_unconstrained,
                     persist_as_hard_delete=self.persist_as_hard_delete,
                     bottom_up_persist=self.bottom_up_persist,
                     deleted_at=self.deleted_at,
                     writes_tenant_rows_only=True,
                 )._run(root_pks, persist_roots=False)
 
-    def _writes_rows_of(self, model: type[Model]) -> bool:
+    def _writes_rows_of(self, binding: ModelBinding) -> bool:
         """Whether this cascade writes the rows of ``model``."""
-        return not self.writes_tenant_rows_only or model._meta.tenant_schema
+        return not self.writes_tenant_rows_only or binding.tenant_schema
 
     async def _run(self, root_pks: list[Any], *, persist_roots: bool) -> DeletionPlan:
         """The collection, checks and writes behind ``run()``."""
         plan = await DeletionCollector(
             self.connection,
             root_action=DeletionAction.DELETE if self.persist_as_hard_delete else DeletionAction.SOFT_DELETE,
-            only_unconstrained=self.only_unconstrained,
+            only_unconstrained=self.policy.only_unconstrained,
             hands_over_rows=True,
             reads_versions=not self.persist_as_hard_delete,
             # A captured row the database's own cascade removes is captured from the walk's rows.
-            locks_rows=DeletionGraph.reaches_captured_models(self.model)
+            locks_rows=DeletionGraph.reaches_captured_models(self._binding)
             and RelatedRows.locks_rows_of(self.connection),
-        ).collect(self.model, root_pks)
-        self._check_row_writes(plan, persist_roots=persist_roots)
+        ).collect(self._binding, root_pks)
+        prepared = await PreparedDeletion.prepare(plan, self.policy, self.connection)
+        self._check_row_writes(prepared, persist_roots=persist_roots)
         self.row_versions = plan.row_versions
-        if persist_roots and not self.persist_as_hard_delete and self.model._meta.optimistic_lock_field:
+        if persist_roots and not self.persist_as_hard_delete and self._binding.optimistic_lock_field:
             await self._read_root_versions(root_pks)
         await self._check_guarding_rows(plan)
         await self._capture_database_deletes(plan)
@@ -228,37 +254,37 @@ class CascadeDeletion:
         writes_tree_at_once = self._is_tree_of_one_model(plan)
         tree_soft_deleted_pks: list[Any] = []
         hard_deleted_waves: list[dict[type[Model], list[Any]]] = []
-        for wave_index, wave in enumerate(plan.waves):
-            for model, rows in wave.items():
-                walked_pks = [pk for pk, action in rows.items() if action not in HANDED_OVER_ACTIONS]
-                if walked_pks:
-                    await self._update_pointing_foreign_keys(model, walked_pks)
-                    await self._clear_many_to_many_through_rows(model, walked_pks)
+        for wave_index, prepared_wave in enumerate(prepared.waves):
+            wave = prepared_wave.rows
+            await self._update_pointing_foreign_keys(prepared_wave)
+            await self._clear_many_to_many_through_rows(prepared_wave)
             if wave_index > 0:
                 hard_deleted_waves.append(
                     await self._write_wave(wave, tree_soft_deleted_pks if writes_tree_at_once else None)
                 )
-        if self._writes_rows_of(self.model):
-            await self._persist_soft_deletes(self.model, tree_soft_deleted_pks)
+        if self._writes_rows_of(self._binding):
+            await self._persist_soft_deletes(self._binding, tree_soft_deleted_pks)
         if writes_tree_at_once:
             hard_deleted_waves = self._merge_tree_waves(hard_deleted_waves)
         for backward_field, target_values in plan.rows_without_key:
-            if not self._writes_rows_of(backward_field.related_model):
+            if not self._writes_rows_of(backward_field.get_related_binding()):
                 continue
             # No key to list them by - deleted by the relation's own condition, as the database's
             # own ON DELETE CASCADE would.
-            for queryset in RelatedRows.get_pointing_querysets(backward_field, target_values, self.connection):
+            for queryset in RelatedRows.get_pointing_querysets(
+                backward_field, target_values, self.connection, source_model=self.model
+            ):
                 await queryset.delete()
         # A hard delete writes nothing before the whole tree is known: the database's cascade of an
         # earlier row would remove rows whose unconstrained relations the walk never found.
         for hard_deleted in reversed(hard_deleted_waves) if self.bottom_up_persist else hard_deleted_waves:
             for model, pks in hard_deleted.items():
-                await self._persist_hard_deletes(model, pks)
+                await self._persist_hard_deletes(self._binding.graph.get_binding(model), pks)
         if persist_roots:
             if self.persist_as_hard_delete:
-                await self._persist_hard_deletes(self.model, root_pks, model_connection=self.connection)
+                await self._persist_hard_deletes(self._binding, root_pks, model_connection=self.connection)
             else:
-                await self._persist_soft_deletes(self.model, root_pks, model_connection=self.connection)
+                await self._persist_soft_deletes(self._binding, root_pks, model_connection=self.connection)
         return plan
 
     async def _write_wave(
@@ -277,85 +303,87 @@ class CascadeDeletion:
         """
         hard_deleted: dict[type[Model], list[Any]] = {}
         for model, rows in wave.items():
-            if not self._writes_rows_of(model):
+            binding = self._binding.graph.get_binding(model)
+            if not self._writes_rows_of(binding):
                 continue
             pks_by_action: dict[DeletionAction | None, list[Any]] = {}
             for pk, action in rows.items():
                 pks_by_action.setdefault(action, []).append(pk)
-            if overridden_delete_pks := pks_by_action.get(DeletionAction.OVERRIDDEN_DELETE):
-                await self._delete_through_override(model, overridden_delete_pks, deletes_permanently=False)
-            if overridden_hard_delete_pks := pks_by_action.get(DeletionAction.OVERRIDDEN_HARD_DELETE):
-                await self._delete_through_override(model, overridden_hard_delete_pks, deletes_permanently=True)
-            if queryset_delete_pks := pks_by_action.get(DeletionAction.QUERYSET_DELETE):
-                await self._delete_through_queryset(model, queryset_delete_pks)
+            for action in (
+                DeletionAction.OVERRIDDEN_DELETE,
+                DeletionAction.OVERRIDDEN_HARD_DELETE,
+                DeletionAction.QUERYSET_DELETE,
+            ):
+                if pks := pks_by_action.get(action):
+                    await self._delete_through_action(binding, pks, action)
             if soft_deleted_pks := pks_by_action.get(DeletionAction.SOFT_DELETE):
                 if tree_soft_deleted_pks is not None:
                     tree_soft_deleted_pks.extend(soft_deleted_pks)
                 else:
-                    await self._persist_soft_deletes(model, soft_deleted_pks)
+                    await self._persist_soft_deletes(binding, soft_deleted_pks)
             if deleted_pks := pks_by_action.get(DeletionAction.DELETE):
                 hard_deleted[model] = deleted_pks
         return hard_deleted
 
-    def _check_row_writes(self, plan: DeletionPlan, *, persist_roots: bool) -> None:
+    def _check_row_writes(self, prepared: PreparedDeletion, *, persist_roots: bool) -> None:
         """Refuses the cascade before its first write when a connection it writes on doesn't update
         or delete stored rows and the cascade needs to - a database without transactions would keep
         the writes made before the refused one.
 
         Args:
-            plan: The collected cascade.
+            prepared: The collected cascade with its selected writes.
             persist_roots: Whether the root rows themselves are written too.
 
         Raises:
             UnSupportedError: A write of the cascade has no statement on its connection.
         """
-        for wave_index, wave in enumerate(plan.waves):
-            for model, rows in wave.items():
+        for wave_index, wave in enumerate(prepared.waves):
+            for change in wave.foreign_key_changes:
+                self._check_row_write(change.backward_field.get_related_binding(), updates=True)
+            for change in wave.through_changes:
+                self._check_row_write(
+                    change.binding,
+                    updates=change.field.on_delete == OnDelete.SET_NULL,
+                    model_connection=change.connection,
+                )
+            for model, rows in wave.rows.items():
+                model_binding = self._binding.graph.get_binding(model)
+                if not self._writes_rows_of(model_binding):
+                    continue
                 actions = set(rows.values())
-                if actions - HANDED_OVER_ACTIONS:
-                    for backward_field, foreign_key_field in DeletionGraph.get_backward_relations(model):
-                        if foreign_key_field.on_delete in {OnDelete.SET_NULL, OnDelete.SET_DEFAULT}:
-                            self._check_row_write(backward_field.related_model, updates=True)
-                    if self.persist_as_hard_delete or model._meta.soft_delete_hard_cascade:
-                        for many_to_many_field in DeletionGraph.get_many_to_many_fields(model):
-                            if (
-                                many_to_many_field.through_model is None
-                                and many_to_many_field.on_delete == OnDelete.CASCADE
-                            ):
-                                self._check_row_write(model, updates=False)
-                            elif (
-                                many_to_many_field.through_model is None
-                                and many_to_many_field.on_delete == OnDelete.SET_NULL
-                            ):
-                                self._check_row_write(model, updates=True)
                 if wave_index == 0:
                     continue
                 if DeletionAction.SOFT_DELETE in actions:
-                    self._check_row_write(model, updates=True)
+                    self._check_row_write(model_binding, updates=True)
                 if DeletionAction.DELETE in actions:
-                    self._check_row_write(model, updates=False)
-        for backward_field, _target_values in plan.rows_without_key:
-            self._check_row_write(backward_field.related_model, updates=False)
+                    self._check_row_write(model_binding, updates=False)
+        for backward_field, _target_values in prepared.graph.rows_without_key:
+            self._check_row_write(backward_field.get_related_binding(), updates=False)
         if persist_roots:
             self._check_row_write(
-                self.model, updates=not self.persist_as_hard_delete, model_connection=self.connection
+                self._binding, updates=not self.persist_as_hard_delete, model_connection=self.connection
             )
 
     def _check_row_write(
-        self, model: type[Model], *, updates: bool, model_connection: DatabaseClient | None = None
+        self, binding: ModelBinding, *, updates: bool, model_connection: DatabaseClient | None = None
     ) -> None:
         """Refuses an ``UPDATE`` (``updates``) or a ``DELETE`` of ``model`` rows the connection they
         are written on doesn't run.
 
         Args:
-            model: The model whose rows are written.
+            binding: The model whose rows are written.
             updates: An ``UPDATE`` rather than a ``DELETE``.
             model_connection: Connection to write through instead of the one ``model`` resolves to.
 
         Raises:
             UnSupportedError: The connection doesn't run the write.
         """
-        connection = model_connection or self._get_model_connection(model) or model.get_connection(for_write=True)
+        model = binding._model
+        connection = (
+            model_connection
+            or self._get_model_connection(binding)
+            or ModelConnectionChoice.get(HareContext.require_current(), binding, True)
+        )
         if connection.features.supports_row_updates if updates else connection.features.supports_row_deletes:
             return
         statement = "UPDATE" if updates else "DELETE"
@@ -372,13 +400,16 @@ class CascadeDeletion:
             plan: The collected plan.
         """
         for model, pks in plan.get_pks_by_model(DeletionAction.DELETE_BY_DATABASE).items():
-            if not self._writes_rows_of(model):
+            model_binding = self._binding.graph.get_binding(model)
+            if not self._writes_rows_of(model_binding):
                 continue
-            capture_needs = model._meta.change_capture_needs
+            capture_needs = model_binding.change_capture_needs
             if capture_needs is None or not capture_needs.captures(RowOperation.DELETE):
                 continue
-            model_connection = self._get_model_connection(model) or model.get_connection(for_write=True)
-            captured = CapturedWrite(model, capture_needs, model_connection, RowOperation.DELETE)
+            model_connection = self._get_model_connection(model_binding) or ModelConnectionChoice.get(
+                HareContext.require_current(), model_binding, True
+            )
+            captured = CapturedWrite(model_binding, capture_needs, model_connection, RowOperation.DELETE)
             values_by_pk = await captured.read(pks, lock=True)
             await captured.capture_values((pk, values, None, tenant) for pk, (values, tenant) in values_by_pk.items())
 
@@ -387,12 +418,12 @@ class CascadeDeletion:
         """Whether every row of the plan is of the root model, which only its own ``on_delete=CASCADE``
         relation points at, and the delete writes each row itself."""
         model = plan.root_model
-        relations = DeletionGraph.get_backward_relations(model)
+        relations = DeletionGraph.get_backward_relations(plan.root_binding)
         return (
             len(relations) == 1
             and relations[0][0].related_model is model
             and relations[0][1].on_delete == OnDelete.CASCADE
-            and not DeletionGraph.get_many_to_many_fields(model)
+            and not DeletionGraph.get_many_to_many_fields(plan.root_binding)
             and not plan.rows_without_key
             and all(
                 wave_model is model and not HANDED_OVER_ACTIONS.intersection(rows.values())
@@ -417,8 +448,10 @@ class CascadeDeletion:
         model = self.model
         if not self.bottom_up_persist:
             return [{model: [pk for wave in hard_deleted_waves for pk in wave.get(model, ())]}]
-        model_connection = self._get_model_connection(model)
-        depth_limit = (model_connection or model.get_connection(for_write=True)).features.cascade_depth_limit
+        model_connection = self._get_model_connection(self._binding)
+        depth_limit = (
+            model_connection or ModelConnectionChoice.get(HareContext.require_current(), self._binding, True)
+        ).features.cascade_depth_limit
         band_size = len(hard_deleted_waves) if depth_limit is None else max(1, depth_limit - 1)
         deepest_first = list(reversed(hard_deleted_waves))
         bands: list[dict[type[Model], list[Any]]] = [
@@ -434,7 +467,7 @@ class CascadeDeletion:
         row among them goes with the rows it guards, so it doesn't block. Read on first use."""
         if self.reachable_keys is None:
             self.reachable_keys = await DeletionCollector.get_reachable_keys(
-                self.model, plan.root_pks, self.connection
+                self._binding, plan.root_pks, self.connection
             )
         return self.reachable_keys
 
@@ -453,22 +486,30 @@ class CascadeDeletion:
                 pks = [pk for pk, action in rows.items() if action not in HANDED_OVER_ACTIONS]
                 if not pks:
                     continue
-                await self._check_restricting_rows(plan, model, pks, plan_keys)
+                await self._check_restricting_rows(plan, self._binding.graph.get_binding(model), pks, plan_keys)
                 if wave_index == 0:
                     continue
                 protecting_rows = await DeletionCollector.find_protecting_rows(
-                    model, pks, self.connection, exclude=plan_keys
+                    self._binding.graph.get_binding(model),
+                    pks,
+                    self.connection,
+                    exclude=plan_keys,
+                    source_model=self.model,
                 )
                 if protecting_rows is not None:
                     # A guard deeper in the tree, or beside the guarded row, goes with it.
                     protecting_rows = await DeletionCollector.find_protecting_rows(
-                        model, pks, self.connection, exclude=await self._get_reachable_keys(plan)
+                        self._binding.graph.get_binding(model),
+                        pks,
+                        self.connection,
+                        exclude=await self._get_reachable_keys(plan),
+                        source_model=self.model,
                     )
                 if protecting_rows is not None:
                     raise ProtectedError(*protecting_rows)
 
     async def _check_restricting_rows(
-        self, plan: DeletionPlan, model: type[Model], pks: list[Any], plan_keys: frozenset[RowKey]
+        self, plan: DeletionPlan, binding: ModelBinding, pks: list[Any], plan_keys: frozenset[RowKey]
     ) -> None:
         """Raises if a ``RESTRICT``/``NO_ACTION`` relation this cascade enforces has rows pointing
         at any of the ``model`` rows ``pks``.
@@ -476,23 +517,26 @@ class CascadeDeletion:
         Raises:
             IntegrityError: Such rows exist.
         """
+        model = binding._model
         restricting_group = await DeletionCollector.find_first_guarding_rows(
-            model,
+            binding,
             pks,
             self.connection,
             guarding_actions=RESTRICTING_ON_DELETE_ACTIONS,
             exclude=plan_keys,
-            only_unconstrained=self.only_unconstrained,
+            only_unconstrained=self.policy.only_unconstrained,
+            source_model=self.model,
         )
         if restricting_group is not None:
             # A restricting row deeper in the tree, or beside this one, goes with it.
             restricting_group = await DeletionCollector.find_first_guarding_rows(
-                model,
+                binding,
                 pks,
                 self.connection,
                 guarding_actions=RESTRICTING_ON_DELETE_ACTIONS,
                 exclude=await self._get_reachable_keys(plan),
-                only_unconstrained=self.only_unconstrained,
+                source_model=self.model,
+                only_unconstrained=self.policy.only_unconstrained,
             )
         if restricting_group is None:
             return
@@ -503,36 +547,27 @@ class CascadeDeletion:
             relation_name = f"{guarding_field.model.__name__}.{guarding_field.model_field_name}"
         raise IntegrityError(
             f"Cannot {self.verb} {model.__name__} because {relation_name} has "
-            f"on_delete={guarding_field.on_delete.name} and live rows point at it"
+            f"on_delete={guarding_field.on_delete.name} and rows point at it (including soft-deleted rows)"
         )
 
-    async def _delete_through_override(self, model: type[Model], pks: list[Any], *, deletes_permanently: bool) -> None:
-        """Deletes the ``model`` rows ``pks`` one by one through their own overridden ``delete()`` - or
-        ``hard_delete()`` when ``deletes_permanently`` - each as its own tenant, since a row found through a
-        real FK match may belong to another tenant than the active scope."""
-        if not (pks := self._get_rows_not_being_deleted(model, pks)):
+    async def _delete_through_action(self, binding: ModelBinding, pks: list[Any], action: DeletionAction) -> None:
+        """Run the selected deletion after checking active cascade roots and the current route."""
+        if not (pks := self._get_rows_not_being_deleted(binding, pks)):
             return
-        model_connection = RelatedRows.get_connection_for(model, self.connection)
-        tenant_field = model._meta.tenant_field
-        for row in await self._get_written_rows_queryset(model, pks, model_connection):
+        model_connection = RelatedRows.get_connection_for(binding, self.connection, source_model=self.model)
+        if action is DeletionAction.QUERYSET_DELETE:
+            await RelatedRows.get_base_queryset(binding).filter(pk__in=pks).using(model_connection).delete()
+            return
+        tenant_field = binding.tenant_field
+        for row in await self._get_written_rows_queryset(binding, pks, model_connection):
             tenant = getattr(row, tenant_field) if tenant_field else None
             with Tenancy.scope(tenant) if tenant is not None else nullcontext():
-                if deletes_permanently:
+                if action is DeletionAction.OVERRIDDEN_HARD_DELETE:
                     await row.hard_delete(using=model_connection)
                 else:
                     await row.delete(using=model_connection)
 
-    async def _delete_through_queryset(self, model: type[Model], pks: list[Any]) -> None:
-        """Deletes the ``model`` rows ``pks`` the way their own model deletes (soft or hard, with
-        its own cascade) - through ``QuerySet.delete()`` over every tenant, which skips rows
-        already soft-deleted."""
-        if not (pks := self._get_rows_not_being_deleted(model, pks)):
-            return
-        model_connection = RelatedRows.get_connection_for(model, self.connection)
-        await RelatedRows.get_base_queryset(model).filter(pk__in=pks).using(model_connection).delete()
-
-    @staticmethod
-    def _get_rows_not_being_deleted(model: type[Model], pks: list[Any]) -> list[Any]:
+    def _get_rows_not_being_deleted(self, binding: ModelBinding, pks: list[Any]) -> list[Any]:
         """The ``model`` rows ``pks`` no cascade running in this context has as a root - each other
         row is left to that cascade's delete and noted as one of its roots reached again."""
         rows_being_deleted = CascadeDeletion.rows_being_deleted.get()
@@ -540,51 +575,42 @@ class CascadeDeletion:
             return pks
         remaining_pks = []
         for pk in pks:
-            if (roots_reached_again := rows_being_deleted.get((model, pk))) is None:
+            if (
+                roots_reached_again := rows_being_deleted.get(
+                    DeletionScope.get_row_identity(binding, pk, self.connection, source_model=self.model)
+                )
+            ) is None:
                 remaining_pks.append(pk)
             else:
                 roots_reached_again.add(pk)
         return remaining_pks
 
-    async def _update_pointing_foreign_keys(self, model: type[Model], pks: list[Any]) -> None:
+    async def _update_pointing_foreign_keys(self, wave: PreparedDeletionWave) -> None:
         """Applies ``on_delete=SET_NULL``/``SET_DEFAULT`` to the rows pointing at the ``model``
         rows ``pks``, soft-deleted ones and every tenant's included.
 
         Raises:
             ConfigurationError: A ``SET_DEFAULT`` composite FK has no fitting default.
         """
-        for backward_field, foreign_key_field in DeletionGraph.get_backward_relations(model):
-            related_model = backward_field.related_model
-            if not self._writes_rows_of(related_model) or not DeletionGraph.reaches_table(
-                related_model, self.connection
-            ):
-                continue
-            if foreign_key_field.on_delete not in {OnDelete.SET_NULL, OnDelete.SET_DEFAULT} or (
-                self.only_unconstrained
-                and foreign_key_field.has_database_constraint
-                # The rows of a captured model are updated here, captured - not by the database.
-                and related_model._meta.change_capture_needs is None
-            ):
-                continue
+        for change in wave.foreign_key_changes:
+            backward_field, foreign_key_field = change.backward_field, change.field
             if foreign_key_field.on_delete == OnDelete.SET_NULL:
                 # The shadow *_id column(s), not the relation attribute - .update() on an FK field
                 # expects a Model instance as the value.
                 update_values: dict[str, Any] | None = dict.fromkeys(foreign_key_field.source_fields)
             else:
-                update_values = self._get_set_default_values(backward_field, foreign_key_field)
+                update_values = await self._get_set_default_values(backward_field, foreign_key_field)
             if update_values is None:
                 continue
-            target_values = await RelatedRows.get_target_values(model, foreign_key_field, pks, self.connection)
-            for queryset in RelatedRows.get_pointing_querysets(backward_field, target_values, self.connection):
+            for queryset in change.querysets:
                 await queryset.update(**update_values)
 
     @staticmethod
-    def get_db_default_value(field: Field[Any], model: type[Model], connection: DatabaseClient) -> Any:
-        """A field's ``db_default`` as an UPDATE writes it - its SQL, or its value bound.
+    def get_db_default_value(field: Field[Any], connection: DatabaseClient) -> Any:
+        """A field's ``db_default`` as an UPDATE input, encoded by the write once.
 
         Args:
             field: The field.
-            model: The model holding it.
             connection: The connection the UPDATE runs on.
 
         Returns:
@@ -593,9 +619,9 @@ class CascadeDeletion:
         db_default = field.db_default
         if hasattr(db_default, "get_sql"):
             return RawSQL(db_default.get_sql(connection.dialect))
-        return connection.dialect.types.get_db_value(field, db_default, model)
+        return db_default
 
-    def _get_set_default_values(
+    async def _get_set_default_values(
         self,
         backward_field: BackwardForeignKeyRelation[Any] | BackwardOneToOneRelation[Any],
         foreign_key_field: ForeignKeyFieldInstance[Any],
@@ -615,27 +641,29 @@ class CascadeDeletion:
         if foreign_key_field.default is not None:
             default = foreign_key_field.default
             value = default() if callable(default) else default
+            if foreign_key_field._default_is_coroutine:
+                value = await value
         elif foreign_key_field.has_db_default():
             # QuerySet.update() has no notion of "the column's own DB-level default", so the
             # db_default is rendered as SQL (or bound as a plain literal) - of a composite FK, each
             # column's own, which its shadow field holds.
-            related_model = backward_field.related_model
+            related_binding = backward_field.get_related_binding()
             related_connection = RelatedRows.get_connection_for(
-                related_model, self.connection
-            ) or related_model.get_connection(for_write=True)
+                related_binding, self.connection, source_model=self.model
+            ) or ModelConnectionChoice.get(HareContext.require_current(), related_binding, True)
             if len(foreign_key_field.source_fields) > 1:
-                fields_map = related_model._meta.fields_map
+                fields_map = related_binding.fields_map
                 return {
-                    source_field: self.get_db_default_value(
-                        fields_map[source_field], related_model, related_connection
-                    )
+                    source_field: self.get_db_default_value(fields_map[source_field], related_connection)
                     for source_field in foreign_key_field.source_fields
                 }
-            value = self.get_db_default_value(foreign_key_field, related_model, related_connection)
+            value = self.get_db_default_value(foreign_key_field, related_connection)
         else:
             return None
+        if value is None and foreign_key_field.null:
+            return dict.fromkeys(foreign_key_field.source_fields)
         if len(foreign_key_field.source_fields) == 1:
-            return {cast("str", foreign_key_field.source_field): value}
+            return {foreign_key_field.source_field: value}  # type: ignore[dict-item]
         if not isinstance(value, (tuple, list)) or len(value) != len(foreign_key_field.source_fields):
             raise ConfigurationError(
                 f"on_delete=SET_DEFAULT for composite-target FK "
@@ -644,29 +672,18 @@ class CascadeDeletion:
             )
         return dict(zip(foreign_key_field.source_fields, value, strict=True))
 
-    async def _clear_many_to_many_through_rows(self, model: type[Model], pks: list[Any]) -> None:
+    async def _clear_many_to_many_through_rows(self, wave: PreparedDeletionWave) -> None:
         """Deletes (``CASCADE``) or disconnects (``SET_NULL``) the auto-generated through-table rows of
         the given rows. A soft delete keeps them unless ``Meta.soft_delete_hard_cascade``.
         """
         # Local import: the relation accessors import the queryset package, which imports the query statements.
         from hare.fields.relations.relation_accessors import RelationAccessors
 
-        if not self.persist_as_hard_delete and not model._meta.soft_delete_hard_cascade:
-            return
-        for many_to_many_field in DeletionGraph.get_many_to_many_fields(model):
-            if (
-                many_to_many_field.through_model is not None
-                or many_to_many_field.on_delete not in {OnDelete.CASCADE, OnDelete.SET_NULL}
-                or (self.only_unconstrained and many_to_many_field.has_database_constraint)
-                or (self.writes_tenant_rows_only and not DeletionGraph.is_tenant_schema_relation(many_to_many_field))
-                or not DeletionGraph.reaches_relation_table(many_to_many_field, self.connection)
-            ):
-                continue
-            chosen_connection, through_table, criteria = RelatedRows.get_through_row_criteria(
-                model, many_to_many_field, pks, self.connection
-            )
+        for change in wave.through_changes:
+            model, many_to_many_field = change.binding._model, change.field
+            chosen_connection, through_table, criteria = change.connection, change.table, change.criteria
             if WrittenConnections.is_recording:
-                WrittenConnections.record(chosen_connection.connection_alias)
+                WrittenConnections.record(chosen_connection)
             for criterion in criteria:
                 if many_to_many_field.on_delete == OnDelete.CASCADE:
                     query = chosen_connection.query_class.from_(through_table).where(criterion).delete()
@@ -674,57 +691,61 @@ class CascadeDeletion:
                     query = chosen_connection.query_class.update(through_table).where(criterion)
                     for column_name in many_to_many_field.backward_keys:
                         query = query.set(column_name, None)
-                await chosen_connection.execute(*query.get_parameterized_sql())
+                await chosen_connection._execute_built(
+                    *query.get_parameterized_sql(chosen_connection.sql_context),
+                    recovery=chosen_connection.get_write_recovery(through_table),
+                )
             root_instance = self.root_instance
             if (
                 many_to_many_field.on_delete == OnDelete.CASCADE
                 and root_instance is not None
                 and type(root_instance) is model
             ):
-                many_to_many_relation = cast(
-                    "ManyToManyRelation[Any]",
-                    RelationAccessors.get_relation(root_instance, many_to_many_field.model_field_name),
+                many_to_many_relation: ManyToManyRelation[Any] = RelationAccessors.get_relation(  # type: ignore[assignment]
+                    root_instance, many_to_many_field.model_field_name
                 )
                 many_to_many_relation._reset_cache_on_rollback(chosen_connection)
                 many_to_many_relation._invalidate_local_cache()
 
-    def _get_model_connection(self, model: type[Model]) -> DatabaseClient | None:
+    def _get_model_connection(self, binding: ModelBinding) -> DatabaseClient | None:
         """The connection a write to ``model`` goes through - ``None`` for ``model``'s own default."""
-        return RelatedRows.get_connection_for(model, self.connection)
+        return RelatedRows.get_connection_for(binding, self.connection, source_model=self.model)
 
-    def _split_into_batches(self, model: type[Model], pks: list[Any]) -> list[list[Any]]:
+    def _split_into_batches(self, binding: ModelBinding, pks: list[Any]) -> list[list[Any]]:
         """Splits ``pks`` into batches a ``pk__in`` filter binds within the bind-parameter ceiling."""
-        model_connection = self._get_model_connection(model) or model.get_connection(for_write=True)
-        return RelatedRows.split_into_batches(pks, model_connection, len(model._meta.primary_key_attribute_names))
+        model_connection = self._get_model_connection(binding) or ModelConnectionChoice.get(
+            HareContext.require_current(), binding, True
+        )
+        return RelatedRows.split_into_batches(pks, model_connection, len(binding.primary_key_attribute_names))
 
     @staticmethod
     def _get_written_rows_queryset(
-        model: type[Model], pks: list[Any], model_connection: DatabaseClient | None
+        binding: ModelBinding, pks: list[Any], model_connection: DatabaseClient | None
     ) -> QuerySet[Any]:
         """The ``model`` rows ``pks`` of every tenant, soft-deleted ones included."""
         return RelatedRows.include_soft_deleted(
-            RelatedRows.get_base_queryset(model).filter(pk__in=pks).using(model_connection)
+            RelatedRows.get_base_queryset(binding).filter(pk__in=pks).using(model_connection)
         )
 
     async def _read_root_versions(self, root_pks: list[Any]) -> None:
         """Reads the version of every root row, for the soft-delete write's stale check."""
-        optimistic_lock_field = cast("str", self.model._meta.optimistic_lock_field)
-        primary_key_attribute_names = self.model._meta.primary_key_attribute_names
+        optimistic_lock_field: str = self._binding.optimistic_lock_field  # type: ignore[assignment]
+        primary_key_attribute_names = self._binding.primary_key_attribute_names
         pk_column_count = len(primary_key_attribute_names)
-        for batch in self._split_into_batches(self.model, root_pks):
-            queryset = self._get_written_rows_queryset(self.model, batch, self.connection)
+        for batch in self._split_into_batches(self._binding, root_pks):
+            queryset = self._get_written_rows_queryset(self._binding, batch, self.connection)
             for values in await queryset.values_list(*primary_key_attribute_names, optimistic_lock_field):
                 root_pk = values[0] if pk_column_count == 1 else tuple(values[:pk_column_count])
                 self.row_versions[(self.model, root_pk)] = values[pk_column_count]
 
     async def _persist_soft_deletes(
-        self, model: type[Model], pks: list[Any], *, model_connection: DatabaseClient | None = None
+        self, binding: ModelBinding, pks: list[Any], *, model_connection: DatabaseClient | None = None
     ) -> None:
         """Soft-deletes the rows with an ``UPDATE`` per batch, bumping the optimistic lock and
         ``auto_now`` fields. A row another write soft-deleted meanwhile keeps its own deletion time.
 
         Args:
-            model: The model of the rows.
+            binding: The model of the rows.
             pks: Their primary keys.
             model_connection: Connection to write through instead of the one ``model`` resolves to.
 
@@ -732,21 +753,21 @@ class CascadeDeletion:
             StaleObjectError: A row's version changed since the cascade read it.
             IntegrityError: A row no longer exists.
         """
+        model = binding._model
         if not pks:
             return
         from hare.query.statements.write.update_query import UpdateQuery
 
-        meta = model._meta
-        soft_delete_field = cast("str", meta.soft_delete_field)
-        optimistic_lock_field = meta.optimistic_lock_field
-        write_connection = model_connection or self._get_model_connection(model)
+        soft_delete_field: str = binding.soft_delete_field  # type: ignore[assignment]
+        optimistic_lock_field = binding.optimistic_lock_field
+        write_connection = model_connection or self._get_model_connection(binding)
         pks_by_version: dict[Any, list[Any]] = {}
         for pk in pks:
             version = self.row_versions.get((model, pk)) if optimistic_lock_field else None
             pks_by_version.setdefault(version, []).append(pk)
         for version, version_pks in pks_by_version.items():
-            for batch in self._split_into_batches(model, version_pks):
-                queryset = self._get_written_rows_queryset(model, batch, write_connection).filter(
+            for batch in self._split_into_batches(binding, version_pks):
+                queryset = self._get_written_rows_queryset(binding, batch, write_connection).filter(
                     **{f"{soft_delete_field}__isnull": True}
                 )
                 if optimistic_lock_field:
@@ -755,10 +776,10 @@ class CascadeDeletion:
                 count = await update_query
                 # A database reporting no count of the rows a write changed tells no missing row.
                 if count is not None and count != len(batch):
-                    await self._raise_for_unwritten_row(model, batch, version, write_connection)
+                    await self._raise_for_unwritten_row(binding, batch, version, write_connection)
 
     async def _raise_for_unwritten_row(
-        self, model: type[Model], batch: list[Any], version: Any, write_connection: DatabaseClient | None
+        self, binding: ModelBinding, batch: list[Any], version: Any, write_connection: DatabaseClient | None
     ) -> None:
         """Raises for the first row of ``batch`` a soft-delete ``UPDATE`` did not write, unless another
         write soft-deleted every such row already.
@@ -768,13 +789,13 @@ class CascadeDeletion:
                 disappeared.
             IntegrityError: Otherwise - the row no longer exists.
         """
-        meta = model._meta
-        optimistic_lock_field = meta.optimistic_lock_field
-        primary_key_attribute_names = meta.primary_key_attribute_names
+        model = binding._model
+        optimistic_lock_field = binding.optimistic_lock_field
+        primary_key_attribute_names = binding.primary_key_attribute_names
         pk_column_count = len(primary_key_attribute_names)
         written_pks = set()
-        queryset = self._get_written_rows_queryset(model, batch, write_connection).filter(
-            **{cast("str", meta.soft_delete_field): self.deleted_at}
+        queryset = self._get_written_rows_queryset(binding, batch, write_connection).filter(  # type: ignore[misc]
+            **{binding.soft_delete_field: self.deleted_at}
         )
         if optimistic_lock_field and version is not None:
             queryset = queryset.filter(**{optimistic_lock_field: version + 1})
@@ -783,7 +804,9 @@ class CascadeDeletion:
         unwritten_pks = [pk for pk in batch if pk not in written_pks]
         already_deleted_pks: set[Any] = set()
         if unwritten_pks:
-            already_deleted_pks = await RelatedRows.get_soft_deleted_pks(model, unwritten_pks, write_connection)
+            already_deleted_pks = await RelatedRows.get_soft_deleted_pks(
+                binding, unwritten_pks, write_connection, source_model=self.model
+            )
             if all(pk in already_deleted_pks for pk in unwritten_pks):
                 return
         unwritten_pk = next((pk for pk in unwritten_pks if pk not in already_deleted_pks), batch[0])
@@ -797,13 +820,13 @@ class CascadeDeletion:
         raise IntegrityError(f"Can't delete object that doesn't exist. PK: {unwritten_pk}")
 
     async def _persist_hard_deletes(
-        self, model: type[Model], pks: list[Any], *, model_connection: DatabaseClient | None = None
+        self, binding: ModelBinding, pks: list[Any], *, model_connection: DatabaseClient | None = None
     ) -> None:
         """Deletes the ``model`` rows ``pks`` - a ``DELETE`` per batch. A row the database's own
         cascade already removed is simply not matched.
 
         Args:
-            model: The model of the rows.
+            binding: The model of the rows.
             pks: Primary keys of the ``model`` rows.
             model_connection: Connection to write through instead of the one ``model`` resolves to.
         """
@@ -811,8 +834,8 @@ class CascadeDeletion:
             return
         from hare.query.statements.write.delete_query import DeleteQuery
 
-        write_connection = model_connection or self._get_model_connection(model)
-        for batch in self._split_into_batches(model, pks):
-            queryset = self._get_written_rows_queryset(model, batch, write_connection)
+        write_connection = model_connection or self._get_model_connection(binding)
+        for batch in self._split_into_batches(binding, pks):
+            queryset = self._get_written_rows_queryset(binding, batch, write_connection)
             delete_query = DeleteQuery(queryset)
             await delete_query.execute_statement()

@@ -5,7 +5,7 @@ import uuid
 from datetime import date, time
 from decimal import Decimal
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.dialects.base.literals.constants import SQL_LONG_INT_MESSAGE
 from hare.exceptions import ValidationError
@@ -20,6 +20,9 @@ from hare.sql.terms.term import Term
 
 class ValueWrapper(Term):
     """A Python value of a statement - a bound parameter, or a literal written into the SQL."""
+
+    structure_attributes: ClassVar[tuple[str, ...]] = ("allow_parametrize", "value")
+    literal_attributes = ("value",)
 
     is_aggregate = None
     #: The wrapper a copy was made from (``as_()``, ``replace_table()``) - its parameter comes from
@@ -48,7 +51,7 @@ class ValueWrapper(Term):
     def get_value_sql(self, sql_context: SqlContext) -> str:
         literals = sql_context.dialect.literals
         value = self.value
-        if literals.writes_bound_values and value is not None and not isinstance(value, Enum | Term):
+        if literals.writes_bound_values and value is not None and not isinstance(value, (Enum, Term)):
             # As the dialect's client binds the value - a view's query keeps its values so.
             return literals.get_literal_sql(value)
         return self.get_formatted_value(value, sql_context)

@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from hare import Connections, fields
+from hare.core.apps.model_binding_graph import ModelBindingGraph
 from hare.ddl import Dictionary, RawSQLTerm
 from hare.dialects.clickhouse.schema_objects import ClickhouseDictionary
 from hare.exceptions import ConfigurationError, UnSupportedError
@@ -25,6 +26,7 @@ from hare.migrations.state.state import State
 from hare.migrations.writer import MigrationWriter
 from hare.models import Model
 from hare.models.enums import ModelOption
+from tests.utils.migration_source import MigrationSource
 
 TABLE = "dictionary_country"
 NAMES = ClickhouseDictionary("country_names", key=("code",), attributes=("name",))
@@ -76,6 +78,8 @@ def test_a_wrong_dictionary_is_refused(arguments):
 
 @pytest.mark.database_independent
 def test_a_dictionary_is_declared_in_meta():
+    declaration_graph = ModelBindingGraph()
+
     class Country(Model):
         code = fields.CharField(max_length=2, primary_key=True)
         name = fields.CharField(max_length=50)
@@ -84,7 +88,7 @@ def test_a_dictionary_is_declared_in_meta():
             app = "dictionary_declarations"
             dictionaries = [NAMES]
 
-    assert Country._meta.dictionaries == (NAMES,)
+    assert declaration_graph.include(Country).dictionaries == (NAMES,)
     assert NAMES.get_field_names() == ("code", "name")
     assert NAMES.get_lifetime_range() == (0, 0)
     assert ClickhouseDictionary("d", key=["a"], attributes=["b"], lifetime=(10, 60)).get_lifetime_range() == (10, 60)
@@ -164,9 +168,7 @@ def test_the_operations_are_written_read_back_and_change_the_state():
         RemoveDictionary("Country", "names_by_code"),
     ]
     source = MigrationWriter("0002_dictionaries", "models", operations).as_string()
-    namespace: dict[str, Any] = {}
-    exec(compile(source, "<migration>", "exec"), namespace)  # noqa: S102 - the test's own text
-    read_back = namespace["Migration"]("0002_dictionaries", "models").operations
+    read_back = MigrationSource.load(source, "0002_dictionaries", "models").operations
     assert [operation.deconstruct() for operation in read_back] == [
         operation.deconstruct() for operation in operations
     ]
@@ -175,7 +177,7 @@ def test_the_operations_are_written_read_back_and_change_the_state():
     state = get_state()
     operations[0].state_forward("models", state)
     assert state.models[("models", "Country")].options[ModelOption.DICTIONARIES] == (NAMES,)
-    assert state.apps.get_model("models.Country")._meta.dictionaries == (NAMES,)
+    assert state.apps.get_binding("models.Country").dictionaries == (NAMES,)
     operations[1].state_forward("models", state)
     operations[2].state_forward("models", state)
     (renamed,) = state.models[("models", "Country")].options[ModelOption.DICTIONARIES]
@@ -207,4 +209,4 @@ async def test_a_database_without_dictionaries_refuses_them_before_any_sql(db_si
         assert editor.collected_sql == []
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=True)
     with pytest.raises(UnSupportedError, match="not supported on"):
-        editor.table_creation.get_schema_objects_after_table_sqls(declared.apps.get_model("models.Country"))
+        editor.table_creation.get_schema_objects_after_tables_sqls((declared.apps.get_binding("models.Country"),))

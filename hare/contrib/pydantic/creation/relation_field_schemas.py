@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast, get_args
+from typing import TYPE_CHECKING, Any, get_args
 
 from pydantic import field_validator
 
@@ -19,6 +19,7 @@ from hare.query.scopes.row_scopes import RowScopes
 if TYPE_CHECKING:
     from hare.contrib.pydantic.creation.pydantic_model_creator import PydanticModelCreator, StackEntry
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class RelationFieldSchemas:
@@ -27,11 +28,11 @@ class RelationFieldSchemas:
     generic foreign key."""
 
     @staticmethod
-    def add_relation_id_names(model: type[Model], names: tuple[str, ...]) -> tuple[str, ...]:
+    def add_relation_id_names(binding: ModelBinding, names: tuple[str, ...]) -> tuple[str, ...]:
         """Adds the shadow id field names of every forward FK/O2O named in ``names``.
 
         Args:
-            model: The Hare model.
+            binding: The Hare model.
             names: Field names, possibly naming relations.
 
         Returns:
@@ -39,7 +40,7 @@ class RelationFieldSchemas:
         """
         relation_id_names: list[str] = []
         for name in names:
-            field = model._meta.fields_map.get(name)
+            field = binding.fields_map.get(name)
             if isinstance(field, ForeignKeyFieldInstance):
                 relation_id_names.extend(field.source_fields)
         return tuple(names) + tuple(relation_id_names)
@@ -54,8 +55,8 @@ class RelationFieldSchemas:
         Args:
             creator: The creator of the pydantic model.
         """
-        fields_map = creator._model_class._meta.fields_map
-        for name, generic_field in creator._model_class._meta.generic_foreign_key_fields.items():
+        fields_map = creator._binding.fields_map
+        for name, generic_field in creator._binding.generic_foreign_key_fields.items():
             if not generic_field.branch_names:
                 continue
             branch_keys = [
@@ -80,9 +81,7 @@ class RelationFieldSchemas:
             if as_keys:
                 annotation = GenericForeignKeySchemas.get_key_union(generic_field, creator._fqname)
             else:
-                annotation = GenericForeignKeySchemas.get_object_union(
-                    generic_field, cast("dict[str, type[PydanticModel]]", submodels), creator._fqname
-                )
+                annotation = GenericForeignKeySchemas.get_object_union(generic_field, submodels, creator._fqname)  # type: ignore[arg-type]
             optional = name in creator._optional or generic_field.default is not None
             if generic_field.null or optional:
                 annotation = annotation | None
@@ -127,10 +126,9 @@ class RelationFieldSchemas:
         Args:
             field: The relation field.
         """
-        if not isinstance(field, (ForeignKeyFieldInstance, OneToOneFieldInstance)):
+        if not isinstance(field, ForeignKeyFieldInstance):
             return False
-        related_model = field.related_model
-        return bool(RowScopes.of(related_model))
+        return bool(RowScopes.of(field.get_related_binding()))
 
     @staticmethod
     def process_single_field_relation(
@@ -163,7 +161,7 @@ class RelationFieldSchemas:
                 or DataFieldSchemas.is_tenant_field(creator, field_name, field)
                 or RelationFieldSchemas.can_hide_target(field)
             ):
-                return cast("type[PydanticModel] | None", model | None)
+                return model | None  # type: ignore[return-value]
             return model
         return None
 
@@ -182,15 +180,15 @@ class RelationFieldSchemas:
 
     @staticmethod
     def create_submodel(
-        model: type[Model],
+        binding: ModelBinding,
         *,
         stack: tuple[StackEntry, ...],
         exclude: tuple[str, ...] = (),
         include: tuple[str, ...] = (),
         computed: tuple[str, ...] = (),
+        optional: tuple[str, ...] = (),
         extra_fields: dict[str, Any] | None = None,
         related_values: dict[str, str] | None = None,
-        name: str | None = None,
         allow_cycles: bool = False,
         sort_alphabetically: bool | None = None,
         max_recursion: int,
@@ -199,6 +197,7 @@ class RelationFieldSchemas:
     ) -> type[PydanticModel] | None:
         """The Pydantic submodel of a related model, guarded against cycles of relations."""
         # Local import: the creator module imports this module.
+        model = binding._model
         from hare.contrib.pydantic.creation.pydantic_model_creator import PydanticModelCreator
 
         if not allow_cycles and model in (stack_entry[0] for stack_entry in stack[:-1]):
@@ -207,17 +206,17 @@ class RelationFieldSchemas:
         # Level 0 is the root model itself, so the Nth stack entry (0-indexed) is level N -
         # reject once level reaches the configured max_recursion, so max_recursion=1 permits
         # exactly one level of nested submodels.
-        for level, (_, _, parent_max_recursion) in enumerate(stack):
+        for level, (_, parent_max_recursion) in enumerate(stack):
             if level >= parent_max_recursion:
                 return None
         creator = PydanticModelCreator(
-            model,
+            binding,
             exclude=exclude,
             include=include,
             computed=computed,
+            optional=optional,
             extra_fields=extra_fields or None,
             related_values=related_values or None,
-            name=name,
             _stack=stack,
             allow_cycles=allow_cycles,
             sort_alphabetically=sort_alphabetically,
@@ -241,7 +240,7 @@ class RelationFieldSchemas:
         """
 
         if related_model:
-            new_stack = creator._stack + ((creator._model_class, field_name, creator.meta.max_recursion),)
+            new_stack = creator._stack + ((creator._binding._model, creator.meta.max_recursion),)
 
             prefix_length = len(field_name) + 1
 
@@ -253,10 +252,11 @@ class RelationFieldSchemas:
                 )
 
             submodel = RelationFieldSchemas.create_submodel(
-                related_model,
+                creator._binding.graph.get_binding(related_model),
                 exclude=get_fields_to_carry_on(creator.meta.exclude),
                 include=get_fields_to_carry_on(creator.meta.include),
                 computed=get_fields_to_carry_on(creator.meta.computed),
+                optional=get_fields_to_carry_on(creator._optional),
                 extra_fields={
                     path[prefix_length:]: annotation
                     for path, annotation in creator.meta.extra_fields.items()
@@ -276,8 +276,5 @@ class RelationFieldSchemas:
             )
         else:
             submodel = None
-
-        if submodel is None:
-            creator.meta.exclude += (field_name,)
 
         return submodel

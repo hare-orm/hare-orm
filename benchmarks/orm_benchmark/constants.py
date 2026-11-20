@@ -30,7 +30,7 @@ LOAD_OPERATION_CYCLE = 20
 LOAD_WARM_UP_ROUNDS = 2
 
 #: The summary compares every target with this package's fastest driver of the database (see
-#: ``ChartWriter.get_baseline()``); its other drivers are compared with it too.
+#: ``BenchmarkReport.get_baseline()``); its other drivers are compared with it too.
 BASELINE_DISTRIBUTION = "hare-orm"
 
 #: The servers a run measures against, at 127.0.0.1 - `make test_db_up` and `make test_clickhouse_up`.
@@ -41,6 +41,13 @@ CLICKHOUSE_PASSWORD = "clickhouse"
 #: The interpreter of a target's own virtual environment (``Target.environment``), under the
 #: repository: ``.bench-venv-<environment>``.
 ENVIRONMENT_DIRECTORY_PREFIX = ".bench-venv-"
+BENCHMARK_REPORT_VERSION = 1
+BENCHMARK_SEED = 1
+BENCHMARK_STATUS_LABELS = {
+    "unsupported": ("unsupported", "не поддерживается"),
+    "failed": ("failed", "ошибка"),
+    "not-run": ("not measured", "не измерено"),
+}
 
 #: The ClickHouse event table's values: a site per event out of 20, a user out of 10 000, an event type
 #: out of five, a moment in the 30 days from CLICKHOUSE_FIRST_DAY.

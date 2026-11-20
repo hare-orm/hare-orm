@@ -26,7 +26,7 @@ class HareExceptions:
         Returns:
             The classes, by their dotted path.
         """
-        HareRegistry.get_installed_modules()
+        HareRegistry.import_installed_modules()
         found: dict[str, type[Exception]] = {}
         pending: list[type[Exception]] = [Exception]
         while pending:

@@ -4,6 +4,7 @@ import math
 import struct
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.clickhouse.fields.constants import FLOAT32_MAX
 from hare.exceptions import ValidationError
 from hare.fields.data.numeric.float_field import FloatField
@@ -22,7 +23,7 @@ class Float32Field(FloatField[TFloat]):
     float32 (``0.1``, not the ``0.10000000149011612`` the driver gives); a value beyond its range, or
     so close to zero it would be stored as 0, is refused - a float32 holds neither."""
 
-    SQL_TYPE = "Float32"
+    SQL_TYPE = ClickhouseTypeName.FLOAT32
     MANTISSA_BITS = FLOAT32_MANTISSA_BITS
     EXACT_DECIMAL_DIGITS = 6
     COLUMN_TYPE_FROM_DIALECT = True
@@ -41,10 +42,13 @@ class Float32Field(FloatField[TFloat]):
     def to_db_value(self, value: Any, instance: type[Model] | Model | None) -> Any:
         value = super().to_db_value(value, instance)
         if isinstance(value, float) and math.isfinite(value) and abs(value) > FLOAT32_MAX:
-            raise ValidationError(f"{self.model_field_name}: {value!r} is beyond a float32's range")
+            raise ValidationError(
+                f"{self.model_field_name}: {self.get_value_for_message(value)} is beyond a float32's range"
+            )
         if isinstance(value, float) and value != 0 and struct.unpack("f", struct.pack("f", value))[0] == 0:
             raise ValidationError(
-                f"{self.model_field_name}: {value!r} is too close to zero for a float32 - it would be stored as 0"
+                f"{self.model_field_name}: {self.get_value_for_message(value)} is too close to zero for a float32 "
+                "- it would be stored as 0"
             )
         return value
 

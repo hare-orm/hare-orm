@@ -5,7 +5,6 @@ from collections.abc import Callable
 from typing import Any
 
 from hare.dialects.postgresql.enums import RangeBound
-from hare.dialects.postgresql.partitioning.partitioning import Partitioning
 from hare.dialects.postgresql.partitioning.partitions.partition import Partition
 from hare.exceptions import ConfigurationError
 
@@ -33,7 +32,7 @@ class RangePartition(Partition):
             ConfigurationError: The name isn't letters, digits and underscores, a bound is empty or
                 mixes ``RangeBound`` members wrongly, or the lower bound isn't below the upper one.
         """
-        Partitioning.check_partition_name(type(self).__name__, self.name)
+        super().__post_init__()
         for attribute in ("from_values", "to_values"):
             value = getattr(self, attribute)
             values = tuple(value) if isinstance(value, (list, tuple)) else (value,)
@@ -63,7 +62,7 @@ class RangePartition(Partition):
             ConfigurationError: A column after a ``RangeBound`` member has another value.
         """
         for position, value in enumerate(values):
-            if isinstance(value, RangeBound) and any(following != value for following in values[position + 1 :]):
+            if isinstance(value, RangeBound) and any(following is not value for following in values[position + 1 :]):
                 raise ConfigurationError(
                     f"RangePartition {name!r}: {attribute} {values!r} - every column after {value} must be {value} too"
                 )
@@ -80,7 +79,7 @@ class RangePartition(Partition):
             The key.
         """
         return tuple(
-            (0,) if value == RangeBound.MINVALUE else (2,) if value == RangeBound.MAXVALUE else (1, value)
+            (0,) if value is RangeBound.MINVALUE else (2,) if value is RangeBound.MAXVALUE else (1, value)
             for value in values
         )
 

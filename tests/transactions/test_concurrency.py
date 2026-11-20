@@ -1,5 +1,4 @@
 import asyncio
-import sys
 
 import pytest
 
@@ -41,7 +40,6 @@ async def test_nonconcurrent_get_or_create_isolated(db_truncate):
 
 
 @requires_features(supports_unique_constraints=True)
-@pytest.mark.skipif(sys.version_info < (3, 7), reason="aiocontextvars backport not handling this well")
 @pytest.mark.asyncio
 async def test_concurrent_get_or_create_isolated(db_truncate):
     """Test concurrent get_or_create."""
@@ -52,7 +50,6 @@ async def test_concurrent_get_or_create_isolated(db_truncate):
         assert una[0] == unas[0][0]
 
 
-@pytest.mark.skipif(sys.version_info < (3, 7), reason="aiocontextvars backport not handling this well")
 @requires_features(supports_transactions=True)
 @pytest.mark.asyncio
 async def test_concurrent_transactions_with_multiple_ops(db_truncate):
@@ -67,7 +64,6 @@ async def test_concurrent_transactions_with_multiple_ops(db_truncate):
     assert count == 1000
 
 
-@pytest.mark.skipif(sys.version_info < (3, 7), reason="aiocontextvars backport not handling this well")
 @requires_features(supports_transactions=True)
 @pytest.mark.asyncio
 async def test_concurrent_transactions_with_single_op(db_truncate):
@@ -82,7 +78,6 @@ async def test_concurrent_transactions_with_single_op(db_truncate):
     assert count == 100
 
 
-@pytest.mark.skipif(sys.version_info < (3, 7), reason="aiocontextvars backport not handling this well")
 @requires_features(supports_transactions=True)
 @pytest.mark.asyncio
 async def test_nested_concurrent_transactions_with_multiple_ops(db_truncate):
@@ -139,23 +134,10 @@ async def test_nonconcurrent_get_or_create_transactioned(db):
 # =============================================================================
 
 
-@pytest.mark.asyncio
-async def test_concurrent_queries_lazy_init(db_truncate):
-    """Test concurrent queries with lazy connection initialization.
-
-    Hare.init is lazy and does not initialize the database connection
-    until the first query. This test ensures that concurrent queries do not
-    cause initialization issues.
-    """
-    # The db_truncate fixture already initializes the connection, so we just
-    # test that concurrent queries work
-    await asyncio.gather(*[Connections.get("models").execute("SELECT 1") for _ in range(100)])
-
-
 @requires_features(supports_transactions=True)
 @pytest.mark.asyncio
-async def test_concurrent_transactions_lazy_init(db_truncate):
-    """Test concurrent transactions with lazy connection initialization."""
+async def test_concurrent_transactions_each_run_on_a_separate_connection(db_truncate):
+    """A hundred transactions at once - each runs on a connection of its own and finishes."""
 
     async def transaction() -> None:
         async with Transactions.atomic():

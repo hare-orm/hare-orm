@@ -66,6 +66,14 @@ arguments — override it, as here, when the function writes its SQL itself. A `
 neither `function_name` nor `database_function`, nor overriding `get_function_term()`, names no SQL
 function: a query with it raises `ConfigurationError` before any SQL.
 
+For adaptation that needs the completed result, override
+`_finalize_result(result, function_arg, expression_context)`. It runs after the output field has been
+selected and coerced: `result` carries the final term, joins and output field, while `function_arg`
+retains the first argument's original field. Call `super()._finalize_result(...)` before adapting its
+returned result, particularly in an `Aggregate` subclass, to preserve keyed comparisons and NULL
+metadata. Return the adapted `ExpressionResult`; keep per-build information on that result or in local
+variables, rather than changing the reusable function declaration.
+
 ## <a id="writing-a-custom-expression"></a>Writing a custom expression
 
 An `Expression` subclass that isn't a `Function` — its own `get_result()` building the SQL term — also
@@ -84,6 +92,7 @@ of the key:
 | `KEY_METHOD` | a method returning what is written into the SQL text |
 | `LITERAL` | a literal bound as a parameter (as `Value` binds one) |
 | `ARGUMENT` / `ARGUMENTS` | an argument (a sequence of them): an expression by its own description, `None` as `NULL`, a `hare.sql` term by its text and values, any other literal by its type, bound; a list or tuple literal keeps no plan |
+| `SHAPE_ARGUMENT` | an `ARGUMENT` whose bound values also affect SQL structure: values remain bound, and their structural description is included in the key; for example, search configurations that determine whether combined queries share a vector configuration |
 | `ENCODED_ARGUMENT` | an argument whose literal the build encodes into one bound value — a point as its text, a vector: a list or tuple literal is bound whole |
 | `ARGUMENT_METHOD` | a method giving an argument, described as an `ARGUMENT` |
 | `VALUE_METHOD` | a method giving a value bound as a parameter |
@@ -120,7 +129,13 @@ from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 
 
+from hare.query.expressions.structure.enums import ArgumentRole
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
+
+
 class Clamp(Expression):
+    structure = ExpressionStructure(positions=((0, ArgumentRole.FIELD),), keywords=(("field", ArgumentRole.FIELD),))
+
     plan_parts: ClassVar[DeclaredPlanParts] = (
         ("field", PlanPartType.FIELD),
         ("low", PlanPartType.ARGUMENT),
@@ -150,3 +165,79 @@ records its plan (`PlanOrigins.records`) `origins` lists where each value comes 
 
 An expression whose SQL text takes no value at all (`PI()`, the current moment) subclasses
 `hare.query.expressions.ConstantExpression`, which describes it by its class alone.
+
+## <a id="bound-paths-ordering"></a>Bound paths and ordering
+
+`BoundExpression` prepares arguments whose literal encoding depends on their siblings.
+It retains a literal's declaration and parameter origin until the containing operation chooses
+its conversion. A non-literal child retains its complete `ExpressionResult`, including its value
+field and required joins. `Case` binds each condition once, chooses the common branch type, then
+encodes its literals. Functions prepare their children before encoding a literal first argument;
+for example, a literal beside a JSON column in `Coalesce` uses the column's JSON conversion.
+The selected result codec also includes custom field storage hooks and registered `TypeMapping.to_db`
+conversions. This does not impose the selected column's length or numeric limits on ordinary SQL
+results: compatible numeric widening and plain text literals retain their expression semantics.
+These prepared arguments belong to one build and must not be retained on shared expression objects.
+
+When referencing another annotation, return its required joins together with its term and value
+field. The input field of a function is not necessarily its result type: `Length("title")` is an
+integer even when `title` is a text column. Unknown custom SQL keeps an unknown output type.
+
+`ExpressionContext` carries the source model and table, connection, visibility and
+extra conditions for relation paths. `F` and functions bind model paths through
+`BoundLookupPath`. Its result contains the SQL value, output field, physical input
+column and already scoped joins. Consumers attach those joins;
+they do not apply a second visibility or extra-condition policy. An annotation's
+bound result belongs to the statement build, including its output field and joins.
+
+`BoundOrdering` applies the field's ordering key to both the column and cursor
+boundary. The cursor first encodes the Python value with the field's read-column
+codec; NULL remains NULL. The comparison and equality used for a subsequent
+tie-breaker use the same key, including JSON and custom type representations.
+NULL placement comes from an explicit ordering option or the effective connection
+features. Parameter recording retains the boundary's explicit source before key
+transformation, so repeated occurrences bind through one parameter slot.
+
+## <a id="structural-references"></a>Structural references and rebuilding
+
+Expressions declare which constructor inputs are field references. This is independent of
+`plan_parts`, which describes cache keys and bound parameters. Equal strings can have different
+meanings: in `Replace("title", "title", "heading")`, only the first argument names a field.
+
+```python
+from hare.query.expressions.structure.enums import ArgumentRole
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
+
+class Suffix(Function):
+    structure = ExpressionStructure(
+        positions=((0, ArgumentRole.FIELD),),
+        keywords=(("field", ArgumentRole.FIELD),),
+    )
+
+    def __init__(self, field, suffix):
+        super().__init__(field, suffix)
+```
+
+Positions are zero-based, excluding `self`. Declare both positional and keyword forms accepted
+by the constructor. Unlisted arguments have the `VALUE` role: child expressions are visited,
+but plain strings remain literals. `FIELD` marks a field path, `ORDERING` also preserves a leading
+minus sign, and `OUTER_FIELD` identifies a reference into the enclosing query.
+`FILTERS` marks a mapping of lookup keys to values; `FIELD_MAPPING` marks a mapping keyed by field
+names. Lists and tuples retain the role of their constructor argument.
+
+`get_expression_children()` returns immediate `ExpressionChild` entries.
+`rebuild_expression(children)` reconstructs the declaration through its constructor so normalized
+attributes agree with the changed inputs. Override both methods when constructor metadata cannot
+describe the declaration, as for condition keyword arguments mixed with result options.
+The traversal preserves unchanged objects and does not mutate the original declaration. It uses an
+explicit stack and rejects ancestor cycles while allowing repeated references to shared children.
+
+`Value` and raw SQL are opaque. `structure = ExpressionStructure(query_scope=True)` establishes a
+separate query scope: renaming the enclosing model does not rename local fields inside the query.
+Ordinary dependency inspection reports outer references separately. A constraint's structural
+check rejects nested queries, aggregates, windows and related columns before rendering; scalar
+functions are checked against the actual DDL dialect.
+
+SQL terms expose direct children through `get_children()`; `nodes_()` uses the shared iterative
+traversal. Custom terms must yield immediate children, rather than recursively yielding descendants.
+Grouping and aggregate analysis apply explicit query/window boundaries to this tree.

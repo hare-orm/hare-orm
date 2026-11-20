@@ -7,6 +7,7 @@ from hare.dialects.base.renderers.json_renderers import JsonRenderers
 from hare.dialects.sqlite.constants import SQLITE_JSON_BYTES_TEMPLATE, SQLITE_JSON_PATH_FUNCTION_NAME
 from hare.dialects.sqlite.lookups.json.sqlite_json_type_criterion import SqliteJsonTypeCriterion
 from hare.exceptions import ValidationError
+from hare.query.filters.lookups.json.json_filter_parser import JsonFilterParser
 from hare.sql import functions
 from hare.sql.enums import JsonValueType
 from hare.sql.sql_context import SqlContext
@@ -66,11 +67,11 @@ class SqliteJsonRenderers(JsonRenderers):
         JSON text, except a number, which stays an SQL number so it compares and orders
         numerically."""
         column_sql = criterion.json_column.get_sql(sql_context)
-        if any(isinstance(part, int) for part in criterion.path):
+        if cls.needs_path_function(criterion.path):
             return cls.get_json_path_function_sql(
                 column_sql, criterion.path, "text" if criterion.as_text else "json", sql_context
             )
-        path_sql = cls.get_json_native_path_sql(criterion.path)
+        path_sql = cls.get_json_native_path_sql(criterion.path, sql_context)
         extract_sql = f"json_extract({column_sql}, {path_sql})"
         if criterion.as_text:
             return extract_sql
@@ -82,14 +83,21 @@ class SqliteJsonRenderers(JsonRenderers):
     @classmethod
     def render_json_type(cls, criterion: SqliteJsonTypeCriterion, sql_context: SqlContext) -> str:
         column_sql = criterion.json_column.get_sql(sql_context)
-        if any(isinstance(part, int) for part in criterion.path):
+        if cls.needs_path_function(criterion.path):
             return cls.get_json_path_function_sql(column_sql, criterion.path, "type", sql_context)
-        return f"json_type({column_sql}, {cls.get_json_native_path_sql(criterion.path)})"
+        return f"json_type({column_sql}, {cls.get_json_native_path_sql(criterion.path, sql_context)})"
+
+    @staticmethod
+    def needs_path_function(path: list[str | int]) -> bool:
+        """Paths that need dynamic indexing or labels the supported SQLite versions cannot quote."""
+        return any(part == "" or JsonFilterParser.is_index_segment(part) or '"' in str(part) for part in path)
 
     @staticmethod
     def get_json_path_function_sql(column_sql: str, path: list[str | int], mode: str, sql_context: SqlContext) -> str:
-        """A path with a digit segment, walked by hare's function - a digit segment is an object's
-        key or an array's index, whichever the value at that point is, which no SQLite JSON path says.
+        """A path walked by hare's function when native JSON path syntax cannot express it.
+
+        A digit segment is an object's key or an array's index, whichever the value at that
+        point is. Empty labels and labels containing a quote also retain their exact spelling.
 
         Args:
             column_sql: The JSON column.
@@ -100,12 +108,12 @@ class SqliteJsonRenderers(JsonRenderers):
         Raises:
             ValidationError: The path contains a null byte.
         """
-        path_sql = SqliteJsonRenderers.get_json_path_array_sql(path)
+        path_sql = SqliteJsonRenderers.get_json_path_array_sql(path, sql_context)
         name = sql_context.note_connection_function(SQLITE_JSON_PATH_FUNCTION_NAME)
         return f"{name}({column_sql}, {path_sql}, '{mode}')"
 
     @staticmethod
-    def get_json_path_array_sql(path: list[str | int]) -> str:
+    def get_json_path_array_sql(path: list[str | int], sql_context: SqlContext) -> str:
         """The literal of a path as the JSON array of its keys and indices hare's functions walk.
 
         Raises:
@@ -114,15 +122,10 @@ class SqliteJsonRenderers(JsonRenderers):
         path_json = json.dumps(path, ensure_ascii=False)
         if SQL_NULL_BYTE in path_json:
             raise ValidationError(SQL_NULL_BYTE_MESSAGE.format(text=path_json))
-        return SqliteJsonRenderers.get_json_path_literal(path_json)
+        return sql_context.dialect.literals.get_string_literal_sql(path_json)
 
     @staticmethod
-    def get_json_path_literal(path_text: str) -> str:
-        """The SQL string literal of a SQLite JSON path."""
-        return "'" + path_text.replace("'", "''") + "'"
-
-    @staticmethod
-    def get_json_native_path_sql(path: list[str | int]) -> str:
+    def get_json_native_path_sql(path: list[str | int], sql_context: SqlContext) -> str:
         """The literal of a SQLite JSON path of object keys - each key double-quoted, so a key with
         a dot in its name isn't read as two nested keys.
 
@@ -135,4 +138,4 @@ class SqliteJsonRenderers(JsonRenderers):
                 raise ValidationError(SQL_NULL_BYTE_MESSAGE.format(text=part))
             escaped = str(part).replace("\\", "\\\\").replace('"', '\\"')
             segments.append(f'."{escaped}"')
-        return SqliteJsonRenderers.get_json_path_literal("$" + "".join(segments))
+        return sql_context.dialect.literals.get_string_literal_sql("$" + "".join(segments))

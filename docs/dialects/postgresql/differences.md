@@ -47,7 +47,7 @@ What an older server does itself, hare leaves to it:
 
 | PostgreSQL | hare |
 |---|---|
-| Extensions for vectors, geodata, trigrams and some types | `Meta.extensions` declares them, and the migration autodetector writes `CreateExtension` for each — see [Extensions](../../migrations/operations.md#extensions). |
+| Extensions for vectors, geodata, trigrams and some types | Field, index and constraint declarations supply their extension requirements automatically. `Meta.extensions` adds requirements for raw SQL or other opaque declarations; the migration autodetector writes `CreateExtension` — see [Extensions](../../migrations/operations.md#extensions). |
 | Partitioned tables, index types | See [Indexes and tables](indexes-and-tables.md). |
 | Schemas | `Meta.schema`, a schema per tenant and row level security work as written — see [Schema per tenant](../../soft-delete-versions-tenants/schema-per-tenant.md). |
 

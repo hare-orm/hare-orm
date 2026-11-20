@@ -13,6 +13,9 @@ class Collate(Function):
     function call, CASE, COALESCE), not just into the comparison it's written in.
     """
 
+    structure_attributes = ("collation", "names_collation")
+    has_repeatable_value = True
+
     def __init__(self, term: Any, collation: str, alias: str | None = None, *, names_collation: bool = False) -> None:
         """
         Args:

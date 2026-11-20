@@ -17,10 +17,7 @@ from tests.utils.operations import apply_operations
 
 
 def _get_schema_editor(conn):
-    """Get the correct backend-specific SchemaEditor for the given connection.
-
-    Mirrors the factory logic in test_operations_real_db.py / MigrationExecutor._schema_editor().
-    """
+    """Build an executing schema editor for the connection's dialect."""
     return conn.dialect.schema_editor_class(conn, atomic=True, collect_sql=False)
 
 
@@ -48,7 +45,7 @@ async def test_backfill_column_runs_multiple_bounded_batches(db_simple):
     tbl = q("test_backfill_batches")
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         for row_id in range(1, 6):
             await conn.execute_script(f"INSERT INTO {tbl} ({q('id')}) VALUES ({row_id})")
@@ -89,7 +86,7 @@ async def test_backfill_column_with_callable_value(db_simple):
     tbl = q("test_backfill_callable")
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         await conn.execute_script(f"INSERT INTO {tbl} ({q('id')}) VALUES (1)")
         await conn.execute_script(f"INSERT INTO {tbl} ({q('id')}) VALUES (2)")
 
@@ -129,7 +126,7 @@ async def test_backfill_column_with_none_value_terminates(db_simple):
     tbl = q("test_backfill_none_value")
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         for row_id in range(1, 6):
             await conn.execute_script(f"INSERT INTO {tbl} ({q('id')}) VALUES ({row_id})")
         await conn.execute_script(f"UPDATE {tbl} SET {q('status')} = 'kept' WHERE {q('id')} = 5")
@@ -175,7 +172,7 @@ async def test_alter_column_not_null_safe_raises_configuration_error_when_nulls_
     tbl = q("test_notnull_raises")
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         await conn.execute_script(f"INSERT INTO {tbl} ({q('id')}) VALUES (1)")
 
         alter_op = AlterColumnNotNullSafe(model_name="Config", field_name="value")
@@ -214,7 +211,7 @@ async def test_alter_column_not_null_safe_locks_table_on_postgres_inside_transac
     tbl = q("test_notnull_locks_table")
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         await conn.execute_script(f"INSERT INTO {tbl} ({q('id')}, {q('value')}) VALUES (1, 'present')")
 
         alter_op = AlterColumnNotNullSafe(model_name="Config", field_name="value")
@@ -253,12 +250,12 @@ async def test_alter_column_not_null_safe_succeeds_once_backfilled(db_simple):
     tbl = q("test_notnull_succeeds")
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         await conn.execute_script(f"INSERT INTO {tbl} ({q('id')}) VALUES (1)")
         await conn.execute_script(f"INSERT INTO {tbl} ({q('id')}, {q('value')}) VALUES (2, 'present')")
 
         backfill_op = BackfillColumn(model_name="Config", field_name="value", value="default", batch_size=10)
-        await apply_operations("models", state, backfill_op, schema_editor=editor)
+        state = await apply_operations("models", state, backfill_op, schema_editor=editor)
 
         alter_op = AlterColumnNotNullSafe(model_name="Config", field_name="value")
         await apply_operations("models", state, alter_op, schema_editor=editor)
@@ -325,13 +322,13 @@ async def test_backfill_column_accepts_a_foreign_key_relation_name(db_simple):
     )
 
     try:
-        await apply_operations("models", state, create_author, schema_editor=editor)
-        await apply_operations("models", state, create_book, schema_editor=editor)
+        state = await apply_operations("models", state, create_author, schema_editor=editor)
+        state = await apply_operations("models", state, create_book, schema_editor=editor)
         await conn.execute_script(f"INSERT INTO {author_table} ({q('id')}) VALUES (7)")
         await conn.execute_script(f"INSERT INTO {book_table} ({q('id')}) VALUES (1)")
         await conn.execute_script(f"INSERT INTO {book_table} ({q('id')}) VALUES (2)")
 
-        await apply_operations(
+        state = await apply_operations(
             "models",
             state,
             BackfillColumn(model_name="BackfillBook", field_name="author", value=7),
@@ -383,7 +380,7 @@ async def test_backfill_column_without_a_single_key_column(db_simple, key_fields
     )
     state = State()
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         for tenant in (1, 2):
             for number in (1, 2, 3):
                 await conn.execute_script(
@@ -403,9 +400,10 @@ def test_backfill_of_a_model_without_a_key_needs_a_name_of_a_row():
     without a primary key in batches - it couldn't pick a batch's rows."""
     from types import SimpleNamespace
 
+    from hare.core.apps.model_binding_graph import ModelBindingGraph
     from hare.dialects.base.schema.columns.column_backfill import ColumnBackfill
     from tests.model_setup.primary_keys.primary_keyless_models import VisitNote
 
     editor = SimpleNamespace(client=SimpleNamespace(dialect="third_party"), quote=lambda name: f'"{name}"')
     with pytest.raises(ConfigurationError, match=r"VisitNote\.text in batches - the model has no primary key"):
-        ColumnBackfill(editor).get_backfill_key_sql(VisitNote, "text")
+        ColumnBackfill(editor).get_backfill_key_sql(ModelBindingGraph().include(VisitNote), "text")

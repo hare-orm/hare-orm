@@ -1,4 +1,4 @@
-use crate::asyncio::completion::future_into_py;
+use crate::asyncio::future_into_py;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 

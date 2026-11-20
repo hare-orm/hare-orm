@@ -102,7 +102,7 @@ def test_two_fields_naming_one_type_with_other_labels_are_refused():
 
     first = NativeEnumField(OrderStatus)
     second = NativeEnumField(Other, type_name="order_status")
-    models = [type("FakeModel", (), {"_meta": type("Meta", (), {"fields_map": {"a": first, "b": second}})()})]
+    models = [type("FakeModel", (), {"fields_map": {"a": first, "b": second}})]
     with pytest.raises(ConfigurationError, match="Two fields name the ENUM type 'order_status' with different labels"):
         BaseSchemaEditor.enum_types_class.get_required_enum_types(models)
 
@@ -129,7 +129,7 @@ def test_same_named_types_of_two_schemas_are_two_types():
 
     first = NativeEnumField(OrderStatus)
     second = NativeEnumField(Other, type_name="order_status", type_schema="paint")
-    models = [type("FakeModel", (), {"_meta": type("Meta", (), {"fields_map": {"a": first, "b": second}})()})]
+    models = [type("FakeModel", (), {"fields_map": {"a": first, "b": second}})]
     assert BaseSchemaEditor.enum_types_class.get_required_enum_types(models) == [
         EnumType("order_status", ("new", "paid", "shipped")),
         EnumType("order_status", ("new",), "paint"),

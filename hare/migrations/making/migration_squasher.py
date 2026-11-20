@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 from hare.exceptions import ConfigurationError
 from hare.migrations.constants import MIGRATION_NUMBER_RE
-from hare.migrations.exceptions import UnknownMigrationError
 from hare.migrations.loading.graph.migration_key import MigrationKey
+from hare.migrations.loading.migration_definitions import MigrationDefinitions
 from hare.migrations.loading.migration_loader import MigrationLoader
 from hare.migrations.loading.recorder.noop_recorder import NoopRecorder
 from hare.migrations.making.migration_optimizer import MigrationOptimizer
 from hare.migrations.making.squashed_migration import SquashedMigration
 from hare.migrations.migration import Migration
 from hare.migrations.operations.operation import Operation
+from hare.migrations.state.migration_environment import MigrationEnvironment
 from hare.migrations.writer.migration_writer import MigrationWriter
 
 
@@ -21,12 +22,22 @@ class MigrationSquasher:
     names what it replaces in ``replaces`` - the loader then puts it in their place where none or
     all of them are applied, and leaves it out until all are."""
 
-    def __init__(self, apps_config: dict[str, dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        apps_config: dict[str, dict[str, Any]],
+        *,
+        definitions: MigrationDefinitions | None = None,
+        environment: MigrationEnvironment | None = None,
+    ) -> None:
         """
         Args:
             apps_config: Every configured app, with its migrations module.
+            definitions: Shared migration declarations, or None to read their modules.
+            environment: Captured application inputs, or None to capture them now.
         """
         self.apps_config = apps_config
+        self.definitions = definitions
+        self.environment = environment if environment is not None else MigrationEnvironment.capture()
 
     async def squash(
         self, app_label: str, end_name: str, *, start_name: str | None = None, squashed_name: str | None = None
@@ -45,61 +56,78 @@ class MigrationSquasher:
             migration.
 
         Raises:
-            ConfigurationError: An unknown app or migration, a start after the end, a new name one
+            ConfigurationError: An unknown app, a start after the end, a new name one
                 of the app's migrations already has, or a range one migration can't replace - see
                 ``raise_if_squash_makes_cycle()``.
+            UnknownMigrationError: No migration matches the name, or its prefix is ambiguous.
         """
         if app_label not in self.apps_config:
             raise ConfigurationError(f"Unknown app label: {app_label}")
-        loader = MigrationLoader(self.apps_config, NoopRecorder())
+        loader = MigrationLoader(self.apps_config, NoopRecorder(), definitions=self.definitions)
         await loader.build_graph()
-        end_key = self.get_migration_key(loader, app_label, end_name)
-        plan = [key for key in loader.graph.forwards_plan(end_key) if key.app_label == app_label]
+        end_key = loader.graph.get_migration_key(app_label, end_name)
+        full_plan = loader.graph.forwards_plan(end_key)
+        plan = [key for key in full_plan if key.app_label == app_label]
         if start_name is not None:
-            start_key = self.get_migration_key(loader, app_label, start_name)
+            start_key = loader.graph.get_migration_key(app_label, start_name)
             if start_key not in plan:
                 raise ConfigurationError(f"{start_key} doesn't come before {end_key} - nothing to squash between them")
             plan = plan[plan.index(start_key) :]
         if len(plan) == 1:
             return SquashedMigration(writer=None, replaced_names=[plan[0].name])
 
-        migrations = [cast("Migration", loader.graph.nodes[key]) for key in plan]
+        migrations = [loader.graph.node_map[key].migration for key in plan]
         replaced: list[tuple[str, str]] = []
+        replacement_aliases: list[tuple[str, str]] = []
         for key, migration in zip(plan, migrations, strict=True):
-            replaced.extend(migration.replaces or [(key.app_label, key.name)])
-        replaced_keys = {MigrationKey(app_label=label, name=name) for label, name in replaced} | set(plan)
+            replaced.extend(migration.replaces or [(key.app_label, key.name)])  # type: ignore[union-attr]
+            if migration is not None and migration.replaces:
+                replacement_aliases.extend([(key.app_label, key.name), *migration.replacement_aliases])
+        replacement_aliases = list(dict.fromkeys(replacement_aliases))
+        squashed_keys = set(plan)
+        replaced_keys = {
+            MigrationKey(app_label=label, name=name) for label, name in [*replaced, *replacement_aliases]
+        } | squashed_keys
         operations: list[Operation] = []
         elided_operation_count = 0
         dependencies: list[Any] = []
         run_before: list[tuple[str, str]] = []
         for migration in migrations:
-            for operation in migration.operations:
+            for operation in migration.operations:  # type: ignore[union-attr]
                 if getattr(operation, "elidable", False):
                     elided_operation_count += 1
                     continue
                 operations.append(operation)
-            for dependency in migration.dependencies:
+            for dependency in migration.dependencies:  # type: ignore[union-attr]
                 dependency_key = MigrationKey(app_label=dependency[0], name=dependency[1])
                 if dependency_key in replaced_keys:
                     continue
-                self.raise_if_squash_makes_cycle(loader, migration, dependency_key, set(plan))
+                self.raise_if_squash_makes_cycle(loader, migration, dependency_key, squashed_keys)
                 if dependency not in dependencies:
                     dependencies.append(dependency)
-            for successor in migration.run_before:
+            for successor in migration.run_before:  # type: ignore[union-attr]
                 if (
                     MigrationKey(app_label=successor[0], name=successor[1]) not in replaced_keys
                     and successor not in run_before
                 ):
                     run_before.append(successor)
 
+        state_before = loader.create_initial_state(self.environment)
+        for key in full_plan:
+            if key not in squashed_keys:
+                self.raise_if_squash_makes_cycle(loader, migrations[-1], key, squashed_keys)
+                predecessor: Migration = loader.graph.node_map[key].migration  # type: ignore[assignment]
+                state_before = predecessor.prepare(state_before).after
+
         name = self.get_squashed_name(loader, plan, squashed_name)
         writer = MigrationWriter(
             name,
             app_label,
-            MigrationOptimizer(app_label).optimize(operations),
+            MigrationOptimizer(app_label).optimize(operations, state_before),
             dependencies=dependencies,
             run_before=run_before,
             replaces=replaced,
+            replacement_aliases=replacement_aliases,
             initial=not any(dependency[0] == app_label for dependency in dependencies),
             migrations_module=self.apps_config[app_label]["migrations"],
             atomic=all(migration.atomic for migration in migrations if isinstance(migration, Migration)),
@@ -128,7 +156,7 @@ class MigrationSquasher:
         Raises:
             ConfigurationError: The dependency depends on a migration of the range.
         """
-        if dependency_key not in loader.graph.nodes:
+        if dependency_key not in loader.graph.node_map:
             return
         needed_squashed_keys = [key for key in loader.graph.forwards_plan(dependency_key) if key in squashed_keys]
         if needed_squashed_keys:
@@ -138,34 +166,6 @@ class MigrationSquasher:
                 f"which depends on {last_needed_key.app_label}.{last_needed_key.name} - one migration can't replace "
                 f"both. Squash up to {last_needed_key.name} and the migrations after it apart"
             )
-
-    @staticmethod
-    def get_migration_key(loader: MigrationLoader, app_label: str, name: str) -> MigrationKey:
-        """The migration of an app named, or named by a unique prefix.
-
-        Args:
-            loader: The loaded migrations.
-            app_label: The app.
-            name: The name or a prefix of it.
-
-        Returns:
-            The migration's key.
-
-        Raises:
-            UnknownMigrationError: No migration or more than one has the name.
-        """
-        exact_key = MigrationKey(app_label=app_label, name=name)
-        if exact_key in loader.graph.nodes:
-            return exact_key
-        matching_keys = [key for key in loader.graph.nodes if key.app_label == app_label and key.name.startswith(name)]
-        if len(matching_keys) == 1:
-            return matching_keys[0]
-        if not matching_keys:
-            raise UnknownMigrationError(f"No migration of {app_label!r} is named {name!r}")
-        raise UnknownMigrationError(
-            f"More than one migration of {app_label!r} starts with {name!r}: "
-            f"{', '.join(sorted(key.name for key in matching_keys))}"
-        )
 
     @staticmethod
     def get_squashed_name(loader: MigrationLoader, plan: list[MigrationKey], squashed_name: str | None) -> str:

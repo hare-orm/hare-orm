@@ -11,15 +11,15 @@
   <a href="https://github.com/hare-orm/hare-orm/actions/workflows/ci.yml"><img src="https://github.com/hare-orm/hare-orm/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://hare-orm.github.io/hare-orm/"><img src="https://img.shields.io/badge/docs-hare--orm.github.io%2Fhare--orm-blue" alt="Docs"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
-  <a href="pyproject.toml"><img src="https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14-blue.svg" alt="Python 3.12, 3.13, 3.14"></a>
+  <a href="pyproject.toml"><img src="https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14%20%7C%203.15-blue.svg" alt="Python 3.12, 3.13, 3.14, 3.15"></a>
 </p>
 
 An async Python ORM for PostgreSQL, SQLite and ClickHouse, built with relations in mind. Models are
 plain classes, queries are built lazily through a `QuerySet`, and migrations are generated from the
 changes to the models. Coming from Django? See [Coming from Django](https://hare-orm.github.io/hare-orm/getting-started/coming-from-django/).
 
-- **Fast.** A Rust PostgreSQL driver decodes rows and converts values outside Python, and every
-  query shape is built once: a repeated query only binds its new values — see
+- **Fast.** A Rust PostgreSQL driver decodes rows and converts values outside Python. Plans for
+  supported query shapes are cached: repeated executions bind new values while the plan remains cached — see
   [Benchmarks](#benchmarks).
 - **Relations done right.** Composite primary keys everywhere — as foreign-key targets too — generic
   relations made of real foreign keys, `select_related()`/`prefetch_related()` with filters, recursive
@@ -29,12 +29,13 @@ changes to the models. Coming from Django? See [Coming from Django](https://hare
   materialized views, functions, sequences, row level security policies, grants and partitioning
   live in the model's `Meta` and are created and changed by migrations — see
   [The schema in `Meta`](https://hare-orm.github.io/hare-orm/#schema-in-meta).
-- **Application patterns built in.** Soft delete, versioned rows, multi-tenancy (by column, by
+- **Application patterns built in.** Soft delete, multi-tenancy (by column, by
   schema or by row level security), optimistic locking, dirty-field tracking and a transactional
-  outbox are `Meta` options — see [Behavior declared in `Meta`](https://hare-orm.github.io/hare-orm/#behavior-in-meta).
-- **Migrations you can trust.** Detected from the models, checked for operations that lock a busy
-  table, compared with the live database (`hare drift`), and generated from an existing database
-  (`hare inspectdb`) — see [Migrations](https://hare-orm.github.io/hare-orm/#migrations).
+  outbox are `Meta` options; versioned rows use `VersionedModel` — see
+  [Behavior declared in `Meta`](https://hare-orm.github.io/hare-orm/#behavior-in-meta).
+- **Migrations you can trust.** Generated from models and checked for operations that lock a busy
+  table. `hare drift` compares the schema with the live database; `hare inspectdb` reconstructs
+  models from an existing database — see [Migrations](https://hare-orm.github.io/hare-orm/#migrations).
 - **Every database on its own terms.** SQLite, PostgreSQL and ClickHouse are dialects built on the
   public API a third-party package uses; PostgreSQL's types, indexes, PostGIS, pgvector, full-text
   search and `LISTEN`/`NOTIFY` come with it, and a database lacking a feature raises a clear error
@@ -69,11 +70,9 @@ pip install hare-orm
 from hare import fields
 from hare.models import Model
 
-
 class Author(Model):
     id = fields.IntField(primary_key=True)
     name = fields.CharField(max_length=120)
-
 
 class Book(Model):
     id = fields.IntField(primary_key=True)
@@ -89,19 +88,18 @@ import asyncio
 from hare import Hare, HareConfig
 from library.models import Author, Book
 
-
 async def main() -> None:
     await Hare.init(HareConfig.from_db_url("sqlite+aiosqlite://db.sqlite3", {"models": ["library.models"]}))
-    await Hare.generate_schemas()
+    try:
+        await Hare.generate_schemas()
 
-    author = await Author.objects.create(name="Ursula K. Le Guin")
-    await Book.objects.create(author=author, title="The Left Hand of Darkness", rating=5)
+        author = await Author.objects.create(name="Ursula K. Le Guin")
+        await Book.objects.create(author=author, title="The Left Hand of Darkness", rating=5)
 
-    async for book in Book.objects.filter(author__name__icontains="le guin").select_related("author"):
-        print(book.title, "—", book.author.name)
-
-    await Hare.close_connections()
-
+        async for book in Book.objects.filter(author__name__icontains="le guin").select_related("author"):
+            print(book.title, "—", book.author.name)
+    finally:
+        await Hare.close_connections()
 
 asyncio.run(main())
 ```
@@ -115,7 +113,7 @@ A real project keeps its schema in migrations instead of `generate_schemas()`:
 ```bash
 pip install hare-orm
 
-pip install hare-orm[asyncpg]        # the pure-Python PostgreSQL driver, instead of the Rust one
+pip install hare-orm[asyncpg]        # PostgreSQL through asyncpg
 pip install hare-orm[clickhouse-connect]  # the ClickHouse dialect over HTTP (clickhouse-connect)
 pip install hare-orm[clickhouse-driver]   # the ClickHouse dialect over the native TCP protocol (clickhouse-driver)
 pip install hare-orm[sqlite-vec]     # vector search on SQLite
@@ -130,7 +128,7 @@ pip install hare-orm[ipython]        # `hare shell` with IPython
 
 Every extra is listed under
 [Installation](https://hare-orm.github.io/hare-orm/getting-started/installation/). Requires Python
-3.12, 3.13 or 3.14.
+3.12, 3.13, 3.14 or 3.15.
 
 ## Benchmarks
 
@@ -193,16 +191,20 @@ latest release.
 | Component | Supported |
 | --- | --- |
 | hare-orm | The latest minor release; fixes ship as its patch releases |
-| Python | CPython 3.12, 3.13, 3.14 |
+| Python | CPython 3.12, 3.13, 3.14, 3.15 |
 | SQLite | 3.35.5+ |
 | PostgreSQL | 14+ |
 | PgBouncer | 1.22.1+ |
 | ClickHouse | 25.8+ |
 | Redis, RabbitMQ, Kafka (outbox) | 7.2+, 4.0+, 3.9+ |
 
-Full support is promised on Linux only: the databases are tested there. On Windows and macOS hare
-installs and runs for development — the wheels, the CLI and the tests reading no database are
-checked on all three systems.
+Python 3.15 supports the core and compatible integrations. Robyn 0.88 and ClickHouse TCP
+(`clickhouse-driver`) need Python 3.12–3.14; use HTTP (`clickhouse-connect`) for ClickHouse
+on 3.15. See [Installation](docs/getting-started/installation.md).
+
+The full database matrix runs on Linux. hare comes as wheels with its Rust extension for Linux (glibc
+and musl), macOS and Windows, on x86-64 and ARM64. The Rust PostgreSQL driver runs on Linux and macOS;
+for PostgreSQL on Windows, install the `asyncpg` extra and use `postgresql+asyncpg://`.
 
 Dropping a Python or database version is a breaking change and is announced in the changelog.
 Security fixes follow [SECURITY.md](SECURITY.md).

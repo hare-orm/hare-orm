@@ -2,7 +2,6 @@
 adds the field, sets the new key and removes the old field after it - it set the key before the field it
 names existed."""
 
-import os
 import textwrap
 
 import pytest
@@ -11,6 +10,8 @@ from tests.utils.cli_project_factory import project_factory  # noqa: F401
 
 MODELS = """
 from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
+from hare.dialects.clickhouse.clickhouse_engine import ClickhouseEngine
+from hare.query.expressions import F
 
 
 class Hit(Model):
@@ -20,20 +21,17 @@ class Hit(Model):
     class Meta:
         table_options = [
             ClickhouseTableOptions(
-                engine={engine!r}, order_by=("id", {field!r}), partition_by={field!r}, sample_by=None
+                engine={engine}, order_by=("id", {field!r}), partition_by={field!r}, sample_by=None
             )
         ]
 """
 
 
-def get_models(field: str, engine: str = "MergeTree") -> str:
+def get_models(field: str, engine: str = "'MergeTree'") -> str:
     return textwrap.dedent(MODELS).format(field=field, engine=engine)
 
 
-@pytest.fixture(autouse=True)
-def skip_without_clickhouse():
-    if not os.getenv("HARE_TEST_DB", "").startswith("clickhouse"):
-        pytest.skip("runs against the ClickHouse test server - make test_clickhouse")
+pytestmark = pytest.mark.usefixtures("skip_without_clickhouse")
 
 
 @pytest.mark.asyncio
@@ -44,7 +42,7 @@ async def test_a_key_moved_to_an_added_field_is_set_after_it(project_factory) ->
     await project.cli_ok("migrate")
     await project.query("INSERT INTO hit (id, x) VALUES (1, 4), (2, 5)")
 
-    project.write_models(get_models("y", "ReplacingMergeTree(y)"))
+    project.write_models(get_models("y", 'ClickhouseEngine("ReplacingMergeTree", F("y"))'))
     await project.cli_ok("makemigrations")
     await project.cli_ok("migrate")
     await project.assert_in_sync()

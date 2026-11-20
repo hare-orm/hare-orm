@@ -10,6 +10,7 @@ import pytest
 
 from hare import fields
 from hare.contrib.test.isolated_contexts import hare_test_context
+from hare.core.apps.model_binding_graph import ModelBindingGraph
 from hare.ddl.constraints import UniqueConstraint
 from hare.ddl.indexes import Index
 from hare.models import Model
@@ -19,10 +20,13 @@ from tests.model_setup.abstract_inheritance.tuple_indexes import (
     TupleIndexPlain,
     TupleIndexRenamedColumn,
 )
+from tests.utils.model_bindings import ModelBindings
 
 
 @pytest.mark.database_independent
 def test_abstract_meta_attr_inherited_through_multi_level_chain():
+    declaration_graph = ModelBindingGraph()
+
     class GrandParent(Model):
         class Meta:
             abstract = True
@@ -37,7 +41,7 @@ def test_abstract_meta_attr_inherited_through_multi_level_chain():
     class Child(Parent):
         pass
 
-    assert Child._meta.db_table == "from_grandparent"
+    assert declaration_graph.include(Child).db_table == "from_grandparent"
 
 
 @pytest.mark.database_independent
@@ -46,6 +50,8 @@ def test_concrete_ancestors_meta_table_is_not_inherited():
     CONCRETE (non-abstract) model with no Meta of its own used to still walk its full MRO and
     merge in the concrete ancestor's own Meta.table/schema, silently mapping two unrelated
     models onto the identical physical table."""
+
+    declaration_graph = ModelBindingGraph()
 
     class ConcreteBase(Model):
         class Meta:
@@ -56,8 +62,8 @@ def test_concrete_ancestors_meta_table_is_not_inherited():
     class ConcreteChild(ConcreteBase):
         extra = fields.CharField(max_length=10, null=True)
 
-    assert ConcreteChild._meta.db_table != "from_concrete_base"
-    assert ConcreteBase._meta.db_table == "from_concrete_base"
+    assert declaration_graph.include(ConcreteChild).db_table != "from_concrete_base"
+    assert declaration_graph.include(ConcreteBase).db_table == "from_concrete_base"
 
 
 @pytest.mark.database_independent
@@ -65,6 +71,8 @@ def test_a_concrete_model_with_the_meta_of_an_abstract_one_hands_none_of_it_down
     """A concrete model's ``class Meta(Base.Meta)`` inherited ``abstract = True`` from the abstract
     model's - a model subclassing the concrete one took its constraints, indexes and ordering, two
     tables then declaring constraints of one name."""
+
+    declaration_graph = ModelBindingGraph()
 
     class AbstractBase(Model):
         level = fields.IntField(default=0)
@@ -87,25 +95,20 @@ def test_a_concrete_model_with_the_meta_of_an_abstract_one_hands_none_of_it_down
     class ConcreteChild(ConcreteParent):
         extra = fields.IntField(null=True)
 
-    assert not ConcreteParent._meta.abstract
-    assert not PlainParent._meta.abstract
-    assert [index.name for index in ConcreteParent._meta.indexes] == ["concrete_parent_level"]
-    assert list(ConcreteChild._meta.indexes) == []
-    assert list(ConcreteChild._meta.constraints) == []
+    assert not declaration_graph.include(ConcreteParent).abstract
+    assert not declaration_graph.include(PlainParent).abstract
+    assert [index.name for index in declaration_graph.include(ConcreteParent).indexes] == ["concrete_parent_level"]
+    assert list(declaration_graph.include(ConcreteChild).indexes) == []
+    assert list(declaration_graph.include(ConcreteChild).constraints) == []
     # The abstract model's ordering still reaches it.
-    assert [field for field, __ in ConcreteChild._meta.ordering] == ["level"]
+    assert [field for field, __ in declaration_graph.include(ConcreteChild).ordering] == ["level"]
 
 
 @pytest.mark.database_independent
 def test_abstract_meta_indexes_not_aliased_across_sibling_concrete_models():
-    """Every attribute value inherited from an abstract ancestor's Meta used to be copied by
-    bare REFERENCE, not value - harmless for immutable content, but an Index(...) entry in
-    Meta.indexes is a plain mutable object whose own get_expressions() permanently memoizes its
-    resolved SQL terms against whichever model calls it FIRST (Index._expressions_compiled).
-    Two sibling concrete models sharing the identical Index object out of an inherited abstract
-    Meta.indexes used to mean the SECOND sibling's own DDL silently kept referencing the FIRST
-    sibling's own table/columns forever - confirmed live to generate a UNIQUE index referencing
-    a column that doesn't even exist on the second sibling's real table."""
+    """Sibling models keep separate index declarations and use their own physical columns."""
+
+    declaration_graph = ModelBindingGraph()
 
     class AbstractBase(Model):
         id = fields.IntField(primary_key=True)
@@ -123,22 +126,27 @@ def test_abstract_meta_indexes_not_aliased_across_sibling_concrete_models():
         class Meta:
             table = "sibling_two"
 
-    assert SiblingOne._meta.indexes[0] is not SiblingTwo._meta.indexes[0]
+    assert declaration_graph.include(SiblingOne).indexes[0] is not declaration_graph.include(SiblingTwo).indexes[0]
 
 
 @pytest.mark.database_independent
 def test_abstract_meta_tuple_indexes_and_constraints_not_aliased():
+    apps = ModelBindings.prepare(TupleIndexPlain, TupleIndexRenamedColumn)
     """An abstract base declaring Meta.indexes as a tuple (not a list) got no copy, so sibling
     concrete models shared the same Index objects."""
-    assert TupleIndexPlain._meta.indexes[0] is not TupleIndexRenamedColumn._meta.indexes[0]
-    assert TupleIndexPlain._meta.constraints[0] is not TupleIndexRenamedColumn._meta.constraints[0]
-    assert TupleIndexPlain._meta.constraints == TupleIndexRenamedColumn._meta.constraints
+    assert apps.get_binding(TupleIndexPlain).indexes[0] is not apps.get_binding(TupleIndexRenamedColumn).indexes[0]
+    assert (
+        apps.get_binding(TupleIndexPlain).constraints[0]
+        is not apps.get_binding(TupleIndexRenamedColumn).constraints[0]
+    )
+    assert apps.get_binding(TupleIndexPlain).constraints == apps.get_binding(TupleIndexRenamedColumn).constraints
 
 
 @pytest.mark.database_independent
 def test_abstract_meta_indexes_reached_through_diamond_kept_once():
-    assert len(TupleIndexDiamond._meta.indexes) == 1
-    assert len(TupleIndexDiamond._meta.constraints) == 1
+    apps = ModelBindings.prepare(TupleIndexDiamond)
+    assert len(apps.get_binding(TupleIndexDiamond).indexes) == 1
+    assert len(apps.get_binding(TupleIndexDiamond).constraints) == 1
 
 
 @pytest.mark.asyncio

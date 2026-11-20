@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from taskiq.kicker import AsyncKicker
 
@@ -17,6 +17,7 @@ from hare.contrib.taskiq.constants import (
     OUTBOX_TASK_NAME_KEY,
 )
 from hare.contrib.taskiq.hare_taskiq_middleware import HareTaskiqMiddleware
+from hare.contrib.taskiq.task_tenant_labels import TaskTenantLabels
 from hare.core.hare_context import HareContext
 
 if TYPE_CHECKING:
@@ -75,8 +76,8 @@ class TaskiqDelivery(OutboxDelivery, Generic[TOutboxEvent]):
             ConfigurationError: The label names no model of the current context.
         """
         if self._model is None:
-            self._model = cast("type[TOutboxEvent]", HareContext.require_current().get_model(self.model_reference))
-        return self._model
+            self._model = HareContext.require_current().get_model(self.model_reference)  # type: ignore[assignment]
+        return self._model  # type: ignore[return-value]
 
     async def kiq_on_commit(
         self,
@@ -115,15 +116,17 @@ class TaskiqDelivery(OutboxDelivery, Generic[TOutboxEvent]):
         kicker: AsyncKicker[Any, Any] = AsyncKicker(
             task_name=payload[OUTBOX_TASK_NAME_KEY], broker=self.broker, labels=dict(payload[OUTBOX_LABELS_KEY])
         )
-        await kicker.kiq(*payload[OUTBOX_ARGS_KEY], **payload[OUTBOX_KWARGS_KEY])
+        with TaskTenantLabels.sending(self.broker, payload[OUTBOX_LABELS_KEY]):
+            await kicker.kiq(*payload[OUTBOX_ARGS_KEY], **payload[OUTBOX_KWARGS_KEY])
 
     def get_relay(self, **relay_options: Any) -> OutboxRelay[TOutboxEvent]:
         """The relay sending the tasks - run it with ``async with``, or ``start()``/``stop()``.
 
         Args:
-            relay_options: ``OutboxRelay`` options.
+            relay_options: ``OutboxRelay`` options. ``using`` defaults to this delivery's connection.
 
         Returns:
             The relay, delivering only this delivery's topic, woken by its wakeup.
         """
+        relay_options.setdefault("using", self.using)
         return OutboxRelay(self.model_reference, self, topics=[self.topic], wakeup=self.wakeup, **relay_options)

@@ -4,6 +4,12 @@ Fields whose values the database stores encrypted (`EncryptedTextField`, `Encryp
 index that lets one be filtered by equality, and `sensitive=True` — the mark keeping a field's value out
 of schemas, errors and logs.
 
+Field-aware diagnostics also hide sensitive primary-key components in `Model[key]`, relation
+assignment conflicts, and tenant mismatch messages. A malformed composite key is hidden entirely
+when any component is sensitive. Schema conversion diagnostics protect a stored value if either
+the old or the new field marks it sensitive. Blind-index comparisons apply the plaintext field
+validators before computing the index.
+
 ## <a id="encrypted-fields"></a>Encrypted fields
 
 ```python
@@ -18,15 +24,23 @@ class Integration(Model):
     answers = fields.EncryptedJSONField(null=True, encrypt_keys=True)  # keys are secret too
 ```
 
-The keys are configured once per process:
+Each application has its own immutable keyring. `configure(..., context=application)` targets a
+specific `HareContext`; without `context`, it configures the active application. When no application
+is active, it sets the default captured by subsequently created contexts. Changing one application
+does not reconfigure existing others. Queries, iterator pages and complete field conversions keep
+the keyring they started with; newly started executions use the replacement.
+
+Key rotation reads and writes through the same selected connection and keeps one keyring for
+all batches. Pass `using=` to select a connection explicitly; otherwise the model’s write
+connection is used. `reset(context=...)` clears that application’s configuration:
 
 ```python
 class FieldEncryption:  # hare.fields.encrypted.field_encryption
     @classmethod
-    def configure(cls, secret_key: str, previous_keys: Sequence[str] = (), blind_index_key: str | None = None) -> None: ...
+    def configure(cls, secret_key: str, previous_keys: Sequence[str] = (), blind_index_key: str | None = None, *, context: HareContext | None = None) -> None: ...
 
     @classmethod
-    async def reencrypt(cls, *models: type[Model], batch_size: int = 500) -> int: ...
+    async def reencrypt(cls, *models: type[Model], batch_size: int = 500, using: str | DatabaseClient | None = None) -> int: ...
 ```
 
 | Field | Stored as | What is encrypted |
@@ -65,7 +79,8 @@ key. `sqlmigrate` lists the step as a comment — the rewrite runs in Python, no
   it — the first actual use (a write, a read, or `FieldEncryption.configure()`) raises
   `ConfigurationError` telling you to install the extra.
 - `FieldEncryption.configure()` derives each key as `urlsafe_b64encode(sha256(secret))`; the keys are
-  process-wide and shared by every encrypted field. Values are written with `secret_key` and read with it
+  shared by encrypted fields in the selected application and execution binding. Values are written
+  with `secret_key` and read with it
   or any of `previous_keys` (see [Changing the key](#changing-the-encryption-key)). Using a field before
   it's called raises `ConfigurationError`, and so do an empty secret and `previous_keys` given as one
   string.
@@ -106,8 +121,9 @@ key. `sqlmigrate` lists the step as a comment — the rewrite runs in Python, no
 - `update()`/`save()`/`update_or_create(defaults=...)` accept an expression for an encrypted field only
   as a bare `F()` of another field of the same class storing its values the same way
   (`EncryptedTextField` ↔ `EncryptedTextField`, `EncryptedJSONField` ↔ `EncryptedJSONField` of the same
-  `encrypt_keys`) — the ciphertext is copied as-is, which works because every encrypted field shares one
-  key. A `Value(...)` literal is written encrypted, as the plain value is. Any other expression
+  `encrypt_keys`) — the ciphertext is copied as-is, using the keyring shared by those fields in the
+  selected application and execution binding. A `Value(...)` literal is written encrypted, as the plain
+  value is. Any other expression
   (`F("plain_field")`, `Upper(...)`, `Case(...)`, ...) raises `FieldError`: its result would be written
   unencrypted. Copying an encrypted field into a plain one
   (`title=F("secret")`) is rejected the same way.
@@ -133,6 +149,10 @@ each batch in a transaction of its own (on a database without transactions, with
 run, drop the old secret from `previous_keys`. A `batch_size` that isn't a positive int raises
 `QueryError`, a model without a primary key `ConfigurationError`, and a value encrypted with a key that
 isn't configured `DecryptionError`.
+
+An active tenant scope does not narrow rotation. The batch temporarily spans every row tenant
+of the rotated model; other models keep their row and schema scopes. The caller's scope is
+restored after each batch, including on failure. Ordinary `bulk_update()` scope checks remain in force.
 
 ### <a id="blind-index"></a>Equality filters on an encrypted field: a blind index
 
@@ -189,10 +209,10 @@ class Reader(Model):
     password_hash = fields.CharField(max_length=128, sensitive=True)
     api_key = fields.EncryptedTextField()  # sensitive=True by default
 
-Reader._meta.sensitive_fields  # frozenset({"email", "password_hash", "api_key"})
+apps.get_binding(Reader).sensitive_fields  # frozenset({"email", "password_hash", "api_key"})
 ```
 
-- `Model._meta.sensitive_fields: frozenset[str]` — every field declared with `sensitive=True`. A
+- `apps.get_binding(Model).sensitive_fields: frozenset[str]` — every field declared with `sensitive=True`. A
   sensitive `ForeignKeyField`/`OneToOneField` also marks its own shadow column (`owner_id`), and so does
   a relation to a sensitive field (a sensitive primary key, a sensitive `to_field`): the column holds
   that field's value. A `GeneratedField` inherits `sensitive` from its `output_field` unless it passes
@@ -207,7 +227,8 @@ Reader._meta.sensitive_fields  # frozenset({"email", "password_hash", "api_key"}
 - `to_dict()` is unaffected — it still returns every field.
 - A `ValidationError` raised for a sensitive field (a failed validator, a value of the wrong type, ...)
   shows `<hidden>` instead of the value, and carries no chained exception (`__cause__` and `__context__`
-  are `None`), so a logged or reported traceback doesn't show the value either.
+  are `None`), so a logged or reported traceback doesn't show the value either. Containers apply this
+  policy to every nested field, including map keys in error paths and unexpected named-tuple keys.
 - `repr()` of a `snapshot()` shows `<hidden>` for a sensitive field. `diff_against()` returns the real
   values — mask them before logging its result.
 - A query's parameter holding a sensitive field's value is shown as `<hidden>` — in the DEBUG log of

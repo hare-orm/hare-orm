@@ -101,12 +101,37 @@ migration file keep that SQL as `RawSQLTerm`, so a queryset whose SQL changes (a
 model's table renamed) makes `makemigrations` write the view anew — removed before the rename and added
 after it.
 
+A queryset with an explicit application or connection is captured when the view is declared:
+its inline SQL and column dependencies replace the live queryset. Closing that source application
+does not invalidate the declaration. `ModelQuery()` and unbound querysets remain templates, compiled
+in the declaring model graph with the schema editor's client. An explicitly offline-bound queryset
+keeps its own graph. Compilation never changes the source query or captures a client on the graph.
+
+Recorded `filter()`, `exclude()` and `get()` calls capture their filter values when the call is
+recorded, including membership iterators. Rebinding and replaying the declaration reuse that captured
+input without consuming the original iterator again. Explicit `ModelQuery(calls=...)` uses the same
+capture rules. Chaining, `for_model()` and `for_binding()` make shallow copies through Python's copy
+protocol, preserving a subclass and its additional attributes without calling its constructor again.
+A custom `__copy__` must return an independent declaration and copy any additional mutable state that
+the subclass changes. Existing recorded calls are shared and must not be mutated in place.
+
 `read_columns` are the columns the view reads, `(table, column)` each. A queryset's are taken from the
 query itself — its selected columns, conditions, joins and subqueries, no SQL is read — and written into
-the migration file; for raw SQL, name them yourself. A migration that changes, renames or removes one of
+the migration file. For raw SQL, name the columns explicitly. Use the short table name for the model's
+schema and `schema.table` to refer to a different schema. A migration that changes, renames or removes one of
 them, or deletes its table, drops the view before and creates it again after, its declaration changed or
 not — PostgreSQL refuses to change the type of a column a view reads. A raw SQL view without
 `read_columns` is left alone while its declaration doesn't change.
+
+Ordinary and materialized views share this dependency order. Removing a table or rebuilding its
+dependent objects drops readers before the views they read, regardless of the two views' types.
+
+When the declared dependencies cross apps on one PostgreSQL connection, the drops, source changes and
+recreation run in one migration transaction. The migration depends on the existing history of the
+affected apps. When it also changes another app's declarations, that app's history records a dependency
+on the atomic migration.
+The generated migration uses `AppOperation` to apply operations to models of the other apps. An atomic
+rebuild requires a common schema scope for the affected models, either shared or tenant.
 
 Changing a view drops it and creates the new version, then grants the model's `Meta.grants` on it again —
 a view created anew has no privileges. A view or materialized view whose `read_columns` name the changed
@@ -119,12 +144,13 @@ only from raw SQL without `read_columns` isn't known — remove it in the same m
 @dataclass(frozen=True)
 class MaterializedView(View):
     name: str
-    query: RawSQLTerm | QuerySet | Callable[[], QuerySet]
+    query: RawSQLTerm | QuerySet | ModelQuery
     with_data: bool = True
     unique_columns: tuple[str, ...] = ()
 ```
 
-The rows of a query, kept in the database until refreshed. `with_data=False` creates the view empty and
+The rows of a query, kept in the database until refreshed. On PostgreSQL, `with_data=False` creates it
+empty and
 unreadable until its first refresh. `unique_columns` — columns of the view, not fields of the model — get
 a unique index named `<view>_unique`, renamed with the view; a concurrent refresh needs it.
 
@@ -136,10 +162,13 @@ await Invoice.objects.refresh_materialized_view("invoice_totals", concurrently=T
 ```
 
 The refresh runs on the connection the model writes to (`.using(...)` picks another one), inside the
-current transaction when there is one. `concurrently=True` keeps the view readable while it refreshes —
+current transaction when there is one. On PostgreSQL, `concurrently=True` keeps it readable while it
+refreshes —
 it needs `unique_columns` and a view filled before (`ConfigurationError` without `unique_columns`). A
 view the model doesn't declare raises `QueryError`. A migration
 refreshes one with [`RefreshMaterializedView`](../migrations/operations.md#schema-objects).
+
+ClickHouse has its own [materialized-view creation and refresh rules](../dialects/clickhouse/schema-objects.md).
 
 Changing a materialized view drops it and creates the new version — filled anew unless `with_data=False`
 — and grants the model's grants on it again.
@@ -160,15 +189,22 @@ class DatabaseFunction:
 
 A function stored in the database, called from SQL — a view, a policy condition, a raw query, a column
 default. `body` is `RawSQLTerm` of the function's body (plain text raises `ConfigurationError`);
-`returns`, `arguments` and `body` are written into the DDL as given, so they aren't portable. The body is
-dollar-quoted (`$hare_function$`); a body holding that quote raises `ConfigurationError`. `language` is a
+`returns`, `arguments` and `body` are written into `CREATE FUNCTION` as given, so they aren't portable.
+The body is escaped as a string literal, preserving its quotes and backslashes. `language` is a
 plain name; `volatility` — `VOLATILE`, `STABLE` or `IMMUTABLE` — is what the function promises the
 planner; `security_definer=True` runs it with its owner's privileges.
 
-The function is known by its name and argument types. A change that keeps both and the result type
-replaces it in place (`CREATE OR REPLACE FUNCTION`), keeping its privileges; a change of the arguments or
+PostgreSQL argument declarations may include `DEFAULT expression` or `= expression`. Addressing the
+function for removal, renaming, schema moves and grants omits those defaults, preserving names and
+modes.
+
+The function is known by its name and argument types. A change that keeps the complete argument
+declarations and result type replaces it in place (`CREATE OR REPLACE FUNCTION`), keeping its privileges;
+a change of the arguments (including their defaults) or
 the result type drops it and creates the new one, granting the model's grants on it again. A function a
-view or policy depends on can't be dropped that way — change those in the same migration first. A
+view or policy depends on needs those objects detached before it can be dropped. Autodetection
+detaches changed views and policies before replacing the function and recreates them afterwards.
+For an unchanged dependency expressed only in raw SQL, include its removal and recreation explicitly. A
 `LANGUAGE sql` function is checked against the tables it reads when created, so it can only read tables
 that exist by then: a model's functions are created after the tables of the migration, before its views
 and policies.
@@ -190,9 +226,9 @@ class DatabaseSequence:
 
 A counter handing out numbers. Each number is a 64-bit integer; `increment` can't be 0 (negative counts
 down), `minimum` must be below `maximum`, `start` within them, and `cache` — how many numbers a session
-takes in advance — within 1..1 000 000. Without `start` the sequence starts at `minimum` counting up (1
-by default) and at `maximum` counting down. `owned_by` names a field of the model: the sequence is
-dropped with that column, and the field must have a column of its own.
+takes in advance — must be positive and fit in a signed 64-bit integer. Without `start` the sequence
+starts at `minimum` counting up (1 by default) and at `maximum` counting down. `owned_by` names a field
+of the model: the sequence is dropped with that column, and the field must have a column of its own.
 
 A model's sequences are created before its table, so a column default can take from one; the owner column
 is set once the table exists. The next number is read at runtime on the connection the model writes to:

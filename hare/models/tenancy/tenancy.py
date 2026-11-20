@@ -5,9 +5,9 @@ tenants the active scope (``Tenancy.scope()``) gives the model.
 from __future__ import annotations
 
 import contextvars
-from collections.abc import Collection, Generator, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Generator, Iterable, Mapping, Sequence
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.caching.model_cache import ModelCache
 from hare.dialects.base.constants import SQL_DIALECT
@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.fields.relations.fields.relational_field import RelationalField
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class Tenancy:
@@ -53,29 +54,28 @@ class Tenancy:
         return TenantValues(*values)
 
     @classmethod
-    def get_scope(cls, model: type[Model]) -> Any:
+    def get_scope(cls, binding: ModelBinding) -> Any:
         """The tenant scope of one model in the current task.
 
         Args:
-            model: The model.
+            binding: The model.
 
         Returns:
             A tenant value, a ``TenantValues`` (several values), ``Tenancy.ALL``, or None when
             no scope is active, the active one doesn't name the model, or the model has neither
             ``Meta.tenant_field`` nor ``Meta.tenant_schema``.
         """
-        meta = model._meta
-        if not meta.tenant_field and not meta.tenant_schema:
+        if not binding.tenant_field and not binding.tenant_schema:
             return None
         scope = cls.current.get()
-        return scope.get_for_model(model) if type(scope) is ModelTenants else scope
+        return scope.get_for_model(binding) if type(scope) is ModelTenants else scope
 
     @classmethod
-    def allows(cls, model: type[Model], scope: Any, value: Any) -> bool:
+    def allows(cls, binding: ModelBinding, scope: Any, value: Any) -> bool:
         """Whether a model's scope allows a value of its ``Meta.tenant_field``.
 
         Args:
-            model: The model.
+            binding: The model.
             scope: The model's scope (``get_scope(model)``), not None.
             value: The value.
 
@@ -84,10 +84,10 @@ class Tenancy:
         """
         scope_class = type(scope)
         if scope_class is TenantValues:
-            return any(cls.is_same_tenant(model, value, allowed_value) for allowed_value in scope.values)
+            return any(cls.is_same_tenant(binding, value, allowed_value) for allowed_value in scope.values)
         if scope_class is AllTenants:
             return True
-        return cls.is_same_tenant(model, value, scope)
+        return cls.is_same_tenant(binding, value, scope)
 
     @staticmethod
     def has_one_value(scope: Any) -> bool:
@@ -112,7 +112,7 @@ class Tenancy:
         if scope is None or scope_class is AllTenants:
             return None
         if scope_class is TenantValues:
-            return cast("tuple[Any, ...]", scope.values)
+            return scope.values
         return (scope,)
 
     @classmethod
@@ -144,44 +144,75 @@ class Tenancy:
         cls.current.reset(token)
 
     @staticmethod
-    def get_given_tenant(model: type[Model], values: dict[str, Any]) -> tuple[bool, Any, str]:
+    def get_tenant_relation(binding: ModelBinding, tenant_field: str) -> tuple[str, str] | None:
+        """Find the relation and target field mapped to the tenant column."""
+        relation_key = binding.foreign_key_shadow_columns.get(tenant_field)
+        if not relation_key:
+            return None
+        relation_name = relation_key[1:]
+        relation: RelationalField[Any] = binding.fields_map[relation_name]  # type: ignore[assignment]
+        position = relation.source_fields.index(tenant_field)
+        return relation_name, relation.to_field_instances[position].model_field_name
+
+    @staticmethod
+    def get_given_tenant(binding: ModelBinding, values: Mapping[str, Any]) -> tuple[bool, Any, str]:
         """Finds the ``Meta.tenant_field`` value ``values`` gives - directly, or, when the tenant
         field is a foreign key's shadow column, through that relation's instance.
 
         Args:
-            model: The tenant-scoped model.
+            binding: The tenant-scoped model.
             values: The field values of a new row.
 
         Returns:
             ``(whether a value is given, the value, a description of the entry it came from)``.
         """
-        tenant_field = cast("str", model._meta.tenant_field)
+        tenant_field: str = binding.tenant_field  # type: ignore[assignment]
         if tenant_field in values:
             return True, values[tenant_field], f"{tenant_field}={values[tenant_field]!r}"
-        relation_key = model._meta.foreign_key_shadow_columns.get(tenant_field)
-        relation_name = relation_key[1:] if relation_key else None
-        if relation_name is None or relation_name not in values:
+        relation = Tenancy.get_tenant_relation(binding, tenant_field)
+        if relation is None:
+            return False, None, ""
+        relation_name, target_field = relation
+        if relation_name not in values:
             return False, None, ""
         related_instance = values[relation_name]
         if related_instance is None:
             return True, None, f"{relation_name}=None"
-        relation_field = cast("RelationalField[Any]", model._meta.fields_map[relation_name])
-        to_field = relation_field.to_field_instances[relation_field.source_fields.index(tenant_field)]
-        return True, getattr(related_instance, to_field.model_field_name), f"{relation_name}={related_instance!r}"
+        return True, getattr(related_instance, target_field), f"{relation_name}={related_instance!r}"
 
     @staticmethod
-    def get_several_values_message(model: type[Model], scope: Any, operation: str) -> str:
+    def get_several_values_message(binding: ModelBinding, scope: Any, operation: str) -> str:
         """The message of a write that names no tenant under a scope of several values.
 
         Args:
-            model: The tenant-scoped model.
+            binding: The tenant-scoped model.
             scope: The model's scope.
             operation: The writing method.
         """
+        model = binding._model
+        tenant_field: str = binding.tenant_field  # type: ignore[assignment]
         return (
-            f"{operation}() on {model.__name__} names no '{model._meta.tenant_field}' and the active tenant "
-            f"scope ({scope!r}) has no single value to give it - pass it directly"
+            f"{operation}() on {model.__name__} names no '{tenant_field}' and the active tenant "
+            f"scope ({binding.fields_map[tenant_field].get_value_for_message(scope)}) "
+            "has no single value to give it - pass it directly"
         )
+
+    @classmethod
+    @contextmanager
+    def scope_if_unset(cls, binding: ModelBinding, tenant: Any) -> Generator[None]:
+        """Fill a model's missing tenant scope without changing any other model's scope.
+
+        An existing scalar or model-specific scope retains its precedence. Otherwise the
+        new model entry extends the current model mapping for this block only.
+        """
+        model = binding._model
+        if cls.get_scope(binding) is not None:
+            yield
+            return
+        current = cls.current.get()
+        scopes = current.scopes if type(current) is ModelTenants else {}
+        with cls.scope({**scopes, model: tenant}):
+            yield
 
     @classmethod
     @contextmanager
@@ -212,12 +243,12 @@ class Tenancy:
             cls.reset(token)
 
     @staticmethod
-    def is_same_tenant(model: type[Model], first: Any, second: Any) -> bool:
+    def is_same_tenant(binding: ModelBinding, first: Any, second: Any) -> bool:
         """Whether two values of ``model``'s ``Meta.tenant_field`` name the same tenant, compared as
         the field converts them - a ``str`` and a ``uuid.UUID`` of a ``UUIDField`` tenant are equal.
 
         Args:
-            model: The model whose ``Meta.tenant_field`` both values belong to.
+            binding: The model whose ``Meta.tenant_field`` both values belong to.
             first: One tenant value.
             second: The other tenant value.
 
@@ -228,7 +259,7 @@ class Tenancy:
             return True
         if first is None or second is None:
             return False
-        tenant_field = model._meta.fields_map[cast("str", model._meta.tenant_field)]
+        tenant_field = binding.fields_map[binding.tenant_field]  # type: ignore[index]
         try:
             return SQL_DIALECT.types.get_python_value(tenant_field, first) == SQL_DIALECT.types.get_python_value(
                 tenant_field, second
@@ -238,32 +269,34 @@ class Tenancy:
 
     @staticmethod
     @ModelCache.fact()
-    def has_tenant_scoped_relations(model: type[Model]) -> bool:
+    def has_tenant_scoped_relations(binding: ModelBinding) -> bool:
         """Whether a forward relation of ``model`` points at a model with ``Meta.tenant_field``."""
-        meta = model._meta
         return any(
-            cast("RelationalField[Model]", meta.fields_map[field_name]).related_model._meta.tenant_field
-            for field_name in meta.foreign_key_fields | meta.one_to_one_fields
+            binding.fields_map[field_name].get_related_binding().tenant_field  # type: ignore[attr-defined]
+            for field_name in binding.forward_key_relation_names
         )
 
     @staticmethod
-    def get_relation_row(obj: Model) -> dict[str, Any]:
-        """The values ``check_relation_targets()`` reads off a written obj - its forward
-        relations' key columns and its own ``Meta.tenant_field``."""
-        meta = obj._meta
+    def get_relation_field_names(binding: ModelBinding) -> tuple[str, ...]:
+        """The forward relation source columns and tenant read for one operation."""
         names = [
             source_field
-            for field_name in meta.foreign_key_fields | meta.one_to_one_fields
-            for source_field in cast("RelationalField[Model]", meta.fields_map[field_name]).source_fields
+            for field_name in binding.forward_key_relation_names
+            for source_field in binding.fields_map[field_name].source_fields  # type: ignore[attr-defined]
         ]
-        if meta.tenant_field:
-            names.append(meta.tenant_field)
-        return {name: getattr(obj, name, None) for name in names}
+        if binding.tenant_field:
+            names.append(binding.tenant_field)
+        return tuple(names)
+
+    @staticmethod
+    def get_relation_row(obj: Model, field_names: tuple[str, ...]) -> dict[str, Any]:
+        """Read a relation-check row, preserving unloaded fields as NULL."""
+        return {name: getattr(obj, name, None) for name in field_names}
 
     @classmethod
     async def check_objects_relation_targets(
         cls,
-        model: type[Model],
+        binding: ModelBinding,
         objects: Sequence[Model],
         connection: DatabaseClient,
         field_names: Iterable[str] | None = None,
@@ -274,16 +307,17 @@ class Tenancy:
         Raises:
             QueryError: A relation names another tenant's row.
         """
-        if cls.has_tenant_scoped_relations(model):
-            rows = [cls.get_relation_row(obj) for obj in objects]
+        if cls.has_tenant_scoped_relations(binding):
+            relation_names = cls.get_relation_field_names(binding)
+            rows = [cls.get_relation_row(obj, relation_names) for obj in objects]
             await cls.check_relation_targets(
-                model, rows, connection, None if field_names is None else set(field_names)
+                binding, rows, connection, None if field_names is None else set(field_names)
             )
 
     @classmethod
     async def check_relation_targets(
         cls,
-        model: type[Model],
+        binding: ModelBinding,
         rows: Sequence[Mapping[str, Any]],
         connection: DatabaseClient,
         field_names: Collection[str] | None = None,
@@ -295,49 +329,63 @@ class Tenancy:
         from the check while the database's foreign key still accepts them.
 
         Args:
-            model: The model the rows are written to.
+            binding: The model the rows are written to.
             rows: Each row's relation key columns and tenant, by attribute name.
-            connection: The client the related rows are read through.
+            connection: The source write client. Related rows inherit it when their configured
+                route matches the source model's; otherwise their own route is selected before
+                key encoding and tenant checks.
             field_names: The fields written, None for every field.
 
         Raises:
             QueryError: A relation names another tenant's row.
         """
-        meta = model._meta
         if cls.current.get() is None:
             return
-        for field_name in sorted(meta.foreign_key_fields | meta.one_to_one_fields):
-            field = cast("RelationalField[Model]", meta.fields_map[field_name])
+        from hare.core.connections.model_connection_choice import ModelConnectionChoice
+        from hare.core.hare_context import HareContext
+
+        selected_names = None if field_names is None else frozenset(field_names)
+        for field_name in sorted(binding.forward_key_relation_names):
+            field: RelationalField[Model] = binding.fields_map[field_name]  # type: ignore[assignment]
             related_model = field.related_model
-            related_tenant_field = related_model._meta.tenant_field
+            related_binding = field.get_related_binding()
+            related_tenant_field = related_binding.tenant_field
             if related_tenant_field is None:
                 continue
-            related_scope = cls.get_scope(related_model)
+            related_scope = cls.get_scope(related_binding)
             if related_scope is None or related_scope is cls.ALL:
                 continue
             if (
-                field_names is not None
-                and field_name not in field_names
-                and not set(field.source_fields) & set(field_names)
+                selected_names is not None
+                and field_name not in selected_names
+                and selected_names.isdisjoint(field.source_fields)
             ):
                 continue
+            source_fields = field.source_fields
             keys: dict[tuple[Any, ...], None] = {}
+            related_connection = connection
+            writers: tuple[Callable[[Any, Any], Any], ...] | None = None
             for row in rows:
-                values = [row.get(source_field) for source_field in field.source_fields]
+                values = [row.get(source_field) for source_field in source_fields]
                 if any(value is None for value in values):
                     continue
-                key = tuple(
-                    connection.dialect.types.get_db_value(to_field, value, related_model)
-                    for value, to_field in zip(values, field.to_field_instances, strict=True)
-                )
+                if writers is None:
+                    # A nullable relation with no key needs neither a target client nor writers.
+                    related_connection = ModelConnectionChoice.get_related_write_client(
+                        HareContext.require_current(), related_binding, binding, connection
+                    ) or ModelConnectionChoice.get(HareContext.require_current(), related_binding, True)
+                    writers = tuple(
+                        related_connection.dialect.types.get_db_writer(column) for column in field.to_field_instances
+                    )
+                key = tuple(write(value, related_model) for value, write in zip(values, writers, strict=True))
                 keys[key] = None
             if keys:
-                await cls._check_related_tenants(model, field_name, field, keys, related_scope, connection)
+                await cls._check_related_tenants(binding, field_name, field, keys, related_scope, related_connection)
 
     @classmethod
     async def _check_related_tenants(
         cls,
-        model: type[Model],
+        binding: ModelBinding,
         field_name: str,
         field: RelationalField[Model],
         keys: Collection[tuple[Any, ...]],
@@ -348,13 +396,16 @@ class Tenancy:
         model's scope - a key of a row of the scope passes, also where a database keeping no key unique
         holds another tenant's row of it too. Under row level security a key whose row the read doesn't
         see is refused."""
+        model = binding._model
         related_model = field.related_model
-        related_meta = related_model._meta
+        related_meta = field.get_related_binding()
         table = related_meta.basetable
         key_columns = [related_meta.fields_db_projection[name] for name in field.to_field_names]
-        tenant_column = related_meta.fields_db_projection[cast("str", related_meta.tenant_field)]
+        tenant_column = related_meta.fields_db_projection[related_meta.tenant_field]  # type: ignore[index]
         rows_hidden_by_policy = related_meta.tenant_row_level_security and connection.tenant_row_level_security
         ordered_keys = list(keys)
+        tenant_field = related_meta.fields_map[related_meta.tenant_field]  # type: ignore[index]
+        read_tenant = connection.dialect.types.get_python_reader(tenant_field)
         for start in range(0, len(ordered_keys), TENANT_RELATION_CHECK_BATCH_SIZE):
             batch = ordered_keys[start : start + TENANT_RELATION_CHECK_BATCH_SIZE]
             query = (
@@ -365,14 +416,13 @@ class Tenancy:
                 )
                 .where(KeyColumns.row_is_in([table[column] for column in key_columns], batch))
             )
-            _, related_rows = await connection.execute(*query.get_parameterized_sql())
-            tenant_field = related_meta.fields_map[cast("str", related_meta.tenant_field)]
+            _, related_rows = await connection._execute_built(*query.get_parameterized_sql())
             allowed_keys: set[tuple[Any, ...]] = set()
             refused_tenants: dict[tuple[Any, ...], Any] = {}
             for related_row in related_rows:
                 row_key = tuple(related_row[f"key_{position}"] for position in range(len(key_columns)))
-                related_tenant = connection.dialect.types.get_python_value(tenant_field, related_row["tenant"])
-                if cls.allows(related_model, related_scope, related_tenant):
+                related_tenant = read_tenant(related_row["tenant"])
+                if cls.allows(field.get_related_binding(), related_scope, related_tenant):
                     allowed_keys.add(row_key)
                 else:
                     refused_tenants.setdefault(row_key, related_tenant)

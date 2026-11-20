@@ -26,12 +26,12 @@ def encryption_key(request: pytest.FixtureRequest):
         yield
         return
     FieldEncryption.configure(CONTRACT_ENCRYPTION_KEY)
-    yield
+    yield FieldEncryption.get_binding().keyring
     FieldEncryption.reset()
 
 
 @pytest_asyncio.fixture
-async def contract_database() -> AsyncGenerator[HareContext]:
+async def contract_database(encryption_key) -> AsyncGenerator[HareContext]:
     async with hare_test_context(
         modules=["tests.contracts.models_anchor"],
         db_url=os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:"),
@@ -39,4 +39,6 @@ async def contract_database() -> AsyncGenerator[HareContext]:
         connection_label=CONTRACT_CONNECTION,
         _generate_schemas=False,
     ) as context:
+        if encryption_key is not None:
+            FieldEncryption.set_keyring(encryption_key, context=context)
         yield context

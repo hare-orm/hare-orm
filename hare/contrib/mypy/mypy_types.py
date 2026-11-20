@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 
     from hare.fields.field import Field
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.lookup_info.lookup_info import LookupInfo
     from hare.typing_info.declarations import ValueType
 
@@ -152,19 +153,20 @@ class MypyTypes:
         """
         return self.get_class_type(BoundModels.get_fullname(model))
 
-    def get_declared_field_type(self, model: type[Model], field_name: str) -> Type | None:
+    def get_declared_field_type(self, binding: ModelBinding, field_name: str) -> Type | None:
         """The type of a field's value as the model class declares it - the ``TValue`` of its
         ``Field[TValue]`` attribute, exact for a generic field (``JSONField[MyDict]``), or the type of
         an attribute a field factory declares as the value itself (``CharEnumField(MyEnum)`` is a
         ``MyEnum``).
 
         Args:
-            model: The model.
+            binding: The binding of the model declaring the field.
             field_name: The field.
 
         Returns:
             The type, None when the class declares no such attribute or declares its value as ``Any``.
         """
+        model = binding._model
         model_info = self.get_type_info(BoundModels.get_fullname(model))
         field_info = self.get_type_info(FIELD_FULLNAME)
         symbol = None if model_info is None else model_info.get(field_name)
@@ -178,14 +180,15 @@ class MypyTypes:
         # A field subclass that names no value type (``class RatingField(IntField)``) declares Any.
         return None if isinstance(get_proper_type(value_type), AnyType) else value_type
 
-    def get_queryset_arguments(self, receiver: Type) -> tuple[type[Model], Instance] | None:
-        """The model of a queryset and the queryset as a ``QuerySet[TModel, TRow, TAnnotations]``.
+    def get_queryset_call(self, receiver: Type, call: Context) -> tuple[ModelBinding, Instance, CallExpr] | None:
+        """The model and type arguments of a queryset method call, with the call expression.
 
         Args:
             receiver: The type a queryset method is called on.
+            call: The syntax node provided by the mypy hook.
 
         Returns:
-            The bound model and the queryset type, None for a queryset of no bound model.
+            The bound model, queryset type and call, or None when the hook cannot specialize it.
         """
         receiver = get_proper_type(receiver)
         queryset_info = self.get_type_info(QUERYSET_FULLNAME)
@@ -199,8 +202,8 @@ class MypyTypes:
         model_type = get_proper_type(queryset_type.args[0])
         if not isinstance(model_type, Instance):
             return None
-        model = self.model_registry.get_model(model_type.type.fullname)
-        return None if model is None else (model, queryset_type)
+        model = self.model_registry.get_binding(model_type.type.fullname)
+        return None if model is None or not isinstance(call, CallExpr) else (model, queryset_type, call)
 
     def get_filter_value_type(self, lookup_info: LookupInfo) -> Type:
         """The type of the value a filter key takes - a value, an iterable or a two-item range of
@@ -275,16 +278,17 @@ class MypyTypes:
         declared_in = value_type.declared_in
         declared_type = None if declared_in is None else self.get_declared_field_type(*declared_in)
         if declared_in is not None and declared_type is not None:
-            model, field_name = declared_in
-            field = model._meta.fields_map[field_name]
+            binding, field_name = declared_in
+            field = binding.fields_map[field_name]
             declared_type = self.without_none(declared_type)
             item_types.append(
                 self.with_raw_enum_values(declared_type, field) if value_type.accepts_enum_values else declared_type
             )
         else:
             item_types.extend(self.get_python_type(cls) for cls in value_type.classes)
+        item_types.extend(self.get_python_type(cls) for cls in value_type.accepted_classes)
         for model in value_type.models:
-            model_type = self.get_model_type(model)
+            model_type = self.get_class_type(BoundModels.get_fullname(model))
             if model_type is not None:
                 item_types.append(model_type)
             elif not value_type.classes:

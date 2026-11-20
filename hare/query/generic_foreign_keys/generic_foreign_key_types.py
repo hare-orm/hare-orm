@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from collections.abc import Iterable
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
+from hare.classes.deferred_import import DeferredImport
 from hare.fields.constants import GENERIC_FOREIGN_KEY_TYPE_SUFFIX
 from hare.fields.relations.fields.generic_foreign_key_field_instance import GenericForeignKeyFieldInstance
 from hare.query.expressions.case.case import Case
@@ -11,13 +13,25 @@ from hare.query.generic_foreign_keys.constants import GENERIC_FOREIGN_KEY_TYPE_K
 from hare.query.generic_foreign_keys.generic_foreign_key_paths import GenericForeignKeyPaths
 
 if TYPE_CHECKING:
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
+    from hare.query.expressions.f import F
+    from hare.query.expressions.ordering import Ordering
     from hare.query.queryset.queryset import QuerySet
+
+
+TQuerySet = TypeVar("TQuerySet", bound="QuerySet[Any, Any]")
 
 
 class GenericForeignKeyTypes:
     """The type of a ``GenericForeignKeyField`` - the name of the branch set, NULL for none - read
     by ``values("target__type")`` and ordered by ``order_by("target__type")`` as a ``CASE``."""
+
+    #: ``F`` - imported at its first read, as its module imports this one.
+    reference_class: ClassVar[DeferredImport[type[F]]] = DeferredImport("hare.query.expressions.f", "F")
+    #: ``Ordering`` - imported at its first read, as its module imports this one.
+    ordering_class: ClassVar[DeferredImport[type[Ordering]]] = DeferredImport(
+        "hare.query.expressions.ordering", "Ordering"
+    )
 
     @staticmethod
     def get_type_expression(prefix: str, generic_field: GenericForeignKeyFieldInstance[Any]) -> Case:
@@ -39,16 +53,15 @@ class GenericForeignKeyTypes:
         )
 
     @staticmethod
-    def get_pending_type_aliases(queryset: QuerySet[Any, Any], names: tuple[Any, ...]) -> dict[str, Any]:
-        """The ``CASE`` of each name reading a generic foreign key's type (``target__type``) the
-        queryset doesn't hold yet - added as an alias under that name before the name is read.
+    def get_type_aliased_queryset(queryset: TQuerySet, names: Iterable[Any]) -> TQuerySet | None:
+        """Add missing aliases for names reading a generic foreign key's type (``target__type``).
 
         Args:
             queryset: The queryset.
             names: Field names, orderings (``"-target__type"``, ``F("target__type").asc()``) or ``F()``.
 
         Returns:
-            Name to its expression.
+            The queryset with the aliases added, or None if none are needed.
         """
         field_names = GenericForeignKeyTypes.get_named_fields(names)
         for name in field_names:
@@ -56,15 +69,17 @@ class GenericForeignKeyTypes:
             if name.endswith(GENERIC_FOREIGN_KEY_TYPE_SUFFIX):
                 break
         else:
-            return {}
-        return {
+            return None
+        model_binding: ModelBinding = queryset._binding  # type: ignore[assignment]
+        aliases = {
             name: expression
-            for name, expression in GenericForeignKeyTypes.get_type_aliases(queryset.model, field_names).items()
+            for name, expression in GenericForeignKeyTypes.get_type_aliases(model_binding, field_names).items()
             if name not in queryset._annotations
         }
+        return queryset.alias(**aliases) if aliases else None
 
     @staticmethod
-    def get_named_fields(names: tuple[Any, ...]) -> tuple[str, ...]:
+    def get_named_fields(names: Iterable[Any]) -> tuple[str, ...]:
         """The field names among names, orderings and references - a string, the name of an ``F()``, the
         field an ``Ordering`` orders by; anything else left out.
 
@@ -74,34 +89,30 @@ class GenericForeignKeyTypes:
         Returns:
             The names.
         """
-        # Local import: the expressions import this module.
-        from hare.query.expressions.f import F
-        from hare.query.expressions.ordering import Ordering
-
+        reference_class = GenericForeignKeyTypes.reference_class
+        ordering_class = GenericForeignKeyTypes.ordering_class
         field_names: list[str] = []
         for name in names:
-            if isinstance(name, Ordering):
+            if isinstance(name, ordering_class):
                 name = name.target
-            if isinstance(name, F):
+            if isinstance(name, reference_class):
                 name = name.name
             if isinstance(name, str):
                 field_names.append(name)
         return tuple(field_names)
 
     @staticmethod
-    def get_type_aliases(model: type[Model], names: tuple[Any, ...]) -> dict[str, Case]:
+    def get_type_aliases(binding: ModelBinding, names: tuple[Any, ...]) -> dict[str, Case]:
         """The ``CASE`` of each name reading the type of a generic foreign key, under that name - an
         ordering name's leading ``-`` left out.
 
         Args:
-            model: The queryset's model.
+            binding: The queryset's model.
             names: Field names or orderings - anything but a string is skipped.
 
         Returns:
             Name to its expression; empty when no name reads a type.
         """
-        if not GenericForeignKeyFieldInstance.declared_names:
-            return {}
         aliases: dict[str, Case] = {}
         for name in names:
             if not isinstance(name, str):
@@ -110,7 +121,7 @@ class GenericForeignKeyTypes:
             if "__" not in path:
                 # A type is read as <field>__type - a name without "__" reads none.
                 continue
-            generic_path = GenericForeignKeyPaths.get_generic_path(model, path)
+            generic_path = GenericForeignKeyPaths.get_generic_path(binding, path)
             if generic_path is None:
                 continue
             relation_path, generic_field, rest = generic_path

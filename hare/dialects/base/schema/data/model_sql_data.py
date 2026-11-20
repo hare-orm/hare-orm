@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from hare.dialects.base.schema.tables.table_definition import TableDefinition
 from hare.models import Model
+from hare.models.model_binding import ModelBinding
 
 
 @dataclass
@@ -13,6 +15,7 @@ class ModelSqlData:
         table_key: The ``(schema, table)`` of the model's table.
         model: The model.
         table_sql: The statements creating the table with its indexes and comments.
+        definition: The prepared table declaration shared with replacement and schema plans.
         constraint_sqls: The statements adding the table's ``Meta.constraints`` once it exists,
             each on its own and without a closing semicolon - the ones a dialect writes into
             ``CREATE TABLE`` are in ``table_sql``.
@@ -25,8 +28,9 @@ class ModelSqlData:
     """
 
     table_key: tuple[str | None, str]
-    model: type[Model]
+    binding: ModelBinding
     table_sql: str
+    definition: TableDefinition
     constraint_sqls: list[str]
     references: set[tuple[str | None, str]]
     many_to_many_tables_sql: list[str]
@@ -39,3 +43,8 @@ class ModelSqlData:
             The table's statements followed by its constraints', each closed with a semicolon.
         """
         return "\n".join([self.table_sql, *(f"{constraint_sql};" for constraint_sql in self.constraint_sqls)])
+
+    @property
+    def model(self) -> type[Model]:
+        """The ordinary Python class of the prepared schema node."""
+        return self.binding._model

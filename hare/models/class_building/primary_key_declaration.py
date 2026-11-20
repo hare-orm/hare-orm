@@ -37,10 +37,9 @@ class PrimaryKeyDeclaration:
             field = attributes.get(component_name)
             if not isinstance(field, Field):
                 raise ConfigurationError(f"CompositePrimaryKey field {field_name!r} is not a field on model {name}")
-            if component_names and component_names[-1] == component_name and field_name != component_name:
-                # Another key column of the same relation.
-                continue
-            component_names.append(component_name)
+            # An explicit key column keeps its declared position. Only a component naming the
+            # relation itself expands to all of its columns when the relation is linked.
+            component_names.append(field_name)
             if field.pk:
                 raise ConfigurationError(
                     f"CompositePrimaryKey field {field_name!r} on model {name} must not itself be "

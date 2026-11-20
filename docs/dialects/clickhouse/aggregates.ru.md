@@ -22,7 +22,7 @@ await PageView.objects.aggregate(popular=TopK("path", 5))
 | `UniqCombined(field)` | `uniqCombined` | Оценка в меньшей памяти и точнее `Uniq` при многих значениях |
 | `Quantile(field, level=0.5, *, exact=False)` | `quantile(level)`, `quantileExact(level)` | Значение, ниже которого лежит доля `level` значений, — интерполированная оценка или, с `exact=True`, одно из значений |
 | `Quantiles(field, *levels, exact=False)` | `quantiles(...)`, `quantilesExact(...)` | Несколько квантилей за один проход — массив в порядке уровней |
-| `Median(field, *, exact=False)` | `quantile(0.5)` | Медиана — оценка или, с `exact=True`, среднее значение |
+| `Median(field, *, exact=False)` | `quantile(0.5)` | Медиана — оценка или, с `exact=True`, центральное значение упорядоченного ряда |
 | `ArgMin(field, by)`, `ArgMax(field, by)` | `argMin`, `argMax` | Значение `field` в строке группы, где `by` наименьшее или наибольшее |
 | `GroupArray(field, *, max_size=None)` | `groupArray` | Значения массивом в порядке чтения, без `NULL`; `max_size` оставляет столько первых |
 | `GroupUniqArray(field, *, max_size=None)` | `groupUniqArray` | Различные значения массивом, без порядка; `max_size` оставляет не больше стольких |

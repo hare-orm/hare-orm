@@ -76,9 +76,22 @@ async def test_a_model_on_a_cycle_reaches_an_overridden_delete_asked_after_anoth
         await init_hare()
         models = register_cycle_models(None, delete)
 
-        assert DeletionGraph.reaches_overridden_deletes(models["CycleTop"]) is True
-        assert DeletionGraph.reaches_overridden_deletes(models["CyclePartner"]) is True
-        assert DeletionGraph.needs_python_cascade(models["CyclePartner"]) is True
+        assert (
+            DeletionGraph.reaches_overridden_deletes(
+                HareContext.require_current().apps.get_binding(models["CycleTop"])
+            )
+            is True
+        )
+        assert (
+            DeletionGraph.reaches_overridden_deletes(
+                HareContext.require_current().apps.get_binding(models["CyclePartner"])
+            )
+            is True
+        )
+        assert (
+            DeletionGraph.needs_python_cascade(HareContext.require_current().apps.get_binding(models["CyclePartner"]))
+            is True
+        )
 
 
 @pytest.mark.database_independent
@@ -91,8 +104,16 @@ async def test_a_model_on_a_cycle_reaches_a_captured_model_asked_after_another()
         await init_hare()
         models = register_cycle_models(Meta)
 
-        assert DeletionGraph.reaches_captured_models(models["CycleTop"]) is True
-        assert DeletionGraph.reaches_captured_models(models["CyclePartner"]) is True
+        assert (
+            DeletionGraph.reaches_captured_models(HareContext.require_current().apps.get_binding(models["CycleTop"]))
+            is True
+        )
+        assert (
+            DeletionGraph.reaches_captured_models(
+                HareContext.require_current().apps.get_binding(models["CyclePartner"])
+            )
+            is True
+        )
 
 
 @pytest.mark.database_independent
@@ -103,5 +124,10 @@ async def test_a_cycle_reaching_nothing_answers_false_for_every_model():
         models = register_cycle_models(None)
 
         for model in models.values():
-            assert DeletionGraph.reaches_overridden_deletes(model) is False
-            assert DeletionGraph.reaches_captured_models(model) is False
+            assert (
+                DeletionGraph.reaches_overridden_deletes(HareContext.require_current().apps.get_binding(model))
+                is False
+            )
+            assert (
+                DeletionGraph.reaches_captured_models(HareContext.require_current().apps.get_binding(model)) is False
+            )

@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-import contextlib
 import importlib.metadata
-import io
 import textwrap
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from hare.cli import hare_cli as cli_module
 from hare.cli.plugins.cli_command_registry import CLICommandRegistry
 from hare.core.config import HareConfig
+from hare.core.hare_context import HareContext
+from tests.utils.cli_commands import CliCommands
+from tests.utils.project_imports import ProjectImports
+from tests.utils.project_sources import ProjectSources
 
 PLUGIN_MODULE_SOURCE = textwrap.dedent(
     """
@@ -23,11 +24,17 @@ PLUGIN_MODULE_SOURCE = textwrap.dedent(
         help = "Say hello to the configured apps."
 
         def add_arguments(self, parser):
+            if hasattr(self, "parser"):
+                raise RuntimeError("arguments were declared twice")
+            self.parser = parser
+            parser.description = "Greet the configured applications."
+            parser.set_defaults(greeting_prefix="hello")
             parser.add_argument("--who", default="world")
 
         async def run(self, ctx, args):
+            assert self.parser.prog.endswith(" greet")
             config = CommandContext.load_config(ctx)
-            print(f"hello {args.who} from {sorted(config.apps)}")
+            print(f"{args.greeting_prefix} {args.who} from {sorted(config.apps)}")
             return 3
 
 
@@ -61,18 +68,52 @@ PLUGIN_MODULE_SOURCE = textwrap.dedent(
 
         async def run(self, ctx, args):
             print("never")
+
+
+    class ArgumentNamesCommand(CLICommand):
+        name = "argument-names"
+
+        def add_arguments(self, parser):
+            parser.add_argument("func")
+            parser.add_argument("config")
+            parser.add_argument("command")
+            parser.add_argument("--callback", dest="handler", default="payload")
+
+        async def run(self, ctx, args):
+            print(f"{args.func}|{args.config}|{args.command}|{args.handler}|{ctx.config}")
+            return 7
+
+
+    class CaptureFlagCommand(CLICommand):
+        name = "capture-flag"
+
+        def add_arguments(self, parser):
+            parser.add_argument("-custom", "-count", "--custom", dest="enabled", action="store_true")
+
+        async def run(self, ctx, args):
+            print(f"{args.enabled}|{ctx.config}")
+            return 8
+
+
+    class CaptureModelsCommand(CLICommand):
+        name = "capture-models"
+
+        async def run(self, ctx, args):
+            config = CommandContext.load_config(ctx)
+            print(list(config.apps["models"].models))
     """
 )
 
 
 def _write_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_commands: list[str] | None) -> str:
-    (tmp_path / "cli_plugin_commands.py").write_text(PLUGIN_MODULE_SOURCE, encoding="utf-8")
-    (tmp_path / "cli_plugin_models.py").write_text("", encoding="utf-8")
+    sources = ProjectSources(tmp_path)
+    sources.write_module("cli_plugin_commands", PLUGIN_MODULE_SOURCE)
+    sources.write_module("cli_plugin_models", "")
     cli_section = f', "cli": {{"commands": {cli_commands!r}}}' if cli_commands is not None else ""
-    (tmp_path / "cli_plugin_settings.py").write_text(
+    sources.write_module(
+        "cli_plugin_settings",
         'HARE_ORM = {"connections": {"default": "sqlite+aiosqlite://:memory:"}, '
         f'"apps": {{"models": {{"models": ["cli_plugin_models"]}}}}{cli_section}}}\n',
-        encoding="utf-8",
     )
     monkeypatch.syspath_prepend(str(tmp_path))
     monkeypatch.chdir(tmp_path)
@@ -86,21 +127,13 @@ def _use_entry_points(monkeypatch: pytest.MonkeyPatch, values: dict[str, str]) -
     monkeypatch.setattr(CLICommandRegistry, "get_entry_points", staticmethod(lambda: entry_points))
 
 
-async def _run_cli(args: list[str]) -> SimpleNamespace:
-    stdout = io.StringIO()
-    stderr = io.StringIO()
-    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-        exit_code = await cli_module.HareCLI.run_cli_async(args)
-    return SimpleNamespace(exit_code=exit_code, stdout=stdout.getvalue(), stderr=stderr.getvalue())
-
-
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_config_listed_command_runs_with_its_arguments_and_exit_code(tmp_path, monkeypatch):
     _use_entry_points(monkeypatch, {})
     config = _write_project(tmp_path, monkeypatch, ["cli_plugin_commands:GreetCommand"])
 
-    result = await _run_cli(["-c", config, "greet", "--who", "team"])
+    result = await CliCommands.run(["-c", config, "greet", "--who", "team"], project=tmp_path)
 
     assert result.exit_code == 3
     assert result.stdout.strip() == "hello team from ['models']"
@@ -109,11 +142,153 @@ async def test_config_listed_command_runs_with_its_arguments_and_exit_code(tmp_p
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
+async def test_plugin_argument_destinations_do_not_replace_execution_metadata(tmp_path, monkeypatch):
+    _use_entry_points(monkeypatch, {})
+    config = _write_project(tmp_path, monkeypatch, ["cli_plugin_commands:ArgumentNamesCommand"])
+    result = await CliCommands.run(
+        ["-c", config, "argument-names", "count", "plugin.cfg", "payload-command"], project=tmp_path
+    )
+    assert result.exit_code == 7
+    assert result.stdout.strip() == f"count|plugin.cfg|payload-command|payload|{config}"
+    assert result.stderr == ""
+
+
+@pytest.mark.database_independent
+def test_synchronous_dispatch_also_keeps_plugin_arguments_separate(tmp_path, monkeypatch, capsys):
+    _use_entry_points(monkeypatch, {})
+    config = _write_project(tmp_path, monkeypatch, ["cli_plugin_commands:ArgumentNamesCommand"])
+    assert cli_module.HareCLI.run_cli(["-c", config, "argument-names", "count", "plugin.cfg", "payload-command"]) == 7
+    captured = capsys.readouterr()
+    assert captured.out.strip() == f"count|plugin.cfg|payload-command|payload|{config}"
+    assert captured.err == ""
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag", ["-custom", "-count", "--custom"])
+async def test_plugin_option_prefixes_are_not_global_config_options(tmp_path, monkeypatch, flag):
+    _use_entry_points(monkeypatch, {})
+    config = _write_project(tmp_path, monkeypatch, ["cli_plugin_commands:CaptureFlagCommand"])
+    result = await CliCommands.run(["--config", config, "capture-flag", flag], project=tmp_path)
+    assert result.exit_code == 8
+    assert result.stdout.strip() == f"True|{config}"
+    assert result.stderr == ""
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+@pytest.mark.parametrize("iterable", ["(name for name in ['cli_plugin_models'])", "iter(['cli_plugin_models'])"])
+async def test_discovery_and_execution_share_a_config_with_one_pass_model_modules(tmp_path, monkeypatch, iterable):
+    _use_entry_points(monkeypatch, {})
+    config = _write_project(tmp_path, monkeypatch, ["cli_plugin_commands:CaptureModelsCommand"])
+    settings = tmp_path / "cli_plugin_settings.py"
+    settings.write_text(
+        settings.read_text(encoding="utf-8") + f"HARE_ORM['apps']['models']['models'] = {iterable}\n",
+        encoding="utf-8",
+    )
+    result = await CliCommands.run(["-c", config, "capture-models"], project=tmp_path)
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "['cli_plugin_models']"
+    assert result.stderr == ""
+
+
+@pytest.mark.database_independent
+@pytest.mark.requires("pyright")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("composite", [False, True], ids=["scalar", "composite"])
+async def test_stubs_keeps_raw_config_model_generators_through_discovery(tmp_path, monkeypatch, composite):
+    _use_entry_points(monkeypatch, {})
+    config = _write_project(tmp_path, monkeypatch, ["cli_plugin_commands:ExportCommand"])
+    model_source = (
+        "from hare import Model, fields\n\nclass Entry(Model):\n"
+        f"    number = fields.IntField(primary_key={not composite!r}, generated=False)\n"
+        "    title = fields.TextField()\n"
+    )
+    if composite:
+        model_source += '    region = fields.IntField()\n    pk = fields.CompositePrimaryKey("region", "number")\n'
+    (tmp_path / "cli_plugin_models.py").write_text(model_source, encoding="utf-8")
+    settings = tmp_path / "cli_plugin_settings.py"
+    settings.write_text(
+        settings.read_text(encoding="utf-8")
+        + "HARE_ORM['apps']['models']['models'] = (name for name in ['cli_plugin_models'])\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "typings"
+    result = await CliCommands.run(["-c", config, "stubs", "--output", str(output)], project=tmp_path)
+    assert result.exit_code == 0, result.stderr
+    stub = output / "cli_plugin_models.pyi"
+    assert stub.is_file()
+    stub_source = stub.read_text(encoding="utf-8")
+    assert "class Entry(" in stub_source
+    assert "title" in stub_source
+
+
+@pytest.mark.database_independent
+@pytest.mark.requires("pyright")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("composite", [False, True], ids=["scalar", "composite"])
+@pytest.mark.parametrize("secondary_exists", [False, True], ids=["missing-alias", "other-rows"])
+async def test_stubs_keeps_typing_bindings_only_for_the_generation_scope(
+    tmp_path, monkeypatch, composite, secondary_exists
+):
+    _use_entry_points(monkeypatch, {})
+    source = (
+        "from hare import Model, fields\nclass Entry(Model):\n"
+        f"    number = fields.IntField(primary_key={not composite!r}, generated=False)\n"
+        "    label = fields.TextField()\n"
+    )
+    if composite:
+        source += '    region = fields.IntField(default=7)\n    pk = fields.CompositePrimaryKey("region", "number")\n'
+    source += '    class Meta:\n        table = "stubs_active_entry"\n'
+    sources = ProjectSources(tmp_path)
+    sources.write_module("active_typing_models", source)
+    sources.write_module(
+        "typing_config",
+        "HARE_ORM = {'connections': {'secondary': 'sqlite+aiosqlite://:memory:'}, "
+        "'apps': {'books': {'models': ['active_typing_models'], 'default_connection': 'secondary'}}}\n",
+    )
+    connections = {"primary": "sqlite+aiosqlite://:memory:"}
+    if secondary_exists:
+        connections["secondary"] = "sqlite+aiosqlite://:memory:"
+    with ProjectImports(tmp_path).activate():
+        async with HareContext() as owner:
+            await owner.init(
+                config={
+                    "connections": connections,
+                    "apps": {"books": {"models": ["active_typing_models"], "default_connection": "primary"}},
+                }
+            )
+            model = owner.apps["books"]["Entry"]
+            await owner.generate_schemas()
+            await model.objects.create(number=1, label="kept")
+            if secondary_exists:
+                await owner.get_connection("secondary").execute_script(
+                    "CREATE TABLE stubs_active_entry(number INTEGER, region INTEGER, label TEXT);"
+                    "INSERT INTO stubs_active_entry VALUES(2,7,'other');"
+                )
+            assert await model.objects.values_list("label", flat=True) == ["kept"]
+            output = tmp_path / "typings"
+            assert (
+                await cli_module.HareCLI.run_cli_async(
+                    ["-c", "typing_config.HARE_ORM", "stubs", "--output", str(output)]
+                )
+                == 0
+            )
+            assert (output / "active_typing_models.pyi").is_file()
+            assert HareContext.get_current() is owner
+            assert HareContext.require_current().apps.get_binding(model).default_connection == "primary"
+            assert await model.objects.values_list("label", flat=True) == ["kept"]
+            if secondary_exists:
+                assert await model.objects.using("secondary").values_list("label", flat=True) == ["other"]
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
 async def test_entry_point_command_runs_without_any_config(tmp_path, monkeypatch):
     _write_project(tmp_path, monkeypatch, None)
     _use_entry_points(monkeypatch, {"export": "cli_plugin_commands:ExportCommand"})
 
-    result = await _run_cli(["export"])
+    result = await CliCommands.run(["export"], project=tmp_path)
 
     assert result.exit_code == 0
     assert result.stdout.strip() == "exported"
@@ -125,7 +300,7 @@ async def test_help_lists_plugin_commands_next_to_built_in_ones(tmp_path, monkey
     config = _write_project(tmp_path, monkeypatch, ["cli_plugin_commands:GreetCommand"])
     _use_entry_points(monkeypatch, {"export": "cli_plugin_commands:ExportCommand"})
 
-    result = await _run_cli(["-c", config, "--help"])
+    result = await CliCommands.run(["-c", config, "--help"], project=tmp_path)
 
     assert result.exit_code == 0
     for text in ("greet", "Say hello to the configured apps.", "export", "migrate"):
@@ -138,7 +313,7 @@ async def test_plugin_error_is_reported_like_a_built_in_command_error(tmp_path, 
     _write_project(tmp_path, monkeypatch, None)
     _use_entry_points(monkeypatch, {"explode": "cli_plugin_commands:FailingCommand"})
 
-    result = await _run_cli(["explode"])
+    result = await CliCommands.run(["explode"], project=tmp_path)
 
     assert result.exit_code == 1
     assert "it went wrong" in result.stderr
@@ -150,10 +325,13 @@ async def test_plugin_cannot_replace_a_built_in_command(tmp_path, monkeypatch):
     _write_project(tmp_path, monkeypatch, None)
     _use_entry_points(monkeypatch, {"heads": "cli_plugin_commands:ShadowingCommand"})
 
-    parser = cli_module.ArgParserBuilder.build_parser(CLICommandRegistry.discover(cli_module.CLIContext(None)))
+    handlers = {}
+    parser = cli_module.ArgParserBuilder.build_parser(
+        CLICommandRegistry.discover(cli_module.CLIContext(None)), command_handlers=handlers
+    )
 
-    assert parser.parse_args(["heads"]).func is not None
-    assert parser.parse_args(["heads"]).func.__qualname__ != "ShadowingCommand.run"
+    assert parser.parse_args(["heads"]).command == "heads"
+    assert handlers["heads"].__qualname__ != "ShadowingCommand.run"
 
 
 @pytest.mark.database_independent
@@ -168,7 +346,7 @@ async def test_name_conflicts_are_warned_about_and_the_later_command_skipped(tmp
         },
     )
 
-    result = await _run_cli(["-c", config, "greet"])
+    result = await CliCommands.run(["-c", config, "greet"], project=tmp_path)
 
     assert result.exit_code == 3
     assert "skipping CLI command 'heads'" in result.stderr
@@ -191,7 +369,7 @@ async def test_unloadable_entry_point_is_skipped_and_the_cli_keeps_working(
     _write_project(tmp_path, monkeypatch, None)
     _use_entry_points(monkeypatch, {"bad": entry_point_value, "export": "cli_plugin_commands:ExportCommand"})
 
-    result = await _run_cli(["export"])
+    result = await CliCommands.run(["export"], project=tmp_path)
 
     assert result.exit_code == 0
     assert result.stdout.strip() == "exported"
@@ -209,7 +387,7 @@ async def test_malformed_config_reference_is_skipped_with_a_warning(tmp_path, mo
     _use_entry_points(monkeypatch, {})
     config = _write_project(tmp_path, monkeypatch, [reference])
 
-    result = await _run_cli(["-c", config, "--help"])
+    result = await CliCommands.run(["-c", config, "--help"], project=tmp_path)
 
     assert result.exit_code == 0
     assert f"skipping CLI command from config cli.commands entry {reference!r}" in result.stderr
@@ -222,8 +400,8 @@ async def test_command_whose_arguments_fail_to_declare_is_not_half_registered(tm
     _write_project(tmp_path, monkeypatch, None)
     _use_entry_points(monkeypatch, {"broken-args": "cli_plugin_commands:BrokenArgumentsCommand"})
 
-    help_result = await _run_cli(["--help"])
-    run_result = await _run_cli(["broken-args"])
+    help_result = await CliCommands.run(["--help"], project=tmp_path)
+    run_result = await CliCommands.run(["broken-args"], project=tmp_path)
 
     assert "skipping CLI command 'broken-args'" in help_result.stderr
     assert "cannot declare arguments" in help_result.stderr
@@ -240,7 +418,7 @@ async def test_missing_config_does_not_hide_installed_plugin_commands(tmp_path, 
     monkeypatch.syspath_prepend(str(tmp_path))
     _use_entry_points(monkeypatch, {"export": "cli_plugin_commands:ExportCommand"})
 
-    result = await _run_cli(["export"])
+    result = await CliCommands.run(["export"], project=tmp_path)
 
     assert result.exit_code == 0
     assert result.stdout.strip() == "exported"

@@ -3,7 +3,6 @@ from __future__ import annotations
 import datetime
 from typing import Any, ClassVar
 
-from hare.dialects.postgresql.enums import RangeBoundType
 from hare.dialects.postgresql.fields.ranges.range import Range
 from hare.dialects.postgresql.fields.ranges.range_field import RangeField
 from hare.exceptions import ValidationError
@@ -11,7 +10,10 @@ from hare.fields import Field
 from hare.fields.constants import NAIVE_INFINITY_DATETIMES
 from hare.fields.data.temporal.datetime_field import DatetimeField
 from hare.fields.data.temporal.parse_datetime import parse_datetime
+from hare.fields.data.temporal.temporal_values import TemporalValues
 from hare.time import Timezone
+from hare.time.system_zone import SystemZone
+from hare.time.zone_settings import ZoneSettings
 
 
 class DateTimeRangeField(RangeField):
@@ -27,9 +29,8 @@ class DateTimeRangeField(RangeField):
 
     SQL_TYPE = "tstzrange"
     ELEMENT_SQL_TYPE = "timestamptz"
-    NATIVE_BOUND_TYPE = RangeBoundType.DATETIME
 
-    #: Shared field a bound is read through - the statement plans hold output fields weakly.
+    #: Shared field used to read timestamp bounds and describe their output type.
     BOUND_FIELD: ClassVar[DatetimeField[Any]] = DatetimeField()
 
     def get_bound_field(self) -> Field[Any]:
@@ -78,7 +79,7 @@ class DateTimeRangeField(RangeField):
         """
         if not isinstance(value, datetime.datetime):
             return value
-        use_timezone = Timezone.get_use_timezone()
+        use_timezone = ZoneSettings.get_use_timezone()
         if value.replace(tzinfo=None) in NAIVE_INFINITY_DATETIMES and (
             value.tzinfo is None or value.utcoffset() == datetime.timedelta(0)
         ):
@@ -89,7 +90,7 @@ class DateTimeRangeField(RangeField):
                     return Timezone.make_aware(value, Timezone.default())
                 return value.astimezone(Timezone.default())
             if Timezone.is_aware(value):
-                return Timezone.get_system_local_naive(value)
+                return SystemZone.get_system_local_naive(value)
         except OverflowError:
             raise ValidationError(
                 f"{self.model_field_name}: range bound {self.get_value_for_message(value)} is out of the "
@@ -124,13 +125,7 @@ class DateTimeRangeField(RangeField):
         if value is None:
             return value
         if isinstance(value, str):
-            validation_error = None
-            try:
-                value = parse_datetime(value)
-            except (ValueError, TypeError) as error:
-                validation_error = self.get_validation_error(error, value)
-            if validation_error is not None:
-                raise validation_error
+            value = TemporalValues.parse_text(self, value, parse_datetime, catch=(ValueError, TypeError))
         if not isinstance(value, datetime.datetime):
             raise ValidationError(
                 f"{self.model_field_name}: expected a datetime, got {self.get_value_for_message(value)}"
@@ -140,10 +135,10 @@ class DateTimeRangeField(RangeField):
             if Timezone.is_naive(value):
                 # A naive bound means what a naive DatetimeField value means: a wall clock in the
                 # configured zone under use_timezone=True, in the system's local zone otherwise.
-                if Timezone.get_use_timezone():
+                if ZoneSettings.get_use_timezone():
                     value = Timezone.make_aware(value, Timezone.default())
                 else:
-                    value = Timezone.make_system_local_aware(value)
+                    value = SystemZone.make_system_local_aware(value)
             value.astimezone(datetime.UTC)
         except OverflowError:
             raise ValidationError(

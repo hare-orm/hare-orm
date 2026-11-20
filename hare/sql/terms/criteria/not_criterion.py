@@ -2,24 +2,21 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable, Iterator
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import Any, TypeVar
 
 from hare.sql.builder_methods import BuilderMethods
 from hare.sql.sql_context import SqlContext
-from hare.sql.terms.node import TNode
-from hare.sql.terms.term import Term
-
-if TYPE_CHECKING:
-    from typing import Self
-
-    from hare.sql.builder.tables.table import Table
 from hare.sql.terms.criteria.criterion import Criterion
+from hare.sql.terms.node import Node
+from hare.sql.terms.term import Term
 
 T = TypeVar("T")
 
 
 class Not(Criterion):
     """``NOT condition``."""
+
+    structure_attributes = ("term",)
 
     def __init__(self, term: Any, alias: str | None = None) -> None:
         super().__init__(alias=alias)
@@ -29,9 +26,8 @@ class Not(Criterion):
     def is_aggregate(self) -> bool | None:  # type:ignore[override]
         return self.term.is_aggregate
 
-    def nodes_(self) -> Iterator[TNode]:
-        yield self  # type:ignore[misc]
-        yield from self.term.nodes_()
+    def get_children(self) -> Iterator[Node]:
+        yield self.term
 
     def get_sql(self, sql_context: SqlContext) -> str:
         not_context = sql_context.copy(subcriterion=True)
@@ -60,19 +56,3 @@ class Not(Criterion):
             return result
 
         return inner
-
-    @BuilderMethods.builder
-    def replace_table(self, current_table: Table | None, new_table: Table | None) -> Self:
-        """Replaces all occurrences of the specified table with the new table.
-
-        Useful when reusing fields across queries.
-
-        Args:
-            current_table: The table to be replaced.
-            new_table: The table to replace with.
-
-        Returns:
-            A copy of the criterion with the tables replaced.
-        """
-        self.term = self.term.replace_table(current_table, new_table)
-        return self

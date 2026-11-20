@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import math
 from typing import Any, ClassVar
 
 from hare.exceptions import ValidationError
 from hare.gis.enums import SpatialFunctionType
 from hare.gis.functions.spatial_function import SpatialFunction
+from hare.numbers.finite_numbers import FiniteNumbers
 
 
 class Simplify(SpatialFunction):
@@ -24,6 +24,6 @@ class Simplify(SpatialFunction):
     default_value_counts = (1, 1)
 
     def __init__(self, expression: Any, tolerance: float) -> None:
-        if isinstance(tolerance, bool) or not isinstance(tolerance, int | float) or not 0 <= tolerance < math.inf:
+        if not FiniteNumbers.is_finite_number(tolerance) or tolerance < 0:
             raise ValidationError(f"Simplify tolerance must be a finite number of zero or more, got {tolerance!r}")
         super().__init__(expression, float(tolerance))

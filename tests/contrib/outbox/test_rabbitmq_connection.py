@@ -1,6 +1,8 @@
 """The connection of a RabbitMQ delivery or wakeup: a connection whose exchange can't be opened is closed,
 never left reconnecting behind the next one."""
 
+import asyncio
+
 import pytest
 
 from hare.contrib.outbox.brokers.rabbitmq_connection import RabbitMQConnection
@@ -47,3 +49,27 @@ async def test_a_connection_whose_exchange_isnt_opened_is_closed():
 
     await rabbitmq_connection.close()
     assert [connection.closed for connection in aio_pika.connections] == [True, True]
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_exchange_setup_and_release_failures_are_both_retained(monkeypatch, cancelled):
+    failure = asyncio.CancelledError("exchange") if cancelled else PermissionError("exchange")
+    release_failure = RuntimeError("cleanup")
+
+    async def open_exchange(connection):
+        raise failure
+
+    async def close(connection):
+        connection.closed = True
+        raise release_failure
+
+    monkeypatch.setattr(RecordedConnection, "close", close)
+    connection = RabbitMQConnection("amqp://broker", open_exchange)
+    connection.aio_pika = RecordingAioPika()
+    with pytest.raises(BaseExceptionGroup) as captured:
+        await connection.get_exchange()
+    assert captured.value.exceptions == (failure, release_failure)
+    assert connection.connection is None and connection.exchange is None
+    assert connection.aio_pika.connections[0].closed

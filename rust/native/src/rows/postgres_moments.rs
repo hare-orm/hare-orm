@@ -10,13 +10,16 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDate, PyDateTime};
 use tokio_postgres::types::{FromSql, Type};
 
+use crate::pg::parameter_encoding::{PgParameterEncoding, PgParameterMode};
 use crate::pg::types::datetime::{decode_date, python_max_datetime, python_min_datetime, timestamp_infinity};
 use crate::pg::value::Value;
 
 /// The binary payload of `value` as a `postgres_type` parameter.
 fn encode<'py>(py: Python<'py>, value: &Value, postgres_type: &Type) -> PyResult<Bound<'py, PyBytes>> {
     let mut out = BytesMut::new();
-    value.encode(postgres_type, &mut out, true).map_err(|error| PyValueError::new_err(error.to_string()))?;
+    PgParameterEncoding::new(value, postgres_type, PgParameterMode::BinaryRequired)
+        .encode(&mut out)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
     Ok(PyBytes::new(py, &out))
 }
 

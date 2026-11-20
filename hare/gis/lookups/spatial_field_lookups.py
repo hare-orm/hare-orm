@@ -15,10 +15,11 @@ from hare.gis.constants import (
     SPATIAL_LOOKUP_REQUIRED_FEATURE,
 )
 from hare.gis.enums import SpatialFunctionType, SpatialRelation
+from hare.gis.geometry_arguments import GeometryArguments
+from hare.gis.spatial_distances import SpatialDistances
 from hare.gis.terms.geometry_value import GeometryValue
 from hare.gis.terms.spatial_function_term import SpatialFunctionTerm
 from hare.gis.terms.spatial_relation_term import SpatialRelationTerm
-from hare.numbers.finite_numbers import FiniteNumbers
 from hare.query.filters.lookups.lookups import Lookups
 from hare.sql.enums import Equality
 from hare.sql.terms.criteria.basic_criterion import BasicCriterion
@@ -56,10 +57,12 @@ class SpatialFieldLookups:
         from hare.query.filters.lookups.field_lookups import FieldLookups
 
         generic = FieldLookups.get_generic(field)
-        lookups = {name: generic[name] for name in KEPT_GENERIC_GEOMETRY_LOOKUPS}
+        lookups: dict[str, FieldLookup] = {name: generic[name] for name in KEPT_GENERIC_GEOMETRY_LOOKUPS}
         if field.geography:
             # A geography has an = operator and no <> - the database would compare its text.
             lookups["not"] = dataclasses.replace(lookups["not"], operator=Lookups.not_equal_by_equality)
+            lookups["in"] = generic["in"]
+            lookups["not_in"] = dataclasses.replace(generic["not_in"], operator=Lookups.not_in_by_equality)
         # A geography is measured on the ellipsoid - a connection needs more for it.
         required_feature = GEOGRAPHY_REQUIRED_FEATURE if field.geography else SPATIAL_LOOKUP_REQUIRED_FEATURE
         encoder: Callable[..., Any]
@@ -89,24 +92,24 @@ class SpatialFieldLookups:
         return lookups
 
     @staticmethod
-    def get_geometry_value(value: Any, field: Field[Any]) -> GeometryValue:
+    def get_geometry_value(value: Any, field: Field[Any], dialect: Dialect) -> GeometryValue:
         """A geometry from Python as the term it is compared through.
 
         Args:
             value: The geometry, in any form the field takes.
             field: The geometry field.
+            dialect: The dialect rendering the geometry literal.
 
         Returns:
             The term - transformed to the field's SRID when the geometry has another.
         """
         geometry_field: GeometryField = field  # type: ignore[assignment]
-        geometry = geometry_field.get_parsed_geometry(value)
-        return GeometryValue(geometry, geometry_field.srid, geometry_field.geography)
+        return GeometryArguments.get_value(value, geometry_field, dialect=dialect)
 
     @staticmethod
     def encode_geometry(value: Any, obj: Model, field: Field[Any], dialect: Dialect) -> Term:
         """Encodes the geometry of a spatial relation."""
-        return SpatialFieldLookups.get_geometry_value(value, field)
+        return SpatialFieldLookups.get_geometry_value(value, field, dialect)
 
     @staticmethod
     def get_pair(value: Any, field: Field[Any], second_name: str) -> tuple[Any, Any]:
@@ -133,12 +136,9 @@ class SpatialFieldLookups:
             ValidationError: ``value`` isn't such a pair.
         """
         geometry, distance = SpatialFieldLookups.get_pair(value, field, "distance")
-        # An int a float can't hold is no distance either - float() would raise OverflowError on it.
-        if not FiniteNumbers.is_finite_number(distance) or distance < 0:
-            raise ValidationError(
-                f"{field.model_field_name}: a distance is a finite number of zero or more, got {distance!r}"
-            )
-        return SpatialFieldLookups.get_geometry_value(geometry, field), ValueWrapper(float(distance))
+        return SpatialFieldLookups.get_geometry_value(geometry, field, dialect), ValueWrapper(
+            SpatialDistances.get_value(distance, field.model_field_name)
+        )
 
     @staticmethod
     def encode_geometry_with_pattern(
@@ -155,7 +155,7 @@ class SpatialFieldLookups:
             raise ValidationError(
                 f"{field.model_field_name}: a relate pattern is nine of 0, 1, 2, T, F, *, got {pattern!r}"
             )
-        return SpatialFieldLookups.get_geometry_value(geometry, field), ValueWrapper(pattern.upper())
+        return SpatialFieldLookups.get_geometry_value(geometry, field, dialect), ValueWrapper(pattern.upper())
 
     @staticmethod
     def get_relation_criterion(

@@ -46,7 +46,7 @@ class VariantField(Field[Any]):
         # Checked as given - a caller may pass anything.
         given_fields: object = variant_fields
         if (
-            isinstance(given_fields, str | Field)
+            isinstance(given_fields, (str, Field))
             or not isinstance(given_fields, Sequence)
             or not given_fields
             or any(not isinstance(variant_field, Field) for variant_field in given_fields)

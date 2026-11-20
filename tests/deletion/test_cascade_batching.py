@@ -3,8 +3,6 @@ one query per relation and model per wave, split past the bind-parameter ceiling
 results as deleting row by row - PROTECT/RESTRICT, SET_NULL, M2M, dispatch switches, versions,
 tenants and overridden delete()."""
 
-import os
-import uuid
 from collections.abc import AsyncGenerator, Generator
 from typing import Any
 from unittest import mock
@@ -14,6 +12,7 @@ import pytest_asyncio
 
 from hare.contrib.test import requires_features, truncate_all_models
 from hare.contrib.test.isolated_contexts import hare_test_context
+from hare.core.hare_context import HareContext
 from hare.exceptions import IntegrityError, ProtectedError, StaleObjectError
 from hare.instrumentation.declarations import QueryExecuted
 from hare.instrumentation.observers.observers import Observers
@@ -49,20 +48,16 @@ from tests.deletion.cascade_batch_models import (
     BatchTenantChild,
     BatchTenantParent,
 )
+from tests.utils.database_under_test import DatabaseUnderTest
 
 #: Bind-parameter ceiling the batching tests lower the backend's to, so a few dozen rows cross it.
 SMALL_BIND_PARAMETER_LIMIT = 150
 
 
-def get_test_db_url() -> str:
-    raw_db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:").replace("\\{", "{").replace("\\}", "}")
-    return raw_db_url.format(uuid.uuid4().hex) if "{}" in raw_db_url else raw_db_url
-
-
 @pytest_asyncio.fixture(scope="module")
 async def cascade_batch_context() -> AsyncGenerator[Any]:
     async with hare_test_context(
-        ["tests.deletion.cascade_batch_models"], db_url=get_test_db_url(), connection_label="models"
+        ["tests.deletion.cascade_batch_models"], db_url=DatabaseUnderTest.get_fresh_url(), connection_label="models"
     ) as ctx:
         yield ctx
 
@@ -84,7 +79,7 @@ async def cascade_batch_db(cascade_batch_context: Any) -> AsyncGenerator[Any]:
 
 @pytest.fixture
 def small_bind_parameter_limit(cascade_batch_db: Any) -> Generator[int]:
-    client_class = type(BatchSoftParent._meta.connection)
+    client_class = type(HareContext.require_current().apps.get_queryset(BatchSoftParent).get_connection())
     with mock.patch.object(
         client_class, "features", client_class.features.replace(max_bind_parameters=SMALL_BIND_PARAMETER_LIMIT)
     ):

@@ -3,11 +3,67 @@
 Generates a Pydantic model straight from a hare model — for API response schemas, without hand-writing a
 parallel Pydantic class for every model.
 
+Install the `pydantic` extra. It requires Pydantic 2.10.1 or later on Python 3.12–3.13,
+2.12 or later on Python 3.14, and 2.14 or later on Python 3.15.
+
+```bash
+pip install "hare-orm[pydantic]"
+```
+
 ```python
 from hare.contrib.pydantic import pydantic_model_creator, pydantic_queryset_creator
 
 AuthorSchema = pydantic_model_creator(Author)
 AuthorListSchema = pydantic_queryset_creator(Author)
+```
+
+Relation fetching follows the schema's validation aliases, including `AliasChoices` and
+`AliasPath`, and its `validate_by_alias` / `validate_by_name` configuration. For example,
+`Field(validation_alias=AliasPath("author", "name"))` fetches `author` before reading its name.
+Alternatives may require fetching several relation paths; synchronous validation checks the
+first available source. A missing ORM column cannot silently become a schema default, while
+an available alternative alias can supply the value. An index in an alias path selects an
+item from an already fetched collection; it does not limit the relation query.
+
+For ORM objects, choose aliases in the schema's `model_config`. Per-call `by_alias` / `by_name`
+overrides are not supported by ORM source checks or automatic fetching: those descriptions belong
+to the compiled schema. Define a separate schema with the desired configuration instead.
+
+Type annotations use the namespace of their declaring module and class, including inherited
+fields and computed methods. Registered models supply missing forward references without
+replacing module types, class aliases or builtins. An unknown name still raises `NameError`.
+
+Omitting unset database-generated values from a dump does not remove their field descriptions
+from `model_json_schema(mode="serialization")`. Output schemas retain the model's property
+types, aliases and enum definitions, including when used as an API response schema.
+Inherited schemas use the actual subclass's serialization aliases and alias settings when
+omitting unset values, even if the parent schema did not declare aliases.
+
+After changing nested Pydantic schemas, rebuild the outer schema with `model_rebuild(force=True)`
+before using it. Its compiled validator and automatic fetch description then describe the same
+schema. Recursive schemas require an explicit finite fetch plan or a generated recursion limit.
+
+Without `sort_alphabetically=True`, computed fields follow the order supplied in `computed`.
+Schemas with different computed-field order therefore use different cached model classes. With
+alphabetical sorting enabled, equivalent reordered declarations reuse the same schema.
+
+Schema factories accept `apps=` to select a registry explicitly. Without it they capture the current
+application once. The schema and its nested schemas retain that structural binding; another registry
+using the same Python classes has independent cache entries. Before application startup, use
+`apps = Hare.bind_models(CONFIG)` followed by `pydantic_model_creator(Book, apps=apps)`.
+
+A handwritten ORM schema selects the same structural source through `source_binding`.
+`source_model` is derived from that binding; specifying a different model is a configuration error.
+Schemas inherit the source binding, while `model_rebuild(force=True)` refreshes their serialization
+description after field or alias changes.
+
+```python
+from typing import ClassVar
+from hare.contrib.pydantic import PydanticModel
+
+class BookOutput(PydanticModel):
+    source_binding: ClassVar = apps.get_binding(Book)
+    title: str
 ```
 
 ## <a id="pydantic-model-creator"></a>`pydantic_model_creator()`
@@ -16,6 +72,7 @@ AuthorListSchema = pydantic_queryset_creator(Author)
 def pydantic_model_creator(
     model: type[Model],
     *,
+    apps: Apps | None = None,
     name: str | None = None,
     exclude: tuple[str, ...] | None = None,
     include: tuple[str, ...] | None = None,
@@ -26,7 +83,7 @@ def pydantic_model_creator(
     allow_cycles: bool | None = None,
     sort_alphabetically: bool | None = None,
     exclude_readonly: bool = False,
-    meta_override: type | None = None,
+    meta_override: object | None = None,
     model_config: ConfigDict | None = None,
     validators: dict[str, Any] | None = None,
     module: str = "hare.contrib.pydantic",
@@ -38,30 +95,32 @@ def pydantic_model_creator(
 | Parameter | Meaning |
 |---|---|
 | `name` | Explicit model name, instead of an auto-generated one. |
-| `exclude` / `include` | Extra fields to drop/keep, on top of whatever `PydanticMeta` already says. A path through a relation (`"author.name"`) reaches a field of the related schema; in `include` it also keeps the relation itself, with only the listed fields. |
+| `exclude` / `include` | Extra fields to drop/keep, on top of whatever `Meta.pydantic` already says. A path through a relation (`"author.name"`) reaches a field of the related schema; in `include` it also keeps the relation itself, with only the listed fields. |
 | `computed` | Names of `@property`/methods on the model to expose as computed fields; a path through a relation (`"books.title_length"`) adds one to the related schema. |
 | `extra_fields` | Values read from the row by name — a query's annotation, an attribute set on the row — with their types; see [Extra fields and related values](#extra-fields). |
 | `related_values` | Fields of related rows, flattened — a name to the path of the related field; see [Extra fields and related values](#extra-fields). |
-| `optional` | Fields to make optional in the schema even though they aren't nullable on the model. |
+| `optional` | Fields to make optional in the schema even though they aren't nullable on the model. A relation path such as `"author.name"` applies to that nested field, including fields in a to-many schema. |
 | `allow_cycles` | Allow self-referential/cyclic relations to recurse (default `False` — cycles are cut off). |
 | `sort_alphabetically` | Sort fields alphabetically instead of declaration order. |
 | `exclude_readonly` | A write schema without the fields the database or hare fills in — see [`exclude_readonly`](#exclude-readonly) |
-| `meta_override` | A `PydanticMeta`-shaped class to override the model's own, without editing the model — every option it sets, `model_config` included, replaces the model's. |
+| `meta_override` | An object or mapping of `Meta.pydantic` settings, without editing the model — every option it sets, `model_config` included, replaces the model's. |
 | `model_config` | A Pydantic `ConfigDict` merged into the generated model's config. |
 | `validators` | `{validator_name: field_validator(...)(func)}`, passed through to `pydantic.create_model`'s `__validators__`. |
 | `module` | The `__module__` of the generated class — `"hare.contrib.pydantic"` (`PYDANTIC_MODELS_MODULE`) by default. |
-| `exclude_sensitive` | Drop every `sensitive=True` field (`Model._meta.sensitive_fields` — see [Sensitive fields](../models/encrypted-and-sensitive-fields.md#sensitive-fields)) — nested relation schemas included — see [`exclude_sensitive`](#exclude-sensitive) |
+| `exclude_sensitive` | Drop every `sensitive=True` field (`apps.get_binding(Model).sensitive_fields` — see [Sensitive fields](../models/encrypted-and-sensitive-fields.md#sensitive-fields)) — nested relation schemas included — see [`exclude_sensitive`](#exclude-sensitive) |
 | `relations_as_ids` | Render every forward FK/O2O as its flat `<name>_id` field instead of a nested submodel — see [Relations as ids](#relations-as-ids). |
 
 A name in `exclude`, `include`, `optional` or `computed` that is no field, relation or computed field of
 the model — of the related model, for a path — raises `ConfigurationError`: a misspelt `exclude` would
 leave the field it means in the schema.
+Every segment is checked, including paths through relations left out of the schema. A scalar field
+cannot be an intermediate segment (`"title.name"` is invalid).
 
 ### <a id="exclude-readonly"></a>`exclude_readonly`
 
 Build a write-schema variant that drops every database-assigned field (a pk the database or ORM assigns —
 generated, or with a `default`/`db_default` — and anything with `generated=True` — includes
-`auto_now`/`auto_now_add` and a `TSVectorField(stored=True)`), plus every backward relation and computed
+`auto_now`/`auto_now_add` and a computed `TSVectorField`), plus every backward relation and computed
 field (neither can ever be supplied on create). A forward FK/O2O/M2M stays in the schema — it isn't
 database-assigned, the caller still has to supply it (required or optional, following the same
 nullable/default rules as any other field). A natural primary key (a `CharField(primary_key=True)` or
@@ -71,7 +130,7 @@ field with `relations_as_ids=True`).
 
 ### <a id="exclude-sensitive"></a>`exclude_sensitive`
 
-Drop every `sensitive=True` field (`Model._meta.sensitive_fields` — see [Sensitive
+Drop every `sensitive=True` field (`apps.get_binding(Model).sensitive_fields` — see [Sensitive
 fields](../models/encrypted-and-sensitive-fields.md#sensitive-fields)) — nested relation schemas
 included, and a related value (`related_values`) of such a field. Useful for a public/export schema.
 Schemas built with and without it are cached separately and never mixed. The `<name>_blind_index` field
@@ -105,10 +164,14 @@ the model, it has a Python-side `default=`, it has a `db_default=`, it's a non-P
 `generated=True` (a `GeneratedField`, or any other field the database fills in — the caller shouldn't
 have to provide it, and it's also marked `readOnly` in the JSON Schema), or it's a
 `DatetimeField`/`TimeField` with `auto_now=True`/`auto_now_add=True` (the ORM fills it in on save, same
-reasoning, also marked `readOnly`) — otherwise it's required. A PK is a separate case: an auto-increment
-integer PK is `generated=True` too, but stays required in the schema like every other PK component,
-regardless of this rule — unless it's listed in `optional=`, which makes it optional and nullable like
-any other field.
+reasoning, also marked `readOnly`) — otherwise it's required. For a PK or any composite PK component,
+`generated=True` alone does not make it optional. An explicit `default=`, `db_default=` or `optional=`
+still applies as usual; `optional=` also makes the schema field nullable.
+
+An explicit Python annotation supplies the value type; it does not remove the ORM field's
+nullable setting or an `optional=` override. These rules also apply to a typed `JSONField`:
+the generated schema accepts `None` where declared, and validates non-null values against
+the annotated or declared JSON type.
 
 A field optional only because the database or the ORM fills it — a `db_default`, a generated value, an
 `auto_now`/`auto_now_add` stamp, the tenant — and refusing NULL on the model is left out of
@@ -116,6 +179,11 @@ A field optional only because the database or the ORM fills it — a `db_default
 instead of writing a NULL the column refuses.
 This also applies when fields use serialization aliases, including `model_dump(by_alias=True)` and
 `model_config["serialize_by_alias"]`; nullable model fields still keep their explicit `None`.
+
+An asynchronous Python default is not called while building or validating the schema. Its
+attribute stays `None` until a value is supplied; a non-nullable, non-optional field is omitted
+from the dump so the ORM awaits its default when creating the model. Synchronous factories
+still run during validation. Explicit `None` requires a nullable field or an `optional=` override.
 
 A model with a [`CompositePrimaryKey`](../models/field-types.md#compositeprimarykey) works the same way
 as one with a single-column pk — every component of the composite key becomes its own field in the
@@ -152,9 +220,9 @@ BookCreate = pydantic_model_creator(Book, relations_as_ids=True, exclude_readonl
 
 - **Field name** is the model's own shadow attribute — `<name>_id` (`book.author_id`), also when the FK
   sets a custom database column via `source_field=`: the column name changes, the attribute doesn't. An
-  FK to a model with a [`CompositePrimaryKey`](../models/field-types.md#compositeprimarykey) gets one
-  field per component (`<name>_<pk_component>`).
-- **Type** is the target model's pk type (`int`, `UUID`, `str` with its `max_length`, …); **nullability
+  composite reference gets one field per referenced component (`<name>_<component>`).
+- **Type** is the referenced target field's type, the primary key by default (`int`, `UUID`, `str`
+  with its `max_length`, …); an explicit `to_field` uses that field's type. **Nullability
   and required-ness** follow the FK itself exactly like a plain field: a `null=True` FK is
   `<type> | None` and optional, a non-null FK without a default is required.
 - `optional=`, `exclude_readonly=`, `exclude_sensitive=` apply to the id field like to any other field.
@@ -165,7 +233,7 @@ BookCreate = pydantic_model_creator(Book, relations_as_ids=True, exclude_readonl
 - An O2O with `primary_key=True` becomes just its id field, which is the pk; `exclude=("owner",)` never
   removes that pk — only `exclude=("owner_id",)` does.
 - **Reverse relations** (reverse FK/O2O) have no column on this row, so a flat schema leaves them out
-  entirely — `PydanticMeta.backward_relations` and annotations are ignored.
+  entirely — `Meta.pydantic.backward_relations` and annotations are ignored.
 - **M2M relations stay nested** submodels (`list[TagSchema]`), and still get prefetched. Nested submodels
   (an M2M target's schema) are built with `relations_as_ids=True` too.
 - `from_hare_orm()`/`from_queryset()` read the id straight off the instance — no query for the related
@@ -180,21 +248,23 @@ composite key by its key fields. `from_hare_orm()`/`from_queryset()` prefetch it
 name in `exclude=`/`include=` stands for its branches and their key fields: `exclude=("target",)` leaves
 all of them out, `include=("id", "target")` keeps the field.
 
-## <a id="pydanticmeta"></a>Defaults of a model: `PydanticMeta`
+## <a id="pydanticmeta"></a>Defaults of a model: `Meta.pydantic`
 
-Declare a nested class on the hare model itself to set defaults every `pydantic_model_creator()` call for
+Declare `pydantic` inside the hare model's `Meta` to set defaults every `pydantic_model_creator()` call for
 that model picks up (an explicit function argument still wins):
 
 ```python
 class Author(Model):
     id = fields.UUIDField(primary_key=True)
     name = fields.CharField(max_length=120)
+    internal_note = fields.TextField()
     books: fields.ReverseRelation["Book"]
 
-    class PydanticMeta:
-        exclude = ("some_internal_field",)
-        max_recursion = 2
-        backward_relations = False  # don't pull in `books` unless explicitly annotated
+    class Meta:
+        class pydantic:
+            exclude = ("internal_note",)
+            max_recursion = 2
+            backward_relations = False  # don't pull in `books` unless explicitly annotated
 ```
 
 | Option | Default | Meaning |
@@ -209,6 +279,20 @@ class Author(Model):
 | `exclude_raw_fields` | `True` | Drop the FK shadow column (e.g. `author_id`) once the related object itself is included. |
 | `sort_alphabetically` | `False` | Field ordering. |
 | `model_config` | `None` | Extra Pydantic `ConfigDict`. |
+
+`Meta.pydantic` also accepts a mapping with these option names. The schema builder copies selections
+to tuples and option maps to read-only mappings; nested `model_config` values are copied separately.
+Settings are captured when the ORM model class is built, for mapping and configuration-class syntax.
+Changing the original settings afterwards does not alter later schemas; use `meta_override` or explicit
+creator arguments for a different schema. Across model bases,
+selections accumulate without duplicates and an explicitly declared scalar option overrides its bases.
+These serialization settings do not enter migration state.
+
+Each schema shares one description of the fields it reads and the relations it fetches, including
+inherited fields. Serialization checks loaded relations even inside another validator. A schema rebuilt
+with `model_rebuild()` receives a new description. Generated schemas have a finite recursion limit;
+a hand-written recursive schema can validate an explicitly loaded finite tree with `model_validate()`,
+but automatic fetching refuses an unbounded relation graph with `ConfigurationError`.
 
 ## <a id="computed-fields"></a>Computed fields
 
@@ -229,6 +313,17 @@ annotation becomes the field's type in the schema. A computed field that touches
 raises `NoValuesFetched` with a message telling you to either annotate the relation so it gets
 auto-prefetched, or load it yourself first with `prefetch_related_objects()`.
 
+When validating an ORM instance, computed values are read through its normal attributes:
+properties use their descriptors, cached properties keep their cached or explicitly assigned
+values, and methods are called as bound methods. An already cached value does not require
+reloading the fields its getter originally used. A schema constructed from a plain payload
+runs the getter on the schema instance; a `cached_property` keeps the same caching and assignment
+semantics there.
+
+The ORM source is available to computed fields during model validators too, including
+validators inherited through multiple schema bases. Nested validation uses its own input;
+validating a plain payload does not borrow the enclosing ORM object's values.
+
 ## <a id="extra-fields"></a>Extra fields and related values
 
 ```python
@@ -245,18 +340,20 @@ BookSchema.model_validate(book)
 `extra_fields` are values read from the row by name — a query's annotation, an attribute set on the row
 after it was read (a request query's `api_getter` sets them too) — with their types: a query builds them, so
 the model can't tell them. `related_values` put a field of a related row next to the row's own, through
-relations to one row; validated from a mapping, the value is taken by its own name too. Both are `None` where
-the row has no value — a query that didn't annotate it, a relation not loaded. A name written as a path
-through the relations (`"author.books_count"`) adds the field to the related schema. A name the schema has
+relations to one row; validated from a mapping, the value is taken by its own name too. A missing extra
+attribute or a null intermediate relation produces `None`. An unfetched ORM relation raises
+`NoValuesFetched` during synchronous validation; fetch it first or use an async constructor.
+A name written as a path through the relations (`"author.books_count"`) adds the field to the related schema.
+A name the schema has
 already, one declared twice, a path through what is no relation and a related value through a relation to
-many rows or ending at a relation raise `ConfigurationError`. `PydanticMeta` declares both as well. A write
+many rows or ending at a relation raise `ConfigurationError`. `Meta.pydantic` declares both as well. A write
 schema (`exclude_readonly=True`) gets neither — a row is never written with them; `sort_alphabetically`
 sorts them with the other fields. `from_hare_orm()`/`from_queryset()` load the relations a related value
 reads through, even when the schema excludes the relation or shows it as an id (`relations_as_ids=True`).
 
 `include` and `exclude` select these fields by their declared schema names, just like model and computed
 fields. Paths select extra fields on nested schemas too (`"author.books_count"`). An excluded related
-value adds no relation-loading requirement. The same selection applies when declared in `PydanticMeta`.
+value adds no relation-loading requirement. The same selection applies when declared in `Meta.pydantic`.
 
 ## <a id="building-instances"></a>Building instances: `PydanticModel` / `PydanticListModel`
 
@@ -304,10 +401,17 @@ of the schema.
 
 ## <a id="modeldescription"></a>A model's fields by type: `ModelDescription`
 
+Install the `pydantic` extra. It requires Pydantic 2.10.1 or later on Python 3.12–3.13,
+and 2.12 or later on Python 3.14.
+
+```bash
+pip install "hare-orm[pydantic]"
+```
+
 ```python
 from hare.contrib.pydantic.descriptions import ModelDescription
 
-description = ModelDescription.from_model(Book)
+description = ModelDescription.from_binding(apps.get_binding(Book))
 ```
 
 What the creator builds a schema from: a model's fields grouped by type, each group a list of `Field`
@@ -323,6 +427,7 @@ and `many_to_many_fields`. The model's relations must be initialized (`Hare.init
 def pydantic_queryset_creator(
     model: type[Model],
     *,
+    apps: Apps | None = None,
     name: str | None = None,
     exclude: tuple[str, ...] | None = None,
     include: tuple[str, ...] | None = None,
@@ -333,7 +438,7 @@ def pydantic_queryset_creator(
     allow_cycles: bool | None = None,
     sort_alphabetically: bool | None = None,
     exclude_readonly: bool = False,
-    meta_override: type | None = None,
+    meta_override: object | None = None,
     model_config: ConfigDict | None = None,
     validators: dict[str, Any] | None = None,
     module: str = "hare.contrib.pydantic",

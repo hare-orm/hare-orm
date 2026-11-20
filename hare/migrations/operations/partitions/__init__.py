@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from hare.migrations.operations.partitions.add_partition import AddPartition
 from hare.migrations.operations.partitions.remove_partition import RemovePartition
+from hare.migrations.operations.partitions.rename_partition import RenamePartition
 
 __all__ = [
     "AddPartition",
     "RemovePartition",
+    "RenamePartition",
 ]
