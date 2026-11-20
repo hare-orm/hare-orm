@@ -1,26 +1,28 @@
 from __future__ import annotations
 
+from itertools import chain
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from hare.classes.deferred_import import DeferredImport
+from hare.core.connections.model_connection_choice import ModelConnectionChoice
 from hare.exceptions import IntegrityError, QueryError
 from hare.models.tenancy.tenancy import Tenancy
 from hare.query.key_columns import KeyColumns
+from hare.query.key_comparison import KeyComparison
 from hare.query.lookup_info.lookup_paths import LookupPaths
 from hare.query.queryset.relations.many_to_many.many_to_many_members import ManyToManyMembers
 from hare.query.queryset.relations.many_to_many.through_rows import ThroughRows
 from hare.query.scopes.row_visibility import RowVisibility
-from hare.sql.builder.queries.query_builder import QueryBuilder
+from hare.query.scopes.scope_join_conditions import ScopeJoinConditions
 from hare.sql.builder.tables.table import Table
 from hare.sql.identifiers import Identifiers
-from hare.sql.terms.star import Star
 
 TModel = TypeVar("TModel", bound="Model")
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.dialects.base.dialect import Dialect
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset.relations.many_to_many_relation import ManyToManyRelation
     from hare.query.scopes.row_scopes import RowScopes
     from hare.sql.terms.criteria.criterion import Criterion
@@ -49,14 +51,14 @@ class ManyToManyScopeChecks:
         Raises:
             QueryError: No tenant is active, or an instance's row belongs to another tenant.
         """
-        owning_tenant_field = type(relation.instance)._meta.tenant_field
+        owning_tenant_field = relation.instance._binding.tenant_field
         if owning_tenant_field:
             await ManyToManyScopeChecks.check_instance_tenant(
                 relation, relation.instance, owning_tenant_field, connection
             )
         if not instances:
             return
-        related_tenant_field = type(instances[0])._meta.tenant_field
+        related_tenant_field = instances[0]._binding.tenant_field
         if related_tenant_field:
             for instance in instances:
                 await ManyToManyScopeChecks.check_instance_tenant(relation, instance, related_tenant_field, connection)
@@ -77,9 +79,9 @@ class ManyToManyScopeChecks:
         Raises:
             IntegrityError: ``relation.instance`` is soft-deleted, or one of ``instances`` is hidden.
         """
-        owning_meta = type(relation.instance)._meta
+        owning_meta: ModelBinding = relation.instance._binding
         if owning_meta.soft_delete_field:
-            owning_connection = ManyToManyMembers.get_connection_of(type(relation.instance), connection)
+            owning_connection = ManyToManyMembers.get_connection_of(relation, type(relation.instance), connection)
             owning_table = owning_meta.basetable
             soft_delete_column = owning_meta.fields_db_projection[owning_meta.soft_delete_field]
             query = (
@@ -93,18 +95,23 @@ class ManyToManyScopeChecks:
                 )
                 .select(*KeyColumns.get_source_columns(owning_meta))
             )
-            _, rows = await owning_connection.execute(*ThroughRows.get_statement(relation, query, owning_connection))
+            _, rows = await owning_connection._execute_built(
+                *ThroughRows.get_statement(relation, query, owning_connection)
+            )
             if not rows:
                 raise IntegrityError(
                     f"{type(relation.instance).__name__} instance (pk={relation.instance.pk!r}) is soft-deleted - "
                     "can't add a relation from it."
                 )
-        related_meta = relation.model._meta
+        related_meta: ModelBinding = relation._binding
         related_table = related_meta.basetable
         # The related rows are read on their own connection.
-        connection = ManyToManyMembers.get_connection_of(relation.model, connection)
-        visible_criterion = ManyToManyScopeChecks.row_scopes.of(relation.model).get_criterion(
-            related_table, dialect=connection.dialect, connection=connection
+        connection = ManyToManyMembers.get_connection_of(relation, relation.model, connection)
+        visible_criterion = ManyToManyScopeChecks.row_scopes.of(relation._binding).get_criterion(
+            related_table,
+            dialect=connection.dialect,
+            connection=connection,
+            application_context=relation._context,
         )
         if visible_criterion is None:
             return
@@ -118,18 +125,18 @@ class ManyToManyScopeChecks:
                 connection.dialect.filter_operators.get_row_membership_criterion(
                     [related_table[column] for column in pk_columns],
                     list(instances_by_pk_values),
-                    ManyToManyMembers.get_forward_key_fields(relation),
+                    relation._binding.pk_fields,
                     connection=connection,
                 )
                 & visible_criterion
             )
             .select(*pk_columns)
         )
-        _, rows = await connection.execute(*ThroughRows.get_statement(relation, query, connection))
+        _, rows = await connection._execute_built(*ThroughRows.get_statement(relation, query, connection))
         related_pk_fields = related_meta.pk_fields
         types = connection.dialect.types
         # Read as the field reads it, then written back - compared with the instances' written values.
-        visible_pk_values = set(
+        visible_pk_values = tuple(
             KeyColumns.transfer_rows(
                 related_pk_fields,
                 pk_columns,
@@ -139,8 +146,12 @@ class ManyToManyScopeChecks:
                 relation.model,
             )
         )
+        read_key = await KeyComparison.get_key_reader(
+            connection, related_pk_fields, chain(instances_by_pk_values, visible_pk_values)
+        )
+        visible_keys = set(map(read_key, visible_pk_values))
         for pk_values, instance in instances_by_pk_values.items():
-            if pk_values not in visible_pk_values:
+            if read_key(pk_values) not in visible_keys:
                 raise IntegrityError(
                     f"{type(instance).__name__} instance (pk={instance.pk!r}) is not shown by "
                     f"{type(instance).__name__}'s default scope (soft-deleted, or filtered out by its "
@@ -163,7 +174,7 @@ class ManyToManyScopeChecks:
         Raises:
             QueryError: No tenant is active, or the row is missing or belongs to another tenant.
         """
-        active_tenant = Tenancy.get_scope(type(obj))
+        active_tenant = Tenancy.get_scope(obj._binding)
         if active_tenant is None:
             raise QueryError(
                 f"{type(obj).__name__} has Meta.tenant_field {tenant_field!r} set but no "
@@ -173,18 +184,18 @@ class ManyToManyScopeChecks:
             return
         # The tenant is read from the database by primary key - an obj built by hand can claim
         # any tenant - on the connection of the obj's own model.
-        connection = ManyToManyMembers.get_connection_of(type(obj), connection)
-        meta = type(obj)._meta
+        connection = ManyToManyMembers.get_connection_of(relation, type(obj), connection)
+        meta = obj._binding
         table = meta.basetable
         tenant_db_column = meta.fields_db_projection[tenant_field]
         pk_columns = [table[column] for column in KeyColumns.get_source_columns(meta)]
         condition = KeyColumns.row_equality(pk_columns, KeyColumns.get_db_values(meta, obj, connection.dialect.types))
         query = connection.query_class.from_(table).where(condition).select(tenant_db_column)
-        _, rows = await connection.execute(*ThroughRows.get_statement(relation, query, connection))
+        _, rows = await connection._execute_built(*ThroughRows.get_statement(relation, query, connection))
         # A database keeping no key unique may hold another tenant's row of the key too.
         read_tenant = connection.dialect.types.get_python_reader(meta.fields_map[tenant_field])
         stored_tenants = [read_tenant(row[tenant_db_column]) for row in rows]
-        if not any(Tenancy.allows(type(obj), active_tenant, stored_tenant) for stored_tenant in stored_tenants):
+        if not any(Tenancy.allows(obj._binding, active_tenant, stored_tenant) for stored_tenant in stored_tenants):
             raise QueryError(
                 f"{type(obj).__name__} instance (pk={obj.pk!r}) belongs to a tenant "
                 f"other than the active one ({active_tenant!r}) according to the database."
@@ -195,9 +206,8 @@ class ManyToManyScopeChecks:
         relation: ManyToManyRelation[Any],
         through_table: Table,
         *,
-        visibility: RowVisibility = RowVisibility.DEFAULT,
-        dialect: Dialect,
-        connection: DatabaseClient | None,
+        visibility: RowVisibility,
+        connection: DatabaseClient,
     ) -> Criterion | None:
         """Builds an ``EXISTS`` condition on ``through_table`` that holds only for rows linking to a
         related row the related model's default scope (soft-delete/tenant/``Meta.manager`` filters)
@@ -207,9 +217,7 @@ class ManyToManyScopeChecks:
             relation: The many-to-many relation of an instance.
             through_table: The through table the condition is built against.
             visibility: Which rows of the related model its default scope shows.
-            dialect: The dialect the query compiles for.
-            connection: The connection the query runs on; None when compiling for no particular
-                database.
+            connection: The connection the query runs on.
 
         Returns:
             The condition, or ``None`` if the related model has no default scope.
@@ -218,28 +226,24 @@ class ManyToManyScopeChecks:
             QueryError: If the related model has ``Meta.tenant_field`` set and no tenant is
                 active.
         """
-        from hare.sql.terms.subqueries.exists_term import ExistsTerm
-
-        related_meta = relation.model._meta
+        dialect = connection.dialect
+        related_meta: ModelBinding = relation._binding
         target_table = related_meta.basetable.as_(
             Identifiers.get_within_limit(f"{related_meta.db_table}__visible_target")
         )
-        visible_target_criterion = ManyToManyScopeChecks.row_scopes.of(relation.model).get_criterion(
+        visible_target_criterion = ManyToManyScopeChecks.row_scopes.of(relation._binding).get_criterion(
             target_table,
             visibility=visibility,
             dialect=dialect,
             connection=connection,
+            application_context=relation._context,
         )
         if visible_target_criterion is None:
             return None
-        if connection is not None and related_meta.checks_tenant_client:
+        if related_meta.checks_tenant_client:
             related_meta.check_tenant_client(connection)
-        link_criterion = KeyColumns.row_equality(
-            [through_table[column] for column in relation.field.forward_keys],
-            [target_table[column] for column in KeyColumns.get_source_columns(related_meta)],
-        )
-        return ExistsTerm(
-            QueryBuilder().from_(target_table).select(Star()).where(link_criterion & visible_target_criterion)
+        return ScopeJoinConditions.get_through_target_exists(
+            through_table, target_table, relation.field.forward_keys, related_meta, visible_target_criterion
         )
 
     @staticmethod
@@ -265,13 +269,17 @@ class ManyToManyScopeChecks:
         """
         if not LookupPaths.crosses_connections(relation.field):
             return ManyToManyScopeChecks.get_visible_target_criterion(
-                relation, through_table, visibility=visibility, dialect=connection.dialect, connection=connection
+                relation, through_table, visibility=visibility, connection=connection
             )
-        related_meta = relation.model._meta
+        related_meta: ModelBinding = relation._binding
         related_table = related_meta.basetable
-        related_connection = relation.model.get_connection(for_write=False)
-        visible_criterion = ManyToManyScopeChecks.row_scopes.of(relation.model).get_criterion(
-            related_table, visibility=visibility, dialect=related_connection.dialect, connection=related_connection
+        related_connection = ModelConnectionChoice.get(relation._context, relation._binding, False)  # type: ignore[arg-type]
+        visible_criterion = ManyToManyScopeChecks.row_scopes.of(relation._binding).get_criterion(
+            related_table,
+            visibility=visibility,
+            dialect=related_connection.dialect,
+            connection=related_connection,
+            application_context=relation._context,
         )
         if visible_criterion is None:
             return None
@@ -282,14 +290,12 @@ class ManyToManyScopeChecks:
             .where(
                 KeyColumns.row_equality(
                     backward_columns,
-                    KeyColumns.get_db_values(
-                        type(relation.instance)._meta, relation.instance, connection.dialect.types
-                    ),
+                    KeyColumns.get_db_values(relation.instance._binding, relation.instance, connection.dialect.types),
                 )
             )
             .select(*forward_keys)
         )
-        _, link_rows = await connection.execute(*ThroughRows.get_statement(relation, links_query, connection))
+        _, link_rows = await connection._execute_built(*ThroughRows.get_statement(relation, links_query, connection))
         related_pk_fields = related_meta.pk_fields
         forward_columns = [through_table[column] for column in forward_keys]
         # Each key read as its field reads it, then written as the other connection writes it.
@@ -309,14 +315,16 @@ class ManyToManyScopeChecks:
                     related_connection.dialect.filter_operators.get_row_membership_criterion(
                         [related_table[column] for column in pk_columns],
                         KeyColumns.write_rows(related_pk_fields, linked_keys, related_types, relation.model),
-                        ManyToManyMembers.get_forward_key_fields(relation),
+                        relation._binding.pk_fields,
                         connection=related_connection,
                     )
                     & visible_criterion
                 )
                 .select(*pk_columns)
             )
-            _, rows = await related_connection.execute(*ThroughRows.get_statement(relation, query, related_connection))
+            _, rows = await related_connection._execute_built(
+                *ThroughRows.get_statement(relation, query, related_connection)
+            )
             visible_keys = KeyColumns.transfer_rows(
                 related_pk_fields, pk_columns, rows, related_types, connection.dialect.types, relation.model
             )
@@ -324,5 +332,5 @@ class ManyToManyScopeChecks:
             # No visible linked row - a condition no through row meets.
             return forward_columns[0].isnull() & forward_columns[0].notnull()
         return connection.dialect.filter_operators.get_row_membership_criterion(
-            forward_columns, visible_keys, ManyToManyMembers.get_forward_key_fields(relation), connection=connection
+            forward_columns, visible_keys, relation._binding.pk_fields, connection=connection
         )

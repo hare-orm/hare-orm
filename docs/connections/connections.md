@@ -68,10 +68,18 @@ class ConnectionHandler:
 settings of a source client. With `config`, the alias only names the new client; credential overrides
 apply to those settings. The caller closes the independent client.
 
+`client.create_independent_client(settings)` and tenant-schema clients follow the source
+client's ownership. A client created by a context retains that context's handler. A standalone
+client creates an isolated handler from its captured settings, including when another context
+is active. The caller closes an independent client; its source closes cached tenant clients.
+
 `get_client(using)` is the connection a `using=` argument names — an alias's client, the client itself,
 or `None`. `get_pool_statuses()` lists the open pools ([Pool metrics and
 health](../observability/pool-health.md)). `create_task_outside_transactions(coroutine)` starts a task
-that sees no transaction of the caller — every alias gives the shared client there.
+that sees no transaction of the caller — every alias gives the shared client there. This applies to
+all inherited connection handlers, including explicit clients from another application context,
+even when no application context is active. The caller's transaction bindings and unrelated
+context variables remain unchanged.
 
 `close_all()` closes every connection of the context — how long it waits for the queries still running is
 in [Closing connections](configuration.md#closing-connections). With `discard=True` (the default;

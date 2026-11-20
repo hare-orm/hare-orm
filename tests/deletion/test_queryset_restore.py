@@ -91,7 +91,7 @@ async def test_only_the_active_tenants_rows(db):
         ),
     ],
 )
-def test_a_wrong_restore_is_refused(make, message):
+def test_a_wrong_restore_is_refused(db, make, message):
     with pytest.raises(QueryError, match=message):
         make()
 

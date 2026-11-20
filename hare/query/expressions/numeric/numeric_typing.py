@@ -36,9 +36,7 @@ class NumericTyping:
     )
     #: (scale,) -> the field a computed Decimal of that scale is decoded through. Room for every
     #: scale there is.
-    DECIMAL_OUTPUT_FIELDS: ClassVar[Cache[DecimalField[Decimal]]] = Cache(
-        DECIMAL_OUTPUT_FIELD_MAX_DIGITS + 1, holds_sql=False
-    )
+    DECIMAL_OUTPUT_FIELDS: ClassVar[Cache[DecimalField[Decimal]]] = Cache(DECIMAL_OUTPUT_FIELD_MAX_DIGITS + 1)
 
     @classmethod
     def get_quotient_output_field(

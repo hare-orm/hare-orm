@@ -4,7 +4,6 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 
-from hare.exceptions import QueryError
 from hare.models.write.rules.written_target_checks import WrittenTargetChecks
 from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
 from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
@@ -15,7 +14,7 @@ from hare.query.plans.statement.declarations import CallPlanHit
 from hare.query.plans.statement.declared_plan_slots import DeclaredPlanSlots
 from hare.query.plans.statement.statement_plan_descriptions import StatementPlanDescriptions
 from hare.query.plans.statement.statement_plan_runs import StatementPlanRuns
-from hare.query.plans.statement.statement_plans import StatementPlans
+from hare.query.query_connection import QueryConnection
 from hare.query.queryset.query_specification import QuerySpecification
 from hare.query.queryset.specification_copying import SpecificationCopying
 from hare.query.statements.building.query_conditions import QueryConditions
@@ -34,6 +33,7 @@ from hare.sql.terms.values.value_wrapper import ValueWrapper
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.instrumentation.capture.captured_write import CapturedWrite
+    from hare.models.model_binding import ModelBinding
     from hare.query.execution.prepared_write import PreparedWrite
     from hare.query.plans.statement.statement_plan import StatementPlan
     from hare.query.queryset.queryset import QuerySet
@@ -74,12 +74,17 @@ class MatchingRowsQuery(RowsSourceQuery):
         # The LIMIT the build put in the statement (or its matching-rows subquery).
         self._limit_term: ValueWrapper | None = None
 
+    def _take_rows_of(self, source: QuerySpecification[Any]) -> None:
+        """Copy the rows this write matches, retaining the order used to take its slice."""
+        SpecificationCopying.copy_specification(source, self)
+        self._configure_rows_source(source, keeps_ordering=True, keeps_grouping=False)
+
     def _get_statement_on(
         self,
         connection: DatabaseClient,
         source: QuerySet[Any] | None = None,
         *,
-        type_part: tuple[Any, Sequence[Any]] = ((), []),
+        type_part: tuple[Any, Sequence[Any]],
         prepared: PreparedWrite | None = None,
     ) -> CallPlanHit | tuple[Self, tuple[str, list[Any]]]:
         """Find SQL before creating build state; only a miss materializes a writable copy."""
@@ -89,7 +94,7 @@ class MatchingRowsQuery(RowsSourceQuery):
             return lookup
         query = self.__copy__()
         if source is not None:
-            query._take_rows_of(source, keeps_ordering=True)
+            query._take_rows_of(source)
         query._init_build_state()
         query._call_signature = specification._call_signature
         query._call_values = specification._call_values
@@ -111,10 +116,11 @@ class MatchingRowsQuery(RowsSourceQuery):
             value_wrapper_references: The bound values recorded for a statement plan, if any.
         """
         self.query = self._get_base_query()
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
         if self._limit is not None:
             self.query._limit = self._limit_term = self.query._wrapper_class(self._limit)
             QueryOrdering.get_ordering(
-                self, self.model, self.model._meta.basetable, self._get_slice_orderings(), self._annotations
+                self, model_binding, model_binding.basetable, self._get_slice_orderings(), self._annotations
             )
 
         QueryConditions.get_filters(self, value_wrapper_references=value_wrapper_references)
@@ -159,7 +165,7 @@ class MatchingRowsQuery(RowsSourceQuery):
         await captured.capture_read(read_before, pks)
         return count, pks
 
-    def _matching_queryset(self, connection: DatabaseClient | None = None) -> QuerySet[Any]:
+    def _matching_queryset(self, connection: DatabaseClient) -> QuerySet[Any]:
         """A plain QuerySet, past the default manager, with this query's filters, slice, ordering and
         ``.distinct()``.
 
@@ -170,14 +176,13 @@ class MatchingRowsQuery(RowsSourceQuery):
 
         # A write has discarded the source's row-return settings. Copy that declaration, not
         # the original source, which can still carry only(), prefetches or grouping settings.
-        check_query = QuerySet(self.model)
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        check_query: QuerySet[Any] = QuerySet.from_binding(model_binding, context=self._context)
         SpecificationCopying.copy_specification(self, check_query)
         check_query._call_signature = self._call_signature
         check_query._call_values = self._call_values
-        connection = connection if connection is not None else self._connection
-        if connection is not None:
-            check_query._apply_connection(connection)
-            check_query._connection_explicitly_chosen = True
+        check_query._apply_connection(connection)
+        check_query._connection_explicitly_chosen = True
         check_query._visibility = self._visibility.get_for_active_tenant()
         return check_query
 
@@ -202,6 +207,7 @@ class MatchingRowsQuery(RowsSourceQuery):
         row once per matching child.
 
         Args:
+            connection: The client used for this operation, including its active transaction if present.
             live_only: Drop the rows ``Meta.soft_delete_field`` already marks as deleted, after
                 the filters (and any slice) picked the matching rows.
 
@@ -213,8 +219,9 @@ class MatchingRowsQuery(RowsSourceQuery):
 
         # The rows are read by a query of their own here - its methods changing how rows are read
         # aren't refused by the write's own statement.
-        WrittenTargetChecks.raise_if_refused_calls(self, connection.dialect)
-        primary_key_attribute_names = self.model._meta.primary_key_attribute_names
+        WrittenTargetChecks.raise_if_rows_unwritable(self, connection, self._get_written_method_name())
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        primary_key_attribute_names = model_binding.primary_key_attribute_names
         is_single_pk = len(primary_key_attribute_names) == 1
         matching_pks = list(
             dict.fromkeys(await StatementSelection.get_primary_key_values_query(self._matching_queryset(connection)))
@@ -223,8 +230,10 @@ class MatchingRowsQuery(RowsSourceQuery):
             return matching_pks
         from hare.query.queryset.queryset import QuerySet
 
-        soft_delete_field: str = self.model._meta.soft_delete_field
-        live_query = QuerySet(self.model).filter(pk__in=matching_pks, **{f"{soft_delete_field}__isnull": True})
+        soft_delete_field: str = model_binding.soft_delete_field  # type: ignore[assignment]
+        live_query: QuerySet[Any] = QuerySet.from_binding(model_binding, context=self._context).filter(
+            pk__in=matching_pks, **{f"{soft_delete_field}__isnull": True}
+        )
         live_query._apply_connection(connection)
         live_query._visibility = replace(
             self._visibility.get_for_active_tenant(), include_deleted=True, only_deleted=False
@@ -233,11 +242,7 @@ class MatchingRowsQuery(RowsSourceQuery):
         return [pk for pk in matching_pks if pk in live_pks]
 
     def _get_plan(self) -> tuple[PlanDescription | None, StatementPlan | None]:
-        # _get_build_plan_description() decides whether the statement keeps a plan.
-        description = self._get_build_plan_description()
-        if description is None:
-            return None, None
-        return description, StatementPlans.find(self.model, description.structure)
+        return self._find_plan_from_description()
 
     def _get_build_plan_description(self) -> PlanDescription | None:
         self._raise_if_rows_unwritable()
@@ -266,9 +271,10 @@ class MatchingRowsQuery(RowsSourceQuery):
         Returns:
             The orderings.
         """
-        if self._orderings or not self.model._meta.has_primary_key:
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        if self._orderings or not model_binding.has_primary_key:
             return list(self._orderings)
-        return [(name, Order.ASC) for name in self.model._meta.primary_key_attribute_names]
+        return [(name, Order.ASC) for name in model_binding.primary_key_attribute_names]
 
     def _get_written_method_name(self) -> str:
         """The queryset method writing the rows, for a message."""
@@ -281,12 +287,9 @@ class MatchingRowsQuery(RowsSourceQuery):
         Raises:
             QueryError: The rows are such rows.
         """
-        if self._extension_calls:
-            WrittenTargetChecks.raise_if_refused_calls(self, self.dialect)
-        if self._offset or (self._limit is not None and not self.features.supports_update_limit_order_by):
-            raise QueryError(f"Cannot {self._get_written_method_name()}() a query once a slice has been taken.")
-        if self._distinct_on:
-            raise QueryError(f"Cannot call {self._get_written_method_name()}() after .distinct(*fields).")
+        WrittenTargetChecks.raise_if_rows_unwritable(
+            self, QueryConnection.get_bound_connection(self), self._get_written_method_name()
+        )
 
     def _filters_need_primary_key_subquery(self) -> bool:
         """Whether the built filters can't be attached to the UPDATE/DELETE itself - they join
@@ -309,7 +312,7 @@ class MatchingRowsQuery(RowsSourceQuery):
         Returns:
             The criterion over the base table.
         """
-        meta = self.model._meta
+        meta: ModelBinding = self._binding  # type: ignore[assignment]
         table = meta.basetable
         if meta.has_primary_key:
             pk_fields = [table[column] for column in KeyColumns.get_source_columns(meta)]

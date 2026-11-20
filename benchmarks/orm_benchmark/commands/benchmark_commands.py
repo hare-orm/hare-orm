@@ -9,6 +9,7 @@ import sys
 from orm_benchmark.constants import BENCHMARK_SEED, CHART_DIRECTORY, REPOSITORY, RESULTS_FILE, SIZES
 from orm_benchmark.declarations.databases import DATABASES
 from orm_benchmark.declarations.targets import TARGET_BY_KEY, TARGETS
+from orm_benchmark.definitions.benchmark_report import BenchmarkReport
 from orm_benchmark.running.runner import Runner
 
 
@@ -45,8 +46,6 @@ class BenchmarkCommands:
             if arguments.out:
                 with open(arguments.out, "w", encoding="utf-8") as output:
                     json.dump(result, output, indent=2)
-            from orm_benchmark.definitions.benchmark_report import BenchmarkReport
-
             for name, observation in result["results"].items():
                 value = (
                     f"{BenchmarkReport.summarize(observation):12.2f} {observation['unit']}"
@@ -63,19 +62,19 @@ class BenchmarkCommands:
                 targets = [target for target in targets if target.database in arguments.databases]
             report = Runner.run_all(targets, arguments.runs, arguments.size, arguments.seed)
         else:
-            report = json.loads(RESULTS_FILE.read_text(encoding="utf-8"))
+            report = BenchmarkReport(json.loads(RESULTS_FILE.read_text(encoding="utf-8")))
         # Local imports: a target's own environment runs only `run`, without what the pages need.
         from orm_benchmark.output.benchmark_artifacts import BenchmarkArtifacts
         from orm_benchmark.output.benchmark_pages import BenchmarkPages
         from orm_benchmark.output.chart_writer import ChartWriter
 
         artifacts = ChartWriter.render_all(report) | BenchmarkPages.render_all(report)
-        artifacts[RESULTS_FILE] = json.dumps(report, indent=2, ensure_ascii=False) + "\n"
+        artifacts[RESULTS_FILE] = json.dumps(report.data, indent=2, ensure_ascii=False) + "\n"
         BenchmarkArtifacts.publish(artifacts, obsolete=CHART_DIRECTORY.glob("*.svg"))
         print(f"wrote {RESULTS_FILE.relative_to(REPOSITORY)}")
         if any(
             process["status"] == "failed"
-            for database in report["databases"].values()
+            for database in report.data["databases"].values()
             for target in database["targets"].values()
             for process in target["processes"]
         ):

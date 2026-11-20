@@ -76,7 +76,9 @@ class AlterRowLevelSecurity(ModelBoundOperation):
             return
         PolicyObjectType.raise_if_unsupported(state_editor)
         await state_editor.row_level_security_policies.alter_row_level_security(
-            self._model(new_state, app_label), self.get_setting(old_state, app_label), self.row_level_security
+            self.get_model_binding(new_state, app_label),
+            self.get_setting(old_state, app_label),
+            self.row_level_security,
         )
 
     async def database_backward(
@@ -91,5 +93,7 @@ class AlterRowLevelSecurity(ModelBoundOperation):
         PolicyObjectType.raise_if_unsupported(state_editor)
         # Going back, new_state holds the setting before the change.
         await state_editor.row_level_security_policies.alter_row_level_security(
-            self._model(new_state, app_label), self.row_level_security, self.get_setting(new_state, app_label)
+            self.get_model_binding(new_state, app_label),
+            self.row_level_security,
+            self.get_setting(new_state, app_label),
         )

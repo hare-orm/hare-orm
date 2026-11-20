@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from hare.inspectdb.enums import SchemaPartType
+from hare.ddl.enums import SchemaPartType
 from hare.migrations.operations import (
     AddDictionary,
     AddFunction,
@@ -16,27 +16,36 @@ from hare.migrations.operations import (
     AlterSequence,
     AlterTrigger,
     AlterView,
+    RemoveDictionary,
+    RemoveFunction,
+    RemoveMaterializedView,
     RemovePolicy,
     RemoveSequence,
     RemoveTrigger,
+    RemoveView,
 )
 from hare.models.enums import ModelOption
 
-#: The objects a model declares by name, compared part by part: the ``MetaInfo`` attribute listing them,
-#: and the operations adding one the database lacks, removing one it has of its own (None where only the
-#: model's objects are read) and altering one it has otherwise.
+#: The objects a model declares by name, compared part by part: the ``ModelBinding`` attribute listing them,
+#: and the operations adding, removing and altering it in a repair.
 DRIFT_NAMED_OBJECT_OPERATIONS = {
     SchemaPartType.TRIGGER: ("triggers", AddTrigger, RemoveTrigger, AlterTrigger),
     SchemaPartType.POLICY: ("policies", AddPolicy, RemovePolicy, AlterPolicy),
     SchemaPartType.SEQUENCE: ("sequences", AddSequence, RemoveSequence, AlterSequence),
-    SchemaPartType.VIEW: ("views", AddView, None, AlterView),
-    SchemaPartType.MATERIALIZED_VIEW: ("materialized_views", AddMaterializedView, None, AlterMaterializedView),
-    SchemaPartType.FUNCTION: ("functions", AddFunction, None, AlterFunction),
-    SchemaPartType.DICTIONARY: ("dictionaries", AddDictionary, None, AlterDictionary),
+    SchemaPartType.VIEW: ("views", AddView, RemoveView, AlterView),
+    SchemaPartType.MATERIALIZED_VIEW: (
+        "materialized_views",
+        AddMaterializedView,
+        RemoveMaterializedView,
+        AlterMaterializedView,
+    ),
+    SchemaPartType.FUNCTION: ("functions", AddFunction, RemoveFunction, AlterFunction),
+    SchemaPartType.DICTIONARY: ("dictionaries", AddDictionary, RemoveDictionary, AlterDictionary),
 }
 
 #: The objects of a schema a model declares, whose definitions are read by name.
 DRIFT_SCHEMA_OBJECT_PART_TYPES = (
+    SchemaPartType.SEQUENCE,
     SchemaPartType.VIEW,
     SchemaPartType.MATERIALIZED_VIEW,
     SchemaPartType.FUNCTION,

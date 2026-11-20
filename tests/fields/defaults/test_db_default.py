@@ -6,12 +6,13 @@ import pytest
 
 from hare import fields
 from hare.declarations.declaration_value_serializer import DeclarationValueSerializer
-from hare.dialects.base.schema.tables.table_comments import TableComments
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.exceptions import ConfigurationError
 from hare.fields.constants import DB_DEFAULT_NOT_SET
 from hare.time import UTC
 from hare.warnings import RedundantDbDefaultWarning
+from tests.utils.model_bindings import ModelBindings
+from tests.utils.schema_editor import TestSchemaEditor
 
 pytestmark = pytest.mark.database_independent
 
@@ -94,17 +95,12 @@ def test_db_default_and_default_coexist():
         # `default` there is silently thrown away, just like the db_default case, but this used to
         # have no warning at all.
         pytest.param({"primary_key": True, "default": 999}, "generated field", id="default_on_generated_field_warns"),
+        pytest.param({"default": 0, "db_default": 2}, None, id="falsy-default-and-db-default"),
     ],
 )
 def test_a_default_that_is_thrown_away_warns(options, message):
     with pytest.warns(RedundantDbDefaultWarning, match=message):
         fields.IntField(**options)
-
-
-def test_db_default_and_default_coexist_warns_even_with_falsy_default():
-    """default=0 is a real, explicitly-set default - not to be confused with "not set"."""
-    with pytest.warns(RedundantDbDefaultWarning):
-        fields.IntField(default=0, db_default=2)
 
 
 @pytest.mark.parametrize(
@@ -113,18 +109,13 @@ def test_db_default_and_default_coexist_warns_even_with_falsy_default():
         pytest.param({"db_default": 2}, id="db_default_alone_does_not_warn"),
         pytest.param({"default": 1}, id="default_alone_does_not_warn"),
         pytest.param({"primary_key": True}, id="generated_alone_does_not_warn"),
+        pytest.param({"primary_key": True, "generated": False, "default": 999}, id="non-generated-key-default"),
     ],
 )
 def test_a_default_alone_does_not_warn(options):
     with warnings.catch_warnings():
         warnings.simplefilter("error", RedundantDbDefaultWarning)
         fields.IntField(**options)
-
-
-def test_default_on_explicitly_non_generated_field_does_not_warn():
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", RedundantDbDefaultWarning)
-        fields.IntField(primary_key=True, generated=False, default=999)
 
 
 # ============================================================================
@@ -270,16 +261,10 @@ def test_schema_db_default(make_field, expected):
     assert sql == expected
 
 
-def test_schema_db_default_bytes_does_not_crash():
-    """encoders (hare/converters.py) has no entry for `bytes` - both the Postgres and SQLite
-    _escape_default_value() implementations used to call encoders.get(type(default))(default)
-    with no fallback for a missing encoder, so encoders.get(bytes) -> None -> None(default)
-    crashed with a bare TypeError, aborting schema generation entirely instead of just that one
-    field. Not asserting on the exact rendered SQL (repr() isn't a real bytea/blob literal) -
-    only that generating a default for a BinaryField no longer raises."""
-    f = fields.BinaryField(db_default=b"\x00\x01")
-    _get_sqlite_default_sql(f)
-    _get_postgres_default_sql(f)
+def test_schema_db_default_bytes_have_binary_literals():
+    field = fields.BinaryField(db_default=b"\x00\x01")
+    assert _get_sqlite_default_sql(field) == " DEFAULT X'0001'"
+    assert _get_postgres_default_sql(field) == r" DEFAULT '\x0001'::bytea"
 
 
 def test_schema_db_default_overrides_default():
@@ -357,23 +342,13 @@ def _make_model(model_name, table, **model_fields):
     attrs = dict(model_fields)
     meta = type("Meta", (), {"app": "models", "table": table})
     attrs["Meta"] = meta
-    return type(model_name, (Model,), attrs)
+    model = type(model_name, (Model,), attrs)
+    return ModelBindings.prepare(model).get_binding(model)
 
 
 def _make_test_editor():
     """Create a BaseSchemaEditor subclass with a FakeClient for testing."""
-    from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
     from tests.utils.fake_client import FakeClient
-
-    class TestSchemaEditorTableComments(TableComments):
-        def get_table_comment_sql(self, table, comment):
-            return ""
-
-        def get_column_comment_sql(self, table, column, comment):
-            return ""
-
-    class TestSchemaEditor(BaseSchemaEditor):
-        table_comments_class = TestSchemaEditorTableComments
 
     client = FakeClient("sql")
     editor = TestSchemaEditor(client)
@@ -397,7 +372,11 @@ async def test_alter_field_sql_set_default():
     )
 
     editor, client = _make_test_editor()
-    await editor.alter_field(OldModel, NewModel, "score")
+    await editor.alter_field(
+        OldModel,
+        NewModel,
+        "score",
+    )
 
     assert len(client.executed) == 1
     sql = client.executed[0]
@@ -422,7 +401,11 @@ async def test_alter_field_sql_drop_default():
     )
 
     editor, client = _make_test_editor()
-    await editor.alter_field(OldModel, NewModel, "score")
+    await editor.alter_field(
+        OldModel,
+        NewModel,
+        "score",
+    )
 
     assert len(client.executed) == 1
     sql = client.executed[0]
@@ -446,7 +429,11 @@ async def test_alter_field_sql_change_default():
     )
 
     editor, client = _make_test_editor()
-    await editor.alter_field(OldModel, NewModel, "score")
+    await editor.alter_field(
+        OldModel,
+        NewModel,
+        "score",
+    )
 
     assert len(client.executed) == 1
     sql = client.executed[0]
@@ -659,7 +646,11 @@ async def test_alter_field_set_default_with_sql_default():
     )
 
     editor, client = _make_test_editor()
-    await editor.alter_field(OldModel, NewModel, "created")
+    await editor.alter_field(
+        OldModel,
+        NewModel,
+        "created",
+    )
 
     assert len(client.executed) == 1
     sql = client.executed[0]
@@ -685,7 +676,11 @@ async def test_alter_field_change_from_literal_to_sql_default():
     )
 
     editor, client = _make_test_editor()
-    await editor.alter_field(OldModel, NewModel, "score")
+    await editor.alter_field(
+        OldModel,
+        NewModel,
+        "score",
+    )
 
     assert len(client.executed) == 1
     sql = client.executed[0]

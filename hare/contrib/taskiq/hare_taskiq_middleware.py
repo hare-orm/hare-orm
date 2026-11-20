@@ -17,7 +17,6 @@ from hare.contrib.taskiq.constants import (
 )
 from hare.contrib.taskiq.running_task import RunningTask
 from hare.contrib.taskiq.task_tenant_labels import TaskTenantLabels
-from hare.core.hare_context import HareContext
 from hare.core.log import logger
 from hare.exceptions import TransactionRetryError
 from hare.instrumentation.queries.query_tags import QueryTags
@@ -70,7 +69,8 @@ class HareTaskiqMiddleware(TaskiqMiddleware):
         self.transaction_retries = transaction_retries
 
     def pre_send(self, message: TaskiqMessage) -> TaskiqMessage:
-        self.add_tenant_label(message.labels)
+        if not TaskTenantLabels.restore_sending_label(self.tenant_label, message.labels):
+            self.add_tenant_label(message.labels)
         return message
 
     def add_tenant_label(self, labels: dict[str, Any]) -> None:
@@ -99,10 +99,12 @@ class HareTaskiqMiddleware(TaskiqMiddleware):
         running_task.running_task_token = self.running_task.set(running_task)
         try:
             if self.lifecycle is not None:
-                running_task.hare_context_token = HareContext.current_context.set(self.lifecycle.get_context())
-                running_task.application_token = ApplicationLifecycle.active.set(self.lifecycle)
-            tenant = message.labels.get(self.tenant_label) if self.tenant_label is not None else None
-            if tenant is not None:
+                context = self.lifecycle.get_context()
+                running_task.lifecycle_tokens = ApplicationLifecycle._enter_scope(
+                    self.lifecycle, context, ApplicationLifecycle
+                )
+            if self.tenant_label is not None:
+                tenant = message.labels.get(self.tenant_label)
                 running_task.tenant_token = Tenancy.set(TaskTenantLabels.get_scope(tenant))
             if self.transaction_connection_names:
                 transactions = TransactionGroup(self.transaction_connection_names)
@@ -134,7 +136,9 @@ class HareTaskiqMiddleware(TaskiqMiddleware):
                     result.error = transaction_error
         finally:
             self.finish(running_task)
-        if isinstance(exception, TransactionRetryError):
+        if isinstance(exception, TransactionRetryError) and (
+            running_task.transactions is None or running_task.transactions.rolled_back
+        ):
             await self.send_again(message, result)
 
     def finish(self, running_task: RunningTask) -> None:
@@ -148,10 +152,7 @@ class HareTaskiqMiddleware(TaskiqMiddleware):
         if running_task.tenant_token is not None:
             Tenancy.reset(running_task.tenant_token)
         QueryTags.reset(running_task.query_tags_token)
-        if running_task.application_token is not None:
-            ApplicationLifecycle.active.reset(running_task.application_token)
-        if running_task.hare_context_token is not None:
-            HareContext.current_context.reset(running_task.hare_context_token)
+        ApplicationLifecycle._restore_scope(running_task.lifecycle_tokens)
 
     async def send_again(self, message: TaskiqMessage, result: TaskiqResult[Any]) -> None:
         """Sends a task that hit a transaction conflict again, under its own id - its failed
@@ -172,18 +173,12 @@ class HareTaskiqMiddleware(TaskiqMiddleware):
                 )
             return
         labels = dict(message.labels)
-        # The kicker writes a label as text - a scope of several tenants, of every tenant or by model would
-        # reach the task as the text of its mapping. The scope is the sender's again, and pre_send() labels it.
-        tenant = labels.pop(self.tenant_label, None) if self.tenant_label is not None else None
         kicker: AsyncKicker[Any, Any] = (
             AsyncKicker(task_name=message.task_name, broker=self.broker, labels=labels)
             .with_task_id(message.task_id)
             .with_labels(**{TRANSACTION_RETRIES_LABEL: retries + 1})
         )
         logger.info("Task %s (%s) hit a transaction conflict - sending it again", message.task_name, message.task_id)
-        if tenant is None:
+        with TaskTenantLabels.sending(self.broker, labels):
             await kicker.kiq(*message.args, **message.kwargs)
-        else:
-            with Tenancy.scope(TaskTenantLabels.get_scope(tenant)):
-                await kicker.kiq(*message.args, **message.kwargs)
         result.error = NoResultError()

@@ -18,20 +18,19 @@ class ModuleStubExports:
     """
 
     @staticmethod
-    def preserve(text: str, module_name: str) -> str:
+    def preserve(stub: cst.Module, module_name: str) -> cst.Module:
         module = sys.modules[module_name]
         get_source = getattr(getattr(module, "__loader__", None), "get_source", None)
         source = None if get_source is None else get_source(module_name)
         if source is None:
-            return text
-        stub = cst.parse_module(text)
+            return stub
         existing = set(ModuleStubExports.get_reexports(stub))
         context = CodemodContext()
         for module_name, name, relative in ModuleStubExports.get_reexports(cst.parse_module(source)):
             if (module_name, name, relative) not in existing:
                 AddImportsVisitor.add_needed_import(context, module_name, name, name, relative=relative)
                 existing.add((module_name, name, relative))
-        return AddImportsVisitor(context).transform_module(stub).code
+        return AddImportsVisitor(context).transform_module(stub)
 
     @staticmethod
     def get_reexports(module: cst.Module) -> Iterator[tuple[str, str, int]]:

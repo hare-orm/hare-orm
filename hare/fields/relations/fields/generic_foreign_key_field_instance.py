@@ -13,11 +13,13 @@ from hare.fields.enums import OnDelete, RelationLoadStrategy
 from hare.fields.field import Field
 from hare.fields.relations.constants import GENERIC_FOREIGN_KEY_CHECK_SUFFIX
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
+from hare.fields.relations.relation_default import RelationDefault
 from hare.fields.relations.swappable_model_reference import SwappableModelReference
 
 if TYPE_CHECKING:
     from hare.ddl.constraints.check_constraint import CheckConstraint
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 TModel = TypeVar("TModel", bound="Model")
 
@@ -99,6 +101,8 @@ class GenericForeignKeyFieldInstance(Generic[TModel]):
         self.lazy = RelationLoadStrategy(lazy) if lazy is not None else None
         self.branch_kwargs = kwargs
         #: The name of the field on its model - set when the model class is built.
+        # Only a prepared graph uses branch metadata; declarations leave this slot empty.
+        self._binding: ModelBinding = None  # type: ignore[assignment]
         self.model_field_name = ""
         #: The model the field belongs to.
         self.model: type[Model] = None  # type: ignore[assignment]
@@ -110,8 +114,11 @@ class GenericForeignKeyFieldInstance(Generic[TModel]):
     def snapshot(self) -> Self:
         """Copy a generic relation declaration without its generated model branches."""
         values = vars(self).copy()
+        if self.default is not None and not callable(self.default) and not isinstance(self.default, RelationDefault):
+            values["default"] = RelationDefault.capture(self.default)
         values.update(
             model=None,
+            _binding=None,
             model_field_name="",
             branch_by_model={},
             branch_names=tuple(self.to) if isinstance(self.to, dict) else (),
@@ -213,16 +220,16 @@ class GenericForeignKeyFieldInstance(Generic[TModel]):
             ConfigurationError: Two branches point at the same model, a target was registered by
                 ``register_live_models()``, or ``default`` isn't an instance of a target.
         """
-        fields_map = self.model._meta.fields_map
+        fields_map: dict[str, ForeignKeyFieldInstance[Any]] = self._binding.fields_map  # type: ignore[assignment]
         self.branch_by_model = {}
         for branch_name in self.branch_names:
-            related_model = fields_map[branch_name].related_model  # type: ignore[attr-defined]
+            related_model = fields_map[branch_name].related_model
             if related_model in self.branch_by_model:
                 raise ConfigurationError(
                     f"{self.get_label()}: {self.branch_by_model[related_model]!r} and {branch_name!r} name the same "
                     f"model {related_model.__name__} - an object of it couldn't tell which branch it is"
                 )
-            if related_model._meta.registered_live:
+            if fields_map[branch_name].get_related_binding().registered_live:
                 raise ConfigurationError(
                     f"{self.get_label()}: the target {related_model.__name__} was registered by "
                     "register_live_models() - a generic relation targets configured models only"
@@ -235,7 +242,7 @@ class GenericForeignKeyFieldInstance(Generic[TModel]):
         """``Model.field``, as an error names the field."""
         return f"{self.model.__name__}.{self.model_field_name}" if self.model is not None else "GenericForeignKeyField"
 
-    def get_branch_of(self, value: Model) -> str:
+    def get_branch_of(self, value: Model | RelationDefault) -> str:
         """The branch an object of a target belongs to.
 
         Args:
@@ -248,7 +255,8 @@ class GenericForeignKeyFieldInstance(Generic[TModel]):
             ValidationError: The object isn't of a target model - the error of a foreign key given
                 an object of another model.
         """
-        branch_name = self.branch_by_model.get(type(value))
+        model = value.model if isinstance(value, RelationDefault) else type(value)
+        branch_name = self.branch_by_model.get(model)
         if branch_name is None:
             expected = ", ".join(f"'{model.__name__}'" for model in self.branch_by_model)
             raise ValidationError(
@@ -258,7 +266,7 @@ class GenericForeignKeyFieldInstance(Generic[TModel]):
             )
         return branch_name
 
-    def get_branch_values(self, value: Model | dict[str, Any] | None) -> dict[str, Any]:
+    def get_branch_values(self, value: Model | RelationDefault | dict[str, Any] | None) -> dict[str, Any]:
         """The value of every branch for a value of the field.
 
         Args:
@@ -271,16 +279,27 @@ class GenericForeignKeyFieldInstance(Generic[TModel]):
             QueryError: None for a field that isn't ``null=True``.
             ValidationError: The object isn't of a target model.
         """
+        if value is None and not self.null:
+            raise QueryError(f"{self.model.__name__}.{self.model_field_name} doesn't take None")
+        return self.get_branch_assignments(value)
+
+    def get_branch_assignments(self, value: Model | RelationDefault | dict[str, Any] | None) -> dict[str, Any]:
+        """Map the input to branch objects or raw key columns, without assignment restrictions.
+
+        Normal assignment checks nullability before using this shared mapping. Trusted
+        construction uses it directly and leaves branch objects to the ordinary unchecked
+        relation construction. Tagged dictionaries still need a known branch and a complete key.
+        """
         if value is None:
-            if not self.null:
-                raise QueryError(f"{self.model.__name__}.{self.model_field_name} doesn't take None")
             return dict.fromkeys(self.branch_names)
+        if isinstance(value, RelationDefault):
+            return self.get_column_values(self.get_key_values(value))
         if isinstance(value, dict):
             return self.get_column_values(value)
         branch_name = self.get_branch_of(value)
         return {name: value if name == branch_name else None for name in self.branch_names}
 
-    def get_key_values(self, value: Model) -> dict[str, Any]:
+    def get_key_values(self, value: Model | RelationDefault) -> dict[str, Any]:
         """An object of a target as ``{"type": "<branch>", <the target's key fields>}``.
 
         Args:
@@ -290,7 +309,9 @@ class GenericForeignKeyFieldInstance(Generic[TModel]):
             The branch and the key values.
         """
         branch_name = self.get_branch_of(value)
-        key_fields = self.model._meta.fields_map[branch_name].to_field_instances  # type: ignore[attr-defined]
+        if isinstance(value, RelationDefault):
+            return {GENERIC_FOREIGN_KEY_TYPE_FIELD: branch_name, **dict(value.key_values)}
+        key_fields = self._binding.fields_map[branch_name].to_field_instances  # type: ignore[attr-defined]
         return {
             GENERIC_FOREIGN_KEY_TYPE_FIELD: branch_name,
             **{key_field.model_field_name: getattr(value, key_field.model_field_name) for key_field in key_fields},
@@ -315,25 +336,25 @@ class GenericForeignKeyFieldInstance(Generic[TModel]):
                 f"{self.model_field_name}: the type {branch_name!r} names no branch - one of "
                 f"{', '.join(repr(name) for name in self.branch_names)}"
             )
-        fields_map = self.model._meta.fields_map
+        fields_map: dict[str, ForeignKeyFieldInstance[Any]] = self._binding.fields_map  # type: ignore[assignment]
         column_values: dict[str, Any] = {}
         for name in self.branch_names:
             branch = fields_map[name]
-            source_fields = branch.source_fields  # type: ignore[attr-defined]
+            source_fields = branch.source_fields
             if name != branch_name:
                 column_values.update(dict.fromkeys(source_fields))
                 continue
-            key_fields = branch.to_field_instances  # type: ignore[attr-defined]
+            key_fields = branch.to_field_instances
             for source_field, key_field in zip(source_fields, key_fields, strict=True):
-                if key_field.model_field_name not in value:
+                key_field_name = key_field.model_field_name
+                if key_field_name not in value:
                     raise ValidationError(
-                        f"{self.model_field_name}: the key field {key_field.model_field_name!r} of {branch_name!r} "
-                        "is missing"
+                        f"{self.model_field_name}: the key field {key_field_name!r} of {branch_name!r} is missing"
                     )
-                column_values[source_field] = value[key_field.model_field_name]
+                column_values[source_field] = value[key_field_name]
         return column_values
 
-    def get_default_branch_values(self) -> dict[str, Model | None] | None:
+    def get_default_branch_values(self) -> dict[str, Any] | None:
         """The branch values of ``default``; None without one."""
         if self.default is None:
             return None
@@ -351,21 +372,10 @@ class GenericForeignKeyFieldInstance(Generic[TModel]):
             ConfigurationError: The default isn't saved.
         """
         default = self.default() if callable(self.default) else self.default
-        branch_name = self.get_branch_of(default)  # type: ignore[arg-type]
-        fields_map = self.model._meta.fields_map
-        values: dict[str, Any] = {}
-        for name in self.branch_names:
-            branch = fields_map[name]
-            source_fields = branch.source_fields  # type: ignore[attr-defined]
-            if name == branch_name:
-                key_names = tuple(field.model_field_name for field in branch.to_field_instances)  # type: ignore[attr-defined]
-                key_values = [getattr(default, key_name) for key_name in key_names]
-                if any(key_value is None for key_value in key_values):
-                    raise ConfigurationError(f"{self.get_label()}: the default {default!r} isn't saved")
-                values.update(zip(source_fields, key_values, strict=True))
-            else:
-                values.update(dict.fromkeys(source_fields))
-        return values
+        keys = self.get_key_values(default)  # type: ignore[arg-type]
+        if any(value is None for name, value in keys.items() if name != GENERIC_FOREIGN_KEY_TYPE_FIELD):
+            raise ConfigurationError(f"{self.get_label()}: the default has an incomplete key")
+        return self.get_column_values(keys)
 
     def get_branch_column(self, branch_name: str) -> str:
         """The key column field a branch is read as set by - its first: the ``CHECK`` keeps a
@@ -378,7 +388,12 @@ class GenericForeignKeyFieldInstance(Generic[TModel]):
         Returns:
             The field name - ``post_id``.
         """
-        return str(self.model._meta.fields_map[branch_name].source_fields[0])  # type: ignore[attr-defined]
+        return str(self._binding.fields_map[branch_name].source_fields[0])  # type: ignore[attr-defined]
+
+    def get_source_fields(self) -> tuple[str, ...]:
+        """The key fields of all branches, in declaration order."""
+        fields_map: dict[str, ForeignKeyFieldInstance[Any]] = self._binding.fields_map  # type: ignore[assignment]
+        return tuple(source for name in self.branch_names for source in fields_map[name].source_fields)
 
     def get_filled_branch(self, obj: Model) -> str | None:
         """The branch an obj has set.
@@ -389,13 +404,13 @@ class GenericForeignKeyFieldInstance(Generic[TModel]):
         Returns:
             The branch name; None when none is set.
         """
-        fields_map = self.model._meta.fields_map
+        fields_map: dict[str, ForeignKeyFieldInstance[Any]] = self._binding.fields_map  # type: ignore[assignment]
         obj_values = obj.__dict__
         for name in self.branch_names:
             related = obj_values.get(f"_{name}")
             if related is not None:
                 return name
-            source_fields = fields_map[name].source_fields  # type: ignore[attr-defined]
+            source_fields = fields_map[name].source_fields
             if any(obj_values.get(source_field) is not None for source_field in source_fields):
                 return name
         return None
@@ -433,16 +448,23 @@ class GenericForeignKeyFieldInstance(Generic[TModel]):
             NoValuesFetched: A query left a branch's key out (``only()``/``defer()``).
         """
         if obj is None:
+            from hare.core.hare_context import HareContext
+
+            context = HareContext.get_current()
+            if context is not None and context.apps is not None:
+                binding = context.apps.get_prepared_binding(owner)
+                if binding is not None:
+                    return binding.generic_foreign_key_fields[self.model_field_name]
             return self
+        field = obj._binding.generic_foreign_key_fields[self.model_field_name]
+        return field.get_instance_value(obj)
+
+    def get_instance_value(self, obj: Model) -> Any:
+        """Read the generic relation with this instance's prepared branch metadata."""
         branch_name = self.get_filled_branch(obj)
         if branch_name is None:
             obj_values = obj.__dict__
-            fields_map = self.model._meta.fields_map
-            if any(
-                source_field not in obj_values
-                for name in self.branch_names
-                for source_field in fields_map[name].source_fields  # type: ignore[attr-defined]
-            ):
+            if any(source_field not in obj_values for source_field in self.get_source_fields()):
                 raise NoValuesFetched(
                     f"{type(obj).__name__}.{self.model_field_name} wasn't fetched - a .only()/.defer() query left "
                     f"it out; load it with refresh_from_db(fields=[{self.model_field_name!r}])"
@@ -457,7 +479,8 @@ class GenericForeignKeyFieldInstance(Generic[TModel]):
         return getattr(obj, branch_name)
 
     def __set__(self, obj: Any, value: Model | dict[str, Any] | None) -> None:
-        for branch_name, branch_value in self.get_branch_values(value).items():
+        field = obj._binding.generic_foreign_key_fields[self.model_field_name]
+        for branch_name, branch_value in field.get_branch_values(value).items():
             setattr(obj, branch_name, branch_value)
 
     def __repr__(self) -> str:

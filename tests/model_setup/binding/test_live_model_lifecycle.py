@@ -8,7 +8,9 @@ import pytest
 
 from hare import Hare, fields
 from hare.contrib.test import requires_features
+from hare.core.apps.model_binding_graph import ModelBindingGraph
 from hare.core.connections.connections import Connections
+from hare.core.hare_context import HareContext
 from hare.declarations.declaration_value_serializer import DeclarationValueSerializer
 from hare.declarations.import_manager import ImportManager
 from hare.exceptions import ConfigurationError, FieldError
@@ -23,10 +25,33 @@ from hare.models.deletion.cascade.deletion_graph import DeletionGraph
 from tests.utils.model_source_generator import ModelSourceGenerator
 
 
-@pytest.fixture
-def connection(db):
-    alias = next(iter(Connections.current().db_config))
-    return Connections.get(alias)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("composite", [False, True], ids=["scalar", "composite"])
+async def test_explicit_registration_uses_its_context_and_restores_the_ambient_one(composite):
+    class Book(Model):
+        number = fields.IntField(primary_key=not composite, generated=False)
+        if composite:
+            region = fields.IntField()
+            pk = fields.CompositePrimaryKey("region", "number")
+
+    class BrokenBook(Model):
+        parent = fields.ForeignKeyField("missing.Parent")
+
+    async with HareContext() as library:
+        await library.init(config={"connections": {"primary": "sqlite+aiosqlite://:memory:"}, "apps": {}})
+        async with HareContext() as other:
+            await other.init(config={"connections": {"secondary": "sqlite+aiosqlite://:memory:"}, "apps": {}})
+            library.register_live_models([Book], app_label="live", connection_alias="primary")
+            assert library.get_model("live.Book") is Book
+            assert not other.apps.apps
+            assert HareContext.require_current() is other
+            with pytest.raises(ConfigurationError):
+                library.register_live_models([BrokenBook], app_label="live", connection_alias="primary")
+            assert "BrokenBook" not in library.apps.apps["live"]
+            assert HareContext.require_current() is other
+        await library.generate_schemas()
+        await Book.objects.create(number=1, **({"region": 7} if composite else {}))
+        assert (await Book.objects.get(number=1)).number == 1
 
 
 def build_parent_and_child_classes(parent_name: str = "LiveParent", child_name: str = "LiveChild"):
@@ -88,7 +113,8 @@ async def test_register_unregister_register_same_name_queries_work(db, connectio
     Hare.unregister_live_models([first_parent])
 
     assert "live" not in Hare.apps
-    assert first_parent._meta.default_connection is None
+    with pytest.raises(ConfigurationError, match="not registered"):
+        HareContext.require_current().apps.get_binding(first_parent)
     with pytest.raises(ConfigurationError):
         await first_parent.objects.all()
 
@@ -113,20 +139,22 @@ async def test_unregister_removes_backward_relations_from_fk_target(db, connecti
     await child_class.objects.create(id=1, parent=parent)
     assert [child.id for child in await parent.children] == [1]
     assert await parent_class.objects.filter(children__id=1).count() == 1
-    assert DeletionGraph.get_backward_relations(parent_class)
+    assert DeletionGraph.get_backward_relations(HareContext.require_current().apps.get_binding(parent_class))
 
     Hare.unregister_live_models([child_class])
 
     try:
-        assert "children" not in parent_class._meta.fields_map
-        assert "children" not in parent_class._meta.backward_foreign_key_fields
-        assert "children" not in parent_class._meta.fetch_fields
+        assert "children" not in HareContext.require_current().apps.get_binding(parent_class).fields_map
+        assert (
+            "children" not in HareContext.require_current().apps.get_binding(parent_class).backward_foreign_key_fields
+        )
+        assert "children" not in HareContext.require_current().apps.get_binding(parent_class).fetch_fields
         with pytest.raises(FieldError):
-            parent_class._meta.get_lookup_info("children__isnull")
+            HareContext.require_current().apps.get_binding(parent_class).get_lookup_info("children__isnull")
         assert "children" not in parent_class.__dict__
-        assert DeletionGraph.get_backward_relations(parent_class) == []
+        assert DeletionGraph.get_backward_relations(HareContext.require_current().apps.get_binding(parent_class)) == []
         assert "LiveChild" not in Hare.apps["live"]
-        with pytest.raises(Exception, match="children"):
+        with pytest.raises(FieldError, match="children"):
             await parent_class.objects.filter(children__id=1).count()
         # The target itself keeps working, deletes included (no stale cascade relation).
         fetched = await parent_class.objects.get(id=1)
@@ -148,8 +176,8 @@ async def test_unregister_target_still_referenced_raises_and_changes_nothing(db,
         with pytest.raises(ConfigurationError, match=r"still referenced by live\.LiveChild\.parent"):
             Hare.unregister_live_models([parent_class])
         assert Hare.apps["live"]["LiveParent"] is parent_class
-        assert "children" in parent_class._meta.fields_map
-        assert parent_class._meta.default_connection == alias
+        assert "children" in HareContext.require_current().apps.get_binding(parent_class).fields_map
+        assert HareContext.require_current().apps.get_binding(parent_class).default_connection == alias
     finally:
         Hare.unregister_live_models([child_class])
         Hare.unregister_live_models([parent_class])
@@ -166,7 +194,7 @@ async def test_same_class_can_be_registered_again_after_unregister(db, connectio
     Hare.register_live_models([parent_class], app_label="live", connection_alias=alias)
     Hare.register_live_models([child_class], app_label="live", connection_alias=alias)
     Hare.unregister_live_models([child_class])
-    assert "parent_id" not in child_class._meta.fields_map
+    assert "parent_id" not in child_class._declaration.fields_map
 
     Hare.register_live_models([child_class], app_label="live", connection_alias=alias)
     try:
@@ -204,7 +232,8 @@ async def test_unregister_self_referential_model_and_register_again(db, connecti
     first_node_class = build_node_class()
     Hare.register_live_models([first_node_class], app_label="live", connection_alias=alias)
     Hare.unregister_live_models([first_node_class])
-    assert "kids" not in first_node_class._meta.fields_map
+    with pytest.raises(ConfigurationError, match="not registered"):
+        HareContext.require_current().apps.get_binding(first_node_class)
 
     second_node_class = build_node_class()
     Hare.register_live_models([second_node_class], app_label="live", connection_alias=alias)
@@ -240,12 +269,12 @@ async def test_unregister_removes_generated_m2m_field_from_target(db, connection
     )
     Hare.register_live_models([tag_class], app_label="live", connection_alias=alias)
     Hare.register_live_models([post_class], app_label="live", connection_alias=alias)
-    assert "posts" in tag_class._meta.many_to_many_fields
+    assert "posts" in HareContext.require_current().apps.get_binding(tag_class).many_to_many_fields
 
     Hare.unregister_live_models([post_class])
     try:
-        assert "posts" not in tag_class._meta.fields_map
-        assert "posts" not in tag_class._meta.many_to_many_fields
+        assert "posts" not in HareContext.require_current().apps.get_binding(tag_class).fields_map
+        assert "posts" not in HareContext.require_current().apps.get_binding(tag_class).many_to_many_fields
         assert "posts" not in tag_class.__dict__
     finally:
         Hare.unregister_live_models([tag_class])
@@ -294,13 +323,13 @@ def render_deconstructed(value: Any) -> str:
 
 
 def describe_model_class(model: type[Model]) -> dict[str, Any]:
-    meta = model._meta
+    meta = ModelBindingGraph().include(model)
     return {
         "name": model.__name__,
         "fields": {name: render_deconstructed(field) for name, field in meta.fields_map.items()},
         "field_classes": {name: type(field) for name, field in meta.fields_map.items()},
         "primary_key_attribute": meta.primary_key_attribute,
-        "db_table": meta.db_table,
+        "db_table": meta.db_table or Hare.apps.get_generated_table_name(model),
         "schema": meta.schema,
         "indexes": [render_deconstructed(index) if hasattr(index, "deconstruct") else index for index in meta.indexes],
         "constraints": [render_deconstructed(constraint) for constraint in meta.constraints],
@@ -367,8 +396,8 @@ async def test_factory_and_generator_build_equivalent_models(db, connection):
         from hare.fields import ArrayField
 
         assert parent_description["field_classes"]["tags"] is ArrayField
-        assert parent_class._meta.fields_map["tags"].base_field.__class__ is fields.IntField
-        assert parent_class._meta.fields_map["labels"].base_field.max_length == 20
+        assert parent_class._declaration.fields_map["tags"].base_field.__class__ is fields.IntField
+        assert parent_class._declaration.fields_map["labels"].base_field.max_length == 20
 
     alias = next(iter(Connections.current().db_config))
     Hare.register_live_models([parent_class], app_label="live", connection_alias=alias, managed=False)
@@ -383,7 +412,7 @@ async def test_factory_and_generator_build_equivalent_models(db, connection):
         assert line.parent.payload == {"k": [1]}
         if dialect == "postgresql":
             assert line.parent.tags == [1, 2]
-        assert line_class._meta.managed is False
+        assert HareContext.require_current().apps.get_binding(line_class).managed is False
     finally:
         Hare.unregister_live_models([line_class])
         Hare.unregister_live_models([parent_class])
@@ -402,7 +431,7 @@ async def test_factory_honours_fk_target_overrides(db, connection):
         app_label="live",
         foreign_key_target_overrides={"live_eq_parent": "models.RealParent"},
     )
-    assert line_class._meta.fields_map["parent"].model_name == "models.RealParent"
+    assert line_class._declaration.fields_map["parent"].model_name == "models.RealParent"
 
 
 @pytest.mark.asyncio
@@ -466,7 +495,7 @@ async def test_failed_registration_rolls_back_registry_and_backward_relations(db
     )
     parent_class, _ = build_parent_and_child_classes()
     Hare.register_live_models([parent_class], app_label="live", connection_alias=alias)
-    parent_fields_before = set(parent_class._meta.fields_map)
+    parent_fields_before = set(HareContext.require_current().apps.get_binding(parent_class).fields_map)
     # "name" collides with LiveParent.name - fails after the FK already added "children".
     bad_child = build_child_class_with_related_names("children", "name")
     try:
@@ -474,9 +503,10 @@ async def test_failed_registration_rolls_back_registry_and_backward_relations(db
             Hare.register_live_models([bad_child], app_label="live", connection_alias=alias, managed=False)
 
         assert set(Hare.apps["live"]) == {"LiveParent"}
-        assert set(parent_class._meta.fields_map) == parent_fields_before
-        assert bad_child._meta.managed is True
-        assert bad_child._meta.default_connection is None
+        assert set(HareContext.require_current().apps.get_binding(parent_class).fields_map) == parent_fields_before
+        assert getattr(bad_child._declaration.meta, "managed", True) is True
+        with pytest.raises(ConfigurationError, match="not registered"):
+            HareContext.require_current().apps.get_binding(bad_child)
         with pytest.raises(ConfigurationError, match="not registered"):
             Hare.unregister_live_models([bad_child])
 
@@ -540,14 +570,15 @@ async def test_mutually_referencing_models_register_together(db, connection):
     with pytest.raises(ConfigurationError, match="LiveCycleB"):
         Hare.register_live_models([cycle_a], app_label="live", connection_alias=alias)
     assert "live" not in Hare.apps
-    assert cycle_a._meta._inited is False
+    with pytest.raises(ConfigurationError, match="not registered"):
+        HareContext.require_current().apps.get_binding(cycle_a)
 
     Hare.register_live_models([cycle_a, cycle_b], app_label="live", connection_alias=alias)
     try:
-        assert cycle_a._meta.fields_map["b"].related_model is cycle_b
-        assert cycle_b._meta.fields_map["a"].related_model is cycle_a
-        assert "a_items" in cycle_b._meta.fields_map
-        assert "b_items" in cycle_a._meta.fields_map
+        assert HareContext.require_current().apps.get_binding(cycle_a).fields_map["b"].related_model is cycle_b
+        assert HareContext.require_current().apps.get_binding(cycle_b).fields_map["a"].related_model is cycle_a
+        assert "a_items" in HareContext.require_current().apps.get_binding(cycle_b).fields_map
+        assert "b_items" in HareContext.require_current().apps.get_binding(cycle_a).fields_map
         first = await cycle_a.objects.create(id=1)
         second = await cycle_b.objects.create(id=1, a=first)
         first.b = second
@@ -559,7 +590,7 @@ async def test_mutually_referencing_models_register_together(db, connection):
     finally:
         Hare.unregister_live_models([cycle_a, cycle_b])
     assert "live" not in Hare.apps
-    assert "a_items" not in cycle_b._meta.fields_map
+    assert "a_items" not in cycle_b._declaration.fields_map
     await drop_tables(connection, "live_cycle_a", "live_cycle_b")
 
 
@@ -568,15 +599,16 @@ async def test_register_live_models_rolls_back_every_model_on_failure(db, connec
     alias = next(iter(Connections.current().db_config))
     parent_class, _ = build_parent_and_child_classes()
     Hare.register_live_models([parent_class], app_label="live", connection_alias=alias)
-    parent_fields_before = set(parent_class._meta.fields_map)
+    parent_fields_before = set(HareContext.require_current().apps.get_binding(parent_class).fields_map)
     good_child = build_child_class_with_related_names("children", "tagged_children", name="LiveGoodChild")
     bad_child = build_child_class_with_related_names("other_children", "name", name="LiveBadChild")
     try:
         with pytest.raises(ConfigurationError, match="duplicates"):
             Hare.register_live_models([good_child, bad_child], app_label="live", connection_alias=alias)
         assert set(Hare.apps["live"]) == {"LiveParent"}
-        assert set(parent_class._meta.fields_map) == parent_fields_before
-        assert good_child._meta._inited is False
+        assert set(HareContext.require_current().apps.get_binding(parent_class).fields_map) == parent_fields_before
+        with pytest.raises(ConfigurationError, match="not registered"):
+            HareContext.require_current().apps.get_binding(good_child)
     finally:
         Hare.unregister_live_models([parent_class])
 
@@ -593,7 +625,10 @@ async def test_registering_a_different_class_under_a_taken_name_is_refused(db, c
         with pytest.raises(ConfigurationError, match="unregister_live_model"):
             Hare.register_live_models([second_child], app_label="live", connection_alias=alias)
         assert Hare.apps["live"]["LiveChild"] is first_child
-        assert parent_class._meta.fields_map["children"].related_model is first_child
+        assert (
+            HareContext.require_current().apps.get_binding(parent_class).fields_map["children"].related_model
+            is first_child
+        )
         # The same class again stays a no-op.
         Hare.register_live_models([first_child], app_label="live", connection_alias=alias)
         assert Hare.apps["live"]["LiveChild"] is first_child

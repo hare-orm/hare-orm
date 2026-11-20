@@ -13,6 +13,7 @@ from hare.native.native_modules import NativeModules
 
 if TYPE_CHECKING:
     from hare.models.model import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class InstanceSnapshot:
@@ -29,9 +30,9 @@ class InstanceSnapshot:
     #: The compiled ``rust.native.rows`` - captures the snapshots of many instances in one call.
     native_rows: ClassVar[Any] = NativeModules.rows
 
-    def __init__(self, instance: Model, values: dict[str, Any] | None = None) -> None:
+    def __init__(self, instance: Model, values: dict[str, Any]) -> None:
         self.instance = instance
-        self.values = {} if values is None else values
+        self.values = values
 
     def remember(self, field_name: str, value: Any) -> None:
         """Keep the value preceding the first assignment in this scope."""
@@ -42,39 +43,39 @@ class InstanceSnapshot:
         """Capture state changed when a write publishes its result on an instance.
 
         The dirty baseline is copied because a partial save edits its mapping in
-        place. The primary key is last so undo restores it before persistence flags.
-        Read publication can omit this synthetic key entry and capture its selected
-        key columns directly, avoiding a second key setter after restoring relations.
+        place. Actual primary-key attributes are last so undo restores them before
+        persistence flags. An absent pending key remains absent rather than becoming
+        a synthetic NULL key that would discard its restored default factory.
+        Read publication can omit the key attributes and capture selected columns.
         """
-        snapshots: list[InstanceSnapshot] = InstanceSnapshot.native_rows.capture_persistence_snapshots(
-            InstanceSnapshot,
-            (instance,),
-            PERSISTENCE_STATE_ATTRIBUTE_NAMES,
-            ROLLBACK_RESTORE_UNSET,
-            include_primary_key and instance._meta.has_primary_key,
-        )
-        return snapshots[0]
+        primary_key_names = instance._binding.primary_key_attribute_names if include_primary_key else ()
+        return InstanceSnapshot._capture_persistence((instance,), primary_key_names)[0]
 
     @staticmethod
     def capture_persistence_of_all(
-        model: type[Model], instances: Sequence[Model], *, include_primary_key: bool = True
+        binding: ModelBinding, instances: Sequence[Model], *, include_primary_key: bool = True
     ) -> list[InstanceSnapshot]:
         """``capture_persistence()`` of each of many instances of a model, in one call.
 
         Args:
-            model: The instances' model.
+            binding: The instances' model.
             instances: The instances.
-            include_primary_key: Whether each snapshot holds the instance's ``pk`` too.
+            include_primary_key: Whether each snapshot holds the actual key attributes too.
 
         Returns:
             The snapshots, in the instances' order.
         """
+        primary_key_names = binding.primary_key_attribute_names if include_primary_key else ()
+        return InstanceSnapshot._capture_persistence(instances, primary_key_names)
+
+    @staticmethod
+    def _capture_persistence(instances: Sequence[Model], primary_key_names: tuple[str, ...]) -> list[InstanceSnapshot]:
         return InstanceSnapshot.native_rows.capture_persistence_snapshots(
             InstanceSnapshot,
             instances,
             PERSISTENCE_STATE_ATTRIBUTE_NAMES,
             ROLLBACK_RESTORE_UNSET,
-            include_primary_key and model._meta.has_primary_key,
+            primary_key_names,
         )
 
     @staticmethod
@@ -113,14 +114,10 @@ class InstanceSnapshot:
                     object.__delattr__(instance, field_name)
             else:
                 object.__setattr__(instance, field_name, value)
-        elif field_name == instance._meta.soft_delete_field:
+        elif field_name == instance._binding.soft_delete_field:
             if value is ROLLBACK_RESTORE_UNSET and not hasattr(instance, field_name):
                 return
-            SoftDeletion.restore_soft_delete_field(
-                instance,
-                value is not ROLLBACK_RESTORE_UNSET,
-                None if value is ROLLBACK_RESTORE_UNSET else value,
-            )
+            SoftDeletion.restore_soft_delete_field(instance, value)
         elif value is ROLLBACK_RESTORE_UNSET:
             if hasattr(instance, field_name):
                 object.__delattr__(instance, field_name)

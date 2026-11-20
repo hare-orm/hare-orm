@@ -12,13 +12,11 @@ from hare.query.expressions.expression import Expression
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
 from hare.query.expressions.structure.declarations import ExpressionChild
-from hare.query.expressions.structure.enums import ArgumentRole
 from hare.query.expressions.subqueries.exists import Exists
 from hare.query.expressions.value import Value
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 from hare.sql.terms.case.when_then import WhenThen
-from hare.sql.terms.criteria.basic_criterion import BasicCriterion
 
 
 class When(Expression):
@@ -56,17 +54,13 @@ class When(Expression):
         self.conditions = self._get_q_objects()
 
     def get_expression_children(self) -> tuple[ExpressionChild, ...]:
-        """Separate lookup keys from the branch's literal or expression result."""
-        return (
-            ExpressionChild("args", self.args),
-            ExpressionChild("kwargs", self.kwargs, ArgumentRole.FILTERS),
-            ExpressionChild("then", self.then),
-        )
+        """Use the normalized conditions, including their captured values."""
+        return ExpressionChild("conditions", self.conditions), ExpressionChild("then", self.then)
 
     def rebuild_expression(self, children: tuple[ExpressionChild, ...]) -> When:
-        """Recompute conditions from transformed inputs, retaining negation."""
+        """Rebuild the branch from conditions that already include its negation."""
         values = {child.argument: child.value for child in children}
-        return type(self)(*values["args"], then=values["then"], negate=self.negate, **values["kwargs"])
+        return type(self)(*values["conditions"], then=values["then"])
 
     def _get_q_objects(self) -> list[Q]:
         """The conditions this branch matches on - negated as one whole, like ``~Q(...)``.
@@ -121,10 +115,4 @@ class When(Expression):
         for node in self.conditions:
             modifier &= node.get_result(condition_expression_context)
 
-        # Both criteria: a condition on an aggregate annotation lands in having_criterion, and a
-        # CASE WHEN has one condition.
-        condition = modifier._and_criterion()
-        if not condition:
-            # A When with no conditions is always true - 1=1, as SQL has no portable TRUE.
-            condition = BasicCriterion.always_true()
-        return ExpressionResult(term=condition, joins=list(modifier.joins))
+        return ExpressionResult(term=modifier.get_expression_criterion(), joins=list(modifier.joins))

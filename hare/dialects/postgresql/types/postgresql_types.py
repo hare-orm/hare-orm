@@ -32,6 +32,7 @@ from hare.dialects.postgresql.spatial.constants import (
     POSTGIS_GEOMETRY_TYPE,
     POSTGIS_GEOMETRY_TYPE_NAMES,
 )
+from hare.dialects.postgresql.types.postgresql_comparison_keys import PostgresqlComparisonKeys
 from hare.dialects.postgresql.types.postgresql_container_values import PostgresqlContainerValues
 from hare.dialects.postgresql.types.postgresql_physical_type import PostgresqlPhysicalType
 from hare.dialects.postgresql.vectors.constants import PGVECTOR_EXTENSION
@@ -44,6 +45,7 @@ from hare.fields.data.json.json_field import JSONField
 from hare.fields.data.network.ip_address_field import IPAddressField
 from hare.fields.data.numeric.big_int_field import BigIntField
 from hare.fields.data.numeric.decimal_field import DecimalField
+from hare.fields.data.numeric.float_field import FloatField
 from hare.fields.data.numeric.int_field import IntField
 from hare.fields.data.numeric.small_int_field import SmallIntField
 from hare.fields.data.temporal.datetime_field import DatetimeField
@@ -78,6 +80,7 @@ class PostgresqlTypes:
             ),
         )
         types.register(DecimalField, TypeMapping(column_type=attrgetter("SQL_TYPE")))
+        types.register(FloatField, TypeMapping(comparison_key=PostgresqlComparisonKeys.prepare_float))
         types.register(IntField, TypeMapping(generated_sql="SERIAL NOT NULL"))
         types.register(BigIntField, TypeMapping(generated_sql="BIGSERIAL NOT NULL"))
         types.register(SmallIntField, TypeMapping(generated_sql="SMALLSERIAL NOT NULL"))
@@ -103,7 +106,15 @@ class PostgresqlTypes:
         )
         types.register(BinaryField, TypeMapping(column_type="BYTEA"))
         # PostgreSQL's own fields - each column type its field's.
-        types.register(CitextField, TypeMapping(column_type=attrgetter("SQL_TYPE"), extension=CITEXT_EXTENSION))
+        types.register(
+            CitextField,
+            TypeMapping(
+                column_type=attrgetter("SQL_TYPE"),
+                comparison_key=PostgresqlComparisonKeys.prepare_citext,
+                comparison_key_requires_database=True,
+                extension=CITEXT_EXTENSION,
+            ),
+        )
         types.register(HStoreField, TypeMapping(column_type=attrgetter("SQL_TYPE"), extension=HSTORE_EXTENSION))
         types.register(LtreeField, TypeMapping(column_type=attrgetter("SQL_TYPE"), extension=LTREE_EXTENSION))
         for field_class in (
@@ -177,6 +188,8 @@ class PostgresqlTypes:
         """
         geometry_field: GeometryField = field  # type: ignore[assignment]
         column_type = POSTGIS_GEOGRAPHY_TYPE if geometry_field.geography else POSTGIS_GEOMETRY_TYPE
+        if geometry_field.srid is None or len(geometry_field.get_geometry_dimensions()) > 1:
+            return column_type
         type_name = POSTGIS_GEOMETRY_TYPE_NAMES[geometry_field.get_geometry_type()]
         dimension_suffix = "Z" if geometry_field.dimensions == 3 else ""
         return f"{column_type}({type_name}{dimension_suffix},{geometry_field.srid})"

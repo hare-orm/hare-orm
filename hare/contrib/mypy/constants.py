@@ -47,7 +47,7 @@ HIDDEN_SELECTION_ATTRIBUTE = "hare values selection"
 #: The type of an annotation by the class of its expression.
 ANNOTATION_TYPE_RULES = {
     "hare.query.functions.aggregates.count.Count": AnnotationTypeRule.INT,
-    "hare.query.functions.text.length.Length": AnnotationTypeRule.INT,
+    "hare.query.functions.text.length.Length": AnnotationTypeRule.NULL_PROPAGATING_INT,
     "hare.query.expressions.subqueries.exists.Exists": AnnotationTypeRule.BOOL,
     "hare.query.functions.aggregates.sum.Sum": AnnotationTypeRule.OPTIONAL_PATH_VALUE,
     "hare.query.functions.aggregates.declarations.Min": AnnotationTypeRule.OPTIONAL_PATH_VALUE,
@@ -68,12 +68,6 @@ CONFIG_NOT_SET_MESSAGE = (
 UNSUPPORTED_LOOKUP_MESSAGE = "Filter param {key!r}: {model}.{path} has no lookup {lookup!r} on the {dialect} database"
 UNSUPPORTED_FIELD_MESSAGE = "Filter param {key!r}: {field} has no column type on the {dialect} database"
 UNKNOWN_NAME_MESSAGE = "{method}(): {model} has no field {name!r}"
-MULTI_VALUED_RELATION_MESSAGE = (
-    "select_related() can't follow {name!r} on {model} - it can hold many related rows (a reverse ForeignKey or a "
-    "ManyToManyField); use prefetch_related() instead"
-)
-NOT_RELATION_MESSAGE = "select_related() field {name!r} on {model} is not a relation"
-RELATION_NOT_FOUND_MESSAGE = "select_related() relation {name!r} for {model} not found"
 RELATION_FIELD_NAME_MESSAGE = "{method}(): {model}.{name} is a relation holding many rows - it can't be {action}"
 NOT_DIRECT_FIELD_MESSAGE = (
     "defer(): {model}.{name} is a relation holding many rows - only direct fields and forward relations can be "

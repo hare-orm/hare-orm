@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from hare.migrations.operations import AddPartition, HareOperation, RemovePartition
+from hare.ddl.partition_changes import PartitionChanges
+from hare.migrations.operations import AddPartition, HareOperation, RemovePartition, RenamePartition
 from hare.models.enums import ModelOption
 
 if TYPE_CHECKING:
@@ -12,10 +13,9 @@ if TYPE_CHECKING:
 
 class PartitionDiff:
     """The partition operations of a model: where a dialect's ``Meta.table_options`` entry reaches
-    its new partitions by adding and removing them one at a time
-    (``TableOptions.can_change_partitions_to()``), each is written as its own ``AddPartition`` or
-    ``RemovePartition`` - the migration file shows which partitions come and go - and
-    ``AlterModelOptions`` carries the rest of the entry's change. A partition whose definition
+    its new partitions by adding, removing or renaming them one at a time
+    (``TableOptions.can_change_partitions_to()``), each is written as an ``AddPartition``, ``RemovePartition``
+    or ``RenamePartition``. ``AlterModelOptions`` carries the remaining changes. A partition whose definition
     changed is removed and added again.
 
     Args:
@@ -53,24 +53,32 @@ class PartitionDiff:
         """The operations removing and adding the partitions that changed.
 
         Returns:
-            Every ``RemovePartition``, then every ``AddPartition``.
+            Removal operations, followed by renames and additions.
         """
-        removals: list[HareOperation] = []
-        additions: list[HareOperation] = []
+        operations: list[HareOperation] = []
         model_name = self.new_state.name
         for old_entry, new_entry in self._get_changed_entries():
             old_partitions, new_partitions = old_entry.get_partitions(), new_entry.get_partitions()
-            for name, partition in old_partitions.items():
-                if new_partitions.get(name) != partition:
-                    removals.append(RemovePartition(model_name=model_name, partition=partition))
+            changes = self.get_partition_changes(model_name, old_partitions, new_partitions)
+            operations.extend(changes)
+            for operation in changes:
+                if isinstance(operation, RemovePartition):
+                    name = operation.partition.name
                     self.data_loss_warnings.append(
                         f"{model_name}: the partition {name!r} is removed with its rows"
                         + (" and added again empty - its definition changed" if name in new_partitions else "")
                     )
-            for name, partition in new_partitions.items():
-                if old_partitions.get(name) != partition:
-                    additions.append(AddPartition(model_name=model_name, partition=partition))
-        return [*removals, *additions]
+        return operations
+
+    @staticmethod
+    def get_partition_changes(model_name: str, old: dict[str, Any], new: dict[str, Any]) -> list[HareOperation]:
+        """Use the same partition operations for model changes and catalog drift."""
+        changes = PartitionChanges.compare(old, new)
+        return [
+            *(RemovePartition(model_name, partition) for partition in changes.removed),
+            *(RenamePartition(model_name, partition, replacement) for partition, replacement in changes.renamed),
+            *(AddPartition(model_name, partition) for partition in changes.added),
+        ]
 
     def get_options_before_partition_operations(self, new_options: dict[str, Any]) -> dict[str, Any]:
         """The model's new options as ``AlterModelOptions`` sets them when the partition operations

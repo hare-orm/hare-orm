@@ -6,7 +6,9 @@ import uuid
 import pytest
 
 from hare import fields
+from hare.core.hare_context import HareContext
 from hare.dialects.clickhouse.clickhouse_dialect import ClickhouseDialect
+from hare.exceptions import ValidationError
 from hare.query.filters.lookups.value_encoders import ValueEncoders
 from tests.shared_models.testmodels import UUIDFkRelatedModel
 
@@ -14,26 +16,37 @@ pytestmark = pytest.mark.database_independent
 
 SAMPLES = {
     fields.UUIDField: [uuid.uuid4(), uuid.UUID(int=0), str(uuid.uuid4())],
-    fields.JSONField: [{"a": [1, 2.5, "x"]}, [1, 2], "text", 5, {"nested": {"deep": True}}],
+    fields.JSONField: [{"a": [1, 2.5, "x"]}, {"nested": {"deep": True}}],
 }
 
 
 @pytest.mark.parametrize("stores_json_natively", [True, False])
 @pytest.mark.parametrize("field_class", list(SAMPLES))
-def test_a_lookup_value_is_the_field_s_own(stores_json_natively, field_class):
+def test_lookup_and_storage_share_the_registered_column_conversion(stores_json_natively, field_class):
     types = ClickhouseDialect(stores_json_natively=stores_json_natively).types
     field = field_class(null=True)
     field.model = UUIDFkRelatedModel
     field.model_field_name = "value"
     for value in SAMPLES[field_class]:
-        expected = field.to_lookup_value(value, UUIDFkRelatedModel)
+        expected = types.get_db_value(field, value, UUIDFkRelatedModel)
         written = types.get_lookup_value(field, value, UUIDFkRelatedModel)
-        assert written == expected
+        prepared = types.get_lookup_writer(field)(value, UUIDFkRelatedModel)
+        assert written == prepared == expected
         assert type(written) is type(expected)
 
 
-def test_a_uuid_list_is_written_as_text():
+@pytest.mark.parametrize("value", [[1, 2], "text", 5])
+def test_native_json_lookup_refuses_values_the_column_cannot_store(value):
+    types = ClickhouseDialect(stores_json_natively=True).types
+    field = fields.JSONField(null=True)
+    field.model_field_name = "value"
+    with pytest.raises(ValidationError, match="holds an object"):
+        types.get_lookup_value(field, value, UUIDFkRelatedModel)
+
+
+@pytest.mark.usefixtures("model_conversion_context")
+def test_uuid_list_retains_the_registered_uuid_representation():
     dialect = ClickhouseDialect()
-    field = UUIDFkRelatedModel._meta.fields_map["id"]
+    field = HareContext.require_current().apps.get_binding(UUIDFkRelatedModel).fields_map["id"]
     values = [uuid.uuid4() for _ in range(3)]
-    assert ValueEncoders.encode_list(values, UUIDFkRelatedModel, field, dialect) == [str(value) for value in values]
+    assert ValueEncoders.encode_list(values, UUIDFkRelatedModel, field, dialect) == values

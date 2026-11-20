@@ -1,6 +1,9 @@
 """Prepared conversions preserve live extension hooks, batch contracts and row order."""
 
+import datetime
+from enum import IntEnum, StrEnum
 from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 
@@ -11,11 +14,66 @@ from hare.exceptions import ValidationError
 from hare.fields.data.containers.array_field import ArrayField
 from hare.fields.data.containers.map_field import MapField
 from hare.fields.data.containers.tuple_field import TupleField
+from hare.fields.generated_field import GeneratedField
 from hare.models.write.returned_values import ReturnedValues
+from hare.query.expressions.value import Value
 from hare.query.filters.lookups.value_encoders import ValueEncoders
 from hare.query.key_columns import KeyColumns
+from tests.utils.model_bindings import ModelBindings
 
 pytestmark = pytest.mark.database_independent
+
+
+@pytest.mark.parametrize("key", ("Ab", "aB", "XY"))
+def test_map_path_keys_are_python_inputs_instead_of_stored_values(key):
+    class SwappedKey(fields.CharField):
+        def to_db_value(self, value, instance):
+            return super().to_db_value(value, instance).swapcase()
+
+        def from_db_value(self, value):
+            return str(value).swapcase()
+
+    field = MapField(SwappedKey(max_length=10), fields.IntField())
+    assert field.to_python({key: 1}) == {key: 1}
+    assert field.get_path_key(key) == key
+    assert field.get_path_key("has_key") is None
+
+
+@pytest.mark.parametrize(
+    "key_field,key,expected",
+    [
+        (fields.IntField(), "17", 17),
+        (fields.CharField(max_length=10), "Ab", "Ab"),
+    ],
+)
+def test_map_path_keys_keep_the_key_fields_input_conversion(key_field, key, expected):
+    field = MapField(key_field, fields.IntField())
+    assert field.get_path_key(key) == expected
+    assert field.get_path_key("has_keys") is None
+
+
+def test_map_path_keys_keep_enum_and_temporal_input_types():
+    class Number(IntEnum):
+        VALUE = 17
+
+    class Label(StrEnum):
+        VALUE = "Ab"
+
+    cases = (
+        (fields.IntEnumField(Number), "17", Number.VALUE),
+        (fields.CharEnumField(Label), "Ab", Label.VALUE),
+        (fields.UUIDField(), "00000000-0000-0000-0000-000000000007", UUID(int=7)),
+        (fields.DateField(), "2024-02-29", datetime.date(2024, 2, 29)),
+        (
+            fields.DatetimeField(),
+            "2024-02-29T12:34:56+00:00",
+            datetime.datetime(2024, 2, 29, 12, 34, 56, tzinfo=datetime.UTC),
+        ),
+    )
+    for key_field, segment, expected in cases:
+        actual = MapField(key_field, fields.IntField()).get_path_key(segment)
+        assert actual == expected
+        assert type(actual) is type(expected)
 
 
 @pytest.mark.parametrize(
@@ -121,11 +179,14 @@ def test_key_writing_stops_at_first_failure_in_row_order():
 
 @pytest.mark.parametrize("count", [1, 8])
 def test_stored_keys_do_not_skip_overridden_conversion_of_native_values(monkeypatch, count):
+
     class Book(Model):
         name = fields.TextField()
 
+    prepared_models = ModelBindings.prepare(Book)
+
     types = TypeRegistry()
-    field = Book._meta.fields_map["name"]
+    field = prepared_models.get_binding(Book).fields_map["name"]
     # Populate identity metadata before replacing the value conversion.
     assert types.get_native_key_type(field) is str
     original = types.get_db_value
@@ -134,7 +195,7 @@ def test_stored_keys_do_not_skip_overridden_conversion_of_native_values(monkeypa
         return original(field, value, instance).casefold()
 
     monkeypatch.setattr(types, "get_db_value", write)
-    objs = [Book(name="UPPER") for _ in range(count)]
+    objs = [prepared_models.new(Book, name="UPPER") for _ in range(count)]
     assert ReturnedValues.get_stored_keys(types, (field,), ("name",), objs) == [("upper",)] * count
 
 
@@ -182,3 +243,97 @@ def test_map_invalid_key_does_not_convert_its_value(prepared):
         else:
             field.encode_value(value, None, None, "payload")
     assert converted_values == []
+
+
+@pytest.mark.parametrize("container", ["array", "map", "tuple", "generated"])
+@pytest.mark.parametrize("operation", ["write", "read"])
+def test_wrapped_fields_keep_registry_selector_overrides(monkeypatch, container, operation):
+    types = TypeRegistry()
+    child = fields.IntField(null=True)
+    if container == "array":
+        field, value, expected = ArrayField(child), [2, None, 9], [102, None, 109]
+    elif container == "map":
+        field = MapField(fields.TextField(), child)
+        value, expected = {"first": 2, "empty": None}, {"first": 102, "empty": None}
+    elif container == "tuple":
+        field, value, expected = TupleField([child, child]), (2, None), (102, None)
+    else:
+        field, value, expected = GeneratedField(expression=Value(2), output_field=child), 2, 102
+    selector = "get_db_writer" if operation == "write" else "get_python_reader"
+    original = getattr(types, selector)
+
+    def select(selected):
+        convert = original(selected)
+        if not isinstance(selected, fields.IntField):
+            return convert
+        if operation == "write":
+            return lambda value, instance: None if value is None else convert(value, instance) + 100
+        return lambda value: None if value is None else convert(value) + 100
+
+    monkeypatch.setattr(types, selector, select)
+    if container == "generated":
+        result = (
+            types.get_db_value(field, value, None) if operation == "write" else types.get_python_value(field, value)
+        )
+    else:
+        result = (
+            field.encode_value(value, None, types, "payload")
+            if operation == "write"
+            else field.decode_value(value, types)
+        )
+    assert result == expected
+
+
+def test_native_hydration_keeps_registry_reader_selector(monkeypatch):
+    types = TypeRegistry()
+    field = fields.IntField()
+    original = types.get_python_reader
+    assert types.get_native_reader(field, frozenset({int})) is None
+    monkeypatch.setattr(types, "get_python_reader", lambda selected: lambda value: original(selected)(value) + 100)
+    read = types.get_native_reader(field, frozenset({int}))
+    assert read is not None
+    assert read(2) == 102
+
+
+@pytest.mark.parametrize("selector", ["get_db_value", "get_db_writer"])
+def test_default_lookup_follows_storage_hooks_after_cache_warmup(monkeypatch, selector):
+    types = TypeRegistry()
+    field = fields.IntField()
+    assert types.get_lookup_value(field, 2, None) == 2
+    original = getattr(types, selector)
+    if selector == "get_db_writer":
+        monkeypatch.setattr(
+            types, selector, lambda selected: lambda value, instance: original(selected)(value, instance) + 100
+        )
+    else:
+        monkeypatch.setattr(
+            types, selector, lambda selected, value, instance: original(selected, value, instance) + 100
+        )
+    assert types.get_lookup_value(field, 2, None) == 102
+    assert types.get_lookup_writer(field)(2, None) == 102
+    assert types.get_lookup_values(field, [2, None, 9], None) == [102, None, 109]
+
+
+@pytest.mark.parametrize("count", [1, 2, 7, 8, 9])
+@pytest.mark.parametrize("selector", ["get_db_writer", "get_python_reader"])
+def test_stored_keys_keep_registry_selectors_at_every_batch_size(monkeypatch, count, selector):
+
+    class Book(Model):
+        key = fields.TextField()
+
+    prepared_models = ModelBindings.prepare(Book)
+
+    types = TypeRegistry()
+    field = prepared_models.get_binding(Book).fields_map["key"]
+    assert types.get_native_key_type(field) is str
+    original = getattr(types, selector)
+    if selector == "get_db_writer":
+        monkeypatch.setattr(
+            types, selector, lambda selected: lambda value, instance: original(selected)(value, instance).casefold()
+        )
+    else:
+        monkeypatch.setattr(types, selector, lambda selected: lambda value: original(selected)(value).casefold())
+    objs = [prepared_models.new(Book, key=f"BOOK-{index}") for index in range(count)]
+    assert ReturnedValues.get_stored_keys(types, (field,), ("key",), objs) == [
+        (f"book-{index}",) for index in range(count)
+    ]

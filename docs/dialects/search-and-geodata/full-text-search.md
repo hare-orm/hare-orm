@@ -75,6 +75,10 @@ can be a `SearchQuery` too.
 
 ## <a id="searchquery"></a>`SearchQuery`
 
+On PostgreSQL, `config` in `SearchVector`, `SearchQuery` and `SearchHeadline` accepts a configuration
+name or a text expression such as `F("configuration")` or `Coalesce(...)`. Text results are converted
+to `regconfig` by the dialect, so a column expression can choose a configuration separately for each row.
+
 ```python
 SearchQuery(value, config=None, search_type=SearchType.PLAIN, invert=False)
 ```

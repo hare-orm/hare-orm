@@ -15,7 +15,6 @@ from typing import Any, ClassVar
 
 from orm_benchmark.constants import (
     BENCHMARK_DIRECTORY,
-    BENCHMARK_SEED,
     ENVIRONMENT_DIRECTORY_PREFIX,
     REPOSITORY,
     SIZES,
@@ -95,12 +94,13 @@ class Runner:
         return getattr(importlib.import_module(module_name), class_name)(target, database)
 
     @classmethod
-    async def run_once(cls, target: Target, size: str, seed: int = BENCHMARK_SEED) -> dict[str, Any]:
+    async def run_once(cls, target: Target, size: str, seed: int) -> dict[str, Any]:
         """One run of one target.
 
         Args:
             target: The target.
             size: ``small`` or ``large``.
+            seed: The seed for the benchmark workload.
 
         Returns:
             The run's results, versions and environment.
@@ -158,7 +158,7 @@ class Runner:
         return Path(cls.get_interpreter(target)).resolve() == Path(sys.executable).resolve()
 
     @classmethod
-    def run_all(cls, targets: list[Target], runs: int, size: str, seed: int = BENCHMARK_SEED) -> dict[str, Any]:
+    def run_all(cls, targets: list[Target], runs: int, size: str, seed: int) -> BenchmarkReport:
         """Every target ``runs`` times, each run in a process of its own - run 1 of every target, then
         run 2 of every target, and so on, so a slow moment of the machine doesn't land on one target.
 
@@ -166,16 +166,19 @@ class Runner:
             targets: The targets.
             runs: How many runs each gets.
             size: ``small`` or ``large``.
+            seed: The seed for the benchmark workload.
 
         Returns:
             The report: by database, the medians and every run's numbers, with the versions and the
             machine.
         """
+        targets = list({target.key: target for target in targets}.values())
         by_target: dict[str, list[dict[str, Any]]] = {target.key: [] for target in targets}
         with tempfile.TemporaryDirectory() as run_directory:
             for run_number in range(1, runs + 1):
+                round_seed = seed + run_number - 1
                 round_order = list(targets)
-                random.Random(seed + run_number - 1).shuffle(round_order)
+                random.Random(round_seed).shuffle(round_order)
                 for target in round_order:
                     output = Path(run_directory) / f"{target.key}-{run_number}.json"
                     print(f"run {run_number}/{runs}: {target.key}", flush=True)
@@ -188,7 +191,7 @@ class Runner:
                             "--size",
                             size,
                             "--seed",
-                            str(seed + run_number - 1),
+                            str(round_seed),
                             "--out",
                             str(output),
                         ],
@@ -201,4 +204,4 @@ class Runner:
                         result.update(status="failed", error=f"Benchmark process exited {process.returncode}")
                         result["results"] = {}
                     by_target[target.key].append(result)
-        return BenchmarkReport.collect(targets, by_target, size, seed, cls.get_version("hare-orm")).data
+        return BenchmarkReport.collect(targets, by_target, size, seed, cls.get_version("hare-orm"))

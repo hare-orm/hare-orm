@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import os
 import sys
 from enum import StrEnum
 from types import MappingProxyType, ModuleType
@@ -13,7 +14,7 @@ from typing import Annotated, Literal
 import pytest
 
 from hare import Hare, fields
-from hare.core.config import HareConfig
+from hare.core.apps.model_binding_graph import ModelBindingGraph
 from hare.core.registries import Registries
 from hare.dialects.postgresql.postgresql_dialect import PostgresqlDialect
 from hare.dialects.sqlite.sqlite_dialect import SqliteDialect
@@ -22,9 +23,7 @@ from hare.query.enums import LookupValueShape
 from hare.query.queryset.extensions import QuerySetExtensions
 from hare.stubs.model_stub import ModelStub
 from hare.stubs.stub_imports import StubImports
-from hare.stubs.stub_writer import StubWriter
 from hare.stubs.value_type_text import ValueTypeText
-from hare.typing_info.bound_models import BoundModels
 from hare.typing_info.declarations import ValueType
 from tests.stubs.stub_configs import CONFIG, MANAGERS_STUB_PATH, STUB_PATH, write_stubs
 
@@ -33,6 +32,10 @@ pytestmark = pytest.mark.database_independent
 
 class StubStatus(StrEnum):
     ACTIVE = "active"
+
+
+type StubPayload = int | list[StubPayload]
+type StubSequence[Item] = list[Item]
 
 
 @pytest.mark.parametrize("shadowed", (False, True))
@@ -47,14 +50,14 @@ def test_generated_signatures_and_value_shapes_use_builtin_import_names(monkeypa
         {"__module__": module.__name__, "id": fields.IntField(primary_key=True)},
     )
     monkeypatch.setitem(sys.modules, module.__name__, module)
-    Hare.bind_models(
+    apps = Hare.bind_models(
         {
             "connections": {"default": "sqlite+aiosqlite://:memory:"},
             "apps": {"models": {"models": [module.__name__]}},
         }
     )
     imports = StubImports(module.__name__)
-    stub = ModelStub(module.Book, SqliteDialect(), imports, 0)
+    stub = ModelStub(apps.get_binding(module.Book), SqliteDialect(), imports, 0)
     declarations = "\n".join(stub.get_declarations())
     primary_key = "class Book:\n" + "\n".join(stub.get_primary_key_lines())
     prefix = "builtins_" if shadowed else ""
@@ -79,15 +82,22 @@ def test_generated_signatures_and_value_shapes_use_builtin_import_names(monkeypa
         (list[Literal["draft", "published"]], "list[Literal['draft', 'published']]"),
         (Annotated[list[Literal[1, 2]], "metadata"], "list[Literal[1, 2]]"),
         (Literal[StubStatus.ACTIVE], "Literal[StubStatus.ACTIVE]"),
+        (StubPayload, "StubPayload"),
+        (StubSequence[int], "StubSequence[int]"),
     ],
 )
-def test_typed_json_field_stubs_keep_literal_and_annotated_types(annotation, expected):
+def test_typed_json_field_stubs_keep_declared_value_types(annotation, expected):
+    declaration_graph = ModelBindingGraph()
+
     class TypedRow(Model):
         id = fields.IntField(primary_key=True)
         document = fields.JSONField(field_type=annotation)
 
     imports = StubImports(__name__)
-    assert ModelStub.get_field_annotations(TypedRow, imports)["document"] == f"Field[{expected}]"
+    assert (
+        ModelStub.get_field_annotations(declaration_graph.include(TypedRow), imports)["document"]
+        == f"Field[{expected}]"
+    )
 
 
 def test_a_stub_types_the_fields_and_the_queryset(stubs_path):
@@ -117,7 +127,7 @@ def test_a_stub_types_the_primary_key_of_an_instance(stubs_path):
 
 
 def test_the_relation_depth_bounds_the_keys(tmp_path):
-    StubWriter(BoundModels(HareConfig.load(CONFIG)), tmp_path, 0).write()
+    write_stubs(tmp_path, CONFIG, relation_depth=0)
     text = tmp_path.joinpath(*STUB_PATH).read_text(encoding="utf-8")
     assert "'team__name'" not in text
     assert "'team':" in text
@@ -142,7 +152,8 @@ def test_a_stub_declares_the_methods_of_the_dialect(tmp_path, monkeypatch):
         "first_matching", SqliteDialect, first_matching, reads_query=True, takes_condition=True
     )
     QuerySetExtensions.register("only_on_postgresql", PostgresqlDialect, first_rows)
-    text = write_stubs(tmp_path).read_text(encoding="utf-8")
+    write_stubs(tmp_path, CONFIG)
+    text = tmp_path.joinpath(*STUB_PATH).read_text(encoding="utf-8")
     assert (
         "    def first_rows(self, name_below: Any, /, limit: Any = ..., *, inclusive: Any = ...) -> Self: ..." in text
     )
@@ -207,6 +218,7 @@ def test_a_stub_takes_the_keys_of_a_generic_foreign_key_and_the_primary_key(mypy
     assert "'pk': tuple[int, int]," in printing_writes
 
 
+@pytest.mark.skipif(os.name != "posix", reason="The typing fixture binds the native PostgreSQL driver")
 def test_a_stub_takes_the_values_and_paths_of_ranges_geometries_and_addresses(postgresql_models_stub_text):
     text = postgresql_models_stub_text
     filters = text.partition("BookingFilters = TypedDict(")[2].partition(")")[0]

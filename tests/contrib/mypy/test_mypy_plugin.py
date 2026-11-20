@@ -187,8 +187,8 @@ def test_the_fingerprint_follows_the_registered_lookups(tmp_path):
     registry = ModelRegistry(options)
     registry.load()
     assert registry.load_error is None
-    assert registry.get_model("tests.contrib.mypy.models.Writer") is not None
-    assert registry.get_model("tests.contrib.mypy.models.Missing") is None
+    assert registry.get_binding("tests.contrib.mypy.models.Writer") is not None
+    assert registry.get_binding("tests.contrib.mypy.models.Missing") is None
     previous_snapshot = Registries.snapshot
     RatingField.register_lookup("rated_for_fingerprint", lambda field: FieldLookup(Lookups.between))
     try:

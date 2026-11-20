@@ -164,7 +164,7 @@ def test_table_options_snapshot_collections_and_accept_compatible_projections():
     projection = ClickhouseProjection("by_site", RawSQLTerm("SELECT site ORDER BY site"))
     compatible = SimpleNamespace(
         name=projection.name,
-        for_model=projection.for_model,
+        for_binding=projection.for_binding,
         with_sql_query=projection.with_sql_query,
         get_definition_sql=projection.get_definition_sql,
         get_read_columns=projection.get_read_columns,

@@ -36,7 +36,7 @@ async def test_execution_retains_keyring_while_configuration_changes():
     application = HareContext()
     FieldEncryption.configure("old application", context=application)
     with application:
-        execution = QueryExecution()
+        execution = QueryExecution(application)
         before = FieldEncryption.encrypt("content")
         FieldEncryption.configure("new application")
 

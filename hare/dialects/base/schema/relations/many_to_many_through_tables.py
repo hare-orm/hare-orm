@@ -15,6 +15,7 @@ from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
 from hare.exceptions import ConfigurationError
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.models import Model
+from hare.models.model_binding import ModelBinding
 
 
 class ManyToManyThroughTables(SchemaEditorPart):
@@ -25,7 +26,7 @@ class ManyToManyThroughTables(SchemaEditorPart):
 
     def get_many_to_many_change_plan(
         self,
-        model: type[Model],
+        binding: ModelBinding,
         old_field: ManyToManyFieldInstance[Model],
         new_field: ManyToManyFieldInstance[Model],
     ) -> SchemaChangePlan:
@@ -35,22 +36,22 @@ class ManyToManyThroughTables(SchemaEditorPart):
         two declared through models, their model operations perform the changes instead.
 
         Args:
-            model: The model declaring the relation.
+            binding: The model declaring the relation.
             old_field: The relation as declared before.
             new_field: The relation as declared now.
         """
         if old_field.through_model is not None and new_field.through_model is not None:
             return SchemaChangePlan(())
         if old_field.through_model is not None or new_field.through_model is not None:
-            return self.get_through_table_move_plan(model, old_field, new_field)
+            return self.get_through_table_move_plan(binding, old_field, new_field)
         foreign_keys = self.editor.foreign_key_rebuild
         rebuilds_keys = self.editor.client.features.supports_foreign_keys and (
             foreign_keys.foreign_key_changed(old_field, new_field) or self.target_table_changed(old_field, new_field)
         )
         steps: list[SchemaStep] = []
         if rebuilds_keys:
-            steps.extend(foreign_keys.get_relation_foreign_key_drop_plan(model, old_field).steps)
-        schema = model._meta.schema
+            steps.extend(foreign_keys.get_relation_foreign_key_drop_plan(binding, old_field).steps)
+        schema = binding.schema
         if old_field.through != new_field.through:
             steps.append(
                 SchemaStatement(self.editor.get_table_rename_sql(old_field.through, new_field.through, schema))
@@ -73,7 +74,7 @@ class ManyToManyThroughTables(SchemaEditorPart):
                     )
         steps.extend(self.get_through_index_change_plan(schema, old_field, new_field).steps)
         if rebuilds_keys:
-            steps.extend(foreign_keys.get_many_to_many_rebuild_plan(model, new_field).steps)
+            steps.extend(foreign_keys.get_many_to_many_rebuild_plan(binding, new_field).steps)
         else:
             steps.extend(self.get_through_foreign_key_rename_plan(table, old_field, new_field).steps)
         return SchemaChangePlan(tuple(steps))
@@ -89,7 +90,7 @@ class ManyToManyThroughTables(SchemaEditorPart):
             old_field: The relation as declared before.
             new_field: The relation as declared now.
         """
-        old_meta, new_meta = old_field.related_model._meta, new_field.related_model._meta
+        old_meta, new_meta = old_field.get_related_binding(), new_field.get_related_binding()
         return (old_meta.schema, old_meta.db_table) != (new_meta.schema, new_meta.db_table)
 
     def get_through_foreign_key_rename_plan(
@@ -184,7 +185,7 @@ class ManyToManyThroughTables(SchemaEditorPart):
         return indexes
 
     def get_through_table_drop_plan(
-        self, model: type[Model], field: ManyToManyFieldInstance[Model]
+        self, binding: ModelBinding, field: ManyToManyFieldInstance[Model]
     ) -> SchemaChangePlan:
         """Prepare removal only of an automatic through table declared on this side."""
         if field.through_model is not None or field._generated:
@@ -193,26 +194,24 @@ class ManyToManyThroughTables(SchemaEditorPart):
             (
                 SchemaStatement(
                     self.editor.DELETE_TABLE_TEMPLATE.format(
-                        table=self.editor.get_schema_table_sql(
-                            field.through, field.through_schema or model._meta.schema
-                        ),
+                        table=self.editor.get_schema_table_sql(field.through, field.through_schema or binding.schema),
                     )
                 ),
             )
         )
 
-    def get_model_through_drop_plan(self, model: type[Model]) -> SchemaChangePlan:
+    def get_model_through_drop_plan(self, binding: ModelBinding) -> SchemaChangePlan:
         """Prepare removal of every automatic through table declared by the model."""
         steps: list[SchemaStep] = []
-        for field_name in sorted(model._meta.many_to_many_fields):
-            field = model._meta.fields_map[field_name]
+        for field_name in sorted(binding.many_to_many_fields):
+            field = binding.fields_map[field_name]
             if isinstance(field, ManyToManyFieldInstance):
-                steps.extend(self.get_through_table_drop_plan(model, field).steps)
+                steps.extend(self.get_through_table_drop_plan(binding, field).steps)
         return SchemaChangePlan(tuple(steps))
 
     def get_through_table_move_plan(
         self,
-        model: type[Model],
+        binding: ModelBinding,
         old_field: ManyToManyFieldInstance[Model],
         new_field: ManyToManyFieldInstance[Model],
     ) -> SchemaChangePlan:
@@ -224,26 +223,26 @@ class ManyToManyThroughTables(SchemaEditorPart):
         """
         steps: list[SchemaStep] = []
         if new_field.through_model is None:
-            definition = self.editor.table_creation.get_many_to_many_table_definition(model, new_field)
+            definition = self.editor.table_creation.get_many_to_many_table_definition(binding, new_field)
             if definition:
                 steps.append(SchemaStatement(definition))
-        source = self.editor.qualify_table_name(old_field.through, old_field.through_schema or model._meta.schema)
-        target = self.editor.qualify_table_name(new_field.through, new_field.through_schema or model._meta.schema)
+        source = self.editor.qualify_table_name(old_field.through, old_field.through_schema or binding.schema)
+        target = self.editor.qualify_table_name(new_field.through, new_field.through_schema or binding.schema)
         columns = [*new_field.backward_keys, *new_field.forward_keys]
         values = [self.editor.quote(key) for key in (*old_field.backward_keys, *old_field.forward_keys)]
-        through_model = new_field.through_model_class
+        through_binding = new_field.get_through_binding()
         defaults = []
         generated_key_column = None
-        if through_model is not None:
+        if through_binding is not None:
             unique_fields = {
                 name
-                for constraint in through_model._meta.constraints
+                for constraint in through_binding.constraints
                 if isinstance(constraint, UniqueConstraint)
                 for name in constraint.fields
             }
             backfill = self.editor.column_backfill
-            for name, column in through_model._meta.fields_db_projection.items():
-                field = through_model._meta.fields_map[name]
+            for name, column in through_binding.fields_db_projection.items():
+                field = through_binding.fields_map[name]
                 if column in columns or field.pk or field.generated or field.has_db_default():
                     continue
                 if field.default is None and not backfill.is_auto_now_field(field):
@@ -252,7 +251,7 @@ class ManyToManyThroughTables(SchemaEditorPart):
                 if runtime_default and (field.unique or name in unique_fields):
                     raise ConfigurationError(
                         f"Can't carry the rows of {new_field.model_field_name!r} over into "
-                        f"{through_model.__name__}'s table - its unique field {name!r} has a callable "
+                        f"{through_binding._model.__name__}'s table - its unique field {name!r} has a callable "
                         "default, and computing it once would give every row the same value. Give it a "
                         "db_default, or fill the through table yourself in a RunPython step."
                     )
@@ -260,10 +259,10 @@ class ManyToManyThroughTables(SchemaEditorPart):
                     defaults.append((column, copy(field)))
                 else:
                     columns.append(column)
-                    values.append(backfill.backfill_default_sql_literal(field, field.default, through_model))
-            key = through_model._meta.pk
+                    values.append(backfill.backfill_default_sql_literal(field, field.default, through_binding))
+            key = through_binding.pk
             if key is not None and key.generated:
-                key_column = through_model._meta.fields_db_projection[key.model_field_name]
+                key_column = through_binding.fields_db_projection[key.model_field_name]
                 if key_column not in columns:
                     generated_key_column = key_column
         step = ThroughTableCopy(
@@ -272,7 +271,7 @@ class ManyToManyThroughTables(SchemaEditorPart):
             tuple(columns),
             tuple(values),
             new_field.through_model is None,
-            through_model,
+            through_binding,
             tuple(defaults),
             generated_key_column,
         )
@@ -287,7 +286,7 @@ class ManyToManyThroughTables(SchemaEditorPart):
                 SchemaStatement(
                     self.editor.DELETE_TABLE_TEMPLATE.format(
                         table=self.editor.get_schema_table_sql(
-                            old_field.through, old_field.through_schema or model._meta.schema
+                            old_field.through, old_field.through_schema or binding.schema
                         )
                     )
                 )

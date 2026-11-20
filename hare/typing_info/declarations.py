@@ -9,6 +9,7 @@ from hare.query.enums import LookupValueShape
 
 if TYPE_CHECKING:
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -39,7 +40,7 @@ class ValueType:
     """
 
     classes: tuple[Any, ...] = ()
-    declared_in: tuple[type[Model], str] | None = None
+    declared_in: tuple[ModelBinding, str] | None = None
     accepts_enum_values: bool = False
     models: tuple[type[Model], ...] = ()
     literals: tuple[str, ...] = ()

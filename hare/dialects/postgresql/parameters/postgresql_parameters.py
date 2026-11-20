@@ -45,7 +45,7 @@ class PostgresqlParameters(SqlParameters):
         if any(
             physical_type.name is None
             or physical_type.array_dimensions
-            or (physical_type.name or "").endswith("multirange")
+            or physical_type.name.endswith("multirange")
             or physical_type.name in POSTGRESQL_CUSTOM_ARRAY_DELIMITER_TYPE_PREFIXES
             for physical_type in map(PostgresqlPhysicalType.from_sql, column_cast_types)
         ):

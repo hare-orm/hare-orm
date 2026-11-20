@@ -336,10 +336,7 @@ async def test_subquery_outerref_scalar_annotation(db):
 
 @pytest.mark.asyncio
 async def test_subquery_outerref_coalesce_wrapped(db):
-    """Same correlated-scalar-subquery pattern wrapped in Coalesce(...) - covers an author with
-    no matching book getting the default instead of NULL, and exercises the resolution path
-    through Function._get_argument() (already Expression-first) rather than _get_annotate()'s
-    own Term-vs-Expression check directly."""
+    """A correlated scalar subquery inside Coalesce gives the default for a row with no related match."""
     has_books = await Author.objects.create(name="HasBooks")
     no_books = await Author.objects.create(name="NoBooks")
     await Book.objects.create(name="b1", author=has_books, rating=3.0)

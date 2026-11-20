@@ -30,6 +30,7 @@ from hare.migrations.operations import (
 from hare.migrations.state.state import State
 from hare.migrations.writer import MigrationWriter
 from hare.transactions.transactions import Transactions
+from tests.utils.migration_source import MigrationSource
 
 TABLE = "enum_migration_ticket"
 
@@ -52,6 +53,7 @@ async def test_enum_replacement_preserves_external_defaults_and_type_metadata(db
     try:
         await connection.execute_script(
             f"CREATE TYPE {type_sql} AS ENUM ('open', 'closed'); "
+            f"CREATE TYPE {old_spelling} AS ENUM ('unrelated'); "
             f"COMMENT ON TYPE {type_sql} IS 'original comment'; "
             f"CREATE TABLE {table_sql} (state {type_sql} DEFAULT {expression}, "
             f"visited {type_sql}[] DEFAULT ARRAY['open']::{type_sql}[])"
@@ -81,6 +83,9 @@ async def test_enum_replacement_preserves_external_defaults_and_type_metadata(db
         )
         assert after == [{"typowner": before[0]["typowner"], "comment": "original comment"}]
         assert await connection.execute_dicts(permissions_sql, [type_sql]) == permissions_before
+        assert await connection.execute_dicts(
+            "SELECT enumlabel FROM pg_enum WHERE enumtypid = $1::regtype", [old_spelling]
+        ) == [{"enumlabel": "unrelated"}]
     finally:
         await connection.execute_script(f"DROP SCHEMA {quote(schema)} CASCADE")
 
@@ -181,9 +186,7 @@ def test_the_operations_are_written_and_read_back():
         DropEnumType(name="ticket_state", labels=("open", "review", "closed")),
     ]
     source = MigrationWriter("0001_initial", "models", operations).as_string()
-    namespace: dict[str, Any] = {}
-    exec(compile(source, "<migration>", "exec"), namespace)  # noqa: S102 - the test's own text
-    read_back = namespace["Migration"]("0001_initial", "models").operations
+    read_back = MigrationSource.load(source, "0001_initial", "models").operations
     assert [operation.deconstruct() for operation in read_back] == [
         operation.deconstruct() for operation in operations
     ]
@@ -200,9 +203,7 @@ def test_a_migration_keeps_the_members_of_the_enum_as_they_are_when_it_is_writte
     assert "TicketState = Enum('TicketState', {'OPEN': 'open', 'CLOSED': 'closed'})" in source
     assert "test_native_enum_migrations" not in source
     assert "default=TicketState.OPEN" in source
-    namespace: dict[str, Any] = {}
-    exec(compile(source, "<migration>", "exec"), namespace)  # noqa: S102 - the test's own text
-    (create_model,) = namespace["Migration"]("0001_initial", "models").operations
+    (create_model,) = MigrationSource.load(source, "0001_initial", "models").operations
     written_field = dict(create_model.fields)["state"]
     assert written_field.enum_type is not TicketState
     assert written_field.requires_enum_type == field.requires_enum_type
@@ -210,6 +211,81 @@ def test_a_migration_keeps_the_members_of_the_enum_as_they_are_when_it_is_writte
 
 def make_migration(name: str, *operations) -> Migration:
     return Migration(name=name, app_label="models", operations=list(operations))
+
+
+@requires_features(supports_enum_types=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("schema", ["public", "enum_archive"])
+async def test_mixed_enum_schema_declarations_follow_the_database_schema(db_isolated_no_schema, schema):
+    connection = db_isolated_no_schema.get_connection()
+    await connection.execute_script('CREATE SCHEMA "enum_archive";')
+    async with connection._in_transaction() as client:
+        await client.execute_script(
+            "SET LOCAL search_path TO public;"
+            if schema == "public"
+            else 'SET LOCAL search_path TO "enum_archive", public;'
+        )
+        editor = client.dialect.schema_editor_class(client, atomic=True, collect_sql=False)
+        expected_schemas = ["public"] if schema == "public" else ["enum_archive", "public"]
+
+        async def get_enum_schemas_and_labels():
+            rows = await client.execute_dicts(
+                "SELECT schemaname, array_agg(enumlabel ORDER BY enumsortorder) AS labels "
+                "FROM (SELECT n.nspname AS schemaname, e.enumlabel, e.enumsortorder "
+                "FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace "
+                "JOIN pg_enum e ON e.enumtypid = t.oid WHERE t.typname = 'ticket_state') enums "
+                "GROUP BY schemaname ORDER BY schemaname"
+            )
+            return [(row["schemaname"], list(row["labels"])) for row in rows]
+
+        empty = State()
+        original = get_state(
+            state=NativeEnumField(TicketState), history=NativeEnumField(TicketState, type_schema="public")
+        )
+        initial = make_migration("initial", *OperationGenerator(empty, original).generate())
+        applied = await initial.apply(empty, schema_editor=editor)
+        assert await get_enum_schemas_and_labels() == [(name, ["open", "closed"]) for name in expected_schemas]
+
+        changed = get_state(
+            state=NativeEnumField(TicketStateWithReview, type_name="ticket_state"),
+            history=NativeEnumField(TicketStateWithReview, type_name="ticket_state", type_schema="public"),
+        )
+        alter = make_migration("add_review", *OperationGenerator(applied, changed).generate())
+        await alter.apply(applied, schema_editor=editor)
+        assert await get_enum_schemas_and_labels() == [
+            (name, ["open", "review", "closed"]) for name in expected_schemas
+        ]
+        await alter.unapply(applied, schema_editor=editor)
+        assert await get_enum_schemas_and_labels() == [(name, ["open", "closed"]) for name in expected_schemas]
+
+        one_left = get_state(history=NativeEnumField(TicketState, type_schema="public"))
+        drop = make_migration("drop_implicit", *OperationGenerator(applied, one_left).generate())
+        await drop.apply(applied, schema_editor=editor)
+        assert await get_enum_schemas_and_labels() == [("public", ["open", "closed"])]
+        await drop.unapply(applied, schema_editor=editor)
+        assert await get_enum_schemas_and_labels() == [(name, ["open", "closed"]) for name in expected_schemas]
+        await initial.unapply(empty, schema_editor=editor)
+        assert await get_enum_schemas_and_labels() == []
+
+        if schema == "public":
+            await client.execute_script('CREATE SCHEMA IF NOT EXISTS "public";')
+            labels = ("open", "closed")
+            await editor.enum_types.create_enum_type(
+                EnumType("ticket_state", labels, "public"), shared_with=(EnumType("ticket_state", labels),)
+            )
+            assert await get_enum_schemas_and_labels() == [("public", list(labels))]
+            await editor.enum_types.drop_enum_type(EnumType("ticket_state", labels, "public"))
+
+        binding = original.apps.get_binding("models.Ticket")
+        create_schema = editor.table_creation.get_create_schema_sql(safe=True, models=[binding])
+        await client.execute_script(create_schema)
+        assert await get_enum_schemas_and_labels() == [(name, ["open", "closed"]) for name in expected_schemas]
+        await client.execute_script('ALTER TYPE "public"."ticket_state" ADD VALUE \'review\';')
+        await client.execute_script(create_schema)
+        assert await get_enum_schemas_and_labels() == [
+            (name, ["open", "closed", "review"] if name == "public" else ["open", "closed"])
+            for name in expected_schemas
+        ]
 
 
 class TicketTable:
@@ -256,7 +332,7 @@ async def test_a_label_added_and_one_removed_on_postgresql(db_simple):
             ),
             AddField("Ticket", "history", fields.TextField(null=True)),
         )
-        state = await initial.apply(empty.clone(), schema_editor=table.get_editor())
+        state = await initial.apply(empty, schema_editor=table.get_editor())
         await table.connection.execute_script(
             f"INSERT INTO {TABLE} (id) VALUES (1); INSERT INTO {TABLE} (id, state) VALUES (2, 'closed')"
         )
@@ -270,7 +346,7 @@ async def test_a_label_added_and_one_removed_on_postgresql(db_simple):
             "0002_review",
             AlterEnumType(name="ticket_state", old_labels=("open", "closed"), new_labels=("open", "review", "closed")),
         )
-        before_added = state.clone()
+        before_added = state
         state = await added.apply(state, schema_editor=table.get_editor())
         assert await table.get_labels() == ["open", "review", "closed"]
         await table.connection.execute_script(
@@ -281,7 +357,7 @@ async def test_a_label_added_and_one_removed_on_postgresql(db_simple):
             "0003_without_closed",
             AlterEnumType(name="ticket_state", old_labels=("open", "review", "closed"), new_labels=("open", "review")),
         )
-        state = await removed.apply(state, schema_editor=table.get_editor())
+        await removed.apply(state, schema_editor=table.get_editor())
         assert await table.get_labels() == ["open", "review"]
         assert await table.get_states() == [(1, "open", None), (2, "review", None)]
         await table.connection.execute_script(f"INSERT INTO {TABLE} (id) VALUES (5)")
@@ -327,7 +403,7 @@ async def test_a_label_a_row_holds_is_not_removed(db_simple):
                 options={"table": TABLE},
             ),
         )
-        state = await initial.apply(empty.clone(), schema_editor=table.get_editor())
+        state = await initial.apply(empty, schema_editor=table.get_editor())
         await table.connection.execute_script(
             f"ALTER TABLE {TABLE} ADD COLUMN visited ticket_state[]; "
             f"INSERT INTO {TABLE} (id, state, visited) VALUES (1, 'open', '{{open,closed}}')"
@@ -338,13 +414,13 @@ async def test_a_label_a_row_holds_is_not_removed(db_simple):
         )
         # Held in the array column: refused before the type is touched.
         with pytest.raises(FieldNarrowingDataLossError, match=r"Cannot remove label\(s\) 'closed' .* 1 row\(s\)"):
-            await removed.apply(state.clone(), schema_editor=table.get_editor())
+            await removed.apply(state, schema_editor=table.get_editor())
         assert await table.get_labels() == ["open", "closed"]
         await table.connection.execute_script(f"UPDATE {TABLE} SET state = 'closed', visited = NULL")
         with pytest.raises(FieldNarrowingDataLossError, match=r"in \"state\""):
-            await removed.apply(state.clone(), schema_editor=table.get_editor())
+            await removed.apply(state, schema_editor=table.get_editor())
         await table.connection.execute_script(f"UPDATE {TABLE} SET state = 'open'")
-        await removed.apply(state.clone(), schema_editor=table.get_editor())
+        await removed.apply(state, schema_editor=table.get_editor())
         assert await table.get_labels() == ["open"]
     finally:
         await table.drop()
@@ -359,11 +435,11 @@ async def test_a_text_column_of_an_enum_becomes_an_enum_column(db_simple):
         text_state = get_state(state=fields.CharEnumField(TicketState), history=fields.TextField(null=True))
         enum_state = get_state(state=NativeEnumField(TicketState), history=fields.TextField(null=True))
         initial = make_migration("0001_initial", *OperationGenerator(empty, text_state).generate())
-        state = await initial.apply(empty.clone(), schema_editor=table.get_editor())
+        state = await initial.apply(empty, schema_editor=table.get_editor())
         await table.connection.execute_script(f"INSERT INTO {TABLE} (id, state) VALUES (1, 'closed')")
         operations = OperationGenerator(text_state, enum_state).generate()
         assert [type(operation).__name__ for operation in operations] == ["CreateEnumType", "AlterField"]
-        before = state.clone()
+        before = state
         state = await make_migration("0002_native", *operations).apply(state, schema_editor=table.get_editor())
         rows = await table.connection.execute_dicts(
             f"SELECT udt_name FROM information_schema.columns WHERE table_name = '{TABLE}' AND column_name = 'state'"

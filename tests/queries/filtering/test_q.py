@@ -3,6 +3,7 @@ from typing import Any
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.exceptions import (
     QueryError,
     ValidationError,
@@ -35,7 +36,6 @@ def test_q_to_bool():
     q_children_empty = Q(Q(), Q())
     q_children_empty_or = Q.with_connector(Connector.OR, Q(), Q())
     assert bool(q) is True
-    assert bool(q_negative) is True
     assert bool(q_negative) is True
     assert bool(q_empty) is False
     assert bool(q_children) is True
@@ -146,11 +146,11 @@ def test_q_hash_follows_equality():
 def int_fields_context(db):
     """Context for IntFields model resolution."""
     return ExpressionContext(
-        model=IntFields,
-        table=IntFields._meta.basequery,
+        binding=HareContext.require_current().apps.get_binding(IntFields),
+        table=HareContext.require_current().apps.get_binding(IntFields).basequery,
         annotations={},
-        dialect=IntFields._meta.connection.dialect,
-        connection=IntFields._meta.connection,
+        dialect=HareContext.require_current().apps.get_queryset(IntFields).get_connection().dialect,
+        connection=HareContext.require_current().apps.get_queryset(IntFields).get_connection(),
     )
 
 
@@ -158,11 +158,11 @@ def int_fields_context(db):
 def char_fields_context(db):
     """Context for CharFields model resolution."""
     return ExpressionContext(
-        model=CharFields,
-        table=CharFields._meta.basequery,
+        binding=HareContext.require_current().apps.get_binding(CharFields),
+        table=HareContext.require_current().apps.get_binding(CharFields).basequery,
         annotations={},
-        dialect=CharFields._meta.connection.dialect,
-        connection=CharFields._meta.connection,
+        dialect=HareContext.require_current().apps.get_queryset(CharFields).get_connection().dialect,
+        connection=HareContext.require_current().apps.get_queryset(CharFields).get_connection(),
     )
 
 
@@ -261,11 +261,11 @@ def test_q_call_annotations_resolved(db):
     q = Q(id__gt=5) | Q(annotated__lt=5)
     r = q.get_result(
         ExpressionContext(
-            model=IntFields,
-            table=IntFields._meta.basequery,
+            binding=HareContext.require_current().apps.get_binding(IntFields),
+            table=HareContext.require_current().apps.get_binding(IntFields).basequery,
             annotations={"annotated": F("intnum")},
-            dialect=IntFields._meta.connection.dialect,
-            connection=IntFields._meta.connection,
+            dialect=HareContext.require_current().apps.get_queryset(IntFields).get_connection().dialect,
+            connection=HareContext.require_current().apps.get_queryset(IntFields).get_connection(),
         )
     )
     assert r.where_criterion.get_sql(DEFAULT_SQL_CONTEXT) == '"id">5 OR "intnum"<5'

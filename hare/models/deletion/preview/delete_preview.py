@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from hare.core.apps.model_binding_graph import ModelBindingGraph
     from hare.models import Model
 
 
@@ -83,21 +84,22 @@ class DeletePreview:
         for model, keys in other.unknown_actions.items():
             self.unknown_actions.setdefault(model, []).extend(keys)
 
-    def keep_tenant_schema_rows(self, tenant_schema_tables: set[str]) -> None:
+    def keep_tenant_schema_rows(self, tenant_schema_tables: set[str], graph: ModelBindingGraph) -> None:
         """Leaves out every row but those of ``Meta.tenant_schema`` models and of their relations'
         tables.
 
         Args:
             tenant_schema_tables: The relation tables kept in each tenant's schema.
+            graph: The model graph used to look up the preview's bindings.
         """
         for counts in (self.deleted, self.soft_deleted, self.nulled, self.set_default):
-            for model in [model for model in counts if not model._meta.tenant_schema]:
+            for model in [model for model in counts if not graph.get_binding(model).tenant_schema]:
                 del counts[model]
         for table_counts in (self.many_to_many_through, self.many_to_many_through_nulled):
             for table in [table for table in table_counts if table not in tenant_schema_tables]:
                 del table_counts[table]
-        self.protected_by[:] = [row for row in self.protected_by if row._meta.tenant_schema]
-        self.restricted_by[:] = [row for row in self.restricted_by if row._meta.tenant_schema]
+        self.protected_by[:] = [row for row in self.protected_by if row._binding.tenant_schema]
+        self.restricted_by[:] = [row for row in self.restricted_by if row._binding.tenant_schema]
         self.unknown_actions = {
-            model: keys for model, keys in self.unknown_actions.items() if model._meta.tenant_schema
+            model: keys for model, keys in self.unknown_actions.items() if graph.get_binding(model).tenant_schema
         }

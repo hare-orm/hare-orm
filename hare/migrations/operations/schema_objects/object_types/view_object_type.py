@@ -8,7 +8,8 @@ from hare.models.enums import ModelOption
 
 if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-    from hare.models import Model
+    from hare.migrations.state.state import State
+    from hare.models.model_binding import ModelBinding
 
 
 class ViewObjectType(SchemaObjectType):
@@ -22,12 +23,14 @@ class ViewObjectType(SchemaObjectType):
     reaches_other_tables: ClassVar[bool] = True
 
     @classmethod
-    def get_state_entry(cls, schema_object: Any) -> Any:
+    def get_state_entry(cls, schema_object: Any, *, state: State, app_label: str, model_name: str) -> Any:
         """The view with its query as SQL text."""
-        return schema_object.with_sql_query()
+        client = state.environment.get_schema_client(app_label, state.default_connections)
+        binding = state.apps.get_binding(f"{app_label}.{model_name}")
+        return schema_object.for_binding(binding).with_sql_query(client)
 
     @classmethod
-    async def add(cls, editor: BaseSchemaEditor, model: type[Model], schema_object: Any, **options: Any) -> None:
+    async def add(cls, editor: BaseSchemaEditor, model: ModelBinding, schema_object: Any, **options: Any) -> None:
         cls.raise_if_unsupported(editor)
         grants = editor.grants.get_grant_again_sqls(model, GrantTarget.VIEW, schema_object.name)
         await editor.views.create_view(model, schema_object)
@@ -37,8 +40,8 @@ class ViewObjectType(SchemaObjectType):
     async def remove(
         cls,
         editor: BaseSchemaEditor,
-        model: type[Model],
-        remaining_model: type[Model],
+        model: ModelBinding,
+        remaining_model: ModelBinding,
         schema_object: Any,
         **options: Any,
     ) -> None:
@@ -46,11 +49,11 @@ class ViewObjectType(SchemaObjectType):
         await editor.views.drop_view(model, schema_object)
 
     @classmethod
-    async def rename(cls, editor: BaseSchemaEditor, model: type[Model], old_object: Any, new_object: Any) -> None:
+    async def rename(cls, editor: BaseSchemaEditor, model: ModelBinding, old_object: Any, new_object: Any) -> None:
         cls.raise_if_unsupported(editor)
         await editor.views.rename_view(model, old_object, new_object)
 
     @classmethod
-    async def alter(cls, editor: BaseSchemaEditor, model: type[Model], old_object: Any, new_object: Any) -> None:
+    async def alter(cls, editor: BaseSchemaEditor, model: ModelBinding, old_object: Any, new_object: Any) -> None:
         cls.raise_if_unsupported(editor)
         await editor.views.alter_view(model, old_object, new_object)

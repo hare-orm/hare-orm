@@ -12,6 +12,7 @@ from hare.sql.terms.node_traversal import NodeTraversal
 from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset.query_specification import QuerySpecification
 
 
@@ -26,12 +27,13 @@ class RowMultiplication:
         Reads explicit and default orderings, including expressions registered as annotations.
         Such a join must survive when a summary or a set operation embeds the query.
         """
+        model_binding: ModelBinding = specification._binding  # type: ignore[assignment]
         for name, _order in specification._apply_default_ordering(specification._orderings):
             annotation = specification._annotations.get(name)
             if annotation is None:
-                annotation = specification.model._meta.ordering_expressions.get(name)
+                annotation = model_binding.ordering_expressions.get(name)
             if annotation is None:
-                if AggregatedMultiValuedPaths.get_multi_valued_paths(specification.model, name):
+                if AggregatedMultiValuedPaths.get_multi_valued_paths(model_binding, name):
                     return True
             elif isinstance(annotation, Expression):
                 paths = AggregatedMultiValuedPaths()
@@ -122,8 +124,11 @@ class RowMultiplication:
                     multi_valued_join_generations=claiming_generation_by_path,
                 )
             )
+        model_binding: ModelBinding = specification._binding  # type: ignore[assignment]
         multi_valued_paths.record_row_pinning_conditions(
-            specification.model, specification._get_top_level_conditions_by_generation(), claiming_generation_by_path
+            model_binding,
+            specification._get_top_level_conditions_by_generation(),
+            claiming_generation_by_path,
         )
         return bool(set(multi_valued_paths.row_paths) - multi_valued_paths.pinned_paths)
 
@@ -138,7 +143,7 @@ class RowMultiplication:
         Returns:
             True when a window function is read.
         """
-        unused_alias_keys = specification._get_unused_alias_keys(specification._get_selected_field_names())
+        unused_alias_keys = specification._get_unused_alias_keys()
         probe_context = specification._get_probe_expression_context(specification._annotations)
         for annotation_name, annotation in specification._annotations.items():
             if annotation_name in unused_alias_keys:

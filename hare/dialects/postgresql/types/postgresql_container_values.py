@@ -7,7 +7,6 @@ from hare.exceptions import ValidationError
 
 if TYPE_CHECKING:
     from hare.dialects.base.types.type_registry import TypeRegistry
-    from hare.fields.data.containers.array_field import ArrayField
     from hare.fields.field import Field
 
 
@@ -41,10 +40,12 @@ class PostgresqlContainerValues:
         return f"{base_field.get_column_type(POSTGRESQL_DIALECT)}[]"
 
     def prepare_db(self, field: Field[Any]) -> Callable[[Any, Any], Any]:
-        """Prepare child conversions; rectangular shape remains a per-value database rule."""
+        """Prepare child conversions and validate nested shape on the converted values."""
+        from hare.fields.data.containers.array_field import ArrayField
+
         array_field: ArrayField = field  # type: ignore[assignment]
         write = array_field.get_dialect_db_writer(self.types)
-        nested = isinstance(array_field.base_field, type(array_field))
+        nested = isinstance(array_field.base_field, ArrayField)
 
         def write_value(value: Any, instance: Any) -> Any:
             db_value = write(value, instance)

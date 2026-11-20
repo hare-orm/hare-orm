@@ -40,14 +40,15 @@ async def test_local_backend_reads_nested_rows_without_replacing_litestar_codege
         BookRow = context.apps.get_model("dto.Book")
         AuthorRow = context.apps.get_model("dto.Author")
         PublisherRow = context.apps.get_model("dto.Publisher")
-        publisher = PublisherRow.construct(id=1, name="Press", _saved_in_db=True)
-        author = AuthorRow.construct(id=2, name="Writer", _saved_in_db=True)
+        publisher = context.apps.construct(PublisherRow, id=1, name="Press", _saved_in_db=True)
+        author = context.apps.construct(AuthorRow, id=2, name="Writer", _saved_in_db=True)
         author.publisher = publisher
-        book = BookRow.construct(id=3, title="Books", _saved_in_db=True)
+        book = context.apps.construct(BookRow, id=3, title="Books", _saved_in_db=True)
         book.author = author
         RelationAccessors.get_relation(author, "books").relation_rows.set_fetched([book])
 
         class BookDTO(HareDTO[BookRow]):
+            binding = context.apps.get_binding(BookRow)
             config = DTOConfig(max_nested_depth=3)
             computed = ("title_length",)
             related_values = {"publisher_name": "author.publisher.name"}

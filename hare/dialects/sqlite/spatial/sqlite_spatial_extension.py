@@ -4,6 +4,7 @@ import sqlite3
 
 import aiosqlite
 
+from hare.dialects.sqlite.connection.sqlite_extension_loading import SqliteExtensionLoading
 from hare.dialects.sqlite.constants import SQLITE_SPATIAL_EXTENSION_OPTION
 from hare.dialects.sqlite.enums import SpatialiteMetadata
 from hare.dialects.sqlite.spatial.constants import (
@@ -38,11 +39,7 @@ class SqliteSpatialExtension:
         Raises:
             ConfigurationError: This Python's sqlite3 module can't load extensions.
         """
-        if not hasattr(sqlite3.Connection, "enable_load_extension"):
-            raise ConfigurationError(
-                f"{SQLITE_SPATIAL_EXTENSION_OPTION.name}=True needs a Python whose sqlite3 module loads "
-                "extensions - this one was built without them (SQLITE_OMIT_LOAD_EXTENSION)"
-            )
+        SqliteExtensionLoading.raise_if_unavailable(SQLITE_SPATIAL_EXTENSION_OPTION.name)
 
     def load(self, raw_connection: sqlite3.Connection) -> frozenset[int] | None:
         """Loads SpatiaLite into a connection, points it at ``proj_database`` and creates the spatial
@@ -57,13 +54,11 @@ class SqliteSpatialExtension:
         Raises:
             ConfigurationError: The library can't be loaded.
         """
-        raw_connection.enable_load_extension(True)
-        try:
-            raw_connection.load_extension(self.library_path)
-        except sqlite3.OperationalError as error:
-            raise ConfigurationError(f"SpatiaLite can't be loaded from {self.library_path!r}: {error}") from error
-        finally:
-            raw_connection.enable_load_extension(False)
+        with SqliteExtensionLoading.enabled(raw_connection):
+            try:
+                raw_connection.load_extension(self.library_path)
+            except sqlite3.OperationalError as error:
+                raise ConfigurationError(f"SpatiaLite can't be loaded from {self.library_path!r}: {error}") from error
         if self.proj_database is not None:
             raw_connection.execute(SQLITE_SPATIAL_PROJ_DATABASE_SQL, (self.proj_database,))
         if self.metadata is SpatialiteMetadata.NONE:

@@ -14,7 +14,6 @@ class SqliteDatabase:
         Args:
             name: The file's name, without its directory and suffix.
         """
-        self.name = name
         self.path = Path(tempfile.gettempdir()) / f"{name}.sqlite3"
         self.created = False
 

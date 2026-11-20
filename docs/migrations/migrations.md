@@ -104,6 +104,9 @@ dict, the path of a `.json`/`.yml` file, or `"module.VARIABLE"`.
   each migration; either may be an `async def` or return an awaitable. Callbacks complete before
   execution continues; their errors and cancellation propagate to the caller. Progress events are
   `apply_start`, `apply_done`, `rollback_start` and `rollback_done`; fake migrations do not emit them.
+  App history follows dependency paths through other apps too: `A1 → B1 → A2` is one chain of
+  migrations of A, without a redundant direct `A1 → A2` edge. Latest-target and reverse plans use
+  that same ordering.
 - `plan()` returns ordered `ConnectionMigrationPlan` records with `connection_alias` and a tuple of
   `PlanStep` objects in `steps`; it prints nothing. `migrate()` returns the runs reported under the
   migration lock (planned runs for a dry run). These records describe the shared schema; tenant
@@ -211,11 +214,25 @@ no lock timeout for DDL: a migration run with one there raises `UnSupportedError
 
 ## <a id="squashing-migrations"></a>Squashing migrations
 
+Cycles between related models are split into the necessary field additions or removals before
+their table operations, including across applications. Already satisfied dependencies do not
+produce repeated removals. A cycle that no relation can break raises `ConfigurationError`.
+When a creation defers a relation, structured generated columns, indexes and constraints reading
+its logical field or key attributes are deferred with it. Their field dependencies determine the
+order of the separate additions. Physical column aliases do not change those logical references;
+opaque SQL still requires explicit ordering.
+
 Optimization uses the actual schema before the selected range, including migrations of other apps
 that it depends on. It prepares independent operation snapshots and accepts a shortening rewrite only
 when the complete resulting state is unchanged, including defaults and relation settings. Sorting and
 cycle splitting preserve the original declarations. Dependencies and opaque SQL can prevent a rewrite
 even when the operations name different models.
+
+For an existing table, the optimizer retains separate field operations when a later field change
+can affect how existing rows are filled or converted. An index-only change can still be combined
+with the preceding addition or alteration.
+An `AddField(not_valid=True)` stays separate from `CreateModel` so the foreign key remains pending
+validation on databases that support `NOT VALID`.
 
 For custom operations, `get_rewrite(other, app_label)` returns `OperationRewrite(operations)` or `None`;
 an empty tuple proposes cancellation. This is separate from `can_move_across(other, app_label)`:
@@ -267,11 +284,22 @@ three and writes nothing; squash the run up to that earlier migration and the mi
 | All | Runs nothing and records the squashed migration. |
 | Some | Runs the rest of the replaced migrations one by one, then records the squashed migration. |
 
+For a plan spanning connections, this decision uses each app's owning journal before the
+shared graph selects replacements. Execution refreshes the current owner's journal under
+its migration lock while retaining the other owners' captured histories for graph metadata.
+Tenant-schema runs use their own journal for local apps.
+
 Unapplying the squashed migration unapplies and unrecords them all. A migration depending on a replaced
 one — of the same app or another — depends on the squashed one instead. Once every database has applied
 all of the replaced migrations, delete their files (and then the `replaces` of the squashed migration); a
 database that applied only some of them while their files are gone raises `MigrationLoadError` naming the
 missing ones.
+
+Squashing an already squashed range keeps `replaces` as the original migrations and stores earlier
+squash journal labels in `replacement_aliases`. The loader executes the covering squash once and
+the journal records or removes those aliases with it, including after the earlier squash file is
+deleted. Keep the generated aliases while the replacement metadata is in use; they carry history
+labels that cannot be reconstructed from the remaining original migration names.
 
 ## <a id="migration"></a>`Migration`
 
@@ -281,6 +309,7 @@ class Migration:
     dependencies: list[tuple[str, str]] = []
     run_before: list[tuple[str, str]] = []
     replaces: list[tuple[str, str]] = []
+    replacement_aliases: tuple[tuple[str, str], ...] = ()
     initial: bool | None = None
     atomic: bool = True
 ```
@@ -289,6 +318,10 @@ With `atomic = True` (the default) the whole migration, including its entry in t
 in one transaction when the database supports transactional DDL. With `atomic = False` operations run one
 by one outside a transaction, except an operation declared with `atomic=True` (`RunSQL`/`RunPython`),
 which runs and rolls back as a unit in its own transaction.
+
+On a transactional database, a squash and its replaced entries are published together in the journal
+even if its DDL runs non-atomically. If the journal rejects the update after non-atomic DDL, inspect
+the schema and the journal before retrying. Hare reports the error as `PartiallyAppliedMigrationError`.
 
 A migration run outside a transaction — every migration on ClickHouse, which has no transactional DDL —
 is checked before its first operation for what the connection refuses: a model's table options its server
@@ -342,7 +375,9 @@ a relation too when its key columns and what their `REFERENCES` names stay.
 
 SQLite runs every migration with `PRAGMA foreign_keys = OFF` (its table rebuilds need it). Before an
 atomic migration commits, and after each operation of a non-atomic one, `PRAGMA foreign_key_check`
-verifies that no row points at a missing parent; a violation raises `hare.exceptions.IntegrityError`
+verifies that no row points at a missing parent in every namespace reported by
+`PRAGMA database_list`, including attached databases. Spatial metadata cleanup uses the same
+namespace as the reported violation. A violation raises `hare.exceptions.IntegrityError`
 listing the offending rows and rolls the migration (or the atomic operation) back. A connection
 configured with `foreign_keys` off is not checked. A delete in a `RunPython` of such a migration carries
 out every `on_delete` itself, as on a database without foreign keys — the database cascades nothing while
@@ -402,6 +437,8 @@ An enum only a default or a condition names, with no enum field of it in the mig
 its `__module__` and `__qualname__` lead to the class itself, or it declares `migration_import_path`.
 An enum the functional form can't write — several enum bases or several data types — is refused with
 `ConfigurationError`. Two different enums of one name are declared as `Status` and `Status2`.
+Member names need not be Python attribute identifiers: defaults such as `Status["Ready state"]`
+or `Status["class"]` are preserved in valid migration source, including runtime enums.
 The autodetector compares an enum by what it holds — its bases, name and members in order — not by the
 class: the same enum built again after a restart changes nothing, a member added, removed, renamed,
 revalued or moved is an `AlterField`.

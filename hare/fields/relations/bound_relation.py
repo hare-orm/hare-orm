@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from hare.fields.field import Field
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclass(slots=True)
@@ -13,6 +14,8 @@ class BoundRelation:
     """Target and key identity prepared for one relation binding."""
 
     related_model: type[Model] | None = None
+    related_binding: ModelBinding | None = None
+    through_binding: ModelBinding | None = None
     to_field_instance: Field[Any] | None = None
     to_field_names: tuple[str, ...] = ()
     to_field_instances: tuple[Field[Any], ...] = ()

@@ -22,12 +22,12 @@ class DeleteModelRule(MigrationSafetyRule):
         operation = context.operation
         if not isinstance(operation, DeleteModel) or operation.state_only:
             return None
-        model = context.get_model_before(operation.name)
-        if model is None or not model._meta.managed:
+        model = context.get_binding_before(operation.name)
+        if model is None or not model.managed:
             return None
         return context.get_risk(
             self.code,
-            f"The table {model._meta.db_table} is dropped while the code still running reads it.",
+            f"The table {model.db_table} is dropped while the code still running reads it.",
             f"First remove the model from the models only - DeleteModel({operation.name!r}, state_only=True) - and "
             "drop the table with RunSQL in a later migration, once no running code reads it.",
         )

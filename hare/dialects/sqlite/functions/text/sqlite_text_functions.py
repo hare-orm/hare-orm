@@ -121,15 +121,10 @@ class SqliteTextFunctions:
             connection: The SQLite connection.
             function_errors: The connection's function errors.
         """
-        functions = {
-            name: (argument_count, function_errors.wrap(function))
-            for name, (argument_count, function) in cls.get_functions().items()
-        }
-        native_functions = SqliteNativeFunctions.module
-        native_text = None if native_functions is None else native_functions.TextFunctions(functions)
-        for name, (argument_count, function) in functions.items():
-            if native_text is not None:
-                function = getattr(native_text, name)
-            await connection.create_function(
-                f"{SQLITE_TEXT_FUNCTION_PREFIX}{name}", argument_count, function, deterministic=True
-            )
+        await SqliteNativeFunctions.install_fallback_group(
+            connection,
+            function_errors,
+            cls.get_functions(),
+            SqliteNativeFunctions.module.TextFunctions,
+            SQLITE_TEXT_FUNCTION_PREFIX,
+        )

@@ -17,6 +17,7 @@ from hare.contrib.taskiq.constants import (
     OUTBOX_TASK_NAME_KEY,
 )
 from hare.contrib.taskiq.hare_taskiq_middleware import HareTaskiqMiddleware
+from hare.contrib.taskiq.task_tenant_labels import TaskTenantLabels
 from hare.core.hare_context import HareContext
 
 if TYPE_CHECKING:
@@ -115,7 +116,8 @@ class TaskiqDelivery(OutboxDelivery, Generic[TOutboxEvent]):
         kicker: AsyncKicker[Any, Any] = AsyncKicker(
             task_name=payload[OUTBOX_TASK_NAME_KEY], broker=self.broker, labels=dict(payload[OUTBOX_LABELS_KEY])
         )
-        await kicker.kiq(*payload[OUTBOX_ARGS_KEY], **payload[OUTBOX_KWARGS_KEY])
+        with TaskTenantLabels.sending(self.broker, payload[OUTBOX_LABELS_KEY]):
+            await kicker.kiq(*payload[OUTBOX_ARGS_KEY], **payload[OUTBOX_KWARGS_KEY])
 
     def get_relay(self, **relay_options: Any) -> OutboxRelay[TOutboxEvent]:
         """The relay sending the tasks - run it with ``async with``, or ``start()``/``stop()``.

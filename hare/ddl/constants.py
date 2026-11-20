@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from hare.ddl.enums import GrantTarget, PolicyCommand, Privilege
+from hare.ddl.enums import GrantTarget, PolicyCommand, Privilege, TriggerEvent
 
 #: The smallest and the largest value of a sequence - a 64-bit integer.
 SEQUENCE_VALUE_MIN = -(2**63)
@@ -11,32 +11,24 @@ SEQUENCE_VALUE_MAX = 2**63 - 1
 #: The name of a function's language - a plain identifier.
 FUNCTION_LANGUAGE_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
+#: The privileges shared by table and view grant declarations.
+TABLE_AND_VIEW_PRIVILEGES = frozenset(
+    {
+        Privilege.SELECT,
+        Privilege.INSERT,
+        Privilege.UPDATE,
+        Privilege.DELETE,
+        Privilege.TRUNCATE,
+        Privilege.REFERENCES,
+        Privilege.TRIGGER,
+        Privilege.ALL,
+    }
+)
+
 #: The privileges a grant on each type of object can give.
 GRANT_TARGET_PRIVILEGES: dict[GrantTarget, frozenset[Privilege]] = {
-    GrantTarget.TABLE: frozenset(
-        {
-            Privilege.SELECT,
-            Privilege.INSERT,
-            Privilege.UPDATE,
-            Privilege.DELETE,
-            Privilege.TRUNCATE,
-            Privilege.REFERENCES,
-            Privilege.TRIGGER,
-            Privilege.ALL,
-        }
-    ),
-    GrantTarget.VIEW: frozenset(
-        {
-            Privilege.SELECT,
-            Privilege.INSERT,
-            Privilege.UPDATE,
-            Privilege.DELETE,
-            Privilege.TRUNCATE,
-            Privilege.REFERENCES,
-            Privilege.TRIGGER,
-            Privilege.ALL,
-        }
-    ),
+    GrantTarget.TABLE: TABLE_AND_VIEW_PRIVILEGES,
+    GrantTarget.VIEW: TABLE_AND_VIEW_PRIVILEGES,
     GrantTarget.MATERIALIZED_VIEW: frozenset({Privilege.SELECT, Privilege.ALL}),
     GrantTarget.SEQUENCE: frozenset({Privilege.USAGE, Privilege.SELECT, Privilege.UPDATE, Privilege.ALL}),
     GrantTarget.FUNCTION: frozenset({Privilege.EXECUTE, Privilege.ALL}),
@@ -51,7 +43,7 @@ POLICY_COMMANDS_WITHOUT_WITH_CHECK = frozenset({PolicyCommand.SELECT, PolicyComm
 
 #: The events of a trigger whose condition reads the row being deleted (``OLD``) - any other reads
 #: the row written (``NEW``).
-TRIGGER_OLD_ROW_EVENTS = frozenset({"DELETE"})
+TRIGGER_OLD_ROW_EVENTS = frozenset({TriggerEvent.DELETE})
 #: The rows a trigger's condition reads - the one written and the one deleted.
 TRIGGER_NEW_ROW = "NEW"
 TRIGGER_OLD_ROW = "OLD"

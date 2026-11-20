@@ -16,6 +16,7 @@ import pytest
 import pytest_asyncio
 
 from hare import fields, prefetch_related_objects
+from hare.core.hare_context import HareContext
 from hare.models import Model
 from hare.query.queryset.relations.many_to_many.linked_keys import LinkedKeys
 from tests.utils.multi_database_context import MultiDatabaseTestContext
@@ -44,7 +45,7 @@ async def test_cross_connection_queries_share_dependency_loading(cross_app_m2m, 
     monkeypatch.setattr(LinkedKeys, "read_linked_keys", tracked_read)
     rows = group.targets.order_by("id")
     expected = [book.id for book in books[:3]]
-    assert type(rows) is Book._meta.manager.queryset_class
+    assert type(rows) is HareContext.require_current().apps.get_binding(Book).manager.queryset_class
 
     checks = (
         (rows.values_list("id", flat=True), expected),
@@ -137,7 +138,7 @@ async def test_m2m_add_remove_clear_use_the_owning_side_connection(cross_app_m2m
     target = await CrossAppM2MTarget.objects.create(name="Target")
 
     owner_db = ctx.connections.get("cam2m_owner")
-    through_table = CrossAppM2MOwner._meta.fields_map["targets"].through
+    through_table = HareContext.require_current().apps.get_binding(CrossAppM2MOwner).fields_map["targets"].through
 
     async def linked() -> bool:
         _, rows = await owner_db.execute(f'SELECT 1 FROM "{through_table}"')  # noqa: S608
@@ -225,7 +226,7 @@ async def test_m2m_add_remove_clear_use_the_configured_router_connection(routed_
 
     routed_db = ctx.connections.get("routed")
     default_db = ctx.connections.get("default")
-    through_table = RoutedEvent._meta.fields_map["participants"].through
+    through_table = HareContext.require_current().apps.get_binding(RoutedEvent).fields_map["participants"].through
 
     async def routed_row_count() -> int:
         _, rows = await routed_db.execute(f'SELECT 1 FROM "{through_table}"')  # noqa: S608

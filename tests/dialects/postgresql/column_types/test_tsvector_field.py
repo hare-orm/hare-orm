@@ -1,7 +1,6 @@
-import os
-
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.dialects.postgresql.fields.ts_vector_field import TSVectorField
 from hare.exceptions import ConfigurationError
@@ -32,25 +31,14 @@ def test_generated_tsvector_with_explicit_config_succeeds():
     assert field.stored is True
 
 
-def skip_if_not_postgres():
-    """Skip test if not running against PostgreSQL."""
-    db_url = os.getenv("HARE_TEST_DB", "")
-    # Strip a "+driver" scheme suffix (postgresql+asyncpg://, postgresql://) before comparing -
-    # see hare/backends/base/config_generator.py's own handling of that same suffix.
-    scheme = db_url.split(":", 1)[0].split("+", 1)[0]
-    if scheme not in {"postgres", "postgresql", "asyncpg", "psycopg"}:
-        pytest.skip("Postgres-only test.")
-
-
 @pytest.mark.asyncio
 async def test_tsvector_generated_sql(db_tsvector):
     """Test TSVector field generates correct SQL."""
-    skip_if_not_postgres()
-    field = TSVectorEntry._meta.fields_map["search_vector"]
+    field = HareContext.require_current().apps.get_binding(TSVectorEntry).fields_map["search_vector"]
     sql = field.get_generated_sql(DialectRegistry.get_dialect("postgresql"))
     assert sql == (
-        "GENERATED ALWAYS AS ((SETWEIGHT(TO_TSVECTOR('english',COALESCE(\"title\",'')),'A')"
-        " || SETWEIGHT(TO_TSVECTOR('english',COALESCE(\"body\",'')),'B'))) STORED"
+        "GENERATED ALWAYS AS ((SETWEIGHT(TO_TSVECTOR(CAST('english' AS regconfig),COALESCE(\"title\",'')),'A')"
+        " || SETWEIGHT(TO_TSVECTOR(CAST('english' AS regconfig),COALESCE(\"body\",'')),'B'))) STORED"
     )
 
 
@@ -64,7 +52,6 @@ async def test_tsvector_generated_field_save(db_tsvector):
     below) would still pass a bare truthiness/isinstance check, since the hex garbage is
     itself a non-empty string.
     """
-    skip_if_not_postgres()
     entry = await TSVectorEntry.objects.create(title="Hare ORM", body="Async Python ORM")
 
     assert isinstance(entry.search_vector, str)
@@ -81,7 +68,6 @@ async def test_tsvector_field_decodes_readable_lexeme_text_not_raw_hex(db_tsvect
     on every read - not a cache-hit-specific regression, just always wrong. Checked against
     both a plain field fetch and an annotation, since a Case()/Coalesce() annotation resolves
     through a separate from_db_value() call path than plain model hydration."""
-    skip_if_not_postgres()
     from hare.query.expressions import Case, F, When
 
     entry = await TSVectorEntry.objects.create(title="cat sat", body="on the mat")
@@ -100,7 +86,6 @@ async def test_tsvector_field_decodes_readable_lexeme_text_not_raw_hex(db_tsvect
 @pytest.mark.asyncio
 async def test_an_empty_tsvector_in_an_array_is_read_back(db_tsvector):
     """asyncpg's text array parser crashed the process on an empty tsvector in an array."""
-    skip_if_not_postgres()
-    connection = TSVectorEntry._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(TSVectorEntry).get_connection()
     rows = await connection.execute_dicts("SELECT ARRAY['', $1::tsvector] AS vectors", ["a:1A b\\\\'c:2,3"])
     assert rows[0]["vectors"] == ["", "'a':1A 'b\\\\''c':2,3"]

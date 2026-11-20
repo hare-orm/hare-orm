@@ -92,6 +92,7 @@ of the key:
 | `KEY_METHOD` | a method returning what is written into the SQL text |
 | `LITERAL` | a literal bound as a parameter (as `Value` binds one) |
 | `ARGUMENT` / `ARGUMENTS` | an argument (a sequence of them): an expression by its own description, `None` as `NULL`, a `hare.sql` term by its text and values, any other literal by its type, bound; a list or tuple literal keeps no plan |
+| `SHAPE_ARGUMENT` | an `ARGUMENT` whose bound values also affect SQL structure: values remain bound, and their structural description is included in the key; for example, search configurations that determine whether combined queries share a vector configuration |
 | `ENCODED_ARGUMENT` | an argument whose literal the build encodes into one bound value — a point as its text, a vector: a list or tuple literal is bound whole |
 | `ARGUMENT_METHOD` | a method giving an argument, described as an `ARGUMENT` |
 | `VALUE_METHOD` | a method giving a value bound as a parameter |
@@ -173,6 +174,9 @@ its conversion. A non-literal child retains its complete `ExpressionResult`, inc
 field and required joins. `Case` binds each condition once, chooses the common branch type, then
 encodes its literals. Functions prepare their children before encoding a literal first argument;
 for example, a literal beside a JSON column in `Coalesce` uses the column's JSON conversion.
+The selected result codec also includes custom field storage hooks and registered `TypeMapping.to_db`
+conversions. This does not impose the selected column's length or numeric limits on ordinary SQL
+results: compatible numeric widening and plain text literals retain their expression semantics.
 These prepared arguments belong to one build and must not be retained on shared expression objects.
 
 When referencing another annotation, return its required joins together with its term and value
@@ -182,7 +186,7 @@ integer even when `title` is a text column. Unknown custom SQL keeps an unknown 
 `ExpressionContext` carries the source model and table, connection, visibility and
 extra conditions for relation paths. `F` and functions bind model paths through
 `BoundLookupPath`. Its result contains the SQL value, output field, physical input
-columns, crossed relations and already scoped joins. Consumers attach those joins;
+column and already scoped joins. Consumers attach those joins;
 they do not apply a second visibility or extra-condition policy. An annotation's
 bound result belongs to the statement build, including its output field and joins.
 

@@ -36,6 +36,7 @@ class ClickhouseInsertValues:
         binary insert takes it.
 
         Args:
+            client: The ClickHouse client supplying driver capabilities and connection settings.
             records: One tuple of values per row.
 
         Returns:
@@ -111,6 +112,7 @@ class ClickhouseInsertValues:
         (``ClickhouseLiterals.get_literal_sql()``) writes into SQL text.
 
         Args:
+            client: The ClickHouse client supplying driver capabilities and connection settings.
             value: The value, ready for the database.
 
         Returns:
@@ -155,6 +157,7 @@ class ClickhouseInsertValues:
         """A value bound with its ClickHouse type as a driver's binary insert takes it.
 
         Args:
+            client: The ClickHouse client supplying driver capabilities and connection settings.
             value: The typed value.
 
         Returns:
@@ -173,6 +176,7 @@ class ClickhouseInsertValues:
         insert takes it.
 
         Args:
+            client: The ClickHouse client supplying driver capabilities and connection settings.
             value: The value.
 
         Returns:

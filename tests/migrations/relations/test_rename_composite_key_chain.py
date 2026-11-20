@@ -52,6 +52,7 @@ def get_create_operations() -> list[CreateModel]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("migration_context")
 @pytest.mark.parametrize(
     ("renamed", "note_key_columns"),
     [
@@ -77,9 +78,9 @@ async def test_a_rename_reaches_the_relations_reading_the_renamed_key(renamed, n
             state, schema_editor=editor
         )
         note = state.apps.get_model("models.Note")
-        assert sorted(column for name, column in note._meta.fields_db_projection.items() if name != "position") == (
-            note_key_columns
-        )
+        assert sorted(
+            column for name, column in state.apps.get_binding(note).fields_db_projection.items() if name != "position"
+        ) == (note_key_columns)
         rows = await client.execute_dicts(f"SELECT {', '.join(note_key_columns)}, position FROM chain_note")
         assert rows == [dict(zip([*note_key_columns, "position"], [7, 1, "x", 3], strict=True))]
     finally:

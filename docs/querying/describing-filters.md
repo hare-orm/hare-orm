@@ -1,6 +1,7 @@
 # Describing filters and orderings
 
-`Model._meta.get_lookup_info(key)` tells what a `.filter()` key refers to — the relations it crosses, the
+`apps.get_binding(Model).get_lookup_info(key)` tells what a `.filter()` key refers to — the relations it
+crosses, the
 field it compares, the lookup and the value the lookup takes — without building or running a query.
 `get_ordering_info(name)` does the same for an `.order_by()` name, and `get_lookups(path, dialect)` lists
 every lookup of a field that a dialect runs.
@@ -16,9 +17,12 @@ SQL.
 ## <a id="get_lookup_info"></a>`get_lookup_info()`
 
 ```python
+from hare import Hare
 from hare.query.enums import Lookup, LookupValueShape
 
-info = Book._meta.get_lookup_info("author__name__icontains")
+apps = Hare.get_context().apps
+
+info = apps.get_binding(Book).get_lookup_info("author__name__icontains")
 info.relations      # (Book.author,)
 info.field          # Author.name
 info.lookup         # Lookup.ICONTAINS
@@ -94,7 +98,7 @@ A key or name that fails raises its `FieldError` again on every call — errors 
 - A lookup other than equality, membership or `isnull` on a forward relation to a composite key
   (`draft__gt=`) raises `QueryError` — it would be ambiguous; filter each key column instead.
 - A model not bound yet (see [Before the connections are set up](#before-the-connections-are-set-up))
-  describes nothing: `get_lookup_info()`, `get_lookups()` and `get_ordering_info()`, on `Model._meta` and
+  describes nothing: `get_lookup_info()`, `get_lookups()` and `get_ordering_info()`, on a prepared binding and
   on a queryset alike, raise `ConfigurationError`:
   `Book is not bound yet: call Hare.bind_models() or Hare.init() before describing its filters or orderings`.
 
@@ -114,7 +118,7 @@ on that dialect runs the lookup. It is not supported when:
 from hare.dialects.dialect_registry import DialectRegistry
 
 sqlite = DialectRegistry.get_dialect("sqlite")
-info = Book._meta.get_lookup_info("title__trigram_similar")
+info = apps.get_binding(Book).get_lookup_info("title__trigram_similar")
 info.is_supported(sqlite)                                  # False
 info.is_supported(DialectRegistry.get_dialect("postgresql"))  # True
 ```
@@ -129,7 +133,7 @@ Book.objects.filter(title__trigram_similar=...) can't run on sqlite: the sqlite 
 ## <a id="get_lookups"></a>`get_lookups()`
 
 ```python
-lookups = Book._meta.get_lookups("added_at", connection.dialect)
+lookups = apps.get_binding(Book).get_lookups("added_at", connection.dialect)
 lookups[""]            # plain equality
 lookups["year__gte"]   # LookupInfo(value_type=int, ...)
 ```
@@ -149,7 +153,7 @@ using one on a connection without the feature raises `UnSupportedError` before i
 ## <a id="get_ordering_info"></a>`get_ordering_info()`
 
 ```python
-info = Book._meta.get_ordering_info("-author__name")
+info = apps.get_binding(Book).get_ordering_info("-author__name")
 info.relations    # (Book.author,)
 info.fields       # (Author.name,)
 info.paths        # ("author__name",)
@@ -165,6 +169,12 @@ model's own `pk` by its key field(s) — every one of a composite primary key, i
 by the related primary key field(s), read through the relation as named. An unknown name raises
 `FieldError`: `Unknown field nme for ordering: Book has no field 'nme'`.
 
+Temporal parts can follow a container path: `moments__0__year` and
+`during__startswith__year` retain both path segments in `transforms`. Their compound filters
+such as `moments__0__year__gte` and `moments__0__date__in` are described using the extracted
+value's comparison and input type. A known scalar annotation does not gain field paths just
+because its output type is known; ordering path access inside annotations is for JSON values.
+
 ## <a id="on-a-queryset"></a>On a queryset
 
 `QuerySet.get_lookup_info()`, `get_lookups()` and `get_ordering_info()` also take the queryset's
@@ -176,38 +186,26 @@ queryset = Author.objects.annotate(book_count=Count("books"))
 queryset.get_lookup_info("book_count__gte").value_type    # int
 ```
 
-## <a id="before-the-connections-are-set-up"></a>Before the connections are set up
+## <a id="before-the-connections-are-set-up"></a>Before connections are opened
 
-Every description needs the models only, no connection. `Hare.bind_models()` binds the models of a whole
-configuration — the relations between them, swappable models, each model's filters and orderings —
-synchronously, and leaves no `HareContext` current:
+Descriptions require a prepared graph, without a database connection:
 
 ```python
 from hare import Hare
 
-Hare.bind_models(config=CONFIG)  # the same config Hare.init() takes
-
-Book._meta.get_lookup_info("author__name__icontains").value_type  # str
-Book.objects.all().get_ordering_info("-published_at").descending           # True
+apps = Hare.bind_models(CONFIG)
+binding = apps.get_binding(Book)
+binding.get_lookup_info("author__name__icontains").value_type  # str
+apps.get_queryset(Book).get_ordering_info("-published_at").descending  # True
 ```
 
-It takes the configuration in every form `Hare.init()` does (a dict, a `HareConfig`, a file path or
-`"module.VARIABLE"`) and describes every key a full `Hare.init()` describes. A framework that builds its
-request handlers' signatures and schema when the application is created, before its lifespan opens the
-connections, reads the filters from there. `Hare.init()` — or `HareContext.init()` in any context, with a
-global fallback context as well — sets the connections up later as usual.
+`bind_models()` returns an independent `Apps` without changing model classes or the current context.
+Use that registry explicitly in subsequent descriptions and integrations. In a running application,
+read `context.apps.get_binding(Book)`. A class's `_declaration` contains its declaration, rather than
+an application-wide flag saying that some registry has configured the class.
 
-`Model._meta.is_bound` tells whether a model is bound — `False` right after its class is defined, `True`
-once any of these calls binds it:
-
-```python
-Book._meta.is_bound  # False
-Hare.bind_models(config=CONFIG)
-Book._meta.is_bound  # True
-```
-
-Until then every description raises `ConfigurationError` (see [Errors](#errors)). A queryset made before
-binding (`BOOKS = Book.objects.all()` at module level) describes its keys once the model is bound.
+An unbound query template cannot describe fields. Its chain is validated when a local copy is bound
+to a registry for execution. Application initialization never searches for or changes shared templates.
 
 ## <a id="validation-in-filter-and-order-by"></a>Validation in `.filter()` and `.order_by()`
 
@@ -219,5 +217,4 @@ Book.objects.filter(author__nme="Le Guin")
 # FieldError: Book.objects.filter(author__nme=...): Author has no field 'nme'
 ```
 
-A queryset built before `Hare.init()` is checked when `init()` replays it, and `init()` reports every
-invalid one with the place it was built.
+A template is checked when it is bound for execution; initialization does not replay it.

@@ -209,6 +209,6 @@ async def test_the_source_selects_another_number_of_columns(db):
         ),
     ],
 )
-def test_a_wrong_call_is_refused(make, error, message):
+def test_a_wrong_call_is_refused(db, make, error, message):
     with pytest.raises(error, match=message):
         make()

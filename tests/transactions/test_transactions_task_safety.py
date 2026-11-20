@@ -10,6 +10,7 @@ import pytest
 
 from hare.contrib.test import requires_features
 from hare.core.connections.connections import Connections
+from hare.core.hare_context import HareContext
 from hare.dialects.base.client.transaction_lifecycle.transaction_ending import TransactionEnding
 from hare.exceptions import DBConnectionError, TransactionManagementError
 from hare.instrumentation.declarations import QueryExecuted, TransactionEvent
@@ -27,7 +28,7 @@ class Boom(Exception):
 
 
 def _is_sqlite() -> bool:
-    return Tournament._meta.connection.dialect.name == "sqlite"
+    return HareContext.require_current().apps.get_queryset(Tournament).get_connection().dialect.name == "sqlite"
 
 
 def _slow_query_sql(seconds: float) -> str:

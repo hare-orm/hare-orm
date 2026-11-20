@@ -5,13 +5,11 @@ from operator import attrgetter, methodcaller
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.query.plans.constants import KEY_ONLY_PLAN_KEY_FORMS
-from hare.query.plans.description.plan_context import PlanContext
 from hare.query.plans.description.plan_description import PlanDescription
 from hare.query.plans.description.plan_parts import PlanParts
 from hare.query.plans.enums import PlanKeyForm
 from hare.query.plans.plan_origins import PlanOrigins
 from hare.query.plans.statement.declared_plan_slots import CompiledKeyPosition, CompiledPlanSlot
-from hare.query.plans.statement.statement_plan_descriptions import StatementPlanDescriptions
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
@@ -186,15 +184,6 @@ class QueryKeyCompiler:
                 connection_bit <<= 1
             elif form is PlanKeyForm.DESCRIBED:
                 description = reader(query)
-                if description is None:
-                    return None
-                structure.append(description.structure)
-                values.extend(description.values)
-                if origins is not None:
-                    origins = PlanParts.get_origins(description, origins)
-            elif form is PlanKeyForm.CONDITIONS:
-                context = PlanContext(model=query.model)
-                description = StatementPlanDescriptions.get_conditions_plan_description(reader(query), context)
                 if description is None:
                     return None
                 structure.append(description.structure)

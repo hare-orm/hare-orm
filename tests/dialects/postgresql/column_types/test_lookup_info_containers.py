@@ -5,6 +5,7 @@ import datetime
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.dialects.postgresql.enums import PostgresqlLookup
 from hare.dialects.postgresql.fields.ranges import Range
@@ -16,7 +17,7 @@ POSTGRESQL = DialectRegistry.get_dialect("postgresql")
 
 
 def describe(key: str) -> tuple:
-    lookup_info = Crate._meta.get_lookup_info(key)
+    lookup_info = HareContext.require_current().apps.get_binding(Crate).get_lookup_info(key)
     return lookup_info.transforms, lookup_info.lookup, lookup_info.value_shape, lookup_info.value_type
 
 
@@ -45,13 +46,13 @@ async def test_range_lookups(db_container_paths):
 
 @pytest.mark.asyncio
 async def test_container_fields_run_only_on_postgresql(db_container_paths):
-    lookup_info = Crate._meta.get_lookup_info("numbers__contains")
+    lookup_info = HareContext.require_current().apps.get_binding(Crate).get_lookup_info("numbers__contains")
     # An array takes its column type from the dialect a query runs on.
     assert lookup_info.is_supported(POSTGRESQL)
     assert not lookup_info.is_supported(SQLITE)
-    assert Crate._meta.get_lookups("numbers", SQLITE) == {}
+    assert HareContext.require_current().apps.get_binding(Crate).get_lookups("numbers", SQLITE) == {}
     assert {"", "contains", "contained_by", "overlap", "len", "item"} <= set(
-        Crate._meta.get_lookups("numbers", POSTGRESQL)
+        HareContext.require_current().apps.get_binding(Crate).get_lookups("numbers", POSTGRESQL)
     )
 
 
@@ -67,5 +68,5 @@ async def test_described_keys_filter(db_container_paths):
         ("span__contains", 8, [2]),
         ("span__startswith__gte", 7, [2]),
     ):
-        Crate._meta.get_lookup_info(key)
+        HareContext.require_current().apps.get_binding(Crate).get_lookup_info(key)
         assert await Crate.objects.filter(**{key: value}).order_by("id").values_list("id", flat=True) == expected

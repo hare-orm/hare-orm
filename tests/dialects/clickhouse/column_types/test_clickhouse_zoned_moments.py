@@ -5,7 +5,6 @@ the parts of a time of day read from its wall clock."""
 
 import datetime
 import os
-import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -29,6 +28,7 @@ from hare.query.functions import (
     TruncYear,
 )
 from tests.dialects.clickhouse.column_types.zoned_moment_models import ZonedMoment
+from tests.utils.database_under_test import DatabaseUnderTest
 
 #: The models of the tests opening a context of their own.
 ZONED_MOMENT_MODELS_MODULE = "tests.dialects.clickhouse.column_types.zoned_moment_models"
@@ -36,16 +36,12 @@ ZONED_MOMENT_MODELS_MODULE = "tests.dialects.clickhouse.column_types.zoned_momen
 MOSCOW = ZoneInfo("Europe/Moscow")
 
 
-@pytest.fixture(autouse=True)
-def skip_without_clickhouse():
-    if not os.getenv("HARE_TEST_DB", "").startswith("clickhouse"):
-        pytest.skip("runs against the ClickHouse test server - make test_clickhouse")
+pytestmark = pytest.mark.usefixtures("skip_without_clickhouse")
 
 
 @pytest_asyncio.fixture
 async def moments() -> AsyncGenerator[Any]:
-    raw_db_url = os.getenv("HARE_TEST_DB", "").replace("\\{", "{").replace("\\}", "}")
-    db_url = raw_db_url.format(uuid.uuid4().hex) if "{}" in raw_db_url else raw_db_url
+    db_url = DatabaseUnderTest.get_fresh_url(os.getenv("HARE_TEST_DB", ""))
     async with hare_test_context(
         [ZONED_MOMENT_MODELS_MODULE],
         db_url=db_url,
@@ -137,6 +133,35 @@ async def test_now_filters_updates_and_defaults_a_column(moments):
 
 
 @pytest.mark.asyncio
+async def test_a_time_default_matches_an_explicit_write_and_an_equality_filter(moments):
+    stored = await ZonedMoment.objects.get(id=1)
+    assert stored.stamped_clock.utcoffset() == datetime.timedelta(hours=3)
+    await ZonedMoment.objects.create(id=2, at=stored.at, clock=stored.clock, stamped_clock=stored.stamped_clock)
+    rows = await moments.get_connection().execute_dicts(
+        "SELECT id, stamped_clock FROM clickhouse_zoned_moment ORDER BY id"
+    )
+    assert rows == [{"id": key, "stamped_clock": stored.stamped_clock.isoformat()} for key in (1, 2)]
+    matches = ZonedMoment.objects.filter(stamped_clock=stored.stamped_clock).order_by("id")
+    assert await matches.values_list("id", flat=True) == [1, 2]
+
+
+@pytest.mark.parametrize(
+    ("expression", "clock"),
+    [
+        pytest.param(Trunc("at", "time"), "01:30:15+03:00", id="local"),
+        pytest.param(Trunc("at", "time", tzinfo="Asia/Kolkata"), "04:00:15+03:00", id="explicit-zone"),
+        pytest.param(Cast("at", fields.TimeField()), "22:30:15+03:00", id="cast"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_computed_time_matches_the_value_read_from_it(moments, expression, clock):
+    computed = await get_value(expression)
+    assert computed.isoformat() == clock
+    matches = ZonedMoment.objects.annotate(value=expression).filter(value=computed)
+    assert await matches.values_list("id", flat=True) == [1]
+
+
+@pytest.mark.asyncio
 async def test_a_time_of_day_is_read_from_its_wall_clock(moments):
     assert await get_value(Extract("clock", "hour")) == 1
     assert await get_value(Extract("clock", "minute")) == 30
@@ -147,8 +172,7 @@ async def test_a_time_of_day_is_read_from_its_wall_clock(moments):
 @pytest.mark.requires("tzlocal")
 @pytest.mark.asyncio
 async def test_a_naive_moment_without_time_zones_is_its_local_wall_clock():
-    raw_db_url = os.getenv("HARE_TEST_DB", "").replace("\\{", "{").replace("\\}", "}")
-    db_url = raw_db_url.format(uuid.uuid4().hex) if "{}" in raw_db_url else raw_db_url
+    db_url = DatabaseUnderTest.get_fresh_url(os.getenv("HARE_TEST_DB", ""))
     async with hare_test_context([ZONED_MOMENT_MODELS_MODULE], db_url=db_url, use_timezone=False):
         wall_clock = datetime.datetime(2020, 6, 1, 12, 30)
         await ZonedMoment.objects.create(id=1, at=wall_clock, clock=datetime.time(12, 30))
@@ -168,8 +192,7 @@ async def test_a_naive_moment_is_cast_and_written_as_text_at_its_local_wall_cloc
     """Without time zones the column holds the instant of the local wall clock - the casts to text, a
     date and a time of day, Concat and a date cast to a moment read it in UTC, a machine's offset away
     from what the model reads."""
-    raw_db_url = os.getenv("HARE_TEST_DB", "").replace("\\{", "{").replace("\\}", "}")
-    db_url = raw_db_url.format(uuid.uuid4().hex) if "{}" in raw_db_url else raw_db_url
+    db_url = DatabaseUnderTest.get_fresh_url(os.getenv("HARE_TEST_DB", ""))
     async with hare_test_context([ZONED_MOMENT_MODELS_MODULE], db_url=db_url, use_timezone=False):
         wall_clock = datetime.datetime(2024, 3, 1, 1, 30)
         await ZonedMoment.objects.create(

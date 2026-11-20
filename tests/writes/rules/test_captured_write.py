@@ -3,6 +3,7 @@ operation it did to the row, whichever write it is."""
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.exceptions import UnSupportedError
 from hare.query.expressions import F
 from tests.writes.rules.write_rules_models import RuleCapturedDocument, RuleCapturedPair, RuleOutboxEvent
@@ -86,22 +87,36 @@ async def test_every_write_captures_each_row_it_wrote(rules_db, write, expected_
 
 
 @pytest.mark.asyncio
-async def test_an_update_moving_rows_to_other_keys_captures_them_as_they_were(rules_db):
+@pytest.mark.parametrize("native", [False, True], ids=["fallback", "native-if-supported"])
+async def test_an_update_moving_rows_to_other_keys_captures_them_as_they_were(rules_db, monkeypatch, native):
     await RuleCapturedPair.objects.create(a=1, b=1, note="x")
+    await RuleCapturedPair.objects.create(a=1, b=2, note="untouched")
     await RuleOutboxEvent.objects.all().delete()
+    connection = RuleCapturedPair.get_connection()
+    if not native:
+        monkeypatch.setattr(connection, "features", connection.features.replace(supports_returning_old_new=False))
     await RuleCapturedPair.objects.filter(a=1, b=1).update(b=5, note="y")
     (event,) = await RuleOutboxEvent.objects.all()
     assert (event.payload["before"], event.payload["after"]) == (
         {"a": 1, "b": 1, "note": "x"},
         {"a": 1, "b": 5, "note": "y"},
     )
+    assert await RuleCapturedPair.objects.order_by("a", "b").values_list("a", "b", "note") == [
+        (1, 2, "untouched"),
+        (1, 5, "y"),
+    ]
 
 
 @pytest.mark.asyncio
 async def test_an_update_moving_rows_to_keys_an_expression_gives_needs_the_rows_as_they_were(rules_db):
     await RuleCapturedPair.objects.create(a=1, b=1, note="x")
     update = RuleCapturedPair.objects.filter(a=1).update(b=F("b") + 1)
-    if RuleCapturedPair._meta.connection.features.supports_returning_old_new:
+    if (
+        HareContext.require_current()
+        .apps.get_queryset(RuleCapturedPair)
+        .get_connection()
+        .features.supports_returning_old_new
+    ):
         assert await update == 1
         return
     with pytest.raises(UnSupportedError, match="sets 'b', a column of its primary key, from an expression"):

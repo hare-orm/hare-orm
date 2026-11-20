@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import heapq
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from contextlib import suppress
 from copy import copy
 from graphlib import CycleError, TopologicalSorter
@@ -9,6 +9,8 @@ from typing import Any
 
 from hare.core.apps.relation_linking import RelationLinking
 from hare.ddl.schema_objects.enum_type import EnumType
+from hare.ddl.schema_objects.view import View
+from hare.ddl.schema_objects.view_creation_order import ViewCreationOrder
 from hare.declarations.declaration_values import DeclarationValues
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.exceptions import ConfigurationError
@@ -19,11 +21,14 @@ from hare.migrations.autodetection.constants import (
     COLUMN_CHANGING_OPERATIONS,
     MANY_TO_MANY_THROUGH_TABLE_SWAP_SUFFIX,
 )
+from hare.migrations.autodetection.diffs.declarations import FunctionDiff
 from hare.migrations.autodetection.diffs.state_model_diff import StateModelDiff
+from hare.migrations.autodetection.native_prerequisites import NativePrerequisites
 from hare.migrations.autodetection.operation_sorter import OperationSorter
 from hare.migrations.autodetection.rename_questions import RenameQuestions
 from hare.migrations.autodetection.schema_object_operations import SchemaObjectOperations
 from hare.migrations.autodetection.state_signatures import StateSignatures
+from hare.migrations.constants import RELATION_FIELDS
 from hare.migrations.operations import (
     AlterEnumType,
     AlterField,
@@ -45,6 +50,7 @@ from hare.migrations.operations.operation import Operation
 from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state import State
 from hare.models.enums import ModelOption
+from hare.sql.identifiers import Identifiers
 
 ModelKey = tuple[str, str]
 
@@ -56,8 +62,10 @@ class OperationGenerator:
         self,
         old_state: State,
         new_state: State,
-        connection_by_app: dict[str, str | None] | None = None,
+        connection_by_app: Mapping[str, str | None] | None = None,
         rename_questions: RenameQuestions | None = None,
+        *,
+        native_prerequisites: NativePrerequisites | None = None,
     ) -> None:
         """
         Args:
@@ -65,13 +73,21 @@ class OperationGenerator:
             new_state: The state of the current models.
             connection_by_app: Each app's default connection alias - a table of one app is the
                 same table as another app's only when both use the same connection.
+                Defaults to the states' aliases, with new declarations taking precedence.
             rename_questions: Answers for candidate renames and moves. Unambiguous field matches
                 by column identity or relation signature need no answer.
+            native_prerequisites: Shared prerequisite publication for this generation run. Model
+                comparisons still use the unchanged old state.
         """
         self.old_state = old_state
         self.new_state = new_state
         self.rename_questions = rename_questions or RenameQuestions()
-        self.connection_by_app = connection_by_app or {}
+        self.connection_by_app = (
+            connection_by_app
+            if connection_by_app is not None
+            else {**old_state.default_connections, **new_state.default_connections}
+        )
+        self.native_prerequisites = native_prerequisites or NativePrerequisites(old_state, self.connection_by_app)
         #: Populated by generate() - (app, model) now in a selected app -> (app, model) it was
         #: moved from, for every model moved between apps with its table kept as it is.
         self.moved_models: dict[ModelKey, ModelKey] = {}
@@ -82,6 +98,7 @@ class OperationGenerator:
         #: StateFieldDiff's own docstring for what these are) across every model diffed in this
         #: one generate() call.
         self.data_loss_warnings: list[str] = []
+        self.changed_columns: set[tuple[str | None, str, str]] = set()
 
     @staticmethod
     def _filter_keys(keys: Iterable[ModelKey], app_labels: Sequence[str] | None) -> list[ModelKey]:
@@ -118,9 +135,9 @@ class OperationGenerator:
                 added_by_signature.setdefault((key[0], signature_key), []).append(key)
         for new_key in sorted(signature_key_by_added_key):
             group_key = (new_key[0], signature_key_by_added_key[new_key])
-            matching_added = added_by_signature.get(group_key, [])
+            matching_added = added_by_signature[group_key]
             matching_removed = removed_by_signature.get(group_key, [])
-            if new_key not in matching_added or not matching_removed:
+            if not matching_removed:
                 continue
             if len(matching_added) == 1 and len(matching_removed) == 1:
                 old_key = matching_removed[0]
@@ -158,7 +175,7 @@ class OperationGenerator:
         return (
             self.connection_by_app.get(key[0]),
             model_state.options.get(ModelOption.SCHEMA),
-            model_state.table or model_state.name.lower(),
+            model_state.db_table,
         )
 
     def _get_moved_model_source(self, new_key: ModelKey) -> ModelKey | None:
@@ -178,10 +195,10 @@ class OperationGenerator:
         table_identity = self._get_table_identity(new_key, new_model_state)
         source_keys = [
             old_key
-            for old_key, old_model_state in self.old_state.models.items()
+            for old_key in self.old_state.models
             if old_key[0] != new_key[0]
             and old_key not in self.new_state.models
-            and self._get_table_identity(old_key, old_model_state) == table_identity
+            and self._get_table_identity(old_key, self.old_state.models[old_key]) == table_identity
         ]
         source_keys = [
             source_key
@@ -197,7 +214,12 @@ class OperationGenerator:
                 f"removed models used ({source_names}) - move one model per makemigrations run."
             )
         source_key = source_keys[0]
-        model_diff = StateModelDiff(self.old_state.models[source_key], new_model_state, self.rename_questions)
+        model_diff = StateModelDiff(
+            self.old_state.models[source_key],
+            new_model_state,
+            self.rename_questions,
+            schema_states=(self.old_state, self.new_state),
+        )
         if model_diff.generate_operations():
             raise ConfigurationError(
                 f"Model {source_key[0]}.{source_key[1]} is moved to {new_key[0]}.{new_key[1]} with its "
@@ -216,11 +238,11 @@ class OperationGenerator:
             The added model's key, or None when no added model of another app uses the table.
         """
         old_table_identity = self._get_table_identity(old_key, self.old_state.models[old_key])
-        for new_key, new_model_state in self.new_state.models.items():
+        for new_key in self.new_state.models:
             if (
                 new_key[0] != old_key[0]
                 and new_key not in self.old_state.models
-                and self._get_table_identity(new_key, new_model_state) == old_table_identity
+                and self._get_table_identity(new_key, self.new_state.models[new_key]) == old_table_identity
                 and self._get_moved_model_source(new_key) == old_key
             ):
                 return new_key
@@ -239,10 +261,10 @@ class OperationGenerator:
             The rendered field, or None when the model or field isn't rendered there.
         """
         try:
-            model = state.apps.get_model(f"{key[0]}.{key[1]}")
+            binding = state.apps.get_binding(f"{key[0]}.{key[1]}")
         except KeyError:
             return None
-        return model._meta.fields_map.get(field_name)
+        return binding.fields_map.get(field_name)
 
     @staticmethod
     def _get_through_model_table(state: State, many_to_many_field: ManyToManyFieldInstance[Any]) -> str | None:
@@ -259,7 +281,7 @@ class OperationGenerator:
         through_model_state = state.models.get(through_key) if through_key is not None else None
         if through_model_state is None:
             return None
-        return through_model_state.table or through_model_state.name.lower()
+        return through_model_state.db_table
 
     @staticmethod
     def _get_through_model_key(many_to_many_field: ManyToManyFieldInstance[Any], state: State) -> ModelKey | None:
@@ -267,16 +289,13 @@ class OperationGenerator:
 
         Args:
             many_to_many_field: An M2M field.
+            state: The migration state containing the through model.
 
         Returns:
             The through model's key, None for a relation through an automatic table.
         """
-        through_reference = state.get_model_reference(many_to_many_field.through_model)
-        if isinstance(through_reference, str):
-            return state.get_model_key(through_reference)
-        if through_reference is not None:
-            return (through_reference._meta.app or "", through_reference.__name__)
-        return None
+        reference = many_to_many_field.through_model
+        return None if reference is None else state.get_model_key(reference)
 
     def _get_through_table_swap_operations(
         self, new_keys: list[ModelKey], renamed_models: dict[ModelKey, ModelKey]
@@ -380,6 +399,7 @@ class OperationGenerator:
 
         Args:
             field: A FK/O2O/M2M field.
+            state: The migration state containing the relation target.
 
         Returns:
             The target's key, or None when the reference isn't an "app.Model" string or a model.
@@ -392,7 +412,7 @@ class OperationGenerator:
                 return state.get_model_key(reference)
             except ConfigurationError:
                 return None
-        return (getattr(reference._meta, ModelOption.APP, ""), reference.__name__)
+        return state.get_model_key(reference)
 
     @classmethod
     def _get_backward_relation_names(cls, state: State, key: ModelKey) -> dict[tuple[ModelKey, str], str]:
@@ -408,14 +428,14 @@ class OperationGenerator:
         model_state = state.models[key]
         backward_relation_names: dict[tuple[ModelKey, str], str] = {}
         for field_name, field in model_state.fields.items():
-            if not isinstance(field, (ForeignKeyFieldInstance, ManyToManyFieldInstance)):
+            if not isinstance(field, RELATION_FIELDS):
                 continue
             if isinstance(field, ManyToManyFieldInstance) and field._generated:
                 continue
             target_key = cls._get_relation_target_key(field, state)
             # The rule the linking goes by.
             related_name = RelationLinking.get_backward_relation_name(
-                field.related_name, model_state.table or model_state.name.lower(), key[0], model_state.name
+                field.related_name, model_state.db_table, key[0], model_state.name
             )
             if target_key is None or related_name is None:
                 continue
@@ -431,11 +451,12 @@ class OperationGenerator:
         Returns:
             True when another model's FK/O2O/M2M (or an M2M's through model) is `key`.
         """
-        for other_key, model_state in self.old_state.models.items():
+        for other_key in self.old_state.models:
             if other_key == key:
                 continue
+            model_state = self.old_state.models[other_key]
             for field in model_state.fields.values():
-                if not isinstance(field, (ForeignKeyFieldInstance, ManyToManyFieldInstance)):
+                if not isinstance(field, RELATION_FIELDS):
                     continue
                 if self._get_relation_target_key(field, self.old_state) == key:
                     return True
@@ -444,7 +465,7 @@ class OperationGenerator:
                     if reference is None:
                         continue
                     # Dependency probing ignores malformed strings and unregistered classes.
-                    if not isinstance(reference, str) and reference._meta.app is None:
+                    if not isinstance(reference, str) and reference._declaration.app is None:
                         continue
                     with suppress(ConfigurationError):
                         if self.old_state.get_model_key(reference) == key:
@@ -554,7 +575,7 @@ class OperationGenerator:
         for key in keys:
             model_state = state.models[key]
             for field_name, field in model_state.fields.items():
-                if not isinstance(field, (ForeignKeyFieldInstance, ManyToManyFieldInstance)):
+                if not isinstance(field, RELATION_FIELDS):
                     continue
                 dep_key = OperationGenerator._get_relation_target_key(field, state)
                 if dep_key is not None and dep_key in key_set and dep_key != key:
@@ -591,8 +612,18 @@ class OperationGenerator:
 
         return result, deferred
 
-    @staticmethod
-    def _collect_schemas(state: State, keys: Iterable[ModelKey] | None = None) -> set[str]:
+    def _get_connection_alias(self, state: State, app_label: str) -> str | None:
+        """Keep captured ownership; an explicit generation map binds otherwise offline apps."""
+        return state.default_connections.get(app_label, self.connection_by_app.get(app_label))
+
+    def _get_recorded_alias(self, state: State, alias: str | None, dependency: OperationDependency) -> str | None:
+        """Bind an offline resource by its recorded provider rather than another app's declaration."""
+        if alias is not None:
+            return alias
+        provider = state.native_providers.get(dependency)
+        return self._get_connection_alias(state, provider) if provider is not None else None
+
+    def _collect_schemas(self, state: State, keys: Iterable[ModelKey] | None = None) -> set[tuple[str | None, str]]:
         """Collect all unique schema names used in a state - of the models' tables and of their fields'
         ``ENUM`` types.
 
@@ -600,20 +631,20 @@ class OperationGenerator:
             state: The state to scan.
             keys: Only these models' schemas - every model of `state` when omitted.
         """
-        schemas: set[str] = set()
+        schemas: set[tuple[str | None, str]] = set()
         for key in state.models if keys is None else keys:
+            alias = self._get_connection_alias(state, key[0])
             model_state = state.models[key]
             schema = model_state.options.get(ModelOption.SCHEMA)
             if schema:
-                schemas.add(schema)
+                schemas.add((alias, schema))
             for field in model_state.fields.values():
                 enum_type = field.requires_enum_type
                 if enum_type is not None and enum_type.schema:
-                    schemas.add(enum_type.schema)
+                    schemas.add((alias, enum_type.schema))
         return schemas
 
-    @staticmethod
-    def _collect_extensions(state: State, keys: Iterable[ModelKey] | None = None) -> set[str]:
+    def _collect_extensions(self, state: State, keys: Iterable[ModelKey] | None = None) -> set[tuple[str | None, str]]:
         """Collect every extension name a model in `state` needs on any dialect - a migration file
         runs on any database (``SchemaRequirements``).
 
@@ -622,15 +653,15 @@ class OperationGenerator:
             keys: Only these models' extensions - every model of `state` when omitted.
         """
         dialects = DialectRegistry.get_dialects()
-        extensions: set[str] = set()
+        extensions: set[tuple[str | None, str]] = set()
         for key in state.models if keys is None else keys:
-            extensions |= state.models[key].get_required_extensions(dialects)
+            alias = self._get_connection_alias(state, key[0])
+            extensions.update((alias, name) for name in state.models[key].get_required_extensions(dialects))
         return extensions
 
-    @staticmethod
     def _collect_enum_types(
-        state: State, keys: Iterable[ModelKey] | None = None
-    ) -> dict[tuple[str | None, str], EnumType]:
+        self, state: State, keys: Iterable[ModelKey] | None = None
+    ) -> dict[tuple[str | None, str | None, str], EnumType]:
         """The database ``ENUM`` types the fields of `state`'s models are of, by schema and name.
 
         Args:
@@ -640,26 +671,20 @@ class OperationGenerator:
         Raises:
             ConfigurationError: Two fields name one type with different labels.
         """
-        enum_types: dict[tuple[str | None, str], EnumType] = {}
-        for key in state.models if keys is None else keys:
-            for field in state.models[key].fields.values():
-                enum_type = field.requires_enum_type
-                if enum_type is None:
-                    continue
-                known = enum_types.setdefault(enum_type.key, enum_type)
-                if known.labels != enum_type.labels:
-                    raise ConfigurationError(
-                        f"Two fields name the ENUM type {enum_type.name!r} with different labels: "
-                        f"{list(known.labels)} and {list(enum_type.labels)}"
-                    )
-        return enum_types
+        return EnumType.collect(
+            (
+                self._get_connection_alias(state, key[0]),
+                (field.requires_enum_type for field in state.models[key].fields.values()),
+            )
+            for key in (state.models if keys is None else keys)
+        )
 
     @staticmethod
-    def _get_enum_type_order(item: tuple[tuple[str | None, str], EnumType]) -> tuple[str, str]:
+    def _get_enum_type_order(item: tuple[tuple[str | None, str | None, str], EnumType]) -> tuple[str, str, str]:
         """The order the operations of ENUM types are written in - the default schema's first, then by
         schema and name."""
-        (schema, name), _enum_type = item
-        return schema or "", name
+        (alias, schema, name), _enum_type = item
+        return alias or "", schema or "", name
 
     def generate(self, app_labels: Sequence[str] | None = None) -> list[HareOperation]:
         """The operations taking the old state to the new one.
@@ -676,6 +701,8 @@ class OperationGenerator:
         """
         old_keys = self._filter_keys(self.old_state.models.keys(), app_labels)
         new_keys = self._filter_keys(self.new_state.models.keys(), app_labels)
+        self.old_state = self._get_state_with_declared_primary_keys(self.old_state)
+        self.new_state = self._get_state_with_declared_primary_keys(self.new_state)
         renamed_models = self._match_renamed_models(old_keys, new_keys)
         renamed_old_keys = set(renamed_models.values())
         self.warnings.extend(self._get_unrecognized_model_rename_warnings(old_keys, new_keys, renamed_models))
@@ -724,6 +751,39 @@ class OperationGenerator:
         operations = self._add_removals_of_relations_through_changed_keys(operations, old_keys, renamed_models)
         return self._get_sorted_operations(operations, [*old_keys, *new_keys])
 
+    @staticmethod
+    def _get_state_with_declared_primary_keys(state: State) -> State:
+        """Compare relation names and their complete ordered key columns alike.
+
+        Only explicit shadow-column declarations need binding. Render a private clone
+        through the normal registry, then use the same declaration form as model snapshots.
+        Partial, reversed and interleaved relation columns keep their original order.
+        Include unselected apps: a selected model may take over their table in a move.
+        The caller's declarations and rendering cache remain untouched.
+        """
+        column_keys = [
+            key
+            for key, model_state in state.models.items()
+            if isinstance(names := model_state.pk_field_name, tuple)
+            and any(name not in model_state.fields for name in names)
+        ]
+        if not column_keys:
+            return state
+        normalized = state.clone()
+        apps = normalized.apps
+        changed = []
+        for key in column_keys:
+            model_state = normalized.models[key]
+            declared_names = ModelState.get_declared_pk_field_name(apps.get_binding(".".join(key)))
+            if declared_names != model_state.pk_field_name:
+                model_state.pk_field_name = declared_names
+                model_state.options[ModelOption.PRIMARY_KEY_ATTRIBUTE] = declared_names
+                changed.append(key)
+        if not changed:
+            return state
+        normalized.mark_models_changed(changed)
+        return normalized
+
     def _get_sorted_operations(self, operations: list[HareOperation], keys: list[ModelKey]) -> list[HareOperation]:
         """The operations ordered by what each needs (``OperationSorter``), each in the app of the model it
         names.
@@ -753,7 +813,10 @@ class OperationGenerator:
             )
             for operation in operations
         ]
-        return [operation for _app_label, operation in OperationSorter(self.old_state).sort(entries)]  # type: ignore[misc]
+        return [
+            operation  # type: ignore[misc]
+            for _app_label, operation in OperationSorter(self.old_state, self.connection_by_app).sort(entries)
+        ]
 
     def _add_removals_of_relations_through_changed_keys(
         self, operations: list[HareOperation], old_keys: list[ModelKey], renamed_models: dict[ModelKey, ModelKey]
@@ -836,26 +899,67 @@ class OperationGenerator:
         # What exists already: what the operations created (kept in the state, though no model uses it
         # any more) and what the old models use. A schema no model uses any more stays - it may hold
         # other objects; a hand-written DropSchema drops it.
-        old_schemas = self.old_state.schemas | self._collect_schemas(self.old_state)
+        old_schemas = {
+            (
+                self._get_recorded_alias(
+                    self.native_prerequisites.state,
+                    alias,
+                    OperationDependency.of_schema(schema, DependencyType.CREATED),
+                ),
+                schema,
+            )
+            for alias, schema in self.native_prerequisites.state.schemas
+        } | self._collect_schemas(self.old_state)
         selected_new_schemas = self._collect_schemas(self.new_state, new_keys)
-        operations.extend(CreateSchema(schema_name=schema) for schema in sorted(selected_new_schemas - old_schemas))
+        operations.extend(
+            CreateSchema(schema_name=schema)
+            for _alias, schema in sorted(selected_new_schemas - old_schemas, key=lambda item: (item[0] or "", item[1]))
+        )
 
         # Before any CreateModel: a column of a type an extension provides can't be
         # created until its extension exists. An extension no model declares any more stays - the
         # database may use it elsewhere; a hand-written RemoveExtension drops it.
-        old_extensions = self.old_state.extensions | self._collect_extensions(self.old_state)
+        old_extensions = {
+            (
+                self._get_recorded_alias(
+                    self.native_prerequisites.state,
+                    alias,
+                    OperationDependency.of_extension(extension, DependencyType.CREATED),
+                ),
+                extension,
+            )
+            for alias, extension in self.native_prerequisites.state.extensions
+        } | self._collect_extensions(self.old_state)
         selected_new_extensions = self._collect_extensions(self.new_state, new_keys)
         operations.extend(
-            CreateExtension(extension_name=extension) for extension in sorted(selected_new_extensions - old_extensions)
+            CreateExtension(extension_name=extension)
+            for _alias, extension in sorted(
+                selected_new_extensions - old_extensions, key=lambda item: (item[0] or "", item[1])
+            )
         )
 
         # ENUM types, before the columns of them - created, or given their new labels (a removed
         # label converts the columns, whose values must not hold it any more).
         # A type the operations created, though no column is of it any more, needs no CREATE.
-        old_enum_types = {**self.old_state.enum_types, **self._collect_enum_types(self.old_state)}
+        old_enum_types = {
+            **self._collect_enum_types(self.old_state),
+            **{
+                (
+                    self._get_recorded_alias(
+                        self.native_prerequisites.state,
+                        alias,
+                        OperationDependency.of_enum_type(schema, name, DependencyType.CREATED),
+                    ),
+                    schema,
+                    name,
+                ): enum_type
+                for (alias, schema, name), enum_type in self.native_prerequisites.state.enum_types.items()
+            },
+        }
         new_enum_types = self._collect_enum_types(self.new_state)
         selected_old_enum_types = self._collect_enum_types(self.old_state, old_keys)
         selected_new_enum_types = self._collect_enum_types(self.new_state, new_keys)
+        selected_aliases = {self.connection_by_app.get(app) for app, _model in (*old_keys, *new_keys)}
         for type_key, enum_type in sorted(selected_new_enum_types.items(), key=self._get_enum_type_order):
             old_enum_type = old_enum_types.get(type_key)
             if old_enum_type is None:
@@ -876,6 +980,11 @@ class OperationGenerator:
             DropEnumType(name=enum_type.name, labels=enum_type.labels, schema=enum_type.schema)
             for type_key, enum_type in sorted(selected_old_enum_types.items(), key=self._get_enum_type_order)
             if type_key not in new_enum_types
+            and type_key[0] in selected_aliases
+            and OperationDependency.of_enum_type(
+                enum_type.schema, enum_type.name, DependencyType.REMOVED
+            ).for_database(type_key[0])
+            not in self.native_prerequisites.provided
         ]
         return operations, cleanup_operations
 
@@ -908,9 +1017,12 @@ class OperationGenerator:
                 renamed_old_state.models[new_key] if new_key in renamed_models else self.old_state.models[old_key]
             )
             model_diffs[new_key] = StateModelDiff(
-                old_model_states[new_key], self.new_state.models[new_key], self.rename_questions
+                old_model_states[new_key],
+                self.new_state.models[new_key],
+                self.rename_questions,
+                schema_states=(renamed_old_state, self.new_state),
             )
-            model_diffs[new_key].generate_operations()
+            model_diffs[new_key].generate_operations(check_primary_key=False)
         # A relation naming a renamed field in its to_field is pointed at the new name by the RenameField
         # itself - compared as the field renames leave it, it isn't changed.
         field_renames = [
@@ -919,6 +1031,7 @@ class OperationGenerator:
             for operation in model_diff.field_operations
             if isinstance(operation, RenameField)
         ]
+        fields_renamed_state = None
         if field_renames:
             fields_renamed_state = renamed_old_state.clone()
             for new_key, rename in field_renames:
@@ -929,10 +1042,19 @@ class OperationGenerator:
                 )
                 if relations_after_renames is not old_model_state:
                     model_diffs[new_key] = StateModelDiff(
-                        relations_after_renames, self.new_state.models[new_key], self.rename_questions
+                        relations_after_renames,
+                        self.new_state.models[new_key],
+                        self.rename_questions,
+                        schema_states=(fields_renamed_state, self.new_state),
                     )
-                    model_diffs[new_key].generate_operations()
+                    model_diffs[new_key].generate_operations(check_primary_key=False)
         for new_key, model_diff in model_diffs.items():
+            key_after_renames = (
+                fields_renamed_state.models[new_key].pk_field_name
+                if fields_renamed_state is not None
+                else model_diff.old_state_after_renames.pk_field_name
+            )
+            model_diff.check_primary_key_change(key_after_renames)
             model_diff_operations.extend(model_diff.operations)
             field_operations_by_key[new_key] = model_diff.field_operations
             self.warnings.extend(model_diff.warnings)
@@ -997,9 +1119,13 @@ class OperationGenerator:
             isinstance(operation, COLUMN_CHANGING_OPERATIONS) for operation in model_diff_operations
         )
         changed_columns = self._get_changed_columns(field_operations_by_key, old_keys, new_keys, renamed_models)
-        schema_object_operations = SchemaObjectOperations(
-            alters_in_place=not tables_change, changed_columns=frozenset(changed_columns)
-        )
+        old_views = self._get_views(self.old_state, old_keys)
+        new_views = self._get_views(self.new_state, new_keys)
+        for alias, views in old_views.items():
+            columns = changed_columns.setdefault(alias, set())
+            self._add_read_view_columns(columns, views, new_views.get(alias, {}))
+        columns_by_alias = {alias: frozenset(columns) for alias, columns in changed_columns.items()}
+        models: list[tuple[ModelState | None, ModelState]] = []
         for new_key in new_keys:
             new_model_state = self.new_state.models[new_key]
             if new_model_state.options.get(ModelOption.MANAGED) is False:
@@ -1009,9 +1135,22 @@ class OperationGenerator:
                 old_model_state = StateModelDiff.get_state_after_field_renames(
                     self.old_state.models[old_key], field_operations_by_key[new_key]
                 )
-                schema_object_operations.add_changed_model(old_model_state, new_model_state)
+                models.append((old_model_state, new_model_state))
             elif self._get_moved_model_source(new_key) is None:
-                schema_object_operations.add_created_model(new_model_state)
+                models.append((None, new_model_state))
+        schema_object_operations = SchemaObjectOperations(
+            alters_in_place=not tables_change,
+            replaces_functions=not tables_change
+            and any(old is not None and FunctionDiff.replaces_function(old, new) for old, new in models),
+        )
+        for old, new in models:
+            if old is None:
+                schema_object_operations.add_created_model(new)
+            else:
+                alias = self._get_connection_alias(self.old_state, old.app)
+                schema_object_operations.add_changed_model(
+                    old, new, changed_columns=columns_by_alias.get(alias, frozenset())
+                )
         return schema_object_operations
 
     def _get_changed_columns(
@@ -1020,10 +1159,8 @@ class OperationGenerator:
         old_keys: list[ModelKey],
         new_keys: list[ModelKey],
         renamed_models: dict[ModelKey, ModelKey],
-    ) -> set[tuple[str, str]]:
-        """The columns the migration changes: those its field operations change, every column of a
-        deleted model's table, and the columns of a view or materialized view dropped and created again - its
-        declaration changes or it reads one of them; a view reading it is dropped first in turn.
+    ) -> dict[str | None, set[tuple[str | None, str, str]]]:
+        """The columns changed by field operations or removed model tables, by connection.
 
         Args:
             field_operations_by_key: The field operations of each model both states have, by its new key.
@@ -1032,68 +1169,73 @@ class OperationGenerator:
             renamed_models: The old key of each renamed model, by its new key.
 
         Returns:
-            ``(table, column)`` of each column.
+            ``(schema, table, column)`` of each column, grouped by connection alias.
         """
-        changed_columns: set[tuple[str, str]] = set()
+        changed_columns: dict[str | None, set[tuple[str | None, str, str]]] = {}
         for new_key, field_operations in field_operations_by_key.items():
             old_model_state = self.old_state.models[renamed_models.get(new_key, new_key)]
-            changed_columns |= StateModelDiff.get_changed_columns(old_model_state, field_operations)
+            alias = self._get_connection_alias(self.old_state, old_model_state.app)
+            changed_columns.setdefault(alias, set()).update(
+                StateModelDiff.get_changed_columns(old_model_state, field_operations)
+            )
         renamed_old_keys = set(renamed_models.values())
         for old_key in old_keys:
             if old_key in new_keys or old_key in renamed_old_keys:
                 continue
             old_model_state = self.old_state.models[old_key]
-            table = old_model_state.table or old_model_state.name.lower()
+            alias = self._get_connection_alias(self.old_state, old_key[0])
+            columns = changed_columns.setdefault(alias, set())
+            table = old_model_state.db_table
+            schema = old_model_state.options.get(ModelOption.SCHEMA)
             for field_name, field in old_model_state.fields.items():
                 column = ModelState.get_field_db_column(field_name, field)
                 if column is not None:
-                    changed_columns.add((table, column))
-        return self._add_read_view_columns(changed_columns, old_keys, new_keys)
+                    columns.add((schema, table, column))
+        self.changed_columns = set().union(*changed_columns.values())
+        return changed_columns
 
+    @staticmethod
     def _add_read_view_columns(
-        self, changed_columns: set[tuple[str, str]], old_keys: list[ModelKey], new_keys: list[ModelKey]
-    ) -> set[tuple[str, str]]:
+        changed_columns: set[tuple[str | None, str, str]],
+        views: dict[tuple[str | None, str], View],
+        new_views: dict[tuple[str | None, str], View],
+    ) -> None:
         """Adds the columns that views read of every view and materialized view dropped and created again -
         one whose declaration changes, one reading a changed column, through other views too: a view reading
         it is dropped first and created again after it.
 
         Args:
             changed_columns: The columns changed so far.
-            old_keys: The selected models of the old state.
-            new_keys: The selected models of the new state.
-
-        Returns:
-            ``changed_columns``, with the columns of the views made again.
+            views: The old declarations on this connection.
+            new_views: The new declarations on this connection.
         """
-        views = self._get_views(self.old_state, old_keys)
         new_declarations = {
-            view.name: DeclarationValues.get_declaration_key(view, without_name=True)
-            for view in self._get_views(self.new_state, new_keys)
+            key: DeclarationValues.get_declaration_key(view, without_name=True) for key, view in new_views.items()
         }
-        # A view whose declaration changes is dropped and created again - the views reading it with it.
-        made_again_names = {
-            view.name
-            for view in views
-            if view.name in new_declarations
-            and DeclarationValues.get_declaration_key(view, without_name=True) != new_declarations[view.name]
+        read_columns = {
+            key: {(*Identifiers.get_schema_and_name(table, key[0]), column) for table, column in view.read_columns}
+            for key, view in views.items()
         }
-        while True:
-            new_names = {
-                view.name
-                for view in views
-                if view.name not in made_again_names
-                and any(column in changed_columns or column[0] in made_again_names for column in view.read_columns)
-            }
-            if not new_names:
-                break
-            made_again_names |= new_names
+        sources = {
+            key: {key}
+            if key not in new_declarations
+            or DeclarationValues.get_declaration_key(view, without_name=True) != new_declarations[key]
+            or not read_columns[key].isdisjoint(changed_columns)
+            else set()
+            for key, view in views.items()
+        }
+        dependencies = {
+            key: {(schema, table) for schema, table, _column in columns} for key, columns in read_columns.items()
+        }
+        affected = ViewCreationOrder.get_affected_sources(dependencies, sources)
         changed_columns.update(
-            column for view in views for column in view.read_columns if column[0] in made_again_names
+            (schema, table, column)
+            for columns in read_columns.values()
+            for schema, table, column in columns
+            if affected.get((schema, table))
         )
-        return changed_columns
 
-    @staticmethod
-    def _get_views(state: State, keys: list[ModelKey]) -> list[Any]:
+    def _get_views(self, state: State, keys: list[ModelKey]) -> dict[str | None, dict[tuple[str | None, str], View]]:
         """The views and materialized views the models of a state declare.
 
         Args:
@@ -1101,14 +1243,17 @@ class OperationGenerator:
             keys: The models.
 
         Returns:
-            The views.
+            The views by connection, then by schema and name.
         """
-        return [
-            view
-            for key in keys
-            for option in (ModelOption.VIEWS, ModelOption.MATERIALIZED_VIEWS)
-            for view in state.models[key].get_option_list(option)
-        ]
+        views: dict[str | None, dict[tuple[str | None, str], View]] = {}
+        for key in keys:
+            model = state.models[key]
+            alias = self._get_connection_alias(state, key[0])
+            connection_views = views.setdefault(alias, {})
+            schema = model.options.get(ModelOption.SCHEMA)
+            for option in (ModelOption.VIEWS, ModelOption.MATERIALIZED_VIEWS):
+                connection_views.update(((schema, view.name), view) for view in model.get_option_list(option))
+        return views
 
     def _get_added_model_operations(self, added_keys: list[ModelKey]) -> list[HareOperation]:
         """The operations creating the models only the new state has.

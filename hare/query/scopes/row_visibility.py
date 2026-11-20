@@ -40,7 +40,7 @@ class RowVisibility:
     DEFAULT_WITHOUT_TENANT: ClassVar[RowVisibility]
     #: ``DEFAULT`` resolved for the last tenant it was resolved for - ``(tenant, visibility)``, kept on
     #: the class in a lifetime bucket: every query of a request resolves it for one tenant.
-    default_visibilities: ClassVar[Cache[tuple[Any, RowVisibility]]] = Cache(holds_sql=False)
+    default_visibilities: ClassVar[Cache[tuple[Any, RowVisibility]]] = Cache()
 
     def get_for_active_tenant(self) -> RowVisibility:
         """This visibility with the tenant it scopes to resolved - the active one, unless a

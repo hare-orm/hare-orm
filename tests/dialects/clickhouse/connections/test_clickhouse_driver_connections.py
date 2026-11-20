@@ -8,6 +8,7 @@ import os
 import time
 import uuid
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import pytz  # noqa: E402
@@ -27,10 +28,71 @@ from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver
 )
 from hare.dialects.clickhouse.types.clickhouse_physical_type import ClickhousePhysicalType
 from hare.exceptions import ConfigurationError, DBConnectionError, OperationalError  # noqa: E402
+from hare.instrumentation.pools.enums import PoolMetricEvent
+from hare.instrumentation.pools.pool_metrics import PoolMetrics
+from hare.instrumentation.pools.pool_metrics_recorder import PoolMetricsRecorder
 from tests.dialects.clickhouse.models import Player  # noqa: E402
+from tests.utils.connection_setup import assert_statement_waits_for_post_connect  # noqa: E402
 from tests.utils.waiting import wait_until  # noqa: E402
 
 BEFORE_1970 = datetime.datetime(1969, 12, 31, 23, 59, 59, 500000, tzinfo=datetime.UTC)
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails", [False, True], ids=["connected", "connection-failed"])
+@pytest.mark.parametrize("measure_waits", [False, True])
+async def test_pool_recorders_can_read_occupancy_and_counts(monkeypatch, fails, measure_waits):
+    client = ClickhouseDriverClient(host="unused", connection_alias="recorded", max_size=1)
+    wire = SimpleNamespace(connected=False)
+
+    def connect():
+        if fails:
+            raise ConnectionError("refused")
+        wire.connected = True
+
+    def disconnect():
+        wire.connected = False
+
+    wire.connect = connect
+    wire.disconnect = disconnect
+    library_client = Mock(connection=wire, disconnect=disconnect)
+    monkeypatch.setattr(
+        clickhouse_driver_connections, "ClickhouseDriverLibraryClient", lambda **settings: library_client
+    )
+    pool = clickhouse_driver_connections.ClickhouseDriverConnections(1, {}, client.pool_statistics)
+    notifications = []
+
+    def record(measurement):
+        # Inspect the lock without blocking, so a regression fails rather than hanging pytest.
+        available = pool.lock.acquire(blocking=False)
+        if available:
+            pool.lock.release()
+            occupancy = pool.get_occupancy()
+            counts = client.pool_statistics.get_counts()
+        else:
+            occupancy, counts = None, None
+        notifications.append((measurement.event, available, occupancy, counts))
+
+    PoolMetricsRecorder.subscribe(record)
+    if measure_waits:
+        PoolMetrics.enable()
+    try:
+        if fails:
+            with pytest.raises(ConnectionError, match="refused"):
+                await pool.run(lambda connection: 7)
+        else:
+            assert await pool.run(lambda connection: 7) == 7
+        expected = [PoolMetricEvent.WAIT] if measure_waits else []
+        expected.append(PoolMetricEvent.CONNECT_FAILURE if fails else PoolMetricEvent.CONNECT)
+        assert [event for event, *_ in notifications] == expected
+        assert all(available for _event, available, _occupancy, _counts in notifications)
+        assert client.pool_statistics.get_counts()[3:] == ((0, 1) if fails else (1, 0))
+    finally:
+        PoolMetricsRecorder.unsubscribe(record)
+        if measure_waits:
+            PoolMetrics.disable()
+        await pool.close()
 
 
 @pytest.fixture
@@ -329,33 +391,4 @@ async def test_a_statement_of_another_task_waits_for_the_connection_being_set_up
     """Another task's statement ran on a connection the opening task had published but still set up -
     before its server's features."""
     client = Connections.current().create_independent("models")
-    set_up = asyncio.Event()
-    set_up_released = asyncio.Event()
-    post_connect = client._post_connect
-
-    async def slow_post_connect():
-        await post_connect()
-        await set_up_released.wait()
-        set_up.set()
-
-    client._post_connect = slow_post_connect
-    try:
-        opening = asyncio.create_task(client.execute_dicts("SELECT 1 AS n"))
-        await wait_until(lambda: client._connection is not None)
-        set_up_seen: list[bool] = []
-
-        async def other_statement() -> list[dict]:
-            rows = await client.execute_dicts("SELECT 2 AS n")
-            set_up_seen.append(set_up.is_set())
-            return rows
-
-        other = asyncio.create_task(other_statement())
-        # The other statement gets every chance to run before the set-up ends.
-        for _ in range(100):
-            await asyncio.sleep(0)
-        set_up_released.set()
-        assert await other == [{"n": 2}]
-        assert set_up_seen == [True]
-        assert await opening == [{"n": 1}]
-    finally:
-        await client.close()
+    await assert_statement_waits_for_post_connect(client, lambda: client._connection is not None)

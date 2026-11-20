@@ -5,14 +5,8 @@ least twice, so both the build and the plan hit return the same rows."""
 import pytest
 
 from hare.query.expressions import Value
-from hare.query.plans.statement.statement_plans import StatementPlans
 from tests.shared_models.testmodels import Event, Tournament
-
-
-async def count_plan_hits(statement) -> tuple[object, int]:
-    hits = StatementPlans.hits
-    result = await statement
-    return result, StatementPlans.hits - hits
+from tests.utils.statement_plan_checks import StatementPlanChecks
 
 
 async def create_tournaments() -> list[Tournament]:
@@ -35,7 +29,7 @@ def names_of(first: str, second: str):
 async def test_values_union_runs_on_its_plan(db):
     await create_tournaments()
     assert await names_of("a", "b") == ["a", "b"]
-    names, hits = await count_plan_hits(names_of("c", "d"))
+    names, hits = await StatementPlanChecks.count_plan_hits(names_of("c", "d"))
     assert names == ["c", "d"]
     assert hits == 1
     assert await names_of("a", "nobody") == ["a"]
@@ -110,7 +104,7 @@ def tournaments_named(first: str, second: str):
 async def test_model_union_runs_on_its_plan(db):
     await create_tournaments()
     assert [tournament.name for tournament in await tournaments_named("a", "b")] == ["a", "b"]
-    rows, hits = await count_plan_hits(tournaments_named("c", "d"))
+    rows, hits = await StatementPlanChecks.count_plan_hits(tournaments_named("c", "d"))
     assert [tournament.name for tournament in rows] == ["c", "d"]
     assert hits == 1
     assert all(isinstance(tournament, Tournament) and tournament._saved_in_db for tournament in rows)

@@ -12,6 +12,7 @@ from hare.dialects.clickhouse.types.constants import (
     CLICKHOUSE_PHYSICAL_TYPE_CACHE_SIZE,
     CLICKHOUSE_TYPE_CONTAINERS,
 )
+from hare.inspectdb.introspection.catalog_sql import CatalogSql
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,7 +33,7 @@ class ClickhousePhysicalType:
     elements: tuple[ClickhousePhysicalType, ...] = ()
     element_names: tuple[str | None, ...] = ()
 
-    parsed: ClassVar[Cache[ClickhousePhysicalType]] = Cache(CLICKHOUSE_PHYSICAL_TYPE_CACHE_SIZE, holds_sql=False)
+    parsed: ClassVar[Cache[ClickhousePhysicalType]] = Cache(CLICKHOUSE_PHYSICAL_TYPE_CACHE_SIZE)
 
     @classmethod
     def from_sql(cls, sql: str) -> ClickhousePhysicalType:
@@ -41,13 +42,12 @@ class ClickhousePhysicalType:
         cached = cls.parsed.get((sql,))
         if cached is not None:
             return cached
-        name = ClickhouseSqlParts.get_before_parentheses(sql)
-        inside, suffix = ClickhouseSqlParts.get_parenthesised(sql)
+        name, inside, suffix = CatalogSql.get_parenthesized_parts(sql)
         if suffix.strip():
             # A syntax this reader does not describe is not silently truncated.
             result = cls(sql, sql)
         else:
-            arguments = tuple(ClickhouseSqlParts.split(inside))
+            arguments = tuple(ClickhouseSqlParts.split(inside or ""))
             elements: tuple[ClickhousePhysicalType, ...] = ()
             names: tuple[str | None, ...] = ()
             if name in CLICKHOUSE_TYPE_CONTAINERS:

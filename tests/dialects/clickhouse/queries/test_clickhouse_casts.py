@@ -13,15 +13,7 @@ from hare.exceptions import OperationalError
 from hare.query.expressions import F, Value
 from hare.query.functions import Cast, Concat, Upper
 from tests.dialects.clickhouse.models import Player, Revision
-
-
-async def get_values(expression, **filters):
-    return (
-        await Player.objects.filter(**filters)
-        .order_by("id")
-        .annotate(value=expression)
-        .values_list("value", flat=True)
-    )
+from tests.dialects.clickhouse.queries.player_values import PlayerValues
 
 
 async def create_players():
@@ -45,15 +37,15 @@ async def create_players():
 async def test_a_number_converts_as_clickhouse_converts(clickhouse_db):
     await create_players()
 
-    assert await get_values(Cast("rating", fields.IntField())) == [2, -1, None]
-    assert await get_values(Cast(F("rating") * 3, fields.BigIntField())) == [7, -4, None]
-    assert await get_values(Cast("score", fields.IntField())) == [2, -2, 0]
-    assert await get_values(Cast("score", fields.DecimalField(max_digits=5, decimal_places=0))) == [
+    assert await PlayerValues.get(Cast("rating", fields.IntField())) == [2, -1, None]
+    assert await PlayerValues.get(Cast(F("rating") * 3, fields.BigIntField())) == [7, -4, None]
+    assert await PlayerValues.get(Cast("score", fields.IntField())) == [2, -2, 0]
+    assert await PlayerValues.get(Cast("score", fields.DecimalField(max_digits=5, decimal_places=0))) == [
         decimal.Decimal("2"),
         decimal.Decimal("-2"),
         decimal.Decimal("0"),
     ]
-    assert await get_values(Cast("rating", fields.DecimalField(max_digits=5, decimal_places=0))) == [
+    assert await PlayerValues.get(Cast("rating", fields.DecimalField(max_digits=5, decimal_places=0))) == [
         decimal.Decimal("2"),
         decimal.Decimal("-1"),
         None,
@@ -67,16 +59,16 @@ async def test_a_float_converts_to_a_decimal_as_clickhouse_converts(clickhouse_d
 
     for value, places, expected in ((2.675, 2, "2.67"), (0.125, 2, "0.12"), (-0.125, 2, "-0.12"), (0.0, 1, "0.0")):
         target = fields.DecimalField(max_digits=30, decimal_places=places)
-        assert await get_values(Cast(Value(value), target), id=1) == [decimal.Decimal(expected)]
+        assert await PlayerValues.get(Cast(Value(value), target), id=1) == [decimal.Decimal(expected)]
 
 
 @pytest.mark.asyncio
 async def test_a_value_out_of_the_target_is_converted_as_clickhouse_converts(clickhouse_db):
     await create_players()
 
-    assert await get_values(Cast(Value(3e9), fields.IntField()), id=1) == [-(2**31)]
-    assert await get_values(Cast(Value(40000.0), fields.SmallIntField()), id=1) == [40000 - 2**16]
-    assert await get_values(Cast(Value(9999.95), fields.DecimalField(max_digits=5, decimal_places=1)), id=1) == [
+    assert await PlayerValues.get(Cast(Value(3e9), fields.IntField()), id=1) == [-(2**31)]
+    assert await PlayerValues.get(Cast(Value(40000.0), fields.SmallIntField()), id=1) == [40000 - 2**16]
+    assert await PlayerValues.get(Cast(Value(9999.95), fields.DecimalField(max_digits=5, decimal_places=1)), id=1) == [
         decimal.Decimal("9999.9")
     ]
 
@@ -85,16 +77,16 @@ async def test_a_value_out_of_the_target_is_converted_as_clickhouse_converts(cli
 async def test_text_is_read_as_clickhouse_reads_it(clickhouse_db):
     await create_players()
 
-    assert await get_values(Cast(Value("42"), fields.IntField()), id=1) == [42]
-    assert await get_values(Cast(Value("-1.25"), fields.DecimalField(max_digits=5, decimal_places=1)), id=1) == [
+    assert await PlayerValues.get(Cast(Value("42"), fields.IntField()), id=1) == [42]
+    assert await PlayerValues.get(Cast(Value("-1.25"), fields.DecimalField(max_digits=5, decimal_places=1)), id=1) == [
         decimal.Decimal("-1.2")
     ]
-    assert await get_values(Cast(Value("1.5e2"), fields.DecimalField(max_digits=5, decimal_places=1)), id=1) == [
+    assert await PlayerValues.get(Cast(Value("1.5e2"), fields.DecimalField(max_digits=5, decimal_places=1)), id=1) == [
         decimal.Decimal("150.0")
     ]
-    assert await get_values(Cast(Value("1.5"), fields.FloatField()), id=1) == [1.5]
+    assert await PlayerValues.get(Cast(Value("1.5"), fields.FloatField()), id=1) == [1.5]
     for text, expected in (("true", True), ("0", False), ("YES", True), ("N", False)):
-        assert await get_values(Cast(Value(text), fields.BooleanField()), id=1) == [expected]
+        assert await PlayerValues.get(Cast(Value(text), fields.BooleanField()), id=1) == [expected]
 
 
 @pytest.mark.asyncio
@@ -107,28 +99,30 @@ async def test_bad_text_is_null_as_clickhouse_converts_it_into_a_nullable_type(c
         Cast("name", fields.DecimalField(max_digits=5, decimal_places=1)),
         Cast("name", fields.FloatField()),
     ):
-        assert await get_values(expression) == [None, None, None]
+        assert await PlayerValues.get(expression) == [None, None, None]
     for expression in (Cast(Value("4.2"), fields.IntField()), Cast(Value(""), fields.IntField())):
-        assert await get_values(expression, id=1) == [None]
+        assert await PlayerValues.get(expression, id=1) == [None]
     for expression in (Cast(Value("o"), fields.BooleanField()), Cast(Value("maybe"), fields.BooleanField())):
         with pytest.raises(OperationalError):
-            await get_values(expression, id=1)
+            await PlayerValues.get(expression, id=1)
 
 
 @pytest.mark.asyncio
 async def test_a_text_date_is_read_as_written_and_an_impossible_one_refused(clickhouse_db):
     await create_players()
 
-    assert await get_values(Cast(Value("2024-02-29 23:30:00-02:00"), fields.DateField()), id=1) == [
+    assert await PlayerValues.get(Cast(Value("2024-02-29 23:30:00-02:00"), fields.DateField()), id=1) == [
         datetime.date(2024, 2, 29)
     ]
-    assert await get_values(Cast(Value("2024-02-29 23:30:00-02:00"), fields.DatetimeField()), id=1) == [
+    assert await PlayerValues.get(Cast(Value("2024-02-29 23:30:00-02:00"), fields.DatetimeField()), id=1) == [
         datetime.datetime(2024, 3, 1, 1, 30, tzinfo=datetime.UTC)
     ]
-    assert await get_values(Cast(Value(" 2024-02-29 "), fields.DateField()), id=1) == [datetime.date(2024, 2, 29)]
+    assert await PlayerValues.get(Cast(Value(" 2024-02-29 "), fields.DateField()), id=1) == [
+        datetime.date(2024, 2, 29)
+    ]
     for text in ("2023-02-29", "2024-02-30", "2024-13-01"):
         with pytest.raises(OperationalError):
-            await get_values(Cast(Value(text), fields.DateField()), id=1)
+            await PlayerValues.get(Cast(Value(text), fields.DateField()), id=1)
 
 
 @pytest.mark.parametrize("target", [fields.DateField, fields.DatetimeField])
@@ -153,7 +147,7 @@ async def test_a_text_date_is_read_as_clickhouse_reads_it(clickhouse_db, target)
     for text, day in cases:
         assert [
             value if target is fields.DateField else value.date()
-            for value in await get_values(Cast(Value(text), target()), id=1)
+            for value in await PlayerValues.get(Cast(Value(text), target()), id=1)
         ] == [day]
 
 
@@ -168,27 +162,27 @@ async def test_a_text_time_of_day_is_read_as_clickhouse_reads_it(clickhouse_db):
         ("12:60", datetime.time(13, 0, tzinfo=datetime.UTC)),
         (None, None),
     ):
-        assert await get_values(Cast(Value(text), fields.TimeField()), id=1) == [expected]
+        assert await PlayerValues.get(Cast(Value(text), fields.TimeField()), id=1) == [expected]
     with pytest.raises(OperationalError):
-        await get_values(Cast(Value("abc"), fields.TimeField()), id=1)
+        await PlayerValues.get(Cast(Value("abc"), fields.TimeField()), id=1)
 
 
 @pytest.mark.asyncio
 async def test_a_null_row_stays_null(clickhouse_db):
     await create_players()
 
-    assert await get_values(Cast("rating", fields.FloatField())) == [2.5, -1.5, None]
-    assert await get_values(Cast("rating", fields.DecimalField(max_digits=5, decimal_places=1))) == [
+    assert await PlayerValues.get(Cast("rating", fields.FloatField())) == [2.5, -1.5, None]
+    assert await PlayerValues.get(Cast("rating", fields.DecimalField(max_digits=5, decimal_places=1))) == [
         decimal.Decimal("2.5"),
         decimal.Decimal("-1.5"),
         None,
     ]
-    assert await get_values(Cast("born", fields.DatetimeField())) == [
+    assert await PlayerValues.get(Cast("born", fields.DatetimeField())) == [
         datetime.datetime(2024, 2, 29, tzinfo=datetime.UTC),
         None,
         None,
     ]
-    assert await get_values(Cast("born", fields.TextField())) == ["2024-02-29", None, None]
+    assert await PlayerValues.get(Cast("born", fields.TextField())) == ["2024-02-29", None, None]
 
 
 @pytest.mark.asyncio
@@ -198,18 +192,18 @@ async def test_json_text_is_the_text_clickhouse_writes(clickhouse_db):
     )
 
     text = '{"a":[1,2],"b":{"c":"x, y: z"}}'
-    assert await get_values(Cast("data", fields.TextField())) == [text, None]
-    assert await get_values(Concat("data", Value("|"))) == [f"{text}|", "|"]
+    assert await PlayerValues.get(Cast("data", fields.TextField())) == [text, None]
+    assert await PlayerValues.get(Concat("data", Value("|"))) == [f"{text}|", "|"]
 
 
 @pytest.mark.asyncio
 async def test_a_boolean_and_a_number_convert_into_each_other(clickhouse_db):
     await create_players()
 
-    assert await get_values(Cast("active", fields.IntField())) == [1, 0, 1]
-    assert await get_values(Cast("active", fields.BigIntField())) == [1, 0, 1]
-    assert await get_values(Cast("active", fields.FloatField())) == [1.0, 0.0, 1.0]
-    assert await get_values(Cast("rating", fields.BooleanField())) == [True, True, None]
+    assert await PlayerValues.get(Cast("active", fields.IntField())) == [1, 0, 1]
+    assert await PlayerValues.get(Cast("active", fields.BigIntField())) == [1, 0, 1]
+    assert await PlayerValues.get(Cast("active", fields.FloatField())) == [1.0, 0.0, 1.0]
+    assert await PlayerValues.get(Cast("rating", fields.BooleanField())) == [True, True, None]
 
 
 @pytest.mark.asyncio
@@ -242,8 +236,8 @@ async def test_cast_to_a_time_of_day_reads_its_text(clickhouse_db):
     String (ILLEGAL_TYPE_OF_ARGUMENT)."""
     await Player.objects.create(id=1, name="10:20:30")
     time_field = fields.TimeField()
-    assert await get_values(Cast("name", time_field)) == [datetime.time(10, 20, 30, tzinfo=datetime.UTC)]
-    assert await get_values(Cast(Cast("name", time_field), fields.TimeField())) == [
+    assert await PlayerValues.get(Cast("name", time_field)) == [datetime.time(10, 20, 30, tzinfo=datetime.UTC)]
+    assert await PlayerValues.get(Cast(Cast("name", time_field), fields.TimeField())) == [
         datetime.time(10, 20, 30, tzinfo=datetime.UTC)
     ]
 
@@ -255,7 +249,7 @@ async def test_cast_to_a_time_of_day_reads_its_text(clickhouse_db):
 async def test_cast_of_a_text_expression_to_a_time_of_day_reads_its_text(clickhouse_db, source):
     """Only a text column was read as one - a text expression of no field was formatted as a moment."""
     await Player.objects.create(id=1, name="10:20:30")
-    assert await get_values(Cast(source, fields.TimeField())) == [datetime.time(10, 20, 30, tzinfo=datetime.UTC)]
+    assert await PlayerValues.get(Cast(source, fields.TimeField())) == [datetime.time(10, 20, 30, tzinfo=datetime.UTC)]
 
 
 @pytest.mark.parametrize("precision", [None, 0, 3, 6])

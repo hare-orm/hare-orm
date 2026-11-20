@@ -115,3 +115,35 @@ class RowLevelSecurity(StrEnum):
     ENABLED = "enabled"
     #: The table's policies apply to its owner too.
     FORCED = "forced"
+
+
+class SchemaPartType(StrEnum):
+    """What a part of a schema read back from the database is - the unit two schemas are compared by."""
+
+    TABLE = "table"
+    COLUMN = "column"
+    PRIMARY_KEY = "primary_key"
+    INDEX = "index"
+    CONSTRAINT = "constraint"
+    FOREIGN_KEY = "foreign_key"
+    TRIGGER = "trigger"
+    POLICY = "policy"
+    GRANT = "grant"
+    VIEW = "view"
+    MATERIALIZED_VIEW = "materialized_view"
+    FUNCTION = "function"
+    SEQUENCE = "sequence"
+    DICTIONARY = "dictionary"
+    TABLE_OPTIONS = "table_options"
+    UNPARSED_PARTITIONING = "unparsed_partitioning"
+    ROW_LEVEL_SECURITY = "row_level_security"
+    ENUM_TYPE = "enum_type"
+    COMMENT = "comment"
+
+
+class SchemaNamespace(StrEnum):
+    """Independent physical name scopes used to compare declarations."""
+
+    RELATION = "relation"
+    TRIGGER = "trigger"
+    INDEX = "index"

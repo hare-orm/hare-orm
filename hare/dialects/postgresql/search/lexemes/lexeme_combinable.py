@@ -32,7 +32,9 @@ class LexemeCombinable(RawSearchQueryText, abstract=True):
         Raises:
             UnSupportedError: The dialect does not support this lexeme expression.
         """
-        DialectExpressions.raise_if_dialect_lacks(self, expression_context.dialect)
+        DialectExpressions.raise_if_dialect_lacks(
+            self, expression_context.dialect, checks_admission=expression_context.checks_dialect_admission
+        )
         return ExpressionArguments.get_result(self, "_as_tsquery", self._as_tsquery(), expression_context)
 
     def _combine(self, other: LexemeCombinable, operator: str, reversed: bool) -> CombinedLexeme:

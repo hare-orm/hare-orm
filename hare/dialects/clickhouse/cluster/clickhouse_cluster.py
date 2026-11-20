@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from hare.dialects.clickhouse.client.constants import CLICKHOUSE_DEFAULT_DATABASE
+from hare.dialects.clickhouse.cluster.clickhouse_placement_plan import ClickhousePlacementPlan
 from hare.dialects.clickhouse.cluster.constants import (
     CLICKHOUSE_DATABASE_ENGINES_SQL,
     CLICKHOUSE_REPLICA_SYNC_TEMPLATE,
@@ -45,7 +45,7 @@ class ClickhouseCluster:
     @property
     def database(self) -> str:
         """The connection's database - of a table a statement names without one."""
-        return self.client.database or CLICKHOUSE_DEFAULT_DATABASE
+        return ClickhousePlacementPlan.get_effective_database(self.client.database)
 
     async def synchronize_table(self, table_name: str) -> None:
         """Waits until the connection's server holds every row written to a replicated table through

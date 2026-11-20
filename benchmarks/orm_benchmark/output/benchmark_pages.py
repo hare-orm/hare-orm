@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import textwrap
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import ClassVar
 
 from orm_benchmark.constants import (
     BENCHMARK_DIRECTORY,
     DOCS_DIRECTORY,
     REPOSITORY,
 )
+from orm_benchmark.definitions.benchmark_report import BenchmarkReport
 from orm_benchmark.definitions.database import Database
+from orm_benchmark.definitions.target import Target
 from orm_benchmark.output.chart_writer import ChartWriter
 
 
@@ -34,13 +36,13 @@ class BenchmarkPages:
         "clickhouse": "ClickHouse",
     }
 
-    def __init__(self, report: dict[str, Any], language: str) -> None:
+    def __init__(self, report: BenchmarkReport, language: str) -> None:
         """
         Args:
             report: The report of ``Runner.run_all()``.
             language: ``en`` or ``ru``.
         """
-        self.report = report
+        self.report = report.data
         self.language = language
         self.russian = language == "ru"
         self.charts = ChartWriter(report, language, "light")
@@ -86,9 +88,8 @@ class BenchmarkPages:
                     names.append(name)
         return self.join(names)
 
-    def get_baseline_phrase(self, database: Database) -> str:
-        """hare-orm on the database's fastest driver, as the summary names it."""
-        drivers = self.charts.data.get_baseline_drivers(database)
+    def get_baseline_phrase(self, drivers: list[Target]) -> str:
+        """hare-orm on the fastest of the database's ranked drivers, as the summary names it."""
         baseline = drivers[0]
         if self.russian:
             phrase = f"hare-orm на {baseline.driver_russian}"
@@ -126,7 +127,7 @@ class BenchmarkPages:
     # --- Images ----------------------------------------------------------------------------------------------
 
     def get_chart_path(self, name: str, theme: str) -> str:
-        return f"assets/benchmarks/{name}-{self.language}-{theme}.svg"
+        return f"assets/benchmarks/{ChartWriter.get_filename(name, self.language, theme)}"
 
     def get_docs_image(self, name: str, alternative_text: str) -> str:
         """Both variants of a chart, from a page under docs/benchmarks/: the docs theme and GitHub each
@@ -218,6 +219,9 @@ class BenchmarkPages:
                 "параллельным сканированием или без.",
                 "Перед нагрузочным тестом параллельные задачи вне замера выполняют каждую операцию нагрузки. "
                 "Это прогрев операций без гарантии подготовки каждого физического подключения.",
+                "Для hare, tortoise-orm и yara-orm исходные объекты запросов получаются после инициализации "
+                "ORM, вне таймера холодного старта. Сценарии измеряют запросы подготовленного приложения, "
+                "без повторной привязки шаблонов, объявленных до инициализации.",
                 "Большинство сценариев повторяются 3–5 раз; в зачёт идёт медиана, все повторы сохраняются. "
                 "Перед повтором массовой вставки или `get_or_create()` данные этого сценария удаляются вне "
                 "замера. Последовательные вставки накапливают строки до следующей группы; обновления "
@@ -263,6 +267,9 @@ class BenchmarkPages:
             "whether it has come by decides the query plan — with a parallel scan or without.",
             "Before a load test, concurrent workers run every operation of the load, untimed. "
             "This warms the operations without guaranteeing preparation on each physical connection.",
+            "For hare, tortoise-orm and yara-orm, query entry points are obtained after ORM initialization, "
+            "outside the cold-start timer. Scenarios measure queries of an initialized application, "
+            "without rebinding templates declared before initialization.",
             "Most scenarios repeat 3–5 times; their median counts and all samples are retained. "
             "Before each bulk insert or `get_or_create()` repetition, that scenario's rows are cleared "
             "outside the timer. Sequential inserts accumulate rows until the next group; updates reuse "
@@ -393,11 +400,13 @@ class BenchmarkPages:
             self.heading(2, self.text("Summary", "Сводка"), "summary"),
             "",
         ]
-        if charts.data.get_baseline(database) is not None:
+        drivers = charts.data.get_baseline_drivers(database)
+        if drivers:
+            baseline_phrase = self.get_baseline_phrase(drivers)
             summary = self.text(
-                f"How many times slower than {self.get_baseline_phrase(database)} each library is, on average: the "
+                f"How many times slower than {baseline_phrase} each library is, on average: the "
                 "ratio of geometric means of the times over every scenario both run, except the cold start.",
-                f"Во сколько раз каждая библиотека в среднем медленнее, чем {self.get_baseline_phrase(database)}: "
+                f"Во сколько раз каждая библиотека в среднем медленнее, чем {baseline_phrase}: "
                 "отношение средних геометрических времени по всем сценариям, которые выполняют обе, кроме запуска.",
             )
             alternative = self.text(
@@ -512,9 +521,7 @@ class BenchmarkPages:
         for database in self.charts.data.get_databases():
             lines.append(f"- **{database.title}** — {self.get_table_description(database)}")
             for group in database.groups:
-                scenarios = [
-                    scenario for scenario in group.scenarios if scenario.key not in database.excluded_scenarios
-                ]
+                scenarios = self.charts.data.get_scenarios(database, group)
                 lines.append(
                     f"  - *{self.charts.get_label(group.english, group.russian)}*: "
                     + "; ".join(self.charts.get_scenario_label(scenario) for scenario in scenarios)
@@ -535,9 +542,7 @@ class BenchmarkPages:
         return f"{before}{start}\n{content}\n{end}{after}"
 
     @classmethod
-    def render_all(
-        cls, report: dict[str, Any], docs_directory: Path = DOCS_DIRECTORY, readmes: bool = True
-    ) -> dict[Path, str]:
+    def render_all(cls, report: BenchmarkReport, docs_directory: Path = DOCS_DIRECTORY) -> dict[Path, str]:
         """Generate every page and README block before publishing any of them."""
         artifacts = {}
         for language in ("en", "ru"):
@@ -546,14 +551,13 @@ class BenchmarkPages:
             artifacts[docs_directory / f"index{suffix}"] = pages.get_summary_page()
             for database in pages.charts.data.get_databases():
                 artifacts[docs_directory / f"{database.key}{suffix}"] = pages.get_database_page(database)
-            if readmes:
-                path = cls.READMES[language]
-                artifacts[path] = cls.replace_block(
-                    path.read_text(encoding="utf-8"), "benchmarks", pages.get_readme_section()
-                )
-                path = cls.BENCHMARK_READMES[language]
-                content = cls.replace_block(
-                    path.read_text(encoding="utf-8"), "benchmark-scenarios", pages.get_scenario_list()
-                )
-                artifacts[path] = cls.replace_block(content, "benchmark-method", pages.get_method_list())
+            path = cls.READMES[language]
+            artifacts[path] = cls.replace_block(
+                path.read_text(encoding="utf-8"), "benchmarks", pages.get_readme_section()
+            )
+            path = cls.BENCHMARK_READMES[language]
+            content = cls.replace_block(
+                path.read_text(encoding="utf-8"), "benchmark-scenarios", pages.get_scenario_list()
+            )
+            artifacts[path] = cls.replace_block(content, "benchmark-method", pages.get_method_list())
         return artifacts

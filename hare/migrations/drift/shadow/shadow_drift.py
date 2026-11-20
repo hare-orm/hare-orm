@@ -4,9 +4,10 @@ from collections.abc import Callable, Collection
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+from hare.ddl.enums import SchemaPartType
+from hare.ddl.table_options import TableOptions
 from hare.exceptions import UnSupportedError
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
-from hare.inspectdb.enums import SchemaPartType
 from hare.inspectdb.exceptions import SchemaNotFoundError
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
 from hare.inspectdb.introspection.schema_part import SchemaPart
@@ -23,11 +24,13 @@ from hare.migrations.operations import CreateExtension, CreateSchema, HareOperat
 from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state import State
 from hare.models.enums import ModelOption
+from hare.query.execution.query_execution import QueryExecution
 from hare.transactions.constants import DISTRIBUTED_DECISIONS_TABLE_NAME
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.inspectdb.introspection.schema_introspector import SchemaIntrospector
+    from hare.models.model_binding import ModelBinding
 
 ModelKey = tuple[str, str]
 
@@ -54,6 +57,8 @@ class ShadowDrift:
         schema: str | None,
         unmanaged_model_states: list[ModelState] | None,
         journal_tables: Collection[str],
+        *,
+        connection_model_keys: Collection[ModelKey] | None = None,
     ) -> None:
         self.connection = connection
         self.new_state = new_state
@@ -61,6 +66,15 @@ class ShadowDrift:
         self.schema = schema
         self.unmanaged_model_states = unmanaged_model_states or []
         self.journal_tables = journal_tables
+        self.connection_model_keys = (
+            frozenset(connection_model_keys)
+            if connection_model_keys is not None
+            else frozenset(
+                key
+                for key in (*new_state.models, *((model.app, model.name) for model in self.unmanaged_model_states))
+                if new_state.default_connections.get(key[0]) in (None, connection.connection_alias)
+            )
+        )
         self.default_schema = ""
         #: On a connection to a tenant's schema, the schema of the models without Meta.tenant_schema.
         self.shared_schema: str | None = None
@@ -76,55 +90,67 @@ class ShadowDrift:
         Raises:
             UnSupportedError: The connection's dialect has no shadow database.
         """
-        connection = self.connection
-        dialect = connection.dialect
-        shadow_database_class = dialect.shadow_database_class
-        if shadow_database_class is None:
-            raise UnSupportedError(f"hare drift is not supported on {dialect}")
-        introspector_class = DatabaseCatalog.get_introspector_class(connection)
-        self.default_schema = await DatabaseCatalog.get_default_schema(connection)
-        self.shared_schema = await self.get_shared_schema()
-        compared, known_tables = self.get_compared_models()
-        built = self.get_built_model_states()
-        real_parts = await self.read_parts(connection, introspector_class, compared, lambda schema: schema)
-        schemas = {self.get_model_schema(model_state) for _key, model_state in built}
-        async with shadow_database_class(connection, schemas) as shadow:
-            shadow_client: DatabaseClient = shadow.client  # type: ignore[assignment]
-            shadow_state = ShadowState.get(built, shadow, self.new_state)
-            models = [shadow_state.apps.get_model(f"{app_label}.{name}") for (app_label, name), _state in built]
-            shadow_editor = dialect.schema_editor_class(shadow_client)
-            await shadow_client.execute_built_script(
-                shadow_editor.table_creation.get_create_schema_sql(safe=False, models=models)
-            )
-            identities = shadow.get_catalog_identities()
-            real_parts = [identities.map_part(part) for part in real_parts]
-            shadow_parts = [
-                identities.map_part(part)
-                for part in await self.read_parts(
-                    shadow_client, introspector_class, compared, shadow.get_shadow_schema_name, reading_shadow=True
+        with QueryExecution(self.new_state.environment.context):
+            connection = self.connection
+            dialect = connection.dialect
+            shadow_database_class = dialect.shadow_database_class
+            if shadow_database_class is None:
+                raise UnSupportedError(f"hare drift is not supported on {dialect}")
+            introspector_class = DatabaseCatalog.get_introspector_class(connection)
+            self.default_schema = await DatabaseCatalog.get_default_schema(connection)
+            self.shared_schema = await self.get_shared_schema()
+            compared, known_tables = self.get_compared_models()
+            built = self.get_built_model_states()
+            real_parts = await self.read_parts(connection, introspector_class, compared, lambda schema: schema)
+            schemas = {self.get_model_schema(model_state) for _key, model_state in built}
+            async with shadow_database_class(connection, schemas) as shadow:
+                shadow_client: DatabaseClient = shadow.client  # type: ignore[assignment]
+                shadow_state = ShadowState.get(built, shadow, self.new_state)
+                models = [shadow_state.apps.get_binding(f"{app_label}.{name}") for (app_label, name), _state in built]
+                shadow_editor = dialect.schema_editor_class(shadow_client)
+                await shadow_client.execute_built_script(
+                    shadow_editor.table_creation.get_create_schema_sql(safe=False, models=models)
                 )
+                identities = shadow.get_catalog_identities()
+                real_parts = [identities.map_part(part) for part in real_parts]
+                shadow_parts = [
+                    identities.map_part(part)
+                    for part in await self.read_parts(
+                        shadow_client, introspector_class, compared, shadow.get_shadow_schema_name, reading_shadow=True
+                    )
+                ]
+            comparison = SchemaComparison(
+                self.new_state, dialect.schema_editor_class(connection), real_parts, shadow_parts
+            )
+            comparison.compare_enum_types()
+            prerequisites: list[HareOperation] = [
+                *(CreateSchema(schema_name=schema) for schema in self.missing_schemas),
+                *await self.get_extension_operations(introspector_class, compared),
+                *comparison.take_repair_operations(),
             ]
-        comparison = SchemaComparison(
-            self.new_state, dialect.schema_editor_class(connection), real_parts, shadow_parts
-        )
-        for key, model_state in compared:
-            prefix = self.get_table_prefix(self.get_model_schema(model_state))
-            comparison.compare_model(key, model_state, self.get_tables(model_state), prefix)
-            comparison.compare_schema_objects(key, prefix)
-        comparison.compare_enum_types()
-        operations: list[HareOperation] = [
-            *(CreateSchema(schema_name=schema) for schema in self.missing_schemas),
-            *await self.get_extension_operations(introspector_class, compared),
-            *comparison.operations,
-        ]
-        untracked_tables = await self.get_untracked_tables(known_tables)
-        return DriftResult(
-            operations=operations,
-            untracked_tables=untracked_tables,
-            untracked_columns=sorted(comparison.untracked_columns),
-            mismatched_columns=comparison.mismatched_columns,
-            mismatched_objects=comparison.mismatched_objects,
-        )
+            models_by_app: dict[str, list[tuple[ModelKey, ModelState]]] = {}
+            for key, model_state in compared:
+                models_by_app.setdefault(key[0], []).append((key, model_state))
+            operations_by_app: dict[str, list[HareOperation]] = {}
+            for app_label, compared_models in models_by_app.items():
+                for key, model_state in compared_models:
+                    prefix = self.get_table_prefix(self.get_model_schema(model_state))
+                    comparison.compare_model(key, model_state, self.get_tables(model_state), prefix)
+                    comparison.compare_schema_objects(key, prefix)
+                operations = comparison.take_repair_operations()
+                if prerequisites:
+                    operations[:0] = prerequisites
+                    prerequisites = []
+                if operations:
+                    operations_by_app[app_label] = operations
+            untracked_tables = await self.get_untracked_tables(known_tables)
+            return DriftResult(
+                operations_by_app=operations_by_app,
+                untracked_tables=untracked_tables,
+                untracked_columns=sorted(comparison.untracked_columns),
+                mismatched_columns=comparison.mismatched_columns,
+                mismatched_objects=comparison.mismatched_objects,
+            )
 
     async def get_shared_schema(self) -> str | None:
         """The schema of the models without ``Meta.tenant_schema`` on a connection to a tenant's schema -
@@ -157,20 +183,18 @@ class ShadowDrift:
     def get_tables(self, model_state: ModelState) -> list[str]:
         """A model's tables - the one storing its rows, then one over it (a table spread over a
         cluster's servers)."""
-        table_options = self.connection.dialect.get_declared_table_options(
+        table_options = self.connection.dialect.get_table_options(
             model_state.options.get(ModelOption.TABLE_OPTIONS, ())
         )
-        storage_table = (
-            model_state.table if table_options is None else table_options.get_storage_table_name(model_state.table)
-        )
+        storage_table = TableOptions.get_effective_storage_table_name(model_state.table, table_options)
         return list(dict.fromkeys((storage_table, model_state.table)))
 
-    def get_through_tables(self, key: ModelKey) -> list[str]:
+    @staticmethod
+    def get_through_tables(binding: ModelBinding) -> list[str]:
         """The automatic through tables of a model's many-to-many relations."""
-        model = self.new_state.apps.get_model(f"{key[0]}.{key[1]}")
         return [
             field.through
-            for field in model._meta.fields_map.values()
+            for field in binding.fields_map.values()
             if isinstance(field, ManyToManyFieldInstance) and not field._generated and field.through_model is None
         ]
 
@@ -191,10 +215,14 @@ class ShadowDrift:
         )
         compared: list[tuple[ModelKey, ModelState]] = []
         known_tables: set[tuple[str, str]] = set()
-        for key, model_state in self.new_state.models.items():
+        for key in self.new_state.models:
+            if key not in self.connection_model_keys:
+                continue
+            model_state = self.new_state.models[key]
             schema = self.get_model_schema(model_state)
             known_tables.update((schema, table) for table in self.get_tables(model_state))
-            known_tables.update((schema, table) for table in self.get_through_tables(key))
+            binding = self.new_state.apps.get_binding(f"{key[0]}.{key[1]}")
+            known_tables.update((schema, table) for table in self.get_through_tables(binding))
             if key[0] not in self.target_labels:
                 continue
             if (
@@ -204,24 +232,31 @@ class ShadowDrift:
                 continue
             compared.append((key, model_state))
         for unmanaged_model_state in self.unmanaged_model_states:
+            if (unmanaged_model_state.app, unmanaged_model_state.name) not in self.connection_model_keys:
+                continue
             schema = self.get_model_schema(unmanaged_model_state)
             known_tables.add((schema, unmanaged_model_state.table))
             # The automatic through tables of its many-to-many relations are its own too.
             known_tables.update(
-                (schema, field.through)
+                (schema, through_name)
                 for field in unmanaged_model_state.fields.values()
-                if isinstance(field, ManyToManyFieldInstance) and field.through_model is None and field.through
+                if isinstance(field, ManyToManyFieldInstance)
+                and field.through_model is None
+                and (through_name := field.through)
             )
         return compared, known_tables
 
     def get_built_model_states(self) -> list[tuple[ModelKey, ModelState]]:
         """The models the shadow is built of - every model of the state, and the tables of the unmanaged
         ones a relation may point at, without the objects they declare beside them."""
-        built = list(self.new_state.models.items())
+        built = [
+            (key, self.new_state.models[key]) for key in self.new_state.models if key in self.connection_model_keys
+        ]
         built.extend(
             ((model_state.app, model_state.name), self.get_table_only(model_state))
             for model_state in self.unmanaged_model_states
             if (model_state.app, model_state.name) not in self.new_state.models
+            and (model_state.app, model_state.name) in self.connection_model_keys
         )
         if self.shared_schema is None:
             return built
@@ -295,12 +330,13 @@ class ShadowDrift:
             wanted_tables: list[str] = []
             object_names: dict[SchemaPartType, set[str]] = {}
             for key, model_state in schema_models:
-                wanted_tables.extend((*self.get_tables(model_state), *self.get_through_tables(key)))
-                model = self.new_state.apps.get_model(f"{key[0]}.{key[1]}")
+                wanted_tables.extend(self.get_tables(model_state))
+                binding = self.new_state.apps.get_binding(f"{key[0]}.{key[1]}")
+                wanted_tables.extend(self.get_through_tables(binding))
                 for part_type in DRIFT_SCHEMA_OBJECT_PART_TYPES:
                     attribute_name = DRIFT_NAMED_OBJECT_OPERATIONS[part_type][0]
                     object_names.setdefault(part_type, set()).update(
-                        declaration.name for declaration in getattr(model._meta, attribute_name)
+                        declaration.name for declaration in getattr(binding, attribute_name)
                     )
             tables = [table for table in dict.fromkeys(wanted_tables) if table in existing_tables]
             schema_parts = await introspector_class.fetch_schema_parts(client, read_schema, tables, object_names)
@@ -310,6 +346,9 @@ class ShadowDrift:
                     part,
                     table=f"{prefix}{part.table}" if part.table else part.table,
                     name=part.name if part.table else f"{prefix}{part.name}",
+                    value=replace(part.value, schema=schema)
+                    if part.part_type is SchemaPartType.ENUM_TYPE
+                    else part.value,
                 )
                 for part in schema_parts
             )

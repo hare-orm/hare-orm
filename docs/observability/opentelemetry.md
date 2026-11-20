@@ -66,6 +66,9 @@ call is a no-op, and `uninstrument()` removes the wrapper again. Several instrum
 providers) can be installed at once. Importing the module activates nothing — you activate it explicitly,
 as with any `opentelemetry-instrumentation-*` package.
 
+Instrumentors using the same meter provider share its pool metrics. Each pool event is recorded once,
+and the occupancy metrics remain active until the last instrumentor using that provider stops.
+
 ## <a id="spans"></a>Spans
 
 Every span carries `db.system.name` (the dialect — `sqlite`, `postgresql`, `clickhouse`; `other_sql` for

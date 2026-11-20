@@ -24,6 +24,24 @@ renames that section to its version and date.
 
 ### Breaking changes
 
+- `BoundModels` takes a prepared `Apps` registry, rather than a configuration and optional registry;
+  pass `BoundModels(Hare.bind_models(config))`. Dialects come from that registry's graph; the
+  configuration-parsing `get_engine()` helper is removed.
+- `ModelQuery` captures deferred filter values when calls are recorded. Its chain and binding copies
+  preserve subclasses through Python's copy protocol without rerunning constructors; custom `__copy__`
+  implementations must return independent declarations.
+- Custom statement builders return complete `PlanDescription` objects through `_get_build_plan_description()`;
+  the redundant `_get_plan_key`, `_get_plan_values`, `_get_plan_value_description` and
+  `_get_plan_record_description` hooks are removed.
+- Model metadata belongs to an independent registry graph. Retained queries and instances keep their
+  original context and graph; a closed context cannot perform database IO. Use a new `HareContext` for
+  another configuration. `Hare.bind_models()` returns an offline `Apps`; use its `get_binding()`,
+  `new()`, `construct()` and `get_queryset()` factories instead of class-global metadata.
+- Historical data callbacks use `apps.get_queryset(reference, using=schema_editor.client)`. Pass
+  `apps=` when generating request/Pydantic schemas offline. Pickled instances are detached from live
+  resources and require `context.attach(instance)` before database operations.
+- Custom manager/queryset constructors forward `binding=` and `context=`. Schema hooks and change sinks
+  receive `ModelBinding` instead of a model class; its `_model` identifies the Python class.
 - `MigrationSafetyChecker.check()` now takes `migration.prepare(state)` as its second argument,
   rather than `State`. Update custom checker overrides to accept `PreparedOperationStates`;
   sequential checks can advance from `prepared.after.clone()` without another dry run.
@@ -47,6 +65,7 @@ renames that section to its version and date.
   `translate_exceptions()`.
 - Custom caches must use explicit holder/model buckets; replace owner helpers with `get_bucket()`,
   `get_value()`, `set_value()` and `forget_holder()`.
+  Remove the `holds_sql` argument from custom caches. SQL cache entries follow their model binding.
 - Declare ClickHouse dictionary sources with `DictionarySource` and explicit `EnvironmentValue` references, or
   literal `RawSQLTerm`; raw SQL no longer expands environment placeholders.
 - Install `hare-orm[clickhouse-keeper]` for ClickHouse Keeper allocation and migration locks.
@@ -67,11 +86,15 @@ renames that section to its version and date.
 
 ### Changed
 
+- Share prepared container conversion hooks and schema-query preparation. M2M metadata uses its linked
+  through binding throughout reads, writes, deletion and schema snapshots.
+- Keep only executable child trees after migration preparation and coalesce historical rendering marks;
+  dependency sorting and splitting use the same provider matching.
 - Batch native asyncio delivery and model hydration, and execute cached model plans without allocating statements.
 - Reduce repeated work in query cloning, row materialization and bulk key/array conversion while preserving
   custom conversion hooks and validation.
 - Reduce intermediate allocations in native parameter and result conversion, prepare annotation readers
-  once per batch, and reuse comparison and dependency metadata within migration preparation.
+  with the result layout, and reuse comparison and dependency metadata within migration preparation.
   Ordinary native-to-Python callbacks use PyO3 instead of custom vectorcall wrappers.
 - Connection clones retain effective construction settings; transactions, migrations and integrations use
   their owning context instead of an unrelated ambient connection.
@@ -87,6 +110,11 @@ renames that section to its version and date.
   transport; updated contract matrices and English/Russian documentation.
 
 ### Fixed
+
+- Align prepared field validation and SQL-plan structure, include nested migration effects in safety
+  inspection, respect dialect object-name scopes, and prevent task retries after a committed or
+  unconfirmed transaction. Preserve computed-field ordering in cached Pydantic schemas and mask
+  field-aware diagnostics consistently.
 
 - Keep relation queries on the instance's current connection and apply router choices at execution time.
 - Enforce tenant-client and transaction-scope checks for explicit clients, nested queries and relation writes.

@@ -9,7 +9,7 @@ from hare.typing_info.declarations import ValueType
 
 if TYPE_CHECKING:
     from hare.fields.relations.fields.relational_field import RelationalField
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class WriteValueTypes:
@@ -21,24 +21,23 @@ class WriteValueTypes:
     """
 
     @staticmethod
-    def get_names(model: type[Model]) -> tuple[str, ...]:
+    def get_names(binding: ModelBinding) -> tuple[str, ...]:
         """Keep declaration order so all typing backends produce deterministic output."""
-        meta = model._meta
-        relations = meta.foreign_key_fields | meta.one_to_one_fields
+        relations = binding.forward_key_relation_names
         return tuple(
             dict.fromkeys(
                 (
-                    *meta.fields_db_projection,
-                    *(name for name in meta.fields_map if name in relations),
-                    *meta.generic_foreign_key_fields,
-                    *((PRIMARY_KEY_ALIAS,) if meta.has_primary_key else ()),
+                    *binding.fields_db_projection,
+                    *(name for name in binding.fields_map if name in relations),
+                    *binding.generic_foreign_key_fields,
+                    *((PRIMARY_KEY_ALIAS,) if binding.has_primary_key else ()),
                 )
             )
         )
 
     @staticmethod
     def get(
-        model: type[Model],
+        binding: ModelBinding,
         name: str,
         *,
         accepts_expressions: bool = False,
@@ -49,52 +48,58 @@ class WriteValueTypes:
         Constructor/create descriptions retain their input names. UPDATE additionally
         applies the runtime assignment policy to every column a name expands into.
         """
-        meta = model._meta
+        if write_type is not WriteType.INSERT and name not in WriteValueTypes.get_names(binding):
+            return None
+        return WriteValueTypes._get_named_type(binding, name, accepts_expressions, write_type)
+
+    @staticmethod
+    def _get_named_type(
+        binding: ModelBinding, name: str, accepts_expressions: bool, write_type: WriteType
+    ) -> ValueType | None:
+        """Describe a known input name, retaining the runtime column assignment policy."""
         if write_type is not WriteType.INSERT:
-            if name not in WriteValueTypes.get_names(model):
-                return None
             names = (
                 (name,)
                 if name == PRIMARY_KEY_ALIAS
-                else RowWriteRules.get_stored_field_names(model, [name], ".update()")
+                else RowWriteRules.get_stored_field_names(binding, [name], ".update()")
             )
             if any(
-                RowWriteRules.get_refusal_reason(model, column, write_type, ".update()", finds_rows_by_key=False)
+                RowWriteRules.get_refusal_reason(binding, column, write_type, ".update()", finds_rows_by_key=False)
                 is not None
                 for column in names
             ):
                 return None
         if name == PRIMARY_KEY_ALIAS:
-            if not meta.has_primary_key:
+            if not binding.has_primary_key:
                 return None
-            if meta.has_composite_primary_key:
+            if binding.has_composite_primary_key:
                 values = tuple(
-                    Union[(column.field_type, *column.get_accepted_value_types())] for column in meta.pk_fields
+                    Union[(column.field_type, *column.get_accepted_value_types())] for column in binding.pk_fields
                 )
                 return ValueType(classes=(values,), accepts_expressions=accepts_expressions)
-            name = meta.primary_key_attribute  # type: ignore[assignment]
-        if name in meta.generic_foreign_key_fields:
-            field = meta.generic_foreign_key_fields[name]
+            name = binding.primary_key_attribute  # type: ignore[assignment]
+        if name in binding.generic_foreign_key_fields:
+            field = binding.generic_foreign_key_fields[name]
             return ValueType(
                 classes=(dict,),
                 models=tuple(field.branch_by_model),
                 nullable=field.null,
                 accepts_expressions=accepts_expressions,
             )
-        if name in meta.foreign_key_fields or name in meta.one_to_one_fields:
-            relation: RelationalField[Any] = meta.fields_map[name]  # type: ignore[assignment]
+        if name in binding.foreign_key_fields or name in binding.one_to_one_fields:
+            relation: RelationalField[Any] = binding.fields_map[name]  # type: ignore[assignment]
             return ValueType(
                 models=(relation.related_model,),
                 nullable=relation.null,
                 accepts_expressions=accepts_expressions,
             )
-        if name not in meta.fields_db_projection:
+        if name not in binding.fields_db_projection:
             return None
-        column = meta.fields_map[name]
+        column = binding.fields_map[name]
         return ValueType(
             classes=(column.field_type,),
             accepted_classes=column.get_accepted_value_types(),
-            declared_in=(model, name),
+            declared_in=(binding, name),
             accepts_enum_values=True,
             nullable=column.null,
             accepts_expressions=accepts_expressions,
@@ -103,14 +108,13 @@ class WriteValueTypes:
     @classmethod
     def get_all(
         cls,
-        model: type[Model],
+        binding: ModelBinding,
         *,
         accepts_expressions: bool = False,
         write_type: WriteType = WriteType.INSERT,
     ) -> dict[str, ValueType]:
         return {
             name: description
-            for name in cls.get_names(model)
-            if (description := cls.get(model, name, accepts_expressions=accepts_expressions, write_type=write_type))
-            is not None
+            for name in cls.get_names(binding)
+            if (description := cls._get_named_type(binding, name, accepts_expressions, write_type)) is not None
         }

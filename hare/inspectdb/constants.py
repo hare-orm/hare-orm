@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import re
 
-from hare.inspectdb.enums import CatalogDiagnosticCode, SchemaPartType
+from hare.ddl.enums import SchemaPartType
+from hare.inspectdb.enums import CatalogDiagnosticCode
 from hare.sql.order import Order
 
 #: Dotted path of the field class a JSON column maps to.
@@ -40,7 +41,7 @@ ENUM_MEMBER_NAME_PATTERN = re.compile(r"\W+")
 
 #: An index key's order when it places NULLs as its direction does by default (last ascending, first
 #: descending) - declarable as a plain or ``"-"``-prefixed field name.
-DEFAULT_KEY_ORDERS = frozenset({Order.ASC_NULLS_LAST, Order.DESC_NULLS_FIRST})
+DEFAULT_KEY_ORDERS = frozenset({Order.ASC, Order.DESC, Order.ASC_NULLS_LAST, Order.DESC_NULLS_FIRST})
 
 INT_LITERAL_RE = re.compile(r"^-?\d+$")
 FLOAT_LITERAL_RE = re.compile(r"^-?\d+\.\d+$")

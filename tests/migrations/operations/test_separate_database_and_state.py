@@ -62,7 +62,7 @@ async def test_state_and_database_change_separately(db_simple):
             "0002_forget_legacy_code",
             SeparateDatabaseAndState(state_operations=[RemoveField(model_name="Book", name="legacy_code")]),
         )
-        before_state_only = state.clone()
+        before_state_only = state
         state = await state_only.apply(state, schema_editor=editor)
         assert "legacy_code" not in state.models[("models", "Book")].fields
         assert await column_exists(connection, "legacy_code")
@@ -81,7 +81,7 @@ async def test_state_and_database_change_separately(db_simple):
                 state_operations=[AddField(model_name="Book", name="pages", field=IntField(null=True))],
             ),
         )
-        before_database_only = state.clone()
+        before_database_only = state
         state = await database_only.apply(state, schema_editor=editor)
         assert "pages" in state.models[("models", "Book")].fields
         assert await column_exists(connection, "pages")

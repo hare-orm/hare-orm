@@ -1,22 +1,11 @@
 import datetime
 
 import pytest
-import pytest_asyncio
 
+from hare.core.hare_context import HareContext
 from hare.query.expressions import F, OuterReference, RawSQL, Subquery
 from hare.query.expressions.expression_context import ExpressionContext
 from tests.shared_models.testmodels import Author, Book, IntFields, TimeDeltaFields
-
-
-@pytest_asyncio.fixture
-async def library(db):
-    first_author = await Author.objects.create(name="First")
-    second_author = await Author.objects.create(name="Second")
-    third_author = await Author.objects.create(name="Third")
-    await Book.objects.create(name="A", author=first_author, rating=1.0)
-    await Book.objects.create(name="B", author=first_author, rating=2.0)
-    await Book.objects.create(name="C", author=second_author, rating=5.0)
-    return first_author, second_author, third_author
 
 
 def best_rating_of_author(author_reference: str) -> Subquery:
@@ -27,20 +16,22 @@ def best_rating_of_author(author_reference: str) -> Subquery:
 
 def test_reused_subquery_keeps_each_outer_table_binding(db):
     declaration = best_rating_of_author("id")
-    connection = Author._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Author).get_connection()
     first_context = ExpressionContext(
-        model=Author,
-        table=Author._meta.basetable.as_("first_author"),
+        binding=HareContext.require_current().apps.get_binding(Author),
+        table=HareContext.require_current().apps.get_binding(Author).basetable.as_("first_author"),
         annotations={},
         dialect=connection.dialect,
         connection=connection,
+        application_context=HareContext.require_current(),
     )
     second_context = ExpressionContext(
-        model=Author,
-        table=Author._meta.basetable.as_("second_author"),
+        binding=HareContext.require_current().apps.get_binding(Author),
+        table=HareContext.require_current().apps.get_binding(Author).basetable.as_("second_author"),
         annotations={},
         dialect=connection.dialect,
         connection=connection,
+        application_context=HareContext.require_current(),
     )
     first = declaration.get_result(first_context).term
     first_sql = first.get_sql(connection.dialect.sql_context)

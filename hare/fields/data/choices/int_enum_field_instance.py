@@ -71,7 +71,7 @@ class IntEnumFieldInstance(SmallIntField[int]):
         return super().get_narrowing_limit(old_field)
 
     def get_assign_normalized_types(self) -> frozenset[type]:
-        return frozenset({self.enum_type})
+        return self._get_unchanged_assign_types(IntEnumFieldInstance.to_python, self.enum_type)
 
     def to_python(self, value: int | None) -> IntEnum | None:
         if value is None:
@@ -97,10 +97,10 @@ class IntEnumFieldInstance(SmallIntField[int]):
                 # re-validate membership.
                 value = int(value.value)
             elif isinstance(value, IntEnum):
-                value = int(self.enum_type(int(value.value)))
+                value = int(self.enum_type(int(value.value)).value)
             elif value is not None:
                 self.raise_if_not_int(value)
-                value = int(self.enum_type(value))
+                value = int(self.enum_type(value).value)
         except ValidationError:
             # Raised with the field's name already - not named a second time.
             raise

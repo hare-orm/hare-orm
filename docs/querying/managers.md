@@ -61,6 +61,11 @@ The hook also runs when a custom queryset is bound to an instance's related quer
 already has its ORM settings. Preparing a SQL statement transfers only the ORM declaration:
 custom methods must express their SQL behavior through the queryset's filters, annotations and options.
 
+A custom `QuerySet` constructor accepts `binding=` and `context=` and forwards them to `super()`.
+A `Manager.get_queryset()` override uses `get_queryset(*, binding=None, context=None)` and forwards
+both values to `super().get_queryset(binding=binding, context=context)`. Registry and relation
+factories use this same path without looking up the current application again.
+
 ## <a id="default-filter"></a>Row visibility: `RowScopeProvider`
 
 Declare a predicate through `Manager(scope=...)`. The provider's

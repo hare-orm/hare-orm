@@ -9,9 +9,11 @@ from hare.dialects.clickhouse.constants import (
     CLICKHOUSE_GENERATED_COLUMN_TYPES,
     CLICKHOUSE_VIRTUAL_COLUMN_TYPE,
 )
+from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.clickhouse.introspection.clickhouse_check_constraints import ClickhouseCheckConstraints
 from hare.dialects.clickhouse.introspection.clickhouse_observed_table_options import ClickhouseObservedTableOptions
 from hare.dialects.clickhouse.introspection.clickhouse_sql_parts import ClickhouseSqlParts
+from hare.dialects.clickhouse.types.clickhouse_physical_type import ClickhousePhysicalType
 from hare.inspectdb.introspection.catalog_snapshot import CatalogSnapshot
 from hare.inspectdb.introspection.column_info import ColumnInfo
 from hare.inspectdb.introspection.index_info import IndexInfo
@@ -62,7 +64,7 @@ class ClickhouseDeclarationMapper:
             expression = ClickhouseSqlParts.get_unwrapped(str(row["expr"]))
             # An index over columns lists them, comma-separated - a name quoted when it isn't plain
             # ASCII; one with a key of another expression is rebuilt from its keys' SQL, each kept whole.
-            parts = [part.strip() for part in ClickhouseSqlParts.split(expression)]
+            parts = ClickhouseSqlParts.split(expression)
             part_identifiers = [ClickhouseSqlParts.get_identifier(part) for part in parts]
             reads_columns_only = all(identifier in column_names for identifier in part_identifiers)
             index_columns = part_identifiers if reads_columns_only else []
@@ -91,14 +93,21 @@ class ClickhouseDeclarationMapper:
         indexed_columns = {index.columns[0] for index in column_indexes}
         columns = []
         for row in column_rows:
-            db_type, nullable = self.introspector.unwrap_type(str(row["type"]))
-            precision, scale = self.introspector.get_decimal_precision_scale(db_type)
+            full_type = str(row["type"])
+            physical_type = ClickhousePhysicalType.from_sql(full_type)
+            value_type = physical_type.unwrapped
+            db_type = value_type.sql
+            precision, scale = (
+                (value_type.precision, value_type.scale)
+                if value_type.name == ClickhouseTypeName.DECIMAL
+                else (None, None)
+            )
             name = str(row["name"])
             columns.append(
                 ColumnInfo(
                     name=name,
                     db_type=db_type,
-                    nullable=nullable,
+                    nullable=physical_type.nullable,
                     is_pk=name in primary_key_columns,
                     is_unique=False,
                     pk_position=primary_key_columns.index(name) + 1 if name in primary_key_columns else None,
@@ -112,7 +121,7 @@ class ClickhouseDeclarationMapper:
                     else None,
                     generated_stored=row["default_type"] != CLICKHOUSE_VIRTUAL_COLUMN_TYPE,
                     description=str(row["comment"]) or None,
-                    full_type=str(row["type"]),
+                    full_type=full_type,
                     has_index=name in indexed_columns,
                     todo_reason=CLICKHOUSE_EPHEMERAL_COLUMN_TODO
                     if row["default_type"] == CLICKHOUSE_EPHEMERAL_COLUMN_TYPE

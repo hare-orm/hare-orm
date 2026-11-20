@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
-from typing import Any, ClassVar
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, ClassVar
+
+if TYPE_CHECKING:
+    from hare.core.hare_context import HareContext
+    from hare.models.model import Model
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclass(slots=True)
@@ -24,10 +29,17 @@ class PlanContext:
 
     annotations: Mapping[str, Any] | None = None
     single_parameter_in_list_min_length: int | None = None
-    model: Any = None
+    binding: ModelBinding | None = None
+    #: Execution-local origin used to bind nested templates, never retained by a stored plan.
+    application_context: HareContext | None = field(default=None, kw_only=True)
 
     #: The context of a part that resolves no annotation names.
     EMPTY: ClassVar[PlanContext]
+
+    @property
+    def model(self) -> type[Model] | None:
+        """The Python class, when the description has a structural source."""
+        return None if self.binding is None else self.binding._model
 
 
 PlanContext.EMPTY = PlanContext()

@@ -5,7 +5,6 @@ from typing import Any
 
 from hare.core.config import HareConfig
 from hare.migrations.api.migration_session import MigrationSession
-from hare.migrations.loading.recorder.noop_recorder import NoopRecorder
 
 
 async def sqlmigrate(
@@ -29,6 +28,4 @@ async def sqlmigrate(
     async with MigrationSession(config, [app_label]) as session:
         executors = session.create_executors()
         executor = next(iter(executors.values()))
-        # SQL collection uses definitions only and does not query an applied journal.
-        executor.loader.recorder = NoopRecorder()
         return await executor.collect_sql(app_label, migration_name, backward=backward)

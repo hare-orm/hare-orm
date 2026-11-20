@@ -18,7 +18,6 @@ from tests.matrix.matrix_catalog import MatrixCatalog
 from tests.matrix.matrix_virtualenv import MatrixVirtualenv
 from tests.matrix.paths import REPOSITORY_DIRECTORY
 from tests.matrix.process_groups import ProcessGroups
-from tests.matrix.run_spec import RunSpec
 
 
 class EnvironmentRun:
@@ -65,14 +64,15 @@ class EnvironmentRun:
             raise SystemExit(f"No environment {environment_name} - known: {', '.join(environments)}")
         environment = environments[environment_name]
         database = EnvironmentRun.get_database(os.environ.get("HARE_TEST_DB", "sqlite+aiosqlite://:memory:"))
-        virtualenv = MatrixVirtualenv.get(RunSpec(python_version, environment_name, environment, database, {}))
-        if not virtualenv.get_python_executable().exists():
+        virtualenv = MatrixVirtualenv.get(python_version, environment, database)
+        python = virtualenv.get_python_executable()
+        if not python.exists():
             raise SystemExit(
                 f"{virtualenv.name} doesn't exist - make matrix_venvs MATRIX_OPTIONS=\"--python {python_version} "
                 f'--environment {environment_name}"'
             )
         command = [
-            str(virtualenv.get_python_executable()),
+            str(python),
             "-m",
             "pytest",
             f"{SUITE_ENVIRONMENT_OPTION}={environment_name}",

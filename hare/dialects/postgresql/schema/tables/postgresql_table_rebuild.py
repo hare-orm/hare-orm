@@ -12,14 +12,12 @@ from hare.dialects.base.schema.tables.table_rebuild import TableRebuild
 from hare.dialects.postgresql.schema.constants import (
     POSTGRESQL_RESYNC_SEQUENCE_TEMPLATE,
     POSTGRESQL_SEQUENCE_OWNER_NONE_TEMPLATE,
-    POSTGRESQL_TABLE_COPY_SUFFIX,
 )
-from hare.sql.identifiers import Identifiers
 
 if TYPE_CHECKING:
     from hare.dialects.postgresql.schema.postgresql_schema_editor import PostgresqlSchemaEditor
     from hare.fields.field import Field
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class PostgresqlTableRebuild(TableRebuild):
@@ -35,8 +33,8 @@ class PostgresqlTableRebuild(TableRebuild):
 
     def get_rebuild_plan(
         self,
-        old_model: type[Model],
-        new_model: type[Model],
+        old_binding: ModelBinding,
+        new_binding: ModelBinding,
         altered_fields: Sequence[tuple[Field[Any], Field[Any]]] = (),
     ) -> SchemaChangePlan:
         """Creates a table anew from the model it is rebuilt to, with its rows: they are kept in a copy
@@ -46,86 +44,84 @@ class PostgresqlTableRebuild(TableRebuild):
         again.
 
         Args:
-            old_model: The model the table matches now.
-            new_model: The model the table is rebuilt to.
+            old_binding: The binding of the model the table matches now.
+            new_binding: The binding of the model the table is rebuilt to.
             altered_fields: (old, new) fields paired otherwise than by name - a renamed field.
         """
-        meta = new_model._meta
+        meta = new_binding
         qualified_table = self.editor.qualify_table_name(meta.db_table, meta.schema)
-        copy_table_name = Identifiers.get_within_limit(f"{meta.db_table}{POSTGRESQL_TABLE_COPY_SUFFIX}")
+        copy_table_name = self.get_rebuilt_table_name(meta.db_table)
         qualified_copy = self.editor.qualify_table_name(copy_table_name, meta.schema)
         creation = self.editor.table_creation
         foreign_keys = self.editor.foreign_key_rebuild
-        model_sql_data = creation.get_model_sql_data(new_model)
-        columns = self.get_copy_columns(old_model, new_model, altered_fields)
+        model_sql_data = creation.get_model_sql_data(new_binding)
+        columns = self.get_copy_columns(old_binding, new_binding, altered_fields)
         steps: list[SchemaStep] = [
             SchemaStatement(
                 f"LOCK TABLE {qualified_table} IN ACCESS EXCLUSIVE MODE", frozenset({SchemaEffect.LOCK_TABLES})
             ),
-            *(SchemaStatement(sql) for sql in foreign_keys.get_incoming_foreign_key_drop_sqls(old_model)),
+            *(SchemaStatement(sql) for sql in foreign_keys.get_incoming_foreign_key_drop_sqls(old_binding)),
             # Both schema-qualified table names are escaped by the dialect identifier renderer.
             SchemaStatement(
                 f"CREATE TABLE {qualified_copy} AS SELECT * FROM {qualified_table}",  # nosec B608
                 frozenset({SchemaEffect.REWRITE_ROWS}),
             ),
-            *(SchemaStatement(sql) for sql in self.get_table_dependent_drop_sqls(old_model)),
+            *(SchemaStatement(sql) for sql in self.get_table_dependent_drop_sqls(old_binding)),
             SchemaStatement(f"DROP TABLE {qualified_table}", frozenset({SchemaEffect.REPLACE_TABLE})),
-            *(SchemaStatement(sql) for sql in creation.get_schema_objects_before_table_sqls(new_model, safe=True)),
+            *(SchemaStatement(sql) for sql in creation.get_schema_objects_before_table_sqls(new_binding, safe=True)),
             SchemaStatement(model_sql_data.table_sql),
             *(
                 SchemaStatement(sql)
                 for trigger in meta.triggers
-                for sql in self.editor.trigger_statements.get_trigger_create_sqls(new_model, trigger, safe=True)
+                for sql in self.editor.trigger_statements.get_trigger_create_sqls(new_binding, trigger, safe=True)
             ),
             *(SchemaStatement(sql) for sql in model_sql_data.constraint_sqls),
         ]
         if columns:
-            steps.extend(self.get_copy_plan(new_model, meta.db_table, qualified_copy, columns).steps)
+            steps.extend(self.get_copy_plan(new_binding, meta.db_table, qualified_copy, columns).steps)
         steps.append(SchemaStatement(f"DROP TABLE {qualified_copy}"))
-        steps.extend(SchemaStatement(sql) for sql in self.get_sequence_resync_sqls(new_model))
-        steps.extend(SchemaStatement(sql) for sql in foreign_keys.get_incoming_foreign_key_create_sqls(new_model))
+        steps.extend(SchemaStatement(sql) for sql in self.get_sequence_resync_sqls(new_binding))
+        steps.extend(SchemaStatement(sql) for sql in foreign_keys.get_incoming_foreign_key_create_sqls(new_binding))
         steps.extend(
-            SchemaStatement(sql) for sql in creation.get_schema_objects_after_table_sqls(new_model, safe=True)
+            SchemaStatement(sql) for sql in creation.get_schema_objects_after_tables_sqls((new_binding,), safe=True)
         )
         return SchemaChangePlan(
             (SchemaTransaction(SchemaChangePlan(tuple(steps))),),
-            before=creation.get_definition(old_model),
+            before=creation.get_definition(old_binding),
             after=model_sql_data.definition,
         )
 
-    def get_table_dependent_drop_sqls(self, model: type[Model]) -> list[str]:
+    def get_table_dependent_drop_sqls(self, binding: ModelBinding) -> list[str]:
         """Drops what a model declares that the drop of its table would refuse to leave or take along:
         its materialized views and views - in the reverse of their creation order - and the ownership
         of its sequences by its columns.
 
         Args:
-            model: The model the table matches now.
+            binding: The model the table matches now.
         """
-        meta = model._meta
-        statements = self.editor.get_model_view_drop_sqls(model, if_exists=False)
-        for sequence in meta.sequences:
+        statements = self.editor.get_model_view_drop_sqls(binding, if_exists=False)
+        for sequence in binding.sequences:
             if sequence.owned_by is not None:
                 statements.append(
                     POSTGRESQL_SEQUENCE_OWNER_NONE_TEMPLATE.format(
-                        sequence=self.editor.qualify_object_name(model, sequence.name)
+                        sequence=self.editor.qualify_object_name(binding, sequence.name)
                     )
                 )
         return statements
 
-    def get_sequence_resync_sqls(self, model: type[Model]) -> list[str]:
+    def get_sequence_resync_sqls(self, binding: ModelBinding) -> list[str]:
         """Moves the sequence of each generated key column of a table past the keys its rows hold.
 
         Args:
-            model: The model of the table.
+            binding: The model of the table.
         """
-        meta = model._meta
-        qualified_table = self.editor.qualify_table_name(meta.db_table, meta.schema)
+        qualified_table = self.editor.qualify_table_name(binding.db_table, binding.schema)
         literals = self.editor.client.dialect.literals
         table_literal = literals.get_string_literal_sql(qualified_table)
         statements = []
-        for field in meta.fields_map.values():
-            if field.pk and field.generated and field.model_field_name in meta.fields_db_projection:
-                column = meta.fields_db_projection[field.model_field_name]
+        for field in binding.fields_map.values():
+            if field.pk and field.generated and field.model_field_name in binding.fields_db_projection:
+                column = binding.fields_db_projection[field.model_field_name]
                 statements.append(
                     POSTGRESQL_RESYNC_SEQUENCE_TEMPLATE.format(
                         table_literal=table_literal,

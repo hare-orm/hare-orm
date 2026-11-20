@@ -8,6 +8,8 @@ from hare.ddl.schema_objects.database_sequence import DatabaseSequence
 from hare.declarations.declaration_value_serializer import DeclarationValueSerializer
 from hare.declarations.import_manager import ImportManager
 from hare.inspectdb.generation.declarations import ModelGenerationOptions
+from hare.inspectdb.generation.inspected_model_builder import InspectedModelBuilder
+from hare.inspectdb.generation.inspected_models import InspectedModels
 from hare.inspectdb.generation.many_to_many_tables import ManyToManyTables
 from hare.inspectdb.generation.model_naming import ModelNaming
 from hare.inspectdb.generation.model_source_builder import ModelSourceBuilder
@@ -20,6 +22,8 @@ if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.dialect import Dialect
     from hare.inspectdb.generation.inspected_model import InspectedModel
+    from hare.inspectdb.introspection.composite_foreign_key_info import CompositeForeignKeyInfo
+    from hare.inspectdb.introspection.foreign_key_info import ForeignKeyInfo
     from hare.inspectdb.introspection.schema_introspector import SchemaIntrospector
     from hare.inspectdb.introspection.schema_part import SchemaPart
     from hare.inspectdb.introspection.table_info import TableInfo
@@ -30,6 +34,32 @@ class SchemaInspector:
     """Reads an existing database's schema and generates hare-orm model source for it - what
     `hare inspectdb` prints. A thin orchestrator over SchemaIntrospector (introspection) and
     ModelSourceBuilder (source rendering)."""
+
+    @staticmethod
+    async def get_target_tables(
+        connection: DatabaseClient, tables: list[TableInfo], schema: str | None
+    ) -> list[TableInfo]:
+        """Read referenced layouts without adding their models to the requested output."""
+        known = {table.name for table in tables}
+        pending = tables
+        targets = []
+        while pending:
+            references: list[ForeignKeyInfo | CompositeForeignKeyInfo] = []
+            for table in pending:
+                references.extend(table.foreign_keys.values())
+                references.extend(table.composite_foreign_keys)
+            missing = {
+                foreign_key.target_table
+                for foreign_key in references
+                if foreign_key.target_table not in known
+                and getattr(foreign_key, "target_schema", None) in (None, schema)
+            }
+            if not missing:
+                break
+            pending = await DatabaseCatalog.inspect_tables(connection, sorted(missing), schema=schema)
+            known.update(missing)
+            targets.extend(pending)
+        return targets
 
     @staticmethod
     def get_table_with_reference_type_notes(
@@ -107,25 +137,26 @@ class SchemaInspector:
                 for table_name in await DatabaseCatalog.get_table_names(connection, schema=schema)
                 if table_name not in bookkeeping_tables
             ]
+        table_infos = await DatabaseCatalog.inspect_tables(connection, table_names, schema=schema)
         table_name_by_class_name: dict[str, str] = {}
-        for table_name in table_names:
+        for table_info in table_infos:
+            table_name = table_info.name
             class_name = ModelNaming.get_class_name(table_name)
             existing_table_name = table_name_by_class_name.get(class_name)
             if existing_table_name is not None and existing_table_name != table_name:
                 raise DuplicateModelClassNameError(existing_table_name, table_name, class_name)
             table_name_by_class_name[class_name] = table_name
-        table_infos = await DatabaseCatalog.inspect_tables(connection, table_names, schema=schema)
+        target_table_infos = await SchemaInspector.get_target_tables(connection, table_infos, schema)
         # The views, functions, table-less sequences and other schema objects of a whole schema are
         # named, as no model is made of them.
-        views = await DatabaseCatalog.get_views(connection, schema=schema) if tables is None else []
-        sequences, functions, grants = (
-            await DatabaseCatalog.get_unattached_schema_objects(connection, schema=schema)
-            if tables is None
-            else ([], [], [])
-        )
-        schema_object_notes = (
-            await DatabaseCatalog.get_schema_object_notes(connection, schema=schema) if tables is None else []
-        )
+        if tables is None:
+            views = await DatabaseCatalog.get_views(connection, schema=schema)
+            sequences, functions, grants = await DatabaseCatalog.get_unattached_schema_objects(
+                connection, schema=schema
+            )
+            schema_object_notes = await DatabaseCatalog.get_schema_object_notes(connection, schema=schema)
+        else:
+            views, sequences, functions, grants, schema_object_notes = [], [], [], [], []
         return SchemaInspector.render_module(
             table_infos,
             dialect,
@@ -134,6 +165,7 @@ class SchemaInspector:
             unattached_objects=[*sequences, *functions],
             unattached_object_grants=grants,
             schema_object_notes=schema_object_notes,
+            target_table_infos=target_table_infos,
         )
 
     @staticmethod
@@ -211,6 +243,7 @@ class SchemaInspector:
         unattached_objects: list[DatabaseSequence | DatabaseFunction] | None = None,
         unattached_object_grants: list[SchemaPart] | None = None,
         schema_object_notes: list[str] | None = None,
+        target_table_infos: list[TableInfo] | None = None,
     ) -> str:
         """Prepare all model declarations, then render one module with collision-free import aliases.
 
@@ -226,6 +259,7 @@ class SchemaInspector:
                 a note with its declaration.
             unattached_object_grants: The grants on them - each written in the note of its object.
             schema_object_notes: The notes naming the schema's other objects no model declares.
+            target_table_infos: Referenced layouts used for name mapping without emitting their models.
 
         Returns:
             The module source.
@@ -244,7 +278,7 @@ class SchemaInspector:
             foreign_key_target_overrides,
             introspector_class,
         )
-        tables_by_name = {table.name: table for table in table_infos}
+        tables_by_name = {table.name: table for table in (*table_infos, *(target_table_infos or []))}
         prepared: list[tuple[ModelSourceBuilder, InspectedModel] | str] = []
         for table_info in table_infos:
             through_table_note = many_to_many_tables.notes_by_table.get(table_info.name)
@@ -264,6 +298,19 @@ class SchemaInspector:
                 module_imports,
             )
             prepared.append((builder, builder.prepare()))
+        declarations = [(item[0].model_builder, item[1]) for item in prepared if not isinstance(item, str)]
+        for table in target_table_infos or ():
+            target_builder = InspectedModelBuilder(
+                table,
+                ModelGenerationOptions(
+                    dialect,
+                    foreign_key_target_overrides=foreign_key_target_overrides,
+                    skip_many_to_many_through_tables=False,
+                    connection_dialect=connection_dialect,
+                ),
+            )
+            declarations.append((target_builder, target_builder.build()))
+        InspectedModels.finalize(declarations)
         blocks = [
             item
             if isinstance(item, str)

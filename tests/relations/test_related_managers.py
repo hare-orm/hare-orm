@@ -3,8 +3,7 @@ writes (add/remove/clear/set with instances or primary key values, get_or_create
 update_or_create), plus composite primary keys through pk ordering, pk__in subqueries, counts
 and updates."""
 
-import os
-import uuid
+import asyncio
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -38,17 +37,13 @@ from tests.relations.related_manager_models import (
     Sticker,
     Tag,
 )
-
-
-def get_test_db_url() -> str:
-    raw_db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:").replace("\\{", "{").replace("\\}", "}")
-    return raw_db_url.format(uuid.uuid4().hex) if "{}" in raw_db_url else raw_db_url
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 @pytest_asyncio.fixture(scope="module")
 async def related_managers_context() -> AsyncGenerator[Any]:
     async with hare_test_context(
-        ["tests.relations.related_manager_models"], db_url=get_test_db_url(), connection_label="models"
+        ["tests.relations.related_manager_models"], db_url=DatabaseUnderTest.get_fresh_url(), connection_label="models"
     ) as ctx:
         yield ctx
 
@@ -195,6 +190,59 @@ async def test_remove_leaves_a_row_moved_to_another_parent_meanwhile(shelves: tu
     with pytest.raises(DoesNotExist, match="isn't related to"):
         await first.items.remove(item, bulk=bulk)
     assert await Item.objects.filter(id=1).values_list("shelf_id", flat=True) == [second.id]
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.parametrize("operation", ["remove", "clear", "set"])
+@pytest.mark.asyncio
+async def test_per_instance_unlink_preserves_a_concurrent_move(bays, monkeypatch, operation):
+    first, second, _third = bays
+    crate = await Crate.objects.get(id=1)
+    kept = await Crate.objects.get(id=2)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    save = Crate.save
+
+    async def wait_during_save(instance, using=None, update_fields=None, **kwargs):
+        if instance.id == crate.id:
+            await using.execute_script("UPDATE rm_crate SET name = 'hook' WHERE id = 3")
+            entered.set()
+            await release.wait()
+        await save(instance, using=using, update_fields=update_fields, **kwargs)
+
+    monkeypatch.setattr(Crate, "save", wait_during_save)
+    other = Crate.get_connection().create_independent_client({})
+    if operation == "remove":
+        unlink = first.crates.remove(crate, bulk=False)
+    elif operation == "set":
+        unlink = first.crates.set(kept, bulk=False)
+    else:
+        unlink = first.crates.clear(bulk=False)
+    task = asyncio.create_task(unlink)
+    try:
+        async with asyncio.timeout(10):
+            await entered.wait()
+            await other.execute_script("UPDATE rm_crate SET bay_slot = 2 WHERE id = 1")
+            release.set()
+            if operation == "remove":
+                with pytest.raises(DoesNotExist, match="isn't related to"):
+                    await task
+                assert (crate.bay_row, crate.bay_slot) == first.pk
+            else:
+                await task
+        rows = await other.execute_dicts("SELECT id, bay_row, bay_slot, name FROM rm_crate ORDER BY id")
+        assert [tuple(row.values()) for row in rows] == [
+            (1, *second.pk, "c1"),
+            (2, *((None, None) if operation == "clear" else first.pk), "c2"),
+            (3, *second.pk, "c3"),
+            (4, None, None, "c4"),
+        ]
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await other.close()
 
 
 @requires_features(supports_transactions=True)

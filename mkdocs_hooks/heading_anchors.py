@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from mkdocs_hooks.constants import FENCED_CODE, HTML_ANCHORED_HEADING
+from mkdocs_hooks.constants import CODE_FENCE, HTML_ANCHORED_HEADING
 
 
 class HeadingAnchors:
@@ -24,11 +24,16 @@ class HeadingAnchors:
         Returns:
             The Markdown.
         """
-        parts = FENCED_CODE.split(markdown)
-        for index, part in enumerate(parts):
-            if not FENCED_CODE.fullmatch(part):
-                parts[index] = HTML_ANCHORED_HEADING.sub(r"\g<level> \g<title> {: #\g<anchor> }", part)
-        return "".join(parts)
+        replacement = r"\g<level> \g<title> {: #\g<anchor> }"
+        lines = markdown.splitlines(keepends=True)
+        in_code = False
+        for index, raw in enumerate(lines):
+            line = raw.rstrip("\r\n")
+            if CODE_FENCE.fullmatch(line):
+                in_code = not in_code
+            elif not in_code:
+                lines[index] = HTML_ANCHORED_HEADING.sub(replacement, line) + raw[len(line) :]
+        return "".join(lines)
 
 
 # The name mkdocs calls the hook by.

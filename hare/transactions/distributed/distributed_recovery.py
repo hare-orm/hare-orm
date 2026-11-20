@@ -34,6 +34,7 @@ class DistributedRecovery:
         run rechecks the databases rather than replaying a saved report.
         """
         connection = Atomic.get_connection(coordinator)
+        coordinator = coordinator or connection.connection_alias
         DistributedCoordinator._require_distributed_capability(connection, coordinator)
         if finish and connection.is_transaction_client:
             raise TransactionManagementError(RECOVERY_INSIDE_TRANSACTION.format(alias=coordinator))

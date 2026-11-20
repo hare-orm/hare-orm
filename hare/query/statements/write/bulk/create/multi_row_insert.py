@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from hare.models.write.bound_rows import BoundRows
 from hare.query.execution.write_statements import WriteStatement
 from hare.query.plans.statement.statement_plans import StatementPlans
 from hare.query.statements.write.bulk.bulk_write_batches import BulkWriteBatches
@@ -18,7 +20,9 @@ from hare.sql.terms.values.literal_value import LiteralValue
 TModel = TypeVar("TModel", bound="Model")
 
 if TYPE_CHECKING:
+    from hare.core.caching.cache_bucket import CacheBucket
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.statements.write.bulk.create.bulk_create_query import BulkCreateQuery
 
 
@@ -64,43 +68,41 @@ class MultiRowInsert:
         # ON CONFLICT may skip rows, so the returned rows no longer line up with the objects - the
         # conflict target's columns are returned too, to match them by value.
         conflict_field_names = (
-            list(bulk_create._on_conflict)
+            tuple(bulk_create._on_conflict)
             if (ConflictClause.may_skip_conflicting_rows(bulk_create) and bulk_create._on_conflict)
-            else []
+            else ()
         )
         # An upsert's row of a conflicting object keeps the key it had - where the database returns rows
         # in no order, they are matched back by the conflict target as well.
+        model_binding: ModelBinding = bulk_create._binding  # type: ignore[assignment]
         if populate_returned_fields and bulk_create._on_conflict:
             conflict_source_columns = [
-                bulk_create.model._meta.fields_db_projection[field_name] for field_name in bulk_create._on_conflict
+                model_binding.fields_db_projection[field_name] for field_name in bulk_create._on_conflict
             ]
             returning_columns = list(dict.fromkeys([*returning_columns, *conflict_source_columns]))
         # Rows of an insert skipping conflicts that come in no order are told apart by every column written.
-        written_field_names = field_names if populate_returned_fields and bulk_create._ignore_conflicts else []
+        written_field_names = tuple(field_names) if populate_returned_fields and bulk_create._ignore_conflicts else ()
         # The columns set on the objects - not those returned only to match the rows.
-        applied_columns = list(returning_columns)
+        applied_columns = tuple(returning_columns)
         if written_field_names and not bulk_create.dialect.features.guarantees_returning_order:
             returning_columns = list(dict.fromkeys([*returning_columns, *db_columns]))
-        statement_objects = [
-            statement_objects_item
-            for objects_item in BulkWriteBatches.get_batches(objects, batch_size)
-            for statement_objects_item in ConflictClause.split_by_conflict_key(bulk_create, list(objects_item))
-        ]
+        statement_rows = []
+        for objects_batch in BulkWriteBatches.get_batches(objects, batch_size):
+            objects_item = list(objects_batch)
+            rows = BulkWriteBatches.serialize_instances(
+                model_binding, bulk_create._connection.dialect.types, objects_item, field_names
+            )
+            for group in ConflictClause.split_by_conflict_key(bulk_create, BoundRows(field_names, rows)):
+                statement_rows.append((objects_item[group], rows[group]))
         sensitive_positions = (
-            BulkWriteBatches.get_sensitive_positions(bulk_create.model, field_names)
-            if bulk_create.model._meta.sensitive_fields
+            BulkWriteBatches.get_sensitive_positions(model_binding, field_names)
+            if model_binding.sensitive_fields
             else []
         )
         batches: list[BoundInsertBatch] = []
-        for objects_item in statement_objects:
+        for objects_item, rows in statement_rows:
             if not objects_item:
                 continue
-            rows = BulkWriteBatches.serialize_instances(
-                bulk_create.model,
-                bulk_create._connection.dialect.types,
-                objects_item,
-                field_names,
-            )
             returns_rows = populate_returned_fields or BulkCreateReports.reports_returned_rows(bulk_create)
             sql, conflict_values = MultiRowInsert.get_multi_row_template(
                 bulk_create,
@@ -112,10 +114,9 @@ class MultiRowInsert:
             values: Any
             if column_arrays_source_sql is not None:
                 values = [list(column) for column in zip(*rows or (), strict=True)]
-                values.extend(conflict_values)
             else:
                 values = [value for row in rows or () for value in row]
-                values.extend(conflict_values)
+            values.extend(conflict_values)
             if sensitive_positions:
                 # A parameter per value, or one per column holding the column's values.
                 hidden_positions = (
@@ -150,15 +151,29 @@ class MultiRowInsert:
                         rows_source_sql=inline_source,
                     ),
                 )
+            target_names = list(bulk_create._on_conflict or ())
+            null_conflict_keys: tuple[bool, ...] = ()
+            if (
+                populate_returned_fields
+                and not bulk_create._ignore_conflicts
+                and not bulk_create.dialect.features.guarantees_returning_order
+                and target_names
+                and all(name in field_names for name in target_names)
+                and ConflictClause.has_distinct_nulls(bulk_create, target_names)
+            ):
+                positions = tuple(field_names.index(name) for name in target_names)
+                null_conflict_keys = tuple(any(row[position] is None for position in positions) for row in rows)
             batches.append(
                 BoundInsertBatch(
                     WriteStatement(sql, values, returns_rows),
                     objects_item,
                     populate_returned_fields,
-                    tuple(conflict_field_names),
-                    tuple(written_field_names),
-                    tuple(applied_columns),
+                    conflict_field_names,
+                    written_field_names,
+                    applied_columns,
                     inline_statements,
+                    null_conflict_keys,
+                    BoundRows(field_names, rows) if returns_rows else None,
                 )
             )
         return batches
@@ -169,7 +184,7 @@ class MultiRowInsert:
         db_columns: list[str],
         row_count: int,
         returning_columns: list[str] | None,
-        column_arrays_source_sql: str | None = None,
+        column_arrays_source_sql: str | None,
     ) -> tuple[str, list[Any]]:
         """The multi-row INSERT of this call's ``ON CONFLICT`` clause for ``row_count`` rows, kept in
         ``StatementPlans.insert_templates``.
@@ -187,7 +202,7 @@ class MultiRowInsert:
             The SQL text and the values of the parameters following the rows'.
         """
         conflict = ConflictClause.get_conflict(bulk_create)
-        meta = bulk_create.model._meta
+        meta: ModelBinding = bulk_create._binding  # type: ignore[assignment]
         key = (
             bulk_create.model,
             bulk_create._connection.connection_alias,
@@ -203,32 +218,24 @@ class MultiRowInsert:
             if returning_columns is None
             else (tuple(returning_columns), BulkCreateReports.reports_returned_rows(bulk_create)),
         )
-        cacheable = True
+        bucket: CacheBucket[tuple[str, list[Any]]] | None
         try:
-            template = StatementPlans.insert_templates.get_bucket(bulk_create.model).get(key)
+            bucket = StatementPlans.insert_templates.get_bucket(bulk_create._binding)
+            template = bucket.get(key)
         except TypeError:
             # A tenant value the conflict update is limited to that can't be hashed - built each time.
-            cacheable = False
+            bucket = None
             template = None
-        if template is None and column_arrays_source_sql is not None:
-            query = bulk_create._get_insert_statement().get_query(
-                db_columns,
-                (),
-                conflict=conflict,
-                returning=(
-                    ()
-                    if returning_columns is None
-                    else [*returning_columns, *BulkCreateReports.get_reported_returning_terms(bulk_create)]
-                ),
-                rows_source_sql=column_arrays_source_sql,
-            )
-            template = TemplateInsert.get_row_template_sql(query, len(db_columns))
-            if cacheable:
-                StatementPlans.insert_templates.get_bucket(bulk_create.model)[key] = template
-        if template is None:
+        if template is not None:
+            return template
+        column_count = len(db_columns)
+        parameter_rows: Sequence[Sequence[LiteralValue]]
+        if column_arrays_source_sql is not None:
+            parameter_rows = ()
+            row_parameter_count = column_count
+        else:
             # A row's placeholders are one string in one LiteralValue term, not a Parameter per value.
             dialect = bulk_create._connection.dialect
-            column_count = len(db_columns)
             parameter_rows = [
                 [
                     LiteralValue(
@@ -240,19 +247,21 @@ class MultiRowInsert:
                 ]
                 for row_index in range(row_count)
             ]
-            query = bulk_create._get_insert_statement().get_query(
-                db_columns,
-                parameter_rows,
-                conflict=conflict,
-                returning=(
-                    ()
-                    if returning_columns is None
-                    else [*returning_columns, *BulkCreateReports.get_reported_returning_terms(bulk_create)]
-                ),
-            )
-            template = TemplateInsert.get_row_template_sql(query, row_count * column_count)
-            if cacheable:
-                StatementPlans.insert_templates.get_bucket(bulk_create.model)[key] = template
+            row_parameter_count = row_count * column_count
+        query = bulk_create._get_insert_statement().get_query(
+            db_columns,
+            parameter_rows,
+            conflict=conflict,
+            returning=(
+                ()
+                if returning_columns is None
+                else [*returning_columns, *BulkCreateReports.get_reported_returning_terms(bulk_create)]
+            ),
+            rows_source_sql=column_arrays_source_sql,
+        )
+        template = TemplateInsert.get_row_template_sql(query, row_parameter_count)
+        if bucket is not None:
+            bucket[key] = template
         return template
 
     @staticmethod
@@ -290,7 +299,8 @@ class MultiRowInsert:
             The SQL, or None.
         """
         dialect = bulk_create._connection.dialect
-        fields_map = bulk_create.model._meta.fields_map
+        model_binding: ModelBinding = bulk_create._binding  # type: ignore[assignment]
+        fields_map = model_binding.fields_map
         cast_types = [
             dialect.parameters.get_field_parameter_cast_type(fields_map[field_name]) for field_name in field_names
         ]

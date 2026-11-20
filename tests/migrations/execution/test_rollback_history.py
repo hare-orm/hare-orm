@@ -9,6 +9,7 @@ import pytest
 
 from hare.core.connections.connections import Connections
 from hare.migrations.api import MigrationSession
+from tests.utils.project_sources import ProjectSources
 
 pytestmark = pytest.mark.sqlite_only
 
@@ -58,12 +59,8 @@ def get_field_changes(number: int) -> str:
 
 
 def write_chain(tmp_path: Path, app_label: str, operations_by_migration: list[str]) -> str:
-    package_dir = tmp_path / app_label
-    migrations_dir = package_dir / "migrations"
-    migrations_dir.mkdir(parents=True)
-    (package_dir / "__init__.py").write_text("", encoding="ascii")
-    (package_dir / "models.py").write_text("", encoding="ascii")
-    (migrations_dir / "__init__.py").write_text("", encoding="ascii")
+    sources = ProjectSources(tmp_path)
+    migrations_dir = sources.prepare_migrations(sources.write_package(app_label))
     previous_name = None
     for number, operations in enumerate(operations_by_migration):
         name = f"{number + 1:04d}_step"
@@ -136,7 +133,19 @@ async def test_a_rollback_part_way_leaves_the_schema_a_migrate_to_that_point_mak
     config = get_config(tmp_path, "changed_chain", "rolled_back.sqlite3")
     async with MigrationSession(config) as session:
         await session.migrate()
+        connection = Connections.get("default")
+        head_schema = await get_schema()
+        await connection.execute("INSERT INTO model0 (id, title) VALUES (17, 'retained')")
         await session.migrate(target=middle)
         assert await get_schema() == expected_schema
+        assert await connection.execute_dicts("SELECT id, title FROM model0") == [{"id": 17, "title": "retained"}]
+        journal_sql = "SELECT name FROM hare_migrations WHERE app = 'changed_chain' ORDER BY name"
+        assert await connection.execute_dicts(journal_sql) == [{"name": f"{step:04d}_step"} for step in range(1, 8)]
+        await session.migrate()
+        assert await get_schema() == head_schema
+        assert await connection.execute_dicts("SELECT id, title FROM model0") == [{"id": 17, "title": "retained"}]
+        assert await connection.execute_dicts(journal_sql) == [
+            {"name": f"{step:04d}_step"} for step in range(1, len(operations_by_migration) + 1)
+        ]
         await session.migrate(target="changed_chain.zero")
         assert await get_schema() == []

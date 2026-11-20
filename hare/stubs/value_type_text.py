@@ -4,8 +4,9 @@ import sys
 import typing
 from enum import Enum
 from types import NoneType
-from typing import Any
+from typing import Any, TypeAliasType
 
+from hare.classes.class_path import ClassPath
 from hare.query.enums import LookupValueShape
 from hare.stubs.stub_imports import StubImports
 from hare.typing_info.constants import ALWAYS_ACCEPTED_VALUE_FULLNAMES, UNION_ORIGINS
@@ -59,7 +60,7 @@ class ValueTypeText:
             return f"{literal}[{', '.join(repr(name) for name in value_type.literals)}]"
         items = [self.get_class_text(cls) for cls in value_type.classes]
         declared_in = value_type.declared_in
-        field = None if declared_in is None else declared_in[0]._meta.fields_map[declared_in[1]]
+        field = None if declared_in is None else declared_in[0].fields_map[declared_in[1]]
         enum_type = getattr(field, "enum_type", None)
         if enum_type is not None and value_type.accepts_enum_values:
             items.insert(0, self.imports.add_class(enum_type))
@@ -74,14 +75,20 @@ class ValueTypeText:
 
     def get_class_text(self, cls: Any) -> str:
         """The annotation of a runtime class - a tuple of classes for a composite key's values, a
-        parametrized type (``list[str]``, ``int | None``) for a container field's value; ``Any`` for
-        a class no module holds (made at run time)."""
+        parametrized type (``list[str]``, ``int | None``) for a container field's value, or a named
+        type alias. Uses ``Any`` for a class or alias no module holds."""
         if isinstance(cls, type):
             if cls is NoneType:
                 return "None"
             if cls is object or not self.is_importable(cls):
                 return self.imports.add("typing", "Any")
             return self.imports.add_class(cls)
+        if isinstance(cls, TypeAliasType):
+            module_name = cls.__module__
+            name = cls.__name__
+            if module_name is not None and getattr(sys.modules.get(module_name), name, None) is cls:
+                return self.imports.add(module_name, name)
+            return self.imports.add("typing", "Any")
         if isinstance(cls, tuple):
             return f"{self.imports.add('builtins', 'tuple')}[{', '.join(self.get_class_text(item) for item in cls)}]"
         origin = typing.get_origin(cls)
@@ -123,10 +130,13 @@ class ValueTypeText:
     @staticmethod
     def is_importable(checked_class: type) -> bool:
         """Whether a class is the one its module holds under its qualified name."""
-        holder: Any = sys.modules.get(checked_class.__module__)
-        for name in checked_class.__qualname__.split("."):
-            holder = getattr(holder, name, None)
-        return holder is checked_class
+        module_name = checked_class.__module__
+        return (
+            isinstance(module_name, str)
+            and ClassPath.is_importable_name(module_name)
+            and ClassPath.is_importable_name(checked_class.__qualname__)
+            and ClassPath.has_module_identity(sys.modules.get(module_name), checked_class)
+        )
 
     def get_fullname_text(self, fullname: str) -> str:
         """The annotation of a class named by its full name."""

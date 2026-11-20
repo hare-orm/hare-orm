@@ -94,11 +94,9 @@ class JsonArrayValues(Term, ListParameter):
                 return None
             return SqliteEncodedText(json.dumps([value.hex() for value in values], separators=(",", ":")))
         # Values are already adapted; the native helper performs JSON encoding only.
-        native_functions = SqliteNativeFunctions.module
-        if native_functions is not None:
-            values_json = native_functions.get_json_array_text(values)
-            if values_json is not None:
-                return SqliteEncodedText(values_json)
+        values_json = SqliteNativeFunctions.module.get_json_array_text(values)
+        if values_json is not None:
+            return SqliteEncodedText(values_json)
         json_elements = []
         for value in values:
             json_element = cls.get_json_element(value)

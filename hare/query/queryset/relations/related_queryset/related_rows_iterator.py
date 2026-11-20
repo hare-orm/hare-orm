@@ -35,7 +35,8 @@ class RelatedRowsIterator(Generic[TModel]):
             relation = self.relation
             relation_rows = relation.relation_rows
             if not relation_rows._fetched:
-                relation._set_result_for_query(await relation)
+                fetched_rows = await relation
+                relation.relation_rows.set_fetched(fetched_rows)
             rows = self.rows = iter(relation_rows.related_objects)
         for row in rows:
             return row

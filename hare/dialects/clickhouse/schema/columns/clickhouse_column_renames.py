@@ -5,10 +5,10 @@ from typing import TYPE_CHECKING, Any
 from hare.dialects.base.schema.columns.column_renames import ColumnRenames
 from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.fields.field import Field
-from hare.models import Model
 
 if TYPE_CHECKING:
     from hare.dialects.clickhouse.schema.clickhouse_schema_editor import ClickhouseSchemaEditor
+    from hare.models.model_binding import ModelBinding
 
 
 class ClickhouseColumnRenames(ColumnRenames):
@@ -23,8 +23,8 @@ class ClickhouseColumnRenames(ColumnRenames):
 
     def get_model_column_rename_plan(
         self,
-        old_model: type[Model],
-        new_model: type[Model],
+        old_binding: ModelBinding,
+        new_binding: ModelBinding,
         field_pairs: list[tuple[Field[Any], Field[Any]]],
     ) -> SchemaChangePlan:
         renamed_columns = [
@@ -37,9 +37,9 @@ class ClickhouseColumnRenames(ColumnRenames):
         ]
         table_rebuild = self.editor.table_rebuild
         if any(
-            table_rebuild.is_key_column(old_model, column)
-            or table_rebuild.is_read_by_schema_objects(old_model, field_name, column)
+            table_rebuild.is_key_column(old_binding, column)
+            or table_rebuild.is_read_by_schema_objects(old_binding, field_name, column)
             for field_name, column in renamed_columns
         ):
-            return table_rebuild.get_rebuild_plan(old_model, new_model, altered_fields=field_pairs)
-        return super().get_model_column_rename_plan(old_model, new_model, field_pairs)
+            return table_rebuild.get_rebuild_plan(old_binding, new_binding, altered_fields=field_pairs)
+        return super().get_model_column_rename_plan(old_binding, new_binding, field_pairs)

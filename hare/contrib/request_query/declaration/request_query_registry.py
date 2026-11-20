@@ -7,7 +7,6 @@ from weakref import ReferenceType, WeakKeyDictionary, WeakSet
 
 from hare.contrib.request_query.declaration.request_query_declaration import RequestQueryDeclaration
 from hare.core.caching.cache import Cache
-from hare.exceptions import ConfigurationError
 from hare.models import Model
 
 if TYPE_CHECKING:
@@ -17,35 +16,18 @@ if TYPE_CHECKING:
 
 
 class RequestQueryRegistry:
-    """The models a request query class reads, tracked so its declaration and parameters are forgotten
-    when one of them changes or leaves the registry - and the refusal of a model already
-    unregistered."""
+    """Track declaration dependencies and invalidate future parameter generations.
+
+    A generation keeps its selected queryset and graph. Explicit invalidation or an extension
+    change rebuilds later generations; completed schemas and request instances remain intact.
+    """
 
     lock: ClassVar[RLock] = RLock()
     revision: ClassVar[int] = 0
     #: Completed declarations follow each request query class's lifetime through its bucket.
-    declarations: ClassVar[Cache[Any]] = Cache(holds_sql=False)
+    declarations: ClassVar[Cache[Any]] = Cache()
     #: Both ends are weak: invalidation must not keep a runtime model or query class alive.
     classes_by_model: ClassVar[WeakKeyDictionary[type[Model], WeakSet[type]]] = WeakKeyDictionary()
-    bound_models: ClassVar[WeakSet[type[Model]]] = WeakSet()
-
-    @staticmethod
-    def check_model_registered(query_class: type[RequestQuery[Any]], model: type[Model]) -> None:
-        """Refuses a queryset of a model that was unregistered (``Hare.unregister_live_models()``) -
-        such a class would query a dead class.
-
-        Args:
-            query_class: The request query class.
-            model: The model of the class's queryset.
-
-        Raises:
-            ConfigurationError: The model was bound once and no longer is.
-        """
-        if model in RequestQueryRegistry.bound_models and not model._meta.is_bound:
-            raise ConfigurationError(
-                f"{query_class.__qualname__}.Meta.queryset is a queryset of {model.__name__}, which was "
-                "unregistered - build the request query for the model registered in its place"
-            )
 
     @staticmethod
     def track_models(query_class: type[RequestQuery[Any]], models: Iterable[type[Model]]) -> None:
@@ -59,7 +41,7 @@ class RequestQueryRegistry:
             for model in models:
                 classes = RequestQueryRegistry.classes_by_model.get(model)
                 if classes is None:
-                    classes = RequestQueryRegistry.classes_by_model.setdefault(model, WeakSet())
+                    classes = RequestQueryRegistry.classes_by_model[model] = WeakSet()
                 classes.add(query_class)
 
     @staticmethod
@@ -96,7 +78,7 @@ class RequestQueryRegistry:
         with RequestQueryRegistry.lock:
             RequestQueryRegistry.revision += 1
             for query_class in tuple(RequestQueryRegistry.classes_by_model.pop(model, ())):
-                RequestQueryRegistry.forget_parameters(query_class)
+                RequestQueryRegistry.declarations.forget_holder(query_class)
 
     @staticmethod
     def forget_all() -> None:

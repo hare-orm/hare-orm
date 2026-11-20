@@ -55,7 +55,7 @@ class PendingStatements:
         outermost first - right before a statement that holds its turn on the savepoint lock, so
         every open savepoint encloses it. Each is shielded: a SAVEPOINT landing after the awaiting
         task was cancelled would leave one more savepoint on the connection than the savepoint lock
-        tracks.
+        tracks. The caller starts the outer transaction before entering this method.
 
         Args:
             client: The transaction's client.

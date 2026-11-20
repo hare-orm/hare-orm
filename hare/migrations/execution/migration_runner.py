@@ -5,7 +5,7 @@ files and for migrations an application builds in memory or keeps in its databas
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from typing import TYPE_CHECKING
 
 from hare.core.config.migrations_config import MigrationsConfig
@@ -14,7 +14,8 @@ from hare.dialects.base.client.transaction_client import TransactionClient
 from hare.migrations.exceptions import PartiallyAppliedMigrationError
 from hare.migrations.execution.prepared_operation_execution import PreparedOperationExecution
 from hare.migrations.loading.graph.migration_key import MigrationKey
-from hare.migrations.operations import RunPython, SeparateDatabaseAndState
+from hare.migrations.operations import AppOperation, RunPython, SeparateDatabaseAndState
+from hare.migrations.reports.operation_effect import OperationEffect
 from hare.transactions.transaction_options import TransactionOptions
 
 if TYPE_CHECKING:
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
     from hare.migrations.loading.recorder.migration_recorder import MigrationRecorder
     from hare.migrations.migration import Migration
-    from hare.migrations.reports.operation_effect import OperationEffect
+    from hare.migrations.state.prepared_operation import PreparedOperation
     from hare.migrations.state.prepared_operation_states import PreparedOperationStates
     from hare.migrations.state.state import State
 
@@ -32,7 +33,8 @@ class MigrationRunner:
 
     An atomic migration (``Migration.atomic``, the default) runs in one transaction with its
     record in the journal, where the database runs DDL in a transaction; a non-atomic one runs
-    operation by operation and raises ``PartiallyAppliedMigrationError`` when one fails partway.
+    operation by operation. If an operation or journal write fails after the schema or data may
+    have changed, it raises ``PartiallyAppliedMigrationError``.
     Constraint checks are deferred while it runs and checked before the commit.
 
     Args:
@@ -58,7 +60,8 @@ class MigrationRunner:
         recorder: MigrationRecorder | None = None,
         lock_timeout: float | None = None,
     ) -> None:
-        self.lock_timeout = MigrationsConfig(lock_timeout=lock_timeout).lock_timeout
+        MigrationsConfig.check_lock_timeout(lock_timeout)
+        self.lock_timeout = lock_timeout
         self.connection = connection
         self.connections = (
             connection.connection_handler if connection.connection_handler is not None else Connections.current()
@@ -153,7 +156,7 @@ class MigrationRunner:
         Raises:
             IrreversibleMigrationError: An operation can't be unapplied.
             PartiallyAppliedMigrationError: Execution failed after data or schema may have changed;
-                the migration's journal record is left as it was.
+                the journal may still describe the schema before the migration.
         """
         # Entered on schema_editor.client as it is before the transaction below opens it - a database
         # may ignore turning its foreign key checks off inside an open transaction.
@@ -182,6 +185,8 @@ class MigrationRunner:
             run_statement_count = schema_editor.run_statement_count
             try:
                 state = await self._run_operations(migration, prepared, schema_editor, forwards, dry_run)
+                if not dry_run:
+                    await self.record(migration, applied=forwards)
             except Exception as error:
                 if schema_editor.run_statement_count == run_statement_count and not MigrationRunner.runs_python(
                     migration
@@ -191,8 +196,6 @@ class MigrationRunner:
                 raise PartiallyAppliedMigrationError(
                     MigrationRunner.get_partial_failure_message(migration, forwards, error)
                 ) from error
-            if not dry_run:
-                await self.record(migration, applied=forwards)
         return state
 
     @staticmethod
@@ -206,7 +209,7 @@ class MigrationRunner:
         """Execute the prepared tree once, returning an independent result snapshot."""
         if not dry_run:
             await PreparedOperationExecution.run(migration, prepared, schema_editor, backward=not forwards)
-        return (prepared.after if forwards else prepared.before).clone()
+        return prepared.after if forwards else prepared.before
 
     @staticmethod
     def runs_python(migration: Migration) -> bool:
@@ -221,7 +224,7 @@ class MigrationRunner:
         """
         operations = list(migration.operations)
         while operations:
-            operation = operations.pop()
+            _, operation = AppOperation.unwrap(migration.app_label, operations.pop())
             if isinstance(operation, RunPython):
                 return True
             if isinstance(operation, SeparateDatabaseAndState):
@@ -243,14 +246,14 @@ class MigrationRunner:
         if forwards:
             return (
                 f"{migration} failed partway through its (non-atomic) apply - some of its operations may "
-                f"already have landed on the schema. Recorded as NOT applied, so a plain retry would replay "
-                f"every operation from the start, including ones that already succeeded. Inspect the schema "
-                f"and fix forward manually (or mark this migration applied once it genuinely matches) before "
+                "already have landed on the schema. A plain retry may replay operations that already succeeded. "
+                "Inspect the schema and migration journal, then fix forward manually (or mark this migration applied "
+                "once the schema genuinely matches) before "
                 f"retrying: {error}"
             )
         return (
             f"{migration} failed partway through its (non-atomic) unapply - the schema may now be a mix of "
-            f"the old and new state. Recorded as still applied. Inspect the schema and fix forward manually "
+            f"the old and new state. Inspect the schema and migration journal and fix forward manually "
             f"before retrying: {error}"
         )
 
@@ -265,19 +268,26 @@ class MigrationRunner:
         """
         if self.recorder is None:
             return
+        record = self.recorder.record_applied if applied else self.recorder.record_unapplied
         if not migration.replaces:
-            if applied:
-                await self.recorder.record_applied(migration.app_label, migration.name, connection=connection)
-            else:
-                await self.recorder.record_unapplied(migration.app_label, migration.name, connection=connection)
+            await record(migration.app_label, migration.name, connection=connection)
             return
-        recorded_keys = set(await self.recorder.applied_migrations(connection))
-        for app_label, name in [(migration.app_label, migration.name), *migration.replaces]:
-            is_recorded = MigrationKey(app_label=app_label, name=name) in recorded_keys
-            if applied and not is_recorded:
-                await self.recorder.record_applied(app_label, name, connection=connection)
-            elif not applied and is_recorded:
-                await self.recorder.record_unapplied(app_label, name, connection=connection)
+        journal = connection if connection is not None else self.recorder.connection
+        # A squash publishes several entries. Keep them together even when its DDL
+        # ran outside a transaction. An atomic migration already supplies its transaction.
+        scope = (
+            journal._in_transaction()
+            if journal.features.supports_transactions and not journal.is_transaction_client
+            else nullcontext(journal)
+        )
+        async with scope as journal_connection:
+            recorded_keys = set(await self.recorder.applied_migrations(journal_connection))
+            for app_label, name in dict.fromkeys(
+                [(migration.app_label, migration.name), *migration.replaces, *migration.replacement_aliases]
+            ):
+                is_recorded = MigrationKey(app_label=app_label, name=name) in recorded_keys
+                if is_recorded != applied:
+                    await record(app_label, name, connection=journal_connection)
 
     async def collect_sql(self, migration: Migration, state: State, *, backward: bool = False) -> list[str]:
         """The SQL of a migration without running it - each operation after a comment naming it,
@@ -318,6 +328,23 @@ class MigrationRunner:
         """
         prepared = migration.prepare(state)
         schema_editor = self.get_schema_editor(collect_sql=True)
-        return [
-            item.operation.get_effect(migration.app_label, item.before, schema_editor) for item in prepared.operations
+        return [self._get_prepared_effect(migration.app_label, item, schema_editor) for item in prepared.operations]
+
+    @staticmethod
+    def _get_prepared_effect(
+        app_label: str, item: PreparedOperation, schema_editor: BaseSchemaEditor
+    ) -> OperationEffect:
+        """Inspect physical children without attributing state-only changes to the database."""
+        if item.database_operations is None:
+            return item.operation.get_effect(app_label, item.before, item.after, schema_editor)
+        effects = [
+            MigrationRunner._get_prepared_effect(app_label, child, schema_editor)
+            for child in item.database_operations.operations
         ]
+        return OperationEffect(
+            operation=item.operation,
+            reversible=item.operation.reversible and all(effect.reversible for effect in effects),
+            rewrites_table=any(effect.rewrites_table for effect in effects),
+            loses_data=any(effect.loses_data for effect in effects),
+            reason="\n".join(effect.reason for effect in effects if effect.reason) or None,
+        )

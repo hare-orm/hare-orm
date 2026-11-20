@@ -25,6 +25,7 @@ from hare.transactions import Transactions
 from tests.dialects.postgresql.conftest import skip_if_not_postgres
 from tests.dialects.postgresql.schema.models_without_overlaps import OverlapPricePeriod, OverlapRoomBooking
 from tests.utils.database_under_test import DatabaseUnderTest
+from tests.utils.model_bindings import ModelBindings
 from tests.utils.model_source_generator import ModelSourceGenerator
 
 MODULE = "tests.dialects.postgresql.schema.models_without_overlaps"
@@ -111,18 +112,19 @@ def test_the_keys_need_two_fields_and_no_condition():
 
 @pytest.mark.database_independent
 def test_migrations_carry_the_keys_and_need_btree_gist():
-    constraint = OverlapRoomBooking._meta.constraints[0]
+    apps = ModelBindings.prepare(OverlapRoomBooking, OverlapPricePeriod)
+    constraint = apps.get_binding(OverlapRoomBooking).constraints[0]
     assert constraint.deconstruct()[2]["without_overlaps"] is True
-    assert OverlapPricePeriod._meta.pk_without_overlaps is True
-    model_state = ModelState.make_from_model("models", OverlapPricePeriod)
+    assert apps.get_binding(OverlapPricePeriod).pk_without_overlaps is True
+    model_state = ModelState.make_from_declaration("models", OverlapPricePeriod)
     assert model_state.options["pk_without_overlaps"] is True
     editor_class = DialectRegistry.get_dialect("postgresql").schema_editor_class
     assert editor_class.constraint_statements_class.get_without_overlaps_extension(
-        ("room", "during"), OverlapRoomBooking._meta.fields_map
+        ("room", "during"), apps.get_binding(OverlapRoomBooking).fields_map
     ) == ("btree_gist")
     assert (
         editor_class.constraint_statements_class.get_without_overlaps_extension(
-            ("during",), OverlapRoomBooking._meta.fields_map
+            ("during",), apps.get_binding(OverlapRoomBooking).fields_map
         )
         is None
     )
@@ -130,8 +132,8 @@ def test_migrations_carry_the_keys_and_need_btree_gist():
 
 @pytest.mark.database_independent
 def test_changing_the_primary_key_flag_is_refused():
-    old_state = ModelState.make_from_model("models", OverlapPricePeriod)
-    new_state = ModelState.make_from_model("models", OverlapPricePeriod)
+    old_state = ModelState.make_from_declaration("models", OverlapPricePeriod)
+    new_state = ModelState.make_from_declaration("models", OverlapPricePeriod)
     new_state.options.pop("pk_without_overlaps")
     with pytest.raises(ConfigurationError, match="without_overlaps"):
         StateModelDiff(old_state, new_state).generate_operations()

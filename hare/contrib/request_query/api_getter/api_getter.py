@@ -348,9 +348,7 @@ class ApiGetter:
             target_value.required = True
         if mapping.default is not None:
             target_value.default = mapping.default
-        if mapping.mode is ApiValueMappingMode.LAST:
-            target_value.value = value
-        elif target_value.value is None and value is not None:
+        if mapping.mode is ApiValueMappingMode.LAST or (target_value.value is None and value is not None):
             target_value.value = value
 
     @staticmethod

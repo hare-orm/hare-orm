@@ -8,14 +8,13 @@ import pytest
 
 from hare import fields
 from hare.contrib import test
+from hare.core.hare_context import HareContext
 from hare.dialects.base.constants import SQL_DIALECT
 from hare.exceptions import ValidationError
 from hare.fields.data.choices import CharEnumFieldInstance, IntEnumFieldInstance
 from hare.models.instances.dirty_fields import DirtyFields
 from hare.native.native_modules import NativeModules
 from hare.query.rows.model_rows.model_columns import ModelColumns
-from hare.query.rows.native.hydration_layout import HydrationLayout
-from hare.query.rows.row_column import RowColumn
 from hare.query.rows.row_layout import RowLayout
 from tests.shared_models.testmodels import (
     BooleanFields,
@@ -63,9 +62,9 @@ def test_hydration_calls_custom_field_reader(field_class, args, native):
 
     field = CustomField(*args)
     native_types = frozenset({field.field_type}) if native else frozenset()
-    reader = HydrationLayout.get_field_reader(field, SQL_DIALECT.types, native_types)
+    reader = SQL_DIALECT.types.get_native_reader(field, native_types)
     raw = object()
-    assert RowLayout((RowColumn(0, reader),)).read((raw,))[0] is converted
+    assert RowLayout(((0, reader),)).read((raw,))[0] is converted
     assert calls == [raw]
 
 
@@ -91,12 +90,15 @@ def _synthetic_row(decode_plan, values_by_name: dict) -> tuple:
 
 
 def _hydrate_models(model, decode_plan, is_partial: bool, rows: list[tuple]):
-    columns = ModelColumns(model, decode_plan, tuple(range(len(decode_plan))), is_partial)
+    columns = ModelColumns.from_entries(
+        HareContext.require_current().apps.get_binding(model), decode_plan, tuple(range(len(decode_plan))), is_partial
+    )
     return NativeModules.rows.ModelResultLayout([columns], ()).read_batch(
         rows,
         0,
         len(rows),
         model.get_connection().connection_alias,
+        HareContext.require_current(),
         DirtyFields.snapshot_dirty_fields,
     )
 
@@ -393,20 +395,25 @@ async def test_datetime_non_utc_target_dst_transition_values(db):
 @pytest.mark.asyncio
 async def test_reused_reader_observes_timezone_config_change(db):
     decode_plan, is_partial = _get_decode_plan(DatetimeFields, only_fields=["id", "datetime"])
-    columns = ModelColumns(DatetimeFields, decode_plan, tuple(range(len(decode_plan))), is_partial)
+    columns = ModelColumns.from_entries(
+        HareContext.require_current().apps.get_binding(DatetimeFields),
+        decode_plan,
+        tuple(range(len(decode_plan))),
+        is_partial,
+    )
     moment = datetime.datetime(2024, 1, 15, 12, 0)
     row = _synthetic_row(decode_plan, {"id": 1, "datetime": moment})
     with override_timezone(use_timezone=True, timezone="UTC"):
         aware = (
             NativeModules.rows.ModelResultLayout((columns,), ())
-            .read_row(row, None, DirtyFields.snapshot_dirty_fields)
+            .read_row(row, None, HareContext.require_current(), DirtyFields.snapshot_dirty_fields)
             .datetime
         )
         assert aware == moment.replace(tzinfo=datetime.UTC)
     with override_timezone(use_timezone=False, timezone="UTC"):
         naive = (
             NativeModules.rows.ModelResultLayout((columns,), ())
-            .read_row(row, None, DirtyFields.snapshot_dirty_fields)
+            .read_row(row, None, HareContext.require_current(), DirtyFields.snapshot_dirty_fields)
             .datetime
         )
         assert naive == moment

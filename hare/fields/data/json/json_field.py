@@ -97,6 +97,10 @@ class JSONField(Field[T]):
             return type_adapter.dump_python(value, mode="json")
         return JsonValues.get_json_value(value)
 
+    def get_snapshot_comparison_value(self, value: Any) -> Any:
+        """Compare a typed document's JSON representation instead of its object's equality."""
+        return self.get_json_value(value) if self.declared_value_type is not None else value
+
     def _get_constructor_argument_value(self, name: str) -> Any:
         # The class's own field_type is the value type of an undeclared document, not an argument.
         if name == "field_type":
@@ -346,7 +350,7 @@ class JSONField(Field[T]):
     def get_assign_normalized_types(self) -> frozenset[type]:
         if self.declared_value_type is not None:
             return frozenset()
-        return frozenset({dict, list, str, bytes, int, float, bool})
+        return self._get_unchanged_assign_types(JSONField.to_python, dict, list, str, bytes, int, float, bool)
 
     def to_python(
         self, value: T | dict[str, Any] | list[Any] | str | bytes | None

@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from mypy.plugin import MethodContext, Plugin
 
     from hare.contrib.mypy.model_registry import ModelRegistry
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class ValuesRowTypes:
@@ -51,13 +51,12 @@ class ValuesRowTypes:
             The type.
         """
         mypy_types = MypyTypes(self.plugin, method_context.api, self.model_registry)
-        queryset_arguments = mypy_types.get_queryset_arguments(method_context.type)
-        call = method_context.context
+        queryset_call = mypy_types.get_queryset_call(method_context.type, method_context.context)
         return_type = get_proper_type(method_context.default_return_type)
-        if queryset_arguments is None or not isinstance(call, CallExpr) or not isinstance(return_type, Instance):
+        if queryset_call is None or not isinstance(return_type, Instance):
             return method_context.default_return_type
         return_type = ValuesSelectionTypes.store(return_type, None, mypy_types)
-        model, queryset_type = queryset_arguments
+        model, queryset_type, call = queryset_call
         annotations = AnnotationTypes.get_annotations(method_context.type, queryset_type)
         if annotations is None or not isinstance(call.callee, MemberExpr):
             return return_type
@@ -82,7 +81,7 @@ class ValuesRowTypes:
             return return_type
         implicit_all = not selected
         if implicit_all:
-            names = [name for name in model._meta.fields_map if name in model._meta.fields_db_projection]
+            names = [name for name in model.fields_map if name in model.fields_db_projection]
             names += [name for name in annotations.items if name in annotations.required_keys]
             selected = [(name, None) for name in names]
         selected_types = [
@@ -130,7 +129,7 @@ class ValuesRowTypes:
     @staticmethod
     def get_selected_type(
         mypy_types: MypyTypes,
-        model: type[Model],
+        binding: ModelBinding,
         annotation_items: dict[str, Type],
         method_name: str,
         name: str,
@@ -141,7 +140,7 @@ class ValuesRowTypes:
 
         Args:
             mypy_types: The types of the call.
-            model: The queryset's model.
+            binding: The queryset's model binding.
             annotation_items: The queryset's annotations.
             method_name: ``values`` or ``values_list``.
             name: The name the value is selected under.
@@ -152,16 +151,17 @@ class ValuesRowTypes:
         Returns:
             The type - ``Any`` for a wrong name, reported.
         """
+        model = binding._model
         if expression is None:
             path = name
         elif isinstance(expression, StrExpr):
             path = expression.value
         else:
-            return AnnotationTypes.get_expression_type(mypy_types, model, expression)
+            return AnnotationTypes.get_expression_type(mypy_types, binding, expression)
         if path in annotation_items:
             return annotation_items[path]
         try:
-            lookup_info = model._meta.get_lookup_info(path)
+            lookup_info = binding.get_lookup_info(path)
         except HareError as error:
             mypy_types.fail(str(error), call)
             return mypy_types.any()

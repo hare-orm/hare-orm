@@ -8,6 +8,7 @@ import pytest
 from hare.dialects.postgresql.drivers.asyncpg.asyncpg_hstore_codec import AsyncpgHstoreCodec
 from hare.dialects.postgresql.drivers.asyncpg.asyncpg_tsvector_codec import AsyncpgTsvectorCodec
 from hare.dialects.postgresql.drivers.asyncpg.client.asyncpg_client import AsyncpgClient
+from hare.dialects.postgresql.drivers.asyncpg.constants import ASYNCPG_DOMAIN_TYPES_SQL
 
 
 @pytest.mark.database_independent
@@ -24,7 +25,9 @@ async def test_schema_generation_refreshes_codecs_and_retires_only_removed_types
     connection.get_server_pid.return_value = 7
     reads = []
 
-    async def catalog(*args):
+    async def catalog(query, *args):
+        if query == ASYNCPG_DOMAIN_TYPES_SQL:
+            return []
         reads.append(client.schema_generation)
         if len(reads) == 1:
             client.schema_generation += 1
@@ -66,7 +69,7 @@ async def test_pinned_connection_refreshes_after_schema_changes_become_visible(b
     client.schema_generation = 1
     async with transaction.acquire_connection():
         assert transaction._lock.locked()
-    assert connection.fetch.await_count == 1
+    assert connection.reload_schema_state.await_count == 1
     if boundary == "transaction_end":
         await transaction._give_back_transaction_resources()
         pool.release.assert_awaited_once()
@@ -74,7 +77,7 @@ async def test_pinned_connection_refreshes_after_schema_changes_become_visible(b
         await transaction._driver_rollback_to_savepoint("nested")
     assert client.schema_generation == 2
     await client.refresh_schema_codecs(connection, pool)
-    assert connection.fetch.await_count == 2
+    assert connection.reload_schema_state.await_count == 2
     pool.expire_connections.assert_not_awaited()
 
 

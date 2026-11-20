@@ -1,27 +1,23 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
+from typing import TYPE_CHECKING, ClassVar, TypeVar
 
-from hare.core.registries import Registries
+from hare.core.caching.forgettable_cache import ForgettableCache
 
 if TYPE_CHECKING:
-    from hare.models import Model
-from hare.core.caching.forgettable_cache import ForgettableCache
+    from hare.models.model_binding import ModelBinding
 
 TForgettableCache = TypeVar("TForgettableCache", bound=ForgettableCache)
 
 
 class Caches:
     """Every process-wide cache, and dropping them: what a cache holds for some models when they
-    change or leave the registry, everything when a registry (``Registries``) changes. A cache is a
-    ``Cache`` or a ``ModelCache`` (both registered when created) or another object registered with
-    ``register()``; nothing else has to know it exists."""
+    change or leave the registry, everything when a registry (``Registries``) changes. Each ``Cache``,
+    including a ``ModelCache``'s storage, registers when created. Other caches can call ``register()``."""
 
     #: Every registered cache.
     registered: ClassVar[list[ForgettableCache]] = []
-    #: The caches holding SQL a model's query builder rendered (``Cache(holds_sql=True)``).
-    sql_caches: ClassVar[list[Any]] = []
 
     @classmethod
     def register(cls, cache: TForgettableCache) -> TForgettableCache:
@@ -44,27 +40,14 @@ class Caches:
             cache.forget_all()
 
     @classmethod
-    def forget_model_caches(cls, models: Iterable[type[Model]]) -> None:
+    def forget_model_caches(cls, bindings: Iterable[ModelBinding]) -> None:
         """Drops what every registered cache holds for ``models`` - needed whenever they change
         after first use, or leave the registry.
 
         Args:
-            models: The affected model classes.
+            bindings: The bindings whose cached data is discarded.
         """
-        models = list(models)
+        bindings = tuple(bindings)
         for cache in cls.registered:
-            for model in models:
-                cache.forget_model(model)
-
-    @classmethod
-    def forget_model_sql(cls, model: type[Model]) -> None:
-        """Drops what the SQL caches hold for ``model`` - when it is bound to another query builder.
-
-        Args:
-            model: The model class.
-        """
-        for cache in cls.sql_caches:
-            cache.forget_holder(model)
-
-
-Registries.forget_all_caches = Caches.forget_all_caches
+            for binding in bindings:
+                cache.forget_model(binding)

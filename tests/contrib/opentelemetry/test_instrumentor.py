@@ -1,3 +1,5 @@
+from contextlib import aclosing
+
 import pytest
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
@@ -7,6 +9,7 @@ from opentelemetry.trace import INVALID_SPAN
 
 from hare.contrib.opentelemetry import OpenTelemetryInstrumentor
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.instrumentation.declarations import QueryExecuted
 from hare.instrumentation.observers.observers import Observers
 from hare.transactions.transactions import Transactions
@@ -41,27 +44,37 @@ async def test_instrument_records_a_span_with_db_attributes(db, exporter):
 
 @pytest.mark.asyncio
 @requires_features(supports_streaming=True)
-async def test_instrument_records_a_span_for_a_stream_query(db, exporter):
-    """stream() (QuerySet.stream()'s own execution primitive) is an async
-    generator, not a plain coroutine - it wasn't in QUERY_EXECUTING_METHOD_NAMES at all, so
-    instrument() never wrapped it, and a .stream() query executed completely outside any span
-    even with instrumentation active."""
+@pytest.mark.parametrize("early_close", [False, True], ids=["exhausted", "closed"])
+async def test_instrument_records_a_span_for_a_stream_query(db, exporter, early_close):
     from tests.shared_models.testmodels import Author
 
     await Author.objects.create(name="Some Author")
+    await Author.objects.create(name="Another Author")
 
     span_exporter, provider = exporter
     instrumentor = OpenTelemetryInstrumentor(tracer_provider=provider)
     instrumentor.instrument()
+    event_spans = []
+
+    def on_query(event):
+        event_spans.append((event.error, trace.get_current_span().get_span_context()))
+
     try:
-        async with Transactions.atomic():
-            async for _ in Author.objects.all().stream():
-                pass
+        with (
+            provider.get_tracer("test").start_as_current_span("consumer") as parent,
+            Observers.observing(QueryExecuted, on_query),
+        ):
+            async with Transactions.atomic(), aclosing(Author.objects.all().stream(chunk_size=1)) as stream:
+                async for _ in stream:
+                    assert trace.get_current_span() is parent
+                    if early_close:
+                        break
     finally:
         instrumentor.uninstrument()
 
     spans = [span for span in span_exporter.get_finished_spans() if span.name == "stream"]
-    assert spans, "no span was recorded for the streamed query"
+    assert len(spans) == 1
+    assert event_spans == [(None, spans[0].context)]
     assert spans[0].attributes["db.system.name"] == db.get_connection().dialect.otel_system_name
     assert "SELECT" in str(spans[0].attributes["db.query.text"]).upper()
 
@@ -121,7 +134,10 @@ async def test_instrument_records_a_span_for_a_copy_bulk_create(db_truncate, exp
     assert statement.startswith("COPY tournament (")
     assert "name" in statement
     assert "A" not in statement.removeprefix("COPY tournament")
-    assert spans[0].attributes["db.system.name"] == Tournament._meta.connection.dialect.otel_system_name
+    assert (
+        spans[0].attributes["db.system.name"]
+        == HareContext.require_current().apps.get_queryset(Tournament).get_connection().dialect.otel_system_name
+    )
 
 
 @pytest.mark.asyncio

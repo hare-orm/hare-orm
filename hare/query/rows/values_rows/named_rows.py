@@ -14,7 +14,7 @@ class NamedRows(TupleRows):
     tuple row does."""
 
     #: (field names,) -> the namedtuple class of a row selecting them.
-    row_classes: ClassVar[Cache[type[tuple[Any, ...]]]] = Cache(ROW_CLASS_CACHE_SIZE, holds_sql=False)
+    row_classes: ClassVar[Cache[type[tuple[Any, ...]]]] = Cache(ROW_CLASS_CACHE_SIZE)
 
     def __init__(self, output_names: tuple[str, ...], output_column_aliases: Sequence[tuple[str, ...]]) -> None:
         """Bind fixed output names and the shared namedtuple class used by every batch."""

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import copy
 from typing import TYPE_CHECKING
 
 from hare.sql.builder.tables.declarations import SourceBinding
@@ -13,8 +14,8 @@ from hare.sql.terms.star import Star
 if TYPE_CHECKING:
     from typing import Self
 
+    from hare.dialects.base.clauses.enums import JoinType
     from hare.sql.builder.tables.table import Table
-    from hare.sql.enums import JoinType
 
 
 class Selectable(Node):
@@ -41,6 +42,13 @@ class Selectable(Node):
 
     def field(self, name: str) -> Field:
         return Field(name, table=self)
+
+    def _copy_preserving_source(self) -> Self:
+        """Copy this SQL source while keeping references to its occurrence valid."""
+        cloned = copy(self)
+        cloned.source_binding = self.source_binding
+        cloned.__dict__.pop("_hash_cache", None)
+        return cloned
 
     def replace_table(self, current_table: Table | None, new_table: Table | None) -> Self:
         """Replaces every occurrence of a table with another one - returns self unless a subclass can

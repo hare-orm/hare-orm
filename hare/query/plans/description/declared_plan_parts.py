@@ -9,6 +9,9 @@ from hare.query.plans.enums import PlanPartType
 #: declares as its ``plan_parts``.
 type DeclaredPlanParts = tuple[tuple[str, PlanPartType], ...]
 
-#: The declared parts with the reader of each attribute, made once when the class is compiled
-#: (``PlanDescriberCompiler.compile()``).
+#: Runtime parts with each attribute's reader, prepared once by ``PlanDescriberCompiler.compile()``.
+#: NONE declarations do not participate in execution.
 type BoundPlanParts = tuple[tuple[str, Callable[[Any], Any], PlanPartType], ...]
+
+#: Key-only structure positions read after value-bearing parts, prepared from the same declaration.
+type BoundKeyParts = tuple[tuple[int, Callable[[Any], Any], PlanPartType], ...]

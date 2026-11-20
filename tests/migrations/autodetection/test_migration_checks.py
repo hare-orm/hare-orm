@@ -4,8 +4,9 @@ written from; they depend on each other in no cycle."""
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -104,6 +105,23 @@ def test_an_argument_a_declaration_does_not_write_is_refused_before_the_file_is(
     writer = MigrationWriter("0002_check", "app", [AddConstraint(model_name="Account", constraint=constraint)])
     with pytest.raises(MigrationAutodetectorError, match=r"operation.*\.comment.*written 'kept', read ''"):
         MigrationChecks.raise_if_not_read_back(writer)
+
+
+def test_an_exported_nested_field_keeps_its_public_import_path(monkeypatch):
+    package = ModuleType("sample_field_package")
+    module = ModuleType("sample_field_package.token_field")
+    monkeypatch.setitem(sys.modules, package.__name__, package)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    declaration = "class Namespace:\n    class TokenField(fields.IntField):\n        pass\n"
+    module.__dict__["fields"] = fields
+    exec(compile(declaration, "<field declaration>", "exec"), module.__dict__)  # noqa: S102 - test declaration
+    field_class = module.__dict__["Namespace"].TokenField
+    package.TokenField = field_class  # type: ignore[attr-defined]
+    assert ClassPath.get(field_class) == "sample_field_package.TokenField"
+
+    migration = MigrationWriter("0001_initial", "app", [CreateModel(name="Item", fields=[("id", field_class())])])
+    restored = Migration.from_source(migration.as_string(), name="0001_initial", app_label="app")
+    assert type(restored.operations[0].fields[0][1]) is field_class
 
 
 @pytest.mark.asyncio

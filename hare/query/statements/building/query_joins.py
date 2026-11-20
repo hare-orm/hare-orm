@@ -15,7 +15,9 @@ from hare.sql import JoinType, Table
 
 if TYPE_CHECKING:
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.statements.awaitable_query import AwaitableQuery
+    from hare.sql.builder.queries.query_builder import QueryBuilder
 
 
 class QueryJoins:
@@ -54,6 +56,7 @@ class QueryJoins:
             dialect=query.dialect,
             connection=query._connection,
             value_wrapper_references=value_wrapper_references,
+            application_context=query._context,
         )
         for join in joins:
             QueryJoins.join_table(query, join)
@@ -67,20 +70,23 @@ class QueryJoins:
         Args:
             query: The query.
         """
-        query._joined_tables = []
-        query._joined_tables_set = set()
+        query._joined_tables = set()
         query._annotation_expression_results = {}
         query._expression_term_references = {}
         query._annotation_ordering_terms = {}
 
     @staticmethod
-    def join_table(query: AwaitableQuery[Any], table_criterio_tuple: TableCriterionTuple) -> None:
-        if table_criterio_tuple[0] not in query._joined_tables_set:
-            query.query = query.query.join(table_criterio_tuple[0], how=JoinType.LEFT_OUTER).on(
-                table_criterio_tuple[1]
-            )
-            query._joined_tables.append(table_criterio_tuple[0])
-            query._joined_tables_set.add(table_criterio_tuple[0])
+    def join_table(query: AwaitableQuery[Any], join: TableCriterionTuple) -> None:
+        query.query = QueryJoins.with_join(query.query, query._joined_tables, join)
+
+    @staticmethod
+    def with_join(builder: QueryBuilder, joined_tables: set[Table], join: TableCriterionTuple) -> QueryBuilder:
+        """Add a left join once, preserving the order in the SQL builder."""
+        table, criterion = join
+        if table not in joined_tables:
+            builder = builder.join(table, how=JoinType.LEFT_OUTER).on(criterion)
+            joined_tables.add(table)
+        return builder
 
     @staticmethod
     def apply_effective_basetable(query: AwaitableQuery[Any]) -> None:
@@ -92,8 +98,9 @@ class QueryJoins:
             query: The query.
         """
         effective_table = query._effective_basetable()
-        if effective_table != query.model._meta.basetable:
-            query.query = query.query.replace_table(query.model._meta.basetable, effective_table)
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
+        if effective_table != model_binding.basetable:
+            query.query = query.query.replace_table(model_binding.basetable, effective_table)
 
     @staticmethod
     def get_field_lookups(query: AwaitableQuery[Any], field_names: Iterable[str]) -> list[str]:
@@ -130,10 +137,11 @@ class QueryJoins:
         Returns:
             The lookups.
         """
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
         return [
             field_name
             for field_name, _order in query._apply_default_ordering(query._orderings)
-            if field_name not in query._annotations and field_name not in query.model._meta.ordering_expressions
+            if field_name not in query._annotations and field_name not in model_binding.ordering_expressions
         ]
 
     @staticmethod
@@ -152,7 +160,7 @@ class QueryJoins:
         first_generation_by_path: dict[str, int] = {}
         for q_object in query._q_objects:
             for key, _value in query._get_top_level_conditions(q_object, including_alternatives=True):
-                for path in AggregatedMultiValuedPaths.get_multi_valued_paths(query.model, key):
+                for path in AggregatedMultiValuedPaths.get_multi_valued_paths(query._binding, key):  # type: ignore[arg-type]
                     first_generation = first_generation_by_path.get(path)
                     if first_generation is None or q_object._filter_call_generation < first_generation:
                         first_generation_by_path[path] = q_object._filter_call_generation
@@ -162,7 +170,7 @@ class QueryJoins:
                 lookup = QueryJoins.get_null_rejected_lookup(key, value)
                 if lookup is None:
                     continue
-                paths = AggregatedMultiValuedPaths.get_multi_valued_paths(query.model, lookup)
+                paths = AggregatedMultiValuedPaths.get_multi_valued_paths(query._binding, lookup)  # type: ignore[arg-type]
                 if paths and first_generation_by_path.get(paths[-1]) == generation:
                     non_null_lookups.add(lookup)
         return non_null_lookups

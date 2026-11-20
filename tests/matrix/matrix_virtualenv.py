@@ -8,7 +8,7 @@ from pathlib import Path
 from tests.matrix.constants import MATRIX_DATABASE_DRIVER_EXTRAS
 from tests.matrix.matrix_catalog import MatrixCatalog
 from tests.matrix.paths import REPOSITORY_DIRECTORY
-from tests.matrix.run_spec import RunSpec
+from tests.matrix.suite_environment import SuiteEnvironment
 
 
 @dataclasses.dataclass(frozen=True)
@@ -29,23 +29,15 @@ class MatrixVirtualenv:
     groups: tuple[str, ...]
 
     @classmethod
-    def get(cls, run: RunSpec) -> MatrixVirtualenv:
-        """The virtualenv of a run.
-
-        Args:
-            run: The run.
-
-        Returns:
-            The virtualenv.
-        """
-        environment = run.suite_environment
+    def get(cls, python_version: str, environment: SuiteEnvironment, database: str) -> MatrixVirtualenv:
+        """The virtualenv for this Python, suite environment and database driver."""
         driver_extras = tuple(
-            extra for extra in MATRIX_DATABASE_DRIVER_EXTRAS[run.database] if extra not in environment.extras
+            extra for extra in MATRIX_DATABASE_DRIVER_EXTRAS[database] if extra not in environment.extras
         )
-        if MatrixCatalog.get_unsupported_extras(run.python_version).intersection(driver_extras):
-            raise SystemExit(f"{run.database} is not available on Python {run.python_version}")
-        name = "-".join([f".venv-{run.python_version}", environment.name, *driver_extras])
-        return cls(run.python_version, name, (*environment.extras, *driver_extras), environment.groups)
+        if MatrixCatalog.get_unsupported_extras(python_version).intersection(driver_extras):
+            raise SystemExit(f"{database} is not available on Python {python_version}")
+        name = "-".join([f".venv-{python_version}", environment.name, *driver_extras])
+        return cls(python_version, name, (*environment.extras, *driver_extras), environment.groups)
 
     def get_path(self) -> Path:
         """The virtualenv's directory."""

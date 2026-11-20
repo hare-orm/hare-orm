@@ -10,7 +10,6 @@ pub(crate) struct CancelQueryOnDrop {
     token: Option<tokio_postgres::CancelToken>,
     tls: PgTls,
     cancel_target: CancelTarget,
-    completed: bool,
     connection_poisoned: Arc<AtomicBool>,
     pending_cancels: PendingCancels,
 }
@@ -21,14 +20,13 @@ impl CancelQueryOnDrop {
             token: Some(token),
             tls: state.tls.clone(),
             cancel_target: state.cancel_target.clone(),
-            completed: false,
             connection_poisoned: state.connection_poisoned.clone(),
             pending_cancels: state.pending_cancels.clone(),
         }
     }
 
     pub(crate) fn finish<T>(&mut self, outcome: Result<T, DriverError>) -> Result<T, DriverError> {
-        self.completed = true;
+        self.token = None;
         if matches!(&outcome, Err(error) if error.is_connection_lost()) {
             self.connection_poisoned.store(true, Ordering::Release);
         }
@@ -37,16 +35,13 @@ impl CancelQueryOnDrop {
 
     /// The leased connection is being disconnected; no later SQL may reuse this session.
     pub(crate) fn discard(&mut self) {
-        self.completed = true;
+        self.token = None;
         self.connection_poisoned.store(true, Ordering::Release);
     }
 }
 
 impl Drop for CancelQueryOnDrop {
     fn drop(&mut self) {
-        if self.completed {
-            return;
-        }
         let Some(token) = self.token.take() else {
             return;
         };

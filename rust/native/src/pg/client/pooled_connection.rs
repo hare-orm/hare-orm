@@ -1,8 +1,6 @@
-use crate::asyncio::future_into_py;
 use crate::pg::connection_executor::PgConnectionExecutor;
-use crate::pg::error::to_pyerr;
 use crate::pg::parameter_values::ParameterValues;
-use crate::pg::result::PgResult;
+use crate::pg::pinned_statements;
 use crate::pg::timed_manager::Object;
 use crate::pg::tls::PgTls;
 
@@ -29,25 +27,25 @@ impl Drop for PooledConnection {
 
 #[pymethods]
 impl PooledConnection {
-    fn execute<'py>(&self, py: Python<'py>, sql: String, parameters: ParameterValues) -> PyResult<Bound<'py, PyAny>> {
-        let params = parameters.0;
-        let executor = self.executor.clone();
-        future_into_py(py, async move {
-            let mut lease = executor.acquire().await.map_err(to_pyerr)?.ok_or_else(connection_released)?;
-            lease.execute(&sql, &params, &executor.caching).await.map_err(to_pyerr)
-        })
+    #[pyo3(signature = (sql, parameters, *, built_sql = false))]
+    fn execute<'py>(
+        &self,
+        py: Python<'py>,
+        sql: String,
+        parameters: ParameterValues,
+        built_sql: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        pinned_statements::execute(&self.executor, py, sql, parameters, built_sql, connection_released)
     }
 
-    fn fetch_all<'py>(&self, py: Python<'py>, sql: String, parameters: ParameterValues) -> PyResult<Bound<'py, PyAny>> {
-        let params = parameters.0;
-        let executor = self.executor.clone();
-        future_into_py(py, async move {
-            let mut lease = executor.acquire().await.map_err(to_pyerr)?.ok_or_else(connection_released)?;
-            lease
-                .fetch(&sql, &params, &executor.caching)
-                .await
-                .map(|(columns, data)| PgResult::new(columns, data))
-                .map_err(to_pyerr)
-        })
+    #[pyo3(signature = (sql, parameters, *, built_sql = false))]
+    fn fetch_all<'py>(
+        &self,
+        py: Python<'py>,
+        sql: String,
+        parameters: ParameterValues,
+        built_sql: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        pinned_statements::fetch_all(&self.executor, py, sql, parameters, built_sql, connection_released)
     }
 }

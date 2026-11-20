@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
     from hare.contrib.mypy.model_registry import ModelRegistry
     from hare.fields.field import Field
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class InstanceAttributeTypes:
@@ -46,13 +46,13 @@ class InstanceAttributeTypes:
             The type - mypy's own for an instance of no bound model or an attribute that isn't a field.
         """
         receiver = get_proper_type(attribute_context.type)
-        model = None if not isinstance(receiver, Instance) else self.model_registry.get_model(receiver.type.fullname)
+        model = None if not isinstance(receiver, Instance) else self.model_registry.get_binding(receiver.type.fullname)
         if model is None:
             return attribute_context.default_attr_type
         mypy_types = MypyTypes(self.plugin, attribute_context.api, self.model_registry)
         if name == PRIMARY_KEY_ALIAS:
             return self.get_primary_key_type(attribute_context, mypy_types, model)
-        generic_field = model._meta.generic_foreign_key_fields.get(name)
+        generic_field = model.generic_foreign_key_fields.get(name)
         if generic_field is not None:
             object_type = self.get_generic_object_type(attribute_context.default_attr_type, mypy_types, generic_field)
             if not attribute_context.is_lvalue:
@@ -62,7 +62,7 @@ class InstanceAttributeTypes:
                 DICT_FULLNAME, [attribute_context.api.named_generic_type(STR_FULLNAME, []), mypy_types.any()]
             )
             return make_simplified_union([object_type, row_type, NoneType()])
-        field = model._meta.fields_map.get(name)
+        field = model.fields_map.get(name)
         if field is None or isinstance(field, RelationalField):
             return attribute_context.default_attr_type
         return self.get_field_value_type(attribute_context.default_attr_type, mypy_types, model, field)
@@ -94,7 +94,7 @@ class InstanceAttributeTypes:
 
     @staticmethod
     def get_field_value_type(
-        declared_type: Type, mypy_types: MypyTypes, model: type[Model], field: Field[Any]
+        declared_type: Type, mypy_types: MypyTypes, binding: ModelBinding, field: Field[Any]
     ) -> Type:
         """The type of a field's value on an instance - the type the class declares, None added or
         dropped as the field is nullable or not; the type ``values()`` gives where the class declares
@@ -103,7 +103,7 @@ class InstanceAttributeTypes:
         Args:
             declared_type: The type mypy reads from the class.
             mypy_types: The types of the access.
-            model: The model.
+            binding: The model.
             field: The field.
 
         Returns:
@@ -113,26 +113,28 @@ class InstanceAttributeTypes:
             value_type = MypyTypes.without_none(declared_type)
             return make_simplified_union([value_type, NoneType()]) if field.null else value_type
         try:
-            return mypy_types.get_selected_value_type(model._meta.get_lookup_info(field.model_field_name))
+            return mypy_types.get_selected_value_type(binding.get_lookup_info(field.model_field_name))
         except HareError:
             return declared_type
 
     @staticmethod
-    def get_primary_key_type(attribute_context: AttributeContext, mypy_types: MypyTypes, model: type[Model]) -> Type:
+    def get_primary_key_type(
+        attribute_context: AttributeContext, mypy_types: MypyTypes, binding: ModelBinding
+    ) -> Type:
         """The type of ``pk`` of an instance.
 
         Args:
             attribute_context: The attribute access.
             mypy_types: The types of the access.
-            model: The model.
+            binding: The model.
 
         Returns:
             The type - mypy's own for a model without a key.
         """
-        if not model._meta.primary_key_attribute:
+        if not binding.primary_key_attribute:
             return attribute_context.default_attr_type
         try:
-            key_type = mypy_types.get_selected_value_type(model._meta.get_lookup_info(PRIMARY_KEY_ALIAS))
+            key_type = mypy_types.get_selected_value_type(binding.get_lookup_info(PRIMARY_KEY_ALIAS))
         except HareError:
             return attribute_context.default_attr_type
         return make_simplified_union([key_type, NoneType()]) if attribute_context.is_lvalue else key_type

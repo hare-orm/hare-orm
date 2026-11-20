@@ -11,6 +11,7 @@ from hare.exceptions import (
     UnSupportedError,
     ValidationError,
 )
+from hare.fields.data.temporal.temporal_values import TemporalValues
 from hare.query.enums import Lookup, LookupValueShape
 from hare.query.expressions.constants import INTEGER_LITERAL_RANGE
 from hare.query.filters.lookups.constants import DATE_PART_COMPARISON_LOOKUPS
@@ -141,7 +142,7 @@ class DatePartLookups:
         """
         if isinstance(value, str):
             try:
-                value = datetime.time.fromisoformat(value)
+                value = TemporalValues.parse_iso_time(value)
             except ValueError:
                 pass
         if isinstance(value, datetime.time):

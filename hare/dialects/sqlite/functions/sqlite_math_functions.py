@@ -198,12 +198,10 @@ class SqliteMathFunctions:
             connection: The SQLite connection.
             function_errors: The connection's function errors.
         """
-        functions = {
-            name: (argument_count, function_errors.wrap(function))
-            for name, (argument_count, function) in cls.get_functions().items()
-        }
-        native_math = SqliteNativeFunctions.module.MathFunctions(functions)
-        for name, (argument_count, _function) in functions.items():
-            await connection.create_function(
-                f"{SQLITE_MATH_FUNCTION_PREFIX}{name}", argument_count, getattr(native_math, name), deterministic=True
-            )
+        await SqliteNativeFunctions.install_fallback_group(
+            connection,
+            function_errors,
+            cls.get_functions(),
+            SqliteNativeFunctions.module.MathFunctions,
+            SQLITE_MATH_FUNCTION_PREFIX,
+        )

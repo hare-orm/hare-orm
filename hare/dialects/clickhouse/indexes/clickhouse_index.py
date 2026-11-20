@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.dialect import Dialect
     from hare.dialects.base.features import Features
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class ClickhouseIndex(Index):
@@ -135,8 +135,8 @@ class ClickhouseIndex(Index):
                 f"{dialect} dialect has none: declare an index of that database in the model, or change the migration"
             )
 
-    def get_extra(self, model: type[Model], client: DatabaseClient) -> str:
-        return f" GRANULARITY {self.granularity}{super().get_extra(model, client)}"
+    def get_extra(self, binding: ModelBinding, client: DatabaseClient) -> str:
+        return f" GRANULARITY {self.granularity}{super().get_extra(binding, client)}"
 
     def deconstruct(self) -> tuple[str, list[Any], dict[str, Any]]:
         path, args, kwargs = super().deconstruct()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from hare.ddl.enums import SchemaPartType
 from hare.dialects.clickhouse.constants import (
     CLICKHOUSE_INDEX_TYPE_ARGUMENT_DEFAULTS,
     CLICKHOUSE_INDEX_TYPE_ARGUMENTS,
@@ -10,7 +11,6 @@ from hare.dialects.clickhouse.constants import (
 from hare.dialects.clickhouse.introspection.clickhouse_observed_table_options import ClickhouseObservedTableOptions
 from hare.dialects.clickhouse.introspection.clickhouse_sql_parts import ClickhouseSqlParts
 from hare.dialects.clickhouse.introspection.constants import CLICKHOUSE_ENGINE_CLAUSES
-from hare.inspectdb.enums import SchemaPartType
 from hare.inspectdb.introspection.schema_part import SchemaPart
 from hare.inspectdb.introspection.table_parts import TableParts
 

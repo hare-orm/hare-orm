@@ -49,7 +49,7 @@ struct DefaultEntry {
 /// the Python functions of `InstanceInitialization`, the one implementation of each.
 #[pyclass(frozen, module = "rust.native.rows")]
 pub struct InstanceConstructor {
-    model: Py<PyAny>,
+    binding: Py<PyAny>,
     /// Field name -> its position in `fields`.
     field_indexes: Py<PyDict>,
     fields: Vec<FieldEntry>,
@@ -72,12 +72,13 @@ impl InstanceConstructor {
         instance: &Bound<'py, PyAny>,
         kwargs: &Bound<'py, PyDict>,
         assigns_directly: bool,
+        copied: Option<&Bound<'py, PyDict>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let py = instance.py();
         let helpers = self.helpers.bind(py);
         let mut kwargs = kwargs.clone();
         if kwargs.contains(intern!(py, "pk"))? {
-            kwargs = helpers.call_method1(intern!(py, "expand_pk_kwarg"), (&self.model, &kwargs))?.cast_into()?;
+            kwargs = helpers.call_method1(intern!(py, "expand_pk_kwarg"), (&self.binding, &kwargs))?.cast_into()?;
         }
         let automatic_keys = self.automatic_keys.bind(py);
         for key in automatic_keys.iter() {
@@ -93,6 +94,7 @@ impl InstanceConstructor {
         // Every value is converted before the first is assigned - a failure leaves the instance untouched.
         let mut direct = Vec::with_capacity(kwargs.len());
         let mut relations = Vec::new();
+        let mut pending_defaults = Vec::new();
         let mut passed: Option<Bound<'py, PySet>> = None;
         for (key, value) in kwargs.iter() {
             let Some(index) = field_indexes.get_item(&key)? else {
@@ -118,22 +120,27 @@ impl InstanceConstructor {
             if entry.is_soft_delete {
                 helpers.call_method1(intern!(py, "check_soft_delete_kwarg"), (instance, &key))?;
             }
-            let assigned = if entry.normalized_types.bind(py).contains(value.get_type())?
+            let is_copied = match copied {
+                Some(values) => values.get_item(&key)?.is_some_and(|original| original.is(&value)),
+                None => false,
+            };
+            let assigned = if is_copied
+                || entry.normalized_types.bind(py).contains(value.get_type())?
                 || value.is_instance(expression_class)?
             {
                 // Already the type to_python() returns unchanged; an expression is applied by the write.
                 value
             } else if value.is_callable() {
-                let (has_value, taken): (bool, Bound<'py, PyAny>) = helpers
-                    .call_method1(intern!(py, "take_callable_kwarg"), (instance, &key, &value, field))?
-                    .extract()?;
+                let (has_value, taken): (bool, Bound<'py, PyAny>) =
+                    helpers.call_method1(intern!(py, "take_callable_kwarg"), (&value, field))?.extract()?;
                 if !has_value {
+                    pending_defaults.push((key.cast_into::<PyString>()?, taken));
                     continue;
                 }
                 taken
             } else {
                 if value.is_none() && !entry.null {
-                    helpers.call_method1(intern!(py, "raise_for_none"), (&self.model, &key))?;
+                    helpers.call_method1(intern!(py, "raise_for_none"), (&self.binding, &key))?;
                 }
                 field.getattr(intern!(py, "to_python"))?.call1((&value,))?
             };
@@ -149,6 +156,9 @@ impl InstanceConstructor {
         for (key, value) in &relations {
             instance.setattr(key, value)?;
         }
+        for (key, value) in &pending_defaults {
+            helpers.call_method1(intern!(py, "add_pending_default"), (instance, key, value))?;
+        }
         Ok(match passed {
             Some(passed_fields) => passed_fields.into_any(),
             None => kwargs.into_any(),
@@ -159,7 +169,7 @@ impl InstanceConstructor {
 #[pymethods]
 impl InstanceConstructor {
     /// Args:
-    ///     model: The model.
+    ///     binding: The prepared model binding.
     ///     fields: Per field a keyword may name: `(name, field, is_relation, normalized_types, null,
     ///         is_generated_pk, is_soft_delete)`.
     ///     `automatic_keys`: The automatic primary-key fields.
@@ -172,7 +182,7 @@ impl InstanceConstructor {
     #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
-        model: Py<PyAny>,
+        binding: Py<PyAny>,
         fields: Vec<(Py<PyString>, Py<PyAny>, bool, Py<PyFrozenSet>, bool, bool, bool)>,
         automatic_keys: Py<PyTuple>,
         defaults: Vec<(Py<PyString>, Py<PyAny>, Py<PyAny>, bool, bool, Py<PyFrozenSet>, bool, Py<PyAny>)>,
@@ -212,7 +222,7 @@ impl InstanceConstructor {
             )
             .collect();
         Ok(InstanceConstructor {
-            model,
+            binding,
             field_indexes: field_indexes.unbind(),
             fields: field_entries,
             automatic_keys,
@@ -224,11 +234,17 @@ impl InstanceConstructor {
     }
 
     /// Assigns a new instance's keywords, then gives every field it got no value for its default.
-    fn construct(&self, instance: &Bound<'_, PyAny>, kwargs: &Bound<'_, PyDict>) -> PyResult<()> {
+    #[pyo3(signature = (instance, kwargs, copied=None))]
+    fn construct<'py>(
+        &self,
+        instance: &Bound<'py, PyAny>,
+        kwargs: &Bound<'py, PyDict>,
+        copied: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<()> {
         let py = instance.py();
         // Not a field - set past the overridden __setattr__.
         generic_set_attribute(instance, intern!(py, "_saved_in_db"), &PyBool::new(py, false).to_owned().into_any())?;
-        let passed = self.assign_kwargs(instance, kwargs, self.sets_columns_directly)?;
+        let passed = self.assign_kwargs(instance, kwargs, self.sets_columns_directly, copied)?;
         let helpers = self.helpers.bind(py);
         for default in &self.defaults {
             let name = default.name.bind(py);
@@ -258,11 +274,11 @@ impl InstanceConstructor {
 
     /// Assigns values by field name to an instance, each through `Model.__setattr__`.
     fn assign(&self, instance: &Bound<'_, PyAny>, kwargs: &Bound<'_, PyDict>) -> PyResult<()> {
-        self.assign_kwargs(instance, kwargs, false).map(drop)
+        self.assign_kwargs(instance, kwargs, false, None).map(drop)
     }
 
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
-        visit.call(&self.model)?;
+        visit.call(&self.binding)?;
         visit.call(&self.field_indexes)?;
         for entry in &self.fields {
             visit.call(&entry.field)?;

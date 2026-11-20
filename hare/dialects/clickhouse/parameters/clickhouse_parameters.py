@@ -7,6 +7,8 @@ from hare.dialects.clickhouse.lookups.constants import CLICKHOUSE_VALUE_SET_MINI
 from hare.dialects.clickhouse.types.clickhouse_nullable_types import ClickhouseNullableTypes
 from hare.dialects.clickhouse.types.clickhouse_type_names import ClickhouseTypeNames
 from hare.dialects.clickhouse.types.declarations import ClickhouseTypedValue
+from hare.fields.data.choices.int_enum_field_instance import IntEnumFieldInstance
+from hare.fields.data.json.json_path_field import JSONPathField
 
 if TYPE_CHECKING:
     from hare.fields.field import Field
@@ -30,6 +32,19 @@ class ClickhouseParameters(SqlParameters):
         # VALUES list holding values of different widths (an Int256 and a UInt256) share no type.
         column_type = ClickhouseTypeNames.get_server_type(field.get_column_type(self.dialect))
         return ClickhouseNullableTypes.get_nullable_type(column_type) if field.null else column_type
+
+    def get_result_literal_cast_type(self, field: Field[Any] | None) -> str | None:
+        """Retain the read representation of paths and numeric enums in literal branches.
+
+        JSON paths expose JSON text rather than object columns. Integer enums bind
+        labels; typing those labels as their enum keeps a branch numeric in SQL.
+        """
+        value_field = self.dialect.types.get_value_field(field) if field is not None else None
+        if isinstance(value_field, JSONPathField):
+            return None
+        if isinstance(value_field, IntEnumFieldInstance):
+            return self.get_field_parameter_cast_type(value_field)
+        return super().get_result_literal_cast_type(field)
 
     def get_null_check_cast_type(self, field: Field[Any]) -> str | None:
         # A type of no NULL refuses the NULL the parameter holds (CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN).

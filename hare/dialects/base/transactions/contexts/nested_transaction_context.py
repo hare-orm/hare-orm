@@ -74,7 +74,7 @@ class NestedTransactionContext(TransactionContext):
                 )
             elif not self.client.transaction_state.finished:
                 if exception is not None:
-                    await self._rollback_savepoint_keeping_error(exception, "Rolling back the savepoint")
+                    await self._roll_back_keeping_error(self.client, exception)
                 else:
                     # Not a real commit - a savepoint inside the outer transaction, which can
                     # itself still roll back. The callbacks only actually run once the outermost
@@ -91,9 +91,7 @@ class NestedTransactionContext(TransactionContext):
                             not self.client.transaction_state.finished
                             and self.client._shielded_savepoint_abandoned_task is None
                         ):
-                            await self._rollback_savepoint_keeping_error(
-                                release_error, "Rolling back the savepoint after its failed release"
-                            )
+                            await self._roll_back_keeping_error(self.client, release_error, after_failed_release=True)
                         raise
         finally:
             # A RELEASE/ROLLBACK TO that hit the shielded wait's bound may still be running - the
@@ -124,26 +122,6 @@ class NestedTransactionContext(TransactionContext):
             if current_savepoint_span.get() is self._span:
                 previous_span = self._span_reset_token.old_value
                 current_savepoint_span.set(None if previous_span is contextvars.Token.MISSING else previous_span)
-
-    async def _rollback_savepoint_keeping_error(self, error: BaseException, action: str) -> None:
-        """Rolls back to this context's savepoint while ``error`` is propagating - a failure
-        doing so (a failing on_rollback() callback, a lost connection) is logged and attached to
-        ``error`` as a note instead of replacing it.
-
-        Args:
-            error: The exception propagating out of the block.
-            action: What is being attempted, for the log message and the note.
-        """
-        try:
-            await self.client.savepoint_rollback()
-        except Exception as rollback_error:
-            if self.client.transaction_state.finished:
-                # The ROLLBACK TO itself landed - only an on_rollback() callback failed.
-                self.client.log.error("on_rollback() callback failed", exc_info=rollback_error)
-                error.add_note(f"on_rollback() callback failed after rolling back the savepoint: {rollback_error!r}")
-            else:
-                self.client.log.error("%s failed", action, exc_info=rollback_error)
-                error.add_note(f"{action} also failed: {rollback_error!r}")
 
     async def _release_span_once_abandoned_task_lands(self, task: asyncio.Future[Any]) -> None:
         """Releases this context's span once the still-running RELEASE/ROLLBACK TO has finished. Runs

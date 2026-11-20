@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.dialects.base.schema.runtime_statements.table_clearing import TableClearing
 from hare.dialects.sqlite.client.sqlite_pragma_scope import SqlitePragmaScope
-from hare.models import Model
 
 if TYPE_CHECKING:
     from hare.dialects.sqlite.schema.sqlite_schema_editor import SqliteSchemaEditor
+    from hare.models.model_binding import ModelBinding
 
 
 class SqliteTableClearing(TableClearing):
@@ -29,9 +29,9 @@ class SqliteTableClearing(TableClearing):
 
     @classmethod
     def defer_cascade_foreign_keys(
-        cls, model: type[Model], connection: DatabaseClient
+        cls, binding: ModelBinding, connection: DatabaseClient
     ) -> AbstractAsyncContextManager[bool]:
         # Local import: the deferral walks hare's models, whose modules import this one.
         from hare.dialects.sqlite.schema.runtime_statements.sqlite_foreign_key_deferral import SqliteForeignKeyDeferral
 
-        return SqliteForeignKeyDeferral.defer(model, connection)
+        return SqliteForeignKeyDeferral.defer(binding, connection)

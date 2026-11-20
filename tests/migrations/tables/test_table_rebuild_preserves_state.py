@@ -9,16 +9,15 @@ import pytest
 
 from hare.contrib.test import requires_features
 from hare.ddl import RawSQLTerm
-from hare.ddl.constraints import UniqueConstraint
+from hare.ddl.constraints import CheckConstraint, UniqueConstraint
 from hare.exceptions import IntegrityError
 from hare.fields.data.boolean_field import BooleanField
 from hare.fields.data.numeric import BigIntField, DecimalField, FloatField, IntField
 from hare.fields.data.temporal import DateField, DatetimeField
 from hare.fields.data.text import CharField
 from hare.fields.generated_field import GeneratedField
-from hare.migrations.drift import detect_drift
-from hare.migrations.operations import AddField
-from tests.migrations.round_trips.test_round_trip_real_db import APP_LABEL, RoundTrip, build_live_state, build_model
+from hare.migrations.operations import AddConstraint, AddField
+from tests.migrations.round_trips.test_round_trip_real_db import RoundTrip, build_live_state, build_model
 from tests.utils.database_under_test import DatabaseUnderTest
 
 
@@ -100,14 +99,14 @@ async def test_type_change_converts_stored_values_to_the_new_format(db_isolated_
 @pytest.mark.parametrize(
     ("old_field", "stored_sql", "new_field", "message"),
     [
-        (CharField(max_length=10), "'abc'", IntField(), '"abc"'),
-        (CharField(max_length=10), "'abc'", BooleanField(), '"abc"'),
-        (CharField(max_length=10), "'abc'", DateField(), '"abc"'),
+        (CharField(max_length=10), "'abc'", IntField(), "abc"),
+        (CharField(max_length=10), "'abc'", BooleanField(), "abc"),
+        (CharField(max_length=10), "'abc'", DateField(), "abc"),
         pytest.param(
             CharField(max_length=10),
             "'1.5x'",
             DecimalField(max_digits=6, decimal_places=2),
-            '"1.5x"',
+            "1.5x",
             marks=pytest.mark.decimal_fields,
         ),
     ],
@@ -177,6 +176,31 @@ async def test_rebuild_of_a_table_a_view_reads_keeps_the_view_working(db_isolate
 
 
 @pytest.mark.asyncio
+async def test_a_rebuild_does_not_use_an_existing_table_as_staging(db_isolated_no_schema):
+    round_trip = RoundTrip(db_isolated_no_schema.get_connection())
+    if round_trip.dialect != "sqlite":
+        pytest.skip("Adding this constraint rebuilds the table on SQLite")
+    await round_trip.migrate_to(build_model("Item", "rebuild_item", {"price": IntField()}))
+    await round_trip.connection.execute_script(
+        "CREATE TABLE new__rebuild_item (value INTEGER); INSERT INTO new__rebuild_item VALUES (99); "
+        "INSERT INTO rebuild_item (id, price) VALUES (1, 7), (2, 8)"
+    )
+    constraint = CheckConstraint(check=RawSQLTerm("price >= 0"), name="valid_price")
+    operations = await round_trip.migrate_to(
+        build_model("Item", "rebuild_item", {"price": IntField()}, {"constraints": [constraint]})
+    )
+
+    assert [type(operation) for operation in operations] == [AddConstraint]
+    assert await round_trip.connection.execute_dicts("SELECT price FROM rebuild_item ORDER BY id") == [
+        {"price": 7},
+        {"price": 8},
+    ]
+    assert await round_trip.connection.execute_dicts("SELECT value FROM new__rebuild_item") == [{"value": 99}]
+    with pytest.raises(IntegrityError):
+        await round_trip.connection.execute_script("INSERT INTO rebuild_item (id, price) VALUES (3, -1)")
+
+
+@pytest.mark.asyncio
 async def test_rebuild_keeps_the_autoincrement_counter(db_isolated_no_schema):
     """A rebuilt table started its AUTOINCREMENT counter from the highest id left in it, so the
     id of a deleted newest row was issued again."""
@@ -194,6 +218,44 @@ async def test_rebuild_keeps_the_autoincrement_counter(db_isolated_no_schema):
 
     [row] = await round_trip.connection.execute_dicts("SELECT id FROM rebuild_counted WHERE quantity = 4")
     assert row["id"] == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("empty", [False, True])
+@pytest.mark.parametrize("schema", ["aux", "aux archive"])
+async def test_attached_rebuild_keeps_its_counter_without_changing_the_main_database(
+    db_isolated_no_schema, empty, schema
+):
+    if DatabaseUnderTest.get_dialect().name != "sqlite":
+        pytest.skip("Attached databases are a SQLite schema mechanism")
+    connection = db_isolated_no_schema.get_connection()
+    editor = connection.dialect.schema_editor_class(connection)
+    quote = editor.quote
+    table = editor.qualify_table_name("rebuild_counted", schema)
+    await connection.execute_script(
+        f"ATTACH DATABASE ':memory:' AS {quote(schema)};"
+        "CREATE TABLE main.rebuild_counted(id INTEGER PRIMARY KEY AUTOINCREMENT, quantity INT NOT NULL);"
+        "INSERT INTO main.rebuild_counted(id, quantity) VALUES(1000, 4);"
+        f"CREATE TABLE {table}(id INTEGER PRIMARY KEY AUTOINCREMENT, quantity INT NOT NULL);"
+        f"INSERT INTO {table}(id, quantity) VALUES(1, 4), (100, 4);"
+        f"DELETE FROM {table} WHERE id {'>= 1' if empty else '= 100'};"
+    )
+    original = build_model("Counted", "rebuild_counted", {"quantity": IntField()}, {"schema": schema})
+    changed = build_model("Counted", "rebuild_counted", {"quantity": BigIntField()}, {"schema": schema})
+    round_trip = RoundTrip(connection)
+    round_trip.tracked_state = build_live_state(original)
+    expected_rows = [] if empty else [{"id": 1, "quantity": 4}]
+    for model in (changed, original):
+        await round_trip.migrate_to(model)
+        assert await connection.execute_dicts(f"SELECT id, quantity FROM {table}") == expected_rows
+        assert await connection.execute_dicts(f"SELECT name, seq FROM {quote(schema)}.sqlite_sequence") == [
+            {"name": "rebuild_counted", "seq": 100}
+        ]
+        assert await connection.execute_dicts("SELECT name, seq FROM main.sqlite_sequence") == [
+            {"name": "rebuild_counted", "seq": 1000}
+        ]
+    await connection.execute_script(f"INSERT INTO {table}(quantity) VALUES(9)")
+    assert await connection.execute_dicts(f"SELECT id FROM {table} WHERE quantity = 9") == [{"id": 101}]
 
 
 @requires_features(supports_unique_constraints=True)
@@ -219,7 +281,7 @@ async def test_partial_unique_constraint_survives_rebuilds_and_matches_drift(db_
     assert "WHERE" in index_definitions["uq_partial_open_name"].upper()
     assert sum("WHERE" in definition.upper() for definition in index_definitions.values()) == 2
     assert round_trip.get_pending_operations(widened) == []
-    assert (await detect_drift(round_trip.connection, build_live_state(widened), [APP_LABEL])).operations == []
+    assert (await round_trip.get_drift(build_live_state(widened))).operations == []
     await round_trip.connection.execute_script(
         "INSERT INTO rebuild_partial (name, status, quantity) VALUES ('a', 'open', 0); "
         "INSERT INTO rebuild_partial (name, status, quantity) VALUES ('a', 'closed', 0)"

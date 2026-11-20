@@ -98,7 +98,7 @@ async def test_other_types(db):
 @pytest.mark.asyncio
 async def test_result_reads_as_a_sequence_of_rows(db):
     await BooleanFields.objects.bulk_create([BooleanFields(boolean=index % 2 == 0) for index in range(3)])
-    rows, _reader, _names = await PgResultReading.fetch_result(BooleanFields)
+    rows, _entries, _is_partial = await PgResultReading.fetch_result(BooleanFields)
     assert len(rows) == 3
     assert bool(rows)
     assert rows[0] is rows[0]

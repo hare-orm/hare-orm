@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -17,7 +16,7 @@ from hare.contrib.test.databases.temporary_databases import TemporaryDatabases
 from hare.core.connections.connections import Connections
 from hare.core.hare_context import HareContext
 from hare.dialects.base.client.transaction_lifecycle.transaction_state import TransactionState
-from hare.dialects.base.transactions.contexts.transaction_context import TransactionContext
+from hare.dialects.base.transactions.contexts.top_level_transaction_context import TopLevelTransactionContext
 from hare.dialects.postgresql.client.transaction_pooler import TransactionPooler
 from hare.dialects.postgresql.constants import POSTGRESQL_DIALECT
 from hare.exceptions import (
@@ -58,15 +57,6 @@ class DistributedVersionedWidget(Model):
         optimistic_lock_field = "version"
 
 
-def _distributed_test_pg_url() -> str | None:
-    """The Postgres URL these tests provision databases against - None (skip) unless
-    HARE_TEST_DB is itself a Postgres URL, mirroring conftest.py's own sqlite-vs-postgres check."""
-    raw_db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    if DatabaseUnderTest.get_dialect().name != "postgresql":
-        return None
-    return raw_db_url.replace("\\{", "{").replace("\\}", "}")
-
-
 def _get_database_name_template(template: str) -> str:
     return template if "{}" in template else f"{template}_{{}}"
 
@@ -80,7 +70,7 @@ async def distributed_databases() -> AsyncGenerator[dict[str, Any]]:
     Returns:
         The config of a context on them.
     """
-    template = _distributed_test_pg_url()
+    template = DatabaseUnderTest.get_postgresql_url_template()
     if template is None:
         pytest.skip("Transactions.distributed() needs a Postgres HARE_TEST_DB")
 
@@ -111,10 +101,20 @@ async def distributed_databases() -> AsyncGenerator[dict[str, Any]]:
 
 
 @pytest_asyncio.fixture
-async def distributed_dbs(distributed_databases: dict[str, Any]) -> AsyncGenerator[None]:
+async def distributed_dbs(
+    distributed_databases: dict[str, Any], request: pytest.FixtureRequest
+) -> AsyncGenerator[None]:
     """A context on the module's three databases, emptied after the test."""
+    config = distributed_databases
+    if getattr(request, "param", False):
+        connections = {alias: dict(value) for alias, value in config["connections"].items()}
+        base_engine = connections[COORDINATOR]["engine"]
+        connections[PARTICIPANT_B]["engine"] = (
+            "postgresql" if base_engine == "postgresql+asyncpg" else "postgresql+asyncpg"
+        )
+        config = {**config, "connections": connections}
     async with HareContext() as ctx:
-        await ctx.init(config=distributed_databases)
+        await ctx.init(config=config)
         try:
             yield
         finally:
@@ -249,12 +249,24 @@ async def test_an_empty_coordinator_alias_is_the_default_connection(distributed_
     """The commit ran under the alias given, "" - COMMIT PREPARED found no such connection after the rows
     had committed, and the task kept the finished transaction."""
     async with Transactions.distributed(coordinator="", participants=[PARTICIPANT_A]) as txns:
-        await DistributedWidget.objects.using(txns.coordinator).create(name="on-coordinator")
+        assert txns[""] is txns.coordinator
+        await DistributedWidget.objects.using(txns[""]).create(name="on-coordinator")
         await DistributedWidget.objects.using(txns[PARTICIPANT_A]).create(name="on-a")
 
     assert await _widget_count(COORDINATOR) == 1
     assert await _widget_count(PARTICIPANT_A) == 1
     assert await Connections.get(PARTICIPANT_A).execute_dicts(POSTGRES_DATABASE_PREPARED_TRANSACTIONS_SQL) == []
+
+
+@pytest.mark.asyncio
+async def test_an_empty_participant_alias_indexes_the_default_connection(distributed_dbs) -> None:
+    async with Transactions.distributed(coordinator=PARTICIPANT_A, participants=[""]) as txns:
+        assert txns[""] is txns[COORDINATOR]
+        await DistributedWidget.objects.using(txns[""]).create(name="on-default")
+        await DistributedWidget.objects.using(txns.coordinator).create(name="on-coordinator")
+
+    assert await _widget_count(COORDINATOR) == 1
+    assert await _widget_count(PARTICIPANT_A) == 1
 
 
 @pytest.mark.parametrize("participant", ["", None])
@@ -447,8 +459,17 @@ async def test_distributed_rollback_on_prepare_failure_records_rollback_transact
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "distributed_dbs",
+    [
+        pytest.param(False, id="single-driver"),
+        pytest.param(True, id="mixed-drivers", marks=pytest.mark.requires("asyncpg")),
+    ],
+    indirect=True,
+)
+@pytest.mark.parametrize("recovery_alias", [COORDINATOR, ""], ids=["explicit", "default"])
 async def test_distributed_partial_commit_raises_and_recovery_finishes_it(
-    distributed_dbs, monkeypatch: pytest.MonkeyPatch
+    distributed_dbs, monkeypatch: pytest.MonkeyPatch, recovery_alias: str
 ) -> None:
     """If a participant's COMMIT PREPARED fails after the coordinator already committed the
     decision, distributed() raises DistributedTransactionPartiallyCommittedError naming it -
@@ -472,6 +493,9 @@ async def test_distributed_partial_commit_raises_and_recovery_finishes_it(
 
     assert exc_info.value.pending_participant_aliases == [PARTICIPANT_B]
     xid = exc_info.value.xid
+    coordinator = Connections.get(COORDINATOR)
+    decision_sql = "SELECT resolved_at IS NOT NULL AS finished FROM hare_distributed_decisions WHERE xid = $1"
+    assert await coordinator.execute_dicts(decision_sql, [xid]) == [{"finished": False}]
 
     # The decision already committed durably - coordinator and participant_a both see it.
     assert await _widget_count(COORDINATOR) == 1
@@ -479,14 +503,22 @@ async def test_distributed_partial_commit_raises_and_recovery_finishes_it(
     # participant_b's write is still only PREPARE'd, not yet visible.
     assert await _widget_count(PARTICIPANT_B) == 0
 
-    stale = (await DistributedRecovery.run(COORDINATOR, older_than_seconds=0)).entries
+    stale = (await DistributedRecovery.run(recovery_alias, older_than_seconds=0)).entries
     matching = [entry for entry in stale if entry.xid == xid]
     assert len(matching) == 1
     assert matching[0].participant_alias == PARTICIPANT_B
     assert matching[0].resolution == DistributedTransactionResolution.COMMIT
 
-    await real_commit_prepared(Connections.get(PARTICIPANT_B), PARTICIPANT_B, xid)
-    assert await _widget_count(PARTICIPANT_B) == 1
+    monkeypatch.setattr(DistributedCoordinator, "commit_prepared", real_commit_prepared)
+    recovered = await DistributedRecovery.run(recovery_alias, finish=True, older_than_seconds=0)
+    assert recovered.completed_xids == (xid,)
+    assert await coordinator.execute_dicts(decision_sql, [xid]) == [{"finished": True}]
+    for alias, name in ((COORDINATOR, "on-coordinator"), (PARTICIPANT_A, "on-a"), (PARTICIPANT_B, "on-b")):
+        client = Connections.get(alias)
+        assert await client.execute_dicts("SELECT name FROM distributedwidget") == [{"name": name}]
+        assert (
+            await client.execute_dicts("SELECT gid FROM pg_prepared_xacts WHERE database = current_database()") == []
+        )
 
 
 @pytest.mark.asyncio
@@ -550,19 +582,9 @@ async def test_recovery_age_filter_never_turns_a_commit_decision_into_an_abort(
 async def test_distributed_partial_commit_does_not_permanently_strand_rollback_restore_bookkeeping(
     distributed_dbs, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Model._register_rollback_restore() (Meta.optimistic_lock_field/soft_delete_field
-    optimistic-bump protection) registers its own on_commit()/on_rollback() pair on the
-    participant's client the moment save() runs inside distributed()'s block. If that
-    participant's own COMMIT PREPARED later fails (the exact partial-commit scenario the test
-    above covers), distributed()'s commit-phase loop deliberately fires NEITHER callback for it
-    (correctly - which of "committed" or "not" actually happened is unknown, so firing either
-    would risk lying to an unrelated caller's own on_rollback()/on_commit()). That correctly
-    leaves this mechanism's own pending marker on the model instance without a normal way to
-    clear - confirmed live as a real bug: a LATER, entirely separate, ordinary transaction on
-    the same instance that itself rolls back for an unrelated reason silently skipped
-    registering its OWN restore (the marker looked "already pending"), so its own version bump
-    was never rolled back in memory either, permanently strand-locking the instance out of the
-    very protection round AR's own rollback-restore fix added."""
+    """An unknown participant outcome skips commit and rollback callbacks. A later local transaction on the
+    same instance can still register and apply a rollback restore.
+    """
     real_commit_prepared = DistributedCoordinator.commit_prepared
 
     async def flaky_commit_prepared(client, alias: str, xid: str) -> None:
@@ -1073,6 +1095,7 @@ async def test_distributed_rejects_non_postgres_alias(sqlite_multi_db) -> None:
 
 def _fake_participant() -> tuple[object, object]:
     client = MagicMock()
+    client._savepoint_name = None
     client.transaction_state = TransactionState()
     client.log = MagicMock()
     client.rollback = AsyncMock()
@@ -1091,13 +1114,13 @@ async def test_distributed_abort_never_commits_after_failed_rollback(failed_alia
         client, context = _fake_participant()
         client.commit = AsyncMock()
 
-        async def rollback(client=client, alias=alias):
+        async def rollback(*, _on_wait_cancelled=None, client=client, alias=alias):
             if alias == failed_alias:
                 raise rollback_error("rollback interrupted")
             client.transaction_state.finish(TransactionOutcome.ROLLED_BACK)
 
         async def exit_context(exception_type, exception, traceback, client=client):
-            await TransactionContext._commit_or_rollback(client, exception_type, exception)
+            await TopLevelTransactionContext._commit_or_rollback(client, exception_type, exception)
 
         client.rollback.side_effect = rollback
         context.__aexit__.side_effect = exit_context

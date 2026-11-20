@@ -23,7 +23,7 @@ with Tenancy.scope(company.id):
 
 `tenant_field` can also name a forward `ForeignKeyField`/`OneToOneField` — `tenant_field = "company"` for
 `company = fields.ForeignKeyField("models.Company")` means its key column, `company_id`, and
-`Order._meta.tenant_field` reads `"company_id"`.
+`apps.get_binding(Order).tenant_field` reads `"company_id"`.
 
 ## <a id="tenancy-scope"></a>`Tenancy.scope(tenant)`
 
@@ -125,6 +125,10 @@ that one scope: its own filter, every JOIN it makes, `.values()`/`.values_list()
 it, its use as a subquery (`field__in=queryset`, `Subquery(...)`, `Exists(...)`) and the second query of
 `.prefetch_related()`.
 
+For `iterator()` and `stream()`, the first read captures that execution's scope. All pages keep it
+even if the consumer changes `Tenancy.scope()` between yielded rows. The consumer's scope is restored
+before each row is yielded; a separate execution of the queryset reads its own active scope.
+
 A scope value is compared with a row's tenant after the tenant field's own conversion, so for a
 `UUIDField` tenant `Tenancy.scope(uuid_value)` and `Tenancy.scope(str(uuid_value))` are the same tenant
 on every database.
@@ -186,8 +190,12 @@ scope's value" below is the one value of that scope, and "inside the scope" mean
   instance built by hand around another tenant's primary key writes nothing. Changing the tenant of an
   instance and saving it moves the row, to a tenant inside the scope only. `delete()` and `restore()` of
   an instance are checked the same way.
-- **A forward FK/O2O can't point at a row its own model's scope doesn't show.** `create()`, `save()`,
-  `.update(...)`, `bulk_create()` and `bulk_update()` read the tenant of every tenant-scoped row a
+- **A forward FK/O2O can't point at a row its own model's scope doesn't show.**
+  Key conversion and tenant lookup use the related model's selected connection. A shared route keeps
+  the exact source client; a distinct configured target keeps its route. An all-NULL relation key
+  needs no target lookup or connection selection.
+  `create()`, `save()`, `.update(...)`, `bulk_create()` and `bulk_update()` read the tenant of every
+  tenant-scoped row a
   written relation names (batched reads for each relation) and raise `QueryError` when it is outside
   the scope **of the related model** — from a tenant-scoped model and from a shared one alike, as M2M
   `add()` rejects such a row. With one value for every model that is "the related row is the active

@@ -9,7 +9,7 @@ from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclass(frozen=True)
@@ -61,11 +61,11 @@ class ExclusiveArcCondition(DialectCondition):
         """
         return replace(self, fields=tuple(new_name if name == old_name else name for name in self.fields))
 
-    def get_condition_sql(self, model: type[Model], client: DatabaseClient) -> str:
+    def get_condition_sql(self, binding: ModelBinding, client: DatabaseClient) -> str:
         """The predicate written into a table of ``model``.
 
         Args:
-            model: The model the constraint belongs to.
+            binding: The model the constraint belongs to.
             client: The client of the database the DDL runs on.
 
         Returns:
@@ -73,7 +73,7 @@ class ExclusiveArcCondition(DialectCondition):
         """
         quote_identifier = client.dialect.literals.quote_identifier
         quoted_column_groups = [
-            [quote_identifier(column_name) for column_name in model._meta.get_column_names((name,))]
+            [quote_identifier(column_name) for column_name in binding.get_column_names((name,))]
             for name in self.fields
         ]
         return client.dialect.schema_editor_class.tenant_conditions_class.get_exclusive_arc_check_sql(

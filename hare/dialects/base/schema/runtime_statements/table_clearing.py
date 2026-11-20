@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
 from hare.exceptions import UnSupportedError
-from hare.models import Model
 
 if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
+    from hare.models.model_binding import ModelBinding
 
 
 class TableClearing(SchemaEditorPart):
@@ -25,9 +25,9 @@ class TableClearing(SchemaEditorPart):
         return editor.qualify_table_name(table_name, schema)
 
     @classmethod
-    def get_model_target_sql(cls, editor: BaseSchemaEditor, model: type[Model]) -> str:
+    def get_model_target_sql(cls, editor: BaseSchemaEditor, binding: ModelBinding) -> str:
         """Prepare a model target while its storage declaration is still available."""
-        return cls.get_table_target_sql(editor, model._meta.db_table, model._meta.schema)
+        return cls.get_table_target_sql(editor, binding.db_table, binding.schema)
 
     @classmethod
     async def clear_tables(cls, connection: DatabaseClient, quoted_tables: Sequence[str]) -> None:
@@ -45,7 +45,7 @@ class TableClearing(SchemaEditorPart):
 
     @classmethod
     def defer_cascade_foreign_keys(
-        cls, model: type[Model], connection: DatabaseClient
+        cls, binding: ModelBinding, connection: DatabaseClient
     ) -> AbstractAsyncContextManager[bool]:
         """Defers, for the block, the foreign keys a hard delete of ``model`` rows made of several
         statements (or of one, see ``checks_foreign_keys_per_cascade_step``) can run into, so a row
@@ -54,7 +54,7 @@ class TableClearing(SchemaEditorPart):
         ends.
 
         Args:
-            model: The model rows are deleted from.
+            binding: The model rows are deleted from.
             connection: A client inside the transaction the delete runs in.
 
         Returns:

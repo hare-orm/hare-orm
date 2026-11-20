@@ -129,11 +129,7 @@ def test_json_attribute_criterion_sqlite_resolves_dot_collision_semantically():
 
 @pytest.mark.parametrize("value", ADVERSARIAL_VALUES)
 def test_with_sql_escapes_cte_alias(value):
-    """QueryBuilder._with_sql() spliced a CTE's own name directly into "WITH {name} AS (...)"
-    with no quoting at all - the only identifier sink in the whole builder that wasn't run
-    through SqlContext.quote_text() (Table/Schema/Field/Index/aliases all are). A malicious name like
-    'x AS (SELECT 1) SELECT ... FROM other_table --' broke out of the WITH clause entirely and
-    substituted a completely different query."""
+    """Render a CTE name as one quoted identifier even when it contains SQL syntax."""
     inner = Query.from_(Table("t")).select("id")
     outer = Query.from_(Table("t")).with_(inner, value).select("id")
     rendered = outer.get_sql(DEFAULT_SQL_CONTEXT)

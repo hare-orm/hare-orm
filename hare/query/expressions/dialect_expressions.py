@@ -24,7 +24,7 @@ class DialectExpressions:
     registered: ClassVar[SnapshotMapping[type, frozenset[type[Dialect]]]] = SnapshotMapping()
     #: The dialect classes each expression class has through its bases, None for an expression of every
     #: dialect - kept in a bucket of this class.
-    found_dialect_classes: ClassVar[Cache[Any]] = Cache(holds_sql=False)
+    found_dialect_classes: ClassVar[Cache[Any]] = Cache()
     #: The buckets of the caches this class reads (``Cache.get_bucket()``).
     cache_buckets: ClassVar[dict[int, Any]] = {}
     #: The bucket of ``found_dialect_classes`` - read on every resolution of a function; taken on first use.
@@ -94,18 +94,21 @@ class DialectExpressions:
         return dialect_classes
 
     @classmethod
-    def raise_if_dialect_lacks(cls, expression: Expression, dialect: Dialect) -> None:
+    def raise_if_dialect_lacks(
+        cls, expression: Expression, dialect: Dialect, *, checks_admission: bool = True
+    ) -> None:
         """Refuses an expression of another database's dialect before any SQL.
 
         Args:
             expression: The expression resolved.
             dialect: The dialect of the query.
+            checks_admission: False for a neutral probe that only analyzes term structure.
 
         Raises:
             UnSupportedError: The dialect registered no such expression, another dialect did.
         """
         dialect_classes = cls.get_dialect_classes(type(expression))
-        if dialect_classes is not None and not isinstance(dialect, tuple(dialect_classes)):
+        if dialect_classes is not None and checks_admission and not isinstance(dialect, tuple(dialect_classes)):
             dialect_names = ", ".join(sorted(str(dialect_class.name) for dialect_class in dialect_classes))
             raise UnSupportedError(
                 f"{type(expression).__name__}() is a function of the {dialect_names} database - the query runs on "

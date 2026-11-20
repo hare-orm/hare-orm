@@ -11,9 +11,10 @@ from hare.migrations.loading.recorder import MigrationRecorder
 
 
 class FakeConnection:
-    def __init__(self, dialect: str) -> None:
+    def __init__(self, dialect: str, *, journal_exists: bool = False) -> None:
         self.dialect = DialectRegistry.get_dialect(dialect)
         self.query_class = {"sqlite": SqliteQuery, "postgresql": PostgresqlQuery}[dialect]
+        self.journal_exists = journal_exists
         self.executed_scripts: list[str] = []
         self.inserts: list[tuple[str, list]] = []
         self.queries: list[tuple[str, list | None]] = []
@@ -21,7 +22,11 @@ class FakeConnection:
     async def execute_script(self, query: str) -> None:
         self.executed_scripts.append(query)
 
-    async def execute(self, query: str, values: list | None = None, *, returns_rows: bool | None = None):
+    async def execute(self, query: str, values: list | None = None) -> StatementResult:
+        rows = [{"name": "hare_migrations"}] if self.journal_exists else []
+        return StatementResult(len(rows), rows)
+
+    async def _execute_built(self, query: str, values: list | None = None) -> StatementResult:
         if query.lstrip().upper().startswith("INSERT"):
             self.inserts.append((query, values))
             return StatementResult(1, [])
@@ -108,13 +113,7 @@ async def test_applied_migrations_returns_empty_when_table_missing() -> None:
     existence check itself (not an exception from the real SELECT) reports this, and
     applied_migrations() must treat it as "no migrations applied yet", not raise."""
 
-    class MissingTableConnection(FakeConnection):
-        async def execute(self, query: str, values: list | None = None):
-            # The existence check query (sqlite_master/pg_tables) genuinely finds nothing -
-            # the real SELECT ... FROM hare_migrations is never even reached.
-            return None, []
-
-    recorder = MigrationRecorder(MissingTableConnection("sqlite"))
+    recorder = MigrationRecorder(FakeConnection("sqlite"))
     assert await recorder.applied_migrations() == []
 
 
@@ -126,12 +125,10 @@ async def test_applied_migrations_does_not_swallow_unrelated_bugs() -> None:
     caught exception from the real SELECT."""
 
     class BuggyConnection(FakeConnection):
-        async def execute(self, query: str, values: list | None = None):
-            if "sqlite_master" in query:
-                return None, [{"name": "hare_migrations"}]
+        async def _execute_built(self, query: str, values: list | None = None) -> StatementResult:
             raise TypeError("boom")
 
-    recorder = MigrationRecorder(BuggyConnection("sqlite"))
+    recorder = MigrationRecorder(BuggyConnection("sqlite", journal_exists=True))
     with pytest.raises(TypeError, match="boom"):
         await recorder.applied_migrations()
 
@@ -147,12 +144,10 @@ async def test_applied_migrations_propagates_a_transient_error_on_an_existing_ta
     confused with the table genuinely missing."""
 
     class LockTimeoutConnection(FakeConnection):
-        async def execute(self, query: str, values: list | None = None):
-            if "sqlite_master" in query:
-                return None, [{"name": "hare_migrations"}]
+        async def _execute_built(self, query: str, values: list | None = None) -> StatementResult:
             raise OperationalError("simulated: database is locked")
 
-    recorder = MigrationRecorder(LockTimeoutConnection("sqlite"))
+    recorder = MigrationRecorder(LockTimeoutConnection("sqlite", journal_exists=True))
     with pytest.raises(OperationalError, match="database is locked"):
         await recorder.applied_migrations()
 
@@ -170,7 +165,6 @@ async def test_applied_migrations_ignores_a_migrations_table_in_another_schema(d
     )
     recorder = MigrationRecorder(connection)
 
-    assert await recorder._table_exists() is False
     assert await recorder.applied_migrations() == []
 
 

@@ -8,6 +8,7 @@ from hare.dialects.base.types.type_mapping import TypeMapping
 from hare.dialects.base.types.type_registry import TypeRegistry
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.models.write.returned_values import ReturnedValues
+from tests.utils.model_bindings import ModelBindings
 
 pytestmark = pytest.mark.database_independent
 
@@ -22,9 +23,11 @@ def test_returned_rows_match_container_keys_in_input_order(key, match, expected_
     class Book(Model):
         key = fields.JSONField(source_field="book_key")
 
-    first = Book(key=key)
-    repeated = Book(key=key)
-    second = Book(key={"other": [3]})
+    prepared_models = ModelBindings.prepare(Book)
+
+    first = prepared_models.new(Book, key=key)
+    repeated = prepared_models.new(Book, key=key)
+    second = prepared_models.new(Book, key={"other": [3]})
     rows = [
         {"book_key": json.dumps(second.key)},
         {"book_key": json.dumps(key)},
@@ -32,7 +35,9 @@ def test_returned_rows_match_container_keys_in_input_order(key, match, expected_
         {"book_key": json.dumps({"absent": 4})},
     ]
     instances = [first, repeated, second]
-    matched = list(match(Book, DialectRegistry.get_dialect("sqlite").types, instances, rows, ["key"]))
+    matched = list(
+        match(prepared_models.get_binding(Book), DialectRegistry.get_dialect("sqlite").types, instances, rows, ["key"])
+    )
     assert len(matched) == len(expected_indices)
     assert all(obj is instances[index] for (obj, _row), index in zip(matched, expected_indices, strict=True))
     assert [row for _, row in matched] == rows[: len(expected_indices)]
@@ -59,6 +64,8 @@ def test_stored_keys_preserve_conversion_dispatch_and_order(count, conversion, m
         name = FoldedText(null=True)
         payload = fields.JSONField(null=True)
 
+    prepared_models = ModelBindings.prepare(Book)
+
     types = TypeRegistry()
     if conversion == "mapping":
 
@@ -80,11 +87,14 @@ def test_stored_keys_preserve_conversion_dispatch_and_order(count, conversion, m
 
         monkeypatch.setattr(types, conversion, tracked)
 
-    selected = [Book._meta.fields_map[name] for name in ("name", "payload")]
+    selected = [prepared_models.get_binding(Book).fields_map[name] for name in ("name", "payload")]
     # Metadata preparation precedes conversion, including when there are no objects.
     for field in selected:
         types.get_native_key_type(field)
-    objs = [Book(name="BOOK" if index != 1 else None, payload={"a": [index, None]}) for index in range(count)]
+    objs = [
+        prepared_models.new(Book, name="BOOK" if index != 1 else None, payload={"a": [index, None]})
+        for index in range(count)
+    ]
     events.clear()
     expected = [
         tuple(

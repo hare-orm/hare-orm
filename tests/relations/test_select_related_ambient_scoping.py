@@ -722,16 +722,7 @@ async def test_distinct_on_touching_a_tenant_scoped_relation_keeps_a_plan_bindin
 
 
 # ============================================================================
-# A queryset's own BASE ambient tenant filter is frozen at CONSTRUCTION time (Manager.
-# get_queryset() reads Tenancy.current.get() once, right there) - but a JOIN's own ambient scope
-# condition (select_related()/a nested `related__field=value` filter) used to be resolved lazily,
-# inside _make_query(), which only runs when the query is actually awaited. Building a queryset
-# under one Tenancy.scope() and awaiting it later - after that block exited, or under a DIFFERENT
-# scope, an ordinary "build now, execute slightly later" pattern - used to make the base filter
-# and the JOIN condition silently disagree, or raise ConfigurationError purely because of WHEN the
-# query happened to be awaited. QuerySet._ambient_tenant_snapshot now freezes the tenant value at
-# construction time too, threaded through ExpressionContext.ambient_tenant_snapshot to every JOIN
-# this query builds, however lazily.
+# A reusable queryset applies the ambient tenant selected at execution to its base rows and joins.
 # ============================================================================
 
 

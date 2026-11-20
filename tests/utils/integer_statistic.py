@@ -3,6 +3,7 @@ under test."""
 
 from decimal import Decimal
 
+from hare.core.hare_context import HareContext
 from hare.models import Model
 
 
@@ -12,4 +13,11 @@ class IntegerStatistic:
     @staticmethod
     def get_type(model: type[Model]) -> type:
         """``Decimal`` where the database computes it exactly (PostgreSQL's ``numeric``), else ``float``."""
-        return Decimal if model._meta.connection.dialect.features.computes_integer_statistics_exactly else float
+        return (
+            Decimal
+            if HareContext.require_current()
+            .apps.get_queryset(model)
+            .get_connection()
+            .dialect.features.computes_integer_statistics_exactly
+            else float
+        )

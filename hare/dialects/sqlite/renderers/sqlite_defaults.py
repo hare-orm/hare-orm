@@ -74,7 +74,7 @@ class SqliteDefaults:
                     value_type=default.value_type.value,
                 )
             moment = SQLITE_NOW_SHIFTED_MOMENT_TEMPLATE.format(minutes=int(constant_offset.total_seconds() // 60))
-            suffix = " || " + sql_context.dialect.literals.get_string_literal_sql(default.get_configured_offset_text())
+            suffix = " || " + sql_context.dialect.literals.get_string_literal_sql(Timezone.get_fixed_offset_text())
         else:
             moment = SQLITE_NOW_LOCAL_MOMENT
         if default.value_type == NowValueType.DATE:

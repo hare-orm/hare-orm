@@ -5,6 +5,7 @@ from typing import Any
 
 from hare.fields.field import Field
 from hare.models import Model
+from hare.models.model_binding import ModelBinding
 
 
 @dataclass
@@ -18,7 +19,12 @@ class ReferencingKeyColumns:
         key_columns: Each key column's name paired with its new SQL type.
     """
 
-    model: type[Model]
+    binding: ModelBinding
     relation_field: Field[Any]
     qualified_table: str
     key_columns: tuple[tuple[str, str], ...]
+
+    @property
+    def model(self) -> type[Model]:
+        """The ordinary Python class of the prepared schema node."""
+        return self.binding._model

@@ -14,6 +14,7 @@ from contextvars import ContextVar
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.classes.deferred_import import DeferredImport
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import ConfigurationError, DecryptionError, QueryError, ValidationError
 from hare.fields.encrypted.constants import (
@@ -30,6 +31,8 @@ if TYPE_CHECKING:
     from hare.core.hare_context import HareContext
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
+    from hare.query.queryset.queryset import QuerySet
 
 
 class FieldEncryption:
@@ -37,7 +40,9 @@ class FieldEncryption:
 
     #: ``cryptography.fernet``, imported by the first ``get_fernet_module()`` rather than with hare.
     fernet_module: ClassVar[ModuleType | None] = None
-    hare_context_class: ClassVar[type[HareContext] | None] = None
+    hare_context_class: ClassVar[DeferredImport[type[HareContext]]] = DeferredImport(
+        "hare.core.hare_context", "HareContext"
+    )
     default_keyring: ClassVar[EncryptionKeyring | None] = None
     default_binding: ClassVar[EncryptionBinding] = EncryptionBinding(None, None)
     binding: ClassVar[ContextVar[EncryptionBinding | None]] = ContextVar("hare_encryption_binding", default=None)
@@ -45,12 +50,7 @@ class FieldEncryption:
     @classmethod
     def get_current_context(cls) -> HareContext | None:
         """The active application context, resolving ``HareContext`` once after module import."""
-        hare_context_class = cls.hare_context_class
-        if hare_context_class is None:
-            from hare.core.hare_context import HareContext
-
-            cls.hare_context_class = hare_context_class = HareContext
-        return hare_context_class.get_current()
+        return cls.hare_context_class.get_current()
 
     @classmethod
     def configure(
@@ -294,42 +294,50 @@ class FieldEncryption:
     ) -> int:
         """Rotate every batch under the execution's captured keyring and selected connection."""
         from hare.core.connections.connections import Connections
+        from hare.core.connections.model_connection_choice import ModelConnectionChoice
+        from hare.core.hare_context import HareContext
         from hare.query.scopes.row_scopes import RowScopes
 
+        context = HareContext.require_current()
+        bindings = tuple(context.get_model_binding(model) for model in dict.fromkeys(models))
         written = 0
-        # A model given twice is written once.
-        for model in dict.fromkeys(models):
+        for binding in bindings:
+            model = binding._model
             encrypted_field_names = [
                 name
-                for name, field in model._meta.fields_map.items()
-                if getattr(field, "encrypted", False) and name in model._meta.fields_db_projection
+                for name, field in binding.fields_map.items()
+                if getattr(field, "encrypted", False) and name in binding.fields_db_projection
             ]
             if not encrypted_field_names:
                 continue
-            model._meta.raise_if_no_primary_key(f"FieldEncryption.reencrypt() of {model.__name__}")
-            connection = Connections.get_client(using) or model.get_connection(for_write=True)
-            rows = RowScopes.get_base_queryset(model, RowVisibility(all_tenants=True, include_deleted=True)).using(
-                connection
-            )
+            binding.raise_if_no_primary_key(f"FieldEncryption.reencrypt() of {model.__name__}")
+            connection = Connections.get_client(using) or ModelConnectionChoice.get(context, binding, True)
+            queryset = RowScopes.get_base_queryset(binding, RowVisibility(all_tenants=True, include_deleted=True))
+            rows = queryset.using(connection)
             batch: list[Any] = []
-            async for row in rows.order_by(*model._meta.primary_key_attribute_names).iterator(chunk_size=batch_size):
+            async for row in rows.order_by(*binding.primary_key_attribute_names).iterator(chunk_size=batch_size):
                 batch.append(row)
                 if len(batch) == batch_size:
-                    written += await cls.write_batch(model, batch, encrypted_field_names, connection)
+                    written += await cls.write_batch(queryset, binding, batch, encrypted_field_names, connection)
                     batch = []
             if batch:
-                written += await cls.write_batch(model, batch, encrypted_field_names, connection)
+                written += await cls.write_batch(queryset, binding, batch, encrypted_field_names, connection)
         return written
 
     @staticmethod
     async def write_batch(
-        model: type[Model], rows: list[Any], field_names: list[str], connection: DatabaseClient
+        queryset: QuerySet[Model],
+        binding: ModelBinding,
+        rows: list[Any],
+        field_names: list[str],
+        connection: DatabaseClient,
     ) -> int:
         """Writes the encrypted fields of a batch of rows in one transaction - as they are on a
         database without transactions.
 
         Args:
-            model: The rows' model.
+            queryset: The scoped model source shared by the rotation.
+            binding: The rows' model.
             rows: The rows, read (and so decrypted) with any configured key.
             field_names: The encrypted fields.
             connection: The connection selected for this model's rotation.
@@ -338,9 +346,13 @@ class FieldEncryption:
             How many rows were written.
         """
         # Deferred: see reencrypt().
-        from hare.query.scopes.row_scopes import RowScopes
+        from hare.models.tenancy.tenancy import Tenancy
+        from hare.query.scopes.tenants.model_tenants import ModelTenants
 
-        queryset = RowScopes.get_base_queryset(model, RowVisibility(all_tenants=True, include_deleted=True))
-        async with connection._in_transaction() as transaction:
-            await queryset.using(transaction).bulk_update(rows, fields=field_names)
+        scope = Tenancy.current.get()
+        if binding.tenant_field:
+            scope = ModelTenants({binding._model: Tenancy.ALL}, fallback=scope)
+        with Tenancy.scope(scope):
+            async with connection._in_transaction() as transaction:
+                await queryset.using(transaction).bulk_update(rows, fields=field_names)
         return len(rows)

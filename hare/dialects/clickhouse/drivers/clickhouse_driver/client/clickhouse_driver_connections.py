@@ -125,11 +125,11 @@ class ClickhouseDriverConnections:
                 library_client = ClickhouseDriverLibraryClient(**self.connection_settings)
                 self.thread_connections.library_client = library_client
                 self.library_clients.append(library_client)
-            if submit_time:
-                self.statistics.add_wait(time.perf_counter() - submit_time)
             # Taken before its connection opens: close() leaves a taken one to its thread.
             self.busy_library_clients.add(library_client)
         try:
+            if submit_time:
+                self.statistics.add_wait(time.perf_counter() - submit_time)
             if not self._is_connected(library_client):
                 self._connect(library_client)
             return function(library_client, *arguments)
@@ -167,11 +167,9 @@ class ClickhouseDriverConnections:
             try:
                 connection.disconnect()
             finally:
-                with self.lock:
-                    self.statistics.add_connect_failure()
+                self.statistics.add_connect_failure()
             raise
-        with self.lock:
-            self.statistics.add_connect(time.perf_counter() - start_time)
+        self.statistics.add_connect(time.perf_counter() - start_time)
 
     def get_occupancy(self) -> tuple[int, int, int, int, int]:
         """How the connections are taken.

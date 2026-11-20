@@ -49,7 +49,6 @@ class HareTaskiq:
         tenant_label: str | None = DEFAULT_TENANT_LABEL,
         transaction_retries: int = 0,
     ) -> None:
-        self.broker = broker
         self.lifecycle = ApplicationLifecycle(
             config, transactions=atomic_tasks, transactions_option="atomic_tasks", context=hare_context
         )

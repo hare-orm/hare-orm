@@ -42,7 +42,7 @@ class MigrationTableRows:
     @staticmethod
     def get_identity(model: ModelState) -> tuple[str | None, str]:
         """The declared schema and physical table name, independently of the model name."""
-        return model.options.get(ModelOption.SCHEMA) or None, model.table or model.name.lower()
+        return model.options.get(ModelOption.SCHEMA) or None, model.db_table
 
     @staticmethod
     def has_physical_table(model: ModelState) -> bool:
@@ -53,8 +53,8 @@ class MigrationTableRows:
         lowercase_name = name.lower()
         return next(
             (
-                model
-                for (app, model_name), model in state.models.items()
+                state.models[(app, model_name)]
+                for app, model_name in state.models
                 if app == app_label and model_name.lower() == lowercase_name
             ),
             None,
@@ -80,14 +80,14 @@ class MigrationTableRows:
         operation = prepared.operation
         counts = {}
         for name in operation.get_table_model_names():
-            source_name = operation.old_name if isinstance(operation, RenameModel) else name
-            model = self.get_model(prepared.before, app_label, source_name)
             if isinstance(operation, CreateModel) and not operation.state_only:
                 created_model = self.get_model(prepared.after, app_label, name)
                 counts[name.lower()] = (
                     0 if created_model is not None and self.has_physical_table(created_model) else None
                 )
             else:
+                source_name = operation.old_name if isinstance(operation, RenameModel) else name
+                model = self.get_model(prepared.before, app_label, source_name)
                 counts[name.lower()] = await self.get_count(model)
         return counts
 

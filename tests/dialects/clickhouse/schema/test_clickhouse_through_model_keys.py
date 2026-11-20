@@ -1,18 +1,13 @@
 """A many-to-many relation switched from its automatic through table to a through model on ClickHouse, which
 writes no key of its own: each link carried over gets the next key of the through model's series."""
 
-import os
 import textwrap
 
 import pytest
 
 from tests.utils.cli_project_factory import project_factory  # noqa: F401
 
-
-@pytest.fixture(autouse=True)
-def skip_without_clickhouse():
-    if not os.getenv("HARE_TEST_DB", "").startswith("clickhouse"):
-        pytest.skip("runs against the ClickHouse test server - make test_clickhouse")
+pytestmark = pytest.mark.usefixtures("skip_without_clickhouse")
 
 
 @pytest.mark.asyncio

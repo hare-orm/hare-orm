@@ -15,6 +15,19 @@ methods use field and annotation names, as on the queryset; an expression passed
 renamed field: `values(title="name").filter(title="a").order_by("-title")` (a new name that is a field of
 the model keeps meaning that field).
 
+Output aliases do not replace existing source annotations. For example,
+`annotate(value=F("score")).values(value="category").distinct()` selects distinct categories;
+the unselected score expression does not add a column to `DISTINCT` or `GROUP BY`.
+Filters and ordering by an existing annotation name continue to read its original expression.
+Several outputs can read the same annotation, and renaming two annotations in either order
+does not change the expressions they read.
+
+Output names remain public names even when they match a physical column name or a
+column selected through `select_related()`. The SQL compiler assigns conflicting columns
+private aliases; model attributes, dictionary keys, tuple positions and combined-query
+outputs keep the requested names and values. Ordering and grouping continue to refer to
+the corresponding expressions.
+
 | Method | Type | What it does |
 |---|---|---|
 | `filter()` / `exclude()` / `order_by()` / `distinct(*fields)` / `alias()` / `group_by()` / `all()` / `none()` / `limit()` / `offset()` / `using()` / `select_for_update()` / `with_cte()` / `after_cursor()` / `before_cursor()` / `all_tenants()` / `include_deleted()` / `only_deleted()` | chain | Same as on the queryset, keeping the selected fields and the row shape. A filter on an aggregate annotation applies to the groups (`HAVING`). |

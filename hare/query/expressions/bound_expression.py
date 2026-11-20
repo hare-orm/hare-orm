@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
+from hare.dialects.base.types.result_literal_binding import ResultLiteralBinding
 from hare.dialects.enums import ParameterPosition
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
 from hare.query.expressions.compatibility.result_branch import ResultBranch
@@ -12,6 +13,9 @@ from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
 from hare.query.expressions.value import Value
 from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
+from hare.sql.functions.cast import Cast
+from hare.sql.terms.values.literal_value import LiteralValue
+from hare.sql.terms.values.null_value import NullValue
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 
@@ -60,10 +64,17 @@ class BoundExpression:
         *,
         encoder: Callable[[Any], Any] | None = None,
         position: ParameterPosition | None = None,
+        binding: ResultLiteralBinding | None = None,
     ) -> ExpressionResult:
-        """Build a literal once with the selected conversion, or reuse an already bound child."""
+        """Lower once with a selected binding or a plain encoder; reuse already bound children.
+
+        A binding retains the field whose conversion produced the parameter and applies
+        its SQL type before generic literal typing. Plain encoders retain inferred typing.
+        """
         if self.result is not None:
             return self.result
+        if binding is not None:
+            encoder = binding.encoder
         result = ExpressionArguments.get_result(
             self.owner,
             self.attribute,
@@ -73,9 +84,20 @@ class BoundExpression:
             index=self.index,
         )
         term = result.term
+        if (
+            binding is not None
+            and binding.cast_type is not None
+            and self.branch.is_literal
+            and not isinstance(term, NullValue)
+        ):
+            term = Cast(term, LiteralValue(binding.cast_type))
         if position is not None and isinstance(term, ValueWrapper):
             term = Value.get_typed_term(term, term.value, position, context.dialect)
         output_field = (
             self.value.get_value_field(result) if isinstance(self.value, Expression) else result.output_field
         )
-        return ExpressionResult(term=term, joins=result.joins, output_field=output_field)
+        return ExpressionResult(
+            term=term,
+            joins=result.joins,
+            output_field=binding.output_field if binding is not None else output_field,
+        )

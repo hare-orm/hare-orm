@@ -136,6 +136,15 @@ class ClickhouseEnumTypes:
         enum_field: CharEnumFieldInstance = field  # type: ignore[assignment]
         return cls.get_enum_type(cls.get_char_enum_numbers(enum_field.enum_type))
 
+    @staticmethod
+    def get_char_enum_lookup_value(field: Field[Any], value: Any, instance: type[Model] | Model | None) -> Any:
+        """Compare the column's text label, retaining the field's lookup conversion hook.
+
+        Binary inserts use numeric enum codes; read expressions compare the label produced
+        by ``get_char_enum_text`` instead.
+        """
+        return field.to_lookup_value(value, instance)
+
     @classmethod
     def get_int_enum_column_type(cls, field: Field[Any]) -> str:
         """The enum type of an ``IntEnumField`` - its members' names numbered by their values.

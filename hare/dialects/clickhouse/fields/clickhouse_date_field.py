@@ -43,7 +43,8 @@ class ClickhouseDateField(DateField[TDate]):
         first_day, last_day = CLICKHOUSE_DATE_RANGE
         if isinstance(value, datetime.date) and not first_day <= value <= last_day:
             raise ValidationError(
-                f"{self.model_field_name}: {value} is outside the days a Date column holds, {first_day} to {last_day}"
+                f"{self.model_field_name}: {self.get_value_for_message(value)} is outside the days a Date column "
+                f"holds, {first_day} to {last_day}"
             )
         # Typed as the column - a day's literal is a Date32, which VALUES doesn't write into a Date.
         return value if value is None else ClickhouseTypedValue(value, self.SQL_TYPE)

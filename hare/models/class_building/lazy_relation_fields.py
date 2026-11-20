@@ -9,11 +9,10 @@ from hare.fields.relations.fields.declarations import BackwardOneToOneRelation
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.fields.relations.fields.one_to_one_field_instance import OneToOneFieldInstance
-from hare.fields.relations.inherited_relation import InheritedRelation
 
 if TYPE_CHECKING:
-    from hare.models.meta_info import MetaInfo
     from hare.models.model import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class LazyRelationFields:
@@ -22,7 +21,7 @@ class LazyRelationFields:
     of each relation."""
 
     @staticmethod
-    def generate_lazy_forward_relation_fields(meta: MetaInfo, keys: Iterable[str]) -> None:
+    def generate_lazy_forward_relation_fields(meta: ModelBinding, keys: Iterable[str]) -> None:
         """Creates the lazy get/set/del properties of forward FK/O2O fields.
 
         Args:
@@ -49,7 +48,7 @@ class LazyRelationFields:
 
     @staticmethod
     def generate_lazy_backward_relation_fields(
-        meta: MetaInfo,
+        meta: ModelBinding,
         keys: Iterable[str],
         make_property: Callable[[str, type[Model], tuple[str, ...], tuple[str, ...]], RelationProperty],
     ) -> None:
@@ -77,7 +76,7 @@ class LazyRelationFields:
             )
 
     @staticmethod
-    def generate_lazy_foreign_key_and_many_to_many_fields(meta: MetaInfo) -> None:
+    def generate_lazy_foreign_key_and_many_to_many_fields(meta: ModelBinding) -> None:
         """Puts the accessors of every relation on the model class - forward, backward and many-to-many.
 
         Args:
@@ -102,37 +101,8 @@ class LazyRelationFields:
             LazyRelationFields.set_relation_property(
                 meta, key, RelationAccessors.make_many_to_many_property(_key, field_object)
             )
-        LazyRelationFields.hide_inherited_relations(meta)
 
     @staticmethod
-    def set_relation_property(meta: MetaInfo, key: str, relation_property: RelationProperty) -> None:
-        """Sets a relation's property on its model, and hides it from the model's concrete subclasses
-        lacking the relation - Python would hand them the property, which reads this model's rows.
-
-        Args:
-            meta: The model's meta.
-            key: The relation's name.
-            relation_property: Its property.
-        """
-        model = meta._model
-        setattr(model, key, relation_property)
-        subclasses = list(model.__subclasses__())
-        while subclasses:
-            subclass = subclasses.pop()
-            subclasses.extend(subclass.__subclasses__())
-            subclass_meta = getattr(subclass, "_meta", None)
-            if subclass_meta is not None and key not in subclass_meta.fields_map and key not in vars(subclass):
-                setattr(subclass, key, InheritedRelation(key, model))
-
-    @staticmethod
-    def hide_inherited_relations(meta: MetaInfo) -> None:
-        """Hides the relation properties a model inherits from a concrete model above it, which it lacks.
-
-        Args:
-            meta: The model's meta.
-        """
-        model = meta._model
-        for base in model.__mro__[1:]:
-            for name, attribute in list(vars(base).items()):
-                if isinstance(attribute, RelationProperty) and name not in meta.fields_map and name not in vars(model):
-                    setattr(model, name, InheritedRelation(name, base))
+    def set_relation_property(meta: ModelBinding, key: str, relation_property: RelationProperty) -> None:
+        """Keep an accessor on its structural binding, without changing model classes."""
+        meta.relation_accessors[key] = relation_property

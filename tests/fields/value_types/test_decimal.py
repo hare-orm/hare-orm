@@ -4,6 +4,7 @@ import pytest
 
 from hare import fields
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError, FieldError, ValidationError
 from hare.query.expressions import F
 from hare.query.functions import Avg, Max, Min, Sum
@@ -325,14 +326,7 @@ async def test_decimal_beyond_28_significant_digits_round_trips_exactly(db):
 
 @pytest.mark.asyncio
 async def test_rust_pg_unsupported_bind_parameter_type_raises_operational_error(db):
-    """rust/pg/src/value.rs's Value::extract() falls through to "unsupported parameter type" for
-    any Python value none of its known branches (bool/int/float/str/datetime/date/time/bytes/
-    uuid.UUID/Decimal/Range/list/dict) recognize - e.g. a bare Python set, reachable in practice
-    whenever a custom Field.to_db_value() forgets to convert something exotic to a primitive
-    before it reaches the driver. This used to raise a bare, unwrapped pyo3 PyTypeError from
-    inside the driver, bypassing RustPgClient._translate_exceptions entirely and reaching the
-    caller as an undocumented exception type. Now routed through the same
-    DriverError -> to_pyerr() -> pg.ConversionError path, surfacing as OperationalError."""
+    """Binding a Python value without a PostgreSQL representation raises Hare's public database error."""
     from hare.core.connections.connections import Connections
     from hare.exceptions import OperationalError
 
@@ -476,7 +470,7 @@ async def test_float_text_lookups_use_the_databases_text(db):
     async def matching_ids(**filters) -> list[int]:
         return sorted(await model.objects.filter(**filters).values_list("id", flat=True))
 
-    is_sqlite = model._meta.connection.dialect.name == "sqlite"
+    is_sqlite = HareContext.require_current().apps.get_queryset(model).get_connection().dialect.name == "sqlite"
     assert await matching_ids(floatnum__iexact="2") == ([] if is_sqlite else [whole.id])
     assert await matching_ids(floatnum__iexact="2.0") == ([whole.id] if is_sqlite else [])
 

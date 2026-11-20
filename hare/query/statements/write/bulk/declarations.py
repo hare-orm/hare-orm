@@ -4,8 +4,11 @@ import dataclasses
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.models.model import Model
+    from hare.models.write.bound_rows import BoundRows
     from hare.query.execution.write_statements import WriteStatement
     from hare.query.expressions import Q
     from hare.sql.builder.update_from_values import UpdateFromValues
@@ -20,7 +23,7 @@ class BulkUpdateRun(Generic[TModel]):
     """Mutable bookkeeping of one bulk update, never retained by the declaration."""
 
     connection: DatabaseClient
-    objects: list[TModel]
+    objects: Sequence[TModel]
     unwritten_objects: list[TModel] = dataclasses.field(default_factory=list)
     completed_objects: list[TModel] = dataclasses.field(default_factory=list)
     tenant_condition: Q | None = None
@@ -33,6 +36,7 @@ class BoundUpdateBatch(Generic[TModel]):
 
     command: WriteStatement
     objects: list[TModel]
+    bound_rows: BoundRows
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

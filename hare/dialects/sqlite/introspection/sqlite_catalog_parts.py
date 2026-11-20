@@ -4,12 +4,12 @@ from collections import defaultdict
 from operator import itemgetter
 from typing import TYPE_CHECKING, Any
 
+from hare.ddl.enums import SchemaPartType
 from hare.dialects.sqlite.constants import SQLITE_PRIMARY_KEY_INDEX_ORIGIN, SQLITE_ROW_ID_TYPE
 from hare.dialects.sqlite.introspection.sqlite_column_declarations import SqliteColumnDeclarations
 from hare.dialects.sqlite.introspection.sqlite_foreign_key_clauses import SqliteForeignKeyClauses
 from hare.dialects.sqlite.sqlite_table_options import SqliteTableOptions
 from hare.dialects.sqlite.types.sqlite_physical_type import SqlitePhysicalType
-from hare.inspectdb.enums import SchemaPartType
 from hare.inspectdb.introspection.schema_introspector import SchemaIntrospector
 from hare.inspectdb.introspection.table_parts import TableParts
 
@@ -95,13 +95,10 @@ class SqliteCatalogParts:
                 if index_sql.get(row["name"]) and terms is None:
                     definition["sql"] = index_sql[row["name"]]
                 definitions[SchemaPartType.INDEX, table, name] = definition
-            foreign_keys: dict[int, list[dict[str, Any]]] = defaultdict(list)
-            deferrals = SqliteForeignKeyClauses.get_deferrals(raw, target_columns)
-            for row in raw["foreign_keys"]:
-                foreign_keys[row["id"]].append(row)
+            foreign_keys = SqliteForeignKeyClauses.get_ordered_groups(raw["foreign_keys"])
+            deferrals = SqliteForeignKeyClauses.get_deferrals(raw, target_columns, foreign_keys)
             by_columns: dict[str, list[dict[str, Any]]] = defaultdict(list)
             for rows in foreign_keys.values():
-                rows.sort(key=itemgetter("seq"))
                 target = rows[0]["table"]
                 primary_columns = sorted(
                     (row for row in target_columns.get(target, []) if row["pk"]), key=itemgetter("pk")

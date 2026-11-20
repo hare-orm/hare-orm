@@ -115,3 +115,11 @@ class SpecificationSlotPlanRole(StrEnum):
     RESULT = "result"
     #: Bookkeeping of the queryset itself - never part of a statement.
     BOOKKEEPING = "bookkeeping"
+
+
+class FilterMethod(StrEnum):
+    """Query calls whose keyword arguments capture filter values before replay."""
+
+    FILTER = "filter"
+    EXCLUDE = "exclude"
+    GET = "get"

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from hare.contrib.test import capture_queries
+from hare.core.hare_context import HareContext
 from hare.core.registries import Registries
 from hare.exceptions import FieldError
 from hare.fields import CharField, Field
@@ -32,7 +33,6 @@ NOT_REGISTRIES = {
     ("hare/dialects/sqlite/client/sqlite_client.py", "register_parameter_adapter"): (
         "client-local adapters, identified by the client's parameter_binding_key"
     ),
-    ("hare/models/write/write_finalizer.py", "register_snapshots"): "instance values restored on rollback",
     ("hare/models/write/rollback_restores.py", "register_snapshots"): "lazy instance snapshots restored on rollback",
     (
         "hare/dialects/sqlite/renderers/sqlite_defaults.py",
@@ -102,9 +102,6 @@ NOT_REGISTRIES = {
     ("hare/models/write/rollback_restores.py", "register_rollback_restore"): (
         "an instance value put back when its transaction rolls back"
     ),
-    ("hare/query/statements/select/values/values_output.py", "register_selected_annotations"): (
-        "the selected annotations of one values() query"
-    ),
     ("hare/dialects/clickhouse/renderers/clickhouse_container_renderers.py", "register"): (
         "passes its renderers to TermRenderers.register()"
     ),
@@ -159,7 +156,7 @@ def test_every_registration_drops_the_caches():
     assert missing == []
 
 
-def equals_lookup(field: CharField | None) -> FieldLookup:
+def equals_lookup(field: Field | None) -> FieldLookup:
     def operator(term: Term, value: str) -> Term:
         return term == value
 
@@ -177,20 +174,17 @@ async def test_a_lookup_registered_after_queries_ran_filters_and_is_described(db
             "first"
         ]
         assert (
-            Tournament._meta.get_lookup_info("name__registry_test_equals").field is Tournament._meta.fields_map["name"]
+            HareContext.require_current()
+            .apps.get_binding(Tournament)
+            .get_lookup_info("name__registry_test_equals")
+            .field
+            is HareContext.require_current().apps.get_binding(Tournament).fields_map["name"]
         )
     finally:
         Registries.snapshot = previous_snapshot
         Registries.changed()
     with pytest.raises(FieldError):
-        Tournament._meta.get_lookup_info("name__registry_test_equals")
-
-
-def every_value_equals_lookup(field: Field | None) -> FieldLookup:
-    def operator(term: Term, value: str) -> Term:
-        return term == value
-
-    return FieldLookup(operator)
+        HareContext.require_current().apps.get_binding(Tournament).get_lookup_info("name__registry_test_equals")
 
 
 @pytest.mark.asyncio
@@ -199,7 +193,7 @@ async def test_a_lookup_registered_on_field_is_a_lookup_of_annotations(db):
     shouted = Tournament.objects.annotate(shouted=Upper("name"))
     assert await shouted.filter(shouted="FIRST").count() == 1
     previous_snapshot = Registries.snapshot
-    Field.register_lookup("registry_test_every_value", every_value_equals_lookup, value_type=str)
+    Field.register_lookup("registry_test_every_value", equals_lookup, value_type=str)
     try:
         shouted = Tournament.objects.annotate(shouted=Upper("name"))
         assert await shouted.filter(shouted__registry_test_every_value="FIRST").count() == 1
@@ -223,13 +217,13 @@ async def test_a_renderer_registered_after_queries_ran_changes_their_sql(db):
     queryset = Tournament.objects.annotate(shouted=Upper("name")).values_list("shouted", flat=True)
     assert await queryset == ["FIRST"]
     assert StatementPlans.plans.entry_count > 0
-    assert HydrationLayout.layouts.get_bucket(Tournament)
+    assert HydrationLayout.layouts.get_bucket(HareContext.require_current().apps.get_binding(Tournament))
 
     previous_snapshot = Registries.snapshot
     renderers.register_name(functions.Upper, lambda function, ctx: "LOWER")
     try:
         assert StatementPlans.plans.entry_count == 0
-        assert not HydrationLayout.layouts.get_bucket(Tournament)
+        assert not HydrationLayout.layouts.get_bucket(HareContext.require_current().apps.get_binding(Tournament))
         async with capture_queries() as counter:
             assert await queryset == ["first"]
         assert "LOWER(" in counter.queries[-1]

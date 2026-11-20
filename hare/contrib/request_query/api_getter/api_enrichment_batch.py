@@ -44,10 +44,11 @@ class ApiEnrichmentBatch:
             if source.triggers.runs_on(trigger)
             and (requested_names is None or source.get_target_names() & requested_names)
         )
-        self.unique_sources = dict((id(source), source) for source in self.sources)
-        self.containers_by_source = {
-            source_id: self.get_source_containers(source) for source_id, source in self.unique_sources.items()
-        }
+        self.source_inputs: dict[int, tuple[ApiSource, dict[Any, list[Any]]]] = {}
+        for source in self.sources:
+            source_id = id(source)
+            if source_id not in self.source_inputs:
+                self.source_inputs[source_id] = source, self.get_source_containers(source)
 
     def get_source_containers(self, source: ApiSource) -> dict[Any, list[Any]]:
         """Snapshot the original keys and target containers before conversion or HTTP work."""
@@ -79,17 +80,13 @@ class ApiEnrichmentBatch:
             # Repeating a source preserves mapping precedence but does not duplicate HTTP work.
             async with ApiHttpRequests() as requests:
                 answers = await self.run_together(
-                    [
-                        getter.ask(requests, source, self.containers_by_source[source_id])
-                        for source_id, source in self.unique_sources.items()
-                    ]
+                    [getter.ask(requests, source, containers) for source, containers in self.source_inputs.values()]
                 )
-            by_source = dict(zip(self.unique_sources, answers, strict=True))
+            by_source = dict(zip(self.source_inputs, answers, strict=True))
             for source in self.sources:
                 source_id = id(source)
-                getter.apply_source_values(
-                    target_values, source, self.containers_by_source[source_id], by_source[source_id]
-                )
+                _, containers = self.source_inputs[source_id]
+                getter.apply_source_values(target_values, source, containers, by_source[source_id])
         return getter.prepare_target_values(target_values)
 
     @staticmethod

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import gc
+import weakref
 from typing import Any
 
 import pytest
@@ -166,13 +168,86 @@ def test_custom_field_changes_leave_prior_boundaries_and_input_unchanged() -> No
 
 def test_rendering_one_boundary_does_not_change_another_boundary() -> None:
     prepared = PreparedOperationStates("app", get_operations()[:12], State())
-    assert "heading" in prepared.after.apps.get_model("app.Book")._meta.fields_map
+    assert "heading" in prepared.after.apps.get_binding("app.Book").fields_map
     before_rename = prepared.operations[-1].before
     book = before_rename.apps.get_model("app.Book")
-    assert "title" in book._meta.fields_map
-    assert "heading" not in book._meta.fields_map
+    assert "title" in before_rename.apps.get_binding(book).fields_map
+    assert "heading" not in before_rename.apps.get_binding(book).fields_map
     before_book = prepared.operations[4].before
     assert list(before_book.apps.apps.get("app", {})) == ["Author"]
     author = before_book.apps.get_model("app.Author")
-    assert author._meta.backward_foreign_key_fields == set()
-    assert author._meta.hidden_backward_relations == {}
+    assert before_book.apps.get_binding(author).backward_foreign_key_fields == set()
+    assert before_book.apps.get_binding(author).hidden_backward_relations == {}
+
+
+@pytest.mark.parametrize("keep_binding", [False, True])
+def test_prepared_tree_releases_rendered_graphs_except_retained_bindings(keep_binding: bool) -> None:
+    prepared = PreparedOperationStates("app", get_operations()[:5], State())
+    state = prepared.after
+    registry = state.apps
+    graph_reference = weakref.ref(registry.binding_graph)
+    registry_reference = weakref.ref(registry)
+    binding = registry.get_binding("app.Author") if keep_binding else None
+
+    del state, registry
+    gc.collect()
+
+    if binding is not None:
+        assert graph_reference() is binding.graph
+        assert binding.graph.get_binding(binding._model) is binding
+        assert binding.db_table == "author"
+    else:
+        assert graph_reference() is None
+        assert registry_reference() is None
+    assert set(prepared.after.models) == {("app", "Author"), ("app", "Book")}
+
+
+def test_prepared_boundaries_isolate_retained_models_and_nested_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    source = PreparedOperationStates(
+        "app",
+        [
+            CreateModel(
+                "Book",
+                [
+                    ("id", fields.IntField(primary_key=True)),
+                    ("pages", fields.IntField(null=True)),
+                    ("data", fields.JSONField(default={"labels": []})),
+                ],
+            )
+        ],
+        State(),
+    ).after
+    retained: list[ModelState] = []
+
+    def change_fields(operation: MakePagesRequired, app_label: str, state: State) -> None:
+        model = state.models[(app_label, "Book")]
+        retained.append(model)
+        model.fields["pages"].null = False
+        model.fields["data"].default["labels"].append("prepared")
+
+    monkeypatch.setattr(MakePagesRequired, "state_forward", change_fields)
+    prepared = PreparedOperationStates("app", [MakePagesRequired()], source)
+    assert len(retained) == 1
+    retained[0].fields["pages"].null = True
+    retained[0].fields["data"].default["labels"].append("later")
+
+    result = prepared.after
+    assert result.models[("app", "Book")].fields["pages"].null is False
+    assert result.models[("app", "Book")].fields["data"].default == {"labels": ["prepared"]}
+    result.models[("app", "Book")].fields["data"].default["labels"].append("consumer")
+    assert prepared.after.models[("app", "Book")].fields["data"].default == {"labels": ["prepared"]}
+    assert prepared.before.models[("app", "Book")].fields["pages"].null is True
+    assert source.models[("app", "Book")].fields["data"].default == {"labels": []}
+
+
+@pytest.mark.parametrize("copy_models", [dict, lambda models: models.copy()], ids=["dict", "copy"])
+def test_prepared_model_mapping_copies_keep_working_changes_local(copy_models: Any) -> None:
+    prepared = PreparedOperationStates("app", get_operations()[:5], State())
+    state = prepared.after
+    copied = copy_models(state.models)
+    copied.pop(("app", "Author"))
+    copied[("app", "Book")].fields["title"].description = "working description"
+
+    assert ("app", "Author") in state.models
+    assert state.models[("app", "Book")].fields["title"].description == "working description"
+    assert prepared.after.models[("app", "Book")].fields["title"].description != "working description"

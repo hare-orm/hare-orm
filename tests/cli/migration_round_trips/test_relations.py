@@ -140,7 +140,7 @@ async def test_an_integer_column_turned_into_a_relation_keeps_its_values(project
     await project.assert_in_sync()
     assert await project.query("SELECT id, author_id FROM book") == [{"id": 10, "author_id": 1}]
     if DatabaseUnderTest.get_dialect().features.supports_foreign_keys:
-        with pytest.raises(Exception, match=r"(?i)foreign key"):
+        with pytest.raises(IntegrityError, match=r"(?i)foreign key"):
             await project.query("INSERT INTO book (id, author_id) VALUES (11, 99)")
 
     await project.cli_ok("migrate", "app", "0001_initial")

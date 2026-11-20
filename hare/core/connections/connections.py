@@ -55,7 +55,7 @@ class Connections:
 
     @staticmethod
     def get_pool_statuses(connection_alias: str | None = None) -> list[PoolStatus]:
-        """What every open pool of the current context holds and has done - of each connection's own
+        """Status of open pools and recorded opening failures in the current context - of each connection's own
         client, its tenant schemas' clients, the client past a transaction pooler and the clients of
         their own (``PoolRole``). A client reporting no pool status (``Features.supports_pool_status``)
         has none in the list.
@@ -69,16 +69,10 @@ class Connections:
         Raises:
             ConfigurationError: If no context is active.
         """
-        handler = Connections.current()
-        statuses = []
-        for client in PoolRegistry.get_clients():
-            if client.connection_handler is not handler or not client.features.supports_pool_status:
-                continue
-            if connection_alias is not None and client.connection_alias != connection_alias:
-                continue
-            status = client.get_pool_status()
-            if status is not None:
-                statuses.append(status)
+        statuses = (
+            status
+            for _client, status in PoolRegistry.iter_statuses(handler=Connections.current(), alias=connection_alias)
+        )
         return sorted(statuses, key=lambda status: (status.connection_alias, status.role, status.schema or ""))
 
     @staticmethod
@@ -114,8 +108,10 @@ class Connections:
 
     @staticmethod
     def create_task_outside_transactions(coroutine: Coroutine[Any, Any, TaskResult]) -> asyncio.Task[TaskResult]:
-        """Starts ``coroutine`` as a task that sees every alias's shared, non-transactional client
-        of the current context - a plain task when no context is active.
+        """Start ``coroutine`` without transaction bindings from any inherited application.
+
+        This also detaches explicit clients' handlers when no ambient context is active.
+        Parent transaction bindings and unrelated context values remain unchanged.
 
         Args:
             coroutine: The coroutine to run.
@@ -125,7 +121,7 @@ class Connections:
         """
         context = HareContext.get_current()
         if context is None:
-            return asyncio.ensure_future(coroutine)
+            return ConnectionHandler.create_task_outside_transactions(coroutine)
         token = HareContext.current_context.set(context)
         try:
             return context.connections.create_task_outside_transactions(coroutine)

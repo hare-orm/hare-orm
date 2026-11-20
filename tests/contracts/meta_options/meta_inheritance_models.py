@@ -138,10 +138,11 @@ class MetaInheritanceModels:
         Returns:
             The structural declaration, including exact raw SQL and scalar types.
         """
-        meta = model._meta
+        declaration = model._declaration
+        meta = declaration.meta
         if option == "primary_key":
-            return meta.has_primary_key
-        value = getattr(meta, option) if hasattr(meta, option) else getattr(meta.meta, option, None)
+            return bool(declaration.primary_key_attribute)
+        value = declaration.manager if option == "manager" else getattr(meta, option, None)
         if isinstance(value, Manager):
             value = (type(value), value.queryset_class, value.scope)
         elif isinstance(value, OutboxWakeup):

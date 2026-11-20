@@ -5,9 +5,8 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeVar
 from hare.exceptions import (
     ConfigurationError,
 )
-from hare.fields.constants import CASCADE, PROTECT, SET_DEFAULT, SET_NULL
+from hare.fields.constants import CASCADE, SET_DEFAULT, SET_NULL
 from hare.fields.enums import OnDelete, RelationLoadStrategy, RelationType
-from hare.fields.relations.constants import PROTECT_DB_ON_DELETE_SQL
 from hare.fields.relations.swappable_model_reference import SwappableModelReference
 
 if TYPE_CHECKING:
@@ -102,16 +101,17 @@ class ForeignKeyFieldInstance(RelationalField[TModel]):
         """The ``ON DELETE`` clause text to emit in DDL - ``PROTECT`` has no SQL keyword of its own
         (it's enforced in Python before the DELETE is issued), so the database gets a deferrable
         ``NO ACTION`` backstop instead."""
-        return PROTECT_DB_ON_DELETE_SQL if self.on_delete == PROTECT else self.on_delete
+        return self.get_db_on_delete(self.on_delete)
 
     def deconstruct(self) -> tuple[str, list[Any], dict[str, Any]]:
         path, args, kwargs = super().deconstruct()
         # Relation initialization repoints source_field at the shadow attribute name, while
         # db_column_names keeps the real column a declared source_field= names. A composite key's
         # columns are always named after the field - it takes no source_field.
-        if len(self.db_column_names) == 1:
-            kwargs["source_field"] = self.db_column_names[0]
-        elif len(self.db_column_names) > 1:
+        column_names = self.db_column_names
+        if len(column_names) == 1:
+            kwargs["source_field"] = column_names[0]
+        elif len(column_names) > 1:
             kwargs.pop("source_field", None)
         return path, args, kwargs
 

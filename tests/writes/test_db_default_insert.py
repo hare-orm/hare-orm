@@ -17,6 +17,7 @@ from decimal import Decimal
 import pytest
 
 from hare import fields
+from hare.core.hare_context import HareContext
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.fields.database_default import DatabaseDefault
 from hare.time import UTC
@@ -331,11 +332,11 @@ class TestNowDbDefaultTimezone:
         assert lower <= created_moscow <= upper, f"{created_moscow} not within [{lower}, {upper}]"
 
 
-class TestMetaInfo:
+class TestModelBinding:
     @pytest.mark.postgresql_models
     @pytest.mark.asyncio
     async def test_db_default_meta_attributes(self, db):
-        meta = DefaultModel._meta
+        meta = HareContext.require_current().apps.get_binding(DefaultModel)
         assert len(meta.db_default_db_columns) > 0
         assert "int_default" in meta.db_default_db_columns
         assert "char_default" in meta.db_default_db_columns

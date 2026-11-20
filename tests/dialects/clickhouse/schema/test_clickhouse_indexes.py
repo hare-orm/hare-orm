@@ -4,6 +4,7 @@ by a migration, and refused on another database."""
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.ddl import PartialIndex, RawSQLTerm
 from hare.dialects.clickhouse.indexes import (
     BloomFilterIndex,
@@ -16,7 +17,6 @@ from hare.exceptions import ConfigurationError, IntegrityError, UnSupportedError
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
 from hare.migrations.drift import detect_drift
 from hare.migrations.operations import AddIndex, RemoveIndex
-from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state import State
 from hare.query.expressions import Q
 from tests.dialects.clickhouse.models import Article
@@ -34,7 +34,7 @@ async def get_index_types(connection):
 
 @pytest.mark.asyncio
 async def test_indexes_are_created_with_their_type(clickhouse_db):
-    assert await get_index_types(Article._meta.connection) == {
+    assert await get_index_types(HareContext.require_current().apps.get_queryset(Article).get_connection()) == {
         "article_body_ngram_idx": ("ngrambf_v1(4, 512, 3, 0)", 1),
         "article_body_token_idx": ("tokenbf_v1(256, 2, 0)", 2),
         "article_id_idx": ("minmax", 1),
@@ -49,7 +49,7 @@ async def test_indexes_are_created_with_their_type(clickhouse_db):
 
 @pytest.mark.asyncio
 async def test_indexes_are_read_back_and_drift_finds_none(clickhouse_db):
-    connection = Article._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Article).get_connection()
     table = await DatabaseCatalog.inspect_table(connection, "article")
     assert {index.name: (index.index_type, index.storage_parameters) for index in table.indexes} == {
         "article_body_ngram_idx": (
@@ -82,8 +82,7 @@ async def test_indexes_are_read_back_and_drift_finds_none(clickhouse_db):
         "BloomFilterIndex(RawSQLTerm('lowerUTF8(title)'), name='article_lower_title_idx')",
     ):
         assert expected in source, (expected, source)
-    state = State()
-    state.models[("models", "Article")] = ModelState.make_from_model("models", Article)
+    state = State.from_models([Article], app_label="models")
     drift = await detect_drift(connection, state, ["models"])
     assert [operation for operation in drift.operations if getattr(operation, "model_name", "") == "Article"] == []
 
@@ -92,7 +91,7 @@ async def test_indexes_are_read_back_and_drift_finds_none(clickhouse_db):
 async def test_an_index_over_columns_of_quoted_names_is_read_back_by_its_columns(clickhouse_db):
     """The server quotes a column name that isn't plain ASCII in an index's expression - such an index
     was read as one of an expression, and drift saw it removed and added again."""
-    connection = Article._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Article).get_connection()
     await connection.execute_script(
         "CREATE TABLE `книга` (id Int32, `название` String, `год` Int32, "
         "INDEX `idx_название` `название` TYPE minmax GRANULARITY 1, "
@@ -112,9 +111,8 @@ async def test_an_index_over_columns_of_quoted_names_is_read_back_by_its_columns
 async def test_drift_finds_another_granularity_or_argument_of_an_index(clickhouse_db):
     """An index's identity left its type's arguments and its granularity out: drift and
     makemigrations saw no change of either."""
-    connection = Article._meta.connection
-    state = State()
-    state.models[("models", "Article")] = ModelState.make_from_model("models", Article)
+    connection = HareContext.require_current().apps.get_queryset(Article).get_connection()
+    state = State.from_models([Article], app_label="models")
 
     async def get_article_operations() -> list[type]:
         drift = await detect_drift(connection, state, ["models"])
@@ -143,9 +141,8 @@ async def test_drift_finds_another_granularity_or_argument_of_an_index(clickhous
 async def test_a_bloom_filter_index_written_without_its_argument_is_one_of_the_default(clickhouse_db):
     """A bloom_filter index of another tool, its false positive share left to ClickHouse's default, was read
     as one without it - drift reported hare's bloom_filter(0.025) of the same index as another one."""
-    connection = Article._meta.connection
-    state = State()
-    state.models[("models", "Article")] = ModelState.make_from_model("models", Article)
+    connection = HareContext.require_current().apps.get_queryset(Article).get_connection()
+    state = State.from_models([Article], app_label="models")
     await connection.execute_script(
         "ALTER TABLE article DROP INDEX article_lower_title_idx; "
         "ALTER TABLE article ADD INDEX article_lower_title_idx lowerUTF8(title) TYPE bloom_filter GRANULARITY 1"
@@ -170,10 +167,9 @@ async def test_a_check_constraint_refuses_a_row(clickhouse_db):
 
 @pytest.mark.asyncio
 async def test_a_migration_adds_and_removes_an_index(clickhouse_db):
-    connection = Article._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Article).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
-    state = State()
-    state.models[("models", "Article")] = ModelState.make_from_model("models", Article)
+    state = State.from_models([Article], app_label="models")
     index = SetIndex(fields=["views"], max_rows=10, granularity=3, name="article_views_set_idx")
     state = await apply_operations("models", state, AddIndex(model_name="Article", index=index), schema_editor=editor)
     assert (await get_index_types(connection))["article_views_set_idx"] == ("set(10)", 3)
@@ -222,10 +218,9 @@ def test_arguments_are_checked_and_other_databases_refused():
 async def test_a_partial_index_is_the_index_of_every_row(clickhouse_db):
     """ClickHouse has no partial indexes: the condition went into the statement, a syntax error - no
     model declaring one, the transactional outbox's among them, could be created."""
-    connection = Article._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Article).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
-    state = State()
-    state.models[("models", "Article")] = ModelState.make_from_model("models", Article)
+    state = State.from_models([Article], app_label="models")
     indexes = (
         PartialIndex(fields=("views",), condition=Q(views__gt=10), name="article_viewed_idx"),
         PartialIndex(fields=("title",), condition=RawSQLTerm("views > 10"), name="article_viewed_title_idx"),

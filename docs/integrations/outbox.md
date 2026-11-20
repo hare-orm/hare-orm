@@ -158,6 +158,10 @@ the event, the same key can create a new one. Choose retention to cover the expe
   `REPEATABLE READ`/`SERIALIZABLE` snapshot). For keys unique **per** tenant, redeclare `idempotency_key`
   without `unique=True` and add `UniqueConstraint(fields=("tenant_id", "idempotency_key"))`; with no
   unique constraint covering the key a keyed `enqueue()` raises `ConfigurationError`.
+- Both enqueue methods retain the effective scoped tenant when an insert is skipped.
+  `enqueue_many()` associates duplicate inputs using the database's equality, including
+  field normalization and column collation, and returns events in input order. Relation
+  fields in the unique constraint expand to their concrete key attributes.
 - The keyed event is written with `bulk_create()`, so a `save()` overridden on the outbox model isn't
   called for it.
 
@@ -166,6 +170,11 @@ the event, the same key can create a new one. Choose retention to cover the expe
 A subclass with columns of its own (a relation to what the event is about, a tenant) fills them through
 `extra_field_values=`. The tenant comes from the active `Tenancy.scope()` or from these values — an
 explicit tenant is accepted without an active scope, as `create()` accepts it.
+
+An explicit event tenant supplies a missing scope for the event model alone while enqueueing.
+It does not supply or replace the tenant scope of a recipient or another model referenced by
+the event. Existing scalar and model-specific scopes retain their normal precedence, including
+the scope checks of those referenced models.
 
 ### <a id="enqueue-many"></a>Several events: `enqueue_many()`
 
@@ -247,8 +256,13 @@ If that write also fails, a `BaseExceptionGroup` retains both cancellation and t
 
 `Meta.change_capture` takes any `ChangeSink` (`hare.instrumentation.capture`); `ChangeCapture` is the one
 writing an outbox. A sink of your own implements `get_written_models()` — the models it writes, each on
-the captured model's connection —, `get_field_names(model)` — the fields a change holds — and
-`async write(connection, model, changes)`, called in the write's transaction with its `CapturedChange`s.
+the captured model's connection —, `get_field_names(binding)` — the fields a change holds — and
+`async write(connection, binding, changes)`, called in the write's transaction with its `CapturedChange`s.
+
+`binding` is the originating graph's `ModelBinding`: `binding._model` supplies the Python class
+for custom checks, while `binding.fields_map` supplies prepared fields. Connection validation also
+uses `check_connection(binding, connection)`. Do not rediscover metadata from the class through the
+current registry: the captured operation may belong to an earlier graph.
 
 ### <a id="change-capture-declaration"></a>Declaration
 
@@ -594,6 +608,10 @@ row, given up with an ERROR — the relay keeps polling.
 | `RedisWakeup(url, channel=...)` or `RedisWakeup(client=...)` | `redis` | pub/sub |
 | `KafkaWakeup(bootstrap_servers, topic=..., create_topic=True, replication_factor=1)` | `kafka` | a topic of signals each relay reads from the end, outside any consumer group; created keeping signals for a minute |
 | `RabbitMQWakeup(url, exchange=...)` | `rabbitmq` | a fanout exchange, an exclusive auto-deleted queue per relay |
+
+Redis, Kafka and RabbitMQ wakeup messages carry a UTF-8 JSON array of topic names. Names retain
+Unicode, quotes and line breaks; an empty array signals without naming topics. PostgreSQL sends
+each topic unchanged as a separate notification payload.
 
 When relays share a wakeup across running event loops, removing the last subscription stops the
 listener and closes its transport on the loop that opened them, even if that relay uses another loop.

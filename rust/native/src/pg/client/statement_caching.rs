@@ -1,5 +1,5 @@
 use crate::pg::error::DriverError;
-use crate::pg::parameter_values::ParameterValues;
+use crate::pg::parameter_description::PgParameterDescription;
 use crate::pg::timed_manager::Object;
 use crate::pg::value::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,6 +34,9 @@ impl StatementCaching {
         }
         client.statement_cache.clear();
         client.clear_type_cache();
+        if let Some(cache) = &client.text_array_delimiters {
+            cache.lock().unwrap_or_else(PoisonError::into_inner).clear();
+        }
         if let Some(tracker) = &client.statement_order {
             tracker.lock().unwrap_or_else(PoisonError::into_inner).clear();
         }
@@ -61,21 +64,24 @@ impl StatementCaching {
         }
         Ok(statement)
     }
-    pub(crate) async fn prepare_values(
-        &self,
-        client: &Object,
-        sql: &str,
-        params: &[Value],
-    ) -> Result<Statement, DriverError> {
-        let types = ParameterValues::types(params);
-        Ok(self.prepare(client, sql, &types).await?)
-    }
-
     /// Invalidate only PostgreSQL's cached-plan result-shape failure, not arbitrary 0A000 errors.
     fn is_stale_cached_plan_error(error: &tokio_postgres::Error) -> bool {
         error
             .as_db_error()
             .is_some_and(|db| db.code().code() == "0A000" && db.routine() == Some("RevalidateCachedQuery"))
+    }
+
+    /// Prepare the statement and describe its parameters on the same physical connection.
+    pub(crate) async fn prepare_bound<'a>(
+        &self,
+        client: &Object,
+        sql: &str,
+        types: &[Type],
+        rows: impl IntoIterator<Item = &'a [Value]>,
+    ) -> Result<(Statement, PgParameterDescription), DriverError> {
+        let statement = self.prepare(client, sql, types).await?;
+        let description = PgParameterDescription::for_rows(client, &statement, rows).await?;
+        Ok((statement, description))
     }
 
     /// Prepare and execute once. A stale plan is evicted for the next explicit call.
@@ -86,18 +92,21 @@ impl StatementCaching {
         client: &Object,
         sql: &str,
         params: &[Value],
+        types: &[Type],
         run: F,
     ) -> Result<(Statement, T), DriverError>
     where
-        F: FnOnce(Statement) -> Fut,
+        F: FnOnce(Statement, PgParameterDescription) -> Fut,
         Fut: std::future::Future<Output = Result<T, tokio_postgres::Error>>,
     {
-        let types = ParameterValues::types(params);
-        let statement = self.prepare(client, sql, &types).await?;
-        match run(statement.clone()).await {
+        let (statement, description) = self.prepare_bound(client, sql, types, std::iter::once(params)).await?;
+        match run(statement.clone(), description).await {
             Ok(value) => Ok((statement, value)),
             Err(error) if self.enabled && Self::is_stale_cached_plan_error(&error) => {
-                client.statement_cache.remove(sql, &types);
+                client.statement_cache.remove(sql, types);
+                if let Some(cache) = &client.text_array_delimiters {
+                    cache.lock().unwrap_or_else(PoisonError::into_inner).clear();
+                }
                 Err(error.into())
             }
             Err(error) => Err(DriverError::from(error)),

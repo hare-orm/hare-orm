@@ -31,9 +31,17 @@ class SchemaTransaction:
         if editor.collect_sql:
             await self.body.execute(editor)
             return
-        async with editor.client._in_transaction() as connection:
-            transaction_editor = type(editor)(connection, atomic=editor.atomic)
+        previous_client = editor.client
+        previous_atomic = editor.atomic_migration
+        async with previous_client._in_transaction() as connection:
             try:
-                await self.body.execute(transaction_editor)
+                editor.client = connection
+                editor.atomic_migration = True
+                await self.body.execute(editor)
+                if not previous_client.is_transaction_client:
+                    # Complete checks owed by this editor's outer scope before committing.
+                    # A savepoint must not check its caller's deferred references early.
+                    await editor.check_constraints()
             finally:
-                editor.run_statement_count += transaction_editor.run_statement_count
+                editor.client = previous_client
+                editor.atomic_migration = previous_atomic

@@ -6,7 +6,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.caching.cache import Cache
-from hare.exceptions import QueryError, UnSupportedError
+from hare.exceptions import QueryError
 from hare.fields import Field, JSONField
 from hare.fields.data.json.json_path_field import JSONPathField
 from hare.query.enums import Lookup
@@ -81,11 +81,7 @@ class JsonPathLookups:
             UnSupportedError: ``values`` isn't a list/tuple/set.
             ValidationError: A value isn't JSON serializable.
         """
-        if not isinstance(values, (list, tuple, set)):
-            raise UnSupportedError(
-                f"{field.model_field_name}: expected a list/tuple/set of values for this lookup, got "
-                f"{field.get_value_for_message(values)}"
-            )
+        ValueEncoders.check_list_values(values, field)
         path_field = cls.get_path_field(field)
         return [path_field.encode_comparison_value(value, dialect, as_parameter=True) for value in values]
 
@@ -179,6 +175,7 @@ class JsonPathLookups:
         return lookups
 
     @classmethod
-    def get_lookup_names(cls) -> frozenset[str]:
-        """The suffixes of the lookups of a JSON path value."""
-        return frozenset(suffix for suffix in cls.get_lookups() if suffix)
+    def get_lookup_suffix(cls, segments: list[str]) -> str | None:
+        """The last segment when it names a lookup of a JSON path value."""
+        suffix = segments[-1] if segments else ""
+        return suffix if suffix and suffix in cls.get_lookups() else None

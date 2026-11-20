@@ -432,18 +432,11 @@ NULL_PLACEMENT_ORDERINGS = [
 ]
 
 
-@pytest_asyncio.fixture
-async def intfields_scores_data(db):
-    """intnum 1..5 with intnum_null 1, NULL, 2, 3, NULL."""
-    for number, score in [(1, 1), (2, None), (3, 2), (4, 3), (5, None)]:
-        await IntFields.objects.create(intnum=number, intnum_null=score)
-
-
 @pytest.mark.parametrize("ordering_factory,expected", NULL_PLACEMENT_ORDERINGS)
 @pytest.mark.parametrize("page_size", [1, 2, 3])
 @pytest.mark.asyncio
 async def test_after_cursor_explicit_null_placement_no_gaps_or_duplicates(
-    intfields_scores_data, ordering_factory, expected, page_size
+    scores_data, ordering_factory, expected, page_size
 ):
     """Every page boundary - value rows, the first NULL row, the last NULL row - keeps the full
     walk identical to the unpaginated ordering, on every dialect."""
@@ -468,9 +461,7 @@ async def test_after_cursor_explicit_null_placement_no_gaps_or_duplicates(
 
 @pytest.mark.parametrize("ordering_factory,expected", NULL_PLACEMENT_ORDERINGS)
 @pytest.mark.asyncio
-async def test_after_cursor_explicit_null_placement_null_boundary_value(
-    intfields_scores_data, ordering_factory, expected
-):
+async def test_after_cursor_explicit_null_placement_null_boundary_value(scores_data, ordering_factory, expected):
     """A cursor sitting on the FIRST NULL row: what follows is every remaining row of the ordering."""
     page = await IntFields.objects.all().order_by(ordering_factory(), "intnum").after_cursor(None, 2).limit(10)
     assert [row.intnum for row in page] == expected[expected.index(2) + 1 :]
@@ -481,7 +472,7 @@ async def test_after_cursor_explicit_null_placement_null_boundary_value(
 
 @pytest.mark.parametrize("ordering_factory,expected", NULL_PLACEMENT_ORDERINGS)
 @pytest.mark.asyncio
-async def test_after_cursor_explicit_null_placement_value_boundary(intfields_scores_data, ordering_factory, expected):
+async def test_after_cursor_explicit_null_placement_value_boundary(scores_data, ordering_factory, expected):
     """A cursor on a real value row (intnum 3, score 2): the NULL group counts as after it exactly
     when the ordering places NULLs last."""
     page = await IntFields.objects.all().order_by(ordering_factory(), "intnum").after_cursor(2, 3).limit(10)
@@ -490,9 +481,7 @@ async def test_after_cursor_explicit_null_placement_value_boundary(intfields_sco
 
 @pytest.mark.parametrize("ordering_factory,expected", NULL_PLACEMENT_ORDERINGS)
 @pytest.mark.asyncio
-async def test_iterator_explicit_null_placement_visits_every_row_once(
-    intfields_scores_data, ordering_factory, expected
-):
+async def test_iterator_explicit_null_placement_visits_every_row_once(scores_data, ordering_factory, expected):
     iterated = [row.intnum async for row in IntFields.objects.all().order_by(ordering_factory(), "intnum").iterator(2)]
     assert iterated == expected
 

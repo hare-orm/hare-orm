@@ -72,5 +72,4 @@ class JsonTableQuery(AliasedQuery):
     def __eq__(self, other: Any) -> bool:
         return isinstance(other, JsonTableQuery) and self.name == other.name
 
-    def __hash__(self) -> int:
-        return hash(str(self.name))
+    __hash__ = AliasedQuery.__hash__

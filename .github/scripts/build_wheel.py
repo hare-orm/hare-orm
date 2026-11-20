@@ -23,22 +23,21 @@ from email.parser import BytesParser
 from itertools import product
 from pathlib import Path, PurePosixPath
 
+from extract_native_extensions import NativeExtensionExtractor
+
 
 @dataclass(frozen=True, slots=True)
 class BuildSpec:
-    """One wheel's ABI/platform and the exact extension archives staged for it."""
+    """One wheel's ABI/platform and the extension archive staged for it."""
 
     tag: str
-    extension_wheels: tuple[tuple[str, Path], ...] = ()
+    extension_wheel: Path
 
 
 class WheelBuilder:
     """Builds hare-orm's wheels of one platform."""
 
-    #: The extension modules a wheel carries.
-    EXTENSION_MODULES = ("native",)
     #: The file suffixes of a compiled extension module.
-    EXTENSION_SUFFIXES = (".so", ".pyd")
     #: The directory of the shared libraries maturin's repair bundles with the extension - at the
     #: wheel's root, where the extension's run path ($ORIGIN/../hare_native.libs) finds them.
     BUNDLED_LIBRARIES_DIRECTORY_NAME = "hare_native.libs"
@@ -101,42 +100,12 @@ class WheelBuilder:
         # name-version(-build)?-python-abi-platform.whl
         return "-".join(wheel.stem.split("-")[-3:])
 
-    def get_extension_wheels_by_tag(self, extension_wheels: Path) -> dict[str, dict[str, Path]]:
-        """Maturin's wheels, by their tag and then by the extension module they carry.
-
-        Args:
-            extension_wheels: The directory with maturin's wheels - for every tag, one per extension
-                module.
-
-        Returns:
-            The wheels.
-
-        Raises:
-            SystemExit: The directory holds no wheel, or a tag misses a module's wheel or has two.
-        """
-        wheels_by_tag: dict[str, dict[str, Path]] = {}
-        for module in self.EXTENSION_MODULES:
-            for wheel in sorted(extension_wheels.glob(f"hare_{module}-*.whl")):
-                module_wheels = wheels_by_tag.setdefault(self.get_wheel_tag(wheel), {})
-                if module in module_wheels:
-                    raise SystemExit(
-                        f"two hare_{module} wheels for one tag: {module_wheels[module].name}, {wheel.name}"
-                    )
-                module_wheels[module] = wheel
-        if not wheels_by_tag:
-            raise SystemExit(f"no extension wheels in {extension_wheels}")
-        for tag, module_wheels in wheels_by_tag.items():
-            missing_modules = sorted(set(self.EXTENSION_MODULES) - set(module_wheels))
-            if missing_modules:
-                raise SystemExit(f"no wheel of {', '.join(missing_modules)} for {tag}")
-        return wheels_by_tag
-
     def extract_extensions(self, spec: BuildSpec, destination: Path) -> list[str]:
         """Puts the extension modules of maturin's wheels of one tag into ``rust/``, and the shared
         libraries bundled with them into ``hare_native.libs/``.
 
         Args:
-            spec: The wheel of every extension module, by module.
+            spec: The native wheel for this build's tag.
             destination: This build's isolated source directory.
 
         Returns:
@@ -148,37 +117,26 @@ class WheelBuilder:
         bundled_libraries = []
         extension_directory = destination / "rust"
         extension_directory.mkdir(exist_ok=True)
-        for module, wheel in spec.extension_wheels:
-            with zipfile.ZipFile(wheel) as archive:
-                members = [
-                    name
-                    for name in archive.namelist()
-                    if name.startswith(f"rust/{module}.") and name.endswith(self.EXTENSION_SUFFIXES)
-                ]
-                if len(members) != 1:
-                    raise SystemExit(
-                        f"{wheel.name} carries {len(members)} rust.{module} extension files, expected one"
-                    )
-                target = extension_directory / Path(members[0]).name
-                with archive.open(members[0]) as source, target.open("wb") as output_file:
+        wheel = spec.extension_wheel
+        with zipfile.ZipFile(wheel) as archive:
+            member, _ = NativeExtensionExtractor.extract(wheel, archive, extension_directory)
+            print(f"{wheel.name}: {member}")
+            for name in archive.namelist():
+                if not name.startswith(f"{self.BUNDLED_LIBRARIES_DIRECTORY_NAME}/") or name.endswith("/"):
+                    continue
+                relative = PurePosixPath(name)
+                if relative.is_absolute() or ".." in relative.parts or "\\" in name or ":" in name:
+                    raise SystemExit(f"invalid bundled library path in {wheel.name}: {name}")
+                target = destination / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if target.exists():
+                    if target.read_bytes() != archive.read(name):
+                        raise SystemExit(f"conflicting bundled library in {wheel.name}: {name}")
+                    continue
+                with archive.open(name) as source, target.open("wb") as output_file:
                     shutil.copyfileobj(source, output_file)
-                print(f"{wheel.name}: {members[0]}")
-                for name in archive.namelist():
-                    if not name.startswith(f"{self.BUNDLED_LIBRARIES_DIRECTORY_NAME}/") or name.endswith("/"):
-                        continue
-                    relative = PurePosixPath(name)
-                    if relative.is_absolute() or ".." in relative.parts or "\\" in name or ":" in name:
-                        raise SystemExit(f"invalid bundled library path in {wheel.name}: {name}")
-                    target = destination / relative
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    if target.exists():
-                        if target.read_bytes() != archive.read(name):
-                            raise SystemExit(f"conflicting bundled library in {wheel.name}: {name}")
-                        continue
-                    with archive.open(name) as source, target.open("wb") as output_file:
-                        shutil.copyfileobj(source, output_file)
-                    bundled_libraries.append(name)
-                    print(f"{wheel.name}: {name}")
+                bundled_libraries.append(name)
+                print(f"{wheel.name}: {name}")
         return bundled_libraries
 
     @staticmethod
@@ -252,40 +210,44 @@ class WheelBuilder:
             raise SystemExit(f"{wheel.name} metadata tags differ from {tag}")
         if metadata.get("Root-Is-Purelib") != "false":
             raise SystemExit(f"{wheel.name} has the wrong Root-Is-Purelib installation scheme")
-        extensions = [name for name in names if name.startswith("rust/") and name.endswith(self.EXTENSION_SUFFIXES)]
+        extensions = [
+            name
+            for name in names
+            if name.startswith("rust/") and name.endswith(NativeExtensionExtractor.EXTENSION_SUFFIXES)
+        ]
         libraries = sorted(name for name in names if name.startswith(f"{self.BUNDLED_LIBRARIES_DIRECTORY_NAME}/"))
         if libraries != sorted(bundled_libraries):
             raise SystemExit(f"{wheel.name} carries the libraries {libraries}, expected {sorted(bundled_libraries)}")
-        modules = sorted(Path(name).name.split(".")[0] for name in extensions)
-        if modules != sorted(self.EXTENSION_MODULES):
-            raise SystemExit(f"{wheel.name} carries {extensions}, expected one file per {self.EXTENSION_MODULES}")
+        if len(extensions) != 1 or not extensions[0].startswith("rust/native."):
+            raise SystemExit(f"{wheel.name} carries {extensions}, expected one rust.native extension")
         # rust/native.cpython-312-x86_64-linux-gnu.so, rust/native.cpython-312-darwin.so,
         # rust/native.cp312-win_amd64.pyd
         python_version_digits = tag.split("-")[0].removeprefix("cp")
-        other_version_extensions = [
-            name for name in extensions if f"cp{python_version_digits}-" not in name.replace("cpython-", "cp")
-        ]
-        if other_version_extensions:
-            raise SystemExit(f"{wheel.name} carries extensions of another Python: {other_version_extensions}")
+        if f"cp{python_version_digits}-" not in extensions[0].replace("cpython-", "cp"):
+            raise SystemExit(f"{wheel.name} carries extensions of another Python: {extensions}")
         print(f"built {wheel.name}: {extensions + libraries}")
 
     def get_specs(self, extension_wheels: Path) -> tuple[BuildSpec, ...]:
         """Describe every requested build before staging or invoking build tools."""
-        return tuple(
-            BuildSpec(tag, tuple(module_wheels.items()))
-            for tag, module_wheels in self.get_extension_wheels_by_tag(extension_wheels).items()
-        )
+        specs_by_tag: dict[str, BuildSpec] = {}
+        for wheel in sorted(extension_wheels.glob("hare_native-*.whl")):
+            tag = self.get_wheel_tag(wheel)
+            if tag in specs_by_tag:
+                raise SystemExit(
+                    f"two hare_native wheels for one tag: {specs_by_tag[tag].extension_wheel.name}, {wheel.name}"
+                )
+            specs_by_tag[tag] = BuildSpec(tag, wheel)
+        if not specs_by_tag:
+            raise SystemExit(f"no extension wheels in {extension_wheels}")
+        return tuple(specs_by_tag.values())
 
     def publish(self, wheel: Path) -> None:
         """Atomically replace the output wheel after its contents have been verified."""
         self.out.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=self.out, suffix=".tmp", delete=False) as output:
-            temporary = Path(output.name)
-        try:
-            shutil.copy2(wheel, temporary)
-            os.replace(temporary, self.out / wheel.name)
-        finally:
-            temporary.unlink(missing_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".hare-wheel-", dir=self.out) as directory:
+            staged = Path(directory) / wheel.name
+            shutil.copy2(wheel, staged)
+            os.replace(staged, self.out / wheel.name)
 
     def run(self, extension_wheels: Path) -> None:
         """Build each ABI in a fresh directory; failures leave the checkout untouched."""

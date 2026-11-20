@@ -49,8 +49,8 @@ class BoundWrite:
         if isinstance(command, (WriteCopy, WriteMany)):
             return BoundWrite.execute_rows_command(connection, command)
         if command.recovery is None:
-            return connection.execute(command.sql, command.parameters, returns_rows=command.returns_rows)
-        return connection.execute(
+            return connection._execute_built(command.sql, command.parameters, returns_rows=command.returns_rows)
+        return connection._execute_built(
             command.sql, command.parameters, returns_rows=command.returns_rows, recovery=command.recovery
         )
 
@@ -61,7 +61,7 @@ class BoundWrite:
             await connection.copy(command.table, command.columns, command.rows, command.column_types, command.schema)
             return StatementResult(None, ())
         if command.recovery is None:
-            await connection.execute_many(command.sql, command.rows)
+            await connection._execute_many_built(command.sql, command.rows)
         else:
-            await connection.execute_many(command.sql, command.rows, recovery=command.recovery)
+            await connection._execute_many_built(command.sql, command.rows, recovery=command.recovery)
         return StatementResult(None, ())

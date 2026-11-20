@@ -1,6 +1,7 @@
 """Worker completion controls pool leases and stream termination."""
 
 import asyncio
+import sys
 import threading
 from types import SimpleNamespace
 
@@ -43,7 +44,7 @@ def library_clients(monkeypatch):
         return client
 
     monkeypatch.setattr(
-        "hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_connections."
+        sys.modules[ClickhouseDriverConnections.__module__],
         "ClickhouseDriverLibraryClient",
         create,
     )
@@ -87,7 +88,7 @@ async def test_stream_startup_failure_terminates_without_a_queue_message(monkeyp
         raise ValueError("startup failed")
 
     monkeypatch.setattr(
-        "hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_connections."
+        sys.modules[ClickhouseDriverConnections.__module__],
         "ClickhouseDriverLibraryClient",
         fail,
     )

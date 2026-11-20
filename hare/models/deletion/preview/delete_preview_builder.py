@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from hare.core.connections.relation_constraints import RelationConstraints
 from hare.fields.enums import OnDelete
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.models.deletion.cascade.cascade_policy import CascadePolicy
@@ -19,6 +20,7 @@ from hare.models.enums import DeletionAction
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class DeletePreviewBuilder:
@@ -27,7 +29,7 @@ class DeletePreviewBuilder:
     reading only."""
 
     @staticmethod
-    async def build(obj: Model, connection: DatabaseClient | None = None) -> DeletePreview:
+    async def build(obj: Model, connection: DatabaseClient) -> DeletePreview:
         """Computes what ``obj.delete()`` would do, reading only.
 
         Walks the same CASCADE tree, with the same tenant/soft-delete visibility, as the real
@@ -47,11 +49,7 @@ class DeletePreviewBuilder:
         if await SoftDeletion.is_already_soft_deleted(obj, connection):
             return DeletePreview()
         preview = await DeletePreviewBuilder.build_in_schema(obj, connection)
-        if (
-            connection is None
-            or connection.tenant_schema_template is None
-            or not DeletionGraph.reaches_tenant_schema_models(type(obj))
-        ):
+        if connection.tenant_schema_template is None or not DeletionGraph.reaches_tenant_schema_models(obj._binding):
             return preview
         # The rows of the other tenants' schemas - read inside a transaction, which visits them.
         async with connection._in_transaction() as transaction_connection:
@@ -65,7 +63,7 @@ class DeletePreviewBuilder:
 
     @staticmethod
     async def build_in_schema(
-        obj: Model, connection: DatabaseClient | None, *, tenant_rows_only: bool = False
+        obj: Model, connection: DatabaseClient, *, tenant_rows_only: bool = False
     ) -> DeletePreview:
         """What ``obj.delete()`` would do in the schema the connection works in.
 
@@ -80,13 +78,13 @@ class DeletePreviewBuilder:
         """
         model = type(obj)
         preview = DeletePreview()
-        soft_delete_field = model._meta.soft_delete_field
+        soft_delete_field = obj._binding.soft_delete_field
         plan = await DeletionCollector(
             connection,
             root_action=DeletionAction.SOFT_DELETE if soft_delete_field else DeletionAction.DELETE,
             hands_over_rows=True,
             defers_querysets=False,
-        ).collect(model, [obj.pk])
+        ).collect(obj._binding, [obj.pk])
         prepared = await PreparedDeletion.prepare(plan, CascadePolicy(), connection)
         pks_by_model = plan.get_pks_by_model()
         soft_deleted_keys = plan.get_keys(DeletionAction.SOFT_DELETE, DeletionAction.UNCHANGED)
@@ -110,7 +108,7 @@ class DeletePreviewBuilder:
         root_key = (model, obj.pk)
         # The obj's own guards ignore the rows its cascade reaches, as delete() checks them
         # (DeletionCollector.check_protected()).
-        root_reachable_keys = await DeletionCollector.get_reachable_keys(model, [obj.pk], connection)
+        root_reachable_keys = await DeletionCollector.get_reachable_keys(obj._binding, [obj.pk], connection)
         statement_restricting_groups: list[tuple[type[Model], ForeignKeyFieldInstance[Any], list[Model]]] = []
         for reached_model, reached_pks in pks_by_model.items():
             # A hard-deleted descendant's guards ignore rows the same delete physically removes too, a
@@ -136,17 +134,24 @@ class DeletePreviewBuilder:
             ]
             for group_pks, exclude in protect_check_groups:
                 async for protecting_group in DeletionCollector.iterate_guarding_rows(
-                    reached_model,
+                    obj._binding.graph.get_binding(reached_model),
                     group_pks,
                     connection,
                     guarding_actions=PROTECTING_ON_DELETE_ACTIONS,
                     exclude=exclude,
+                    source_model=model,
                 ):
                     preview.add_blocking_rows(preview.protected_by, protecting_group[1])
             async for __, restricting_rows, guarding_field in DeletionCollector.iterate_guarding_rows(
-                reached_model, reached_pks, connection, guarding_actions=RESTRICTING_ON_DELETE_ACTIONS
+                obj._binding.graph.get_binding(reached_model),
+                reached_pks,
+                connection,
+                guarding_actions=RESTRICTING_ON_DELETE_ACTIONS,
+                source_model=model,
             ):
-                if isinstance(guarding_field, ForeignKeyFieldInstance) and not guarding_field.has_database_constraint:
+                if isinstance(guarding_field, ForeignKeyFieldInstance) and not RelationConstraints.is_enforced(
+                    guarding_field, obj._context, connection=connection, source_binding=obj._binding
+                ):
                     # hare enforces it - a row the same delete removes doesn't block, as the cascade
                     # checks it.
                     preview.add_blocking_rows(
@@ -154,13 +159,20 @@ class DeletePreviewBuilder:
                         [row for row in restricting_rows if (type(row), row.pk) not in physically_deleted_keys],
                     )
                 elif isinstance(guarding_field, ForeignKeyFieldInstance) and (
-                    CascadePolicy.database_checks_at_statement_end(reached_model, guarding_field, connection)
+                    CascadePolicy.database_checks_at_statement_end(
+                        obj._binding.graph.get_binding(reached_model), guarding_field, connection, source_model=model
+                    )
                 ):
                     statement_restricting_groups.append((reached_model, guarding_field, restricting_rows))
                 else:
                     preview.add_blocking_rows(preview.restricted_by, restricting_rows)
         await DeletePreviewBuilder.add_restricting_rows_outside_statement(
-            preview, statement_restricting_groups, pks_by_model, physically_deleted_keys, connection
+            preview,
+            statement_restricting_groups,
+            pks_by_model,
+            physically_deleted_keys,
+            connection,
+            source_binding=obj._binding,
         )
 
         await DeletePreviewBuilder.add_foreign_key_updates(preview, prepared, physically_deleted_keys)
@@ -170,9 +182,12 @@ class DeletePreviewBuilder:
                 {
                     many_to_many_field.through
                     for reached_model in pks_by_model
-                    for many_to_many_field in DeletionGraph.get_many_to_many_fields(reached_model)
+                    for many_to_many_field in DeletionGraph.get_many_to_many_fields(
+                        obj._binding.graph.get_binding(reached_model)
+                    )
                     if DeletionGraph.is_tenant_schema_relation(many_to_many_field)
-                }
+                },
+                obj._binding.graph,
             )
         return preview
 
@@ -182,7 +197,9 @@ class DeletePreviewBuilder:
         restricting_groups: list[tuple[type[Model], ForeignKeyFieldInstance[Any], list[Model]]],
         pks_by_model: dict[type[Model], list[Any]],
         physically_deleted_keys: frozenset[tuple[type[Model], Any]],
-        connection: DatabaseClient | None,
+        connection: DatabaseClient,
+        *,
+        source_binding: ModelBinding,
     ) -> None:
         """Fills ``preview.restricted_by`` with the rows of ``restricting_groups`` that still
         exist once the ``DELETE`` statement removing the row they point at has run.
@@ -194,8 +211,9 @@ class DeletePreviewBuilder:
             pks_by_model: The rows the delete reaches, by model.
             physically_deleted_keys: ``(type, pk)`` of rows the delete physically removes.
             connection: The connection the delete runs on - every lookup against a model on that
-                connection runs on it, inside its transaction; a model on another connection,
-                or every model when None, uses its own.
+                connection runs on it, inside its transaction; a model on another connection
+                uses that connection.
+            source_binding: The binding of the model that started the delete preview.
         """
         if not any(
             (type(row), row.pk) in physically_deleted_keys
@@ -206,14 +224,18 @@ class DeletePreviewBuilder:
                 preview.add_blocking_rows(preview.restricted_by, restricting_group[2])
             return
         statement_by_key = await PreparedDeletion.group_rows_by_deleting_statement(
-            pks_by_model, physically_deleted_keys, connection
+            pks_by_model, physically_deleted_keys, connection, source_binding=source_binding
         )
         for guarded_model, foreign_key_field, rows in restricting_groups:
             deleted_guarded_pks = [
                 pk for pk in pks_by_model.get(guarded_model, []) if (guarded_model, pk) in physically_deleted_keys
             ]
             pk_by_target_value = await RelatedRows.get_pks_by_target_values(
-                guarded_model, foreign_key_field, deleted_guarded_pks, connection
+                source_binding.graph.get_binding(guarded_model),
+                foreign_key_field,
+                deleted_guarded_pks,
+                connection,
+                source_model=source_binding._model,
             )
             blocking_rows = []
             for row in rows:
@@ -244,7 +266,7 @@ class DeletePreviewBuilder:
             for change in wave.foreign_key_changes:
                 updated_keys = updated_keys_by_action[change.field.on_delete]
                 related_model = change.backward_field.related_model
-                key_names = related_model._meta.primary_key_attribute_names
+                key_names = change.backward_field.get_related_binding().primary_key_attribute_names
                 for queryset in change.querysets:
                     for related_pk in await queryset.values_list(*key_names, flat=len(key_names) == 1):
                         if (related_model, related_pk) not in physically_deleted_keys:
@@ -285,7 +307,7 @@ class DeletePreviewBuilder:
         """Counts selected through rows by their key-column tuples."""
         many_to_many_field = change.field
         chosen_connection, through_table, criteria = change.connection, change.table, change.criteria
-        key_column_names = sorted(set(many_to_many_field.forward_keys) | set(many_to_many_field.backward_keys))
+        key_column_names = sorted({*many_to_many_field.forward_keys, *many_to_many_field.backward_keys})
         row_counts: dict[tuple[Any, ...], int] = {}
         for criterion in criteria:
             query = (
@@ -293,7 +315,7 @@ class DeletePreviewBuilder:
                 .select(*(through_table[column_name] for column_name in key_column_names))
                 .where(criterion)
             )
-            __, through_rows = await chosen_connection.execute(*query.get_parameterized_sql())
+            __, through_rows = await chosen_connection._execute_built(*query.get_parameterized_sql())
             for through_row in through_rows:
                 key_values = tuple(through_row[column_name] for column_name in key_column_names)
                 row_counts[key_values] = row_counts.get(key_values, 0) + 1

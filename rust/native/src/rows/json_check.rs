@@ -2,8 +2,13 @@
 //! value before writing it, done natively: every node of a nested payload was an `isinstance`
 //! chain in Python, the bulk of a JSON write's cost.
 
+use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyFloat, PyInt, PyList, PyTuple};
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
+
+/// The enum base class, imported only when a non-JSON scalar needs inspection.
+static ENUM_TYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 /// Maximum container nesting accepted by the JSON field.
 const MAXIMUM_DEPTH: usize = 254;
@@ -63,8 +68,17 @@ pub fn check_json_storable<'py>(py: Python<'py>, value: Bound<'py, PyAny>) -> Py
             if !item.extract::<f64>()?.is_finite() {
                 return Ok((NON_FINITE_FLOAT, item));
             }
-        } else if item.is_instance_of::<PyInt>() && item.extract::<i64>().is_err() && item.extract::<u64>().is_err() {
-            has_long_integer = true;
+        } else if item.is_instance_of::<PyInt>() {
+            if item.extract::<i64>().is_err() && item.extract::<u64>().is_err() {
+                has_long_integer = true;
+            }
+        } else if !item.is_none() && !item.is_instance_of::<PyString>() {
+            let enum_type = ENUM_TYPE.get_or_try_init(py, || -> PyResult<_> {
+                Ok(py.import("enum")?.getattr(intern!(py, "Enum"))?.unbind())
+            })?;
+            if item.is_instance(enum_type.bind(py))? {
+                pending.push(item.getattr(intern!(py, "value"))?);
+            }
         }
     }
     let code = if has_long_integer { STORABLE_WITH_LONG_INTEGER } else { STORABLE };

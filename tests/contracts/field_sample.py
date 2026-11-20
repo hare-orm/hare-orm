@@ -4,10 +4,9 @@ import dataclasses
 from collections.abc import Callable
 from typing import Any
 
-import pytest
-
 from hare.fields.field import Field
 from tests.contracts.constants import CONTRACT_DIALECTS, SAMPLED_FIELD_NAME
+from tests.contracts.contract_parameters import ContractParameters
 
 
 @dataclasses.dataclass(frozen=True)
@@ -60,8 +59,7 @@ class FieldSample:
         Returns:
             The parameter, named after the sample.
         """
-        marks = [pytest.mark.requires(*self.requires)] if self.requires else []
-        return pytest.param(self, id=self.name, marks=marks)
+        return ContractParameters.make(self, self.name, self.requires)
 
     def get_field_class(self) -> type[Field[Any]]:
         """The class the sample is of.

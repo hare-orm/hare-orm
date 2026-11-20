@@ -101,15 +101,37 @@ migration file keep that SQL as `RawSQLTerm`, so a queryset whose SQL changes (a
 model's table renamed) makes `makemigrations` write the view anew — removed before the rename and added
 after it.
 
+A queryset with an explicit application or connection is captured when the view is declared:
+its inline SQL and column dependencies replace the live queryset. Closing that source application
+does not invalidate the declaration. `ModelQuery()` and unbound querysets remain templates, compiled
+in the declaring model graph with the schema editor's client. An explicitly offline-bound queryset
+keeps its own graph. Compilation never changes the source query or captures a client on the graph.
+
+Recorded `filter()`, `exclude()` and `get()` calls capture their filter values when the call is
+recorded, including membership iterators. Rebinding and replaying the declaration reuse that captured
+input without consuming the original iterator again. Explicit `ModelQuery(calls=...)` uses the same
+capture rules. Chaining, `for_model()` and `for_binding()` make shallow copies through Python's copy
+protocol, preserving a subclass and its additional attributes without calling its constructor again.
+A custom `__copy__` must return an independent declaration and copy any additional mutable state that
+the subclass changes. Existing recorded calls are shared and must not be mutated in place.
+
 `read_columns` are the columns the view reads, `(table, column)` each. A queryset's are taken from the
 query itself — its selected columns, conditions, joins and subqueries, no SQL is read — and written into
-the migration file; for raw SQL, name them yourself. A migration that changes, renames or removes one of
+the migration file. For raw SQL, name the columns explicitly. Use the short table name for the model's
+schema and `schema.table` to refer to a different schema. A migration that changes, renames or removes one of
 them, or deletes its table, drops the view before and creates it again after, its declaration changed or
 not — PostgreSQL refuses to change the type of a column a view reads. A raw SQL view without
 `read_columns` is left alone while its declaration doesn't change.
 
 Ordinary and materialized views share this dependency order. Removing a table or rebuilding its
 dependent objects drops readers before the views they read, regardless of the two views' types.
+
+When the declared dependencies cross apps on one PostgreSQL connection, the drops, source changes and
+recreation run in one migration transaction. The migration depends on the existing history of the
+affected apps. When it also changes another app's declarations, that app's history records a dependency
+on the atomic migration.
+The generated migration uses `AppOperation` to apply operations to models of the other apps. An atomic
+rebuild requires a common schema scope for the affected models, either shared or tenant.
 
 Changing a view drops it and creates the new version, then grants the model's `Meta.grants` on it again —
 a view created anew has no privileges. A view or materialized view whose `read_columns` name the changed
@@ -180,7 +202,9 @@ The function is known by its name and argument types. A change that keeps the co
 declarations and result type replaces it in place (`CREATE OR REPLACE FUNCTION`), keeping its privileges;
 a change of the arguments (including their defaults) or
 the result type drops it and creates the new one, granting the model's grants on it again. A function a
-view or policy depends on can't be dropped that way — change those in the same migration first. A
+view or policy depends on needs those objects detached before it can be dropped. Autodetection
+detaches changed views and policies before replacing the function and recreates them afterwards.
+For an unchanged dependency expressed only in raw SQL, include its removal and recreation explicitly. A
 `LANGUAGE sql` function is checked against the tables it reads when created, so it can only read tables
 that exist by then: a model's functions are created after the tables of the migration, before its views
 and policies.

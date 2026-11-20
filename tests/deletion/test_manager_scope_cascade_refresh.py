@@ -2,20 +2,18 @@
 PROTECT/RESTRICT checks and refresh_from_db() must still see every row that exists. Also covers
 manager attributes inherited from an abstract base or a plain mixin."""
 
-import os
-
 import pytest
 import pytest_asyncio
 
 from hare import fields
 from hare.contrib.test import truncate_all_models
-from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.exceptions import DoesNotExist, IntegrityError, ProtectedError
 from hare.fields.enums import OnDelete
 from hare.models import Model
 from hare.models.tenancy.tenancy import Tenancy
 from hare.query.expressions import Q
 from hare.query.managers.manager import Manager
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 class ActiveOnlyRows:
@@ -237,10 +235,7 @@ class TypeFromNestedMixin(GreenManagerMixin, Model):
 
 @pytest_asyncio.fixture(scope="module")
 async def scope_context():
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    async with hare_test_context(
-        modules=[__name__], db_url=db_url, app_label="models", connection_label="models"
-    ) as ctx:
+    async with DatabaseUnderTest.open_model_context([__name__]) as ctx:
         yield ctx
 
 

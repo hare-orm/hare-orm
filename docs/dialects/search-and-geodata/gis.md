@@ -55,6 +55,9 @@ coordinates, and its own SRID is dropped — the collection's applies. Every cla
 wrong shape, a non-finite number, an unclosed ring, a member of another type raise `ValidationError`,
 as do geometry collections nested more than 100 deep. Measured (M) coordinates aren't supported.
 
+A polygon hole must be a nonempty closed ring; an empty interior ring raises `ValidationError`.
+`Polygon()` itself remains the empty polygon.
+
 Each geometry has:
 
 - `wkt` — its well-known text without the SRID (`POINT Z (1 2 3)`), `ewkt` — with it
@@ -114,6 +117,8 @@ A geometry without an SRID gets the field's, so `Point(1, 2)` assigned to a `Poi
 type, have its dimensions and its SRID; otherwise `ValidationError` is raised before the query runs. A
 geometry in another SRID is not transformed on write — transform it first, or store it in a column of its
 own SRID. Values are read back as `Geometry` objects carrying their SRID.
+A standalone `Value(Point(...))` annotation has no field supplying a coordinate system: it preserves
+the geometry's SRID, including an unspecified one.
 
 ### <a id="geography"></a>Choosing geometry or geography
 
@@ -210,6 +215,23 @@ from Python in any form a field takes, transformed to the first one's SRID:
 | `AsGeoJSON(geometry)` | dict — the GeoJSON geometry |
 | `NumPoints(geometry)`, `NumGeometries(geometry)` | int |
 | `GeometryTypeName(geometry)` | str — `POINT`, `POLYGON`, ... |
+
+Nested operations retain each geometry argument's type and SRID, including geometry literals and
+annotations. `Transform` exposes the target SRID to its enclosing expression. A generated geometry
+column uses its `output_field` metadata; a generated geography therefore keeps geographic distance
+units when passed to another spatial function.
+
+Geometry-producing functions describe their result independently of the source column: a buffer of
+a point is an area, and a centroid is a point. Reading the result or filtering its annotation uses
+that result's shape, dimensions and geometry/geography type. Native dimension rules still apply:
+PostGIS `Centroid` returns x/y, while `PointOnSurface` can retain a line's z coordinate. A function
+that can return either x/y or x/y/z does not force a literal in `Case` or `Coalesce` into x/y.
+The original column's declared shape and dimensions remain enforced on writes.
+
+An explicit `Value(Point(1, 2))` retains its unknown reference system (`srid=None`) on PostgreSQL and
+SQLite, including through functions that preserve SRID and filters on the result. It does not acquire
+the default field SRID. Assigning the same point to a declared `PointField()` still assigns that
+field's SRID, as described above.
 
 ```python
 from hare.gis.functions import Area, Distance, Transform

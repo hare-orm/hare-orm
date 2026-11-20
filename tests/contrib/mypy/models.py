@@ -2,11 +2,12 @@
 plugin reads, plus a custom field, lookup and transform."""
 
 from enum import StrEnum
-from typing import Self, TypedDict
+from typing import Any, Self, TypedDict
 
 from hare import fields
 from hare.fields import CASCADE, SET_NULL
 from hare.fields.composite_primary_key import CompositePrimaryKey
+from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.models import Model, swappable
 from hare.query.enums import LookupValueShape
 from hare.query.filters import FieldLookup
@@ -29,7 +30,7 @@ class RatingField(fields.IntField):
     """An integer with a lookup registered by the project."""
 
     @staticmethod
-    def build_between(field: fields.IntField | None) -> FieldLookup:
+    def build_between(_field: fields.Field[Any] | None) -> FieldLookup:
         return FieldLookup(Lookups.between)
 
 
@@ -132,7 +133,9 @@ class Loan(Model):
     """A relation to the model the ``READER_MODEL`` setting names."""
 
     id = fields.IntField(primary_key=True)
-    reader = fields.ForeignKeyField(swappable("READER_MODEL"), related_name="loans", on_delete=CASCADE)
+    reader: ForeignKeyFieldInstance[Model] = fields.ForeignKeyField(
+        swappable("READER_MODEL"), related_name="loans", on_delete=CASCADE
+    )
 
     class Meta:
         table = "typing_loan"

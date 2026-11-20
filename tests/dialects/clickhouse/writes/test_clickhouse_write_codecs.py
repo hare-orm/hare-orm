@@ -6,6 +6,7 @@ import pytest
 
 from hare import fields
 from hare.dialects.clickhouse.clickhouse_dialect import ClickhouseDialect
+from hare.exceptions import ValidationError
 from tests.shared_models.testmodels import UUIDFkRelatedModel
 
 pytestmark = pytest.mark.database_independent
@@ -38,5 +39,5 @@ def test_a_written_uuid_is_the_uuid_itself(null, validators):
             assert isinstance(written, uuid.UUID)
     assert writer(value, UUIDFkRelatedModel) is value
     if validators:
-        with pytest.raises(Exception, match="nil"):
+        with pytest.raises(ValidationError, match="nil"):
             writer(uuid.UUID(int=0), UUIDFkRelatedModel)

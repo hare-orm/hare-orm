@@ -77,7 +77,7 @@ async def test_same_alias_connections_keep_mutation_plans_and_instance_templates
             target = f'"book storage" ON CLUSTER "{cluster}"'
             query = model.objects.using(connection).filter(id=1).update(rating=2)
             assert target in query.sql()
-            writer = InstanceWriter(model, connection)
+            writer = InstanceWriter(context.apps.get_binding("placement.Book"), connection)
             assert target in writer.templates.delete_sql
             assert target in writer.get_update_sql(["rating"], None)[0]
             bulk = model.objects.using(connection).bulk_update(
@@ -151,58 +151,68 @@ async def test_schema_compilation_selects_storage_and_companion_before_rendering
     try:
         context.apps.bind_base_queries()
         model = context.apps.get_model("placement.Book")
-        model._meta.schema = schema
+        context.apps.get_binding(model).schema = schema
         connection = context.connections.get("default")
         with pytest.raises(ConfigurationError, match="needs the engine"):
-            ClickhouseSchemaEditor(connection).table_creation.get_definition(model)
+            ClickhouseSchemaEditor(connection).table_creation.get_definition(context.apps.get_binding(model))
         editor = ClickhouseSchemaEditor(connection, collect_sql=True, database_engines={schema or "default": engine})
         prefix = '"other""database".' if schema else ""
         placement = ' ON CLUSTER "alpha"' if engine == "Atomic" else ""
         storage = prefix + '"book storage"' + placement
         logical = prefix + '"book"' + placement
-        definition = editor.table_creation.get_definition(model)
+        definition = editor.table_creation.get_definition(context.apps.get_binding(model))
         assert f"CREATE TABLE {storage} (" in definition.get_create_sql(editor.TABLE_CREATE_TEMPLATE)
         assert definition.qualified_name == prefix + '"book storage"'
-        options = model._meta.get_table_options(connection.dialect)
-        companion = options.get_companion_table_sqls(model, editor, replaces=False)[0]
+        options = context.apps.get_binding(model).get_table_options(connection.dialect)
+        companion = options.get_companion_table_sqls(context.apps.get_binding(model), editor, replaces=False)[0]
         assert f"TABLE IF NOT EXISTS {logical} AS {prefix}" + '"book storage"' in companion
         comment = "'TTL, ON CLUSTER untouched'"
         sql = editor.get_column_change_sql(
-            model, editor.ALTER_FIELD_TEMPLATE, changes=f'MODIFY COLUMN "rating" COMMENT {comment}'
+            context.apps.get_binding("placement.Book"),
+            editor.ALTER_FIELD_TEMPLATE,
+            changes=f'MODIFY COLUMN "rating" COMMENT {comment}',
         )
         assert sql.split(";\n") == [
             f'ALTER TABLE {storage} MODIFY COLUMN "rating" COMMENT {comment}',
             f'ALTER TABLE {logical} MODIFY COLUMN "rating" COMMENT {comment}',
         ]
         rewrite = editor.get_column_change_sql(
-            model,
+            context.apps.get_binding("placement.Book"),
             editor.ALTER_FIELD_TEMPLATE,
             changes='MODIFY COLUMN "rating" Int64',
             storage_changes='MODIFY COLUMN "rating" Int64, UPDATE "rating" = "rating" WHERE 1',
         )
         assert ", UPDATE" in rewrite.split(";\n")[0]
         assert ", UPDATE" not in rewrite.split(";\n")[1]
-        assert [step.sql for step in editor.get_delete_model_plan(model).steps] == [
+        assert [
+            step.sql for step in editor.get_delete_model_plan(context.apps.get_binding("placement.Book")).steps
+        ] == [
             f"DROP TABLE {logical}",
             f"DROP TABLE {storage}",
         ]
         view = View('read"view', RawSQLTerm("SELECT 'ON CLUSTER leave literal'"))
-        view_sql = editor.views.get_view_create_sqls(model, view)[0]
+        view_sql = editor.views.get_view_create_sqls(context.apps.get_binding("placement.Book"), view)[0]
         assert prefix + '"read""view"' + placement + " AS" in view_sql
         assert "SELECT 'ON CLUSTER leave literal'" in view_sql
-        assert editor.get_row_change_table_sql(model) == prefix + '"book storage" ON CLUSTER "alpha"'
-        assert editor.get_row_recovery(model) is None
-        assert editor.get_schema_recovery(model) is None
-        field = model._meta.fields_map["rating"]
+        assert (
+            editor.get_row_change_table_sql(context.apps.get_binding("placement.Book"))
+            == prefix + '"book storage" ON CLUSTER "alpha"'
+        )
+        assert editor.get_row_recovery(context.apps.get_binding("placement.Book")) is None
+        assert editor.get_schema_recovery(context.apps.get_binding("placement.Book")) is None
+        field = context.apps.get_binding(model).fields_map["rating"]
         not_null = editor.column_backfill.get_not_null_plan(
-            model, field, '"rating"', "Int32", column_has_db_default=False
+            context.apps.get_binding("placement.Book"), field, '"rating"', "Int32", column_has_db_default=False
         )
         assert not_null.steps[0].sql == (f'ALTER TABLE {prefix}"book storage" ON CLUSTER "alpha" APPLY DELETED MASK')
         assert f'ALTER TABLE {storage} MODIFY COLUMN "rating"' in not_null.steps[1].sql
         assert f'ALTER TABLE {logical} MODIFY COLUMN "rating"' in not_null.steps[1].sql
         assert all(step.recovery is None for step in not_null.steps)
-        assert editor.table_clearing_class.get_model_target_sql(editor, model) == storage
-        flush = editor.table_rebuild.get_distributed_flush_plan(model)
+        assert (
+            editor.table_clearing_class.get_model_target_sql(editor, context.apps.get_binding("placement.Book"))
+            == storage
+        )
+        flush = editor.table_rebuild.get_distributed_flush_plan(context.apps.get_binding("placement.Book"))
         database = prefix or '"default".'
         assert flush.steps[0].sql == f'SYSTEM FLUSH DISTRIBUTED {database}"book" ON CLUSTER "alpha"'
         execute_script = AsyncMock()

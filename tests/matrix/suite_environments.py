@@ -103,7 +103,7 @@ class SuiteEnvironments:
 
     @staticmethod
     def get_path_requirements(path: Path) -> frozenset[str]:
-        """What the tests of a file or directory require - ``SuiteRequirements.get_path_requirements()``.
+        """What the tests of a file or directory require - ``TestSelectionManifest.get_path_requirements()``.
 
         Args:
             path: A test module or a directory of tests.
@@ -115,7 +115,7 @@ class SuiteEnvironments:
             pytest.UsageError: A test module is absent from the selection manifest.
         """
         try:
-            return SuiteRequirements.get_path_requirements(path)
+            return SuiteRequirements.manifest.get_path_requirements(path)
         except ValueError as error:
             raise pytest.UsageError(str(error)) from None
 
@@ -159,7 +159,9 @@ class SuiteEnvironments:
                 name for marker in item.iter_markers(REQUIRES_MARKER) for name in marker.args
             }
             try:
-                SuiteRequirements.manifest.check_cell_requirements(item.path, requirements)
+                SuiteRequirements.manifest.check_cell_requirements(
+                    item.path, requirements, module_requirements=module_requirements
+                )
             except ValueError as error:
                 raise pytest.UsageError(f"{item.nodeid}: {error}") from None
             installed = SuiteRequirements.get_installed(requirements)

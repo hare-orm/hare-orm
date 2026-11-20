@@ -6,6 +6,7 @@ import math
 import pytest
 
 from hare.contrib.test import capture_queries
+from hare.core.hare_context import HareContext
 from hare.dialects.clickhouse.fields import ClickhouseDatetimeField
 from hare.dialects.postgresql.functions.array import ArraySubquery
 from hare.exceptions import UnSupportedError
@@ -73,7 +74,7 @@ async def test_field_values_survive_query_paths(contract_database, sample):
             actual = await QueryFieldContract.read(window, shape, iterate=True)
             assert QueryFieldContract.comparable(actual) == QueryFieldContract.comparable(neighbors), (offset, shape)
 
-    connection = model._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(model).get_connection()
     null_query = model.objects.annotate(result=NullIf("value", F("value"))).order_by("id", "part")
     if connection.dialect.name == "clickhouse" and sample.name in {
         "array",
@@ -138,7 +139,11 @@ async def test_native_annotations_use_the_iteration_connection(contract_database
     query = model.objects.order_by("id", "part").annotate(result=expression)
     for shape in ("model", "dict", "flat"):
         for pinned in (False, True):
-            source = query.using(model._meta.connection.connection_alias) if pinned else query
+            source = (
+                query.using(HareContext.require_current().apps.get_queryset(model).get_connection().connection_alias)
+                if pinned
+                else query
+            )
             assert await QueryFieldContract.read(source, shape, iterate=True) == expected
 
 

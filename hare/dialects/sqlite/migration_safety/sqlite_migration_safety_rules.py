@@ -4,7 +4,8 @@ from typing import TYPE_CHECKING
 
 from hare.dialects.base.migration_safety.constants import LIMITED_ROW_COUNT_SQL
 from hare.dialects.base.migration_safety.migration_safety_rules import MigrationSafetyRules
-from hare.dialects.sqlite.constants import SQLITE_DATABASE_TABLE_EXISTS_SQL, SQLITE_MAIN_SCHEMA
+from hare.dialects.sqlite.constants import SQLITE_DATABASE_TABLE_EXISTS_SQL
+from hare.dialects.sqlite.literals.constants import SQLITE_MAIN_SCHEMA
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from hare.migrations.constants import RELATION_FIELDS
 from hare.migrations.exceptions import IncompatibleStateError
-from hare.migrations.operations.constants import DIRECT_RELATION_FIELDS, MISSING_MODEL_MESSAGE
+from hare.migrations.operations.constants import MISSING_MODEL_MESSAGE
 from hare.migrations.operations.dependencies.operation_dependency import OperationDependency
 from hare.migrations.operations.dependencies.relation_dependencies import RelationDependencies
 from hare.migrations.operations.enums import DependencyType
@@ -40,7 +41,7 @@ class DeleteModel(ModelTableOperation):
             "reference is applied first."
         )
 
-    def get_provided_dependencies(self, app_label: str) -> list[OperationDependency]:
+    def get_provided_dependencies(self, app_label: str, state: State) -> list[OperationDependency]:
         return [OperationDependency.of_model(app_label, self.name, DependencyType.REMOVED)]
 
     def get_required_dependencies(self, app_label: str, state: State) -> list[OperationDependency]:
@@ -56,7 +57,9 @@ class DeleteModel(ModelTableOperation):
             return f"Delete model {self.name} (state only, its table is kept)"
         return f"Delete model {self.name}"
 
-    def get_effect(self, app_label: str, state: State, schema_editor: BaseSchemaEditor) -> OperationEffect:
+    def get_effect(
+        self, app_label: str, old_state: State, new_state: State, schema_editor: BaseSchemaEditor
+    ) -> OperationEffect:
         if self.state_only:
             return OperationEffect(operation=self, reversible=self.reversible)
         return OperationEffect(
@@ -70,12 +73,13 @@ class DeleteModel(ModelTableOperation):
         model_reference = f"{app_label}.{self.name}"
         model_key = (app_label, self.name)
 
-        for state_key, model_state in state.models.items():
+        for state_key in state.models:
             if state_key == model_key:
                 # The model's own self-referencing relation doesn't keep it.
                 continue
+            model_state = state.models[state_key]
             for field_name, field in model_state.fields.items():
-                if not isinstance(field, DIRECT_RELATION_FIELDS):
+                if not isinstance(field, RELATION_FIELDS):
                     continue
 
                 # A label, a model class or a swappable reference alike.
@@ -86,9 +90,9 @@ class DeleteModel(ModelTableOperation):
                         f"run before the one deleting {model_reference}."
                     )
 
-        model_state_to_delete = state.models.pop((app_label, self.name), None)
-        if not model_state_to_delete:
+        if model_key not in state.models:
             raise IncompatibleStateError(MISSING_MODEL_MESSAGE.format(app_label=app_label, model_name=self.name))
+        del state.models[model_key]
 
         state.mark_model_removed(app_label, self.name)
 

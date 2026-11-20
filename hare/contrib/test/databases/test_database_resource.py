@@ -13,7 +13,7 @@ class TestDatabaseResource:
         self.client = client
 
     async def create(self) -> None:
-        await self.client.db_create()
+        await self.client.db_create_exclusive()
 
     async def generate_schema(self, safe: bool = False) -> None:
         await self.client.generate_schema(safe)

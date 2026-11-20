@@ -13,6 +13,7 @@ from hare.core.connections.connections import Connections
 from hare.core.constants import DEFAULT_CONNECTION_NAME
 from hare.inspectdb import SchemaInspector
 from hare.migrations.drift.detect_drift_for_alias import detect_drift_for_alias
+from hare.migrations.writer import MigrationWriter
 
 
 class SchemaCommands:
@@ -26,12 +27,7 @@ class SchemaCommands:
         """Prints hare-orm model source reverse-engineered from an existing database's schema -
         best-effort, review before trusting it, same as Django's own inspectdb."""
         hare_config = CommandContext.load_config(cli_context)
-        if connection_alias:
-            if connection_alias not in hare_config.connections:
-                raise CLIUsageError(f"Unknown connection alias: {connection_alias}")
-            inspected_connection_alias = connection_alias
-        else:
-            inspected_connection_alias = next(iter(hare_config.connections))
+        inspected_connection_alias = CommandContext.get_connection_alias(hare_config, connection_alias)
         async with CommandContext.database_error_boundary(), CommandContext.hare_cli_context(hare_config):
             connection = Connections.get(inspected_connection_alias)
             source = await SchemaInspector.inspect(connection, tables=list(tables) or None, schema=schema)
@@ -56,14 +52,9 @@ class SchemaCommands:
         full_apps_config = CommandContext.select_apps(hare_config, None)
         apps_dict = {label: app.to_dict() for label, app in full_apps_config.items()}
 
-        if connection_alias:
-            if connection_alias not in hare_config.connections:
-                raise CLIUsageError(f"Unknown connection alias: {connection_alias}")
-            checked_connection_alias = connection_alias
-        else:
-            checked_connection_alias = next(iter(hare_config.connections))
+        checked_connection_alias = CommandContext.get_connection_alias(hare_config, connection_alias)
 
-        requested_apps_config = CommandContext.select_apps(hare_config, app_labels or None)
+        requested_apps_config = CommandContext.select_apps(hare_config, app_labels) if app_labels else full_apps_config
         target_labels = [
             label
             for label in requested_apps_config
@@ -88,8 +79,11 @@ class SchemaCommands:
             return None
 
         OutputFormatter.echo_connection_header(checked_connection_alias)
-        for operation in result.operations:
-            print(f"  {TerminalColors.YELLOW}~{TerminalColors.RESET} {operation.describe()}")
+        for app_label, operations in result.operations_by_app.items():
+            print(f"  Suggested migration for {app_label!r}")
+            for operation in operations:
+                print(f"  {TerminalColors.YELLOW}~{TerminalColors.RESET} {operation.describe()}")
+            print(MigrationWriter("repair_drift", app_label, operations).as_string(), end="")
         for app_label, model_name, table, column_name in result.untracked_columns:
             print(
                 f"  {TerminalColors.YELLOW}~{TerminalColors.RESET} Untracked column {column_name!r} in table "

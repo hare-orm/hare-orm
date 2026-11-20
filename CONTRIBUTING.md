@@ -70,11 +70,11 @@ it holds. The public API is what `hare`, `hare.fields`, `hare.models`, `hare.que
 
 | Package | What it holds |
 | --- | --- |
-| `hare/` | The public entry points (`__init__.py`), `exceptions.py` and `warnings.py` — nothing else. |
+| `hare/` | The public entry points (`__init__.py`), `exceptions.py`, `warnings.py` and the `py.typed` marker. |
 | `hare/core/` | Starting and holding the ORM: `Hare` (`hare.py`), its config (`config/`), the context a process or test runs in (`hare_context.py`), the connections (`connections/`) and the router (`routing/`), the app and model registry (`apps/`: the registry, relation linking, swappable models, model discovery, table name checks), the caches and dropping them (`caching/`), and `Registries` — what dialects, fields and packages register. |
-| `hare/models/` | `Model` — its public API — and the classes running its steps: an instance's set-up, connections, copies, saving, checks and dirty fields (`instances/`), writing rows (`write/`: the writer, inserts, updates, rollback restores, captured changes), deletion and soft deletion with their cascades and previews (`deletion/`), building the class and checking its definition (`class_building/`), `MetaInfo` and the metaclass (`model_meta.py`), tenancy (`tenancy/`). |
+| `hare/models/` | `Model` and its metaclass (`model_meta.py`), the class-level `ModelDeclaration` and the per-graph `ModelBinding`, class construction and checks (`class_building/`), instance setup and tracking (`instances/`), row writes and rollback restores (`write/`), cascades and previews (`deletion/`), tenancy (`tenancy/`) and declared uniqueness (`uniqueness/`). |
 | `hare/fields/` | `Field` (`field.py`), the value fields by family (`data/`: `numeric`, `text`, `temporal`, `json`, `choices`, `containers` — arrays, maps, tuples —, `network`, boolean, binary and UUID fields), relational fields, their accessors and related managers (`relations/`), generated, encrypted and swappable fields, database defaults (`db_defaults/`), registered lookups and transforms (`registrations/`), validators (`validators/`: limits and formats). |
-| `hare/query/` | Building queries: `QuerySet` and the classes checking its arguments (`queryset/`), the statements a queryset runs (`statements/`: building — joins, grouping, ordering, keysets, row locks, annotations, conditions, CTEs; `select/` — values, model rows, set operations; `summary/`; `write/` — update, delete, bulk writes, merge), statement plans and how the parts of a query describe them (`plans/`), expressions (`expressions/`), ORM functions (`functions/`), lookups and filters (`filters/`), managers, scopes, relation loading, lookup paths and the lookup-info API (`lookup_info/`). |
+| `hare/query/` | Query declarations and arguments (`queryset/`), SQL assembly and statement executors (`statements/`), statement planning and binding (`plans/`), execution context and driver calls (`execution/`), model and value projections (`rows/`), expressions and functions, filters, managers, scopes, relation loading and the lookup-info API. |
 | `hare/sql/` | The SQL builder the ORM renders through: terms, criteria, functions and query builders (`builder/`) — no models, no connections. |
 | `hare/ddl/` | Schema objects declared in `Meta`: indexes, constraints, triggers, table options, the expressions a declaration writes into DDL (`expressions/`), and the dialect-neutral quoting of names and literals. |
 | `hare/dialects/` | One package per database (`sqlite/`, `postgresql/` with `drivers/asyncpg` and `drivers/rust_pg`, `clickhouse/` with `drivers/clickhouse_connect` and `drivers/clickhouse_driver`) on the contract in `base/`: `Dialect` and `Features`, the connection and its client (`connection/`, `client/`), transactions, literals, parameters, clauses, renderers, types, lookups, full-text search (`search/`), schema editors and their parts (`schema/`), migration safety rules. What several of hare's dialects write alike beyond ISO SQL is a class of `base/` too, named after what it holds (`LimitReturningConflictQueryClauses`). The core imports no dialect; a dialect-specific class lives in its dialect. |
@@ -98,15 +98,27 @@ Where new code goes: a constant into the `constants.py` of the package using it,
 `enums.py`; a helper that belongs to a class is a method of that class, not a function next to it;
 a module of its own for a new concept rather than a new class in an unrelated module.
 
-Every process-wide cache is registered in `hare.core.caching.caches.Caches` where it is declared, so a
-change to a model or a registry drops it — never `functools.cache`/`lru_cache` or a module-level dict:
-a `Cache(max_size)` for global values by key, with explicit `get_bucket(holder)` or
-`get_model_bucket(model)` storage for values whose lifetime follows an object or model. A key
-does not determine its lifetime. Use `ModelCache()` for one value per model class
-(`ModelCache(depends_on_other_models=True)`
-when a value describes other models too), or `Caches.register(cache)` for anything else with
-`forget_model(model)` and `forget_all()`.
-`tests/model_setup/binding/test_model_caches.py` fails on a model-keyed `WeakKeyDictionary` declared in its place.
+Every cache uses `Cache` or `ModelCache`, which register with `Caches` when constructed.
+Use `Cache(max_size)` for bounded global values and `get_bucket(holder)` for values following an
+explicit holder. Model-dependent facts use a `ModelBinding` holder or `ModelCache()`; their lifetime
+follows that graph node, not the shared Python model class. `depends_on_other_models=True` also
+invalidates dependent facts in that graph. Independent registries keep independent entries.
+Never replace this storage with `functools.cache`/`lru_cache`, a module-level dictionary or a
+model-keyed `WeakKeyDictionary`.
+
+Model options are normalized when their declaration is captured; a binding consumes those values
+and snapshots mutable schema objects for its graph. Container shapes implement `_prepare_encoder()`
+and `_prepare_decoder()`; `ContainerField` supplies the common hook-aware preparation interface.
+
+Related-model and explicit through-model metadata use `get_related_binding()` and
+`get_through_binding()` on linked fields. Through nodes are linked before model finalization, so
+schema compilation and runtime relations use the same graph identity. `through_model_class` remains
+for declaration and incomplete-state work. Use `types.get_native_reader(field, native_types)` for a
+native column reader and `PlanDescription.structure`/`.values` for a statement's prepared description.
+
+Deferred class or callable imports use `DeferredImport(module_name, attribute_path)`. The attribute
+path may be dotted; after the first access the class stores the imported object itself. Access an
+imported plain callable through its holding class when the caller supplies its arguments explicitly.
 
 A new part of a query declares how it meets its statement plan instead of describing it by hand:
 an expression or a window function lists how each attribute meets the plan in `plan_parts`
@@ -129,6 +141,15 @@ on demand through the diff's hooks. `is_unchanged()` receives these entries; ope
 receive their original declarations. These facts must not survive the comparison or cross a state
 change. `PreparedOperationGraph` prepares provider keys once for its operation sequence; rebuilding
 the graph after a rewrite also rebuilds those keys and the state boundaries used for requirements.
+
+Prepared migration nodes retain private before/after declarations and executable database children.
+`StateSnapshot` materializes an independent working `State`; its `ModelStateMap` detaches each model
+on first access and protects exposed declarations again on publication. Rendered registries belong
+to the working state, not to the retained operation tree. `State.clone()` remains a deep copy.
+Safety checks release their cached schema plans after each assessment scope. State-only children
+are prepared to compute the resulting state; their intermediate tree is not retained in
+`PreparedOperation`. Sorting and migration splitting share the provider-position matcher
+of `PreparedOperationGraph`.
 
 ## Running the test suite
 
@@ -273,18 +294,18 @@ make rust_check             # cargo fmt --check, clippy and the Rust unit tests 
 ```
 
 `rust.native` (`rust/native/`) holds the PostgreSQL driver behind `postgresql://` URLs (`rust.native.pg`)
-and independent attribute, JSON and value-format operations (`rust.native.rows`). Batch hydration
-calls Python's model `__new__`, field readers and dirty snapshots; relation and annotation processing
-is shared with the Python reader. It processes rows in bounded chunks and yields to the event loop
-between chunks. Converters run in row order, including for NULL values, and the first error stops
-the batch. It does not implement a second set of field codecs. hare's Python code has no second
-version of what the extension does: every wheel carries it - on Windows without the PostgreSQL driver
+and the shared model row layouts (`rust.native.rows`). Python prepares the column keys and field
+readers. The native layout applies them, creates model instances, attaches related objects and
+annotations, and calls the dirty-field snapshot hook. Large results are read in bounded chunks,
+yielding to the event loop between chunks. Configured converters run in row order, including on
+NULL values, and the first conversion error stops the batch. Every wheel carries the extension,
+on Windows without the PostgreSQL driver
 (`rust.native.pg`, `rust.native.pool`), which is built on Linux and macOS alone. CI builds it on every
 run for Python 3.12, 3.13, 3.14 and 3.15 on Linux and shares it with every job that needs it. The built files
 aren't committed: a checkout has no `rust.native` until `make build_native` builds it with the Rust
 toolchain `rust-toolchain.toml` pins, and the wheels on PyPI carry it built.
 
-Native annotation readers are classified once per bounded batch; their conversions and attribute
+Native annotation readers are classified when the result layout is prepared. Their conversions and attribute
 assignments still run for each row in order. Ordinary Python callbacks use PyO3 `call1` with Rust
 tuples. The small CPython FFI module retains generic attribute assignment and exact-integer
 extraction, whose behavior is distinct from ordinary Python method calls. PostgreSQL bind and COPY
@@ -398,9 +419,9 @@ make test_environment ENVIRONMENT=litestar HARE_TEST_DB=postgresql://postgres:po
 
 ### Contract matrices
 
-`tests/contracts/` checks each capability of hare against every place it is used, as a matrix: the rows are
-enumerated from hare itself (`HareRegistry` walks its packages), so a class added to hare is checked at once,
-and a row without its expected result fails a completeness test instead of being skipped.
+`tests/contracts/` checks shared guarantees across fields, query forms, write paths and databases. The
+registry-backed matrices use `HareRegistry` to enumerate their classes. A new class without a sample
+or a documented exception fails the corresponding completeness test.
 
 | Matrix | Rows × columns | Where |
 | --- | --- | --- |
@@ -409,12 +430,14 @@ and a row without its expected result fails a completeness test instead of being
 | Field × bound conversion | every sample and its `GeneratedField` copy × model hydration and bound writing, in every time zone setting — results agree with the type registry's conversions | `test_field_native_codecs.py` |
 | Field × query path | representative `FIELD_SAMPLES` with composite keys × model/dict/flat results, iteration, cursor boundaries, windows and returning; expected values come from the input samples | `test_field_query_paths.py` |
 | Keyless rows × operation | repeated rows × slices, iteration, count, existence, aggregation and returning, including refusals before SQL | `test_keyless_query_paths.py` |
+| Reader × scope lifetime | scalar/composite keys × tenant changes in the consumer; early close for iterator and stream, soft-delete visibility for iteration | `test_iterator_scope_lifetime.py` |
 | Prefetch slice × query shape | composite many-to-many relations × masks, windows, distinct, repeated rows and separate connections | `test_prefetch_query_shapes.py` |
 | Query columns × identifier | letter case and byte length × set operations, windows, recursion and old values returned by updates | `test_query_column_names.py` |
 | Query shape × operation | composite aliases, nullable subqueries and their slices, ordering joins and grouped rows × filtering, summaries and set operations; single/composite keys × result shapes, ordering and slices, checked against Python keys | `test_query_shape_interactions.py` |
 | Relation × connection choice | reverse FK and many-to-many, single/composite source and target keys × saved connection changes, runtime routers, explicit `using()`, result shapes, summaries, union and sliced prefetch | `test_relation_connection_paths.py` |
 | Mutable input × call snapshot | list/set/dict and their subclasses × filter/exclude/`Q`, pending JSON writes and nested values, with single/composite keys | `test_filter_value_snapshots.py` |
 | Write path × nested outcome | update/save/bulk update/soft delete × inner/outer commit and rollback, single/composite keys, tenant isolation and commit/rollback callbacks | `test_transaction_scope_paths.py` |
+| Migration × state and database | declaration isolation, apply/unapply, connection moves, rewrites across batch boundaries, and rollback followed by reapply with surviving data and history | `test_migration_runner_state.py`, `tests/migrations/execution/test_rollback_history.py` |
 | Tenant model × selected client | single/composite keys × reads, writes, relations and embedded queries; missing template/scope, explicit aliases/clients and remembered aliases; a valid tenant client remains usable | `test_tenant_connection_paths.py` |
 | JSON aggregate × element type | binary and interval `FIELD_SAMPLES` × scalar/nested arrays/generated outputs; refusal before SQL and exact `ArrayAgg` values | `test_json_aggregate_inputs.py` |
 | Write path × observer | every method writing rows (`writes/write_methods.py`) × `ChangeCapture`, `RowsChanged`, validators, `auto_now`, optimistic lock, tenant scope, encryption, `GeneratedField` | `writes/` |
@@ -424,6 +447,11 @@ and a row without its expected result fails a completeness test instead of being
 | Documentation × code | every `from hare… import …` of `docs/**/*.md` | `documentation/` |
 | `Meta` option × inheritance | every model option and extension option × no `Meta`, a bare one, `Meta(Base.Meta)`, overridden, `None` | `meta_options/` |
 | Exception × integration answer | every public exception × each integration's status, without the database's text | `exceptions/` |
+
+Every field sample keeps the migration source round-trip and declared column-type checks. For fields
+with a row column, the inspectdb matrix also applies the written migration, reverses it, checks that its
+tables are gone and recreates them from the inspected models. Samples without a row column run their
+apply/reverse cycle in the migration matrix, using `FIELD_SAMPLES_WITHOUT_ROW_COLUMN` to partition the cases.
 
 A new field class needs its `FieldSample` (with its values and their JSON forms), a new writing method its
 write path, a new `Meta` option its sample — or an entry with the reason in `tests/contracts/constants.py`.
@@ -459,6 +487,11 @@ the suites you run — every ClickHouse server and cluster at once needs a lot o
 A run is the tests of one environment in one suite. Each run writes its pytest output to
 `.test-matrix/<python>-<environment>-<suite>.log`; `make test_matrix` fails when any run failed - a
 run choosing no tests fails unless its declaration explicitly permits `allow_empty=True`.
+The `[contracts]` table in `tests/matrix/catalog.toml` names required pytest cases and their suites
+in the `all` environment. Use the full node ID, including its parameter ID, to require a specific
+case. A test name without a parameter ID requires at least one passing variant. The JSON report
+beside the log records selected case outcomes and skip reasons. A required case that doesn't pass
+fails the matrix run, including when it wasn't collected. List only suites where the case applies.
 The suites are `database-independent`, `sqlite-<version>`,
 `sqlite-regexp`, `asyncpg-<postgres>`, `rust_pg-<postgres>`, `pgbouncer-<asyncpg|rust_pg>-<pgbouncer>-<postgres>`,
 `clickhouse-connect-<clickhouse>`, `clickhouse-driver-<clickhouse>`, `clickhouse-connect-cluster-<clickhouse>`,

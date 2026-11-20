@@ -61,6 +61,7 @@ class MigrationWriter:
         dependencies: list[tuple[str, str]] | None = None,
         run_before: list[tuple[str, str]] | None = None,
         replaces: list[tuple[str, str]] | None = None,
+        replacement_aliases: list[tuple[str, str]] | None = None,
         initial: bool | None = None,
         migrations_module: str | None = None,
         atomic: bool = True,
@@ -71,6 +72,7 @@ class MigrationWriter:
         self.dependencies = dependencies or []
         self.run_before = run_before or []
         self.replaces = replaces or []
+        self.replacement_aliases = tuple(replacement_aliases or ())
         self.initial = initial
         self.migrations_module = migrations_module
         self.atomic = atomic
@@ -170,6 +172,8 @@ class MigrationWriter:
             blocks.append([f"    run_before = {self.run_before!r}"])
         if self.replaces:
             blocks.append([f"    replaces = {self.replaces!r}"])
+        if self.replacement_aliases:
+            blocks.append([f"    replacement_aliases = {self.replacement_aliases!r}"])
         if self.initial is not None:
             blocks.append([f"    initial = {self.initial!r}"])
         if not self.atomic:
@@ -219,24 +223,16 @@ class MigrationWriter:
             if module_name == "hare.migrations.operations"
             else DeclarationValueSerializer.get_import_reference(path, imports)
         )
-        if not any(isinstance(value, list) and value for value in kwargs.values()):
-            arguments = [DeclarationValueSerializer.render_value(arg, imports) for arg in args]
-            arguments += [
-                f"{name}={DeclarationValueSerializer.render_value(value, imports)}" for name, value in kwargs.items()
-            ]
-            line = f"{indent}{callee}({', '.join(arguments)}),"
-            if len(line) <= MIGRATION_LINE_LENGTH and "\n" not in line:
-                return [line]
-        lines = [f"{indent}{callee}("]
-        lines += [f"{indent}    {DeclarationValueSerializer.render_value(arg, imports)}," for arg in args]
+        arguments = [DeclarationValueSerializer.render_value(arg, imports) for arg in args]
         for name, value in kwargs.items():
             if isinstance(value, list) and value:
-                lines.append(f"{indent}    {name}=[")
-                lines += [
-                    f"{indent}        {DeclarationValueSerializer.render_value(item, imports)}," for item in value
-                ]
-                lines.append(f"{indent}    ],")
+                items = "".join(
+                    f"{indent}        {DeclarationValueSerializer.render_value(item, imports)},\n" for item in value
+                )
+                arguments.append(f"{name}=[\n{items}{indent}    ]")
             else:
-                lines.append(f"{indent}    {name}={DeclarationValueSerializer.render_value(value, imports)},")
-        lines.append(f"{indent}),")
-        return lines
+                arguments.append(f"{name}={DeclarationValueSerializer.render_value(value, imports)}")
+        line = f"{indent}{callee}({', '.join(arguments)}),"
+        if len(line) <= MIGRATION_LINE_LENGTH and "\n" not in line:
+            return [line]
+        return [f"{indent}{callee}(", *(f"{indent}    {argument}," for argument in arguments), f"{indent}),"]

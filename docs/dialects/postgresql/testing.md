@@ -28,6 +28,10 @@ privileges and comment a new database gets, and clears database-level settings
 some). None of these statements requests a checkpoint. Objects that don't live in a schema — large
 objects, event triggers, publications — are not removed.
 
+Database creation and deletion use an independent administrative connection, so an application
+client replaced by a later `init()` cannot redirect database DDL into its replacement's pool.
+Both PostgreSQL drivers use this same path and close the administrative client after the statement.
+
 Behind a [transaction pooler](../../connections/connection-poolers.md) the reset runs on the server
 itself (`direct_host`) and ends the pooler's server sessions on the database too. PgBouncer notices a
 session ended only when it lends it, so a test's first statement would fail on it: set

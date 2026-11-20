@@ -8,7 +8,6 @@ from hare.exceptions import DoesNotExist, ValidationError
 from hare.fields.composite_primary_key import CompositePrimaryKey
 from hare.fields.field import Field
 from hare.fields.generated_field import GeneratedField
-from hare.fields.relations.fields.one_to_one_field_instance import OneToOneFieldInstance
 from hare.models.class_building.abstract_meta_inheritance import AbstractMetaInheritance
 from hare.models.class_building.blind_indexes import BlindIndexes
 from hare.models.class_building.field_comments import FieldComments
@@ -16,11 +15,14 @@ from hare.models.class_building.generic_foreign_keys import GenericForeignKeys
 from hare.models.class_building.model_field_collection import ModelFieldCollection
 from hare.models.class_building.model_managers import ModelManagers
 from hare.models.class_building.primary_key_declaration import PrimaryKeyDeclaration
-from hare.models.meta_info import MetaInfo
+from hare.models.enums import ModelOption
+from hare.models.model_declaration import ModelDeclaration
 from hare.query.managers.manager import Manager
 
 if TYPE_CHECKING:
+    from hare.core.hare_context import HareContext
     from hare.models.model import Model
+    from hare.models.model_binding import ModelBinding
 
 TModel = TypeVar("TModel", bound="Model")
 
@@ -32,8 +34,9 @@ class ModelMeta(type):
 
     def __new__(cls, name: str, bases: tuple[type, ...], attributes: dict[str, Any]) -> ModelMeta:
         attributes = ModelFieldCollection.snapshot_attributes(attributes)
-        fields_db_projection: dict[str, str] = {}
         primary_key_attribute: str | tuple[str, ...] = "id"
+        # The bootstrap base has no model parent. A user's subclass may also be named Model.
+        has_model_parent = any(isinstance(base, ModelMeta) for base in bases)
         # The C3 order of the ancestors, nearest first.
         canonical_mro = cls._linearize_mro(bases)
         meta_class = AbstractMetaInheritance.get_merged_meta_class(
@@ -56,7 +59,7 @@ class ModelMeta(type):
         pk_without_overlaps = any(
             isinstance(value, CompositePrimaryKey) and value.without_overlaps for value in attributes.values()
         )
-        if name != "Model":
+        if has_model_parent:
             attributes, primary_key_attribute = PrimaryKeyDeclaration.parse_custom_pk(
                 attributes,
                 primary_key_attribute,
@@ -69,10 +72,8 @@ class ModelMeta(type):
             # A model rendered from the migrations' state has the blind indexes the state holds - each
             # an AddField of its own, after the field it indexes.
             attributes = BlindIndexes.expand_declarations(attributes, name)
-        fields_map, foreign_key_fields, many_to_many_fields, one_to_one_fields = ModelFieldCollection.dispatch_fields(
-            attributes, fields_db_projection
-        )
-        if name != "Model":
+        fields_map = ModelFieldCollection.get_declared_fields(attributes)
+        if has_model_parent:
             ModelFieldCollection.check_field_name_conflicts(fields_map, name)
 
         # The fields this class's own body declares or overrides, plus a synthesized `id` - a
@@ -84,50 +85,42 @@ class ModelMeta(type):
         # Clean the class attributes
         for slot in fields_map:
             attributes.pop(slot, None)
-        attributes["_meta"] = meta = cls.build_meta(
+        declared_manager = inspect.getattr_static(meta_class, ModelOption.MANAGER, None)
+        manager = declared_manager.copy_unbound() if declared_manager is not None else Manager()
+        attributes["objects"] = manager = ModelManagers.get_default_manager(
+            attributes, "objects" in declared_attribute_names, meta_class, manager
+        )
+        new_class = super().__new__(cls, name, bases, attributes)
+        table_description = cls._bind_to_class(
+            new_class, fields_map, attributes, getattr(meta_class, ModelOption.TABLE_DESCRIPTION, "")
+        )
+        new_class._declaration = ModelDeclaration.capture(  # type: ignore[attr-defined]
+            new_class,  # type: ignore[arg-type]
             meta_class,
             fields_map,
-            fields_db_projection,
-            foreign_key_fields,
-            one_to_one_fields,
-            many_to_many_fields,
+            generic_fields,
             primary_key_attribute,
             declared_field_names,
+            pk_without_overlaps and isinstance(primary_key_attribute, tuple),
+            manager,
+            table_description,
         )
-        meta.pk_without_overlaps = pk_without_overlaps and isinstance(primary_key_attribute, tuple)
-        attributes["objects"] = meta.manager = ModelManagers.get_default_manager(
-            attributes, "objects" in declared_attribute_names, meta_class, meta.manager
-        )
-
-        new_class = super().__new__(cls, name, bases, attributes)
-        cls._bind_to_class(new_class, meta, attributes)
-        GenericForeignKeys.bind(new_class, generic_fields, is_abstract)  # type: ignore[arg-type]
-        meta.finalise_fields()
         return new_class
 
     @staticmethod
-    def _bind_to_class(new_class: ModelMeta, meta: MetaInfo, attributes: dict[str, Any]) -> None:
-        """Binds the fields, the managers and the meta of a model class just created to it, and
-        reads the fields' comments and the table's description from its source.
-
-        Args:
-            new_class: The model class.
-            meta: The class's meta.
-            attributes: The attributes the class was created with.
-        """
-        fields_map = meta.fields_map
-        # A class without fields - the base Model, a mixin - has no comment to read.
+    def _bind_to_class(
+        new_class: ModelMeta, fields_map: dict[str, Field[Any]], attributes: dict[str, Any], table_description: str
+    ) -> str:
+        """Apply class comments and declaration hooks, without preparing runtime metadata."""
         if fields_map and not attributes.get("_no_comments"):
             for field_name, comment in FieldComments.get_comments(new_class).items():  # type: ignore[arg-type]
                 commented_field = fields_map.get(field_name)
-                if commented_field is None:
-                    continue
-                commented_field.docstring = comment
-                if commented_field.description is None:
-                    commented_field.description = comment.split("\n")[0]
-
-        if new_class.__doc__ and not meta.table_description:
-            meta.table_description = inspect.cleandoc(new_class.__doc__).split("\n")[0]
+                if commented_field is not None:
+                    commented_field.docstring = comment
+                    if commented_field.description is None:
+                        commented_field.description = comment.split("\n")[0]
+        if new_class.__doc__ and not table_description:
+            table_description = inspect.cleandoc(new_class.__doc__).split("\n")[0]
         for field_name, field in fields_map.items():
             field.bind_to_model(new_class, field_name)  # type: ignore[arg-type]
             if isinstance(field, GeneratedField):
@@ -135,14 +128,7 @@ class ModelMeta(type):
         for value in attributes.values():
             if isinstance(value, Manager):
                 value._model = new_class  # type: ignore[assignment]
-        meta._model = new_class  # type: ignore[assignment]
-        meta.manager._model = new_class  # type: ignore[assignment]
-        # A ModelQuery() of a view is a queryset of the model just built.
-        meta.views = tuple(view.for_model(new_class) for view in meta.views)  # type: ignore[arg-type]
-        meta.materialized_views = tuple(
-            view.for_model(new_class)  # type: ignore[arg-type]
-            for view in meta.materialized_views
-        )
+        return table_description or ""
 
     @staticmethod
     def _linearize_mro(bases: tuple[type, ...]) -> tuple[type, ...]:
@@ -177,78 +163,33 @@ class ModelMeta(type):
                 if sequence and sequence[0] is candidate:
                     del sequence[0]
 
-    @staticmethod
-    def build_meta(
-        meta_class: type[Model.Meta],
-        fields_map: dict[str, Field[Any]],
-        fields_db_projection: dict[str, str],
-        foreign_key_fields: set[str],
-        one_to_one_fields: set[str],
-        many_to_many_fields: set[str],
-        primary_key_attribute: str | tuple[str, ...],
-        declared_field_names: frozenset[str],
-    ) -> MetaInfo:
-        """The ``MetaInfo`` of a model class: its Meta options and the fields the class collected.
-
-        Args:
-            meta_class: The class's Meta.
-            fields_map: The fields by name.
-            fields_db_projection: The columns of the fields by name.
-            foreign_key_fields: The names of the foreign key fields.
-            one_to_one_fields: The names of the one-to-one fields.
-            many_to_many_fields: The names of the many-to-many fields.
-            primary_key_attribute: The name or names of the primary key.
-            declared_field_names: The fields the class itself declares.
-
-        Returns:
-            The meta.
-        """
-        meta = MetaInfo(meta_class)
-        meta.fields_map = fields_map
-        meta.fields_db_projection = fields_db_projection
-        meta.foreign_key_fields = foreign_key_fields
-        meta.one_to_one_fields = one_to_one_fields
-        meta.many_to_many_fields = many_to_many_fields
-        meta.primary_key_attribute = primary_key_attribute
-        meta.declared_field_names = declared_field_names
-        if isinstance(primary_key_attribute, tuple):
-            # A composite key has no single field or column - meta.pk and db_pk_column stay unset, and
-            # queries and DDL read the key's names off meta.primary_key_attribute.
-            meta.pk_fields = tuple(fields_map[name] for name in primary_key_attribute)
-        elif pk_field := fields_map.get(primary_key_attribute):
-            meta.pk = pk_field
-            meta.pk_fields = (pk_field,)
-            if pk_field.source_field:
-                meta.db_pk_column = pk_field.source_field
-            elif isinstance(pk_field, OneToOneFieldInstance):
-                meta.db_pk_column = f"{primary_key_attribute}_id"
-            else:
-                meta.db_pk_column = primary_key_attribute
-        meta._inited = False
-        if not fields_map:
-            meta.abstract = True
-        return meta
-
     def __getitem__(cls: type[TModel], key: Any) -> Coroutine[Any, Any, TModel]:  # type: ignore[misc]
-        return ModelMeta._get_by_primary_key(cls, key)
+        from hare.core.hare_context import HareContext
+
+        context = HareContext.require_current()
+        return ModelMeta._get_by_primary_key(context.get_model_binding(cls), context, key)
 
     #: A model class isn't a sequence of its objects - without this, ``iter(Model)`` would read
     #: ``Model[0]``, ``Model[1]``, ... through ``__getitem__`` without end.
     __iter__ = None
 
     @staticmethod
-    async def _get_by_primary_key(model: type[TModel], key: Any) -> TModel:
+    async def _get_by_primary_key(binding: ModelBinding, context: HareContext, key: Any) -> TModel:
         """The object ``Model[key]`` reads.
 
         Raises:
             DoesNotExist: No object has that primary key.
         """
-        message = f"{model.__name__} has no object with {model._meta.primary_key_attribute}={key}"
+
+        model = binding._model
+        shown_key = binding.get_shown_primary_key(key)
+        message = f"{model.__name__} has no object with {binding.primary_key_attribute}={shown_key}"
+        cause: BaseException | None = None
         try:
-            return await model.objects.get(pk=key)
+            return await binding.manager.create_queryset(binding=binding, context=context).get(pk=key)
         except DoesNotExist:
-            raise DoesNotExist(model, message) from None
+            pass
         except (ValueError, ValidationError) as error:
-            # The key can't be coerced to the pk field's type: still "no such object" for a
-            # subscript, with the real cause chained.
-            raise DoesNotExist(model, message) from error
+            if not any(field.sensitive for field in binding.pk_fields):
+                cause = error
+        raise DoesNotExist(model, message) from cause

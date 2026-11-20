@@ -42,15 +42,14 @@ class ChartWriter:
     #: The ratio a summary table's bar is full at - a slower ORM's bar stops there, its number doesn't.
     SCOREBOARD_RATIO_CEILING = 4.0
 
-    def __init__(self, report: dict[str, Any], language: str, theme: str) -> None:
+    def __init__(self, report: BenchmarkReport, language: str, theme: str) -> None:
         """
         Args:
             report: The report of ``Runner.run_all()``.
             language: ``en`` or ``ru``.
             theme: ``light`` or ``dark``.
         """
-        self.data = BenchmarkReport(report)
-        self.language = language
+        self.data = report
         self.russian = language == "ru"
         self.theme = theme
         self.colours = self.THEMES[theme]
@@ -119,12 +118,11 @@ class ChartWriter:
     def get_series_colour(self, target: Target) -> str:
         return target.light_colour if self.theme == "light" else target.dark_colour
 
-    def legend(self, targets: list[Target], y: float) -> tuple[list[str], float]:
+    def legend(self, targets: list[Target]) -> tuple[list[str], float]:
         """The legend's items in rows across the chart's width.
 
         Args:
             targets: The targets.
-            y: The top of the legend.
 
         Returns:
             The SVG elements and the legend's height.
@@ -136,7 +134,7 @@ class ChartWriter:
             item_width = 22 + len(name) * 7.2 + 18
             if x + item_width > self.WIDTH and x > 0:
                 x, row = 0.0, row + 1
-            top = y + row * 22
+            top = row * 22
             colour = self.get_series_colour(target)
             elements.append(f'<rect x="{x:.1f}" y="{top + 3:.1f}" width="12" height="12" rx="3" fill="{colour}"/>')
             elements.append(self.text(x + 18, top + 13.5, name, size=13))
@@ -164,12 +162,13 @@ class ChartWriter:
         label_width, row_height, top = 220.0, 32.0, 30.0
         column_width = (self.WIDTH - label_width) / len(databases)
         bar_room = column_width - 74
+        baselines = {database.key: self.data.get_baseline(database) for database in databases}
         targets_by_cell = {
             (target.family, database.key): target
             for database in databases
             for target in self.data.get_targets(database)
             # One target per ORM and database: hare-orm's fastest driver stands for it.
-            if target.family != "hare-orm" or target == self.data.get_baseline(database)
+            if target.family != "hare-orm" or target == baselines[database.key]
         }
         families = [
             family for family in self.data.conditions["families"] if any(cell[0] == family for cell in targets_by_cell)
@@ -189,7 +188,7 @@ class ChartWriter:
                 if target is None:
                     elements.append(self.text(x, y + 21, "—", size=13, colour=self.colours["muted"]))
                     continue
-                baseline = self.data.get_baseline(database)
+                baseline = baselines[database.key]
                 ratio = self.data.get_ratio(target, baseline)
                 if ratio is None:
                     elements.append(self.text(x, y + 21, "—", size=13, colour=self.colours["muted"]))
@@ -212,7 +211,7 @@ class ChartWriter:
         load_label = "hare-orm под нагрузкой, оп/с" if self.russian else "hare-orm under load, ops/s"
         elements.append(self.text(0, y + 21, load_label, size=13, colour=self.colours["secondary"]))
         for column, database in enumerate(databases):
-            baseline = self.data.get_baseline(database)
+            baseline = baselines[database.key]
             if baseline is None:
                 continue
             throughput = self.data.get_median(baseline, "load_test_throughput_ops_per_sec")
@@ -235,7 +234,7 @@ class ChartWriter:
             The SVG.
         """
         label_width, row_height = 220.0, 30.0
-        maximum = max((value for __, value, __ in rows), default=1.0)
+        maximum = max((value for _target, value, _value_text in rows), default=1.0)
         plot_width = self.WIDTH - label_width - 90
         elements = []
         for index, (target, value, value_text) in enumerate(rows):
@@ -291,10 +290,9 @@ class ChartWriter:
         wide, each scenario on its own scale with the time at the end of each bar - a note instead of a
         bar for an ORM with no way to write the scenario."""
         group = next(group for group in database.groups if group.key == group_key)
-        scenarios = [scenario for scenario in group.scenarios if scenario.key not in database.excluded_scenarios]
+        scenarios = self.data.get_scenarios(database, group)
         targets = self.data.get_targets(database)
-        legend_elements, legend_height = self.legend(targets, 0)
-        elements = list(legend_elements)
+        elements, legend_height = self.legend(targets)
         column_gap = 36.0
         column_width = (self.WIDTH - column_gap) / 2
         bar_thickness, bar_gap = 10.0, 4.0
@@ -362,11 +360,16 @@ class ChartWriter:
                 charts[f"{database.key}-{group.key}"] = self.group(database, group.key)
         return charts
 
+    @staticmethod
+    def get_filename(name: str, language: str, theme: str) -> str:
+        """The basename shared by SVG output and document links."""
+        return f"{name}-{language}-{theme}.svg"
+
     @classmethod
-    def render_all(cls, report: dict[str, Any], directory: Path = CHART_DIRECTORY) -> dict[Path, str]:
+    def render_all(cls, report: BenchmarkReport, directory: Path = CHART_DIRECTORY) -> dict[Path, str]:
         """Generate the complete set before any published artifact is replaced."""
         return {
-            directory / f"{name}-{language}-{theme}.svg": svg
+            directory / cls.get_filename(name, language, theme): svg
             for language in ("en", "ru")
             for theme in ("light", "dark")
             for name, svg in cls(report, language, theme).get_charts().items()

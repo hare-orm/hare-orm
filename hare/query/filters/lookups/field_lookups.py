@@ -35,7 +35,7 @@ class FieldLookups:
     known) takes the generic set, every date part and the lookups registered on ``Field`` itself."""
 
     #: Each lifetime holder keeps its own bucket; the cache tracks those buckets weakly.
-    built_lookups: ClassVar[Cache[Any]] = Cache(holds_sql=False, depends_on_other_models=True)
+    built_lookups: ClassVar[Cache[Any]] = Cache(depends_on_other_models=True)
 
     @classmethod
     def get(cls, field: Field[Any] | None) -> dict[str, FieldLookup]:
@@ -216,9 +216,9 @@ class FieldLookups:
         Returns:
             The lookups by suffix.
         """
-        target_meta = field.related_model._meta
+        target_meta = field.get_related_binding()
         if target_meta.pk is None:
-            target_pk_fields = tuple(target_meta.pk_fields)
+            target_pk_fields = target_meta.pk_fields  # type: ignore[unreachable]
             return {
                 Lookup.EXACT: FieldLookup(Lookups.row_equal, ValueEncoders.encode_composite_pk),
                 Lookup.NOT: FieldLookup(Lookups.row_not_equal, ValueEncoders.encode_composite_pk),
@@ -258,9 +258,9 @@ class FieldLookups:
             Lookup.ISNULL: FieldLookup(Lookups.is_null),
             Lookup.NOT_ISNULL: FieldLookup(Lookups.not_null),
         }
-        target_pk = field.related_model._meta.pk
+        target_pk = field.get_related_binding().pk
         if target_pk is None:
-            return lookups
+            return lookups  # type: ignore[unreachable]
         return {
             **lookups,
             Lookup.EXACT: FieldLookup(operator.eq, ValueEncoders.encode_related_value),

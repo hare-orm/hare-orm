@@ -9,6 +9,15 @@ from hare.query.enums import Lookup
 #: run on top of aggregate annotations (one row per surviving base row, carrying their values).
 AGGREGATE_SUBQUERY_ALIAS = "hare_aggregate_groups"
 
+#: The single count column read when a count query is embedded as a scalar subquery.
+COUNT_SUBQUERY_VALUE_ALIAS = "hare count value"
+
+#: Positional names of derived columns used by aggregate expressions; output aliases stay public.
+AGGREGATE_SUBQUERY_COLUMN_ALIAS_PREFIX = "hare aggregate column "
+
+#: Private SQL names for outputs colliding with source columns or other selected names.
+RESULT_COLUMN_ALIAS_PREFIX = "hare result column "
+
 #: Prefix of the alias each primary-key column of the base table gets inside that derived table -
 #: the outer query joins the base table back to it on these columns.
 AGGREGATE_SUBQUERY_PRIMARY_KEY_ALIAS_PREFIX = "hare pk "
@@ -152,3 +161,5 @@ MOVED_KEY_EXPRESSION_MESSAGE = (
     "reads the rows before the update by their keys and can't follow them to the keys the expression gives; set "
     "it to a value, or capture on a database returning the rows as they were (Features.supports_returning_old_new)"
 )
+CONTAINS_SOURCE_COLUMN_ALIAS_PREFIX = "hare contains column "
+CONTAINS_SOURCE_ALIAS = "hare contains rows"

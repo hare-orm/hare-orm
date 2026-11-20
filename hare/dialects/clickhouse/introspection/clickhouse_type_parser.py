@@ -42,21 +42,6 @@ class ClickhouseTypeParser:
     #: The spec of a type no field maps to - its values read as text.
     FALLBACK_SPECIFICATION = InspectedFieldSpecification(CLICKHOUSE_FALLBACK_FIELD_PATH, is_ambiguous=True)
 
-    @staticmethod
-    def unwrap(type_sql: str) -> tuple[str, bool]:
-        """A type without its ``Nullable(...)``, and whether it holds NULLs.
-
-        Args:
-            type_sql: The type.
-
-        Returns:
-            The type, and whether it is nullable.
-        """
-        physical_type = ClickhousePhysicalType.from_sql(type_sql)
-        if physical_type.name == ClickhouseTypeName.NULLABLE and len(physical_type.elements) == 1:
-            return physical_type.elements[0].sql, True
-        return type_sql, False
-
     @classmethod
     def get_named_elements(
         cls, physical_type: ClickhousePhysicalType, enum_name: str = CLICKHOUSE_INSPECTED_ENUM_NAME

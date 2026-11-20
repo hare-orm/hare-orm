@@ -248,7 +248,7 @@ async def test_meta_filters_are_parameters_before_the_application_starts():
         logging_config=None,
     )
     assert {"writer", "writer__in", "title__icontains", "pk__in"} <= set(
-        FilteredChapterQuery.prepare_parameters().model_fields
+        FilteredChapterQuery.prepare_parameters(apps=app.plugins.get(HarePlugin).apps).model_fields
     )
     async with AsyncTestClient(app) as client:
         schema = (await client.get("/schema/openapi.json")).json()
@@ -505,9 +505,10 @@ async def test_an_error_of_the_whole_query_is_answered_with_400():
 
 @pytest.mark.asyncio
 async def test_a_request_query_built_for_a_model_is_a_dependency():
-    Hare.bind_models(config=CONFIG)
+    apps = Hare.bind_models(config=CONFIG)
     built_writer_query = RequestQuery.for_model(
         Writer,
+        apps=apps,
         filters=(FilterField("name", lookups=(Lookup.IN,)),),
         ordering=OrderingConfig(default=("name",)),
     )

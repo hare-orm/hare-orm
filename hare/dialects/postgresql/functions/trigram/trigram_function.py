@@ -47,7 +47,9 @@ class TrigramFunction(Expression):
         return f"{type(self).__name__}({self.expression!r}, {self.string!r})"
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
-        DialectExpressions.raise_if_dialect_lacks(self, expression_context.dialect)
+        DialectExpressions.raise_if_dialect_lacks(
+            self, expression_context.dialect, checks_admission=expression_context.checks_dialect_admission
+        )
         expression_result = self.expression.get_result(expression_context)
         string_term = self.string_value.get_result(expression_context).term
         left, right = (

@@ -6,6 +6,7 @@ from hare.declarations.declaration_value_serializer import DeclarationValueSeria
 from hare.declarations.import_manager import ImportManager
 from hare.inspectdb.generation.declarations import ModelGenerationOptions
 from hare.inspectdb.generation.inspected_model_builder import InspectedModelBuilder
+from hare.inspectdb.generation.inspected_models import InspectedModels
 from hare.models.enums import ModelOption
 
 if TYPE_CHECKING:
@@ -38,7 +39,9 @@ class ModelSourceBuilder:
         Returns:
             The source, or the note a skipped table gets instead.
         """
-        inspected = self.prepare()
+        inspected = InspectedModels.prepare(self.model_builder)
+        if inspected.state is not None:
+            self.imports.reserved_names |= {inspected.class_name, *inspected.state.fields}
         if inspected.state is None:
             return inspected.skipped_note or ""
         body = self.render(inspected)

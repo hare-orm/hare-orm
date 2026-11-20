@@ -2,6 +2,7 @@ import pytest
 
 from hare.contrib.test import capture_queries, requires_features
 from hare.contrib.test.conditions.not_eq import NotEQ
+from hare.core.hare_context import HareContext
 from hare.exceptions import QueryError, UnSupportedError
 from tests.shared_models.testmodels import IntFields, Tournament
 from tests.utils.explain_plan_checks import ExplainPlanChecks
@@ -11,7 +12,11 @@ from tests.utils.explain_plan_checks import ExplainPlanChecks
 async def test_explain(db):
     """The server returns a structured plan for reading the model's table."""
     plan = await Tournament.objects.all().explain()
-    ExplainPlanChecks.assert_read_plan(plan, Tournament.get_connection().dialect.name, Tournament._meta.db_table)
+    ExplainPlanChecks.assert_read_plan(
+        plan,
+        Tournament.get_connection().dialect.name,
+        HareContext.require_current().apps.get_binding(Tournament).db_table,
+    )
 
 
 @pytest.mark.asyncio
@@ -25,7 +30,11 @@ async def test_explain_on_values_query(db):
         Tournament.objects.values_list("id", flat=True),
     ):
         plan = await query.explain()
-        ExplainPlanChecks.assert_read_plan(plan, Tournament.get_connection().dialect.name, Tournament._meta.db_table)
+        ExplainPlanChecks.assert_read_plan(
+            plan,
+            Tournament.get_connection().dialect.name,
+            HareContext.require_current().apps.get_binding(Tournament).db_table,
+        )
 
 
 @pytest.mark.asyncio
@@ -37,7 +46,11 @@ async def test_explain_on_union_query(db):
     await Tournament.objects.create(name="A")
     await Tournament.objects.create(name="B")
     plan = await Tournament.objects.filter(name="A").union(Tournament.objects.filter(name="B")).explain()
-    ExplainPlanChecks.assert_read_plan(plan, Tournament.get_connection().dialect.name, Tournament._meta.db_table)
+    ExplainPlanChecks.assert_read_plan(
+        plan,
+        Tournament.get_connection().dialect.name,
+        HareContext.require_current().apps.get_binding(Tournament).db_table,
+    )
 
 
 @pytest.mark.parametrize(

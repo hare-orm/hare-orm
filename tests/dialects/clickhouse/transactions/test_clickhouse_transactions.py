@@ -7,17 +7,19 @@ import asyncio
 import pytest
 
 from hare.contrib.test import assert_query_count
+from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError, TransactionManagementError, UnSupportedError
 from hare.transactions import Transactions
 from hare.transactions.enums import IsolationLevel
 from tests.dialects.clickhouse.transactions.models import Entry, Note
+from tests.utils.database_under_test import DatabaseUnderTest
 from tests.utils.waiting import wait_until
 
 
 async def count_committed(table):
     """The rows a reader in a transaction of its own sees - a statement outside every transaction reads
     the rows of open transactions too."""
-    connection = Entry._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Entry).get_connection()
     non_transactional_client = (
         connection.get_non_transactional_client() if connection.is_transaction_client else connection
     )
@@ -29,7 +31,7 @@ async def count_committed(table):
 
 @pytest.mark.asyncio
 async def test_the_connection_has_transactions_without_savepoints(clickhouse_transactions_db):
-    features = Entry._meta.connection.features
+    features = HareContext.require_current().apps.get_queryset(Entry).get_connection().features
     assert features.supports_transactions and not features.supports_savepoints
 
 
@@ -102,7 +104,7 @@ async def test_a_nested_atomic_joins_the_transaction(clickhouse_transactions_db)
 
 @pytest.mark.asyncio
 async def test_a_statement_transactions_dont_take_is_refused(clickhouse_transactions_db):
-    connection = Entry._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Entry).get_connection()
     await connection.execute_script(
         "CREATE TABLE replicated_entry (id Int64) ENGINE = "
         f"ReplicatedMergeTree('/hare/tests/{connection.database}/replicated_entry', 'replica') ORDER BY id"
@@ -118,7 +120,7 @@ async def test_a_statement_transactions_dont_take_is_refused(clickhouse_transact
 
 @pytest.mark.asyncio
 async def test_a_server_without_transactions_is_refused_on_connect(clickhouse_transactions_db, monkeypatch):
-    connection = Entry._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Entry).get_connection()
     client = type(connection)(
         connection_alias="no_transactions",
         host=connection.host,
@@ -159,7 +161,7 @@ async def test_a_server_without_transactions_is_refused_on_connect(clickhouse_tr
 async def test_a_connection_not_opened_yet_has_transactions(clickhouse_transactions_db):
     """The features were set as the connection opened - the first atomic() of a process, before any
     statement, raised UnSupportedError ("has no transactions")."""
-    connection = Entry._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Entry).get_connection()
     client = type(connection)(
         connection_alias="not_opened",
         host=connection.host,
@@ -218,8 +220,11 @@ async def test_a_statement_stopped_waiting_for_still_rolls_its_transaction_back(
         await task
     assert await Entry.objects.count() == 0
     # Only this transaction: the server's table lists every session's, other tests' running alongside.
-    rows = await Entry._meta.connection.execute_dicts(
-        f"SELECT count() AS open FROM system.transactions WHERE tid.2 = {transaction_ids[0]}"
+    rows = (
+        await HareContext.require_current()
+        .apps.get_queryset(Entry)
+        .get_connection()
+        .execute_dicts(f"SELECT count() AS open FROM system.transactions WHERE tid.2 = {transaction_ids[0]}")
     )
     assert rows[0]["open"] == 0
 
@@ -243,8 +248,7 @@ async def test_a_transaction_per_request_needs_a_connection_with_transactions():
     from hare.exceptions import ConfigurationError
 
     db_url = os.getenv("HARE_TEST_DB", "")
-    if not db_url.startswith("clickhouse"):
-        pytest.skip("runs against the ClickHouse test server")
+    DatabaseUnderTest.skip_unless_clickhouse(db_url, reason="runs against the ClickHouse test server")
     plain_url = db_url.rsplit("/", 1)[0] + "/default"
     for url, starts in ((plain_url, False), (f"{plain_url}?transactions=true", True)):
         lifecycle = HareLifecycle(

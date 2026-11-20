@@ -32,7 +32,7 @@ class ExtensionDialect(SqlDialect):
 def test_invalid_last_component_does_not_publish_or_invalidate(monkeypatch):
     snapshot = Registries.snapshot
     invalidations = []
-    monkeypatch.setattr(Registries, "forget_all_caches", lambda: invalidations.append(True))
+    monkeypatch.setattr(Caches, "forget_all_caches", lambda: invalidations.append(True))
     contribution = ExtensionContribution(
         dialects=(ExtensionDialect(),),
         lookups=(
@@ -55,7 +55,7 @@ def test_success_publishes_once_and_keeps_previous_snapshot_unchanged(monkeypatc
     snapshot = Registries.snapshot
     monkeypatch.setattr(Registries, "snapshot", snapshot)
     invalidations = []
-    monkeypatch.setattr(Registries, "forget_all_caches", lambda: invalidations.append(True))
+    monkeypatch.setattr(Caches, "forget_all_caches", lambda: invalidations.append(True))
     dialect = ExtensionDialect()
     Registries.register(ExtensionContribution(dialects=(dialect,)))
     current = Registries.snapshot
@@ -116,8 +116,8 @@ async def test_active_execution_keeps_declarations_and_cache_entries_separate(mo
     monkeypatch.setattr(Registries, "snapshot", Registries.snapshot)
     mapping = SnapshotMapping({"column": "before"})
     mapping.seal()
-    cache = Cache(2, holds_sql=False)
-    previous = QueryExecution()
+    cache = Cache(2)
+    previous = QueryExecution(None)
     try:
         mapping.register("column", "after")
         cache[("column",)] = "new statement"
@@ -131,7 +131,7 @@ async def test_active_execution_keeps_declarations_and_cache_entries_separate(mo
                 assert mapping["column"] == "before"
                 assert cache[("column",)] == "old statement"
 
-            await QueryExecution().call(nested)
+            await QueryExecution(None).call(nested)
 
         await previous.call(read_previous)
         assert mapping["column"] == "after"
@@ -151,7 +151,7 @@ def test_component_and_mirror_registration_is_one_publication(monkeypatch):
     mirror.seal()
     previous = Registries.snapshot
     invalidations = []
-    monkeypatch.setattr(Registries, "forget_all_caches", lambda: invalidations.append(True))
+    monkeypatch.setattr(Caches, "forget_all_caches", lambda: invalidations.append(True))
     mapping.register("column", "b", (mirror,))
     assert Registries.snapshot.generation == previous.generation + 1
     assert mapping["column"] == mirror["column"] == "b"
@@ -204,7 +204,7 @@ async def test_iterator_pins_snapshot_through_pages_and_close_without_leaking_it
         finally:
             closed.append(mapping["column"])
 
-    iterator = QueryExecution.iterate(SimpleNamespace(_execution_dependencies=()), rows())
+    iterator = QueryExecution.iterate(SimpleNamespace(_execution_dependencies=(), _context=None), rows())
     try:
         assert await anext(iterator) == "before"
         assert Registries.execution_snapshot.get() is None

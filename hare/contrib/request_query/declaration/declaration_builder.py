@@ -51,8 +51,9 @@ class DeclarationBuilder:
             declaration or parameters are stale once one of them changes.
     """
 
-    def __init__(self, request_query_class: type[RequestQuery[Any]]) -> None:
+    def __init__(self, request_query_class: type[RequestQuery[Any]], queryset: QuerySet[Any] | None = None) -> None:
         self.request_query_class = request_query_class
+        self.queryset = queryset
         self.class_name = request_query_class.__qualname__
         self.described_models: set[type[Model]] = set()
 
@@ -78,7 +79,7 @@ class DeclarationBuilder:
         versions = self.request_query_class.get_meta_option("versions")
         for model_option in (deleted, versions, pagination):
             if model_option is not None:
-                model_option.check_model(self.class_name, queryset.model)
+                model_option.check_model(self.class_name, queryset._binding)
         join_type = self.request_query_class.get_meta_option("join_type")
         option_parameters = self.get_option_parameters()
         api_sources, api_mappings = self.get_api_getter()
@@ -99,7 +100,7 @@ class DeclarationBuilder:
         self.check_ordering(queryset, ordering, pagination)
         self.described_models.add(queryset.model)
         key_ordering_paths = (
-            self.describe_ordering(queryset, PRIMARY_KEY_ALIAS).paths if queryset.model._meta.has_primary_key else ()
+            self.describe_ordering(queryset, PRIMARY_KEY_ALIAS).paths if queryset._binding.has_primary_key else ()  # type: ignore[union-attr]
         )
         return RequestQueryDeclaration(
             queryset=queryset,
@@ -129,7 +130,7 @@ class DeclarationBuilder:
         Raises:
             ConfigurationError: The class declares no queryset.
         """
-        queryset = self.request_query_class.get_meta_option("queryset")
+        queryset = self.queryset if self.queryset is not None else self.request_query_class.get_meta_option("queryset")
         if queryset is None:
             raise ConfigurationError(
                 f"{self.class_name} declares no Meta.queryset - a class without one only serves as a base"

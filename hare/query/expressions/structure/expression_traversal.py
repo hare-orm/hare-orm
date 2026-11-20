@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from copy import deepcopy
 from dataclasses import replace
 from typing import Any
 
@@ -21,11 +22,30 @@ class ExpressionTraversal:
     """
 
     @staticmethod
-    def map_fields(
-        value: Any, transform: Callable[[FieldReference], str], role: ArgumentRole = ArgumentRole.VALUE
-    ) -> Any:
+    def map_fields(value: Any, transform: Callable[[FieldReference], str]) -> Any:
         """Map references in one source scope and preserve unchanged object identity."""
-        pending: list[tuple[Any, ArgumentRole, tuple[ExpressionChild, ...] | None]] = [(value, role, None)]
+        return ExpressionTraversal._map_tree(
+            value,
+            lambda item, role: (
+                ExpressionTraversal.map_reference(item, role, transform) if isinstance(item, str) else item
+            ),
+        )
+
+    @staticmethod
+    def map_values(value: Any, transform: Callable[[Any], Any]) -> Any:
+        """Capture literal leaves and mutable constructor containers in one source scope."""
+        return ExpressionTraversal._map_tree(value, lambda item, _: transform(item), snapshot=True)
+
+    @staticmethod
+    def _map_tree(
+        value: Any,
+        transform: Callable[[Any, ArgumentRole], Any],
+        *,
+        snapshot: bool = False,
+    ) -> Any:
+        pending: list[tuple[Any, ArgumentRole, tuple[ExpressionChild, ...] | None]] = [
+            (value, ArgumentRole.VALUE, None)
+        ]
         ancestors: set[int] = set()
         results: list[Any] = []
         while pending:
@@ -34,17 +54,21 @@ class ExpressionTraversal:
                 transformed = results[-len(children) :]
                 del results[-len(children) :]
                 ancestors.remove(id(item))
-                if all(child.value is result for child, result in zip(children, transformed, strict=True)):
+                pairs = zip(children, transformed, strict=True)
+                if snapshot and isinstance(item, (dict, list, tuple)):
+                    # Reuse the captured children and preserve container subclasses and their attributes.
+                    results.append(deepcopy(item, {id(child.value): result for child, result in pairs}))
+                elif all(child.value is result for child, result in pairs):
                     results.append(item)
                 else:
                     results.append(ExpressionTraversal.rebuild(item, children, transformed))
                 continue
             if isinstance(item, str):
-                results.append(ExpressionTraversal.map_reference(item, item_role, transform))
+                results.append(transform(item, item_role))
                 continue
             children = ExpressionTraversal.get_children(item, item_role)
             if not children:
-                results.append(item)
+                results.append(transform(item, item_role))
                 continue
             if id(item) in ancestors:
                 raise QueryError(CYCLIC_EXPRESSION_TREE)

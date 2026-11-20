@@ -31,7 +31,7 @@ from hare.migrations.autodetection.diffs.state_model_diff import StateModelDiff
 from hare.migrations.drift import detect_drift
 from hare.migrations.exceptions import IncompatibleStateError
 from hare.migrations.migration import Migration
-from hare.migrations.operations import AddPartition, AlterModelTable, RemovePartition
+from hare.migrations.operations import AddPartition, AlterModelTable, RemovePartition, RenamePartition
 from hare.migrations.state.model_state import ModelState
 from hare.models import Model
 from hare.query.expressions import Q
@@ -72,7 +72,7 @@ def build_ledger(table_options: list[Any], **meta_options: Any) -> type[Model]:
 def get_postgresql_sql(model: type[Model]) -> str:
     return (
         POSTGRESQL_DIALECT.schema_editor_class(FakeClient("postgresql"))
-        .table_creation.get_model_sql_data(model)
+        .table_creation.get_model_sql_data(build_live_state(model).apps.get_binding(f"{APP_LABEL}.{model.__name__}"))
         .table_sql
     )
 
@@ -159,7 +159,7 @@ def test_bound_values_are_written_by_the_key_field():
 def test_a_long_partition_table_name_stays_within_the_identifier_limit():
     model = build_model(
         "LongNamed",
-        "a_table_with_a_name_long_enough_to_reach_the_limit_of_identifiers",
+        "a_table_with_a_name_long_enough_to_reach_the_limit_of_identifie",
         {"id": IntField(), "tenant": IntField(), "pk": CompositePrimaryKey("tenant", "id")},
         {
             "table_options": [
@@ -179,7 +179,11 @@ def test_a_long_partition_table_name_stays_within_the_identifier_limit():
 def test_sqlite_creates_a_plain_table_for_a_postgresql_partitioning():
     model = build_ledger([PostgresqlTableOptions(partitioning=HASH)])
 
-    sql = SQLITE_DIALECT.schema_editor_class(FakeClient("sqlite")).table_creation.get_model_sql_data(model).table_sql
+    sql = (
+        SQLITE_DIALECT.schema_editor_class(FakeClient("sqlite"))
+        .table_creation.get_model_sql_data(build_live_state(model).apps.get_binding(f"{APP_LABEL}.{model.__name__}"))
+        .table_sql
+    )
 
     assert "PARTITION" not in sql
 
@@ -332,11 +336,16 @@ def test_a_partitioning_that_doesnt_fit_the_model_is_refused(table_options, meta
 
 
 @pytest.mark.database_independent
-def test_unique_guarantees_including_the_key_are_accepted():
+@pytest.mark.parametrize("guarantee", ["constraint", "index"])
+def test_unique_guarantees_including_the_key_are_accepted(guarantee):
     model = build_ledger(
         [PostgresqlTableOptions(partitioning=HASH)],
-        constraints=[UniqueConstraint(fields=("tenant", "code"), name="uq_ledger_tenant_code")],
-        indexes=[Index(fields=("code", "tenant"), unique=True, name="uq_ledger_code_tenant_index")],
+        constraints=[UniqueConstraint(fields=("tenant", "code"), name="uq_ledger_tenant_code")]
+        if guarantee == "constraint"
+        else [],
+        indexes=[Index(fields=("code", "tenant"), unique=True, name="uq_ledger_code_tenant_index")]
+        if guarantee == "index"
+        else [],
     )
 
     assert "PARTITION BY HASH" in get_postgresql_sql(model)
@@ -378,7 +387,7 @@ def test_partitions_compare_whatever_order_they_are_listed_in():
 
 def get_model_operations(old_model: type[Model], new_model: type[Model]) -> tuple[list[Any], list[str]]:
     diff = StateModelDiff(
-        ModelState.make_from_model(APP_LABEL, old_model), ModelState.make_from_model(APP_LABEL, new_model)
+        ModelState.make_from_declaration(APP_LABEL, old_model), ModelState.make_from_declaration(APP_LABEL, new_model)
     )
     return diff.generate_operations(), diff.data_loss_warnings
 
@@ -531,9 +540,13 @@ async def test_a_dialect_without_partitions_refuses_to_add_one(db_isolated_no_sc
     model = build_ledger([])
 
     with pytest.raises(UnSupportedError, match="can't add a partition"):
-        await round_trip.editor.table_partitions.add_partition(model, ListPartition("one", [1]))
+        await round_trip.editor.table_partitions.add_partition(
+            build_live_state(model).apps.get_binding(f"{APP_LABEL}.{model.__name__}"), ListPartition("one", [1])
+        )
     with pytest.raises(UnSupportedError, match="can't remove a partition"):
-        await round_trip.editor.table_partitions.remove_partition(model, ListPartition("one", [1]))
+        await round_trip.editor.table_partitions.remove_partition(
+            build_live_state(model).apps.get_binding(f"{APP_LABEL}.{model.__name__}"), ListPartition("one", [1])
+        )
 
 
 @pytest.mark.asyncio
@@ -580,7 +593,7 @@ async def insert_rows(round_trip: RoundTrip, tenants: list[int], table: str = "p
 
 
 async def get_drift_operations(round_trip: RoundTrip, model: type[Model]) -> list[str]:
-    drift = await detect_drift(round_trip.connection, build_live_state(model), [APP_LABEL])
+    drift = await round_trip.get_drift(build_live_state(model))
     return [type(operation).__name__ for operation in drift.operations]
 
 
@@ -654,7 +667,7 @@ async def test_partitions_are_added_and_removed_by_migrations_and_back(db_isolat
         partitions=[RANGE.partitions[0], RangePartition("high", from_values=(30,), to_values=(40,))],
         default_partition="rest",
     )
-    state_before = round_trip.tracked_state.clone()
+    state_before = round_trip.tracked_state
 
     operations = await round_trip.migrate_to(
         build_ledger([PostgresqlTableOptions(partitioning=grown, storage_parameters={"fillfactor": 70})])
@@ -950,7 +963,11 @@ async def test_indexes_of_a_partitioned_table_plain_partial_and_concurrent(db_is
     # CONCURRENTLY can't run in the transaction of an atomic migration.
     concurrent_editor = round_trip.connection.dialect.schema_editor_class(round_trip.connection, atomic=False)
     concurrent_index = Index(fields=("id",), name="idx_ledger_id_concurrent")
-    await concurrent_editor.add_index(indexed, concurrent_index, concurrently=True)
+    await concurrent_editor.add_index(
+        build_live_state(indexed).apps.get_binding(f"{APP_LABEL}.PartitionedLedger"),
+        concurrent_index,
+        concurrently=True,
+    )
 
     assert (await get_valid_index_names())["idx_ledger_id_concurrent"] is True
     partition_indexes = await round_trip.connection.execute_dicts(
@@ -964,7 +981,11 @@ async def test_indexes_of_a_partitioned_table_plain_partial_and_concurrent(db_is
         "partitioned_ledger_p2",
     ]
 
-    await concurrent_editor.remove_index(indexed, concurrent_index, concurrently=True)
+    await concurrent_editor.remove_index(
+        build_live_state(indexed).apps.get_binding(f"{APP_LABEL}.PartitionedLedger"),
+        concurrent_index,
+        concurrently=True,
+    )
     assert "idx_ledger_id_concurrent" not in await get_valid_index_names()
     assert round_trip.get_pending_operations(indexed) == []
 
@@ -977,7 +998,7 @@ async def test_drift_reports_what_was_changed_by_hand(db_isolated_no_schema):
     assert await get_drift_operations(round_trip, model) == []
 
     await round_trip.connection.execute_script("ALTER TABLE partitioned_ledger_big SET (fillfactor = 90)")
-    assert await get_drift_operations(round_trip, model) == ["AlterModelOptions"]
+    assert await get_drift_operations(round_trip, model) == ["SeparateDatabaseAndState", "AlterModelOptions"]
     await round_trip.connection.execute_script("ALTER TABLE partitioned_ledger_big SET (fillfactor = 70)")
     assert await get_drift_operations(round_trip, model) == []
 
@@ -986,11 +1007,11 @@ async def test_drift_reports_what_was_changed_by_hand(db_isolated_no_schema):
         "FOR VALUES IN (50) WITH (fillfactor = 70)"
     )
     # The operations lead from the database to the declaration: the extra partition goes.
-    assert await get_drift_operations(round_trip, model) == ["RemovePartition"]
+    assert await get_drift_operations(round_trip, model) == ["SeparateDatabaseAndState", "RemovePartition"]
     await round_trip.connection.execute_script("DROP TABLE partitioned_ledger_extra")
 
     await round_trip.connection.execute_script("DROP TABLE partitioned_ledger_other")
-    assert await get_drift_operations(round_trip, model) == ["AddPartition"]
+    assert await get_drift_operations(round_trip, model) == ["SeparateDatabaseAndState", "AddPartition"]
 
 
 @pytest.mark.asyncio
@@ -999,8 +1020,60 @@ async def test_drift_reports_a_table_that_should_be_partitioned(db_isolated_no_s
     await round_trip.migrate_to(build_ledger([]))
 
     assert await get_drift_operations(round_trip, build_ledger([PostgresqlTableOptions(partitioning=HASH)])) == [
-        "AlterModelOptions"
+        "SeparateDatabaseAndState",
+        "AlterModelOptions",
     ]
+
+
+@pytest.mark.asyncio
+async def test_direct_removal_of_a_hash_remainder_is_refused_before_ddl(db_isolated_no_schema):
+    round_trip = get_postgresql_round_trip(db_isolated_no_schema)
+    model = build_ledger([PostgresqlTableOptions(partitioning=HASH)])
+    await round_trip.migrate_to(model)
+    await insert_rows(round_trip, list(range(10)))
+    query = "SELECT tenant, id, tableoid::regclass::text AS partition FROM partitioned_ledger ORDER BY tenant"
+    expected_rows = await round_trip.connection.execute_dicts(query)
+    assert len(expected_rows) == 10 and any(row["partition"] == "partitioned_ledger_p0" for row in expected_rows)
+    migration = Migration(
+        "remove_remainder", APP_LABEL, operations=[RemovePartition(model.__name__, HASH.get_partitions()["p0"])]
+    )
+    with pytest.raises(IncompatibleStateError, match="cannot represent the change"):
+        await migration.apply(round_trip.tracked_state, schema_editor=round_trip.editor)
+    assert await round_trip.connection.execute_dicts(query) == expected_rows
+    assert await get_drift_operations(round_trip, model) == []
+
+
+@pytest.mark.asyncio
+async def test_drift_restores_a_partition_address_without_dropping_rows(db_isolated_no_schema):
+    round_trip = get_postgresql_round_trip(db_isolated_no_schema)
+    model = build_ledger([PostgresqlTableOptions(partitioning=LIST)])
+    await round_trip.migrate_to(model)
+    await insert_rows(round_trip, [1, 3])
+    before = round_trip.tracked_state
+    connection = round_trip.connection
+    await connection.execute_script(
+        "CREATE SCHEMA moved_partitions; "
+        "ALTER TABLE partitioned_ledger_small RENAME TO existing_rows; "
+        "ALTER TABLE existing_rows SET SCHEMA moved_partitions"
+    )
+    drift = await detect_drift(connection, before, [APP_LABEL])
+    assert isinstance(drift.operations[-1], RenamePartition)
+    repair = Migration("restore_partition", APP_LABEL, operations=drift.operations)
+
+    await repair.apply(before, schema_editor=round_trip.editor)
+    assert sorted(await get_partitions(round_trip)) == [
+        "partitioned_ledger_big",
+        "partitioned_ledger_other",
+        "partitioned_ledger_small",
+    ]
+    assert await get_rows(round_trip) == [(1, 100, "t1"), (3, 300, "t3")]
+    assert not (await detect_drift(connection, before, [APP_LABEL])).has_drift
+
+    await repair.unapply(before, schema_editor=round_trip.editor)
+    assert await connection.execute_dicts("SELECT tenant, id FROM moved_partitions.existing_rows") == [
+        {"tenant": 1, "id": 100}
+    ]
+    assert await get_rows(round_trip) == [(1, 100, "t1"), (3, 300, "t3")]
 
 
 @pytest.mark.asyncio
@@ -1016,7 +1089,11 @@ async def test_inspectdb_writes_the_partitioning_and_it_round_trips(db_isolated_
     assert "PartitionedLedgerP0" not in source and "PartitionedLedgerSmall" not in source
     namespace: dict[str, Any] = {}
     exec(source.replace('app = "models"', 'app = "inspected"'), namespace)  # noqa: S102
-    (inspected_options,) = namespace["PartitionedLedger"]._meta.table_options
+    (inspected_options,) = (
+        build_live_state(namespace["PartitionedLedger"])
+        .apps.get_binding(f"{APP_LABEL}.PartitionedLedger")
+        .table_options
+    )
     assert inspected_options == options
 
 
@@ -1032,10 +1109,14 @@ def test_an_exclusion_constraint_on_a_partitioned_table_needs_a_server_that_has_
     new_server.features = new_server.features.replace(supports_partitioned_exclusion_constraints=True)
 
     with pytest.raises(UnSupportedError, match="from PostgreSQL 17 on"):
-        POSTGRESQL_DIALECT.schema_editor_class(old_server).table_creation.get_model_sql_data(model)
+        POSTGRESQL_DIALECT.schema_editor_class(old_server).table_creation.get_model_sql_data(
+            build_live_state(model).apps.get_binding(f"{APP_LABEL}.{model.__name__}")
+        )
     assert (
         "PARTITION BY HASH"
-        in POSTGRESQL_DIALECT.schema_editor_class(new_server).table_creation.get_model_sql_data(model).table_sql
+        in POSTGRESQL_DIALECT.schema_editor_class(new_server)
+        .table_creation.get_model_sql_data(build_live_state(model).apps.get_binding(f"{APP_LABEL}.{model.__name__}"))
+        .table_sql
     )
 
 
@@ -1048,7 +1129,10 @@ async def test_storage_and_tablespace_changes_go_to_every_partition():
     )
     new_options = PostgresqlTableOptions(partitioning=HASH, storage_parameters={"fillfactor": 80}, tablespace="fast")
 
-    await editor.table_partitions.alter_table_options(build_ledger([old_options]), build_ledger([new_options]))
+    await editor.table_partitions.alter_table_options(
+        build_live_state(build_ledger([old_options])).apps.get_binding(f"{APP_LABEL}.PartitionedLedger"),
+        build_live_state(build_ledger([new_options])).apps.get_binding(f"{APP_LABEL}.PartitionedLedger"),
+    )
 
     partitions = [f'"partitioned_ledger_p{remainder}"' for remainder in range(3)]
     assert editor.collected_sql == [
@@ -1096,12 +1180,12 @@ async def test_recreating_a_table_sets_the_foreign_keys_referencing_it_again_fro
         "ledger_entry",
         {"ledger": ForeignKeyField(f"{APP_LABEL}.PartitionedLedger", related_name="entries")},
     )
-    rendered_ledger = build_live_state(ledger, entry).apps.get_model(f"{APP_LABEL}.PartitionedLedger")
+    rendered_ledger = build_live_state(ledger, entry).apps.get_binding(f"{APP_LABEL}.PartitionedLedger")
 
     previous_ledger = build_live_state(
         build_ledger([PostgresqlTableOptions(partitioning=HASH)]),
         entry,
-    ).apps.get_model(f"{APP_LABEL}.PartitionedLedger")
+    ).apps.get_binding(f"{APP_LABEL}.PartitionedLedger")
     await editor.table_partitions.alter_table_options(previous_ledger, rendered_ledger)
 
     foreign_key_name = GeneratedNames.get_foreign_key_name("ledger_entry", ("ledger_tenant", "ledger_id"))

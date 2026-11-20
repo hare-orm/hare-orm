@@ -4,6 +4,7 @@ from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.dialects.base.types.result_literal_binding import ResultLiteralBinding
 from hare.dialects.enums import ParameterPosition
 from hare.fields.data.json.json_field import JSONField
 from hare.fields.generated_field import GeneratedField
@@ -199,19 +200,36 @@ class Case(CombinableExpression):
     ) -> ExpressionResult:
         """Choose the literal conversion from the common branch type and lower it once."""
         literal = value.branch.value
-        wall_clock = False
-        if value.branch.is_literal and isinstance(literal, dict):
-            encoder = self.get_dict_literal_encoder(output_field, context.dialect)
-        elif value.branch.is_literal and isinstance(literal, datetime) and literal.tzinfo is None:
-            encoder = self.get_naive_datetime_literal_encoder(output_field, context.dialect)
-            wall_clock = output_field is not None and TemporalArithmetic.is_naive_field(output_field)
-        elif value.branch.is_literal and isinstance(literal, timedelta):
-            encoder = self.get_timedelta_literal_encoder(output_field, context.dialect)
-        else:
-            encoder = self._get_branch_encoder(value.value, context.dialect)
+        encoder = (
+            context.dialect.types.get_result_literal_encoder(output_field, literal, context.model)
+            if value.branch.is_literal
+            else None
+        )
+        wall_clock = (
+            value.branch.is_literal
+            and isinstance(literal, datetime)
+            and literal.tzinfo is None
+            and output_field is not None
+            and TemporalArithmetic.is_naive_field(output_field)
+        )
+        if encoder is None:
+            if value.branch.is_literal and isinstance(literal, dict):
+                encoder = self.get_dict_literal_encoder(output_field, context.dialect)
+            elif value.branch.is_literal and isinstance(literal, datetime) and literal.tzinfo is None:
+                encoder = self.get_naive_datetime_literal_encoder(output_field, context.dialect)
+            elif value.branch.is_literal and isinstance(literal, timedelta):
+                encoder = self.get_timedelta_literal_encoder(output_field, context.dialect)
+            else:
+                encoder = self._get_branch_encoder(value.value, context.dialect)
+        binding = None
+        if value.branch.is_literal and not wall_clock and encoder is not None and output_field is not None:
+            binding = ResultLiteralBinding(
+                encoder, output_field, context.dialect.parameters.get_result_literal_cast_type(output_field)
+            )
         result = value.lower(
             context,
-            encoder=encoder,
+            encoder=encoder if binding is None else None,
+            binding=binding,
             position=None if wall_clock else ParameterPosition.CASE_BRANCH,
         )
         if wall_clock:

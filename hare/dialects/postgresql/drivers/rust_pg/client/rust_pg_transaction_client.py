@@ -4,9 +4,11 @@ import asyncio
 import logging
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable
+from functools import partial
 from typing import Any
 
 from hare.dialects.base.client.enums import StatementForm
+from hare.dialects.base.client.statement_execution import StatementExecution
 from hare.dialects.base.client.transaction_client import TransactionClient
 from hare.dialects.base.client.transaction_lifecycle.pending_statements import PendingStatements
 from hare.dialects.base.transactions.savepoints.nested_savepoint_lock import NestedSavepointLock
@@ -54,9 +56,8 @@ class RustPgTransactionClient(PostgresqlTransactionClient, RustPgClient):
         await self._parent._ensure_connection()
 
     async def _undo_failed_begin(self) -> None:
-        # A BEGIN that landed though begin() raised (a cancellation) left a pg.Transaction owning
-        # a pooled connection until it is committed or rolled back - its Rust-side drop guard only
-        # spawns an unordered background rollback.
+        # A native handle can hold a pool connection even while BEGIN is deferred. Finish it
+        # before returning from a failed start instead of leaving cleanup to its drop guard.
         await self._roll_back_unfinished_transaction()
 
     async def _give_back_transaction_resources(self) -> None:
@@ -161,8 +162,15 @@ class RustPgTransactionClient(PostgresqlTransactionClient, RustPgClient):
         finally:
             savepoint_lock.release(span)
 
-    async def _driver_stream_batches(
+    def _stream_built_batches(
         self, query: str, values: list[Any] | None = None, chunk_size: int = 0
+    ) -> AsyncGenerator[list[Any]]:
+        return StatementExecution.stream(
+            self, query, values, chunk_size, driver_stream=partial(self._driver_stream_batches, built_sql=True)
+        )
+
+    async def _driver_stream_batches(
+        self, query: str, values: list[Any] | None = None, chunk_size: int = 0, *, built_sql: bool = False
     ) -> AsyncGenerator[list[Any]]:
         """Streams the rows of ``query`` off a portal, a batch of ``chunk_size`` rows per fetch
         (``RUST_PG_DEFAULT_STREAM_BATCH_SIZE`` when 0). The shared statement boundary translates driver errors.
@@ -179,7 +187,7 @@ class RustPgTransactionClient(PostgresqlTransactionClient, RustPgClient):
         row_stream = None
         try:
             async with self.acquire_connection() as transaction:
-                row_stream = await transaction.stream(query, values)
+                row_stream = await transaction.stream(query, values, built_sql=built_sql)
             while True:
                 async with self.acquire_connection():
                     rows = await row_stream.fetch_many(batch_size)
@@ -193,8 +201,8 @@ class RustPgTransactionClient(PostgresqlTransactionClient, RustPgClient):
 
     @PostgresqlClient.translate_exceptions(StatementForm.CONTROL)
     async def begin(self) -> None:
-        # Pool waiting remains cancellable. Native begin_on confirms BEGIN and retains cleanup
-        # ownership if cancellation interrupts its response.
+        # Pool waiting remains cancellable. Native begin_on takes the lease and queues BEGIN
+        # for the first operation. The native handle owns cleanup after the transfer.
         slot_wait_seconds = await self._acquire_transaction_slot()
         self._begin_connection = None
         try:

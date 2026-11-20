@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from itertools import chain, pairwise
 from typing import TYPE_CHECKING, Any
 
 from hare.dialects.clickhouse.spatial.constants import CLICKHOUSE_GEOMETRY_COLUMN_TYPES, CLICKHOUSE_OTHER_SRID_MESSAGE
@@ -66,11 +67,7 @@ class ClickhouseGeometryValues:
             The area.
         """
         return (
-            sum(
-                first[0] * second[1] - second[0] * first[1]
-                for first, second in zip(ring, [*ring[1:], *ring[:1]], strict=True)
-            )
-            / 2
+            sum(first[0] * second[1] - second[0] * first[1] for first, second in pairwise(chain(ring, ring[:1]))) / 2
         )
 
     @classmethod

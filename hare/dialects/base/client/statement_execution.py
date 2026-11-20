@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncGenerator, Callable, Coroutine
+from contextlib import aclosing
 from functools import partial, wraps
 from typing import TYPE_CHECKING, Any
 
@@ -207,10 +208,38 @@ class StatementExecution:
 
     @staticmethod
     async def stream(
-        client: DatabaseClient, query: str, values: list[Any] | None, chunk_size: int
+        client: DatabaseClient,
+        query: str,
+        values: list[Any] | None,
+        chunk_size: int,
+        *,
+        driver_stream: Callable[[str, list[Any] | None, int], AsyncGenerator[list[Any]]] | None = None,
     ) -> AsyncGenerator[list[Any]]:
         """Observe one stream through wire cleanup; a partially read stream never retries."""
         query = QueryTags.append(query, client.dialect)
+        proceed = partial(StatementExecution.stream_attempt, client, query, values, chunk_size, driver_stream)
+        if Observers.query_wrappers:
+            call = QueryCall("stream", query, values, client.connection_alias, client.dialect)
+            batches = Observers.stream_wrapped(call, proceed)
+        else:
+            batches = proceed()
+        try:
+            async for batch in batches:
+                yield batch
+        finally:
+            if (close_batches := getattr(batches, "aclose", None)) is not None:
+                # Query wrappers may restore context on close. Finish them in the same task.
+                await close_batches()
+
+    @staticmethod
+    async def stream_attempt(
+        client: DatabaseClient,
+        query: str,
+        values: list[Any] | None,
+        chunk_size: int,
+        driver_stream: Callable[[str, list[Any] | None, int], AsyncGenerator[list[Any]]] | None,
+    ) -> AsyncGenerator[list[Any]]:
+        """Clean up the driver and report its result inside the query wrappers."""
         start = time.perf_counter()
         exception: BaseException | None = None
         try:
@@ -218,21 +247,11 @@ class StatementExecution:
                 client._check_statement_allowed()  # type: ignore[attr-defined]
             if client.rejected_sql_character is not None and client.rejected_sql_character in query:
                 client.raise_rejected_sql_character(query)
-            if Observers.query_wrappers:
-                call = QueryCall("stream", query, values, client.connection_alias, client.dialect)
-                batches = Observers.stream_wrapped(
-                    call, lambda: client._driver_stream_batches(query, values, chunk_size)
-                )
-            else:
-                batches = client._driver_stream_batches(query, values, chunk_size)
-            try:
+            if driver_stream is None:
+                driver_stream = client._driver_stream_batches
+            async with aclosing(driver_stream(query, values, chunk_size)) as batches:
                 async for batch in batches:
                     yield batch
-            finally:
-                if (close_batches := getattr(batches, "aclose", None)) is not None:
-                    # Query wrappers may restore ContextVar tokens when they close;
-                    # their generator must finish in the task that entered it.
-                    await close_batches()
         except GeneratorExit:
             raise
         except BaseException as driver_error:

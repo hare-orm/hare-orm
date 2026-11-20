@@ -4,6 +4,7 @@ Other tests may already have loaded a package; this is not an isolated cold-impo
 
 import ast
 import importlib
+import os
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,8 @@ def get_exporting_packages() -> list[str]:
     ],
 )
 def test_a_package_exports_each_name_once_and_lists_it(package_name):
+    if os.name != "posix" and package_name.startswith("hare.dialects.postgresql.drivers.rust_pg."):
+        pytest.skip("The native PostgreSQL driver is built only on Unix")
     package = importlib.import_module(package_name)
 
     assert len(set(package.__all__)) == len(package.__all__)

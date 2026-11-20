@@ -6,6 +6,7 @@ import pytest
 
 from hare import fields
 from hare.contrib.test import hare_test_context
+from hare.core.hare_context import HareContext
 from hare.models import Model
 from hare.models.deletion.cascade.deletion_graph import DeletionGraph
 
@@ -34,11 +35,11 @@ async def delete_a_shelf_with_volumes() -> list[int]:
 @pytest.mark.asyncio
 async def test_cascade_runs_by_hare_once_the_model_writes_to_a_database_without_foreign_keys(monkeypatch):
     async with hare_test_context([MODELS_MODULE], db_url="sqlite+aiosqlite://:memory:"):
-        assert not DeletionGraph.needs_python_cascade(Shelf)
+        assert not DeletionGraph.needs_python_cascade(HareContext.require_current().apps.get_binding(Shelf))
         assert await delete_a_shelf_with_volumes() == []
 
     async with hare_test_context([MODELS_MODULE], db_url="sqlite+aiosqlite://:memory:"):
-        connection = Shelf._meta.connection
+        connection = HareContext.require_current().apps.get_queryset(Shelf).get_connection()
         monkeypatch.setattr(connection, "features", connection.features.replace(supports_foreign_keys=False))
-        assert DeletionGraph.needs_python_cascade(Shelf)
+        assert DeletionGraph.needs_python_cascade(HareContext.require_current().apps.get_binding(Shelf))
         assert await delete_a_shelf_with_volumes() == []

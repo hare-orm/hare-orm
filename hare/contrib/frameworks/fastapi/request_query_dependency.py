@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from pydantic.fields import FieldInfo
 
     from hare.contrib.request_query.request_query import RequestQuery
+    from hare.core.apps import Apps
 
 
 class RequestQueryDependency:
@@ -39,25 +40,27 @@ class RequestQueryDependency:
         request_query_class: The request query class.
     """
 
-    def __init__(self, request_query_class: type[RequestQuery[Any]]) -> None:
+    def __init__(self, request_query_class: type[RequestQuery[Any]], *, apps: Apps | None = None) -> None:
         self.request_query_class = request_query_class
+        self.apps = apps
 
     @classmethod
-    def provide(cls, request_query_class: type[RequestQuery[Any]]) -> Any:
+    def provide(cls, request_query_class: type[RequestQuery[Any]], *, apps: Apps | None = None) -> Any:
         """The dependency building a request query from the request.
 
         Args:
             request_query_class: The request query class.
+            apps: The model registry used to read the model's binding.
 
         Returns:
             ``Depends()`` of the class's dependency.
         """
-        return Depends(cls(request_query_class))
+        return Depends(cls(request_query_class, apps=apps))
 
     @property
     def __signature__(self) -> inspect.Signature:
         """The parameters FastAPI reads the query from - the class's, and the request."""
-        schema = self.request_query_class.prepare_parameters()
+        schema = self.request_query_class.prepare_parameters(apps=self.apps)
         parameters = [inspect.Parameter(REQUEST_ARGUMENT_NAME, inspect.Parameter.KEYWORD_ONLY, annotation=Request)]
         for name, field_info in schema.model_fields.items():
             parameters.append(self.get_parameter(name, field_info))
@@ -75,7 +78,8 @@ class RequestQueryDependency:
             The parameter: its type - ``str`` for a type read from one text value - with its
             limits and a ``Query()`` describing it, a ``Path()`` for one marked ``InPath()``.
         """
-        constraints: list[Any] = [item for item in field_info.metadata if isinstance(item, BaseMetadata)]
+        metadata = ParameterAnnotation.get_metadata(field_info.annotation, field_info.metadata)
+        constraints: list[Any] = [item for item in metadata if isinstance(item, BaseMetadata)]
         in_path = ParameterAnnotation.is_in_path(field_info)
         if field_info.default_factory is not None and not in_path:
             # The whole request model must validate first: a factory can depend on

@@ -254,7 +254,7 @@ async def test_init_connections_false_with_create_db():
 @pytest.mark.asyncio
 async def test_init_connections_false_then_running_a_query_raises_clear_error():
     """Building a queryset needs no connection; running one on a model whose connection was
-    never initialized (basetable/basequery are still MetaInfo's dialect-less placeholders) raises a
+    never initialized (basetable/basequery are still ModelBinding's dialect-less placeholders) raises a
     clear ConfigurationError instead of crashing deep inside query construction. Manipulates
     Tournament's already-finalised _meta directly (rather than going through a second
     Hare.init(connect=False) call) because tests.shared_models.testmodels is
@@ -277,17 +277,17 @@ async def test_init_connections_false_then_running_a_query_raises_clear_error():
             }
         )
 
-        original_basetable = Tournament._meta.basetable
-        original_basequery = Tournament._meta.basequery
-        Tournament._meta.basetable = Table("")
-        Tournament._meta.basequery = QueryBuilder()
+        original_basetable = HareContext.require_current().apps.get_binding(Tournament).basetable
+        original_basequery = HareContext.require_current().apps.get_binding(Tournament).basequery
+        HareContext.require_current().apps.get_binding(Tournament).basetable = Table("")
+        HareContext.require_current().apps.get_binding(Tournament).basequery = QueryBuilder()
         try:
             queryset = Tournament.objects.all()
             with pytest.raises(ConfigurationError, match="Hare.init\\(\\) hasn't set up its connections yet"):
                 await queryset
         finally:
-            Tournament._meta.basetable = original_basetable
-            Tournament._meta.basequery = original_basequery
+            HareContext.require_current().apps.get_binding(Tournament).basetable = original_basetable
+            HareContext.require_current().apps.get_binding(Tournament).basequery = original_basequery
 
 
 @pytest.mark.database_independent

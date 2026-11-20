@@ -6,20 +6,20 @@ from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.results.statement_result import StatementResult
 from hare.exceptions import FieldError
+from hare.models.write.returned_values import ReturnedValues
 from hare.models.write.rules.constants import RETURNING_METHOD_NAME
 from hare.models.write.rules.row_write_rules import RowWriteRules
 from hare.query.hare_column_names import HareColumnNames
 from hare.query.key_columns import KeyColumns
-from hare.query.rows.row_column import RowColumn
 from hare.query.rows.row_layout import RowLayout
 from hare.query.statements.constants import RETURNING_OLD_VALUES_KEY
 from hare.sql.terms.values.old_row_value import OldRowValue
 
 if TYPE_CHECKING:
+    from hare.core.hare_context import HareContext
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.types.type_registry import TypeRegistry
-    from hare.fields.field import Field
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.scopes.row_visibility import RowVisibility
 
 
@@ -28,7 +28,7 @@ class ReturnedRows:
     or the model instance when no field is named.
 
     Args:
-        model: The written model.
+        binding: The written model's structural binding.
         field_names: The fields - a concrete field, a forward relation (its key, a tuple for a
             composite one) or ``pk``; none for the model instances.
         old_field_names: The fields returned as they were before the write too, under ``"old"`` -
@@ -39,18 +39,20 @@ class ReturnedRows:
             ``old_field_names`` without ``field_names``, or ``"old"`` among ``field_names`` with them.
     """
 
-    __slots__ = ("model", "field_names", "source_names_by_name", "old_source_names_by_name")
+    __slots__ = ("_binding", "field_names", "source_names_by_name", "old_source_names_by_name")
 
-    def __init__(self, model: type[Model], field_names: tuple[str, ...], old_field_names: Sequence[str] = ()) -> None:
+    def __init__(
+        self, binding: ModelBinding, field_names: tuple[str, ...], old_field_names: Sequence[str] = ()
+    ) -> None:
         old_field_names = tuple(old_field_names)
-        self.model = model
+        self._binding = binding
         self.field_names = field_names
         #: The concrete fields each name reads - one, or the key fields of a composite one.
         self.source_names_by_name: dict[str, tuple[str, ...]] = {}
         for name in field_names:
             if name in self.source_names_by_name:
                 raise FieldError(f"returning() names {name!r} twice")
-            self.source_names_by_name[name] = self.get_source_names(model, name)
+            self.source_names_by_name[name] = self.get_source_names(binding, name)
         #: The same, of the fields returned as they were before the write.
         self.old_source_names_by_name: dict[str, tuple[str, ...]] = {}
         if old_field_names and not field_names:
@@ -63,7 +65,7 @@ class ReturnedRows:
         for name in old_field_names:
             if name in self.old_source_names_by_name:
                 raise FieldError(f"returning(old=...) names {name!r} twice")
-            self.old_source_names_by_name[name] = self.get_source_names(model, name)
+            self.old_source_names_by_name[name] = self.get_source_names(binding, name)
 
     @property
     def plan_key(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -90,21 +92,21 @@ class ReturnedRows:
         Returns:
             A term per column, each once.
         """
-        meta = self.model._meta
+        meta = self._binding
         columns = dict.fromkeys(
             meta.fields_db_projection[source_name]
             for source_names in self.old_source_names_by_name.values()
             for source_name in source_names
         )
-        old_value_names = HareColumnNames.get_old_value_names(self.model)
+        old_value_names = HareColumnNames.get_old_value_names(self._binding)
         return [OldRowValue(column, alias=old_value_names[column]) for column in columns]
 
     @staticmethod
-    def get_source_names(model: type[Model], name: Any) -> tuple[str, ...]:
+    def get_source_names(binding: ModelBinding, name: Any) -> tuple[str, ...]:
         """The concrete fields a returned name reads.
 
         Args:
-            model: The written model.
+            binding: The written model's structural binding.
             name: The name.
 
         Returns:
@@ -114,7 +116,7 @@ class ReturnedRows:
             FieldError: The name isn't a concrete field, a forward relation or ``pk``.
         """
         return tuple(
-            RowWriteRules.get_stored_field_names(model, [name], RETURNING_METHOD_NAME, expands_generic_keys=False)
+            RowWriteRules.get_stored_field_names(binding, [name], RETURNING_METHOD_NAME, expands_generic_keys=False)
         )
 
     @property
@@ -126,7 +128,7 @@ class ReturnedRows:
     def builds_instances_from_rows(self) -> bool:
         """Whether the instances are built from the ``RETURNING`` rows themselves - a model without a
         primary key has no key to read them back by."""
-        return not self.field_names and not self.model._meta.has_primary_key
+        return not self.field_names and not self._binding.has_primary_key
 
     def get_returning_columns(self) -> list[str]:
         """The columns the write's ``RETURNING`` returns - the named fields', or for the instances the
@@ -135,7 +137,7 @@ class ReturnedRows:
         Returns:
             The columns, each once.
         """
-        meta = self.model._meta
+        meta = self._binding
         if self.builds_instances_from_rows:
             return list(meta.db_fields)
         source_names = (
@@ -145,12 +147,15 @@ class ReturnedRows:
         )
         return list(dict.fromkeys(meta.fields_db_projection[source_name] for source_name in source_names))
 
-    async def get_instances(self, connection: DatabaseClient, raw_rows: Sequence[Any]) -> list[Any]:
+    async def get_instances(
+        self, connection: DatabaseClient, raw_rows: Sequence[Any], *, context: HareContext | None = None
+    ) -> list[Any]:
         """The instances of ``RETURNING`` rows holding every column of the model.
 
         Args:
             connection: The connection the rows were written on.
             raw_rows: The rows, by column name.
+            context: The application context attached to returned instances, if supplied.
 
         Returns:
             An instance per row.
@@ -159,8 +164,10 @@ class ReturnedRows:
 
         if not raw_rows:
             return []
-        instances = ModelRows(self.model, connection.dialect.types).read_all(
-            connection, StatementResult(len(raw_rows), raw_rows)
+        instances = ModelRows(self._binding, connection.dialect.types).read_all(
+            connection,
+            StatementResult(len(raw_rows), raw_rows),
+            context=context,
         )
         return instances if isinstance(instances, list) else await instances
 
@@ -174,11 +181,11 @@ class ReturnedRows:
         Returns:
             A dict per row, by returned name.
         """
-        projection = self.model._meta.fields_db_projection
+        projection = self._binding.fields_db_projection
         layout = self._get_layout(self.source_names_by_name, types=types, column_names=projection)
         old_layout = None
         if self.old_source_names_by_name:
-            old_value_names = HareColumnNames.get_old_value_names(self.model)
+            old_value_names = HareColumnNames.get_old_value_names(self._binding)
             old_layout = self._get_layout(
                 self.old_source_names_by_name,
                 types=types,
@@ -206,10 +213,10 @@ class ReturnedRows:
         Raw RETURNING rows use database column names and field readers. Follow-up SELECT
         rows already contain Python values under field names and omit both options.
         """
-        fields = self.model._meta.fields_map
+        fields = self._binding.fields_map
         return RowLayout(
             tuple(
-                RowColumn(
+                (
                     column_names[name] if column_names is not None else name,
                     types.get_python_reader(fields[name]) if types is not None else None,
                 )
@@ -229,18 +236,26 @@ class ReturnedRows:
         Returns:
             A key per row - a tuple for a composite key.
         """
-        meta = self.model._meta
-        key_fields: list[tuple[Field[Any], str]] = [
-            (meta.fields_map[name], meta.fields_db_projection[name]) for name in meta.primary_key_attribute_names
-        ]
+        meta = self._binding
+        names = meta.primary_key_attribute_names
         return [
             values[0] if len(values) == 1 else values
             for values in KeyColumns.read_rows(
-                [field for field, _column in key_fields], [column for _field, column in key_fields], raw_rows, types
+                [meta.fields_map[name] for name in names],
+                [meta.fields_db_projection[name] for name in names],
+                raw_rows,
+                types,
             )
         ]
 
-    async def read(self, connection: DatabaseClient, visibility: RowVisibility, keys: Sequence[Any]) -> list[Any]:
+    async def read(
+        self,
+        connection: DatabaseClient,
+        visibility: RowVisibility,
+        keys: Sequence[Any],
+        *,
+        context: HareContext | None = None,
+    ) -> list[Any]:
         """The rows of ``keys`` as they are now - instances, or dicts of the named fields - in the
         order of the keys; a key whose row is gone is left out.
 
@@ -248,6 +263,7 @@ class ReturnedRows:
             connection: The connection - the write's transaction.
             visibility: The visibility of the write - soft-deleted rows are read too.
             keys: The primary keys.
+            context: The application context used to load and bind returned instances.
 
         Returns:
             The rows.
@@ -256,32 +272,30 @@ class ReturnedRows:
 
         if not keys:
             return []
-        meta = self.model._meta
-        queryset: QuerySet[Any] = QuerySet(self.model).filter(pk__in=list(keys))
+        meta = self._binding
+        queryset: QuerySet[Any] = QuerySet.from_binding(self._binding, context=context).filter(pk__in=list(keys))
         queryset._apply_connection(connection)
         queryset._connection_explicitly_chosen = True
         queryset._visibility = replace(visibility, include_deleted=True, only_deleted=False)
         if self.returns_instances:
-            instances_by_key = {instance.pk: instance for instance in await queryset}
-            return [instances_by_key[key] for key in keys if key in instances_by_key]
+            instances_by_key = {ReturnedValues.get_hashable(instance.pk): instance for instance in await queryset}
+            return [instances_by_key[key] for key in map(ReturnedValues.get_hashable, keys) if key in instances_by_key]
+        primary_key_names = meta.primary_key_attribute_names
         source_names = list(
             dict.fromkeys(
                 [
-                    *meta.primary_key_attribute_names,
+                    *primary_key_names,
                     *(source_name for names in self.source_names_by_name.values() for source_name in names),
                 ]
             )
         )
         key_layout = RowLayout(
-            tuple(RowColumn(name) for name in meta.primary_key_attribute_names),
-            (len(meta.primary_key_attribute_names),),
+            tuple((name, None) for name in primary_key_names),
+            (len(primary_key_names),),
         )
         output_layout = self._get_layout(self.source_names_by_name)
         rows_by_key: dict[Any, dict[str, Any]] = {}
-        for values in await queryset.values_list(*source_names):
-            values_by_source_name = dict(zip(source_names, values, strict=True))
-            key = key_layout.read(values_by_source_name)[0]
-            rows_by_key[key] = dict(
-                zip(self.source_names_by_name, output_layout.read(values_by_source_name), strict=True)
-            )
-        return [rows_by_key[key] for key in keys if key in rows_by_key]
+        for values in await queryset.values(*source_names):
+            key = ReturnedValues.get_hashable(key_layout.read(values)[0])
+            rows_by_key[key] = dict(zip(self.source_names_by_name, output_layout.read(values), strict=True))
+        return [rows_by_key[key] for key in map(ReturnedValues.get_hashable, keys) if key in rows_by_key]

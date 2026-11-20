@@ -53,19 +53,26 @@ async def test_an_upsert_reports_an_updated_normalized_conflict_key(db_contacts)
 @pytest.mark.parametrize("returning", [False, True])
 @requires_features(supports_insert_conflicts=True, supports_returning=True)
 @pytest.mark.asyncio
-async def test_repeated_normalized_conflict_keys_are_written_in_order(db_contacts, returning):
+@pytest.mark.parametrize("batch_size", [1, 3], ids=["separate-batches", "one-batch"])
+async def test_repeated_normalized_conflict_keys_are_written_in_order(db_contacts, returning, batch_size):
     contact_model = db_contacts
     first = contact_model(id=1, email="Ann@EXAMPLE.COM", label="first")
     middle = contact_model(id=2, email="Bob@example.com", label="middle")
     last = contact_model(id=3, email="Ann@example.com", label="last")
 
     written = await contact_model.objects.bulk_create(
-        [first, middle, last], update_fields=["label"], on_conflict=["email"], returning=returning
+        [first, middle, last],
+        batch_size=batch_size,
+        update_fields=["label"],
+        on_conflict=["email"],
+        returning=returning,
     )
 
     assert written == [first, middle, last]
-    assert await contact_model.objects.count() == 2
-    assert (await contact_model.objects.get(email="Ann@example.com")).label == "last"
+    assert await contact_model.objects.order_by("id").values_list("id", "email", "label") == [
+        (1, "Ann@example.com" if contact_model is Contact else "ann@example.com", "last"),
+        (2, "Bob@example.com" if contact_model is Contact else "bob@example.com", "middle"),
+    ]
     assert all(contact._saved_in_db for contact in written)
     if returning:
         assert [contact.pk for contact in written] == [1, 2, 1]

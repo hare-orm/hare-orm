@@ -33,7 +33,7 @@ class SearchQuery(SearchQueryCombinable, Expression):
         ("search_type", PlanPartType.KEY),
         ("invert", PlanPartType.KEY),
         ("value", PlanPartType.ARGUMENT),
-        ("config", PlanPartType.ARGUMENT),
+        ("config", PlanPartType.SHAPE_ARGUMENT),
     )
 
     def __init__(

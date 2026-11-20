@@ -16,6 +16,9 @@ The field must be a `DatetimeField(null=True)` on the model.
 
 ## <a id="deleting"></a>Deleting: `delete()`
 
+Queryset deletion and restoration use the ordinary write restrictions on slices and
+`distinct(<fields>)`, including `restore(cascade=True)`. A Python cascade does not relax them.
+
 The transaction and row-lock guarantees below apply only when the database and driver support them.
 Without transactions, cascading commands have no shared rollback; without row locks, concurrent
 changes are not protected by those locks.

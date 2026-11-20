@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import sys
 from collections.abc import Iterable
 from pathlib import Path
 from types import ModuleType
@@ -15,18 +16,21 @@ class MigrationsModules:
     else the ``migrations`` package next to its models module."""
 
     @staticmethod
-    def get_first_models_module(models: Iterable[ModuleType | str] | str | None) -> str | None:
-        """The name of an app's first models module."""
-        if isinstance(models, str):
-            return models
-        if not models:
-            return None
-        for item in models:
-            if isinstance(item, str):
-                return item
-            if isinstance(item, ModuleType):
-                return item.__name__
-        return None
+    def get_first_models_module(models: Iterable[ModuleType | str] | str | None) -> ModuleType | str | None:
+        """Select the module used for both package naming and placement."""
+        return models if isinstance(models, str) else next(iter(models or ()), None)
+
+    @staticmethod
+    def get_model_module_origin(model_module: ModuleType | str | None) -> Path | None:
+        """The selected module's source, including module objects without a spec."""
+        if isinstance(model_module, str):
+            origin = getattr(sys.modules.get(model_module), "__file__", None)
+            if origin is None:
+                specification = importlib.util.find_spec(model_module)
+                origin = None if specification is None else specification.origin
+        else:
+            origin = getattr(model_module, "__file__", None)
+        return None if origin is None or origin in {"built-in", "frozen"} else Path(origin)
 
     @staticmethod
     def infer(models: Iterable[ModuleType | str] | str | None) -> str | None:
@@ -39,7 +43,12 @@ class MigrationsModules:
         Returns:
             The module name, None without a models module.
         """
-        module = MigrationsModules.get_first_models_module(models)
+        return MigrationsModules.get_inferred_name(MigrationsModules.get_first_models_module(models))
+
+    @staticmethod
+    def get_inferred_name(models_module: ModuleType | str | None) -> str | None:
+        """The migrations package name for the selected models module."""
+        module = models_module.__name__ if isinstance(models_module, ModuleType) else models_module
         if not module:
             return None
         if module.endswith(".models"):
@@ -112,10 +121,19 @@ class MigrationsModules:
                 inferred = MigrationsModules.infer(updated.get("models"))
                 if inferred:
                     try:
-                        if importlib.util.find_spec(inferred) is not None:
+                        specification = importlib.util.find_spec(inferred)
+                    except ModuleNotFoundError as error:
+                        if error.name is None or not (inferred == error.name or inferred.startswith(error.name + ".")):
+                            raise ConfigurationError(
+                                f"Cannot locate migrations module {inferred} for app {label}: {error}"
+                            ) from error
+                    except Exception as error:
+                        raise ConfigurationError(
+                            f"Cannot locate migrations module {inferred} for app {label}: {error}"
+                        ) from error
+                    else:
+                        if specification is not None:
                             updated["migrations"] = inferred
-                    except (ModuleNotFoundError, AttributeError, ValueError):
-                        pass
             apps_with_modules[label] = updated
         return apps_with_modules
 
@@ -154,20 +172,31 @@ class MigrationsModules:
 
         Raises:
             ConfigurationError: The module can't be inferred, exists as a plain module, or its
-                parent module can't be imported or located.
+                parent module can't be imported or located, or its directory can't be created.
         """
-        migrations_module = app_config.get("migrations") or MigrationsModules.infer(app_config.get("models"))
+        declared_module = app_config.get("migrations")
+        models_module = MigrationsModules.get_first_models_module(app_config.get("models"))
+        migrations_module = declared_module or MigrationsModules.get_inferred_name(models_module)
         if not migrations_module:
             raise ConfigurationError(
                 f"Cannot infer migrations module for app {app_label}; set apps.{app_label}.migrations"
             )
-        if "." not in migrations_module:
+        try:
             specification = importlib.util.find_spec(migrations_module)
-            if specification and specification.submodule_search_locations:
+        except Exception as error:
+            raise ConfigurationError(
+                f"Cannot locate migrations module {migrations_module} for app {app_label}: {error}"
+            ) from None
+        if specification is not None:
+            if specification.submodule_search_locations:
                 return migrations_module, Path(next(iter(specification.submodule_search_locations)))
-            if specification and specification.origin and specification.origin != "built-in":
-                raise ConfigurationError(f"Migrations module {migrations_module} exists but is not a package")
-            return migrations_module, MigrationsModules.create_package(Path.cwd() / migrations_module)
+            raise ConfigurationError(f"Migrations module {migrations_module} exists but is not a package")
+        model_origin = MigrationsModules.get_model_module_origin(models_module)
+        if "." not in migrations_module:
+            base_path = Path.cwd()
+            if not declared_module and model_origin is not None:
+                base_path = model_origin.parent
+            return migrations_module, MigrationsModules.create_package(base_path / migrations_module)
         parent_module_name, package_name = migrations_module.rsplit(".", 1)
         try:
             parent_module = importlib.import_module(parent_module_name)
@@ -175,13 +204,17 @@ class MigrationsModules:
             raise ConfigurationError(
                 f"Cannot import parent module {parent_module_name} for app {app_label}: {error}"
             ) from None
-        except (NameError, AttributeError, SyntaxError) as error:
+        except Exception as error:
             # Usually the app's own models module - a typo or broken syntax there.
             raise ConfigurationError(
                 f"Module {parent_module_name} failed to import for app {app_label}: {error}"
             ) from None
         if hasattr(parent_module, "__path__"):
-            parent_path = Path(next(iter(parent_module.__path__)))
+            parent_paths = [Path(path) for path in parent_module.__path__]
+            parent_path = next(
+                (path for path in parent_paths if model_origin is not None and model_origin.is_relative_to(path)),
+                parent_paths[0],
+            )
         else:
             module_file = getattr(parent_module, "__file__", None)
             if not module_file:
@@ -198,10 +231,16 @@ class MigrationsModules:
 
         Returns:
             The directory.
+
+        Raises:
+            ConfigurationError: The filesystem cannot create the directory or initializer.
         """
-        package_path.mkdir(parents=True, exist_ok=True)
-        init_path = package_path / "__init__.py"
-        if not init_path.exists():
-            init_path.write_text("", encoding="utf-8")
+        try:
+            package_path.mkdir(parents=True, exist_ok=True)
+            init_path = package_path / "__init__.py"
+            if not init_path.exists():
+                init_path.write_text("", encoding="utf-8")
+        except OSError as error:
+            raise ConfigurationError(f"Cannot create migrations package at {package_path}: {error}") from error
         importlib.invalidate_caches()
         return package_path

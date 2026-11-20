@@ -24,4 +24,6 @@ class Negative(Term):
         yield self.term
 
     def get_sql(self, sql_context: SqlContext) -> str:
-        return f"-{self.term.get_sql(sql_context)}"
+        operand = self.term.get_sql(sql_context.copy(with_alias=False))
+        sql = f"-({operand})"
+        return sql_context.format_alias_sql(sql, self.alias) if sql_context.with_alias else sql

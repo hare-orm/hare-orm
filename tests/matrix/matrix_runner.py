@@ -22,6 +22,7 @@ import os
 import sys
 import time
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 
 from tests.matrix.constants import (
@@ -111,16 +112,16 @@ class MatrixRunner:
             for environment in SUITE_ENVIRONMENTS
             if not environments or any(fnmatch.fnmatchcase(environment.name, pattern) for pattern in environments)
         ]
-        self.python_versions = python_versions or list(
+        self.python_versions = tuple(dict.fromkeys(python_versions)) or (
             MATRIX_PYTHON_VERSIONS[-1:] if newest else MATRIX_PYTHON_VERSIONS
         )
-        self.sqlite_versions = list(SQLITE_RELEASES)[-1:] if newest else list(SQLITE_RELEASES)
-        self.postgres_versions = list(MATRIX_POSTGRES_VERSIONS[-1:] if newest else MATRIX_POSTGRES_VERSIONS)
-        self.pgbouncer_versions = list(MATRIX_PGBOUNCER_VERSIONS[-1:] if newest else MATRIX_PGBOUNCER_VERSIONS)
-        self.clickhouse_versions = list(MATRIX_CLICKHOUSE_VERSIONS[-1:] if newest else MATRIX_CLICKHOUSE_VERSIONS)
+        sqlite_versions = tuple(SQLITE_RELEASES)
+        self.sqlite_versions = sqlite_versions[-1:] if newest else sqlite_versions
+        self.postgres_versions = MATRIX_POSTGRES_VERSIONS[-1:] if newest else MATRIX_POSTGRES_VERSIONS
+        self.pgbouncer_versions = MATRIX_PGBOUNCER_VERSIONS[-1:] if newest else MATRIX_PGBOUNCER_VERSIONS
+        self.clickhouse_versions = MATRIX_CLICKHOUSE_VERSIONS[-1:] if newest else MATRIX_CLICKHOUSE_VERSIONS
         self.broker_versions = {
-            broker: list(versions[-1:] if newest else versions)
-            for broker, (versions, _, _, _) in MATRIX_BROKERS.items()
+            broker: versions[-1:] if newest else versions for broker, (versions, _, _, _) in MATRIX_BROKERS.items()
         }
         self.suites = suites
         self.workers = workers
@@ -128,7 +129,6 @@ class MatrixRunner:
             raise SystemExit(f"--jobs is a number of runs at once, 1 or more - not {jobs}")
         self.jobs = jobs
         self.print_failed_logs = print_failed_logs
-        self.processes = ProcessGroups()
 
     def get_runs(self) -> list[RunSpec]:
         """The runs of the matrix, filtered by the requested suites and environments.
@@ -332,14 +332,14 @@ class MatrixRunner:
         """The file the pytest output of a run is written to."""
         return MATRIX_LOG_DIRECTORY / f"{run.python_version}-{run.suite_environment.name}-{run.suite}.log"
 
-    def execute(self, run: RunSpec) -> RunResult:
+    def execute(self, run: RunSpec, *, processes: ProcessGroups) -> RunResult:
         """Execute a profile in a clean test environment and retain its actual pytest status."""
         MATRIX_LOG_DIRECTORY.mkdir(exist_ok=True)
         log_path = self.get_log_path(run)
         report_path = log_path.with_suffix(".json")
         report_path.unlink(missing_ok=True)
         command = [
-            str(MatrixVirtualenv.get(run).get_python_executable()),
+            str(MatrixVirtualenv.get(run.python_version, run.suite_environment, run.database).get_python_executable()),
             "-m",
             "pytest",
             "-p",
@@ -359,7 +359,7 @@ class MatrixRunner:
         environment[RUN_REPORT_ENVIRONMENT_VARIABLE] = str(report_path)
         started = time.perf_counter()
         with log_path.open("w", encoding="utf-8") as log_file:
-            exit_code = self.processes.run(command, cwd=REPOSITORY_DIRECTORY, environment=environment, output=log_file)
+            exit_code = processes.run(command, cwd=REPOSITORY_DIRECTORY, environment=environment, output=log_file)
         duration = time.perf_counter() - started
         return RunResult.read(run, exit_code, duration, log_path)
 
@@ -393,7 +393,9 @@ class MatrixRunner:
         """
         if interpreter is not None and len(self.python_versions) != 1:
             raise SystemExit("--interpreter is the Python of one version - name it with --python")
-        for virtualenv in dict.fromkeys(MatrixVirtualenv.get(run) for run in self.get_runs()):
+        for virtualenv in dict.fromkeys(
+            MatrixVirtualenv.get(run.python_version, run.suite_environment, run.database) for run in self.get_runs()
+        ):
             print(f"{virtualenv.name}: {', '.join(virtualenv.extras) or 'no extras'}", flush=True)
             virtualenv.create(interpreter)
 
@@ -410,7 +412,7 @@ class MatrixRunner:
     def run(self) -> int:
         """Execute every cell while serializing conflicting server and cleanup resources."""
         runs = self.get_runs()
-        self.processes = ProcessGroups()
+        processes = ProcessGroups()
         print(
             f"{len(runs)} runs: up to {self.jobs} full runs and {FEW_TEST_RUNS_AT_ONCE} small runs; "
             "shared resources serialized",
@@ -418,8 +420,8 @@ class MatrixRunner:
         )
         results = RunScheduler(self.jobs, FEW_TEST_RUNS_AT_ONCE).run(
             runs,
-            self.execute,
-            self.processes.stop,
+            partial(self.execute, processes=processes),
+            processes.stop,
             self.report_progress,
         )
         print(self.format_table(results))

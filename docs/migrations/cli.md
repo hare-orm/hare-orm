@@ -7,6 +7,12 @@ The `hare` command (installed as a console script) reads its config from `-c/--c
 [`HareConfig.load()`](../connections/configuration.md#the-config-dict) takes. `hare -V`/`--version`
 prints hare's version.
 
+`hare init` reuses an importable migrations package without replacing its initializer or
+shadowing an existing module. A missing inferred package is created beside the configured
+model source, including the matching portion of a namespace package. An explicit top-level
+package is created in the current directory. An existing plain migrations module or an
+unwritable destination is reported as a command error without modifying that file.
+
 | Command | Purpose |
 |---|---|
 | `hare init [app_labels...]` | Create a migrations package for the given (or all) apps. |
@@ -19,12 +25,16 @@ prints hare's version.
 | `hare inspectdb [tables...] [--connection ALIAS] [--schema SCHEMA]` | Writes the models of an existing schema — see [Models from an existing database](inspectdb.md). |
 | `hare dbshell [--connection ALIAS]` | Runs the database's own interactive client on a connection — see [`hare dbshell`](#dbshell). |
 | `hare checkmigrations [app_labels...]` | Checks the migrations `migrate` would apply for risks to a database in use — see [`hare checkmigrations`](#checkmigrations). |
-| `hare sqlmigrate APP_LABEL MIGRATION_NAME [--backward]` | Print a migration's SQL without running it; `--backward` prints the rollback. An atomic migration on a database that rolls back DDL (PostgreSQL, SQLite) is wrapped in `BEGIN;`/`COMMIT;`. Any migration on disk is printed, a squashed one and those it replaces alike, each on the state of its dependencies. |
+| `hare sqlmigrate APP_LABEL MIGRATION_NAME [--backward]` | Print a migration's SQL without running it; `--backward` prints the rollback. An atomic migration on a database that rolls back DDL (PostgreSQL, SQLite) is wrapped in `BEGIN;`/`COMMIT;`. Any migration on disk is printed, a squashed one and those it replaces alike, each on the state of its dependencies. The applied migration journal is not read. |
 | `hare drift [app_labels...] [--connection ALIAS] [--schema SCHEMA] [--journal-table NAME ...]` | Compares a connection's live database with the models — see [`hare drift`](#drift). |
 | `hare distributed-recover --coordinator ALIAS [--finish] [--older-than SECONDS]` | Reports or finishes `Transactions.distributed()` prepared transactions that never resolved — see [`hare distributed-recover`](#distributed-recover). |
 | `hare stubs [--output DIRECTORY] [--relation-depth N] [--check]` | Writes the stubs pyright and Pylance check the models with — see [`hare stubs`](#stubs). |
 
 ## <a id="shell"></a>`hare shell`
+
+`Hare`, `hare` and `apps` are reserved. Unambiguous `<app_label>_<ModelName>` aliases
+take precedence over plain model names. A qualified alias shared by different models is
+omitted with a warning; every model remains reachable through `apps[app_label][model_name]`.
 
 The shell opens one application and one asyncio event loop for the whole session. Every asynchronous
 cell runs on that loop; connections are reused between cells. `asyncio.timeout()`, `wait_for()` and
@@ -77,9 +87,10 @@ migration of the app (`hare migrate models zero`). `migration` may be a unique p
 for `0002_add_email`), as for `sqlmigrate`; a name of no migration, or one several begin with, exits with
 code `2` here, in `sqlmigrate` and in `squashmigrations`, as an unknown `app_label` does. Without
 `migration` the app goes to its latest; without `app_label` every app does. `--fake` records history
-without running SQL; `--dry-run` prints the plan only and writes nothing to the database, not even the
-migrations table. `--lock-timeout` fails a migration whose statement waits longer for a lock another
-session holds (see [Lock timeout](migrations.md#lock-timeout)); a value outside the range a transaction's
+without running migration SQL or state callbacks. `--dry-run` only prints the plan and writes nothing
+to the database, including the migrations table. `--lock-timeout` fails a migration whose statement
+waits longer for a lock another session holds (see [Lock timeout](migrations.md#lock-timeout));
+a value outside the range a transaction's
 `lock_timeout` takes exits with code `2`.
 
 ## <a id="dbshell"></a>`hare dbshell`
@@ -178,6 +189,13 @@ parsing and help, a warning is printed, and the remaining commands are registere
 `-c`/`--config` value (`module.VARIABLE` or a file path), `None` when not given: then
 `CommandContext.load_config(cli_context)` locates the config through the environment or `pyproject.toml`,
 like every built-in command.
+
+Discovery and execution share one normalized configuration for the invocation, including
+one-pass iterables of model modules. Global options precede the subcommand; its own options
+are parsed only by its parser. Command arguments may use names such as `func`, `config` or
+`command`: they do not replace the execution callback or `cli_context.config`.
+`CommandContext.select_apps(config, labels)` reads any iterable once; an empty iterable selects
+all configured apps, just like `None`.
 
 `run()` raising `CLIUsageError` exits with code 2, `CLIError` with code 1, the message printed to stderr
 — the same as built-in commands. Any other hare exception (`ConfigurationError`, `DBConnectionError`,

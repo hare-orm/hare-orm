@@ -3,13 +3,16 @@
 import pytest
 import pytest_asyncio
 
-from hare.contrib.test import hare_test_context
-from hare.query.expressions import Q
+from hare import Model, fields
+from hare.contrib.test import hare_test_context, requires_features
+from hare.query.expressions import Case, Q, Value, When
+from tests.contracts.constants import CONTRACT_APP, CONTRACT_CONNECTION
 from tests.contracts.filter_snapshot_models import CompositeSnapshotItem, SnapshotItem
 from tests.contracts.snapshot_containers import JsonDocument, KeyList, KeySet
 from tests.utils.database_under_test import DatabaseUnderTest
 from tests.utils.first_key_list import FirstKeyList
 from tests.utils.first_key_set import FirstKeySet
+from tests.utils.single_pass_values import SinglePassValues
 
 
 @pytest_asyncio.fixture(scope="module")
@@ -46,6 +49,41 @@ async def test_membership_inputs_are_taken_at_each_filter_call(snapshot_rows, co
                 assert [obj.pk for obj in await query] == [expected]
                 assert await query.count() == 1
                 assert await query.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped", [False, True], ids=["plain", "literal"])
+@pytest.mark.parametrize("iterable_type", ["generator", "single-pass", "list", "dict-keys"])
+async def test_literal_membership_inputs_are_captured_before_pending_queries_are_rebuilt(
+    snapshot_rows, wrapped, iterable_type
+):
+    for model, first, second in ((SnapshotItem, 1, 2), (CompositeSnapshotItem, (1, 1), (1, 2))):
+        for path in ("filter", "exclude", "Q"):
+            backing = [first]
+            if iterable_type == "generator":
+                requested = (value for value in backing)
+            elif iterable_type == "single-pass":
+                requested = SinglePassValues(backing)
+            elif iterable_type == "dict-keys":
+                backing = dict.fromkeys(backing)
+                requested = backing.keys()
+            else:
+                requested = backing
+            value = Value(requested) if wrapped else requested
+            if path == "Q":
+                condition = Q(pk__in=value)
+                query = model.objects.filter(condition)
+            else:
+                query = getattr(model.objects, path)(pk__in=value)
+            if isinstance(requested, SinglePassValues):
+                assert requested.iterations == 1
+            backing.clear()
+            expected = second if path == "exclude" else first
+            for repeat in (0, 1):
+                assert [obj.pk for obj in await query] == [expected]
+                assert await query.count() == 1
+            if isinstance(requested, SinglePassValues):
+                assert requested.iterations == 1
 
 
 @pytest.mark.asyncio
@@ -111,3 +149,68 @@ async def test_json_array_writes_copy_nested_values(snapshot_rows, container):
                 await model.objects.filter(pk=number if model is SnapshotItem else (1, number)).update(
                     payload={"value": number}
                 )
+
+
+@pytest.mark.asyncio
+async def test_nested_write_literals_and_existing_conditions_are_captured(snapshot_rows):
+    for model, first, second in ((SnapshotItem, 1, 2), (CompositeSnapshotItem, (1, 1), (1, 2))):
+        then_payload = {"labels": ["élan"]}
+        default_payload = {"labels": ["default"]}
+        keys = [first]
+        expression = Case(When(pk__in=keys, then=Value(then_payload)), default=default_payload)
+        # When has already constructed its condition just as a standalone Q would.
+        keys[:] = [second]
+        pending = model.objects.all().update(payload=expression)
+        then_payload["labels"].append("later")
+        default_payload["labels"].clear()
+        try:
+            await pending
+            assert (await model.objects.get(pk=first)).payload == {"labels": ["élan"]}
+            assert (await model.objects.get(pk=second)).payload == {"labels": ["default"]}
+        finally:
+            await model.objects.filter(pk=first).update(payload={"value": 1})
+            await model.objects.filter(pk=second).update(payload={"value": 2})
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("composite", (False, True), ids=("scalar", "composite"))
+@pytest.mark.parametrize("container", (list, tuple, Value))
+async def test_binary_array_writes_capture_views_before_the_buffer_changes(contract_database, composite, container):
+    class Item(Model):
+        number = fields.IntField(primary_key=not composite, generated=False)
+        region = fields.IntField()
+        blobs = fields.ArrayField(fields.BinaryField())
+        if composite:
+            pk = fields.CompositePrimaryKey("region", "number")
+
+    contract_database.register_live_models([Item], CONTRACT_APP, CONTRACT_CONNECTION)
+    await contract_database.generate_schemas()
+    buffer = bytearray(b"abcdef")
+    views = [memoryview(buffer)[::2]]
+    created = await Item.objects.create(number=1, region=7, blobs=views)
+    assert created.blobs == [b"ace"]
+    assert await Item.objects.values_list("blobs", flat=True) == [[b"ace"]]
+
+    buffer[:] = b"bdf000"
+    update = Item.objects.filter(number=1).update(blobs=container(views)).returning("blobs")
+    buffer[:] = b"zyxwvu"
+    assert await update == [{"blobs": [b"bf0"]}]
+    assert await Item.objects.values_list("blobs", flat=True) == [[b"bf0"]]
+
+    features = contract_database.get_connection(CONTRACT_CONNECTION).features
+    if features.supports_merge:
+        buffer[:] = b"abcdef"
+        on = ("region", "number") if composite else "number"
+        merge = (
+            Item.objects.merge([{"number": 1, "region": 7}, {"number": 2, "region": 7}], on=on)
+            .when_matched(update={"blobs": container(views)})
+            .when_not_matched(insert={"number": 2, "region": 7, "blobs": container(views)})
+        )
+        buffer[:] = b"zyxwvu"
+        if features.supports_merge_returning:
+            rows = await merge.returning("number", "blobs")
+            assert sorted((row["number"], row["blobs"]) for row in rows) == [(1, [b"ace"]), (2, [b"ace"])]
+        else:
+            assert await merge == 2
+        assert await Item.objects.order_by("number").values_list("blobs", flat=True) == [[b"ace"], [b"ace"]]

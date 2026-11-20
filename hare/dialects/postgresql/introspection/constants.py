@@ -40,7 +40,7 @@ POSTGRESQL_CATALOG_REFERENCE_CASTS = frozenset(
     }
 )
 
-POSTGRESQL_CATALOG_COLUMN_NONCOMPARABLE_MEMBERS = frozenset({"table_name", "enum_labels"})
+POSTGRESQL_CATALOG_COLUMN_NONCOMPARABLE_MEMBERS = frozenset({"table_name", "enum_labels", "default_schema"})
 POSTGRESQL_CATALOG_FOREIGN_KEY_NONCOMPARABLE_MEMBERS = frozenset(
     {
         "table_name",

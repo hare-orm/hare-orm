@@ -22,6 +22,10 @@ def CharEnumField(
         max_length: The column length - taken from the longest value when zero or omitted, so
             changing the enum may need a schema change.
         kwargs: The arguments of every field (``null``, ``default``, ``db_index``...).
+
+    Raises:
+        ConfigurationError: Distinct members have the same stored text, or the declaration
+            cannot represent the enum's values.
     """
 
     return CharEnumFieldInstance(enum_type, description, max_length, **kwargs)  # type: ignore[return-value]

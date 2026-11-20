@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from hare.migrations.state.prepared_operation import PreparedOperation
+from hare.migrations.state.state_snapshot import StateSnapshot
 
 if TYPE_CHECKING:
     from hare.migrations.operations.operation import Operation
@@ -11,44 +12,55 @@ if TYPE_CHECKING:
 
 
 class PreparedOperationStates:
-    """Prepare independent operation states without changing input declarations.
+    """Prepare private boundaries once, preserving arbitrary nested state changes.
 
-    Execution, reverse execution, SQL collection and safety inspection consume
-    this same tree. No undo journal or declaration-origin heuristic participates
-    in deciding which state an operation receives. Preparation performs no
-    database work and does not invoke data-migration callbacks.
+    Execution, inspection and optimization use the same operation tree. State
+    callbacks run once during preparation. Working states and renderings are
+    materialized by consumers without mutating retained declarations.
     """
 
     def __init__(self, app_label: str, operations: Sequence[Operation], state_before: State) -> None:
+        self._prepare(app_label, tuple(operation.snapshot() for operation in operations), StateSnapshot(state_before))
+
+    @classmethod
+    def _from_snapshots(
+        cls, app_label: str, operations: Sequence[Operation], before_snapshot: StateSnapshot
+    ) -> PreparedOperationStates:
+        prepared = cls.__new__(cls)
+        prepared._prepare(app_label, operations, before_snapshot)
+        return prepared
+
+    def _prepare(self, app_label: str, operations: Sequence[Operation], before_snapshot: StateSnapshot) -> None:
         from hare.migrations.operations.special.separate_database_and_state import SeparateDatabaseAndState
 
         self.app_label = app_label
-        self.before: State = state_before.clone()
-        current = self.before
+        self.before_snapshot = before_snapshot
+        current = self.before_snapshot
         prepared = []
-        for declaration in operations:
-            operation = declaration.snapshot()
-            before = current.clone()
-            state_operations = database_operations = None
+        for operation in operations:
+            before = current
+            database_operations = None
             if isinstance(operation, SeparateDatabaseAndState):
-                state_operations = type(self)(app_label, operation.state_operations, before)
-                database_operations = type(self)(app_label, operation.database_operations, before)
-                after = state_operations.after.clone()
+                state_operations = type(self)._from_snapshots(app_label, operation.state_operations, before)
+                database_operations = type(self)._from_snapshots(app_label, operation.database_operations, before)
+                after = state_operations.after_snapshot
             else:
-                after = before.clone()
-                operation.state_forward(app_label, after)
-                # A custom state operation may have changed a nested declaration
-                # after reading rendered models. Publish a fresh rendering too.
-                after = after.clone()
-            prepared.append(PreparedOperation(operation, before, after, state_operations, database_operations))
+                working = before.materialize()
+                operation.state_forward(app_label, working)
+                after = StateSnapshot(working)
+            prepared.append(PreparedOperation(operation, before, after, database_operations=database_operations))
             current = after
         self.operations: tuple[PreparedOperation, ...] = tuple(prepared)
-        self.after: State = current.clone()
+        self.after_snapshot: StateSnapshot = current
+
+    @property
+    def before(self) -> State:
+        return self.before_snapshot.materialize()
+
+    @property
+    def after(self) -> State:
+        return self.after_snapshot.materialize()
 
     def get(self, position: int) -> State:
-        """Read the boundary before an operation, or after the complete sequence.
-
-        Readers must not mutate a returned snapshot. Call ``clone()`` when a
-        working state is required. All boundaries exist before execution starts.
-        """
+        """Return an independent state at a prepared boundary, without replaying callbacks."""
         return self.after if position == len(self.operations) else self.operations[position].before

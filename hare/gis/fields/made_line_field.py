@@ -26,7 +26,7 @@ class MadeLineField(GeometryField):
     reason."""
 
     #: Bounded reuse of output fields with the same (srid, dimensions).
-    fields: ClassVar[Cache[MadeLineField]] = Cache(Cache.max_size_from_env(), holds_sql=False)
+    fields: ClassVar[Cache[MadeLineField]] = Cache(Cache.max_size_from_env())
 
     @classmethod
     def get_for(cls, point_field: GeometryField) -> MadeLineField:

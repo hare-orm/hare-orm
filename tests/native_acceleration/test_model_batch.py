@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.dialects.base.results.statement_result import StatementResult
 from hare.models.instances.dirty_fields import DirtyFields
 from hare.native.native_modules import NativeModules
@@ -19,7 +20,7 @@ def test_batch_keeps_row_order_null_callbacks_and_custom_construction(monkeypatc
     calls = []
 
     class Loaded:
-        _meta = SimpleNamespace(default_custom_generated_pk=True, track_dirty_fields=True)
+        binding = SimpleNamespace(default_custom_generated_pk=True, track_dirty_fields=True)
 
         def __new__(cls):
             calls.append("new")
@@ -34,6 +35,14 @@ def test_batch_keeps_row_order_null_callbacks_and_custom_construction(monkeypatc
             calls.append(("set", value))
             self._value = value
 
+    bindings = {Loaded: Loaded.binding}
+    graph = SimpleNamespace(get_binding=bindings.__getitem__)
+    for model, binding in bindings.items():
+        binding._model = model
+        binding.graph = graph
+        binding.cache_buckets = {}
+    context = HareContext()
+
     def decode(value):
         calls.append(("decode", value))
         if fail and value == "bad":
@@ -46,8 +55,8 @@ def test_batch_keeps_row_order_null_callbacks_and_custom_construction(monkeypatc
     monkeypatch.setattr(DirtyFields, "snapshot_dirty_fields", snapshot)
     keys = (0, 1, 2) if by_position else ("base", "child", "note")
     columns = [
-        ModelColumns(Loaded, (("value", None, decode),), (keys[0],), True),
-        ModelColumns(Loaded, (("value", None, decode),), (keys[1],), False, ("child",), True),
+        ModelColumns.from_entries(Loaded.binding, (("value", None, decode),), (keys[0],), True),
+        ModelColumns.from_entries(Loaded.binding, (("value", None, decode),), (keys[1],), False, ("child",), True),
     ]
     raw = [("one", None, None), ("bad" if fail else "two", "child", "note"), ("last", None, "end")]
     rows = raw if by_position else [dict(zip(("base", "child", "note"), row, strict=True)) for row in raw]
@@ -57,12 +66,12 @@ def test_batch_keeps_row_order_null_callbacks_and_custom_construction(monkeypatc
         features=SimpleNamespace(supports_positional_rows=by_position),
         dialect=SimpleNamespace(types=SimpleNamespace(get_python_reader=lambda field: None)),
     )
-    reader = ModelRows(Loaded, connection.dialect.types, annotations=("note",))
+    reader = ModelRows(Loaded.binding, connection.dialect.types, annotations=("note",))
     reader.annotation_decoders = {"note": decode}
     layout = reader.get_result_layout(columns, reader.get_annotation_layout(connection, result.column_names))
     if fail:
         with pytest.raises(ValueError, match="bad value"):
-            reader.read_batch(connection, result, layout, start=0, stop=3)
+            reader.read_batch(connection, result.rows, layout, start=0, stop=3, context=context)
         assert calls == [
             "new",
             ("decode", "one"),
@@ -73,13 +82,14 @@ def test_batch_keeps_row_order_null_callbacks_and_custom_construction(monkeypatc
             ("decode", "bad"),
         ]
     else:
-        loaded = reader.read_batch(connection, result, layout, start=0, stop=2)
+        loaded = reader.read_batch(connection, result.rows, layout, start=0, stop=2, context=context)
         assert [obj.value for obj in loaded] == ["one", "two"]
         assert loaded[0]._child is None
         assert loaded[1]._child.value == "child"
         assert [obj.note for obj in loaded] == [None, "note"]
         assert all(obj._partial and obj._saved_in_db and obj._custom_generated_pk for obj in loaded)
         assert all(obj._connection_alias == "selected" for obj in loaded)
+        assert all(obj._context is context and obj._binding is Loaded.binding for obj in loaded)
         assert calls == [
             "new",
             ("decode", "one"),
@@ -102,7 +112,15 @@ def test_model_batch_observes_a_replaced_constructor_on_the_next_row():
     calls = []
 
     class Loaded:
-        _meta = SimpleNamespace(default_custom_generated_pk=False, track_dirty_fields=False)
+        binding = SimpleNamespace(default_custom_generated_pk=False, track_dirty_fields=False)
+
+    bindings = {Loaded: Loaded.binding}
+    graph = SimpleNamespace(get_binding=bindings.__getitem__)
+    for model, binding in bindings.items():
+        binding._model = model
+        binding.graph = graph
+        binding.cache_buckets = {}
+    context = HareContext()
 
     def replacement(model):
         calls.append("replacement")
@@ -112,8 +130,10 @@ def test_model_batch_observes_a_replaced_constructor_on_the_next_row():
         Loaded.__new__ = staticmethod(replacement)
         return value
 
-    columns = ModelColumns(Loaded, (("value", None, decode),), (0,), False)
-    loaded = NativeModules.rows.ModelResultLayout([columns], ()).read_batch([(1,), (2,)], 0, 2, None, lambda obj: None)
+    columns = ModelColumns.from_entries(Loaded.binding, (("value", None, decode),), (0,), False)
+    loaded = NativeModules.rows.ModelResultLayout([columns], ()).read_batch(
+        [(1,), (2,)], 0, 2, None, context, lambda obj: None
+    )
     assert [obj.value for obj in loaded] == [1, 2]
     assert calls == ["replacement"]
 
@@ -144,7 +164,7 @@ def test_native_relation_grouping_keeps_duplicates_nulls_and_last_single_row():
 
 
 @pytest.mark.parametrize("by_position", [False, True])
-def test_combined_union_rows_hydrate_each_model_and_annotations_natively(by_position):
+def test_combined_union_rows_hydrate_each_model_and_annotations_natively(by_position, monkeypatch):
     layout = SimpleNamespace(
         entry_by_column={"value": ("value", None, lambda raw: f"decoded:{raw}")},
         entry_by_field_name={},
@@ -154,7 +174,7 @@ def test_combined_union_rows_hydrate_each_model_and_annotations_natively(by_posi
     class FirstBranch:
         # Model's class default.
         _custom_generated_pk = False
-        _meta = SimpleNamespace(
+        binding = SimpleNamespace(
             app="models",
             default_custom_generated_pk=False,
             track_dirty_fields=False,
@@ -164,12 +184,20 @@ def test_combined_union_rows_hydrate_each_model_and_annotations_natively(by_posi
     class SecondBranch:
         # Model's class default.
         _custom_generated_pk = False
-        _meta = SimpleNamespace(
+        binding = SimpleNamespace(
             app="models",
             default_custom_generated_pk=True,
             track_dirty_fields=False,
             get_hydration_layout=lambda _connection: layout,
         )
+
+    bindings = {FirstBranch: FirstBranch.binding, SecondBranch: SecondBranch.binding}
+    graph = SimpleNamespace(get_binding=bindings.__getitem__)
+    for model, binding in bindings.items():
+        binding._model = model
+        binding.graph = graph
+        binding.cache_buckets = {}
+    context = HareContext()
 
     column_names = ("value", "note", "__app", "__model")
     raw_rows = [("a", "first", "models", "FirstBranch"), ("b", "second", "models", "SecondBranch")]
@@ -179,12 +207,15 @@ def test_combined_union_rows_hydrate_each_model_and_annotations_natively(by_posi
         features=SimpleNamespace(supports_positional_rows=by_position),
         dialect=SimpleNamespace(types=SimpleNamespace(get_python_reader=lambda _field: None)),
     )
-    reader = ModelRows(FirstBranch, connection.dialect.types, annotations=("note",))
+    reader = ModelRows(FirstBranch.binding, connection.dialect.types, annotations=("note",))
     reader.annotation_decoders = {"note": str.upper}
     loaded = list(
-        reader.read_combined(connection, rows, column_names, (FirstBranch, SecondBranch), "__app", "__model")
+        reader.read_combined(
+            connection, rows, column_names, (FirstBranch, SecondBranch), "__app", "__model", context=context
+        )
     )
     assert [type(obj) for obj in loaded] == [FirstBranch, SecondBranch]
+    assert all(obj._context is context and obj._binding is bindings[type(obj)] for obj in loaded)
     assert [obj.value for obj in loaded] == ["decoded:a", "decoded:b"]
     assert [obj.note for obj in loaded] == ["FIRST", "SECOND"]
     assert not loaded[0]._custom_generated_pk and loaded[1]._custom_generated_pk
@@ -214,24 +245,34 @@ def test_grouped_models_decode_every_occurrence_and_share_normalized_keys(by_pos
     calls = []
 
     class Loaded:
-        _meta = SimpleNamespace(default_custom_generated_pk=False, track_dirty_fields=False)
+        binding = SimpleNamespace(default_custom_generated_pk=False, track_dirty_fields=False)
 
         def __new__(cls):
             calls.append("new")
             return object.__new__(cls)
+
+    bindings = {Loaded: Loaded.binding}
+    graph = SimpleNamespace(get_binding=bindings.__getitem__)
+    for model, binding in bindings.items():
+        binding._model = model
+        binding.graph = graph
+        binding.cache_buckets = {}
+    context = HareContext()
 
     def decode(value):
         calls.append(value)
         return int(value)
 
     keys = (0, 1, 2) if by_position else ("left", "right", "owner")
-    columns = ModelColumns(Loaded, (("left", None, decode), ("right", None, decode)), keys[:2], False)
+    columns = ModelColumns.from_entries(
+        Loaded.binding, (("left", None, decode), ("right", None, decode)), keys[:2], False
+    )
     raw = [("01", "2", "10"), ("1", "02", "11"), ("2", "3", "10")]
     rows = raw if by_position else [dict(zip(keys, row, strict=True)) for row in raw]
     shared = {}
     layout = NativeModules.rows.GroupedModelLayout(columns, ("left", "right"), keys[2], int)
-    first = layout.read_batch(rows, 0, 1, "selected", lambda obj: None, shared)
-    rest = layout.read_batch(rows, 1, 3, "selected", lambda obj: None, shared)
+    first = layout.read_batch(rows, 0, 1, "selected", context, lambda obj: None, shared)
+    rest = layout.read_batch(rows, 1, 3, "selected", context, lambda obj: None, shared)
     assert [pair[0] for pair in first + rest] == [10, 11, 10]
     assert first[0][1] is rest[0][1]
     assert rest[1][1] is not first[0][1]

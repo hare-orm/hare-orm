@@ -3,7 +3,6 @@
 import contextlib
 import os
 
-import pytest
 import pytest_asyncio
 
 from hare.contrib.test import hare_test_context, truncate_all_models
@@ -15,8 +14,7 @@ from tests.utils.database_under_test import DatabaseUnderTest
 async def open_transactions_context(url_options):
     """Open the transaction models; setup failures fail the selected profile."""
     db_url = os.getenv("HARE_TEST_DB", "")
-    if not db_url.startswith("clickhouse"):
-        pytest.skip("runs against the ClickHouse test server - make test_clickhouse")
+    DatabaseUnderTest.skip_unless_clickhouse(db_url)
     async with hare_test_context(
         modules=["tests.dialects.clickhouse.transactions.models"],
         db_url=DatabaseUnderTest.get_url_with_options(url_options, db_url),

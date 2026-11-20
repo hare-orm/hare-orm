@@ -127,6 +127,11 @@ class ObserverDispatcher:
             await result
         except Exception as error:
             logger.exception("Observer %r raised on %r", observer.callback, event)
+            # This active frame cannot be cleared yet and still holds the event and awaitable.
+            # Retain the callback's traceback, which consists of finished frames we can clear.
+            error_traceback = error.__traceback__
+            if error_traceback is not None:
+                error.__traceback__ = error_traceback.tb_next
             self.keep_error(error)
 
     def keep_error(self, error: Exception) -> None:
@@ -161,7 +166,7 @@ class ObserverDispatcher:
             if isinstance(current_error, BaseExceptionGroup):
                 pending_errors.extend(current_error.exceptions)
 
-    async def wait_for_pending(self, timeout_seconds: float | None = None) -> None:
+    async def wait_for_pending(self, timeout_seconds: float | None) -> None:
         """Drain the current batch, then raise its retained observer errors.
 
         After the graceful timeout, remaining tasks are cancelled and their cleanup

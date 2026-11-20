@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -23,6 +24,11 @@ class PreparedConverter:
     def prepare(self, field: Field[Any]) -> Callable[..., Any]:
         """Bind one declaration for reuse without retaining an input value or instance."""
         return self.factory(field)
+
+    @staticmethod
+    def bind(converter: Callable[..., Any], field: Field[Any]) -> Callable[..., Any]:
+        """Prepare a registered converter or bind its field argument."""
+        return converter.prepare(field) if isinstance(converter, PreparedConverter) else partial(converter, field)
 
     def __call__(self, field: Field[Any], *arguments: Any) -> Any:
         """Apply the prepared implementation through TypeMapping's direct-call contract."""

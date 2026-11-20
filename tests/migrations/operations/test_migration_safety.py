@@ -630,14 +630,14 @@ async def test_an_alter_field_of_the_index_only_creates_or_drops_the_index(db_si
             state, schema_editor=editor
         )
         collecting_editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=True)
-        await make_migration(indexing).apply(state.clone(), schema_editor=collecting_editor)
+        await make_migration(indexing).apply(state, schema_editor=collecting_editor)
         statements = "\n".join(collecting_editor.collected_sql)
         assert "CREATE INDEX" in statements
         assert "CREATE TABLE" not in statements
         state = await make_migration(indexing).apply(state, schema_editor=editor)
         unindexing = [AlterField("Book", "title", CharField(max_length=50, null=True))]
         collecting_editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=True)
-        await make_migration(unindexing).apply(state.clone(), schema_editor=collecting_editor)
+        await make_migration(unindexing).apply(state, schema_editor=collecting_editor)
         statements = "\n".join(collecting_editor.collected_sql)
         assert "DROP INDEX" in statements
         assert "CREATE TABLE" not in statements

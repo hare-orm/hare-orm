@@ -53,7 +53,7 @@ class NodeStructure:
         return tuple((name, getattr(node, name)) for name in names if hasattr(node, name))
 
     @staticmethod
-    def get_key(root: Node, source_bindings: Mapping[Any, Any] | None = None) -> tuple[Any, ...]:
+    def get_key(root: Any, source_bindings: Mapping[Any, Any] | None = None) -> tuple[Any, ...]:
         """Describe a value without rendering SQL, ignoring presentation aliases.
 
         The key is flat, so hashing a deeply nested expression does not recurse.
@@ -82,11 +82,10 @@ class NodeStructure:
                     result.append((StructurePartType.OPAQUE, type(value), StructureIdentity(identity)))
                     continue
                 result.append((StructurePartType.NODE, type(value)))
-                children = [(item, name in value.literal_attributes, False) for name, item in attributes]
                 # Attribute names distinguish optional settings that happen to share a value.
                 entries: list[tuple[Any, bool, bool]] = []
-                for (name, _), child in zip(attributes, children, strict=True):
-                    entries.extend(((name, True, False), child))
+                for name, item in attributes:
+                    entries.extend(((name, True, False), (item, name in value.literal_attributes, False)))
             elif isinstance(value, (tuple, list)):
                 result.append((StructurePartType.SEQUENCE, type(value), len(value)))
                 entries = [(item, literal, False) for item in value]

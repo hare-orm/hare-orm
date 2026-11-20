@@ -11,23 +11,16 @@ use crate::pg::value::Value;
 
 pub struct FirstRow {
     pub columns: Arc<ResultColumns>,
-    /// The row's decoded values - None for a result without rows.
-    pub values: Option<Vec<Value>>,
+    pub values: Vec<Value>,
 }
 
 impl<'py> IntoPyObject<'py> for FirstRow {
-    type Target = PyAny;
-    type Output = Bound<'py, PyAny>;
+    type Target = PgRow;
+    type Output = Bound<'py, PgRow>;
     type Error = PyErr;
 
-    /// The row's `PgRow`, None without a row.
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
-        match self.values {
-            Some(values) => {
-                let row = PgRow::from_values(py, self.columns.get_row_names(py).clone(), &values)?;
-                Ok(Bound::new(py, row)?.into_any())
-            }
-            None => Ok(py.None().into_bound(py)),
-        }
+        let row = PgRow::from_values(py, self.columns.get_row_names(py).clone(), &self.values)?;
+        Bound::new(py, row)
     }
 }

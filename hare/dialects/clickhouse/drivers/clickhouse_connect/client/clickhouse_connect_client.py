@@ -71,9 +71,7 @@ class ClickhouseConnectClient(ClickhouseClient):
     #: (host, port, database, table, columns) -> the library's type of each column, as the server named
     #: it before the first insert - the library asks the server before every insert. Emptied by every
     #: change of a schema made through any connection.
-    inserted_column_types: ClassVar[Cache[list[Any]]] = Cache(
-        CLICKHOUSE_CONNECT_INSERTED_COLUMN_TYPES_CACHE_SIZE, holds_sql=False
-    )
+    inserted_column_types: ClassVar[Cache[list[Any]]] = Cache(CLICKHOUSE_CONNECT_INSERTED_COLUMN_TYPES_CACHE_SIZE)
 
     def get_hare_error(self, error: Exception, sql: Any, parameters: Any) -> Exception:
         # The library reports a server error it couldn't read out of the stream as a failed

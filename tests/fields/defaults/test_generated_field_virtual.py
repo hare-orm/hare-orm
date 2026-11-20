@@ -7,6 +7,7 @@ import pytest
 
 from hare.contrib.test import requires_features
 from hare.core.connections.connections import Connections
+from hare.core.hare_context import HareContext
 from hare.exceptions import UnSupportedError
 from hare.fields.generated_field import GeneratedField
 from tests.fields.defaults.models_generated_field_virtual import VirtualWidget
@@ -25,7 +26,7 @@ async def test_generated_field_virtual(db_generated_field_virtual):
 async def test_an_older_server_refuses_a_virtual_column(db_generated_field_virtual, monkeypatch):
     client = Connections.get("models")
     monkeypatch.setattr(client, "features", client.features.replace(supports_virtual_generated_columns=False))
-    field = VirtualWidget._meta.fields_map["area"]
+    field = HareContext.require_current().apps.get_binding(VirtualWidget).fields_map["area"]
     assert isinstance(field, GeneratedField)
     with pytest.raises(UnSupportedError, match="only supports STORED"):
         client.dialect.schema_editor_class(client).column_definitions.get_generated_column_sql(field)

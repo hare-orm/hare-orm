@@ -33,7 +33,7 @@ class NativeInterpreters:
         argparse.ArgumentParser(description="Find supported native-build interpreters on PATH.").parse_args()
         # Shell command substitution must not retain a Windows carriage return in the last path.
         sys.stdout.reconfigure(newline="\n")
-        print(" ".join(path.as_posix() for path in cls.get_paths()))
+        sys.stdout.writelines(f"{path.as_posix()}\n" for path in cls.get_paths())
 
 
 if __name__ == "__main__":

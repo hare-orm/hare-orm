@@ -23,10 +23,8 @@ from hare.dialects.base.results.statement_result import StatementResult
 from hare.dialects.postgresql.client.pool_timeouts import PoolTimeouts
 from hare.dialects.postgresql.client.postgresql_client import PostgresqlClient
 from hare.dialects.postgresql.client.postgresql_connect_errors import PostgresqlConnectErrors
-from hare.dialects.postgresql.client.transaction_pooler import TransactionPooler
 from hare.dialects.postgresql.constants import POSTGRES_SERVER_VERSION_NUMBER_SQL
 from hare.dialects.postgresql.drivers.asyncpg.asyncpg_date_codec import AsyncpgDateCodec
-from hare.dialects.postgresql.drivers.asyncpg.asyncpg_extension_type_codecs import AsyncpgExtensionTypeCodecs
 from hare.dialects.postgresql.drivers.asyncpg.asyncpg_interval_codec import AsyncpgIntervalCodec
 from hare.dialects.postgresql.drivers.asyncpg.asyncpg_timestamp_codec import AsyncpgTimestampCodec
 from hare.dialects.postgresql.drivers.asyncpg.asyncpg_timestamptz_codec import AsyncpgTimestamptzCodec
@@ -183,6 +181,11 @@ class AsyncpgClient(PostgresqlClient):
         """
 
     async def create_pool(self, **kwargs: Any) -> asyncpg.Pool:
+        if "init_size" in ASYNCPG_CONNECTION_PARAMETERS and kwargs.get("init_size") is None:
+            # asyncpg 0.32 separates the initial size from the maintained floor.
+            # Hare's min_size sets the initial size and lets idle connections expire.
+            kwargs["init_size"] = kwargs["min_size"]
+            kwargs["min_size"] = 0
         configured_init = kwargs.pop("init", None)
         configured_connect = kwargs.pop("connect", None) or asyncpg.connect
         pool_failed = asyncio.Event()
@@ -289,7 +292,7 @@ class AsyncpgClient(PostgresqlClient):
         await AsyncpgTimestamptzCodec.install(connection)
         await AsyncpgDateCodec.install(connection)
         await AsyncpgIntervalCodec.install(connection)
-        installed_oids = await AsyncpgExtensionTypeCodecs.install(connection)
+        installed_oids = await AsyncpgSchemaCodecs.install(connection)
         if configured_init is not None:
             await configured_init(connection)
         if pool_failed.is_set():
@@ -305,29 +308,26 @@ class AsyncpgClient(PostgresqlClient):
         ``callback`` for every NOTIFY. The caller owns the returned connection and closes it. For a
         subscription that reconnects use ``hare.contrib.notify.NotificationListener``.
         """
-        self.raise_if_channel_unusable(channel)
-        if self.transaction_pooling:
-            # A LISTEN holds its session - on the server itself, past the transaction pooler.
-            return await TransactionPooler.get_direct_client(self).listen(channel, callback)
-        self.raise_if_root_certificate_unusable(self.ssl_root_cert)
+        client = self._get_listen_client(channel)
+        client.raise_if_root_certificate_unusable(client.ssl_root_cert)
         connect_parameters = {
-            key: value for key, value in self.extra.items() if key not in ASYNCPG_POOL_ONLY_PARAMETERS
+            key: value for key, value in client.extra.items() if key not in ASYNCPG_POOL_ONLY_PARAMETERS
         }
         try:
             connection = await asyncpg.connect(
-                self.root_certificate_dsn,
-                host=self.host,
-                port=self.port,
-                user=self.user,
-                password=self._get_password(),
-                database=self.database,
-                connection_class=self.connection_class,
-                loop=self.loop,
-                server_settings=self.server_settings,
+                client.root_certificate_dsn,
+                host=client.host,
+                port=client.port,
+                user=client.user,
+                password=client._get_password(),
+                database=client.database,
+                connection_class=client.connection_class,
+                loop=client.loop,
+                server_settings=client.server_settings,
                 **connect_parameters,
             )
         except Exception as error:
-            connect_error = PostgresqlConnectErrors.get_error(self, error, with_db=True)
+            connect_error = PostgresqlConnectErrors.get_error(client, error, with_db=True)
             if connect_error is None:
                 raise
             raise connect_error from None
@@ -349,9 +349,14 @@ class AsyncpgClient(PostgresqlClient):
         statistics.acquiring += 1
         # The wait is measured only while the pool metrics are enabled - else no call is added.
         start_time = time.perf_counter() if PoolMetrics.enabled else 0.0
+        deadline = asyncio.timeout(self.pool_acquire_timeout)
         try:
-            connection = await pool.acquire(timeout=self.pool_acquire_timeout)
-        except TimeoutError:
+            async with deadline:
+                connection = await pool.acquire()
+        except TimeoutError as error:
+            if not deadline.expired():
+                ConnectFailureReports.record(self, error)
+                raise
             raise PoolTimeouts.get_error(self, self.pool_acquire_timeout or 0.0) from None
         except self.RETRYABLE_CONNECT_EXCEPTIONS as error:
             # The pool grew and opening its new connection failed - unless the pool was closed meanwhile,
@@ -381,7 +386,7 @@ class AsyncpgClient(PostgresqlClient):
             idle_size,
             # asyncpg counts no waiters - the tasks taking a connection beyond the idle ones wait.
             max(0, self.pool_statistics.acquiring - idle_size),
-            pool.get_min_size(),
+            self.pool_minsize,
             pool.get_max_size(),
         )
 
@@ -579,15 +584,18 @@ class AsyncpgClient(PostgresqlClient):
             transaction = connection.transaction()
             await transaction.start()
             try:
-                await AsyncpgClient.run_ending_connection_on_cancel(
-                    connection,
-                    connection.executemany(query, [AsyncpgParameters.get_bound_values(row) for row in values]),
-                )
+                await self._execute_many_on_connection(connection, query, values)
             except Exception:
                 await transaction.rollback()
                 raise
             else:
                 await transaction.commit()
+
+    @staticmethod
+    async def _execute_many_on_connection(connection: Any, query: str, values: list[Any]) -> None:
+        await AsyncpgClient.run_ending_connection_on_cancel(
+            connection, connection.executemany(query, [AsyncpgParameters.get_bound_values(row) for row in values])
+        )
 
     @staticmethod
     async def run_ending_connection_on_cancel(connection: Any, call: Awaitable[Any]) -> Any:
@@ -679,8 +687,8 @@ class AsyncpgClient(PostgresqlClient):
             )
 
     #: Public-driver codec state, bounded and retained only by the client owning its pools.
-    schema_connections: ClassVar[Cache[tuple[int, frozenset[int]]]] = Cache(holds_sql=False)
-    schema_retirements: ClassVar[Cache[int]] = Cache(holds_sql=False)
+    schema_connections: ClassVar[Cache[tuple[int, frozenset[int]]]] = Cache()
+    schema_retirements: ClassVar[Cache[int]] = Cache()
 
     def forget_schema_connections(self, pool: asyncpg.Pool) -> None:
         """Drop a retired pool's snapshots without retaining pools in cache keys.

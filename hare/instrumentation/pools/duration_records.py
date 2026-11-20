@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import threading
 
-from hare.instrumentation.constants import DURATION_RECORDS_CAPACITY
-
 
 class DurationRecords:
     """The latest durations of one type a pool measured - its waits for a connection, or its
@@ -18,7 +16,7 @@ class DurationRecords:
 
     __slots__ = ("capacity", "durations", "count", "lock")
 
-    def __init__(self, capacity: int = DURATION_RECORDS_CAPACITY) -> None:
+    def __init__(self, capacity: int) -> None:
         self.capacity = max(1, capacity)
         self.durations = [0.0] * self.capacity
         #: How many durations were ever added - the cursor of a reader that has them all.

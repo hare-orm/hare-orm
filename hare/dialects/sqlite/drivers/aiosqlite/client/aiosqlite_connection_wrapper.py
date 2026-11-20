@@ -40,8 +40,7 @@ class AiosqliteConnectionWrapper(ConnectionWrapper[aiosqlite.Connection]):
         self.connection._conn.interrupt()
         try:
             await TransactionEnding.run_shielded_from_cancellation(
-                AiosqliteClient._run_on_worker_thread(self.connection, AiosqliteConnectionWrapper._do_nothing),
-                on_landed=lambda: None,
+                AiosqliteClient._run_on_worker_thread(self.connection, AiosqliteConnectionWrapper._do_nothing)
             )
         except ValueError:
             # aiosqlite's "no active connection" - closed meanwhile, nothing left running.
@@ -59,4 +58,4 @@ class AiosqliteConnectionWrapper(ConnectionWrapper[aiosqlite.Connection]):
             exception: the exception the statement block raised, if any.
         """
         if isinstance(exception, asyncio.CancelledError) and self.connection.in_transaction:
-            await TransactionEnding.run_shielded_from_cancellation(self.connection.rollback(), on_landed=lambda: None)
+            await TransactionEnding.run_shielded_from_cancellation(self.connection.rollback())

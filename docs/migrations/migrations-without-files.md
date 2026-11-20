@@ -43,7 +43,7 @@ class State:
     ) -> OperationPlan: ...
 
 class Operation(ABC):
-    def get_effect(self, app_label: str, state: State, schema_editor: BaseSchemaEditor) -> OperationEffect: ...
+    def get_effect(self, app_label: str, old_state: State, new_state: State, schema_editor: BaseSchemaEditor) -> OperationEffect: ...
 
 class MigrationRunner:
     def __init__(
@@ -90,6 +90,9 @@ class MigrationRecorder:
   `hare.migrations.exceptions.MigrationLoadError`.
 - `State.from_models()` is the schema state of model classes as they are declared. A model's app is its
   `Meta.app`, else `app_label`; a model with neither raises `ConfigurationError`.
+  Class references between included models are captured as historical labels, including models
+  assigned to `app_label`; later changes to their fields read the historical target rather than
+  the original live class. A missing managed target is rejected for both class and string references.
   Accessing `state.apps` publishes the rendered graph only after binding succeeds. If an added or
   changed model fails to bind, the previous rendered classes and pending change marks are retained;
   correcting the declaration allows the next access to retry the same changes.
@@ -99,14 +102,28 @@ class MigrationRecorder:
   are recognized automatically. Other candidates need `rename_questions`
   (`RenameQuestions({"content.Book.title": "name"})` — see [Renames](migrations.md#renames)); an
   unconfirmed candidate is removed and added.
+  An omitted relation `to_field` means the target's historical primary key. It is equivalent
+  to explicitly naming that key; changing from a different unique key to the omitted primary key
+  produces `AlterField`, just like an explicitly named target change.
+  The states' `default_connections` identify each app's database connection. A confirmed app move
+  keeps its table only when the connection alias, schema and table name match. Different aliases
+  require ordinary table operations; these do not copy rows between databases automatically.
+  An existing table on another alias does not require removal before creating an identically
+  named table: replacement dependencies apply only within the same alias and schema.
+  Native schemas, extensions and enum types are tracked separately for each connection alias.
+  Applications on the same alias share their prerequisites: generated migrations depend on the
+  migration that created or last changed the resource, including providers from existing history.
+  Different aliases require independent prerequisites even when their SQL names match. In `State`,
+  `schemas` and `extensions` contain `(alias, name)` pairs; `enum_types` uses
+  `(alias, schema, name)` keys. The alias is `None` in an offline state without connection mappings.
 - `Operation.get_effect()` returns an
   `OperationEffect(operation, reversible, rewrites_table, loses_data, reason)`: whether the operation can
   be unapplied, whether the database rewrites the whole table (the time grows with its rows), whether
   values or rows can be lost, and why. `RemoveField` and `DeleteModel` lose data. For `AlterField`,
   `loses_data` conservatively flags every declared column-type change, including widening; it does not
-  prove that existing values will be lost. Pass a configured `BaseSchemaEditor`; the method prepares
-  the same plan as execution without database IO or runtime defaults. Rewrite effects include
-  dependent tables and stored-value conversions —
+  prove that existing values will be lost. Pass the two states and a configured `BaseSchemaEditor`.
+  The method prepares the same plan as execution without database IO or runtime defaults. Rewrite
+  effects include dependent tables and stored-value conversions. Also
   see [`alter_field_rewrites_table`](zero-downtime.md#alter-field-rewrites-table).
 - `MigrationRunner` applies one migration on `connection` exactly as `hare migrate` does: an atomic
   migration in one transaction together with its journal record, constraint checks before the commit.
@@ -114,6 +131,14 @@ class MigrationRecorder:
   The runner retains the supplied client's connection handler, capturing the current handler only
   for a standalone client without one. An active transaction is reused only when it belongs to that
   exact client; an independent client or schema client is not replaced by another with the same alias.
+  An explicitly supplied tenant-schema client remains authoritative outside a tenant scope or
+  under a different ambient scope. Historical query-class metadata uses the captured base client;
+  actual table operations still use the selected editor and retain transaction scope checks.
+  On SQLite, a borrowed transaction retains its actual foreign-key setting and deferred checks;
+  the caller completes those checks when committing. Plans that replace tables require foreign
+  keys to have been disabled before that transaction began and otherwise fail before any plan
+  step runs. Outside a caller's transaction, the runner disables enforcement, checks the resulting
+  references before its own commit, and restores the actual previous setting.
     - `ensure_journal()` creates the recorder's table when it doesn't exist.
     - `apply()` returns the state after the migration; `unapply()` takes the state before it was applied
       and returns a new copy of it. Both leave the supplied state unchanged, including on failure.

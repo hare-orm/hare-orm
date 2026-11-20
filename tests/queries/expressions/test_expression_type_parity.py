@@ -14,16 +14,11 @@ from hare.query.expressions import Case, F, OuterReference, Subquery, Value, Whe
 from hare.query.functions import Avg, Coalesce, Concat, Count, Length, Max, Round, Sum
 from hare.query.functions.window import Sum as WindowSum
 from tests.shared_models.testmodels_postgres import ExpressionTypeChild, ExpressionTypeParity, ExpressionTypeRow
+from tests.utils.expression_type_parity import annotated_values, assert_same_values
 from tests.utils.integer_statistic import IntegerStatistic
 
 BIG_VALUE = 2**60 + 3
 AWARE_DATETIME = datetime(2020, 1, 2, 3, 4, 5, tzinfo=timezone(timedelta(hours=3)))
-
-
-def assert_same_values(actual: list, expected: list) -> None:
-    assert actual == expected
-    assert [type(value) for value in actual] == [type(value) for value in expected]
-    assert [str(value) for value in actual] == [str(value) for value in expected]
 
 
 @pytest_asyncio.fixture
@@ -34,10 +29,6 @@ async def parity_rows(db):
     await ExpressionTypeParity.objects.create(
         num=2, big=5, dec=Decimal("0.40"), flag=False, grp="b", ts=datetime(2021, 1, 2, tzinfo=timezone.utc)
     )
-
-
-async def annotated_values(expression) -> list:
-    return await ExpressionTypeParity.objects.all().annotate(c=expression).order_by("num").values_list("c", flat=True)
 
 
 # -- F4: integer % stays integer ---------------------------------------------------
@@ -126,12 +117,16 @@ async def test_float_literal_still_gives_float(parity_rows):
 @pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_arithmetic_filter_values_order_aggregate_update(parity_rows):
-    queryset = ExpressionTypeParity.objects.all().annotate(c=F("dec") + 1)
-    assert await queryset.filter(c__gt=Decimal("2")).values_list("num", flat=True) == [1]
-    assert await queryset.order_by("c").values("c") == [{"c": Decimal("1.40")}, {"c": Decimal("2.10")}]
-    assert await ExpressionTypeParity.objects.all().aggregate(top=Max(F("dec") + 1)) == {"top": Decimal("2.10")}
-    await ExpressionTypeParity.objects.filter(num=2).update(dec=F("dec") + Decimal("0.05"))
-    assert await ExpressionTypeParity.objects.get(num=2).values_list("dec", flat=True) == Decimal("0.45")
+    expression = (F("dec") + 1) * 2
+    queryset = ExpressionTypeParity.objects.all().annotate(c=expression)
+    assert await queryset.filter(c__gt=Decimal("4")).values_list("num", flat=True) == [1]
+    assert_same_values(await queryset.order_by("c").values_list("c", flat=True), [Decimal("2.80"), Decimal("4.20")])
+    assert await ExpressionTypeParity.objects.all().aggregate(top=Max(expression)) == {"top": Decimal("4.20")}
+    await ExpressionTypeParity.objects.filter(num=2).update(dec=expression)
+    assert_same_values(
+        await ExpressionTypeParity.objects.order_by("num").values_list("dec", flat=True),
+        [Decimal("1.10"), Decimal("2.80")],
+    )
 
 
 # -- F6: Case with bool/Decimal/date literals --------------------------------------

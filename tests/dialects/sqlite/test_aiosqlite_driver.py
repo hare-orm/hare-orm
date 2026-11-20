@@ -83,11 +83,14 @@ async def test_failed_setup_releases_connection_and_preserves_errors(monkeypatch
     client = AiosqliteClient(file_path=":memory:", connection_alias="default")
     error = setup_error()
     release_error = RuntimeError("release failed") if release_fails else None
-    connection = SimpleNamespace(close=AsyncMock(side_effect=release_error))
+    connection = SimpleNamespace(
+        close=AsyncMock(side_effect=release_error), _thread=SimpleNamespace(join=lambda: None)
+    )
     opening = asyncio.get_running_loop().create_future()
     opening._thread = SimpleNamespace(daemon=False)
     opening.set_result(connection)
     monkeypatch.setattr("aiosqlite.connect", lambda *args, **kwargs: opening)
+    monkeypatch.setattr(client, "_get_native_storage_filename", AsyncMock(return_value=""))
     monkeypatch.setattr(client, "_set_up_connection", AsyncMock(side_effect=error))
 
     if release_fails:
@@ -135,3 +138,39 @@ async def test_a_client_closed_and_dropped_opens_no_connection_again(tmp_path):
     with pytest.raises(DBConnectionError, match="was closed and dropped"):
         await client.execute_dicts("SELECT 1 AS n")
     assert client._connection is None
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rollback", [False, True])
+async def test_explicit_client_handlers_keep_transaction_bindings_local(rollback):
+    from hare.core.connections.connection_handler import ConnectionHandler
+    from hare.core.hare_context import HareContext
+
+    ambient = HareContext()
+    token = HareContext.current_context.set(ambient)
+    client = AiosqliteClient(file_path=":memory:", connection_alias="standalone")
+    client.connection_handler = ConnectionHandler()
+    client.connection_handler.root_clients["standalone"] = client
+    await client.create_connection(with_db=True)
+    try:
+        await client.execute_script("CREATE TABLE entries (id INTEGER)")
+        try:
+            async with client._in_transaction() as transaction:
+                assert client.connection_handler is not ambient.connections
+                assert client.connection_handler.get("standalone") is transaction
+                await transaction.execute("INSERT INTO entries VALUES (1)")
+                async with transaction._in_transaction() as nested:
+                    await nested.execute("INSERT INTO entries VALUES (2)")
+                if rollback:
+                    raise ValueError("roll back both writes")
+        except ValueError:
+            if not rollback:
+                raise
+        assert client.connection_handler.get("standalone") is client
+        assert ambient.connections._get_storage() == {}
+        rows = await client.execute_dicts("SELECT id FROM entries ORDER BY id")
+        assert rows == ([] if rollback else [{"id": 1}, {"id": 2}])
+    finally:
+        await client.close()
+        HareContext.current_context.reset(token)

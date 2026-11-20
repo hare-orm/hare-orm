@@ -7,7 +7,7 @@ from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
 from hare.exceptions import UnSupportedError
 
 if TYPE_CHECKING:
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class Schemas(SchemaEditorPart):
@@ -44,12 +44,12 @@ class Schemas(SchemaEditorPart):
         cascade = " CASCADE" if with_objects else ""
         await self.editor.run_sql(f"DROP SCHEMA IF EXISTS {self.editor.quote(schema_name)}{cascade};")
 
-    def raise_if_model_unmovable(self, model: type[Model]) -> None:
+    def raise_if_model_unmovable(self, binding: ModelBinding) -> None:
         """Refuses moving a model's table to another schema when something of the model can't follow
         it - before any statement of the move runs. Nothing by default.
 
         Args:
-            model: The model, rendered in the schema it moves from.
+            binding: The binding of the model, rendered in the schema it moves from.
         """
 
     def get_table_schema_move_plan(

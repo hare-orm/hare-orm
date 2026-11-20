@@ -8,6 +8,7 @@ from hare.contrib.test.databases.model_truncation import truncate_all_models
 from hare.contrib.test.databases.resource_cleanup import ResourceCleanup
 from hare.contrib.test.exceptions import RollbackIsolationEnd
 from hare.contrib.test.messages import ROLLBACK_ISOLATION_ACTIVE
+from hare.core.enums import ApplicationScope
 from hare.core.hare_context import HareContext
 from hare.core.routing import Routing
 from hare.dialects.base.client.transaction_lifecycle.transaction_callbacks import TransactionCallbacks
@@ -51,7 +52,7 @@ class RollbackIsolation:
     def __init__(self, context: HareContext | None = None) -> None:
         self.context = context
         self.isolating_clients: list[TransactionClient] = []
-        self.context_token: Token[HareContext | None] | None = None
+        self.context_token: Token[HareContext | ApplicationScope | None] | None = None
         self.cleanup = ResourceCleanup()
 
     async def __aenter__(self) -> HareContext:

@@ -5,6 +5,7 @@ import os
 import tempfile
 import uuid
 from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -77,24 +78,19 @@ class ArtifactCache:
             if not files:
                 raise ValueError("An artifact build produced no files")
             self.write_json(stage / ARTIFACT_MANIFEST_NAME, {"spec": spec.description, "files": files})
-            target = self.directory / f"{spec.key[:16]}-{uuid.uuid4().hex}"
+            key = spec.key
+            target = self.directory / f"{key[:16]}-{uuid.uuid4().hex}"
             stage.rename(target)
-            self.write_json(self.directory / f"{spec.key}.json", {"directory": target.name})
+            self.write_json(self.directory / f"{key}.json", {"directory": target.name})
         return target
 
     @staticmethod
     def write_json(target: Path, value: Any) -> None:
         """Publish one manifest or artifact selection through an atomic file replacement."""
         target.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=target.parent, delete=False) as output:
-            temporary = Path(output.name)
-            try:
+        with ExitStack() as cleanup:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=target.parent, delete=False) as output:
+                temporary = Path(output.name)
+                cleanup.callback(temporary.unlink, missing_ok=True)
                 json.dump(value, output, sort_keys=True, indent=2)
-            except BaseException:
-                output.close()
-                temporary.unlink(missing_ok=True)
-                raise
-        try:
             os.replace(temporary, target)
-        finally:
-            temporary.unlink(missing_ok=True)

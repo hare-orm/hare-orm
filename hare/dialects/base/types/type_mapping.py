@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from hare.dialects.base.client.database_client import DatabaseClient
     from hare.fields.field import Field
     from hare.sql.terms.term import Term
 
@@ -12,6 +13,9 @@ if TYPE_CHECKING:
     DbConverter = Callable[..., Any]
     #: ``(field, value) -> value``; the field parameter is typed by each converter.
     PythonConverter = Callable[..., Any]
+
+    ComparisonKeyReader = Callable[[Any], Any]
+    ComparisonKeyFactory = Callable[[DatabaseClient, Iterable[Any]], Awaitable[ComparisonKeyReader]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,13 +33,17 @@ class TypeMapping:
             ordered or copied.
         to_db: A ``(field, value, instance) -> value`` replacing the field's ``to_db_value()``.
         to_lookup: A ``(field, value, instance) -> value`` replacing the field's
-            ``to_lookup_value()``.
+            ``to_lookup_value()``. Without it, a field using the default lookup hook
+            compares through its storage writer, including ``to_db``; an explicit
+            field lookup hook retains its conversion.
         to_python: A ``(field, value) -> value`` replacing the field's ``from_db_value()``.
         json_term: A ``(field, term) -> term`` giving the text a column's value is written into a
             JSON object as - for a value stored in a form JSON can't hold (a UUID in 16 bytes).
         ordering_key: A ``(field, term) -> term | None`` giving what a column is ordered by - for a
             value hare stores in a form of its own (an array of enums, ordered by their labels); None
             orders by the column itself.
+        comparison_key: Prepare a key reader for values whose database equality differs from Python equality.
+        comparison_key_requires_database: Whether preparing the comparison reader may execute SQL.
         holds_null: Whether the column type holds NULL - False for a type the database has no NULL
             of (an array, a map or a tuple of a columnar database), whose aggregates give its empty
             value over no rows; None leaves it to the mapping of a base class.
@@ -54,6 +62,8 @@ class TypeMapping:
     to_python: PythonConverter | None = None
     json_term: Callable[[Field[Any], Term], Term] | None = None
     ordering_key: Callable[[Field[Any], Term], Term | None] | None = None
+    comparison_key: ComparisonKeyFactory | None = None
+    comparison_key_requires_database: bool = False
     holds_null: bool | None = None
     extension: str | None = None
     inserted_by_select: bool | Callable[[Field[Any]], bool] = False

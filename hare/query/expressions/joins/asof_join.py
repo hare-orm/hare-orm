@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.classes.value_descriptions import ValueDescriptions
@@ -130,7 +129,6 @@ class AsofJoin(NamedJoin):
             )
         equalities = {}
         inequalities = {}
-        fields_map = self.model._meta.fields_map
         for key, value in on.filters.items():
             if not isinstance(value, OuterReference):
                 raise QueryError(
@@ -138,9 +136,9 @@ class AsofJoin(NamedJoin):
                     f"got {ValueDescriptions.get_shown_value(value)}"
                 )
             field_name, _separator, lookup = key.rpartition("__")
-            if lookup in self.INEQUALITY_LOOKUPS and field_name in fields_map:
+            if lookup in self.INEQUALITY_LOOKUPS and field_name:
                 inequalities[key] = value
-            elif key in fields_map:
+            elif "__" not in key:
                 equalities[key] = value
             else:
                 raise QueryError(
@@ -163,11 +161,16 @@ class AsofJoin(NamedJoin):
                 a composite primary key.
             UnSupportedError: The database joins nothing as of (``Features.supports_asof_join``).
         """
-        return self.get_field_result(path or self.get_primary_key_name(self.model), expression_context)
+        return self.get_field_result(
+            path or self.get_primary_key_name(expression_context.binding.graph.get_binding(self.model)),
+            expression_context,
+        )
 
     def get_joins_result(self, expression_context: ExpressionContext) -> ExpressionResult:
         # The first column of the primary key, a JOIN of any key.
-        return self.get_field_result(self.model._meta.primary_key_attribute_names[0], expression_context)
+        return self.get_field_result(
+            expression_context.binding.graph.get_binding(self.model).primary_key_attribute_names[0], expression_context
+        )
 
     def get_field_result(self, field_path: str, expression_context: ExpressionContext) -> ExpressionResult:
         """What a field of the joined row reads.
@@ -193,19 +196,12 @@ class AsofJoin(NamedJoin):
                 "have (Features.supports_asof_join)"
             )
         joins = self.get_joins(expression_context)
-        bound_path = BoundLookupPath.bind(
-            replace(
-                expression_context,
-                model=self.model,
-                table=joins[-1][0],
-                annotations={},
-                select_related_extra_conditions=None,
-                select_related_path_prefix="",
-            ),
+        return BoundLookupPath.get_joined_result(
+            expression_context,
+            expression_context.binding.graph.get_binding(self.model),
+            joins[-1][0],
+            joins,
             field_path,
-        )
-        return ExpressionResult(
-            term=bound_path.term, joins=joins + list(bound_path.joins), output_field=bound_path.field
         )
 
     def get_joins(self, expression_context: ExpressionContext) -> list[TableCriterionTuple]:
@@ -218,9 +214,16 @@ class AsofJoin(NamedJoin):
             The JOINs.
         """
         name = self.name
+        binding = expression_context.binding.graph.get_binding(self.model)
+        condition = self.get_join_condition()
+        for key in condition.filters:
+            field_name, _, lookup = key.rpartition("__")
+            field_name = field_name if lookup in self.INEQUALITY_LOOKUPS else key
+            if field_name not in binding.fields_map:
+                raise QueryError(f"AsofJoin(on=...) reads {key!r}, which is not a field of {self.model.__name__}")
         subquery = self.get_source_subquery()
         source: Selectable = (
-            self.model._meta.basetable if subquery is None else subquery.get_result(expression_context).term  # type: ignore[assignment]
+            binding.basetable if subquery is None else subquery.get_result(expression_context).term  # type: ignore[assignment]
         )
         joined = AsofJoinSource(name, source)  # type: ignore[arg-type]
         # The condition's values are bound from the query holding the JOIN when a plan runs.
@@ -231,12 +234,13 @@ class AsofJoin(NamedJoin):
         try:
             modifier = self.get_join_condition().get_result(
                 ExpressionContext(
-                    model=self.model,
+                    binding=binding,
                     table=joined,  # type: ignore[arg-type]
                     annotations={},
                     value_wrapper_references=value_wrapper_references,
                     dialect=expression_context.dialect,
                     connection=expression_context.connection,
+                    application_context=expression_context.application_context,
                 )
             )
         finally:
@@ -259,10 +263,11 @@ class AsofJoin(NamedJoin):
     ) -> QueryModifier:
         """The JOIN, then the filter on the joined row."""
         joins = self.get_joins(expression_context)
-        filter_key = self.get_filter_key(path, self.model)
+        binding = expression_context.binding.graph.get_binding(self.model)
+        filter_key = self.get_filter_key(path, binding)
         return self.get_joined_row_filter(
             expression_context,
-            self.model,
+            binding,
             joins[-1][0],
             joins,
             filter_key,
@@ -270,9 +275,6 @@ class AsofJoin(NamedJoin):
             filter_call_generation,
             value_origin,
         )
-
-    def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
-        return self.get_path_result("", expression_context)
 
     def is_multi_valued(self, model: Any) -> bool:
         """An as-of join joins at most one row to each row - it repeats none."""

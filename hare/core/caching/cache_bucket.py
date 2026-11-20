@@ -16,7 +16,6 @@ class CacheBucket(MutableMapping[Any, TValue], Generic[TValue]):
 
     All writes obey max_size, including update() and setdefault(). Clearing preserves the
     bucket identity, so a query and its clones cannot retain a detached stale dictionary.
-    Generation belongs to the bucket and changes whenever its contents are invalidated.
     Entries are scoped to the execution's registration snapshot. One LRU bound covers
     all snapshots, including an older execution continuing after a publication.
     Writes, evictions and invalidations hold the lock; a read takes none - hare runs only
@@ -26,7 +25,6 @@ class CacheBucket(MutableMapping[Any, TValue], Generic[TValue]):
 
     def __init__(self, max_size: int) -> None:
         self.max_size = max_size
-        self.generation = 0
         self.entries: OrderedDict[Any, TValue] = OrderedDict()
         self.lock = RLock()
 
@@ -99,4 +97,3 @@ class CacheBucket(MutableMapping[Any, TValue], Generic[TValue]):
     def clear(self) -> None:
         with self.lock:
             self.entries.clear()
-            self.generation += 1

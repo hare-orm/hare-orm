@@ -6,8 +6,10 @@ from enum import StrEnum
 class AnnotationTypeRule(StrEnum):
     """How the type of an annotation follows from its expression."""
 
-    #: Always an ``int`` (``Count``, ``Length``).
+    #: Always an ``int`` (``Count``).
     INT = "int"
+    #: An ``int`` when the argument is present, None for a NULL argument (``Length``).
+    NULL_PROPAGATING_INT = "null_propagating_int"
     #: Always a ``bool`` (``Exists``).
     BOOL = "bool"
     #: The type of the field path the expression reads (``F("price")``).

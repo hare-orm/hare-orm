@@ -30,6 +30,17 @@ settings are passed through without requiring an exact `bool` type. A missing or
 raises `ConfigurationError`. Python credentials also accept bytes and `os.PathLike` paths, normalized
 to text with `os.fsdecode`.
 
+The opened database's native main filename determines deletion; attached databases are not deleted.
+That filename is retained after `close()`, so changing the working directory cannot redirect cleanup.
+An unopened ordinary `db_create()` only checks absence and does not claim a file created later by
+another caller. URI-like filenames follow the linked SQLite library's actual interpretation.
+Cancelling an opening waits for the submitted connection attempt and closes any acquired handle
+before propagating cancellation, including openings used to inspect storage.
+Closing likewise finishes the submitted release before propagating cancellation and clears the
+client's connection slot even if the driver reports an error after closing. A subsequent query
+can reopen the same file. Migration locks use that native filename, so symlink and URI spellings
+of the same file share a lock; connection-only databases create no lock file.
+
 `page_size` and `auto_vacuum` shape the database file, so SQLite takes them only before the file's header
 is written: hare sends them first, before `journal_mode=WAL`, and they take effect on a new file. An
 existing file keeps its own until `VACUUM`.

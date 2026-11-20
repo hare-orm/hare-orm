@@ -202,7 +202,6 @@ class ManyToManyTables:
             or index.nulls_not_distinct
             or index.without_overlaps
             or not index.is_valid
-            or index.unrepresentable_properties
             or any(order not in {Order.ASC, Order.ASC_NULLS_LAST} for order in index.key_orders)
         )
 

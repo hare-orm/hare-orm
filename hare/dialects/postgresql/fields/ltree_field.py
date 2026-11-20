@@ -71,6 +71,9 @@ class LtreeField(Field[str]):
                 )
         return LTREE_LABEL_SEPARATOR.join(labels)
 
+    def get_assign_normalized_types(self) -> frozenset[type]:
+        return self._get_unchanged_assign_types(LtreeField.to_python, self.field_type)
+
     def to_python(self, value: Any) -> str | None:
         if isinstance(value, (list, tuple)):
             return self.get_path_text(value)

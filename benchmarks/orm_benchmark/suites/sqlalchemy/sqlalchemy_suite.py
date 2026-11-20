@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 from typing import Any
 
 # At module level: SQLAlchemy reads the models' Mapped[...] annotations from the module's names.
@@ -34,7 +35,6 @@ class SqlAlchemySuite:
             target: The target.
             database: The run's ``PostgresqlDatabase`` or ``SqliteDatabase``.
         """
-        self.target = target
         self.database = database
         self.is_sqlite = target.database == "sqlite"
         self.autocommit = "autocommit" in target.key
@@ -211,18 +211,18 @@ class SqlAlchemySuite:
             self.run_insert_scenarios,
             self.run_read_scenarios,
             self.run_filter_scenarios,
-            self.run_relation_scenarios,
+            partial(self.run_relation_scenarios, transactional_factory=transactional_factory),
             self.run_aggregate_scenarios,
             self.run_update_scenarios,
             self.run_delete_scenarios,
-            self.run_transaction_scenarios,
+            partial(self.run_transaction_scenarios, transactional_factory=transactional_factory),
         ):
             await self.database.settle()
-            await run_group(session_factory, transactional_factory, rows, results)
+            await run_group(session_factory, rows, results)
         return results
 
     async def run_insert_scenarios(
-        self, session_factory: Any, transactional_factory: Any, rows: int, results: dict[str, Measurement | None]
+        self, session_factory: Any, rows: int, results: dict[str, Measurement | None]
     ) -> None:
         """The inserts - in bulk, of many rows and one by one."""
         from sqlalchemy import delete, insert, select
@@ -279,7 +279,7 @@ class SqlAlchemySuite:
         results["single_insert"] = await measure(single_insert, 3)
 
     async def run_read_scenarios(
-        self, session_factory: Any, transactional_factory: Any, rows: int, results: dict[str, Measurement | None]
+        self, session_factory: Any, rows: int, results: dict[str, Measurement | None]
     ) -> None:
         """The reads of one model's rows - by key, the first, a page."""
         from sqlalchemy import delete, select
@@ -332,7 +332,7 @@ class SqlAlchemySuite:
         results["top_ten"] = await measure(top_ten, 5)
 
     async def run_filter_scenarios(
-        self, session_factory: Any, transactional_factory: Any, rows: int, results: dict[str, Measurement | None]
+        self, session_factory: Any, rows: int, results: dict[str, Measurement | None]
     ) -> None:
         """The filtered reads of one model's rows."""
         from sqlalchemy import exists, or_, select
@@ -412,7 +412,7 @@ class SqlAlchemySuite:
         results["large_in_filter"] = await measure(large_in_filter, 5)
 
     async def run_relation_scenarios(
-        self, session_factory: Any, transactional_factory: Any, rows: int, results: dict[str, Measurement | None]
+        self, session_factory: Any, rows: int, results: dict[str, Measurement | None], *, transactional_factory: Any
     ) -> None:
         """The reads across relations."""
         from sqlalchemy import select
@@ -496,7 +496,7 @@ class SqlAlchemySuite:
         results["many_to_many_filter"] = await measure(many_to_many_filter, 5)
 
     async def run_aggregate_scenarios(
-        self, session_factory: Any, transactional_factory: Any, rows: int, results: dict[str, Measurement | None]
+        self, session_factory: Any, rows: int, results: dict[str, Measurement | None]
     ) -> None:
         """The annotations and the aggregates."""
         from sqlalchemy import case, exists, func, select
@@ -603,7 +603,7 @@ class SqlAlchemySuite:
         results["window_rank"] = await measure(window_rank, 5)
 
     async def run_update_scenarios(
-        self, session_factory: Any, transactional_factory: Any, rows: int, results: dict[str, Measurement | None]
+        self, session_factory: Any, rows: int, results: dict[str, Measurement | None]
     ) -> None:
         """The updates and the upserts."""
         from sqlalchemy import delete, select, update
@@ -703,7 +703,7 @@ class SqlAlchemySuite:
         results["upsert"] = await measure(upsert, 3)
 
     async def run_delete_scenarios(
-        self, session_factory: Any, transactional_factory: Any, rows: int, results: dict[str, Measurement | None]
+        self, session_factory: Any, rows: int, results: dict[str, Measurement | None]
     ) -> None:
         """get_or_create() and the deletes."""
         from sqlalchemy import delete, insert, select
@@ -752,7 +752,7 @@ class SqlAlchemySuite:
         results["delete_loop"] = await measure(delete_loop, 1)
 
     async def run_transaction_scenarios(
-        self, session_factory: Any, transactional_factory: Any, rows: int, results: dict[str, Measurement | None]
+        self, session_factory: Any, rows: int, results: dict[str, Measurement | None], *, transactional_factory: Any
     ) -> None:
         """The concurrent reads, the transactions and the JSON values."""
         from sqlalchemy import insert, select, update

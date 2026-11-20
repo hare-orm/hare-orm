@@ -34,10 +34,12 @@ from hare.migrations.operations.operation_rewrite import OperationRewrite
 from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state import State
 from hare.models import Model
+from hare.models.class_building.primary_key_declaration import PrimaryKeyDeclaration
 from hare.models.enums import ModelOption
 
 if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
+    from hare.models.model_binding import ModelBinding
 
 
 class RenameField(ModelBoundOperation):
@@ -67,7 +69,7 @@ class RenameField(ModelBoundOperation):
             )
         return super().get_rewrite(other, app_label)
 
-    def get_provided_dependencies(self, app_label: str) -> list[OperationDependency]:
+    def get_provided_dependencies(self, app_label: str, state: State) -> list[OperationDependency]:
         return [
             OperationDependency.of_field(app_label, self.model_name, self.old_name, DependencyType.REMOVED),
             OperationDependency.of_field(app_label, self.model_name, self.new_name, DependencyType.CREATED),
@@ -114,10 +116,10 @@ class RenameField(ModelBoundOperation):
         # carries the old field over.
         new_field = (self.field if self.field is not None else old_field).snapshot()  # type: ignore[union-attr]
         model_state.set_field(self.new_name, new_field)
-        self._rename_meta_field_references(model_state)
+        self._rename_meta_field_references(model_state, old_field=old_field)
 
     def _rename_key_field_readers(self, app_label: str, state: State, model_state: ModelState) -> set[tuple[str, str]]:
-        """A renamed relation to a composite key renames its key fields (``<relation>_<field>``) - the
+        """A renamed relation renames its key fields - its single id column or composite columns - the
         relations reading them are pointed at the new names: a ``to_field`` naming one, and their own
         key fields named after it.
 
@@ -130,11 +132,11 @@ class RenameField(ModelBoundOperation):
             The (app_label, model_name) keys of the models whose relations or options changed.
         """
         try:
-            rendered_model = state.apps.get_model(f"{app_label}.{self.model_name}")
+            binding = state.apps.get_binding(f"{app_label}.{self.model_name}")
         except KeyError:
             return set()
-        relation = rendered_model._meta.fields_map.get(self.old_name)
-        if not isinstance(relation, ForeignKeyFieldInstance) or len(relation.source_fields) < 2:
+        relation = binding.fields_map.get(self.old_name)
+        if not isinstance(relation, ForeignKeyFieldInstance):
             return set()
         changed_model_keys: set[tuple[str, str]] = set()
         for key_field_name in relation.source_fields:
@@ -142,7 +144,7 @@ class RenameField(ModelBoundOperation):
             key_field_rename = RenameField(self.model_name, key_field_name, renamed_key_field_name)
             key_field_rename._rename_meta_field_references(model_state)
             changed_model_keys |= key_field_rename._rename_referencing_to_fields(
-                app_label, state, rendered_model._meta.fields_map[key_field_name]
+                app_label, state, binding.fields_map[key_field_name]
             )
             changed_model_keys |= key_field_rename._rename_relation_key_field_references(app_label, state)
         return changed_model_keys
@@ -170,17 +172,17 @@ class RenameField(ModelBoundOperation):
         changed_model_keys: set[tuple[str, str]] = set()
         for model_key, model_state in state.models.items():
             try:
-                rendered_model = state.apps.get_model(".".join(model_key))
+                binding = state.apps.get_binding(".".join(model_key))
             except KeyError:
                 continue
-            for relation in rendered_model._meta.fields_map.values():
+            for relation in binding.fields_map.values():
                 if (
                     not isinstance(relation, ForeignKeyFieldInstance)
-                    or len(relation.source_fields) < 2
+                    or len(source_fields := relation.source_fields) < 2
                     or relation.related_model is not target_model
                 ):
                     continue
-                for key_field_name, to_field in zip(relation.source_fields, relation.to_field_instances, strict=True):
+                for key_field_name, to_field in zip(source_fields, relation.to_field_instances, strict=True):
                     if to_field.model_field_name != self.old_name:
                         continue
                     renamed_key_field_name = f"{relation.model_field_name}_{self.new_name}"
@@ -188,7 +190,7 @@ class RenameField(ModelBoundOperation):
                     key_field_rename._rename_meta_field_references(model_state)
                     changed_model_keys.add(model_key)
                     changed_model_keys |= key_field_rename._rename_referencing_to_fields(
-                        model_key[0], state, rendered_model._meta.fields_map[key_field_name]
+                        model_key[0], state, binding.fields_map[key_field_name]
                     )
                     changed_model_keys |= key_field_rename._rename_relation_key_field_references(model_key[0], state)
         return changed_model_keys
@@ -306,12 +308,34 @@ class RenameField(ModelBoundOperation):
             renamed_fields.append((field_name, renamed_field))
         return renamed_fields
 
-    def _renamed_names(self, names: list[str] | tuple[str, ...]) -> Any:
+    def _renamed_names[TNames: (list[str], tuple[str, ...])](self, names: TNames) -> TNames:
         """Same sequence, same type (list stays list, tuple stays tuple), with every
         occurrence of `self.old_name` replaced by `self.new_name`."""
         return type(names)(self.new_name if name == self.old_name else name for name in names)
 
-    def _rename_meta_field_references(self, model_state: ModelState) -> None:
+    def _renamed_primary_key_names(
+        self, model_state: ModelState, names: tuple[str, ...], old_field: Field[Any] | None
+    ) -> tuple[str, ...]:
+        """Rename a key's declared field and its explicit relation columns using the old namespace.
+
+        Longer sibling relation names and explicitly declared scalar columns retain their ownership.
+        A relation becoming a scalar names that scalar instead of a shadow column.
+        """
+        if not isinstance(old_field, ForeignKeyFieldInstance):
+            return self._renamed_names(names)
+        old_fields = {name: field for name, field in model_state.fields.items() if name != self.new_name}
+        old_fields[self.old_name] = old_field
+        remains_relation = isinstance(model_state.fields.get(self.new_name), ForeignKeyFieldInstance)
+        renamed = []
+        for name in names:
+            if PrimaryKeyDeclaration.get_component_name(old_fields, name) == self.old_name:
+                suffix = name[len(self.old_name) :] if remains_relation else ""
+                renamed.append(f"{self.new_name}{suffix}")
+            else:
+                renamed.append(name)
+        return tuple(renamed)
+
+    def _rename_meta_field_references(self, model_state: ModelState, *, old_field: Field[Any] | None = None) -> None:
         """Renames the field where the ``Meta`` options name it - the primary key, the fields and hare
         expressions of indexes and constraints, ``Q`` conditions, the tenant/soft-delete/lock fields,
         table options, a dictionary's fields, the columns of a grant, a sequence's owner. Raw SQL is left
@@ -319,17 +343,22 @@ class RenameField(ModelBoundOperation):
 
         Args:
             model_state: The model state the field is renamed in.
+            old_field: Its declaration before the rename, for explicit primary-key relation columns.
         """
         if model_state.pk_field_name == self.old_name:
             model_state.pk_field_name = self.new_name
         elif isinstance(model_state.pk_field_name, tuple):
-            model_state.pk_field_name = self._renamed_names(model_state.pk_field_name)
+            model_state.pk_field_name = self._renamed_primary_key_names(
+                model_state, model_state.pk_field_name, old_field
+            )
 
         primary_key_attribute = model_state.options.get(ModelOption.PRIMARY_KEY_ATTRIBUTE)
         if primary_key_attribute == self.old_name:
             model_state.options[ModelOption.PRIMARY_KEY_ATTRIBUTE] = self.new_name
         elif isinstance(primary_key_attribute, tuple):
-            model_state.options[ModelOption.PRIMARY_KEY_ATTRIBUTE] = self._renamed_names(primary_key_attribute)
+            model_state.options[ModelOption.PRIMARY_KEY_ATTRIBUTE] = self._renamed_primary_key_names(
+                model_state, primary_key_attribute, old_field
+            )
 
         indexes = model_state.get_option_list(ModelOption.INDEXES)
         if indexes:
@@ -621,7 +650,7 @@ class RenameField(ModelBoundOperation):
 
     def _get_renamed_column_fields(
         self, app_label: str, old_state: State, new_state: State, old_field_name: str, new_field_name: str
-    ) -> list[tuple[type[Model], type[Model], list[tuple[Field[Any], Field[Any]]]]]:
+    ) -> list[tuple[ModelBinding, ModelBinding, list[tuple[Field[Any], Field[Any]]]]]:
         """The fields whose columns the rename changes, by model - the renamed field, and each relation
         whose key columns are named after it.
 
@@ -635,15 +664,18 @@ class RenameField(ModelBoundOperation):
         Returns:
             Per model: the model in both states and the (old, new) fields whose columns change.
         """
-        old_renamed_model = self._model(old_state, app_label)
-        new_renamed_model = self._model(new_state, app_label)
-        old_renamed_field = old_renamed_model._meta.fields_map[old_field_name]
-        new_renamed_field = new_renamed_model._meta.fields_map[new_field_name]
+        old_renamed_binding = self.get_model_binding(old_state, app_label)
+        new_renamed_binding = self.get_model_binding(new_state, app_label)
+        old_renamed_field = old_renamed_binding.fields_map[old_field_name]
+        new_renamed_field = new_renamed_binding.fields_map[new_field_name]
         field_pairs_by_model: dict[type[Model], tuple[type[Model], list[tuple[Field[Any], Field[Any]]]]] = {}
         if not isinstance(old_renamed_field, ManyToManyFieldInstance) and ColumnRenames.get_column_names(
             old_renamed_field
         ) != ColumnRenames.get_column_names(new_renamed_field):
-            field_pairs_by_model[new_renamed_model] = (old_renamed_model, [(old_renamed_field, new_renamed_field)])
+            field_pairs_by_model[new_renamed_binding._model] = (
+                old_renamed_binding._model,
+                [(old_renamed_field, new_renamed_field)],
+            )
         for old_model, new_model, old_field, new_field in self._get_fields_of_both_states(old_state, new_state):
             if (
                 isinstance(new_field, ForeignKeyFieldInstance)
@@ -651,7 +683,10 @@ class RenameField(ModelBoundOperation):
                 and ColumnRenames.get_column_names(old_field) != ColumnRenames.get_column_names(new_field)
             ):
                 field_pairs_by_model.setdefault(new_model, (old_model, []))[1].append((old_field, new_field))
-        return [(old_model, new_model, pairs) for new_model, (old_model, pairs) in field_pairs_by_model.items()]
+        return [
+            (old_state.apps.get_binding(old_model), new_state.apps.get_binding(new_model), pairs)
+            for new_model, (old_model, pairs) in field_pairs_by_model.items()
+        ]
 
     @staticmethod
     def get_through_table_column_rename_plan(
@@ -677,10 +712,11 @@ class RenameField(ModelBoundOperation):
                 and new_field.through_model_class is None
                 and old_field.through == new_field.through
             ):
+                new_binding = new_state.apps.get_binding(new_model)
                 steps.extend(
                     state_editor.column_renames.get_table_column_rename_plan(
                         new_field.through,
-                        new_model._meta.schema,
+                        new_binding.schema,
                         (*old_field.forward_keys, *old_field.backward_keys),
                         (*new_field.forward_keys, *new_field.backward_keys),
                     ).steps
@@ -688,12 +724,12 @@ class RenameField(ModelBoundOperation):
                 # Its key indexes and foreign keys are named after the columns.
                 steps.extend(
                     state_editor.many_to_many_through_tables.get_through_index_change_plan(
-                        new_model._meta.schema, old_field, new_field
+                        new_binding.schema, old_field, new_field
                     ).steps
                 )
                 steps.extend(
                     state_editor.many_to_many_through_tables.get_through_foreign_key_rename_plan(
-                        state_editor.qualify_table_name(new_field.through, new_model._meta.schema),
+                        state_editor.qualify_table_name(new_field.through, new_binding.schema),
                         old_field,
                         new_field,
                     ).steps
@@ -719,8 +755,8 @@ class RenameField(ModelBoundOperation):
                 old_model = old_models.get(model_name)
                 if old_model is None:
                     continue
-                for field_name, new_field in new_model._meta.fields_map.items():
-                    old_field = old_model._meta.fields_map.get(field_name)
+                for field_name, new_field in new_state.apps.get_binding(new_model).fields_map.items():
+                    old_field = old_state.apps.get_binding(old_model).fields_map.get(field_name)
                     if old_field is not None:
                         yield old_model, new_model, old_field, new_field
 

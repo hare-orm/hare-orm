@@ -330,7 +330,14 @@ impl Client {
         ));
     }
 
-    fn execute<'py>(&self, py: Python<'py>, sql: String, parameters: ParameterValues) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (sql, parameters, *, built_sql = false))]
+    fn execute<'py>(
+        &self,
+        py: Python<'py>,
+        sql: String,
+        parameters: ParameterValues,
+        built_sql: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let params = parameters.0;
         let pool = self.pool.clone();
         let counters = self.counters.clone();
@@ -342,14 +349,20 @@ impl Client {
             let pooled = PooledConnection::new(connection, caching, tls, cancel_target);
             let executor = &pooled.executor;
             let mut lease = executor.acquire().await.map_err(to_pyerr)?.ok_or_else(connection_released)?;
-            let result = lease.execute(&sql, &params, &executor.caching).await.map_err(to_pyerr);
-            drop(lease);
-            executor.release().await;
+            let result = lease.execute(&sql, &params, &executor.caching, built_sql).await.map_err(to_pyerr);
+            executor.release_after_statement(lease).await;
             result
         })
     }
 
-    fn fetch_all<'py>(&self, py: Python<'py>, sql: String, parameters: ParameterValues) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (sql, parameters, *, built_sql = false))]
+    fn fetch_all<'py>(
+        &self,
+        py: Python<'py>,
+        sql: String,
+        parameters: ParameterValues,
+        built_sql: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let params = parameters.0;
         let pool = self.pool.clone();
         let counters = self.counters.clone();
@@ -362,12 +375,11 @@ impl Client {
             let executor = &pooled.executor;
             let mut lease = executor.acquire().await.map_err(to_pyerr)?.ok_or_else(connection_released)?;
             let result = lease
-                .fetch(&sql, &params, &executor.caching)
+                .fetch(&sql, &params, &executor.caching, built_sql)
                 .await
                 .map(|(columns, data)| PgResult::new(columns, data))
                 .map_err(to_pyerr);
-            drop(lease);
-            executor.release().await;
+            executor.release_after_statement(lease).await;
             result
         })
     }
@@ -390,21 +402,22 @@ impl Client {
             let executor = &pooled.executor;
             let mut lease = executor.acquire().await.map_err(to_pyerr)?.ok_or_else(connection_released)?;
             let result = lease
-                .fetch(&sql, &params, &executor.caching)
+                .fetch(&sql, &params, &executor.caching, false)
                 .await
                 .map(|(columns, data)| DescribedRows { columns, data })
                 .map_err(to_pyerr);
-            drop(lease);
-            executor.release().await;
+            executor.release_after_statement(lease).await;
             result
         })
     }
 
+    #[pyo3(signature = (sql, parameter_rows, *, built_sql = false))]
     fn execute_many<'py>(
         &self,
         py: Python<'py>,
         sql: String,
         parameter_rows: ParameterValueRows,
+        built_sql: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let rows = parameter_rows.0;
         let pool = self.pool.clone();
@@ -416,28 +429,28 @@ impl Client {
             if rows.is_empty() {
                 return Ok(());
             }
-            let types = ParameterValues::batch_types(&rows).map_err(to_pyerr)?;
+            let types = ParameterValues::batch_types(&rows, built_sql).map_err(to_pyerr)?;
             let connection = PoolCheckout::get(&pool, &counters).await.map_err(to_pyerr)?;
             let pooled = PooledConnection::new(connection, caching.clone(), tls, cancel_target);
             let executor = &pooled.executor;
             let mut lease = executor.acquire().await.map_err(to_pyerr)?.ok_or_else(connection_released)?;
             let outcome: Result<(), DriverError> = async {
                 let client = lease.client_mut();
-                let statement = caching.prepare(client, &sql, &types).await?;
+                let (statement, description) =
+                    caching.prepare_bound(client, &sql, &types, rows.iter().map(Vec::as_slice)).await?;
                 // execute_many's own transaction wraps just this batch, like asyncpg's
                 // executemany() - not the caller's ambient transaction (if any).
                 let transaction = client.transaction().await?;
                 // Pipelined (one round trip for the batch, not one per row), through execute_raw:
                 // no per-row Vec<&dyn ToSql> allocation and no parsing of RETURNING rows nobody reads.
-                let futures = rows.iter().map(|row| transaction.execute_raw(&statement, row.iter()));
+                let futures = rows.iter().map(|row| transaction.execute_raw(&statement, description.bind(row)));
                 futures_util::future::try_join_all(futures).await?;
                 transaction.commit().await?;
                 Ok(())
             }
             .await;
             let result = lease.finish(outcome).map_err(to_pyerr);
-            drop(lease);
-            executor.release().await;
+            executor.release_after_statement(lease).await;
             result
         })
     }
@@ -478,8 +491,7 @@ impl Client {
             )
             .await;
             let result = lease.finish(outcome).map_err(to_pyerr);
-            drop(lease);
-            executor.release().await;
+            executor.release_after_statement(lease).await;
             result
         })
     }
@@ -499,8 +511,7 @@ impl Client {
             let mut lease = executor.acquire().await.map_err(to_pyerr)?.ok_or_else(connection_released)?;
             let outcome = lease.client().batch_execute(&sql).await.map_err(DriverError::from);
             let result = lease.finish(outcome).map_err(to_pyerr);
-            drop(lease);
-            executor.release().await;
+            executor.release_after_statement(lease).await;
             result
         })
     }

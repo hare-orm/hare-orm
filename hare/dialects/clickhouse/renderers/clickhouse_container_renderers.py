@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from hare.fields.data.containers.container_field import ContainerField
+from hare.dialects.clickhouse.constants import CLICKHOUSE_NEVER_NULLABLE_TYPE_PREFIXES
 from hare.sql.terms.containers import (
     ArrayContainedByTerm,
     ArrayContainsTerm,
@@ -99,9 +99,11 @@ class ClickhouseContainerRenderers:
         (array_sql,) = cls.get_argument_sqls(term, sql_context)
         position = term.index + 1 if term.index >= 0 else term.index
         element_sql = f"arrayElement({array_sql},{position})"
-        if isinstance(term.element_field, ContainerField):
-            # A container is never NULL - past either end it is the empty one.
-            return element_sql
+        if term.element_field is not None:
+            column_type = term.element_field.get_column_type(sql_context.dialect)
+            if column_type.startswith(CLICKHOUSE_NEVER_NULLABLE_TYPE_PREFIXES):
+                # Nonnullable results retain the server's default, including geometry tuples/arrays.
+                return element_sql
         # arrayElement() is the type's default past either end - NULL there, as on the other databases.
         return f"if(length({array_sql})>={abs(position)},{element_sql},NULL)"
 

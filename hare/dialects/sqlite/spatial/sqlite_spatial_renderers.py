@@ -16,7 +16,6 @@ from hare.dialects.sqlite.spatial.constants import (
     SPATIALITE_RELATION_FUNCTIONS,
     SPATIALITE_UNSUPPORTED_GEOGRAPHY_FUNCTIONS,
 )
-from hare.dialects.sqlite.spatial.spatialite_blob_writer import SpatialiteBlobWriter
 from hare.exceptions import UnSupportedError
 from hare.gis.enums import SpatialFunctionType, SpatialRelation
 from hare.gis.terms.geometry_value import GeometryValue
@@ -52,7 +51,7 @@ class SqliteSpatialRenderers:
     @classmethod
     def render_geometry_value(cls, value: GeometryValue, sql_context: SqlContext) -> str:
         """The geometry's BLOB - transformed to the column's SRID when it has another."""
-        value_sql = Function.get_arg_sql(ValueWrapper(SpatialiteBlobWriter.write(value.geometry)), sql_context)
+        value_sql = Function.get_arg_sql(value.args[0], sql_context)
         if value.srid == value.target_srid:
             return value_sql
         return cls.get_transform_sql(value_sql, str(value.srid), str(value.target_srid))
@@ -134,12 +133,17 @@ class SqliteSpatialRenderers:
             or column.table is None
         ):
             return None
-        model = field.model
-        if SpatialiteIndex.get_covering(model, field.model_field_name) is None:
+        model_binding = field.get_binding().model_binding
+        if SpatialiteIndex.get_covering(model_binding, field.model_field_name) is None:  # type: ignore[arg-type]
             return None
-        row_key = SqlField(model._meta.get_column_names([model._meta.primary_key_attribute])[0], table=column.table)  # type: ignore[list-item]
+        row_key = SqlField(
+            model_binding.get_column_names(  # type: ignore[union-attr]
+                model_binding.primary_key_attribute_names  # type: ignore[union-attr]
+            )[0],
+            table=column.table,
+        )
         row_key_sql = Function.get_arg_sql(row_key, sql_context)
-        table_sql = Function.get_arg_sql(ValueWrapper(model._meta.db_table), sql_context)
+        table_sql = Function.get_arg_sql(ValueWrapper(model_binding.db_table), sql_context)  # type: ignore[union-attr]
         column_sql = Function.get_arg_sql(ValueWrapper(column.name), sql_context)
         frame_sql = Function.get_arg_sql(term.args[1], sql_context)
         if term.relation == SpatialRelation.DWITHIN:

@@ -7,6 +7,7 @@ from hare.migrations.api.migration_request_parser import MigrationRequestParser
 from hare.migrations.api.plan import plan
 from hare.migrations.exceptions import UnknownMigrationError
 from hare.migrations.execution.executor import MigrationTarget
+from tests.utils.project_sources import ProjectSources
 
 pytestmark = pytest.mark.sqlite_only
 
@@ -66,11 +67,8 @@ def test_parse_targets_unknown_app_label(target):
 
 
 def _write_empty_initial_migration(tmp_path: Path, app_label: str) -> str:
-    migrations_dir = tmp_path / app_label / "migrations"
-    migrations_dir.mkdir(parents=True)
-    (tmp_path / app_label / "__init__.py").write_text("", encoding="ascii")
-    (tmp_path / app_label / "models.py").write_text("", encoding="ascii")
-    (migrations_dir / "__init__.py").write_text("", encoding="ascii")
+    sources = ProjectSources(tmp_path)
+    migrations_dir = sources.prepare_migrations(sources.write_package(app_label))
     (migrations_dir / "0001_initial.py").write_text(
         "from hare import migrations\n\nclass Migration(migrations.Migration):\n    operations = []\n",
         encoding="ascii",

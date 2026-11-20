@@ -64,10 +64,12 @@ class TestSelectionManifest:
                 f"undeclared modules={sorted(actual - declared)}, missing files={sorted(declared - actual)}"
             )
 
-    def check_cell_requirements(self, path: Path, requirements: set[str] | frozenset[str]) -> None:
+    def check_cell_requirements(
+        self, path: Path, requirements: set[str] | frozenset[str], *, module_requirements: frozenset[str]
+    ) -> None:
         """Refuse a collected cell whose requirements were not available to preselection."""
         relative = path.absolute().relative_to(REPOSITORY_DIRECTORY).as_posix()
         module = self.modules[relative]
-        unexpected = requirements - self.get_path_requirements(path) - module.cells
+        unexpected = requirements - module_requirements - module.cells
         if unexpected:
             raise ValueError(f"{relative}: undeclared cell requirements {sorted(unexpected)} in selection.toml")

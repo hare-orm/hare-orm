@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.dialect import Dialect
+from hare.dialects.base.schema.columns.column_narrowing_check import ColumnNarrowingCheck
 from hare.dialects.base.schema.columns.column_type_changes import ColumnTypeChanges
 from hare.dialects.base.schema.tables.table_rebuild import TableRebuild
 from hare.fields.constants import DB_DEFAULT_NOT_SET
@@ -43,7 +44,7 @@ class SqliteColumnTypeChanges(ColumnTypeChanges):
         return (
             not isinstance(old_field, ManyToManyFieldInstance)
             and type(old_field) is type(new_field)
-            and new_field.get_narrowing_limit(old_field) is None
+            and not ColumnNarrowingCheck.has_narrowing_limits(old_field, new_field)
             and TableRebuild.get_remake_column_name(old_field) == TableRebuild.get_remake_column_name(new_field)
             and cls.get_column_declaration(old_field, dialect) == cls.get_column_declaration(new_field, dialect)
         )
@@ -60,12 +61,12 @@ class SqliteColumnTypeChanges(ColumnTypeChanges):
         Returns:
             The declaration's parts.
         """
-        related_meta = field.related_model._meta
-        fields_map = field.model._meta.fields_map
+        related_meta = field.get_related_binding()
+        fields_map = field.get_binding().model_binding.fields_map  # type: ignore[union-attr]
         return (
             related_meta.db_table,
             related_meta.schema,
-            tuple(to_field.source_field or to_field.model_field_name for to_field in field.to_field_instances),
+            field.to_column_names,
             field.db_on_delete,
             field.db_constraint,
             field.db_column_names,
@@ -110,6 +111,7 @@ class SqliteColumnTypeChanges(ColumnTypeChanges):
         """
         return (
             not isinstance(old_field, ForeignKeyFieldInstance)
+            and not ColumnNarrowingCheck.has_narrowing_limits(old_field, new_field)
             and TableRebuild.get_remake_column_name(old_field) != TableRebuild.get_remake_column_name(new_field)
             and old_field.null == new_field.null
             and old_field.unique == new_field.unique

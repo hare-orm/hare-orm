@@ -100,10 +100,17 @@ Other reconstruction rules:
   Such a junction is not collapsed into an automatic many-to-many field.
 - When a table has two or more relations to the same target (including a self-referencing pair), each
   gets `related_name="<table>_<field>_set"` so their backward relations don't collide.
+  The same explicit form is used when the default reverse name is not a usable field attribute,
+  for example for a table containing spaces, starting with a digit or containing `__`, or when
+  appending `s` produces a Python keyword. Explicit names use the field-name normalization rules;
+  valid Unicode defaults remain unchanged. This applies to scalar and composite foreign keys
+  and one-to-one relations in both generated source and `ModelFactory`.
+  A table named `model` may produce a class named `Model`; its declared scalar or composite key
+  is treated like any other model's. Generated source aliases the imported base when necessary.
 - A partial index keeps its `WHERE` clause as `PartialIndex(condition=RawSQLTerm(...))`, the predicate as
-  the database reports it, on both PostgreSQL and SQLite. An expression index (`lower(note)`) is rebuilt
-  as `Index(RawSQLTerm(...))` on both dialects — a key without the parentheses SQLite keeps around it
-  (`(lower(note))`) — and a composite foreign key is rebuilt on SQLite too.
+  the database reports it, on both PostgreSQL and SQLite. PostgreSQL reconstructs an expression
+  index with `RawSQLTerm` keys. SQLite retains the complete expression key SQL with `CatalogIndexKey`,
+  including its parentheses, collation and sort direction. SQLite also reconstructs composite foreign keys.
 - An index or constraint keeps its database name (`Index(..., name="book_published_idx")`) unless it is
   the one hare generates for the declaration or the one PostgreSQL gives an unnamed index or `UNIQUE`
   constraint (`<table>_<columns>_idx`/`_key`); a plain single-column index under a name of its own
@@ -121,8 +128,7 @@ Other reconstruction rules:
   order (`"-a"`, `F("a").desc(nulls_last=True)`, an expression key as
   `OrderedIndexKey(RawSQLTerm("lower(c)"), Order.DESC_NULLS_FIRST)`), a collated key as an expression
   (`RawSQLTerm('d COLLATE "C"')`) and `NULLS NOT DISTINCT` (`UniqueConstraint(nulls_distinct=False)`).
-  What no hare index can declare — the sort order of a collated key on SQLite — is left out and listed in
-  a `# TODO`.
+  SQLite gets key order and collation from its index catalog, including descending collated keys.
 - A foreign key to a table of another schema than the inspected one stays a plain column with a `# TODO`
   naming its target — a relation can only point at a model of the same run.
 - A partition of a partitioned PostgreSQL table is not listed (the partitioned table stands for it),
@@ -157,6 +163,10 @@ Other reconstruction rules:
 - A foreign key's own index (a plain index over exactly its key columns) isn't written out —
   `ForeignKeyField` [has it by default](../models/relations.md#index-on-the-key-column); a foreign key
   without one, and without another index starting with its columns, gets `db_index=False`.
+- PostgreSQL `numeric`/`decimal` literal defaults retain their exact `Decimal` value. Casts that
+  can change the value before column assignment and other SQL expressions remain `SqlDefault`;
+  reconstructing a default does not silently replace those casts with a Python float. Custom
+  introspector default parsers retain their results.
 - An array column's default (`'{1,2}'::integer[]`) comes back as the list (`db_default=[1, 2]`), its
   elements read by the array's element type.
 - A PostgreSQL array column comes back with the dimensions it was declared with: `integer[][]` as
@@ -301,3 +311,28 @@ migration file writes it — every field, index and constraint as its `deconstru
 `ModelFactory` builds a class from the very same state, so the generated source and a class built at
 runtime use the same declarations. The standalone builder checks a possible many-to-many through-table
 shape using only that table; module-level inference additionally needs metadata of all related tables.
+
+Relation finalization maps physical foreign-key target columns to the target's allocated storage
+attributes, including renamed fields and relation key shadows. Reverse accessors share the target's
+field namespace and receive suffixes when needed. CLI inspection reads referenced table layouts even
+when those tables are not requested for output; it still emits only the requested models.
+
+For a standalone factory or source builder, supply the same context explicitly:
+
+```python
+from hare.inspectdb import ModelFactory
+from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
+
+tables = await DatabaseCatalog.inspect_tables(connection, ["authors", "books"])
+book_class = ModelFactory.from_table_info(
+    tables[1], connection.dialect.name, app_label="library", target_tables=tuple(tables)
+)
+```
+
+The returned class is unregistered. `target_models` can instead provide existing, linked classes by
+full model reference, alongside `foreign_key_target_overrides` when their names differ. Source builders
+accept these options in `ModelGenerationOptions`; `SchemaInspector.render_module()` accepts extra
+layouts in `target_table_infos` without rendering those tables. A standalone non-primary-key reference
+without its target layout raises `ConfigurationError` rather than guessing an attribute from a raw
+column name. `InspectedModelBuilder.build()` itself constructs the intermediate declaration; publishing
+classes or source through the factory/source APIs performs relation finalization.

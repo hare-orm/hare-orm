@@ -8,6 +8,7 @@ import time
 import pytest
 
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.dialects.base.client.transaction_lifecycle import transaction_ending
 from hare.dialects.sqlite.drivers.aiosqlite.client.aiosqlite_transaction_client import AiosqliteTransactionClient
 from hare.exceptions import IntegrityError, OperationalError, TransactionManagementError
@@ -144,7 +145,7 @@ async def test_commit_of_aborted_transaction_raises_and_commits_nothing(db_trunc
 @requires_features(dialect="sqlite")
 @pytest.mark.asyncio
 async def test_trigger_raise_rollback_aborts_transaction(db_truncate):
-    connection = Tournament._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Tournament).get_connection()
     await connection.execute_script(
         "CREATE TEMP TRIGGER hare_test_reject_rollback BEFORE INSERT ON tournament "
         "WHEN NEW.name = 'reject' BEGIN SELECT RAISE(ROLLBACK, 'rejected by trigger'); END"

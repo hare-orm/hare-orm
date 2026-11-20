@@ -6,6 +6,7 @@ import ast
 import io
 import logging
 import tokenize
+from itertools import chain
 from pathlib import Path
 from typing import Any
 
@@ -122,7 +123,7 @@ class DocsStandardChecks:
                 )
             following = page.headings[index + 1] if index + 1 < len(page.headings) else None
             opens_subsection = following is not None and following.level > heading.level
-            section_end = following.line if following is not None else len(page.lines) + 1
+            section_end = following.line if following is not None else page.line_count + 1
             has_code = any(heading.line < block.line < section_end for block in page.code_blocks)
             # A section going straight into its subsections needs no text of its own - one holding code does.
             if heading.level > 1 and not page.heading_has_text[heading.line] and (has_code or not opens_subsection):
@@ -153,7 +154,7 @@ class DocsStandardChecks:
             if block.language != "python":
                 continue
             try:
-                compile(block.code, page.name, "exec", flags=ast.PyCF_ONLY_AST | ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+                ast.parse(block.code, filename=page.name)
             except SyntaxError as error:
                 problems.append(DocsProblem(page.name, block.line, f"a python block that doesn't parse: {error.msg}"))
         return problems
@@ -171,15 +172,15 @@ class DocsStandardChecks:
         """
         problems: list[DocsProblem] = [
             DocsProblem(page.name, line, "a link without a text")
-            for line, text in [
-                *((prose.line, prose.text) for prose in page.prose),
-                *((line, " ".join(cells)) for table in page.tables for line, cells in table),
-            ]
+            for line, text in chain(
+                ((prose.line, prose.text) for prose in page.prose),
+                ((line, " ".join(cells)) for table in page.tables for line, cells in table),
+            )
             if EMPTY_LINK_TEXT.search(text)
         ]
         if not page.is_russian:
             return problems
-        for line, linked_name in page.get_linked_page_names():
+        for line, linked_name in page.linked_page_names:
             linked = pages.get(linked_name)
             if linked is not None and not linked.is_russian:
                 problems.append(DocsProblem(page.name, line, f"a Russian page links the English {linked_name}"))
@@ -200,9 +201,10 @@ class DocsStandardChecks:
         replaced_wording = RUSSIAN_REPLACED_WORDING if page.is_russian else ENGLISH_REPLACED_WORDING
         compares_orms = page.english_name.startswith(OTHER_ORM_PAGE_PREFIXES)
         for prose in page.prose:
-            if len(LINK_TARGET.sub("]()", prose.text)) > MAX_PROSE_LINE_LENGTH:
+            text_without_link_targets = LINK_TARGET.sub("]()", prose.text)
+            if len(text_without_link_targets) > MAX_PROSE_LINE_LENGTH:
                 problems.append(DocsProblem(page.name, prose.line, f"a line longer than {MAX_PROSE_LINE_LENGTH}"))
-            text = INLINE_CODE.sub("`code`", LINK_TARGET.sub("]()", prose.text))
+            text = INLINE_CODE.sub("`code`", text_without_link_targets)
             if HYPHEN_AS_DASH.search(text):
                 problems.append(DocsProblem(page.name, prose.line, 'a dash written " - " - write "—"'))
             if page.is_russian and STRAIGHT_QUOTED_RUSSIAN.search(text):
@@ -390,7 +392,7 @@ class DocsStandardChecks:
         """
         linked: set[str] = set()
         for page in pages.values():
-            linked.update(name for _line, name in page.get_linked_page_names() if name != page.name)
+            linked.update(name for _line, name in page.linked_page_names if name != page.name)
         return [
             DocsProblem(name, 1, "no other page links it")
             for name in pages

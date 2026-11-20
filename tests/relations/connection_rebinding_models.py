@@ -25,3 +25,8 @@ class Book(Model):
 class Review(Model):
     name = fields.TextField()
     edition = fields.ForeignKeyField(Edition, related_name="reviews", db_constraint=False)
+
+
+class Note(Model):
+    name = fields.TextField()
+    edition = fields.ForeignKeyField(Edition, related_name="notes", null=True, db_constraint=False)

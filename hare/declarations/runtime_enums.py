@@ -7,8 +7,8 @@ from __future__ import annotations
 import importlib
 import sys
 from enum import Enum
-from typing import Any
 
+from hare.classes.class_path import ClassPath
 from hare.exceptions import ConfigurationError
 
 
@@ -31,9 +31,9 @@ class RuntimeEnums:
             return True
         qualname = getattr(enum_type, "__qualname__", "")
         module_name = getattr(enum_type, "__module__", None)
-        if not module_name or not qualname or "<locals>" in qualname:
+        if not module_name or not ClassPath.is_importable_name(qualname):
             return False
-        if not all(part.isidentifier() for part in module_name.split(".")):
+        if not ClassPath.is_importable_name(module_name):
             # A migration file's own module (``app.migrations.0001_initial``) - no import statement
             # can name it, so an enum it declares is declared again by a migration built from it.
             return False
@@ -43,12 +43,7 @@ class RuntimeEnums:
                 module = importlib.import_module(module_name)
             except ImportError:
                 return False
-        found: Any = module
-        for part in qualname.split("."):
-            found = getattr(found, part, None)
-            if found is None:
-                return False
-        return found is enum_type
+        return ClassPath.has_module_identity(module, enum_type)
 
     @staticmethod
     def get_bases(enum_type: type[Enum]) -> tuple[type[Enum], type | None]:

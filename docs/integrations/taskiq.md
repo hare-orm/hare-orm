@@ -9,6 +9,12 @@ the extra:
 pip install "hare-orm[taskiq]"
 ```
 
+With middleware-managed transactions, a task conflict is retried only after every participating
+transaction has a confirmed rollback. A successful commit followed by a callback failure, an unknown
+commit outcome, or release of a nested savepoint does not authorize resending the task. Transactions
+on several connections remain separate: an earlier successful commit cannot be undone by another
+connection failing during cleanup.
+
 ## <a id="hare-taskiq"></a>Setting up the broker
 
 ```python
@@ -82,6 +88,10 @@ The application sending tasks keeps its own `HareContext` (`Hare.init()`, a web 
   failure. With taskiq's own `SimpleRetryMiddleware`, leave `TransactionRetryError` out of its
   exceptions, or a conflict is retried twice.
 
+Task entry activates the worker's Hare context and application lifecycle together.
+If application activation fails, the previous Hare context is restored immediately.
+Normal completion restores the preceding application and Hare context, including for nested tasks.
+
 Hare's `post_execute` hook completes transactions and restores the tags, tenant and running-task
 scope. This includes a task error reported through taskiq's `on_error` hook. The hooks depend on
 taskiq's receiver reaching them: an exception in another middleware, dependency cleanup or an
@@ -129,6 +139,14 @@ event of `topic` (`OutboxEvent.enqueue()`) — in the current transaction, so a 
 neither the event nor the task; outside a transaction it commits at once. The broker's `HareTaskiqMiddleware`
 writes the tenant scope active then into the tenant label of the event, so the task runs in the sender's
 tenant, not in the relay's. It returns the event.
+
+Delivery and transaction retries preserve structured tenant labels, including several tenants,
+all tenants and model-specific scopes. Restoration occurs in Hare's sending middleware after
+Taskiq prepares the message; ordinary task labels retain Taskiq's conversions. The captured
+labels apply only to the sending task, without replacing the relay's scope or leaking into
+child tasks and later sends. Custom tenant-label names and explicit overrides are preserved.
+An absent or explicitly `None` tenant scope is preserved too: it does not inherit the relay's
+tenant. Setting `tenant_label=None` on the middleware continues to leave tenant context alone.
 
 The relay of `get_relay(**relay_options)` sends the tasks — the events of the delivery's `topic` only, so
 the table can hold other topics too — a relay of the other events of the table takes

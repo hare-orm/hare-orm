@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -21,7 +22,7 @@ class PreparedOperationExecution:
     """
 
     @classmethod
-    async def run(
+    async def run_in_constraint_scope(
         cls,
         migration: Migration,
         states: PreparedOperationStates,
@@ -30,9 +31,51 @@ class PreparedOperationExecution:
         backward: bool = False,
         collect_sql: bool = False,
     ) -> None:
+        """Give direct migration execution the editor's constraint ownership contract.
+
+        The migration runner opens this scope around its transaction and journal instead.
+        Direct apply/unapply have no runner, so must enter it before operation transactions.
+        Borrowed transactions and previews retain the dialect's existing no-toggle policy.
+        """
+        if collect_sql or editor.collect_sql:
+            previous_collect_sql = editor.collect_sql
+            editor.collect_sql = True
+            try:
+                await cls.run(migration, states, editor, backward=backward)
+            finally:
+                editor.collect_sql = previous_collect_sql
+            return
+        async with editor.constraint_checking_disabled() as check_constraints:
+            previous_client = editor.client
+            previous_atomic = editor.atomic_migration
+            transaction = (
+                previous_client._in_transaction()
+                if previous_atomic and not previous_client.is_transaction_client
+                else nullcontext(previous_client)
+            )
+            try:
+                async with transaction as client:
+                    editor.client = client
+                    editor.atomic_migration = client.is_transaction_client
+                    await cls.run(migration, states, editor, backward=backward)
+                    if check_constraints:
+                        await editor.check_constraints()
+            finally:
+                editor.client = previous_client
+                editor.atomic_migration = previous_atomic
+
+    @classmethod
+    async def run(
+        cls,
+        migration: Migration,
+        states: PreparedOperationStates,
+        editor: BaseSchemaEditor,
+        *,
+        backward: bool = False,
+    ) -> None:
         operations = reversed(states.operations) if backward else states.operations
         for prepared in operations:
-            await cls.run_operation(migration, prepared, editor, backward=backward, collect_sql=collect_sql)
+            await cls.run_operation(migration, prepared, editor, backward=backward)
 
     @classmethod
     async def run_operation(
@@ -42,47 +85,44 @@ class PreparedOperationExecution:
         editor: BaseSchemaEditor,
         *,
         backward: bool,
-        collect_sql: bool,
     ) -> None:
-        operation = prepared.operation
-        database_operations = prepared.database_operations
-        if database_operations is not None:
-            if collect_sql:
-                editor.collected_sql.extend(("--", f"-- {operation.describe()}", "--"))
-                if not database_operations.operations:
-                    editor.collected_sql.append("-- (no-op)")
-            await cls.run_atomic(
-                migration,
-                operation,
-                editor,
-                lambda: cls.run(
+        from hare.query.execution.query_execution import QueryExecution
+
+        before = prepared.before
+        with QueryExecution(before.environment.context):
+            operation = prepared.operation
+            database_operations = prepared.database_operations
+            if database_operations is not None:
+                if editor.collect_sql:
+                    editor.collected_sql.extend(("--", f"-- {operation.describe()}", "--"))
+                    if not database_operations.operations:
+                        editor.collected_sql.append("-- (no-op)")
+                await cls.run_atomic(
                     migration,
-                    database_operations,
+                    operation,
                     editor,
-                    backward=backward,
-                    collect_sql=collect_sql,
-                ),
-            )
-            return
-        states = (prepared.after, prepared.before) if backward else (prepared.before, prepared.after)
-        if operation.touches_swapped_model(migration.app_label, *states) or not cls.runs_on_client(
-            migration,
-            operation,
-            editor,
-            states,
-        ):
-            return
-        run = operation.database_backward if backward else operation.database_forward
+                    lambda: cls.run(
+                        migration,
+                        database_operations,
+                        editor,
+                        backward=backward,
+                    ),
+                )
+                return
+            states = (prepared.after, before) if backward else (before, prepared.after)
+            if not cls.should_run_operation(migration, operation, editor, states):
+                return
+            run = operation.database_backward if backward else operation.database_forward
 
-        async def execute() -> None:
-            if not collect_sql:
-                await editor.prepare_schema()
-            await cls.run_atomic(migration, operation, editor, lambda: run(migration.app_label, *states, editor))
+            async def execute() -> None:
+                if not editor.collect_sql:
+                    await editor.prepare_schema()
+                await cls.run_atomic(migration, operation, editor, lambda: run(migration.app_label, *states, editor))
 
-        if collect_sql:
-            await cls.collect_operation_sql(operation, editor, execute)
-        else:
-            await execute()
+            if editor.collect_sql:
+                await cls.collect_operation_sql(operation, editor, execute)
+            else:
+                await execute()
 
     @classmethod
     def check_support(
@@ -92,29 +132,29 @@ class PreparedOperationExecution:
         editor: BaseSchemaEditor,
     ) -> None:
         """Check every database leaf against the same states execution receives."""
-        for prepared in states.operations:
-            if prepared.database_operations is not None:
-                cls.check_support(migration, prepared.database_operations, editor)
-                continue
-            operation = prepared.operation
-            boundaries = (prepared.before, prepared.after)
-            if operation.touches_swapped_model(migration.app_label, *boundaries) or not cls.runs_on_client(
-                migration,
-                operation,
-                editor,
-                boundaries,
-            ):
-                continue
-            operation.raise_if_unsupported(migration.app_label, *boundaries, editor)
+        from hare.query.execution.query_execution import QueryExecution
+
+        with QueryExecution(states.before.environment.context):
+            for prepared in states.operations:
+                if prepared.database_operations is not None:
+                    cls.check_support(migration, prepared.database_operations, editor)
+                    continue
+                operation = prepared.operation
+                boundaries = (prepared.before, prepared.after)
+                if not cls.should_run_operation(migration, operation, editor, boundaries):
+                    continue
+                operation.raise_if_unsupported(migration.app_label, *boundaries, editor)
 
     @staticmethod
-    def runs_on_client(
+    def should_run_operation(
         migration: Migration,
         operation: Operation,
         editor: BaseSchemaEditor,
-        states: tuple[State, ...],
+        states: tuple[State, State],
     ) -> bool:
-        """Select shared or tenant database leaves independently, including nested branches."""
+        """Select applicable shared or tenant leaves for execution and validation."""
+        if operation.touches_swapped_model(migration.app_label, *states):
+            return False
         client = editor.client
         if client.tenant_schema_template is None or editor.collect_sql:
             return True

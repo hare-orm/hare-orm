@@ -44,7 +44,9 @@ class AlterSchemaObject(ModelBoundOperation):
         """
         model_state = self.get_model_state(state, app_label, self.model_name)
         return self.object_type.find(
-            model_state, lambda: self._model(state, app_label), name=self.object_type.get_name(self.schema_object)
+            model_state,
+            lambda: self.get_model_binding(state, app_label),
+            name=self.object_type.get_name(self.schema_object),
         )
 
     def state_forward(self, app_label: str, state: State) -> None:
@@ -52,7 +54,9 @@ class AlterSchemaObject(ModelBoundOperation):
         self.object_type.update_objects(
             model_state,
             removed=self.find_current(state, app_label),
-            added=self.object_type.get_state_entry(self.schema_object),
+            added=self.object_type.get_state_entry(
+                self.schema_object, state=state, app_label=app_label, model_name=self.model_name
+            ),
         )
         state.mark_models_changed([(app_label, self.model_name)])
 
@@ -60,7 +64,7 @@ class AlterSchemaObject(ModelBoundOperation):
         self, app_label: str, old_state: State, new_state: State, schema_editor: BaseSchemaEditor
     ) -> None:
         self.object_type.raise_if_object_unsupported(
-            schema_editor, self._model(new_state, app_label), self.schema_object
+            schema_editor, self.get_model_binding(new_state, app_label), self.schema_object
         )
 
     async def database_forward(
@@ -72,7 +76,7 @@ class AlterSchemaObject(ModelBoundOperation):
     ) -> None:
         if not state_editor:
             return
-        model = self._model(new_state, app_label)
+        model = self.get_model_binding(new_state, app_label)
         await self.object_type.alter(state_editor, model, self.find_current(old_state, app_label), self.schema_object)
 
     async def database_backward(
@@ -85,5 +89,5 @@ class AlterSchemaObject(ModelBoundOperation):
         if not state_editor:
             return
         # Going back, new_state holds the version before the change.
-        model = self._model(old_state, app_label)
+        model = self.get_model_binding(old_state, app_label)
         await self.object_type.alter(state_editor, model, self.schema_object, self.find_current(new_state, app_label))

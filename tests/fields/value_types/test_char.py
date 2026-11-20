@@ -7,6 +7,8 @@ from hare import fields
 from hare.exceptions import ConfigurationError, ValidationError
 from tests.shared_models import testmodels
 
+pytestmark = pytest.mark.usefixtures("model_conversion_context")
+
 
 @pytest.mark.database_independent
 def test_max_length_missing():

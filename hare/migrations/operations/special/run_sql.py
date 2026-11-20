@@ -77,31 +77,24 @@ class RunSQL(HareOperation):
         """Runs the statements through the schema editor."""
         if isinstance(sqls, Sequence) and not isinstance(sqls, (str, bytes, bytearray)):
             for sql in sqls:
-                parameters: Any = None
-                takes_parameters = False
-                if isinstance(sql, Sequence) and not isinstance(sql, (str, bytes, bytearray)):
-                    elements = len(sql)
-                    if elements == 2:
-                        sql, parameters = sql  # type: ignore[misc]
-                        takes_parameters = True
-                    else:
-                        raise ConfigurationError(f"Expected a 2-tuple but got {elements}")
+                if not isinstance(sql, Sequence) or isinstance(sql, (str, bytes, bytearray)):
+                    await state_editor.run_raw_sql(sql)  # type: ignore[arg-type]
+                    continue
+                elements = len(sql)
+                if elements != 2:
+                    raise ConfigurationError(f"Expected a 2-tuple but got {elements}")
+                sql, parameters = sql  # type: ignore[misc]
 
-                if takes_parameters:
-                    # A (sql, parameters) pair, an empty list too: %s placeholders on every database, as raw()
-                    # takes them - written in the connection's own style, and with the values in the text where
-                    # the SQL is only shown.
-                    raw_sql = RawSQL(sql, parameters)
-                    sql_context = state_editor.client.query_class.SQL_CONTEXT
-                    if state_editor.collect_sql:
-                        state_editor.collected_sql.append(raw_sql.get_sql(sql_context))
-                    else:
-                        parameterizer = RecordingParameterizer()
-                        rendered_sql = raw_sql.get_sql(sql_context.copy(parameterizer=parameterizer))
-                        await state_editor.run_parameterized_sql(
-                            rendered_sql, parameterizer.values, schema_change=True
-                        )
+                # A (sql, parameters) pair, an empty list too: %s placeholders on every database, as raw()
+                # takes them - written in the connection's own style, and with the values in the text where
+                # the SQL is only shown.
+                raw_sql = RawSQL(sql, parameters)
+                sql_context = state_editor.client.query_class.SQL_CONTEXT
+                if state_editor.collect_sql:
+                    state_editor.collected_sql.append(raw_sql.get_sql(sql_context))
                 else:
-                    await state_editor.run_raw_sql(sql)
+                    parameterizer = RecordingParameterizer()
+                    rendered_sql = raw_sql.get_sql(sql_context.copy(parameterizer=parameterizer))
+                    await state_editor.run_parameterized_sql(rendered_sql, parameterizer.values, schema_change=True)
         elif isinstance(sqls, str) and sqls != RunSQL.noop:
             await state_editor.run_raw_sql(sqls)

@@ -21,6 +21,7 @@ class TransactionCallback:
         self.savepoint_span = savepoint_span
         #: Whether the application registered it - not hare for its own bookkeeping (events, the
         #: instances' state); ``RollbackIsolation.capture_on_commit()`` hands out only these.
+        #: Internal rollback callbacks run before application callbacks restore or write new state.
         self.is_user_callback = is_user_callback
 
     def is_registered_within(self, savepoint_span: SavepointSpan) -> bool:

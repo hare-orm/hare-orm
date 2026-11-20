@@ -1,5 +1,4 @@
 # pylint: disable=C0301
-import os
 import re
 from unittest.mock import MagicMock, patch
 
@@ -250,13 +249,9 @@ async def test_a_cycle_of_foreign_keys_is_created_in_the_order_of_its_tables_on_
 async def test_a_cycle_of_foreign_keys_is_created_with_its_foreign_keys():
     # generate_schemas() creates a table of the cycle without the foreign key to the table created
     # after it, added once that exists - again with safe=True, as a migration's AddField does.
-    from hare.contrib.test.isolated_contexts import hare_test_context
     from hare.exceptions import IntegrityError
 
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    async with hare_test_context(
-        ["tests.schema.models_cyclic_nullable"], db_url=db_url, connection_label="models"
-    ) as ctx:
+    async with DatabaseUnderTest.open_model_context(["tests.schema.models_cyclic_nullable"]) as ctx:
         head_model = ctx.apps.get_model("models.CycleHead")
         tail_model = ctx.apps.get_model("models.CycleTail")
         head = await head_model.objects.create(id=1)
@@ -265,7 +260,7 @@ async def test_a_cycle_of_foreign_keys_is_created_with_its_foreign_keys():
         await head.save()
         await Hare.generate_schemas(safe=True)
         assert await head_model.objects.values_list("id", "tail_id") == [(1, 1)]
-        if head_model._meta.connection.features.supports_foreign_keys:
+        if ctx.apps.get_queryset(head_model).get_connection().features.supports_foreign_keys:
             with pytest.raises(IntegrityError):
                 await head_model.objects.create(id=2, tail_id=99)
         await tail.delete()
@@ -957,7 +952,7 @@ CREATE INDEX "idx_index_gist_cc203a3ffdb7" ON "index" USING GIST ("gist");
 CREATE INDEX "idx_index_sp_gist_939be3501a54" ON "index" USING SPGIST ("sp_gist");
 CREATE INDEX "idx_index_hash_c08b870a8bf2" ON "index" USING HASH ("hash");
 CREATE INDEX "idx_index_partial_31679bd35f20" ON "index" ("partial") WHERE ("id"=1);
-CREATE INDEX "idx_index_expr_6b3aac52573a" ON "index" USING GIN ((TO_TSVECTOR('english',((COALESCE("title",'') || ' ') || COALESCE("body",'')))));
+CREATE INDEX "idx_index_expr_1f7136a4108a" ON "index" USING GIN ((TO_TSVECTOR(CAST('english' AS regconfig),((COALESCE("title",'') || ' ') || COALESCE("body",'')))));
 CREATE INDEX "idx_index_path_21f724a059db" ON "index" ("path" "varchar_pattern_ops");"""
 
 ASYNCPG_INDEX_SAFE_SQL = """CREATE EXTENSION IF NOT EXISTS "bloom";
@@ -981,7 +976,7 @@ CREATE INDEX IF NOT EXISTS "idx_index_gist_cc203a3ffdb7" ON "index" USING GIST (
 CREATE INDEX IF NOT EXISTS "idx_index_sp_gist_939be3501a54" ON "index" USING SPGIST ("sp_gist");
 CREATE INDEX IF NOT EXISTS "idx_index_hash_c08b870a8bf2" ON "index" USING HASH ("hash");
 CREATE INDEX IF NOT EXISTS "idx_index_partial_31679bd35f20" ON "index" ("partial") WHERE ("id"=1);
-CREATE INDEX IF NOT EXISTS "idx_index_expr_6b3aac52573a" ON "index" USING GIN ((TO_TSVECTOR('english',((COALESCE("title",'') || ' ') || COALESCE("body",'')))));
+CREATE INDEX IF NOT EXISTS "idx_index_expr_1f7136a4108a" ON "index" USING GIN ((TO_TSVECTOR(CAST('english' AS regconfig),((COALESCE("title",'') || ' ') || COALESCE("body",'')))));
 CREATE INDEX IF NOT EXISTS "idx_index_path_21f724a059db" ON "index" ("path" "varchar_pattern_ops");"""
 
 ASYNCPG_M2M_NO_AUTO_CREATE_SQL = """CREATE TABLE "team" (
@@ -1318,7 +1313,7 @@ async def test_generate_schemas_creates_meta_triggers():
     declares silently didn't exist on a database set up without migrations."""
     from hare.contrib.test.isolated_contexts import hare_test_context
 
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+    db_url = DatabaseUnderTest.get_url()
     is_sqlite = DatabaseUnderTest.get_engine_name(DatabaseUnderTest.get_dialect(db_url)) == "sqlite"
     app_label = "generate_schema_triggers_sqlite" if is_sqlite else "generate_schema_triggers_postgres"
     model_name = "GeneratedTriggerCounterSqlite" if is_sqlite else "GeneratedTriggerCounterPostgres"

@@ -61,6 +61,9 @@ sub-arrays of other lengths at one depth (`[[1, 2], [3]]`), or a value beside a 
 (`[[]]`, `[[], []]`) is stored by PostgreSQL as an empty array and read back as `[]`; ClickHouse keeps
 it.
 
+The same nested-shape check applies to `ArrayField` subclasses, including different subclasses
+at successive dimensions, after their child writers convert the input values.
+
 For annotating an element instead of filtering on it, use [`ArrayItem`](functions.md) — same 0-indexed
 convention:
 
@@ -86,6 +89,11 @@ await Book.objects.filter(keywords__len__gte=2)
 await Book.objects.filter(keywords__0_2__contains=["whaling"])
 await Book.objects.all().order_by("keywords__0").values_list("keywords__0", "keywords__len")
 ```
+
+Temporal elements and range bounds keep their ordinary compound lookups after extraction:
+`moments__0__year__gte=2024`, `moments__0__date__in=[date(2024, 1, 1)]` or
+`during__startswith__year__range=(2023, 2024)`. Their ordering descriptions accept the same
+value paths, such as `moments__0__year`.
 
 ## <a id="wall-clock-fields"></a>`NaiveDatetimeField`, `NaiveTimeField`, `IntervalField`, `FixedCharField`
 
@@ -207,6 +215,9 @@ await Loan.objects.filter(status__in=[LoanStatus.LENT, "overdue"]).order_by("sta
   `type_schema` names is created as a model's `Meta.schema` is (`CreateSchema`). Turning a
   `CharEnumField` into a `NativeEnumField`, or moving the column to another type (another `type_name` or
   `type_schema`), converts it in place through its text (`ALTER COLUMN ... TYPE ... USING`).
+  An implicit schema and an explicit schema share a type when PostgreSQL's current schema matches the explicit
+  one. Both declarations must then use the same labels. Removing a declaration keeps the type while
+  another declaration uses it. If the current schema differs, the declarations identify separate types.
 - **Changing the members.** New members added while the old ones keep their order become new labels in
   place (`ALTER TYPE ... ADD VALUE`) — a value added this way can't be used in the transaction that adds
   it, so write such rows in a later migration. A removed or reordered member replaces the type: the

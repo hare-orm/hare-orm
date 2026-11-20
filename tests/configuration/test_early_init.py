@@ -47,51 +47,30 @@ class Event(Model):
 @pytest.mark.asyncio
 async def test_early_init():
     from hare.contrib.pydantic import pydantic_model_creator
+    from hare.core.apps.model_binding_graph import ModelBindingGraph
 
-    Event_TooEarly = pydantic_model_creator(Event)
-    assert Event_TooEarly.model_json_schema() == {
-        "title": "Event",
-        "type": "object",
-        "description": "The Event model docstring.<br/><br/>This is multiline docs.",
-        "properties": {
-            "id": {
-                "title": "Id",
-                "type": "integer",
-                "maximum": 2147483647,
-                "minimum": -2147483648,
-            },
-            "name": {
-                "title": "Name",
-                "type": "string",
-                "description": "The Event NAME<br/>It's pretty important",
-                "maxLength": 255,
-            },
-            "created_at": {
-                "title": "Created At",
-                "type": "string",
-                "format": "date-time",
-                "readOnly": True,
-                "default": None,
-            },
-        },
-        "required": ["id", "name"],
-        "additionalProperties": False,
-    }
+    declaration_graph = ModelBindingGraph()
+    from hare.core.apps.apps import Apps
+    from hare.core.connections.connection_handler import ConnectionHandler
+    from hare.exceptions import ConfigurationError
+
+    with pytest.raises(ConfigurationError, match="not registered"):
+        pydantic_model_creator(Event, apps=Apps({}, ConnectionHandler()))
     # Not bound yet: the relation is declared, its target not resolved.
-    assert Event._meta.app is None
-    assert Event._meta.foreign_key_fields == {"tournament"}
-    assert Event._meta.fields_map["tournament"].deconstruct()[2] == {
+    assert Event._declaration.app is None
+    assert declaration_graph.include(Event).foreign_key_fields == {"tournament"}
+    assert declaration_graph.include(Event).fields_map["tournament"].deconstruct()[2] == {
         "model_name": "models.Tournament",
         "related_name": "events",
         "null": True,
         "db_index": True,
     }
 
-    Hare.bind_models(
+    apps = Hare.bind_models(
         HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": ["tests.configuration.test_early_init"]})
     )
 
-    Event_Pydantic = pydantic_model_creator(Event)
+    Event_Pydantic = pydantic_model_creator(Event, apps=apps)
     schema = Event_Pydantic.model_json_schema()
     # Extract the dynamic hash from $defs key
     tournament_def_key = [k for k in schema.get("$defs", {}) if k.startswith("Tournament_")][0]
@@ -157,11 +136,11 @@ async def test_early_init():
         "type": "object",
     }
     # Bound: the relation resolved to its model and key column.
-    assert Event._meta.full_name == "models.Event"
-    assert Event._meta.foreign_key_fields == {"tournament"}
-    assert Event._meta.fields_map["tournament"].related_model is Tournament
-    assert Event._meta.fields_map["tournament"].source_field == "tournament_id"
-    assert Tournament._meta.backward_foreign_key_fields == {"events"}
+    assert apps.get_binding(Event).full_name == "models.Event"
+    assert apps.get_binding(Event).foreign_key_fields == {"tournament"}
+    assert apps.get_binding(Event).fields_map["tournament"].related_model is Tournament
+    assert apps.get_binding(Event).fields_map["tournament"].source_field == "tournament_id"
+    assert apps.get_binding(Tournament).backward_foreign_key_fields == {"events"}
 
 
 @pytest.mark.parametrize(
@@ -371,9 +350,13 @@ def test_dialects_are_listed_in_builtin_order_whichever_registered_first():
 
 
 def test_sqlite_client_reads_the_bind_parameter_limit():
+    import sqlite3
+    from contextlib import closing
+
     from hare.dialects.sqlite.drivers.aiosqlite.client import AiosqliteClient
 
-    assert AiosqliteClient.features.max_bind_parameters == AiosqliteClient.read_max_bind_parameters()
+    with closing(sqlite3.connect(":memory:")) as probe:
+        assert AiosqliteClient.features.max_bind_parameters == probe.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
     assert AiosqliteClient.features.max_bind_parameters >= 999
 
 

@@ -11,7 +11,7 @@ from hare.fields.data.temporal.datetime_field import DatetimeField
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
 from hare.fields.field import Field
 from hare.fields.generated_field import GeneratedField
-from hare.query.constants import PLAN_CACHE_MISS, PRIMARY_KEY_ALIAS
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.expressions.constants import (
     LIST_LOOKUP_SUFFIXES,
     VALUE_COMPARISON_LOOKUPS,
@@ -19,6 +19,7 @@ from hare.query.expressions.constants import (
 from hare.query.expressions.expression import Expression
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import TableCriterionTuple
+from hare.query.expressions.structure.expression_traversal import ExpressionTraversal
 from hare.query.expressions.subqueries.subquery import Subquery
 from hare.query.expressions.value import Value
 from hare.query.expressions.value_references.container_value_reference import ContainerValueReference
@@ -136,9 +137,9 @@ class FilterValues:
             # The encoded value as an argument of a function in the criterion (``UPPER(?)`` of
             # ``__iexact``, the text query of ``__search``, a JSON containment test): one parameter
             # holds the encoder's result itself.
-            value_wrappers = [node for node in criterion.find_(ValueWrapper) if node.value is encoded_value]
-            if len(value_wrappers) == 1:
-                return EncodedValueReference(value_wrappers[0], cache_reference_field, value_encoder)
+            value_wrapper = FilterValues.get_unique_value_wrapper(criterion, encoded_value)
+            if value_wrapper is not None:
+                return EncodedValueReference(value_wrapper, cache_reference_field, value_encoder)
             return None
         return FilterValues.get_list_value_reference(
             expression_context, criterion, encoded_value, cache_reference_field, value_encoder
@@ -167,10 +168,16 @@ class FilterValues:
             return ScalarValueReference(criterion.right, cache_reference_field)
         # The converted value as an argument of a function in the criterion (a JSON containment
         # test): one parameter holds it.
-        value_wrappers = [node for node in criterion.find_(ValueWrapper) if node.value is encoded_value]
-        if not isinstance(value, (list, tuple, set)) and len(value_wrappers) == 1:
-            return ScalarValueReference(value_wrappers[0], cache_reference_field)
+        value_wrapper = FilterValues.get_unique_value_wrapper(criterion, encoded_value)
+        if not isinstance(value, (list, tuple, set)) and value_wrapper is not None:
+            return ScalarValueReference(value_wrapper, cache_reference_field)
         return None
+
+    @staticmethod
+    def get_unique_value_wrapper(term: Term, value: Any) -> ValueWrapper | None:
+        """The only wrapper in the term holding this exact value, if there is one."""
+        wrappers = [node for node in term.find_(ValueWrapper) if node.value is value]
+        return wrappers[0] if len(wrappers) == 1 else None
 
     @staticmethod
     def get_range_value_reference(
@@ -327,19 +334,21 @@ class FilterValues:
         value_field: Field[Any] | None = None
         if isinstance(value, Subquery) and expression_context.filter_value_is_built:
             value.raise_if_selects_more_columns(
-                key, CompositeKeyFilters.get_filter_column_count(expression_context.model, key)
+                key, CompositeKeyFilters.get_filter_column_count(expression_context.binding, key)
             )
             return value, [], value.get_output_field()
-        filter_value = FilterValues.get_subquery_filter_value(value, expression_context.value_wrapper_references)
+        filter_value = FilterValues.get_subquery_filter_value(
+            value, expression_context.value_wrapper_references, expression_context=expression_context
+        )
         filter_value_joins: list[TableCriterionTuple] = []
         if isinstance(filter_value, Subquery):
             filter_value.raise_if_selects_more_columns(
-                key, CompositeKeyFilters.get_filter_column_count(expression_context.model, key)
+                key, CompositeKeyFilters.get_filter_column_count(expression_context.binding, key)
             )
         if isinstance(filter_value, Expression):
             expression_result = filter_value.get_result(expression_context)
             EncryptedFieldBase.raise_if_compared_to_expression(
-                expression_context.model,
+                expression_context.binding,
                 key,
                 expression_result.output_field,
             )
@@ -367,7 +376,10 @@ class FilterValues:
 
     @staticmethod
     def get_subquery_filter_value(
-        filter_value: Any, value_wrapper_references: RecordedValueReferences | None = None
+        filter_value: Any,
+        value_wrapper_references: RecordedValueReferences | None = None,
+        *,
+        expression_context: ExpressionContext | None = None,
     ) -> Any:
         """A query passed as a filter value, as the subquery the filter compares with
         (``field__in=Other.objects.filter(...)``). A bare queryset is narrowed to its model's
@@ -376,15 +388,34 @@ class FilterValues:
         Args:
             filter_value: The filter value.
             value_wrapper_references: The references being recorded, None when no plan is.
+            expression_context: SQL context for the expression, including its query, binding and connection.
 
         Returns:
             A ``Subquery``, the built SELECT of a set operation's primary key, or ``filter_value``
             unchanged.
         """
+        if expression_context is not None:
+            from hare.query.queryset.pending_calls.calls_before_setup import CallsBeforeSetup
+
+            if isinstance(filter_value, (FilterValues.query_set_class, FilterValues.awaitable_query_class)):
+                filter_value = CallsBeforeSetup.bind(
+                    filter_value, expression_context.application_context, expression_context.binding.graph
+                )
+            elif isinstance(filter_value, Subquery):
+                original = filter_value
+                filter_value = copy.copy(original)
+                filter_value._plan_origin = original
+                filter_value.source_query = CallsBeforeSetup.bind(
+                    original.source_query, expression_context.application_context, expression_context.binding.graph
+                )
+                filter_value._query = None
+                filter_value._built_query = None
         if type(filter_value) is Subquery:
             source = filter_value.source_query
             if isinstance(source, FilterValues.query_set_class) and source._selection is None:
-                narrowed = FilterValues.get_subquery_filter_value(source, value_wrapper_references)
+                narrowed = FilterValues.get_subquery_filter_value(
+                    source, value_wrapper_references, expression_context=expression_context
+                )
                 if isinstance(narrowed, Subquery):
                     narrowed.shares_outer_scope = filter_value.shares_outer_scope
                 return narrowed
@@ -403,24 +434,6 @@ class FilterValues:
         return filter_value
 
     @staticmethod
-    def get_converted_term_parameter(parameter_converter: Callable[[Any], Any], value: Any) -> Any:
-        """The one parameter of the term a value of a filter on an annotation converts into.
-
-        Args:
-            parameter_converter: The conversion.
-            value: The value.
-
-        Returns:
-            The parameter's value; ``PLAN_CACHE_MISS`` - of no type a plan binds - when the value
-            converts into anything else.
-        """
-        term = parameter_converter(value)
-        if not isinstance(term, Term):
-            return PLAN_CACHE_MISS
-        value_wrappers = term.find_(ValueWrapper)
-        return value_wrappers[0].value if len(value_wrappers) == 1 else PLAN_CACHE_MISS
-
-    @staticmethod
     def get_date_timestamp_comparand(
         expression_context: ExpressionContext, key: str, term: Any, value_field: Field[Any] | None
     ) -> Any:
@@ -437,7 +450,7 @@ class FilterValues:
             The term - a date promoted, a timestamp marked for the date column to be promoted.
         """
         field_name, __, lookup = key.partition("__")
-        field_object = expression_context.model._meta.fields_map.get(field_name)
+        field_object = expression_context.binding.fields_map.get(field_name)
         if lookup not in VALUE_COMPARISON_LOOKUPS or field_object is None or value_field is None:
             return term
         filtered_field = GeneratedField.get_effective_field(field_object)
@@ -478,21 +491,56 @@ class FilterValues:
         return value.value
 
     @staticmethod
+    def get_captured_filter_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Capture keywords of a filter call through the shared literal contract."""
+        return {key: FilterValues.get_captured_filter_value(key, value) for key, value in kwargs.items()}
+
+    @staticmethod
+    def get_captured_filter_value(key: str, value: Any) -> Any:
+        """Capture a keyword or Q literal at its call boundary, before deferred compilation.
+
+        Unwrap ordinary Value literals before copying containers or consuming membership
+        iterables. Value(None), expression literals and Value subclasses retain their
+        existing expression semantics. All callers use the same capture order.
+        """
+        return FilterValues.get_list_lookup_value(
+            key, FilterValues.get_detached_value(FilterValues.get_literal_value(value))
+        )
+
+    @staticmethod
     def get_detached_value(value: Any, *, written: bool = False) -> Any:
-        """A filter or update value as it is at the call - copied, so the caller changing it before the
-        query runs changes no query: a dict (a JSON document) whole, a list or set of values shallow.
+        """Capture a value before deferred execution. Copy written containers and dictionaries
+        deeply, and membership lists and sets shallowly.
 
         Args:
             value: The value given.
-            written: Whether the value is written (``update()``) - a list is then copied whole too, a JSON
-                array holding documents.
+            written: Whether the value is written, including a literal wrapped in ``Value``.
 
         Returns:
-            The copy of a dict, list or set; any other value itself.
+            An independent snapshot where the value can change after the call.
         """
-        if isinstance(value, dict) or (written and isinstance(value, list)):
+        if written and isinstance(value, Expression) and type(value) is not Value:
+            return ExpressionTraversal.map_values(
+                value, lambda literal: FilterValues._get_detached_literal(literal, written=True)
+            )
+        return FilterValues._get_detached_literal(value, written=written)
+
+    @staticmethod
+    def _get_detached_literal(value: Any, *, written: bool) -> Any:
+        if written and type(value) is Value:
+            literal = FilterValues.get_detached_value(value.value, written=True)
+            return value if literal is value.value else Value(literal)
+        if isinstance(value, memoryview):
+            return memoryview(value.tobytes())
+        if isinstance(value, dict) or (written and isinstance(value, (list, tuple, set, frozenset, bytearray))):
             try:
-                return copy.deepcopy(value)
+                try:
+                    return copy.deepcopy(value)
+                except TypeError:
+                    memo = FilterValues.get_buffer_copies(value)
+                    if not memo:
+                        raise
+                    return copy.deepcopy(value, memo)
             except RecursionError:
                 # Nested deeper than a copy reaches - deeper than JSON holds: the field refuses it as it is.
                 return value
@@ -501,6 +549,27 @@ class FilterValues:
         if isinstance(value, set):
             return set(iter(value))
         return value
+
+    @staticmethod
+    def get_buffer_copies(value: Any) -> dict[int, Any]:
+        """Supply independent buffers for the container leaves deepcopy cannot copy."""
+        seen: set[int] = set()
+        copies: dict[int, Any] = {}
+        pending = [value]
+        while pending:
+            item = pending.pop()
+            identity = id(item)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            if isinstance(item, memoryview):
+                copies[identity] = memoryview(item.tobytes())
+            elif isinstance(item, dict):
+                pending.extend(item)
+                pending.extend(item.values())
+            elif isinstance(item, (list, tuple, set, frozenset)):
+                pending.extend(item)
+        return copies
 
     @staticmethod
     def get_list_lookup_value(key: str, value: Any) -> Any:

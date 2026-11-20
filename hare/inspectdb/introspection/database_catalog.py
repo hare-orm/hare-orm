@@ -24,7 +24,7 @@ class DatabaseCatalog:
         """Returns the introspector of a dialect.
 
         Args:
-            dialect_name: The dialect's name.
+            dialect_name: The dialect's name or an existing dialect object.
 
         Returns:
             The dialect's ``SchemaIntrospector`` subclass.
@@ -36,9 +36,10 @@ class DatabaseCatalog:
         from hare.dialects.dialect_registry import DialectRegistry
 
         dialect = DialectRegistry.get_dialect(dialect_name)
-        if dialect.introspector_class is None:
+        introspector_class = dialect.introspector_class
+        if introspector_class is None:
             raise UnsupportedDialectError(dialect.name)
-        return dialect.introspector_class
+        return introspector_class
 
     @staticmethod
     def get_introspector_class(connection: DatabaseClient) -> type[SchemaIntrospector]:
@@ -53,10 +54,16 @@ class DatabaseCatalog:
         Raises:
             UnsupportedDialectError: The dialect has no introspector.
         """
-        introspector_class = connection.dialect.introspector_class
-        if introspector_class is None:
-            raise UnsupportedDialectError(connection.dialect.name)
-        return introspector_class
+        return DatabaseCatalog.get_dialect_introspector_class(connection.dialect)
+
+    @staticmethod
+    async def _get_introspector_and_schema(
+        connection: DatabaseClient, schema: str | None
+    ) -> tuple[type[SchemaIntrospector], str]:
+        introspector = DatabaseCatalog.get_introspector_class(connection)
+        if schema is None:
+            schema = await introspector.fetch_default_schema(connection)
+        return introspector, schema
 
     @staticmethod
     async def get_default_schema(connection: DatabaseClient) -> str:
@@ -110,9 +117,7 @@ class DatabaseCatalog:
             UnsupportedDialectError: The connection's dialect has no introspector.
             SchemaNotFoundError: The schema doesn't exist.
         """
-        introspector_class = DatabaseCatalog.get_introspector_class(connection)
-        if schema is None:
-            schema = await introspector_class.fetch_default_schema(connection)
+        introspector_class, schema = await DatabaseCatalog._get_introspector_and_schema(connection, schema)
         return await introspector_class.fetch_table_names(connection, schema, include_partitions)
 
     @staticmethod
@@ -131,9 +136,7 @@ class DatabaseCatalog:
         Raises:
             UnsupportedDialectError: The connection's dialect has no introspector.
         """
-        introspector_class = DatabaseCatalog.get_introspector_class(connection)
-        if schema is None:
-            schema = await introspector_class.fetch_default_schema(connection)
+        introspector_class, schema = await DatabaseCatalog._get_introspector_and_schema(connection, schema)
         return await introspector_class.fetch_views(connection, schema)
 
     @staticmethod
@@ -150,9 +153,7 @@ class DatabaseCatalog:
         Raises:
             UnsupportedDialectError: The connection's dialect has no introspector.
         """
-        introspector_class = DatabaseCatalog.get_introspector_class(connection)
-        if schema is None:
-            schema = await introspector_class.fetch_default_schema(connection)
+        introspector_class, schema = await DatabaseCatalog._get_introspector_and_schema(connection, schema)
         return await introspector_class.fetch_schema_object_notes(connection, schema)
 
     @staticmethod
@@ -171,9 +172,7 @@ class DatabaseCatalog:
         Raises:
             UnsupportedDialectError: The connection's dialect has no introspector.
         """
-        introspector_class = DatabaseCatalog.get_introspector_class(connection)
-        if schema is None:
-            schema = await introspector_class.fetch_default_schema(connection)
+        introspector_class, schema = await DatabaseCatalog._get_introspector_and_schema(connection, schema)
         return await introspector_class.fetch_unattached_schema_objects(connection, schema)
 
     @staticmethod
@@ -213,9 +212,7 @@ class DatabaseCatalog:
             SchemaNotFoundError: The requested tables' schema doesn't exist.
             TableNotFoundError: A requested table doesn't exist in the schema.
         """
-        introspector = DatabaseCatalog.get_introspector_class(connection)
-        if schema is None:
-            schema = await introspector.fetch_default_schema(connection)
+        introspector, schema = await DatabaseCatalog._get_introspector_and_schema(connection, schema)
         return await introspector.fetch_catalog(connection, tables, schema)
 
     @staticmethod
@@ -262,7 +259,5 @@ class DatabaseCatalog:
                 that silently returns nothing for one would otherwise describe a table with no
                 columns at all.
         """
-        introspector_class = DatabaseCatalog.get_introspector_class(connection)
-        if schema is None:
-            schema = await introspector_class.fetch_default_schema(connection)
+        introspector_class, schema = await DatabaseCatalog._get_introspector_and_schema(connection, schema)
         return await introspector_class.fetch_tables(connection, tables, schema)

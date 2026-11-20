@@ -79,7 +79,7 @@ async def test_not_null_without_a_transaction_goes_through_a_check_dropped_after
         state = await create_tables(connection)
         migration = make_migration("0002_title", AlterColumnNotNullSafe("Book", "title"), atomic=False)
         collecting_editor = connection.dialect.schema_editor_class(connection, atomic=False, collect_sql=True)
-        await migration.apply(state.clone(), schema_editor=collecting_editor, collect_sql=True)
+        await migration.apply(state, schema_editor=collecting_editor, collect_sql=True)
         statements = "\n".join(collecting_editor.collected_sql)
         assert "NOT VALID" in statements
         assert "VALIDATE CONSTRAINT" in statements
@@ -87,7 +87,7 @@ async def test_not_null_without_a_transaction_goes_through_a_check_dropped_after
         assert "DROP CONSTRAINT" in statements
 
         editor = connection.dialect.schema_editor_class(connection, atomic=False, collect_sql=False)
-        await migration.apply(state.clone(), schema_editor=editor)
+        await migration.apply(state, schema_editor=editor)
         constraints = await connection.execute_dicts(CONSTRAINT_VALIDITY_SQL.format(table=BOOK_TABLE))
         assert [row["conname"] for row in constraints if row["conname"].startswith("nn_")] == []
         not_null = await connection.execute_dicts(

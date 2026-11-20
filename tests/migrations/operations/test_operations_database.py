@@ -10,7 +10,6 @@ from hare.ddl import RawSQLTerm
 from hare.ddl.constraints import CheckConstraint, UniqueConstraint
 from hare.ddl.indexes import Index
 from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-from hare.dialects.base.schema.tables.table_comments import TableComments
 from hare.fields.field import Field
 from hare.fields.relations.fields import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
@@ -35,25 +34,11 @@ from hare.migrations.state.state import State
 from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
 from tests.utils.fake_client import FakeClient
+from tests.utils.model_bindings import ModelBindings
 from tests.utils.operations import apply_operations
+from tests.utils.schema_editor import TestSchemaEditor
 
 pytestmark = pytest.mark.database_independent
-
-
-class TestSchemaEditorTableComments(TableComments):
-    __test__ = False
-
-    def get_table_comment_sql(self, table: str, comment: str) -> str:
-        return ""
-
-    def get_column_comment_sql(self, table: str, column: str, comment: str) -> str:
-        return ""
-
-
-class TestSchemaEditor(BaseSchemaEditor):
-    __test__ = False
-
-    table_comments_class = TestSchemaEditorTableComments
 
 
 def make_model(
@@ -71,7 +56,7 @@ def make_model(
 
 
 def build_state(app_label: str, model: type) -> State:
-    return State(models={(app_label, model.__name__): ModelState.make_from_model(app_label, model)})
+    return State(models={(app_label, model.__name__): ModelState.make_from_declaration(app_label, model)})
 
 
 @pytest.mark.asyncio
@@ -223,7 +208,7 @@ async def test_m2m_through_model_migration_lifecycle_emits_no_extra_through_tabl
     client.executed.clear()
 
     person = state.apps.get_model("models.Person")
-    m2m_field: ManyToManyFieldInstance = person._meta.fields_map["groups"]
+    m2m_field: ManyToManyFieldInstance = state.apps.get_binding(person).fields_map["groups"]
     assert m2m_field.through == "membership"
     assert m2m_field.forward_keys == ("group_id",)
     assert m2m_field.backward_keys == ("person_id",)
@@ -447,7 +432,7 @@ async def test_create_model_names_the_unique_constraint_of_a_unique_field() -> N
 
     create_client = FakeClient("sql")
     create_editor = TestSchemaEditor(create_client)
-    await create_editor.create_model(OldModel)
+    await create_editor.create_model(ModelBindings.prepare(OldModel).get_binding(OldModel))
 
     assert len(create_client.executed) == 1
     assert create_client.executed[0] == (

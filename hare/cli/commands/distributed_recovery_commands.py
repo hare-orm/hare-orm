@@ -6,7 +6,6 @@ import argparse
 
 from hare.cli.context.cli_context import CLIContext
 from hare.cli.context.command_context import CommandContext
-from hare.cli.exceptions import CLIUsageError
 from hare.cli.output.terminal_colors import TerminalColors
 from hare.transactions.distributed.distributed_recovery import DistributedRecovery
 
@@ -27,8 +26,7 @@ class DistributedRecoveryCommands:
             otherwise.
         """
         hare_config = CommandContext.load_config(cli_context)
-        if coordinator not in hare_config.connections:
-            raise CLIUsageError(f"Unknown connection alias: {coordinator}")
+        CommandContext.check_connection_alias(hare_config, coordinator)
 
         async with CommandContext.database_error_boundary(), CommandContext.hare_cli_context(hare_config):
             report = await DistributedRecovery.run(coordinator, finish=finish, older_than_seconds=older_than_seconds)

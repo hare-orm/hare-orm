@@ -7,6 +7,7 @@ from hare.ddl.table_options import TableOptions
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.dialects.base.client.transaction_client import TransactionClient
 from hare.exceptions import DoesNotExist, IntegrityError, QueryError
+from hare.models.instances.field_snapshot import FieldSnapshot
 from hare.models.write.rules.constants import UPDATE_OR_CREATE_METHOD_NAME
 from hare.models.write.rules.enums import WriteType
 from hare.models.write.rules.row_write_rules import RowWriteRules
@@ -19,6 +20,7 @@ TModel = TypeVar("TModel", bound="Model")
 
 if TYPE_CHECKING:
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset.queryset import QuerySet
 
 
@@ -54,7 +56,8 @@ class CreateOrUpdate:
             QueryError: ``defaults`` conflicts with an exact ``kwargs`` value.
             IntegrityError: The create failed for a reason other than the row already existing.
         """
-        create_values = CreateOrUpdate.get_create_values(queryset.model, defaults, kwargs)
+        model_binding: ModelBinding = queryset._binding  # type: ignore[assignment]
+        create_values = CreateOrUpdate.get_create_values(model_binding, defaults, kwargs)
         pinned_connection: DatabaseClient = queryset._connection  # type: ignore[assignment]
         try:
             if (
@@ -86,7 +89,7 @@ class CreateOrUpdate:
         Raises:
             IntegrityError: Such a row matches ``kwargs``.
         """
-        meta = queryset.model._meta
+        meta: ModelBinding = queryset._binding  # type: ignore[assignment]
         visibility = queryset._visibility
         unhidden = queryset
         hiding_rules = []
@@ -96,7 +99,12 @@ class CreateOrUpdate:
         if meta.tenant_field and not visibility.all_tenants:
             unhidden = unhidden.all_tenants()
             hiding_rules.append("of a tenant outside the scope (read it through all_tenants())")
-        if not hiding_rules or not await unhidden.filter(**kwargs).exists():
+        if not hiding_rules:
+            return
+        unhidden = unhidden.filter(**kwargs)
+        # This diagnostic reads membership; row locks belong to the write's matching read.
+        unhidden._options = unhidden._options.updated(select_for_update=False)
+        if not await unhidden.exists():
             return
         raise IntegrityError(
             f"{error} - a row the queryset doesn't show matches the conditions on {sorted(kwargs)}: it is "
@@ -116,12 +124,12 @@ class CreateOrUpdate:
             connection: The connection to save on.
 
         Raises:
-            QueryError: ``defaults`` sets a field an update can't set (``RowWriteRules``).
+            QueryError: ``defaults`` changes the matched row's key or sets a field an update can't set.
             FieldError: ``defaults`` names a field the model doesn't have.
         """
-        meta = queryset.model._meta
-        # A reverse or many-to-many relation is set on the object as a whole, not written as a column; the
-        # primary key is the row's own, given along with its other values.
+        meta: ModelBinding = queryset._binding  # type: ignore[assignment]
+        # Relations without local columns are assigned on the object. The matched row's key is checked
+        # after assignment so key aliases and normalization follow the usual model rules.
         unwritten_names = (
             meta.backward_foreign_key_fields
             | meta.backward_one_to_one_fields
@@ -129,12 +137,20 @@ class CreateOrUpdate:
             | {PRIMARY_KEY_ALIAS, *meta.primary_key_attribute_names}
         )
         RowWriteRules.get(
-            queryset.model,
+            meta,
             WriteType.UPDATE,
             [name for name in defaults if name not in unwritten_names],
             UPDATE_OR_CREATE_METHOD_NAME,
         )
-        await obj.update_from_dict(defaults).save(using=connection)
+        key_fields = meta.primary_key_attribute_names
+        matched_key = tuple(getattr(obj, name) for name in key_fields)
+        obj.update_from_dict(defaults)
+        if any(
+            FieldSnapshot.values_differ(value, getattr(obj, name))
+            for name, value in zip(key_fields, matched_key, strict=True)
+        ):
+            raise QueryError("update_or_create() defaults cannot change the primary key of the matched row")
+        await obj.save(using=connection)
 
     @staticmethod
     def get_matching(queryset: QuerySet[Any, Any], kwargs: dict[str, Any]) -> QuerySetSingle[TModel]:
@@ -156,12 +172,12 @@ class CreateOrUpdate:
         )
 
     @staticmethod
-    def get_create_values(model: type[Model], defaults: dict[str, Any], kwargs: dict[str, Any]) -> dict[str, Any]:
+    def get_create_values(binding: ModelBinding, defaults: dict[str, Any], kwargs: dict[str, Any]) -> dict[str, Any]:
         """The field values of the object ``get_or_create()``/``update_or_create()`` creates:
         ``kwargs`` without its lookups (a lookup only filters, like Django), then ``defaults``.
 
         Args:
-            model: The created object's model - a ``sensitive=True`` field's values never show.
+            binding: The created object's model - a ``sensitive=True`` field's values never show.
             defaults: The values for a created object.
             kwargs: The conditions.
 
@@ -174,7 +190,7 @@ class CreateOrUpdate:
         exact_match_kwargs = {key: value for key, value in kwargs.items() if "__" not in key}
         for key in defaults.keys() & exact_match_kwargs.keys():
             if (default_value := defaults[key]) != (query_value := exact_match_kwargs[key]):
-                if key in model._meta.sensitive_fields:
+                if key in binding.sensitive_fields:
                     default_value = query_value = HIDDEN_PARAMETER_TEXT
                 raise QueryError(f"Conflict value with {key=}: {default_value=} vs {query_value=}")
         return {**exact_match_kwargs, **defaults}

@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset import QuerySet
     from hare.query.queryset.model_query import ModelQuery
 
@@ -30,7 +31,8 @@ class View(NamedSchemaObject):
             ``RawSQLTerm`` too.
         read_columns: The columns the query reads, ``(table, column)`` each - a migration changing one
             drops the view before and creates it again after. Taken from a queryset itself; for raw SQL,
-            the ones you name.
+            the ones you name. A short name refers to the declaring model's schema. Use
+            ``schema.table`` for a dependency in another schema.
 
     Raises:
         ConfigurationError: The name is empty, the query is neither a queryset, ``ModelQuery()`` nor a
@@ -39,6 +41,7 @@ class View(NamedSchemaObject):
 
     query: RawSQLTerm | QuerySet[Any, Any] | ModelQuery
     read_columns: tuple[tuple[str, str], ...] = field(default=(), kw_only=True)
+    _binding: ModelBinding | None = field(default=None, init=False, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -66,6 +69,14 @@ class View(NamedSchemaObject):
                 f"{type(self).__name__} {self.name!r}: the query takes a queryset, ModelQuery() or "
                 f"RawSQLTerm(...) of raw SQL, got {ValueDescriptions.get_shown_value(self.query)}"
             )
+        if isinstance(self.query, QuerySet) and (
+            self.query._context is not None or self.query._connection is not None
+        ):
+            # Capture an explicitly selected source while it is available; declarations keep SQL,
+            # not that source's context or connection.
+            captured = self.with_sql_query()
+            object.__setattr__(self, "query", captured.query)
+            object.__setattr__(self, "read_columns", captured.read_columns)
 
     def for_model(self, model: type[Model]) -> Self:
         """The view as the model declaring it has it - a ``ModelQuery()`` made on that model.
@@ -79,6 +90,27 @@ class View(NamedSchemaObject):
             return self
         return replace(self, query=self.query.for_model(model))
 
+    def for_binding(self, binding: ModelBinding) -> Self:
+        """Prepare a schema declaration without retaining its source application's resources.
+
+        An explicitly bound queryset keeps its selected SQL, just like a RawSQLTerm;
+        unbound templates and ModelQuery calls use this graph's fields and table names.
+        """
+        if isinstance(self.query, RawSQLTerm):
+            return self
+        bound = replace(self)
+        object.__setattr__(bound, "_binding", binding)
+        return bound
+
+    def get_compiled_queryset(self, client: DatabaseClient | None = None) -> QuerySet[Any, Any] | None:
+        """Select compilation resources at this call boundary, retaining no client on the view."""
+        queryset = self.get_queryset()
+        if queryset is None:
+            return None
+        from hare.query.query_connection import QueryConnection
+
+        return QueryConnection.get_schema_queryset(queryset, client)
+
     def get_queryset(self) -> QuerySet[Any, Any] | None:
         """The queryset the view selects, None for raw SQL.
 
@@ -87,7 +119,7 @@ class View(NamedSchemaObject):
         """
         from hare.query.queryset.model_query import ModelQuery
 
-        return ModelQuery.get_declared_queryset(self.query)
+        return ModelQuery.get_declared_queryset(self.query, binding=self._binding)
 
     def get_query_sql(self, client: DatabaseClient | None = None) -> str:
         """The ``SELECT`` as SQL.
@@ -98,25 +130,23 @@ class View(NamedSchemaObject):
         Returns:
             The SQL.
         """
-        queryset = self.get_queryset()
+        queryset = self.get_compiled_queryset(client)
         if queryset is None:
             return self.query.sql  # type: ignore[return-value]
-        if client is not None:
-            queryset = queryset.using(client)
         return queryset.sql(parameters_inline=True)
 
-    def get_read_columns(self) -> tuple[tuple[str, str], ...]:
+    def get_read_columns(self, client: DatabaseClient | None = None) -> tuple[tuple[str, str], ...]:
         """The columns the query reads - a queryset's own, else ``read_columns``."""
-        queryset = self.get_queryset()
+        queryset = self.get_compiled_queryset(client)
         if queryset is None:
             return self.read_columns
         return tuple(sorted(queryset.get_read_columns()))
 
-    def with_sql_query(self) -> View:
+    def with_sql_query(self, client: DatabaseClient | None = None) -> View:
         """The view with its query as ``RawSQLTerm`` - as the migration state keeps it."""
         if isinstance(self.query, RawSQLTerm):
             return self
-        return replace(self, query=RawSQLTerm(self.get_query_sql()), read_columns=self.get_read_columns())
+        return replace(self, query=RawSQLTerm(self.get_query_sql(client)), read_columns=self.get_read_columns(client))
 
     def get_options(self) -> dict[str, Any]:
         """The arguments beside the name and the query a migration file writes."""

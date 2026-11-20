@@ -38,6 +38,7 @@ class TenantClients:
         """The client of one tenant's schema, made on its first use.
 
         Args:
+            source_client: The client supplying the base connection settings.
             schema_name: The tenant's schema.
 
         Returns:
@@ -66,9 +67,11 @@ class TenantClients:
         source_client: DatabaseClient, settings: Mapping[str, Any] | None = None
     ) -> DatabaseClient:
         """A new connection to this client's database, apart from it and in the same tenant schema.
-        The caller closes it.
+        The caller closes it. A context-owned source retains its handler; a standalone
+        source creates an isolated handler from its captured connection settings.
 
         Args:
+            source_client: The client supplying the base connection settings.
             settings: Settings replacing the connection's own.
 
         Returns:
@@ -88,6 +91,7 @@ class TenantClients:
         """A new connection to this client's database.
 
         Args:
+            source_client: The client supplying the base connection settings.
             settings: Settings replacing the connection's own.
             tenant_client_settings: The settings of the tenant schema it works in.
             tenant_schema: The tenant schema it works in, None for none.
@@ -95,12 +99,14 @@ class TenantClients:
         Returns:
             The client.
         """
-        # Local import: the connections import the dialects.
-        from hare.core.connections.connections import Connections
+        # Local import: the connection handler imports the dialects.
+        from hare.core.connections.connection_handler import ConnectionHandler
 
-        connections = (
-            source_client.connection_handler if source_client.connection_handler is not None else Connections.current()
-        )
+        # A standalone client has no ambient application owner. Keep this independent
+        # lifetime separate instead of requiring or borrowing another context's handler.
+        connections = source_client.connection_handler
+        if connections is None:
+            connections = ConnectionHandler()
         client = connections.create_independent(
             source_client.connection_alias,
             {**settings, **tenant_client_settings},

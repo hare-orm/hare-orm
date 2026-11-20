@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from decimal import Decimal
+from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeVar, overload
 
 from hare.exceptions import ValidationError
@@ -103,10 +104,21 @@ class IntField(Field[TInt]):
             return value.is_integer()
         return value.is_finite() and value == value.to_integral_value()
 
+    def get_assign_normalized_types(self) -> frozenset[type]:
+        return self._get_unchanged_assign_types(IntField.to_python, self.field_type)
+
     def to_python(self, value: Any) -> Any:
         if type(value) is not int and value is not None:
             self.raise_if_not_int(value)
         return super().to_python(value)
+
+    def get_path_key_value(self, segment: str) -> Any:
+        """Parse an integer key's path text before its normal assignment conversion.
+
+        Direct assignments remain integer-only. Integer enums and custom integer
+        normalizers receive the parsed number through their ordinary ``to_python`` hook.
+        """
+        return self.to_python(Field.to_python(self, segment))
 
     def from_db_value(self, value: Any) -> Any:
         # An integer expression a database computes as a fraction (a SUM of a wider type divided)
@@ -131,7 +143,8 @@ class IntField(Field[TInt]):
 
     def to_lookup_values(self, values: list[Any], instance: type[Model] | Model | None) -> list[Any]:
         # Plain ints - every key of a long `id__in` list, say - are checked in one pass.
-        if type(self).to_lookup_value is IntField.to_lookup_value and type(self).to_db_value is IntField.to_db_value:
+        field_class = type(self)
+        if field_class.to_lookup_value is IntField.to_lookup_value and field_class.to_db_value is IntField.to_db_value:
             validated_values = self.get_validated_values(values)
             if validated_values is not None:
                 return validated_values
@@ -153,7 +166,7 @@ class IntField(Field[TInt]):
             ValidationError: ``value`` is NaN, past the field's bounds or no number.
         """
         if isinstance(value, (float, Decimal)):
-            if value != value:
+            if value.is_nan() if isinstance(value, Decimal) else value != value:
                 # NaN - a value no write stores, compared differently by every database.
                 raise ValidationError(f"{self.model_field_name}: NaN is no number to compare with")
             self.validate(value)
@@ -195,21 +208,62 @@ class IntField(Field[TInt]):
         # Local import: the filters import the fields.
         from hare.query.filters.lookups.value_encoders import ValueEncoders
 
-        if not isinstance(values, (list, tuple, set)):
-            # Refused as every list lookup refuses it.
-            return ValueEncoders.encode_list(values, obj, field, dialect)
+        ValueEncoders.check_list_values(values, field)
         return [None if value is None else self.get_compared_value(value, obj, dialect) for value in values]
+
+    def encode_column_bound(
+        self,
+        value: Any,
+        obj: Model | type[Model],
+        field: Field[Any],
+        dialect: Dialect,
+        *,
+        round_bound: Callable[[Decimal], int],
+    ) -> Any:
+        """Use an equivalent integer threshold when the dialect requires it."""
+        if (
+            dialect.features.rounds_integer_lookup_bounds
+            and isinstance(value, Decimal)
+            and value.is_finite()
+            and type(self).get_compared_value is IntField.get_compared_value
+        ):
+            self.validate(value)
+            return round_bound(value)
+        return self.encode_compared_value(value, obj, field, dialect)
+
+    def encode_column_bounds(
+        self, values: Any, obj: Model | type[Model], field: Field[Any], dialect: Dialect
+    ) -> list[Any]:
+        """Encode the inclusive lower and upper bounds of a stored integer column."""
+        if not isinstance(values, (list, tuple, set)) or len(values) != 2:
+            return self.encode_compared_values(values, obj, field, dialect)
+        lower, upper = values
+        return [
+            self.encode_column_bound(lower, obj, field, dialect, round_bound=math.ceil),
+            self.encode_column_bound(upper, obj, field, dialect, round_bound=math.floor),
+        ]
 
     def get_lookups(self) -> dict[str, FieldLookup]:
         lookups = super().get_lookups()
         compared_lookups: dict[str, FieldLookup] = {
-            suffix: lookups[suffix].with_changes(value_encoder=self.encode_compared_value)
-            for suffix in (Lookup.GT, Lookup.GTE, Lookup.LT, Lookup.LTE)
+            suffix: lookups[suffix].with_changes(
+                value_encoder=self.encode_compared_value,
+                column_value_encoder=partial(self.encode_column_bound, round_bound=round_bound),
+            )
+            for suffix, round_bound in (
+                (Lookup.GT, math.floor),
+                (Lookup.GTE, math.ceil),
+                (Lookup.LT, math.ceil),
+                (Lookup.LTE, math.floor),
+            )
         }
         return {
             **lookups,
             **compared_lookups,
-            Lookup.RANGE: lookups[Lookup.RANGE].with_changes(value_encoder=self.encode_compared_values),
+            Lookup.RANGE: lookups[Lookup.RANGE].with_changes(
+                value_encoder=self.encode_compared_values,
+                column_value_encoder=self.encode_column_bounds,
+            ),
         }
 
     @property

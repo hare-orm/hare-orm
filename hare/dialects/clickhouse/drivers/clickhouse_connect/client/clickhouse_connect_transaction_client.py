@@ -23,9 +23,6 @@ class ClickhouseConnectTransactionClient(ClickhouseTransactionClient, Clickhouse
     async def open_transaction_connection(self) -> AsyncClient:
         return await self.open_library_client(with_db=True, session_id=str(uuid.uuid4()))
 
-    async def close_transaction_connection(self, connection: AsyncClient) -> None:
-        await connection.close()
-
     async def send_transaction_statement(self, sql: str) -> None:
         await self.send_command(self._connection, sql)
 

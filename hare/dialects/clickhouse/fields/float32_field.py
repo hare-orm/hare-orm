@@ -42,10 +42,13 @@ class Float32Field(FloatField[TFloat]):
     def to_db_value(self, value: Any, instance: type[Model] | Model | None) -> Any:
         value = super().to_db_value(value, instance)
         if isinstance(value, float) and math.isfinite(value) and abs(value) > FLOAT32_MAX:
-            raise ValidationError(f"{self.model_field_name}: {value!r} is beyond a float32's range")
+            raise ValidationError(
+                f"{self.model_field_name}: {self.get_value_for_message(value)} is beyond a float32's range"
+            )
         if isinstance(value, float) and value != 0 and struct.unpack("f", struct.pack("f", value))[0] == 0:
             raise ValidationError(
-                f"{self.model_field_name}: {value!r} is too close to zero for a float32 - it would be stored as 0"
+                f"{self.model_field_name}: {self.get_value_for_message(value)} is too close to zero for a float32 "
+                "- it would be stored as 0"
             )
         return value
 

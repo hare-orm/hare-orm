@@ -23,12 +23,13 @@ impl ColumnEntry {
 }
 
 /// How the instances of one model are made from a result's rows - its columns, their readers and the
-/// model's flags - made once from its `ModelColumns` and kept with them (a plan keeps them), never per
-/// query. The model's public `__new__` - looked up for each row, so a replaced one counts from the next -
-/// the field readers and descriptors run in row order.
+/// model's flags. A statement plan keeps this layout. The model's public `__new__` is looked up for
+/// each row, so a replaced one counts from the next.
+/// Field readers and descriptors run in row order.
 #[pyclass(frozen, module = "rust.native.rows")]
 pub struct ModelRowLayout {
-    model: Py<PyAny>,
+    allocate: Py<PyAny>,
+    binding: Py<PyAny>,
     entries: Vec<ColumnEntry>,
     partial: bool,
     related: bool,
@@ -43,28 +44,19 @@ pub struct ModelRowLayout {
 
 #[pymethods]
 impl ModelRowLayout {
-    /// Args:
-    ///     columns: The `ModelColumns` of the model.
     #[new]
-    fn new(columns: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let py = columns.py();
-        let model = columns.getattr(intern!(py, "model"))?;
-        let meta = model.getattr(intern!(py, "_meta"))?;
-        let names = columns.getattr(intern!(py, "field_names"))?.cast_into::<PyTuple>()?;
-        let layout =
-            columns.getattr(intern!(py, "row_layout"))?.getattr(intern!(py, "columns"))?.cast_into::<PyTuple>()?;
-        if names.len() != layout.len() {
-            return Err(pyo3::exceptions::PyValueError::new_err("field names and columns differ in length"));
-        }
-        let mut entries = Vec::with_capacity(names.len());
-        for (name, column) in names.iter().zip(layout.iter()) {
-            entries.push(ColumnEntry {
-                name: name.cast_into::<PyString>()?.unbind(),
-                key: column.getattr(intern!(py, "key"))?.unbind(),
-                reader: ColumnReader::new(column.getattr(intern!(py, "reader"))?),
-            });
-        }
-        let path = columns.getattr(intern!(py, "path"))?.cast_into::<PyTuple>()?;
+    fn new<'py>(
+        binding: &Bound<'py, PyAny>,
+        columns: Vec<(Bound<'py, PyString>, Bound<'py, PyAny>, Bound<'py, PyAny>)>,
+        path: Bound<'py, PyTuple>,
+        partial: bool,
+        related: bool,
+    ) -> PyResult<Self> {
+        let py = binding.py();
+        let allocate = py
+            .import("hare.models.instances.instance_initialization")?
+            .getattr(intern!(py, "InstanceInitialization"))?
+            .getattr(intern!(py, "allocate"))?;
         let parent_attribute = if path.is_empty() {
             None
         } else {
@@ -72,23 +64,23 @@ impl ModelRowLayout {
             Some(PyString::new(py, &format!("_{relation}")).unbind())
         };
         Ok(ModelRowLayout {
-            model: model.unbind(),
-            entries,
-            partial: columns.getattr(intern!(py, "is_partial"))?.is_truthy()?,
-            related: columns.getattr(intern!(py, "is_related"))?.is_truthy()?,
-            custom_pk: meta.getattr(intern!(py, "default_custom_generated_pk"))?.is_truthy()?,
-            track_dirty: meta.getattr(intern!(py, "track_dirty_fields"))?.is_truthy()?,
+            allocate: allocate.unbind(),
+            binding: binding.clone().unbind(),
+            entries: Self::prepare_columns(columns),
+            partial,
+            related,
+            custom_pk: binding.getattr(intern!(py, "default_custom_generated_pk"))?.is_truthy()?,
+            track_dirty: binding.getattr(intern!(py, "track_dirty_fields"))?.is_truthy()?,
             path: path.unbind(),
             parent_attribute,
         })
     }
 
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
-        visit.call(&self.model)?;
+        visit.call(&self.allocate)?;
+        visit.call(&self.binding)?;
         for entry in &self.entries {
-            visit.call(&entry.name)?;
-            visit.call(&entry.key)?;
-            entry.reader.traverse(&visit)?;
+            entry.traverse(&visit)?;
         }
         visit.call(&self.path)?;
         visit.call(&self.parent_attribute)
@@ -101,6 +93,7 @@ impl ModelRowLayout {
         &self,
         row: &Bound<'py, PyAny>,
         connection_alias: &Bound<'py, PyAny>,
+        context: &Bound<'py, PyAny>,
         snapshot: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let py = row.py();
@@ -116,7 +109,7 @@ impl ModelRowLayout {
                 return Ok(py.None().into_bound(py));
             }
         }
-        self.construct(self.decode(row), connection_alias, snapshot)
+        self.construct(self.decode(row), connection_alias, context, snapshot)
     }
 
     /// Decoding is lazy: ordinary hydration still interleaves readers and descriptors.
@@ -142,12 +135,12 @@ impl ModelRowLayout {
         &self,
         values: impl Iterator<Item = PyResult<Bound<'py, PyAny>>>,
         connection_alias: &Bound<'py, PyAny>,
+        context: &Bound<'py, PyAny>,
         snapshot: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let py = connection_alias.py();
         let truth = PyBool::new(py, true).to_owned().into_any();
-        let model = self.model.bind(py);
-        let instance = model.getattr(intern!(py, "__new__"))?.call1((model,))?;
+        let instance = self.allocate.bind(py).call1((self.binding.bind(py), context))?;
         if self.partial {
             generic_set_attribute(&instance, intern!(py, "_partial"), &truth)?;
         }
@@ -166,11 +159,11 @@ impl ModelRowLayout {
         Ok(instance)
     }
 
-    /// Classify annotation readers once for a row or a bounded batch; callbacks run for every value.
-    pub(crate) fn prepare_annotations<'py>(
-        annotations: Vec<(Bound<'py, PyString>, Bound<'py, PyAny>, Bound<'py, PyAny>)>,
+    /// Classify field or annotation readers once; callbacks run for every value.
+    pub(crate) fn prepare_columns<'py>(
+        columns: Vec<(Bound<'py, PyString>, Bound<'py, PyAny>, Bound<'py, PyAny>)>,
     ) -> Vec<ColumnEntry> {
-        annotations
+        columns
             .into_iter()
             .map(|(name, key, reader)| ColumnEntry {
                 name: name.unbind(),
@@ -192,9 +185,4 @@ impl ModelRowLayout {
         }
         Ok(())
     }
-}
-
-/// The native layout kept with a `ModelColumns` (`ModelColumns.native_layout`).
-pub fn get_layout<'py>(columns: &Bound<'py, PyAny>) -> PyResult<Bound<'py, ModelRowLayout>> {
-    Ok(columns.getattr(intern!(columns.py(), "native_layout"))?.cast_into::<ModelRowLayout>()?)
 }

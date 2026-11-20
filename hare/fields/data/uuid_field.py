@@ -84,6 +84,9 @@ class UUIDField(Field[TUuid]):
         self.validate(value)
         return value
 
+    def get_assign_normalized_types(self) -> frozenset[type]:
+        return self._get_unchanged_assign_types(UUIDField.to_python, self.field_type)
+
     def to_python(self, value: Any) -> UUID | None:
         if value is None or type(value) is UUID:
             return value
@@ -101,7 +104,8 @@ class UUIDField(Field[TUuid]):
         except ValueError as error:
             # UUID(...) raises a bare ValueError for malformed input - wrapped so it fails the
             # same catchable-ValidationError way every other field validation failure does.
-            raise ValidationError(f"{self.model_field_name}: {error}")
+            validation_error = self.get_validation_error(error, value)
+        raise validation_error
 
     def get_unchanged_write_types(self, converter: Callable[..., Any] | None) -> tuple[type, ...] | None:
         # Only a UUID-valued column keeps a UUID unchanged; text conversion uses to_db_value().

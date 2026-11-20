@@ -11,6 +11,7 @@ from hare.sql.builder.tables.table import Table
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset.relations.many_to_many_relation import ManyToManyRelation
 
 
@@ -36,8 +37,8 @@ class LinkedKeys:
             )
         ) is not None:
             query = query.where(visible_target_criterion)
-        _, rows = await connection.execute(*ThroughRows.get_statement(relation, query, connection))
-        related_meta = relation.model._meta
+        _, rows = await connection._execute_built(*ThroughRows.get_statement(relation, query, connection))
+        related_meta: ModelBinding = relation._binding
         related_pk_fields = related_meta.pk_fields
         types = connection.dialect.types
         forward_keys = relation.field.forward_keys
@@ -70,12 +71,9 @@ class LinkedKeys:
         Returns:
             True when no key field converts its values.
         """
-        # Local import: the row codecs import the models, which import this module.
-        from hare.query.rows.native.hydration_layout import HydrationLayout
-
         types = connection.dialect.types
         return all(
-            HydrationLayout.get_field_reader(field, types, connection.native_python_types) is None
+            types.get_native_reader(field, connection.native_python_types) is None
             and types.get_native_key_type(field) is not None
             for field in key_fields
         )
@@ -102,17 +100,17 @@ class LinkedKeys:
         backward_columns = [through_table[column_name] for column_name in relation.field.backward_keys]
         if backward_key_values is None:
             backward_key_values = KeyColumns.get_db_values(
-                type(relation.instance)._meta, relation.instance, connection.dialect.types
+                relation.instance._binding, relation.instance, connection.dialect.types
             )
         query = (
             connection.query_class.from_(through_table)
             .where(KeyColumns.row_equality(backward_columns, backward_key_values))
             .select(*relation.field.forward_keys)
         )
-        through_model = relation.field.through_model_class
-        soft_delete_field = through_model._meta.soft_delete_field if through_model is not None else None
-        if through_model is not None and soft_delete_field is not None:
-            soft_delete_column = through_model._meta.fields_map[soft_delete_field].source_field or soft_delete_field
+        through_binding = relation.field.get_through_binding()
+        soft_delete_field = through_binding.soft_delete_field if through_binding is not None else None
+        if through_binding is not None and soft_delete_field is not None:
+            soft_delete_column = through_binding.fields_map[soft_delete_field].source_field or soft_delete_field
             query = query.where(through_table[soft_delete_column].isnull())
         return query
 
@@ -130,16 +128,17 @@ class LinkedKeys:
         connection = ThroughRows.through_table_connection(relation, for_write=False)
         through_table = Table(relation.field.through, schema=relation.field.through_schema)
         query = LinkedKeys.get_links_query(relation, connection, through_table)
-        _, rows = await connection.execute(*ThroughRows.get_statement(relation, query, connection))
-        related_meta = relation.model._meta
+        _, rows = await connection._execute_built(*ThroughRows.get_statement(relation, query, connection))
+        related_meta: ModelBinding = relation._binding
         related_pk_fields = related_meta.pk_fields
+        forward_keys = relation.field.forward_keys
         types = connection.dialect.types
         return [
             key if len(key) > 1 else key[0]
             for key in KeyColumns.read_rows(
                 related_pk_fields,
-                relation.field.forward_keys,
-                (row for row in rows if all(row[column] is not None for column in relation.field.forward_keys)),
+                forward_keys,
+                (row for row in rows if all(row[column] is not None for column in forward_keys)),
                 types,
             )
         ]

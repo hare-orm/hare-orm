@@ -11,7 +11,7 @@ from hare.dialects.clickhouse.constants import CLICKHOUSE_DEFAULT_INDEX_GRANULAR
 
 if TYPE_CHECKING:
     from hare.dialects.clickhouse.schema.clickhouse_schema_editor import ClickhouseSchemaEditor
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class ClickhouseIndexStatements(IndexStatements):
@@ -22,7 +22,7 @@ class ClickhouseIndexStatements(IndexStatements):
 
     def get_index_sql(
         self,
-        model: type[Model],
+        binding: ModelBinding,
         field_names: Sequence[str | BoundIndexKey],
         safe: bool = False,
         index_name: str | None = None,
@@ -35,7 +35,7 @@ class ClickhouseIndexStatements(IndexStatements):
         template: str | None = None,
     ) -> str:
         return super().get_index_sql(
-            model,
+            binding,
             field_names,
             safe,
             index_name=index_name,
@@ -44,7 +44,7 @@ class ClickhouseIndexStatements(IndexStatements):
             opclasses=opclasses,
             unique=unique,
             orders=orders,
-            indexed_table_sql=indexed_table_sql or self.editor.get_storage_table_sql(model),
+            indexed_table_sql=indexed_table_sql or self.editor.get_storage_table_sql(binding),
             template=template,
         )
 

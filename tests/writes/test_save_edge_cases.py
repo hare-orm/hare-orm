@@ -2,7 +2,6 @@
 empty update_fields, a pk left None whose field has a default, and a save with no column left
 to write."""
 
-import os
 import uuid
 
 import pytest
@@ -10,10 +9,10 @@ import pytest_asyncio
 
 from hare import fields
 from hare.contrib.test import requires_features, truncate_all_models
-from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.exceptions import IntegrityError, QueryError
 from hare.models import Model
 from hare.transactions.transactions import Transactions
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 class SaveAuthor(Model):
@@ -58,10 +57,7 @@ class SaveDbDefaultOnly(Model):
 
 @pytest_asyncio.fixture(scope="module")
 async def save_context():
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    async with hare_test_context(
-        modules=[__name__], db_url=db_url, app_label="models", connection_label="models"
-    ) as ctx:
+    async with DatabaseUnderTest.open_model_context([__name__]) as ctx:
         yield ctx
 
 

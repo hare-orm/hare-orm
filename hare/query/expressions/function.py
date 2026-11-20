@@ -4,6 +4,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any, ClassVar
 
+from hare.dialects.base.types.result_literal_binding import ResultLiteralBinding
 from hare.dialects.enums import ParameterPosition
 from hare.exceptions import ConfigurationError, FieldError, QueryError
 from hare.fields.data.json.json_field import JSONField
@@ -16,7 +17,6 @@ from hare.query.expressions.bound_expression import BoundExpression
 from hare.query.expressions.compatibility.constants import TEXT_VALUE_TYPE
 from hare.query.expressions.compatibility.output_field_compatibility import OutputFieldCompatibility
 from hare.query.expressions.compatibility.result_branch import ResultBranch
-from hare.query.expressions.constants import FIELD_TYPED_LITERAL_TYPES
 from hare.query.expressions.dialect_expressions import DialectExpressions
 from hare.query.expressions.enums import TemporalType
 from hare.query.expressions.expression import Expression
@@ -138,29 +138,19 @@ class Function(CombinableExpression):
             # (values()/values_list() re-register an annotation under its positional alias).
             if annotation is not self and field not in expression_context.annotation_names_in_progress:
                 expression_context.annotation_names_in_progress.add(field)
-                annotation_output_field: Field[Any] | None = None
-                joins = []
                 try:
-                    if isinstance(annotation, Term) and not isinstance(annotation, Expression):
-                        term = annotation
-                    else:
-                        referenced_result = annotation.get_result(expression_context)
-                        term = referenced_result.term
-                        joins = referenced_result.joins
-                        # The referenced annotation's own value type, as F(field) would decode it.
-                        annotation_output_field = annotation.get_value_field(referenced_result)
+                    return Expression._get_referenced_annotation_value(annotation, expression_context)
                 finally:
                     expression_context.annotation_names_in_progress.discard(field)
-                return ExpressionResult(term=term, joins=joins, output_field=annotation_output_field)
             # The name is the annotation currently being resolved (annotate(price=Sum("price"))):
             # it can only mean the real model field of the same name; without one it is a cycle.
-            if field.partition("__")[0] not in expression_context.model._meta.fields_map:
+            if field.partition("__")[0] not in expression_context.binding.fields_map:
                 raise QueryError(
                     f"Circular annotation reference detected: {field!r} depends on itself "
                     "(directly or through another annotation)"
                 )
         if (tracker := AggregatedMultiValuedPaths.get_from(expression_context)) is not None:
-            tracker.record_lookup(expression_context.model, field, expression_context.select_related_path_prefix)
+            tracker.record_lookup(expression_context.binding, field, expression_context.select_related_path_prefix)
         return BoundLookupPath.bind(expression_context, field).get_result()
 
     def _prepare_argument(
@@ -189,34 +179,35 @@ class Function(CombinableExpression):
         self,
         context: ExpressionContext,
         argument: BoundExpression,
-        defaults: list[BoundExpression],
+        output_field: Field[Any] | None,
     ) -> ExpressionResult:
-        """Choose JSON-column conversion before encoding a literal first argument."""
+        """Select conversion before lowering; let the post-hook step type the returned term."""
         if not argument.branch.is_literal:
             return argument.lower(context)
-        literal = argument.branch.value
-        json_field = None
-        if self.returns_an_argument and literal is not None:
-            json_field = next(
-                (
-                    value.branch.field
-                    for value in defaults
-                    if not value.branch.is_literal and self.is_json_field(value.branch.field)
-                ),
-                None,
-            )
-        encoder = (
-            context.dialect.types.get_field_encoder(json_field)
-            if json_field is not None
-            else Value.get_literal_encoder(literal, context.dialect)
+        encoder = context.dialect.types.get_result_literal_encoder(output_field, argument.branch.value, context.model)
+        if encoder is None:
+            encoder = Value.get_literal_encoder(argument.branch.value, context.dialect)
+        if encoder is None or output_field is None:
+            return argument.lower(context, encoder=encoder)
+        return argument.lower(context, binding=ResultLiteralBinding(encoder, output_field, None))
+
+    def _lower_default_argument(
+        self,
+        context: ExpressionContext,
+        argument: BoundExpression,
+        encoding_argument: ExpressionResult,
+        output_field: Field[Any] | None,
+    ) -> ExpressionResult:
+        """Keep the default encoder hook authoritative, selecting and applying it once."""
+        if not argument.branch.is_literal:
+            return argument.lower(context)
+        encoder = self._get_default_literal_encoder(argument.branch.value, encoding_argument, context)
+        if encoder is None or output_field is None:
+            return argument.lower(context, encoder=encoder)
+        binding = ResultLiteralBinding(
+            encoder, output_field, context.dialect.parameters.get_result_literal_cast_type(output_field)
         )
-        result = argument.lower(context, encoder=encoder)
-        if json_field is not None:
-            term = result.term
-            if (sql_type := context.dialect.parameters.get_field_parameter_cast_type(json_field)) is not None:
-                term = Cast(term, LiteralValue(sql_type))
-            return ExpressionResult(term=term, joins=result.joins, output_field=json_field)
-        return result
+        return argument.lower(context, binding=binding)
 
     def _get_collation_argument(self, argument: ExpressionResult) -> ExpressionResult:
         """Drops an argument's explicit collation unless this function keeps it.
@@ -285,16 +276,16 @@ class Function(CombinableExpression):
         EncryptedFieldBase.raise_if_encrypted(field_object, f"{type(self).__name__}()")
 
     def _cast_literal_argument(
-        self, expression_context: ExpressionContext, function_arg: ExpressionResult, argument: Any
+        self, expression_context: ExpressionContext, function_arg: ExpressionResult
     ) -> ExpressionResult:
-        """Types a bare literal main argument where the dialect says nothing around it does - of a function
-        returning one of its arguments, a literal bound in its field type's stored form
-        (``FIELD_TYPED_LITERAL_TYPES``) as that type's column.
+        """Type a bare main literal after the overridable main lowering has returned its value field.
+
+        Functions selecting an argument retain that field's parameter representation;
+        other literals use their inferred type. No conversion is selected or applied here.
 
         Args:
             expression_context: Carries the model whose database decides the dialect.
             function_arg: The resolved main argument.
-            argument: The main argument as given.
 
         Returns:
             `function_arg`, or a copy whose term is the cast literal.
@@ -303,24 +294,16 @@ class Function(CombinableExpression):
         if isinstance(term, Term) and not isinstance(term, ValueWrapper):
             return function_arg
         literal = term.value if isinstance(term, ValueWrapper) else term
-        given_literal = argument.value if isinstance(argument, Value) else argument
-        if (
-            self.returns_an_argument
-            and isinstance(given_literal, FIELD_TYPED_LITERAL_TYPES)
-            and function_arg.output_field is not None
-        ):
-            # The text a UUID or a dict is bound as - as their column, or COALESCE() finds no type of both.
-            cast_sql_type = expression_context.dialect.parameters.get_field_parameter_cast_type(
+        if self.returns_an_argument and function_arg.output_field is not None:
+            cast_sql_type = expression_context.dialect.parameters.get_result_literal_cast_type(
                 function_arg.output_field
             )
-            if cast_sql_type is None:
-                return function_arg
-            # The type as the dialect names it - Cast() writes a bare name upper-cased.
-            return ExpressionResult(
-                term=Cast(term, LiteralValue(cast_sql_type)),
-                joins=function_arg.joins,
-                output_field=function_arg.output_field,
-            )
+            if cast_sql_type is not None:
+                return ExpressionResult(
+                    term=Cast(term, LiteralValue(cast_sql_type)),
+                    joins=function_arg.joins,
+                    output_field=function_arg.output_field,
+                )
         typed_term = Value.get_typed_term(
             term, literal, ParameterPosition.FUNCTION_ARGUMENT, expression_context.dialect
         )
@@ -382,29 +365,41 @@ class Function(CombinableExpression):
             The term, the joins and the output field.
         """
 
-        DialectExpressions.raise_if_dialect_lacks(self, expression_context.dialect)
+        DialectExpressions.raise_if_dialect_lacks(
+            self, expression_context.dialect, checks_admission=expression_context.checks_dialect_admission
+        )
         main = self._prepare_argument(expression_context, self.field, attribute="field", field_name=True)
         defaults = [
             self._prepare_argument(expression_context, value, attribute="default_values", index=index)
             for index, value in enumerate(self.default_values)
         ]
-        function_arg = self._get_collation_argument(self._lower_main_argument(expression_context, main, defaults))
+        common_field = None
+        if self.returns_an_argument:
+            branches = [main.branch, *(value.branch for value in defaults)]
+            OutputFieldCompatibility.raise_if_value_types_mix(branches, f"{type(self).__name__}()")
+            common_field = OutputFieldCompatibility.get_common_output_field(branches)
+        function_arg = self._get_collation_argument(self._lower_main_argument(expression_context, main, common_field))
         self._raise_if_encrypted_argument(self.field, function_arg)
         self._raise_if_argument_type_refused(self.field, function_arg)
-        function_arg = self._cast_literal_argument(expression_context, function_arg, self.field)
+        function_arg = self._cast_literal_argument(expression_context, function_arg)
         if TEXT_VALUE_TYPE in self.refused_argument_value_types and NumericTyping.is_enum_field(
             function_arg.output_field
         ):
             # A function of numbers takes an integer enum's column by its number.
             function_arg.term = expression_context.dialect.renderers.get_enum_number_term(function_arg.term)
         function_arg = self._wrap_argument(expression_context, function_arg)
+        encoding_argument = (
+            ExpressionResult(term=function_arg.term, output_field=common_field)
+            if common_field is not None
+            else function_arg
+        )
         default_results = [
             self._get_collation_argument(
-                value.lower(
+                self._lower_default_argument(
                     expression_context,
-                    encoder=self._get_default_literal_encoder(value.branch.value, function_arg, expression_context)
-                    if value.branch.is_literal
-                    else None,
+                    value,
+                    encoding_argument,
+                    common_field if self.returns_an_argument else None,
                 )
             )
             for value in defaults
@@ -503,7 +498,18 @@ class Function(CombinableExpression):
         if self.binds_as_main_field(value, function_arg):
             main_field: Field[Any] = function_arg.output_field  # type: ignore[assignment]
             return expression_context.dialect.types.get_field_encoder(main_field)
-        return Value.get_literal_encoder(value, expression_context.dialect)
+        literal_encoder = Value.get_literal_encoder(value, expression_context.dialect)
+        if (
+            self.returns_an_argument
+            and (
+                encoder := expression_context.dialect.types.get_result_literal_encoder(
+                    function_arg.output_field, value, expression_context.model
+                )
+            )
+            is not None
+        ):
+            return encoder
+        return literal_encoder
 
     @staticmethod
     def is_json_field(field: Field[Any] | None) -> bool:

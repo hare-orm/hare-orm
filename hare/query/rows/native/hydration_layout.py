@@ -5,12 +5,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.caching.cache import Cache
-from hare.fields.field import Field
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.dialects.base.types.type_registry import TypeRegistry
-    from hare.models.meta_info import MetaInfo
+    from hare.fields.field import Field
+    from hare.models.model_binding import ModelBinding
 
     HydrationEntry = tuple[str, Field[Any], Callable[[Any], Any] | None]
 
@@ -30,14 +29,14 @@ class HydrationLayout:
 
     #: A model's layouts, in a bucket the model keeps: (driver's native Python types, dialect) ->
     #: how the model's rows are read on such a connection.
-    layouts: ClassVar[Cache[Any]] = Cache(holds_sql=False)
+    layouts: ClassVar[Cache[Any]] = Cache()
 
     entry_by_column: dict[str, HydrationEntry]
     entry_by_field_name: dict[str, tuple[str, Field[Any], Callable[[Any], Any] | None]]
     full_column_count: int
 
     @staticmethod
-    def build(meta: MetaInfo, connection: DatabaseClient) -> HydrationLayout:
+    def build(meta: ModelBinding, connection: DatabaseClient) -> HydrationLayout:
         """The layout of ``meta``'s model on ``connection``.
 
         Args:
@@ -54,7 +53,7 @@ class HydrationLayout:
         for column in meta.db_fields:
             model_field = meta.fields_db_projection_reverse[column]
             field = meta.fields_map[model_field]
-            reader = HydrationLayout.get_field_reader(field, types, native_types)
+            reader = types.get_native_reader(field, native_types)
             entry_by_column[column] = (model_field, field, reader)
             entry_by_field_name[model_field] = (column, field, reader)
         return HydrationLayout(
@@ -62,19 +61,3 @@ class HydrationLayout:
             entry_by_field_name=entry_by_field_name,
             full_column_count=len(entry_by_column),
         )
-
-    @staticmethod
-    def get_field_reader(
-        field: Field[Any], types: TypeRegistry, native_types: frozenset[type]
-    ) -> Callable[[Any], Any] | None:
-        """How a column of ``field`` is read on a connection.
-
-        Args:
-            field: The field.
-            types: The dialect's type registry.
-            native_types: The Python types the driver returns values as already.
-
-        Returns:
-            The complete reader, or None for a value used as the driver returns it.
-        """
-        return types.get_native_reader(field, native_types)

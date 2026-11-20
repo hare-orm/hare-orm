@@ -11,7 +11,7 @@ from tests.native_acceleration.test_field_codecs import (
     assert_reads_match,
 )
 
-pytestmark = pytest.mark.database_independent
+pytestmark = [pytest.mark.database_independent, pytest.mark.usefixtures("model_conversion_context")]
 
 ASYNCPG_CONNECTIONS = [("asyncpg", POSTGRESQL_TYPES, AsyncpgClient.native_python_types, None)]
 

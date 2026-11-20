@@ -56,7 +56,7 @@ class ClickhouseDynamicValues:
             if value is None:
                 field.validate(value)
                 return ClickhouseTypedValue(None, ClickhouseTypeName.NOTHING, held_type)
-            written_value, column_type = cls.get_written_value(value, field.model_field_name or "value")
+            written_value, column_type = cls.get_field_written_value(field, value)
             return ClickhouseTypedValue(written_value, column_type, held_type)
 
         return write_value
@@ -78,8 +78,23 @@ class ClickhouseDynamicValues:
         """
         if value is None:
             return None
-        written_value, column_type = cls.get_written_value(value, field.model_field_name or "value")
+        written_value, column_type = cls.get_field_written_value(field, value)
         return ClickhouseTypedValue(written_value, column_type)
+
+    @classmethod
+    def get_field_written_value(cls, field: Field[Any], value: Any) -> tuple[Any, str]:
+        """Convert through the common Dynamic algorithm, formatting errors at the field boundary."""
+        try:
+            return cls.get_written_value(value, field.model_field_name or "value")
+        except (ValidationError, ValueError, TypeError, ArithmeticError) as error:
+            if not field.sensitive:
+                raise
+            validation_error = field.get_validation_error(
+                error,
+                value,
+                f"{field.model_field_name}: invalid Dynamic value {field.get_value_for_message(value)}",
+            )
+        raise validation_error from None
 
     @classmethod
     def get_written_value(cls, value: Any, path: str) -> tuple[Any, str]:
@@ -253,7 +268,6 @@ class ClickhouseDynamicValues:
             if not value.is_finite():
                 raise ValidationError(f"{path}: {value} has no ClickHouse decimal")
             _, digits, exponent = value.as_tuple()
-            exponent = exponent
             integer_digits = max(integer_digits, len(digits) + exponent)  # type: ignore[operator]
             scale = max(scale, -exponent)  # type: ignore[operator]
         precision = max(integer_digits + scale, 1)

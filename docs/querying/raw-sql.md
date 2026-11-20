@@ -24,6 +24,12 @@ neither a column nor a field of the model becomes an attribute of each instance,
 `author.book_count`), holding the driver's value. A column name returned more than once
 (`SELECT b.*, a.id ...`) raises `QueryError` — alias the extra column.
 
+Extra columns cannot replace model methods, properties, persistence state or relation caches
+(`save`, `_binding`, `_context`, `_declaration`, `_saved_in_db`, `_connection_alias`, `_books`): `FieldError`
+is raised before
+instances are returned. Safe custom extras, including `_` names and user-declared class defaults,
+remain available. The SQL text and the values of ordinary model columns are the caller's responsibility.
+
 ## <a id="rawsql"></a>`RawSQL`
 
 ```python
@@ -176,3 +182,5 @@ application's SQL console, a report. It returns a `DescribedResult(columns, rows
 
 It works on SQLite, asyncpg, rust_pg and ClickHouse, on a transaction's connection too. `sql` is written
 for the connection's dialect, with its placeholders for `values`.
+On PostgreSQL, use an explicit type such as `$1::uuid` when the surrounding SQL does not determine
+the parameter type. See [raw PostgreSQL parameters](../dialects/postgresql/connecting.md#driver-differences).

@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from hare import fields
+from hare.core.hare_context import HareContext
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.dialects.base.types.type_registry import TypeRegistry
 from hare.dialects.postgresql.client.postgresql_client import PostgresqlClient
@@ -42,7 +43,6 @@ from hare.models.write.rules.row_write_rules import RowWriteRules
 from hare.native.native_modules import NativeModules
 from hare.query.rows.model_rows.model_columns import ModelColumns
 from hare.query.rows.native.hydration_layout import HydrationLayout
-from hare.query.rows.row_column import RowColumn
 from hare.query.rows.row_layout import RowLayout
 from hare.time import Timezone
 from tests.shared_models.testmodels import (
@@ -64,7 +64,19 @@ from tests.shared_models.testmodels import (
 from tests.shared_models.testmodels_postgres import DecimalFields
 from tests.utils.timezone_context import override_timezone
 
-pytestmark = pytest.mark.database_independent
+pytestmark = [pytest.mark.database_independent, pytest.mark.usefixtures("model_conversion_context")]
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+def test_named_tuple_invalid_key_types_raise_validation_error(prepared):
+    from hare.exceptions import ValidationError
+
+    field = fields.TupleField({"number": fields.IntField()})
+    writer = field.get_value_writer(TypeRegistry()) if prepared else field.to_db_value
+    with pytest.raises(ValidationError, match="expected the elements"):
+        writer({"number": 1, 2: 2}, None)
+    assert writer({"number": 3}, None) == (3,)
+
 
 SQLITE_TYPES = SqliteTypes.build()
 POSTGRESQL_TYPES = PostgresqlTypes.build()
@@ -157,7 +169,10 @@ def assert_same_outcome(codec_run: Any, python_run: Any, label: str) -> None:
 
 def get_layout(model: Any, types: Any, native_types: frozenset[type]) -> HydrationLayout:
     connection = SimpleNamespace(dialect=SimpleNamespace(types=types), native_python_types=native_types)
-    return HydrationLayout.build(model._meta, connection)  # type: ignore[arg-type]
+    return HydrationLayout.build(
+        HareContext.require_current().apps.get_binding(model),
+        connection,
+    )  # type: ignore[arg-type]
 
 
 def assert_reads_match(
@@ -171,7 +186,7 @@ def assert_reads_match(
         layout = get_layout(model, types, native_types)
         column, field, bound_reader = layout.entry_by_field_name[field_name]
         reader = (lambda value: value) if bound_reader is None else types.get_python_reader(field)
-        columns = ModelColumns.build(model, layout, [column], [0])
+        columns = ModelColumns.build(HareContext.require_current().apps.get_binding(model), layout, [column], [0])
         for use_timezone, zone in ZONES:
             with override_timezone(use_timezone=use_timezone, timezone=zone):
                 for raw in raw_values:
@@ -183,7 +198,7 @@ def assert_reads_match(
                         run(
                             lambda value: getattr(
                                 NativeModules.rows.ModelResultLayout((columns,), ()).read_row(
-                                    (value,), None, DirtyFields.snapshot_dirty_fields
+                                    (value,), None, HareContext.require_current(), DirtyFields.snapshot_dirty_fields
                                 ),
                                 field_name,
                             ),
@@ -305,15 +320,15 @@ def test_bound_datetime_writer_runs_validators():
 def test_a_stamp_writes_like_the_field_and_the_write_leaves_the_instance_as_it_is(field_name):
     """The stamp a write gives an auto_now/auto_now_add field is written by the codec as by the field -
     and neither changes the instance: the stamp is the write's, set before the values are written."""
-    field = DatetimeFields._meta.fields_map[field_name]
+    field = HareContext.require_current().apps.get_binding(DatetimeFields).fields_map[field_name]
     for _connection_name, types, _native_types, adapters in CONNECTIONS:
         for use_timezone, zone in ZONES:
             with override_timezone(use_timezone=use_timezone, timezone=zone):
                 writer = types.get_db_writer(field)
                 instance = DatetimeFields(datetime=datetime.datetime(2024, 1, 1, tzinfo=UTC))
-                RowWriteRules.get(DatetimeFields, WriteType.INSERT, None, "create()").stamp(
-                    (instance,), InstanceValues()
-                )
+                RowWriteRules.get(
+                    HareContext.require_current().apps.get_binding(DatetimeFields), WriteType.INSERT, None, "create()"
+                ).stamp((instance,), InstanceValues())
                 stamp = getattr(instance, field_name)
                 assert stamp is not None
                 assert_same_outcome(
@@ -325,7 +340,7 @@ def test_a_stamp_writes_like_the_field_and_the_write_leaves_the_instance_as_it_i
 
 
 def test_auto_now_add_keeps_a_set_value():
-    field = DatetimeFields._meta.fields_map["datetime_add"]
+    field = HareContext.require_current().apps.get_binding(DatetimeFields).fields_map["datetime_add"]
     moment = datetime.datetime(2020, 5, 5, 5, 5, tzinfo=UTC)
     instance = DatetimeFields(datetime=moment, datetime_add=moment)
     instance._saved_in_db = True
@@ -413,7 +428,16 @@ UUID_VALUES = [
 
 
 def test_uuid_read_builds_a_plain_uuid():
-    layout = RowLayout((RowColumn(0, SQLITE_TYPES.get_python_reader(UUIDFields._meta.fields_map["data"])),))
+    layout = RowLayout(
+        (
+            (
+                0,
+                SQLITE_TYPES.get_python_reader(
+                    HareContext.require_current().apps.get_binding(UUIDFields).fields_map["data"]
+                ),
+            ),
+        )
+    )
     value = layout.read((str(SAMPLE_UUID),))[0]
     assert type(value) is uuid.UUID
     assert value == SAMPLE_UUID
@@ -621,7 +645,7 @@ def test_reads_match(model, field_name, values):
     [pytest.param(*case, id=f"{case[0].__name__}.{case[1]}") for case in WRITE_CASES],
 )
 def test_writes_match(model, field_name, values):
-    assert_writes_match(model._meta.fields_map[field_name], values)
+    assert_writes_match(HareContext.require_current().apps.get_binding(model).fields_map[field_name], values)
 
 
 def test_scalar_checks_run_in_validator_order():
@@ -680,7 +704,7 @@ EXPRESSION_VALUES = [
 def test_expression_column_reads_match(field):
     for connection_alias, types, _native_types, _adapters in CONNECTIONS:
         reader = types.get_python_reader(field)
-        layout = RowLayout((RowColumn("result", reader),))
+        layout = RowLayout((("result", reader),))
         for use_timezone, zone in ZONES:
             with override_timezone(use_timezone=use_timezone, timezone=zone):
                 for raw in EXPRESSION_VALUES:
@@ -694,8 +718,8 @@ def test_expression_column_reads_match(field):
 def assert_container_reads_match(field: Any, raw_values: list[Any]) -> None:
     for use_timezone, zone in ZONES:
         with override_timezone(use_timezone=use_timezone, timezone=zone):
-            reader = HydrationLayout.get_field_reader(field, POSTGRESQL_TYPES, PostgresqlClient.native_python_types)
-            layout = RowLayout((RowColumn(0, reader),))
+            reader = POSTGRESQL_TYPES.get_native_reader(field, PostgresqlClient.native_python_types)
+            layout = RowLayout(((0, reader),))
             for raw in raw_values:
                 assert_same_outcome(
                     run(lambda value: layout.read((value,))[0], raw),
@@ -800,14 +824,45 @@ def test_array_reads_match(field, raw_values):
     assert_container_reads_match(field, raw_values)
 
 
+@pytest.mark.parametrize(
+    ("field", "raw", "expected"),
+    [
+        pytest.param(
+            fields.JSONField(),
+            '{"n":1267650600228229401496703205377}',
+            {"n": 1267650600228229401496703205377},
+            id="json-integer",
+        ),
+        pytest.param(
+            ArrayField(ArrayField(fields.IntField(null=True))),
+            [[1, None], [2, 3]],
+            [[1, None], [2, 3]],
+            id="nullable-nested-array",
+        ),
+        pytest.param(
+            fields.DatetimeField(),
+            "2024-01-02 03:04:05.123456+00:00",
+            datetime.datetime(2024, 1, 2, 3, 4, 5, 123456, tzinfo=ZoneInfo("UTC")),
+            id="instant",
+        ),
+    ],
+)
+def test_prepared_and_field_readers_keep_literal_values(field, raw, expected):
+    with override_timezone(use_timezone=True, timezone="UTC"):
+        native = POSTGRESQL_TYPES.get_native_reader(field, PostgresqlClient.native_python_types)
+        assert is_same(RowLayout(((0, native),)).read((raw,))[0], expected)
+        assert is_same(POSTGRESQL_TYPES.get_python_reader(field)(raw), expected)
+
+
 def test_an_array_subclass_reading_otherwise_is_read_by_the_field():
     class UpperTextArray(ArrayField):
         def decode_value(self, value, types):
             return [element.upper() for element in super().decode_value(value, types)]
 
     field = UpperTextArray(base_field=fields.TextField())
-    reader = HydrationLayout.get_field_reader(field, POSTGRESQL_TYPES, PostgresqlClient.native_python_types)
-    assert RowLayout((RowColumn(0, reader),)).read((["hello", "World"],))[0] == ["HELLO", "WORLD"]
+    reader = POSTGRESQL_TYPES.get_native_reader(field, PostgresqlClient.native_python_types)
+    assert RowLayout(((0, reader),)).read((["hello", "World"],))[0] == ["HELLO", "WORLD"]
+    assert POSTGRESQL_TYPES.get_python_reader(field)(["hello", "World"]) == ["HELLO", "WORLD"]
 
 
 def test_a_range_subclass_reading_otherwise_is_read_by_the_field():
@@ -816,6 +871,6 @@ def test_a_range_subclass_reading_otherwise_is_read_by_the_field():
             return None if value is None else int(value) + 1
 
     field = ShiftedIntRange()
-    reader = HydrationLayout.get_field_reader(field, POSTGRESQL_TYPES, PostgresqlClient.native_python_types)
-    value = RowLayout((RowColumn(0, reader),)).read((Range(1, 4),))[0]
+    reader = POSTGRESQL_TYPES.get_native_reader(field, PostgresqlClient.native_python_types)
+    value = RowLayout(((0, reader),)).read((Range(1, 4),))[0]
     assert (value.lower, value.upper) == (2, 5)

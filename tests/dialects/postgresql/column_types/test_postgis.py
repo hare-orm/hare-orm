@@ -2,6 +2,7 @@ import pytest
 
 from hare import Connections
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.exceptions import ValidationError
 from hare.gis import Point, PointField
 from hare.gis.functions import Distance, DWithin
@@ -77,7 +78,7 @@ async def test_extension_tables_and_views_are_not_models(db_postgis):
     table_names = await DatabaseCatalog.get_table_names(connection)
     view_names = [name for name, _is_materialized, _triggers in await DatabaseCatalog.get_views(connection)]
     assert "spatial_ref_sys" not in table_names
-    assert Place._meta.db_table in table_names
+    assert HareContext.require_current().apps.get_binding(Place).db_table in table_names
     assert not {"geometry_columns", "geography_columns"} & set(view_names)
 
 

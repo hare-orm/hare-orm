@@ -4,18 +4,29 @@ from typing import TYPE_CHECKING, Any
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import QueryError
+from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.expressions import Expression
 from hare.query.expressions.conditions.condition_value import ConditionValue
+from hare.query.lookup_info.lookup_path import LookupPath
 from hare.query.queryset.arguments.filter_arguments import FilterArguments
 from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset.queryset import QuerySet
 
 
 class ValuesArguments:
     """The checks of what values() and values_list() are given - field names or expressions of the
     right types, on a queryset not loading model fields or relations the rows don't use."""
+
+    @staticmethod
+    def is_model_path(binding: ModelBinding, name: str) -> bool:
+        """Whether the name starts at a declared field, possibly through a relation."""
+        if "__" not in name:
+            return name in binding.fields_map
+        path = LookupPath.parse(binding, name)
+        return path.field_name == PRIMARY_KEY_ALIAS or path.field_name in path.binding.fields_map
 
     @staticmethod
     def get_checked_expressions(
@@ -145,9 +156,10 @@ class ValuesArguments:
         Returns:
             The names.
         """
-        return [
-            field for field in queryset.model._meta.fields_map if field in queryset.model._meta.fields_db_projection
-        ] + [key for key in queryset._annotations if key not in queryset._alias_keys]
+        model_binding: ModelBinding = queryset._binding  # type: ignore[assignment]
+        return [field for field in model_binding.fields_map if field in model_binding.fields_db_projection] + [
+            key for key in queryset._annotations if key not in queryset._alias_keys
+        ]
 
     @staticmethod
     def raise_if_values_selected(queryset: QuerySet[Any, Any], method_name: str) -> None:

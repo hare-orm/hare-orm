@@ -6,9 +6,7 @@ from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import ValidationError
 from hare.gis.constants import MAX_SRID
 from hare.gis.enums import SpatialFunctionType
-from hare.gis.fields.geometry_field import GeometryField
 from hare.gis.functions.spatial_function import SpatialFunction
-from hare.query.expressions import ExpressionResult
 
 
 class Transform(SpatialFunction):
@@ -26,9 +24,6 @@ class Transform(SpatialFunction):
     function_type: ClassVar[SpatialFunctionType] = SpatialFunctionType.TRANSFORM
     default_value_counts = (1, 1)
 
-    #: Reusable result codec for a planar geometry carrying its own SRID.
-    OUTPUT_FIELD: ClassVar[GeometryField] = GeometryField()
-
     def __init__(self, expression: Any, srid: int) -> None:
         if type(srid) is not int or not 1 <= srid <= MAX_SRID:
             raise ValidationError(
@@ -36,5 +31,6 @@ class Transform(SpatialFunction):
             )
         super().__init__(expression, srid)
 
-    def _get_output_field(self, function_arg: ExpressionResult, default_results: list[ExpressionResult]) -> Any:
-        return self.OUTPUT_FIELD
+    def get_geometry_plan_key(self) -> tuple[Any, ...]:
+        """Keep the result SRID with the plan whose readers and enclosing SQL use it."""
+        return (*super().get_geometry_plan_key(), self.default_values[0])

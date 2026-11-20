@@ -80,7 +80,7 @@ class ClickhouseQuerySetMethods:
         Returns:
             The options - the dialect's defaults when the model declares none.
         """
-        table_options = extension_query.model._meta.get_table_options(extension_query.dialect)
+        table_options = extension_query.binding.get_table_options(extension_query.dialect)
         return table_options if isinstance(table_options, ClickhouseTableOptions) else ClickhouseTableOptions()
 
     @staticmethod
@@ -142,7 +142,7 @@ class ClickhouseQuerySetMethods:
             )
         if builder._table_sample is not None:
             raise QueryError("sample_rows() reads a sample of a number of rows - the queryset reads a sample() too")
-        ClickhouseQuerySetMethods.get_table_options(extension_query).raise_if_unsampled(extension_query.model)
+        ClickhouseQuerySetMethods.get_table_options(extension_query).raise_if_unsampled(extension_query.binding)
         return builder.set_dialect_clause(ClickhouseClause.SAMPLE_ROWS, rows)
 
     @staticmethod
@@ -253,7 +253,7 @@ class ClickhouseQuerySetMethods:
                 "limit_by() limits the rows a query returns - aggregate() computes over the rows of the table; "
                 "read the rows and compute over them, or count() them"
             )
-        meta = extension_query.model._meta
+        meta = extension_query.binding
         if meta.has_composite_primary_key:
             # "pk" of a composite key groups the rows by each of its columns.
             expressions = tuple(

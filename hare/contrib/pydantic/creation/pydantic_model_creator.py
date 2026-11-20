@@ -7,12 +7,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
 from pydantic import ConfigDict, Field as PydanticField, create_model
 from pydantic.fields import ComputedFieldInfo
 
-from hare import (
-    BackwardForeignKeyRelation,
-    BackwardOneToOneRelation,
-    ForeignKeyFieldInstance,
-    OneToOneFieldInstance,
-)
+from hare import BackwardForeignKeyRelation, BackwardOneToOneRelation, ForeignKeyFieldInstance
 from hare.contrib.pydantic.constants import (
     HASH_LENGTH,
     MODEL_INDEX_MAX_SIZE,
@@ -34,10 +29,12 @@ from hare.contrib.pydantic.models.pydantic_model import PydanticModel
 from hare.core.caching.cache import Cache
 from hare.exceptions import ConfigurationError
 from hare.fields import Field, JSONField
+from hare.fields.generated_field import GeneratedField
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 
 if TYPE_CHECKING:
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 # A recursion level's model and maximum nesting depth.
@@ -62,15 +59,13 @@ class PydanticModelCreator:
     #: validators, the module and each further option set - plus the schema's name: a ``:leaf``
     #: submodel or an explicit ``name=`` shares its root schema's hash. The hash is known only once
     #: the model is analysed whole.
-    MODEL_INDEX: ClassVar[Cache[type[PydanticModel]]] = Cache(MODEL_INDEX_MAX_SIZE, holds_sql=False)
+    MODEL_INDEX: ClassVar[Cache[type[PydanticModel]]] = Cache(MODEL_INDEX_MAX_SIZE)
     #: (model, its Pydantic model, list name) -> the list wrapper around the Pydantic model.
-    QUERYSET_MODEL_INDEX: ClassVar[Cache[type[PydanticListModel]]] = Cache(
-        QUERYSET_MODEL_INDEX_MAX_SIZE, holds_sql=False
-    )
+    QUERYSET_MODEL_INDEX: ClassVar[Cache[type[PydanticListModel]]] = Cache(QUERYSET_MODEL_INDEX_MAX_SIZE)
 
     def __init__(
         self,
-        model: type[Model],
+        binding: ModelBinding,
         name: str | None = None,
         exclude: tuple[str, ...] | None = None,
         include: tuple[str, ...] | None = None,
@@ -91,7 +86,8 @@ class PydanticModelCreator:
         _as_submodel: bool = False,
         _max_recursion: int | None = None,
     ) -> None:
-        self._model_class: type[Model] = model
+        model = binding._model
+        self._binding = binding
         self._stack: tuple[StackEntry, ...] = _stack
         self._is_default: bool = (
             exclude is None
@@ -114,7 +110,7 @@ class PydanticModelCreator:
             exclude = ()
         self._exclude_sensitive: bool = exclude_sensitive
         if exclude_sensitive:
-            exclude = tuple(exclude) + tuple(sorted(model._meta.sensitive_fields))
+            exclude = tuple(exclude) + tuple(sorted(binding.sensitive_fields))
         if include is None:
             include = ()
         if computed is None:
@@ -123,10 +119,10 @@ class PydanticModelCreator:
             optional = ()
         self._relations_as_ids: bool = relations_as_ids
         if relations_as_ids:
-            optional = RelationFieldSchemas.add_relation_id_names(model, optional)
+            optional = RelationFieldSchemas.add_relation_id_names(binding, optional)
 
         self.meta = PydanticMetaReading.get_meta(
-            model,
+            binding,
             meta_override=meta_override,
             exclude=exclude,
             include=include,
@@ -139,16 +135,16 @@ class PydanticModelCreator:
             model_config=model_config,
         )
         PydanticModelCreator.raise_if_unknown_names(
-            model,
+            binding,
             {"include": include, "exclude": exclude, "optional": optional},
             computed,
-            {*self.meta.model_computed, *self.meta.model_extra_fields, *self.meta.model_related_values},
+            {*self.meta.computed, *self.meta.extra_fields, *self.meta.related_values},
         )
         ExtraFieldSchemas.raise_if_wrong(
-            model,
+            binding,
             self.meta.extra_fields,
             self.meta.related_values,
-            {*model._meta.fields_map, *model._meta.generic_foreign_key_fields, *self.meta.model_computed},
+            {*binding.fields_map, *binding.generic_foreign_key_fields, *self.meta.model_computed},
         )
 
         self._exclude_read_only: bool = exclude_readonly
@@ -161,14 +157,14 @@ class PydanticModelCreator:
 
         self._as_submodel = _as_submodel
 
-        self._annotations = ModelAnnotations.get(model)
+        self._annotations = ModelAnnotations.get(model, binding=binding)
 
         self._pconfig: ConfigDict
 
         self._properties: dict[str, PropertyValue] = dict()
         self._relational_fields_index: list[tuple[str, str]] = list()
 
-        self._model_description: ModelDescription = ModelDescription.from_model(model)
+        self._model_description: ModelDescription = ModelDescription.from_binding(binding)
 
         self._field_map: FieldMap = self._initialize_field_map()
         self._construct_field_map()
@@ -192,25 +188,29 @@ class PydanticModelCreator:
                     field_info.append(f"{name}:{prop[0]}")
                 else:
                     computed_field_info.append(f"{name}:computed")
-            # Only the computed fields - a trailing block - are sorted among themselves, so their
-            # declared order doesn't change the hash.
-            field_info += sorted(computed_field_info)
+            # Computed fields retain their declaration order unless the schema sorts fields.
+            field_info += sorted(computed_field_info) if self.meta.sort_alphabetically else computed_field_info
+            computed_names = (
+                tuple(sorted(self.meta.computed)) if self.meta.sort_alphabetically else tuple(self.meta.computed)
+            )
             # (schema, db_table) tells apart classes that would hash alike - a stable identity
             # across runs, unlike id().
             hashval = (
-                f"{self._model_class._meta.schema};{self._model_class._meta.db_table};"
+                f"{self._binding.schema};{self._binding.db_table};"
                 f"{self._fqname};"
                 f"{field_info};"
                 f"{self._relational_fields_index};"
                 f"{self._optional};"
                 f"{self.meta.allow_cycles};"
                 f"{self._exclude_read_only};"
-                f"{tuple(sorted(self.meta.computed))};"
+                f"{computed_names};"
                 f"{self.meta.model_config};"
                 f"{self._validators};"
                 f"{self._module}"
             )
             # Each further option is appended only when set.
+            if self.meta.sort_alphabetically:
+                hashval += ";sort_alphabetically"
             if self._exclude_sensitive:
                 hashval += ";exclude_sensitive"
             if self._relations_as_ids:
@@ -225,17 +225,17 @@ class PydanticModelCreator:
 
     @staticmethod
     def raise_if_unknown_names(
-        model: type[Model],
+        binding: ModelBinding,
         names_by_argument: dict[str, tuple[str, ...]],
         computed: tuple[str, ...],
         declared_names: set[str],
     ) -> None:
         """Refuses a name given to the creator that names nothing of the model - a misspelt ``exclude``
         would leave the field it means in the schema. A path into a relation is checked by the
-        relation's own creator.
+        related model is checked even when that relation is left out of the final schema.
 
         Args:
-            model: The model.
+            binding: The model.
             names_by_argument: The names and paths given as ``include``/``exclude``/``optional``.
             computed: The names and paths given as ``computed``.
             declared_names: The computed fields, extra fields and related values declared on this schema.
@@ -244,18 +244,44 @@ class PydanticModelCreator:
             ConfigurationError: A name is neither a field, a relation nor a computed field of the
                 model, or a computed name isn't a method or property of it.
         """
-        meta = model._meta
-        known_names = {*meta.fields_map, *meta.generic_foreign_key_fields, *declared_names}
+        model = binding._model
+        known_names = {
+            *binding.fields_map,
+            *binding.generic_foreign_key_fields,
+            *(name for name in declared_names if "." not in name),
+        }
         for argument_name, names in names_by_argument.items():
             for name in names:
-                if name.split(".", 1)[0] not in known_names:
+                field_name, separator, remainder = name.partition(".")
+                if field_name not in known_names:
                     raise ConfigurationError(
                         f"pydantic_model_creator({model.__name__}, {argument_name}=...): {name!r} names no field, "
                         "relation or computed field of the model"
                     )
+                if separator:
+                    if field_name not in binding.fetch_fields:
+                        raise ConfigurationError(
+                            f"pydantic_model_creator({model.__name__}, {argument_name}=...): {name!r} - "
+                            f"{field_name!r} is no relation of the model"
+                        )
+                    related_model = binding.fields_map[field_name].related_model  # type: ignore[attr-defined]
+                    related_binding = binding.graph.get_binding(related_model)
+                    related_meta = PydanticMetaReading.collect_pydantic_meta(related_binding)
+                    prefix = field_name + "."
+                    PydanticModelCreator.raise_if_unknown_names(
+                        related_binding,
+                        {argument_name: (remainder,)},
+                        (),
+                        {
+                            *related_meta.computed,
+                            *related_meta.extra_fields,
+                            *related_meta.related_values,
+                            *(path[len(prefix) :] for path in declared_names if path.startswith(prefix)),
+                        },
+                    )
         for name in computed:
             relation_name, _, rest = name.partition(".")
-            if rest and relation_name not in meta.fetch_fields:
+            if rest and relation_name not in binding.fetch_fields:
                 raise ConfigurationError(
                     f"pydantic_model_creator({model.__name__}, computed=...): {name!r} - {relation_name!r} is no "
                     "relation of the model"
@@ -273,13 +299,13 @@ class PydanticModelCreator:
             return self.given_name, self.given_name
         name = f"{self._fqname}:{self._hash}" if not self._is_default else self._fqname
         name = f"{name}:leaf" if self._as_submodel else name
-        return name, self._model_class.__name__
+        return name, self._binding._model.__name__
 
     def _initialize_field_map(self) -> FieldMap:
         return FieldMap(
             self.meta,
             pk_fields=DataFieldSchemas.get_caller_supplied_pk_fields(self),
-            model_fields_map=self._model_class._meta.fields_map,
+            model_fields_map=self._binding.fields_map,
             relations_as_ids=self._relations_as_ids,
         )
 
@@ -304,11 +330,11 @@ class PydanticModelCreator:
                     if not self.meta.backward_relations:
                         fields = [field for field in fields if field.model_field_name in self._annotations]
                     self._field_map.field_map_update(fields, self.meta)
-            self._field_map.computed_field_map_update(self.meta.model_computed, self._model_class, self.meta)
+            self._field_map.computed_field_map_update(self.meta.model_computed, self._binding._model, self.meta)
         if self.meta.sort_alphabetically:
             self._field_map.sort_alphabetically()
         else:
-            self._field_map.sort_definition_order(self._model_class, self.meta.model_computed)
+            self._field_map.sort_definition_order(self._binding, self.meta.model_computed)
 
     def create_pydantic_model(self) -> type[PydanticModel]:
         """Builds the schema of the model - or gives the one kept under the same hash and name.
@@ -328,10 +354,9 @@ class PydanticModelCreator:
 
         # Keyed by hash AND name: a root schema and the ":leaf" submodel of the same model (or
         # two given name= values) can share one hash while being different schemas.
-        model_index_key = (self._model_class, f"{self._hash};{self._name}")
-        if (
-            hashed_model := PydanticModelCreator.MODEL_INDEX.get_bucket(self._model_class).get(model_index_key)
-        ) is not None:
+        model_index_key = (self._binding._model, f"{self._hash};{self._name}")
+        bucket = PydanticModelCreator.MODEL_INDEX.get_bucket(self._binding)
+        if (hashed_model := bucket.get(model_index_key)) is not None:
             return hashed_model
 
         self._pconfig = PydanticMetaReading.initialize_pconfig(self)
@@ -346,8 +371,6 @@ class PydanticModelCreator:
         if self._unset_when_none:
             base_namespace["drop_unset_values"] = DataFieldSchemas.get_unset_value_dropping_serializer(
                 frozenset(self._unset_when_none),
-                uses_aliases=bool(self._pconfig.get("alias_generator"))
-                or any(getattr(common_fields[name][1], "serialization_alias", None) for name in self._unset_when_none),
             )
         base_model = type("BasePydanticModel", (PydanticModel,), base_namespace)
         model: type[PydanticModel] = create_model(
@@ -361,13 +384,13 @@ class PydanticModelCreator:
             },
             **common_fields,
         )
-        model.__doc__ = FieldDescriptions.get_clean_docstring(self._model_class)
-        model.source_model = self._model_class
+        model.__doc__ = FieldDescriptions.get_clean_docstring(self._binding._model)
+        model._set_source_binding(self._binding)
         # The relations a related value reads through - from_hare_orm()/from_queryset() fetch them.
         model.related_value_paths = (
             () if self._exclude_read_only else tuple(ExtraFieldSchemas.get_shown_related_values(self).values())
         )
-        PydanticModelCreator.MODEL_INDEX.get_bucket(self._model_class)[model_index_key] = model
+        bucket[model_index_key] = model
         return model
 
     def _process_field(
@@ -417,10 +440,13 @@ class PydanticModelCreator:
                     pydantic_field = PydanticField(default_factory=field.default, **fconfig)
                 else:
                     pydantic_field = PydanticField(default=field.default, **fconfig)
-                    if field.default is None and not field.null and field_name not in self._optional:
-                        # None stands for "not given": a create from the dump leaves the value to
-                        # the database or the ORM rather than writing a NULL the column refuses.
-                        self._unset_when_none.append(field_name)
+                if (
+                    (field.default is None or field._default_is_coroutine)
+                    and not field.null
+                    and field_name not in self._optional
+                ):
+                    # A pending database/ORM default is absent from a write payload, not SQL NULL.
+                    self._unset_when_none.append(field_name)
                 self._properties[field_name] = (field_property, pydantic_field)
             else:
                 if json_schema_extra.get("nullable") or (
@@ -437,11 +463,11 @@ class PydanticModelCreator:
         json_schema_extra: dict[str, Any],
         fconfig: dict[str, Any],
     ) -> Any:
-        if isinstance(field, (ForeignKeyFieldInstance, OneToOneFieldInstance, BackwardOneToOneRelation)):
+        if isinstance(field, (ForeignKeyFieldInstance, BackwardOneToOneRelation)):
             return RelationFieldSchemas.process_single_field_relation(self, field_name, field, json_schema_extra)
         if isinstance(field, (BackwardForeignKeyRelation, ManyToManyFieldInstance)):
             return RelationFieldSchemas.process_many_field_relation(self, field_name, field)
-        if isinstance(json_field := DataFieldSchemas.unwrap_generated_field(field), JSONField):
+        if isinstance(json_field := GeneratedField.get_effective_field(field), JSONField):
             # A JSONField(null=True) is marked nullable here - it doesn't go through
             # _process_data_field. Its type is field_type when declared, else Any.
             if field.null:
@@ -449,7 +475,5 @@ class PydanticModelCreator:
             declared_value_type = json_field.declared_value_type
             if not declared_value_type:
                 return Any
-            if field.null or field_name in self._optional:
-                declared_value_type = declared_value_type | None
-            return self._annotations.get(field_name) or declared_value_type
+            return DataFieldSchemas.get_annotation(self, field_name, field, declared_value_type)
         return DataFieldSchemas.process_data_field(self, field_name, field, json_schema_extra, fconfig)

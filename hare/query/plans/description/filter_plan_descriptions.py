@@ -17,10 +17,10 @@ from hare.query.expressions.constants import (
 from hare.query.plans.description.plan_context import PlanContext
 from hare.query.plans.description.plan_description import PlanDescription
 from hare.query.plans.description.plannable import Plannable
-from hare.query.query_connection import QueryConnection
 
 if TYPE_CHECKING:
     from hare.query.queryset.combination.queryset_combination import QuerySetCombination
+    from hare.query.queryset.query_specification import QuerySpecification
     from hare.query.queryset.queryset import QuerySet
 
 
@@ -192,14 +192,23 @@ class FilterPlanDescriptions:
         from hare.query.queryset import QuerySet
         from hare.query.statements import AwaitableQuery
 
+        if isinstance(value, (QuerySet, AwaitableQuery)):
+            if context.binding is not None:
+                from hare.query.queryset.pending_calls.calls_before_setup import CallsBeforeSetup
+
+                value = CallsBeforeSetup.bind(value, context.application_context, context.binding.graph)
+            elif value._binding is None:
+                return None
         if isinstance(value, QuerySet):
             # The values it selects, else its primary key - or the rows it combines, whose
             # primary key is selected from them built into the filter.
             value = value._get_filter_value_compiler()
         if isinstance(value, AwaitableQuery):
-            filter_value_query = value._get_filter_value_query()
+            filter_value_query: QuerySpecification[Any] = value._get_filter_value_query()
+            if filter_value_query._connection is not None:
+                return None
             return PlanDescription.combine(
-                ("query", QueryConnection.get_pinned_connection_name(filter_value_query)),
+                ("query",),
                 (filter_value_query.get_plan_description(context),),
             )
         return value.get_plan_description(context)

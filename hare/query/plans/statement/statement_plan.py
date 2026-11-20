@@ -14,12 +14,12 @@ from hare.sql.terms.parameters.recording_parameterizer import RecordingParameter
 from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
+    from hare.core.hare_context import HareContext
     from hare.dialects.base.dialect import Dialect
     from hare.fields.field import Field as ModelField
     from hare.models import Model
     from hare.query.expressions.value_references.value_reference_types import ValueReference
     from hare.query.plans.recording.scope_value_source import ScopeValueSource
-    from hare.query.rows.native.hydration_layout import HydrationEntry
     from hare.sql.sql_context import SqlContext
 
 
@@ -31,15 +31,14 @@ class StatementPlan:
     (``PlanOrigins``) - as many as the build resolved it - the query's LIMIT or OFFSET, or a constant
     of the plan. A query whose text could differ from the plan's - a value rendered as a
     literal, a value of another type, a LIMIT or OFFSET on one side only, a value no reference binds
-    - is built in full. The text isn't reused (``sql`` is None) when it holds a parameter that came
-    from no term, or a CTE whose values the plan doesn't bind.
+    - is built in full. Preparation returns no reusable plan when the text holds a parameter
+    that came from no term, or a CTE whose values the plan cannot bind.
 
     A fixed positional model projection retains its shared column layout, prepared before the
     plan is published. Connections and loaded instances remain local to each execution.
     """
 
     __slots__ = (
-        "value_sources",
         "parameter_bindings",
         "sql",
         "parameters",
@@ -48,11 +47,6 @@ class StatementPlan:
         "limit_binding",
         "offset_binding",
         "result_reading",
-        "result_column_names",
-        "decode_plan",
-        "decode_plan_key",
-        "decode_plan_is_partial",
-        "select_related_positions",
         "annotation_output_fields",
         "scope_sources",
     )
@@ -63,20 +57,14 @@ class StatementPlan:
     unbindable_value_classes: ClassVar[tuple[type, ...]] = (Term,)
 
     if TYPE_CHECKING:
-        value_sources: tuple[tuple[ValueReference, ...], ...]
         parameter_bindings: Any
-        sql: str | None
+        sql: str
         parameters: list[Any]
         has_limit: bool
         has_offset: bool
         limit_binding: ParameterSlot | None
         offset_binding: ParameterSlot | None
         result_reading: Any
-        result_column_names: tuple[str, ...]
-        decode_plan: tuple[HydrationEntry, ...] | None
-        decode_plan_key: tuple[str | None, ...] | None
-        decode_plan_is_partial: bool
-        select_related_positions: tuple[Any, ...]
         annotation_output_fields: tuple[tuple[str, ModelField[Any] | None], ...]
         scope_sources: tuple[ScopeValueSource, ...]
 
@@ -86,17 +74,12 @@ class StatementPlan:
         template: QueryBuilder | SetOperationQuery,
         value_sources: tuple[tuple[ValueReference, ...], ...],
         repeated_values: tuple[tuple[int, int], ...] = (),
-        decode_plan: tuple[HydrationEntry, ...] | None = None,
-        decode_plan_is_partial: bool = False,
-        select_related_positions: tuple[Any, ...] = (),
         annotation_output_fields: tuple[tuple[str, ModelField[Any] | None], ...] = (),
-        decode_plan_key: tuple[str | None, ...] | None = None,
-        binds_ctes: bool = False,
         result_reading: Any = None,
         scope_sources: tuple[ScopeValueSource, ...] = (),
         *,
         sql_context: SqlContext | None = None,
-        result_column_names: tuple[str, ...] = (),
+        slice_boundary_terms: tuple[Term | None, Term | None] | None = None,
     ) -> tuple[RenderedStatement, Self | None]:
         """Render once for this execution and prepare a detached plan from the same recording.
 
@@ -108,20 +91,17 @@ class StatementPlan:
             repeated_values: The values listed again under an origin listed before, each with the
                 position of the first - one object read twice, so a later query binds the plan only
                 when its values there are one object too.
-            decode_plan: The row decode plan of a model query.
-            decode_plan_is_partial: Whether the decode plan covers only some fields.
-            select_related_positions: The ``select_related()`` row layout of a model query.
             annotation_output_fields: The output fields of the annotations whose results are
                 decoded through a field.
-            decode_plan_key: The names of the base model's selected columns a model query reads
-                its rows by - a part of the plan's key.
-            binds_ctes: Whether the values of the template's CTEs are among ``value_sources`` - the
-                plan key then holds the structure of each CTE body.
             result_reading: What else a query of the key needs to read its result, kept for its
                 type (the column converters of a set operation, say).
             scope_sources: The default scopes folded into its JOINs - their references follow
                 the description's in ``value_sources``.
             sql_context: The selected connection's rendering settings, captured when the plan is built.
+            slice_boundary_terms: The limit and offset wrappers created by this query, before
+                extensions or derived-table wrapping replace its final builder boundaries.
+                None uses the template boundaries. A replaced wrapper may have no rendered
+                positions; it never acquires an extension's unrelated parameter positions.
 
         Returns:
             The current statement and its reusable plan, or None for the plan when a recorded
@@ -135,36 +115,27 @@ class StatementPlan:
         preparation = ParameterPreparation(parameterizer, sql_context.dialect.parameters, sql_context.dialect.types)
         prepared_sources = preparation.prepare_inputs(value_sources)
         rendered = RenderedStatement(sql, parameterizer.values)
-        if (
-            prepared_sources is None
-            or any(source is None for source in parameterizer.sources)
-            or (not binds_ctes and template._with)
-        ):
+        if prepared_sources is None or any(source is None for source in parameterizer.sources):
             return rendered, None
         plan = cls()
         plan.sql = sql
-        plan.value_sources = prepared_sources
         plan.parameter_bindings = NativeModules.rows.ParameterBindings(
             tuple(tuple(reference.bind for reference in sources) for sources in prepared_sources), repeated_values
         )
         plan.parameters = parameterizer.values.copy()
         for position in preparation.bound_positions:
             plan.parameters[position] = None
-        plan.has_limit = template._limit is not None
-        plan.has_offset = template._offset is not None
-        plan.limit_binding = preparation.slot(template._limit) if template._limit is not None else None
-        plan.offset_binding = preparation.slot(template._offset) if template._offset is not None else None
+        limit, offset = (template._limit, template._offset) if slice_boundary_terms is None else slice_boundary_terms
+        plan.has_limit = limit is not None
+        plan.has_offset = offset is not None
+        plan.limit_binding = preparation.slot(limit) if limit is not None else None
+        plan.offset_binding = preparation.slot(offset) if offset is not None else None
         plan.result_reading = result_reading
-        plan.result_column_names = result_column_names
-        plan.decode_plan = decode_plan
-        plan.decode_plan_key = decode_plan_key
-        plan.decode_plan_is_partial = decode_plan_is_partial
-        plan.select_related_positions = select_related_positions
         plan.annotation_output_fields = annotation_output_fields
         plan.scope_sources = scope_sources
         return rendered, plan
 
-    def get_scope_values(self) -> list[Any] | None:
+    def get_scope_values(self, *, application_context: HareContext | None = None) -> list[Any] | None:
         """The values of the default scopes folded into the plan's JOINs, as the current context
         makes them.
 
@@ -173,7 +144,7 @@ class StatementPlan:
         """
         values: list[Any] = []
         for scope_source in self.scope_sources:
-            scope_values = scope_source.get_values()
+            scope_values = scope_source.get_values(application_context=application_context)
             if scope_values is None:
                 return None
             values += scope_values
@@ -186,25 +157,26 @@ class StatementPlan:
         dialect: Dialect,
         limit: Any = PLAN_CACHE_MISS,
         offset: Any = PLAN_CACHE_MISS,
+        *,
+        application_context: HareContext | None = None,
     ) -> list[Any] | None:
         """The parameters of one query of the plan key, in the order of the plan's SQL text.
 
         Args:
-            values: The query's values in description order, before the current JOIN-scope values
-                appended here to match ``value_sources``.
+            values: The query's values in description order. Current values from scopes in JOINs
+                are appended in the order expected by the prepared parameter bindings.
             model: The model queried.
             dialect: The dialect the query runs on.
             limit: The query's LIMIT (None for none); ``PLAN_CACHE_MISS`` keeps the plan's own.
             offset: The query's OFFSET, the same way.
+            application_context: The context used to bind current default-scope values in joined relations.
 
         Returns:
             The parameters, or None when the query's SQL text would differ from the plan's,
             including a change in the structure of a JOIN scope.
         """
-        if self.sql is None:
-            return None
         if self.scope_sources:
-            scope_values = self.get_scope_values()
+            scope_values = self.get_scope_values(application_context=application_context)
             if scope_values is None:
                 return None
             scope_values[:0] = values
@@ -239,4 +211,4 @@ class StatementPlan:
         """
         if value is None:
             return not present
-        return slot is not None and bool(slot.positions) and slot.bind(parameters, value)
+        return slot is not None and slot.bind(parameters, value)

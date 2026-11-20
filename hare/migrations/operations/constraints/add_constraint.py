@@ -113,7 +113,7 @@ class AddConstraint(AddSchemaObject):
             return
         self.raise_if_table_options_unsupported(app_label, new_state, state_editor)
         plan = state_editor.constraint_statements.get_unique_constraint_using_index_plan(
-            self._model(new_state, app_label),
+            self.get_model_binding(new_state, app_label),
             self.constraint,  # type: ignore[arg-type]
             self.using_index,
         )
@@ -134,7 +134,7 @@ class AddConstraint(AddSchemaObject):
         self.check_can_run(state_editor)
         # Dropping the constraint dropped the index it took over - built again, for whatever
         # removes it going further back.
-        model = self._model(new_state, app_label)
-        removal = state_editor.get_remove_constraint_plan(model, self.constraint)
-        restoration = state_editor.get_add_index_plan(model, self.get_used_index(new_state, app_label))
+        binding = self.get_model_binding(new_state, app_label)
+        removal = state_editor.get_remove_constraint_plan(binding, self.constraint)
+        restoration = state_editor.get_add_index_plan(binding, self.get_used_index(new_state, app_label))
         await SchemaChangePlan((*removal.steps, *restoration.steps)).execute(state_editor)

@@ -13,11 +13,11 @@ from hare.dialects.sqlite.sqlite_table_options import SqliteTableOptions
 from hare.exceptions import ConfigurationError
 from hare.fields import CharField, IntField
 from hare.inspectdb import SchemaInspector
-from hare.migrations.drift import detect_drift
-from hare.migrations.operations import AlterModelOptions
+from hare.migrations.operations import AlterModelOptions, SeparateDatabaseAndState
 from hare.models import Model
-from tests.migrations.round_trips.test_round_trip_real_db import APP_LABEL, RoundTrip, build_live_state, build_model
+from tests.migrations.round_trips.test_round_trip_real_db import APP_LABEL, RoundTrip, build_model
 from tests.utils.fake_client import FakeClient
+from tests.utils.model_bindings import ModelBindings
 
 
 @pytest.mark.database_independent
@@ -65,12 +65,15 @@ def test_a_connection_uses_its_own_dialect_entry():
         {"id": IntField(primary_key=True, generated=False), "code": CharField(max_length=20)},
         {"table_options": [SqliteTableOptions(without_rowid=True), PostgresqlTableOptions(unlogged=True)]},
     )
+    apps = ModelBindings.prepare(model)
     sqlite_sql = (
-        SQLITE_DIALECT.schema_editor_class(FakeClient("sqlite")).table_creation.get_model_sql_data(model).table_sql
+        SQLITE_DIALECT.schema_editor_class(FakeClient("sqlite"))
+        .table_creation.get_model_sql_data(apps.get_binding(model))
+        .table_sql
     )
     postgresql_sql = (
         POSTGRESQL_DIALECT.schema_editor_class(FakeClient("postgresql"))
-        .table_creation.get_model_sql_data(model)
+        .table_creation.get_model_sql_data(apps.get_binding(model))
         .table_sql
     )
     assert sqlite_sql.startswith('CREATE TABLE "both_optioned"')
@@ -104,7 +107,7 @@ def test_without_rowid_rejects_a_generated_primary_key():
     model = build_model("RowidGauge", "rowid_gauge", {}, {"table_options": [SqliteTableOptions(without_rowid=True)]})
     editor = SQLITE_DIALECT.schema_editor_class(FakeClient("sqlite"))
     with pytest.raises(ConfigurationError, match="without_rowid=True"):
-        editor.table_creation.get_model_sql_data(model)
+        editor.table_creation.get_model_sql_data(ModelBindings.prepare(model).get_binding(model))
 
 
 @pytest.mark.database_independent
@@ -128,7 +131,7 @@ def test_without_rowid_rejects_a_model_without_a_primary_key():
     )
     editor = SQLITE_DIALECT.schema_editor_class(FakeClient("sqlite"))
     with pytest.raises(ConfigurationError, match=r"without_rowid=True\) needs a primary key"):
-        editor.table_creation.get_model_sql_data(model)
+        editor.table_creation.get_model_sql_data(ModelBindings.prepare(model).get_binding(model))
 
 
 @pytest.mark.asyncio
@@ -177,11 +180,6 @@ async def test_postgresql_options_are_created_and_changed_in_place(db_isolated_n
     assert await round_trip.connection.execute_dicts("SELECT id, code FROM optioned_gauge") == [{"id": 1, "code": "a"}]
 
 
-async def get_drift_operations(round_trip: RoundTrip, model: type[Model]) -> list[type]:
-    drift = await detect_drift(round_trip.connection, build_live_state(model), [APP_LABEL])
-    return [type(operation) for operation in drift.operations]
-
-
 @pytest.mark.asyncio
 async def test_drift_and_inspectdb_read_sqlite_options(db_isolated_no_schema):
     round_trip = RoundTrip(db_isolated_no_schema.get_connection())
@@ -190,12 +188,12 @@ async def test_drift_and_inspectdb_read_sqlite_options(db_isolated_no_schema):
     rowid_less = build_gauge([SqliteTableOptions(without_rowid=True)])
     await round_trip.migrate_to(rowid_less)
 
-    assert await get_drift_operations(round_trip, rowid_less) == []
-    assert await get_drift_operations(round_trip, build_gauge([])) == [AlterModelOptions]
+    assert await round_trip.get_drift_operation_types(rowid_less) == []
+    assert await round_trip.get_drift_operation_types(build_gauge([])) == [SeparateDatabaseAndState, AlterModelOptions]
     # Another dialect's entry can't be seen in this database and isn't reported.
     assert (
-        await get_drift_operations(
-            round_trip, build_gauge([SqliteTableOptions(without_rowid=True), PostgresqlTableOptions(unlogged=True)])
+        await round_trip.get_drift_operation_types(
+            build_gauge([SqliteTableOptions(without_rowid=True), PostgresqlTableOptions(unlogged=True)])
         )
         == []
     )
@@ -203,8 +201,8 @@ async def test_drift_and_inspectdb_read_sqlite_options(db_isolated_no_schema):
     assert "table_options = [SqliteTableOptions(without_rowid=True)]" in source
 
     await round_trip.migrate_to(build_gauge([]))
-    assert await get_drift_operations(round_trip, build_gauge([])) == []
-    assert await get_drift_operations(round_trip, rowid_less) == [AlterModelOptions]
+    assert await round_trip.get_drift_operation_types(build_gauge([])) == []
+    assert await round_trip.get_drift_operation_types(rowid_less) == [SeparateDatabaseAndState, AlterModelOptions]
     assert "table_options" not in await SchemaInspector.inspect(round_trip.connection, ["optioned_gauge"])
 
 
@@ -218,11 +216,11 @@ async def test_drift_and_inspectdb_read_postgresql_options(db_isolated_no_schema
     )
     await round_trip.migrate_to(stored)
 
-    assert await get_drift_operations(round_trip, stored) == []
-    assert await get_drift_operations(round_trip, build_gauge([])) == [AlterModelOptions]
-    assert await get_drift_operations(
-        round_trip, build_gauge([PostgresqlTableOptions(unlogged=True, storage_parameters={"fillfactor": 80})])
-    ) == [AlterModelOptions]
+    assert await round_trip.get_drift_operation_types(stored) == []
+    assert await round_trip.get_drift_operation_types(build_gauge([])) == [SeparateDatabaseAndState, AlterModelOptions]
+    assert await round_trip.get_drift_operation_types(
+        build_gauge([PostgresqlTableOptions(unlogged=True, storage_parameters={"fillfactor": 80})])
+    ) == [SeparateDatabaseAndState, AlterModelOptions]
     source = await SchemaInspector.inspect(round_trip.connection, ["optioned_gauge"])
     assert (
         "table_options = [PostgresqlTableOptions(unlogged=True, storage_parameters="
@@ -242,8 +240,8 @@ async def test_drift_takes_the_default_tablespace_named_explicitly(db_isolated_n
     on_default_tablespace = build_gauge([PostgresqlTableOptions(tablespace=row["spcname"])])
     await round_trip.migrate_to(on_default_tablespace)
 
-    assert await get_drift_operations(round_trip, on_default_tablespace) == []
-    assert await get_drift_operations(round_trip, build_gauge([])) == []
+    assert await round_trip.get_drift_operation_types(on_default_tablespace) == []
+    assert await round_trip.get_drift_operation_types(build_gauge([])) == []
 
     # Taking the tablespace away moves the table to the database's default one.
     await round_trip.migrate_to(build_gauge([]))
@@ -251,7 +249,7 @@ async def test_drift_takes_the_default_tablespace_named_explicitly(db_isolated_n
         "SELECT reltablespace FROM pg_class WHERE oid = 'optioned_gauge'::regclass"
     )
     assert stored["reltablespace"] == 0
-    assert await get_drift_operations(round_trip, build_gauge([])) == []
+    assert await round_trip.get_drift_operation_types(build_gauge([])) == []
 
 
 @pytest.mark.database_independent
@@ -274,7 +272,7 @@ def test_a_time_to_live_reading_a_changed_field_is_set_after_the_change():
             {"id": IntField(primary_key=True, generated=False), "at": DatetimeField(null=nullable)},
             options,
         )
-        return ModelState.make_from_model(APP_LABEL, model)
+        return ModelState.make_from_declaration(APP_LABEL, model)
 
     def get_operation_names(old_state: ModelState, new_state: ModelState) -> list[str]:
         operations = StateModelDiff(old_state, new_state).generate_operations()

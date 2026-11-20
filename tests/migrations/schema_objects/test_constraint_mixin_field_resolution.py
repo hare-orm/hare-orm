@@ -5,6 +5,7 @@ The db fixture initializes relationships before their database columns are inspe
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from tests.shared_models.testmodels import Book, UUIDFkRelatedSourceModel
 
 
@@ -21,4 +22,4 @@ from tests.shared_models.testmodels import Book, UUIDFkRelatedSourceModel
 )
 @pytest.mark.asyncio
 async def test_resolve_fields_to_columns(db, model_class, field_name, column):
-    assert model_class._meta.get_column_names([field_name]) == [column]
+    assert HareContext.require_current().apps.get_binding(model_class).get_column_names([field_name]) == [column]

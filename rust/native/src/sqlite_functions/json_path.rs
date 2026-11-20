@@ -81,6 +81,9 @@ fn walk<'a>(mut value: &'a Value, parts: &[Value]) -> PathTarget<'a> {
                 Some(member) => member,
                 None => return PathTarget::Missing,
             },
+            // Python preserves the spelling of a noncanonical numeric object key while
+            // still accepting it as an index when the current value is an array.
+            (Value::String(_), Value::Array(_)) => return PathTarget::LeftToPython,
             (Value::Number(number), _) if number.is_i64() => return PathTarget::Missing,
             (Value::String(_), _) => return PathTarget::Missing,
             // A part of another type - Python decides.

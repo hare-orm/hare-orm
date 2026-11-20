@@ -5,13 +5,13 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from hare.exceptions import (
     ConfigurationError,
 )
-from hare.fields.constants import CASCADE, PROTECT, SET_DEFAULT
+from hare.fields.constants import CASCADE, SET_DEFAULT
 from hare.fields.enums import OnDelete, RelationLoadStrategy, RelationType
-from hare.fields.relations.constants import PROTECT_DB_ON_DELETE_SQL
 from hare.fields.relations.swappable_model_reference import SwappableModelReference
 
 if TYPE_CHECKING:
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.filters.lookups.field_lookup import FieldLookup
 from hare.fields.relations.fields.relational_field import RelationalField
 
@@ -127,8 +127,22 @@ class ManyToManyFieldInstance(RelationalField[TModel]):
         if name == "through" and self.through_model is not None:
             if isinstance(self.through_model, (str, SwappableModelReference)):
                 return self.through_model
-            return f"{self.through_model._meta.app}.{self.through_model.__name__}"
+            binding = self.get_binding().model_binding
+            app = (
+                binding.graph.get_binding(self.through_model).app
+                if binding is not None
+                else self.through_model._declaration.app
+            )
+            return f"{app}.{self.through_model.__name__}" if app is not None else self.through_model
         return super()._get_constructor_argument_value(name)
+
+    def get_through_binding(self) -> ModelBinding | None:
+        """The linked explicit through node, None for an automatic through table.
+
+        Relation linking fills both sides before model finalization. Runtime metadata
+        consumers use this node from the retained graph, independent of the current app.
+        """
+        return self.get_relation_binding().through_binding
 
     @property
     def through_model_class(self) -> type[Model] | None:
@@ -202,4 +216,4 @@ class ManyToManyFieldInstance(RelationalField[TModel]):
         """The ``ON DELETE`` clause text to emit in DDL - ``PROTECT`` has no SQL keyword of its own
         (it's enforced in Python before the DELETE is issued), so the database gets a deferrable
         ``NO ACTION`` backstop instead."""
-        return PROTECT_DB_ON_DELETE_SQL if self.on_delete == PROTECT else self.on_delete
+        return self.get_db_on_delete(self.on_delete)

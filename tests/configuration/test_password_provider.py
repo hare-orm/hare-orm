@@ -2,6 +2,7 @@
 again once the password is older than ``password_refresh_seconds``; the settings are checked."""
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -68,6 +69,41 @@ async def test_connections_waiting_together_ask_once():
     refused = provider.password
     assert await asyncio.gather(*(provider.fetch(refused) for _ in range(5))) == ["password-2"] * 5
     assert passwords.calls == 2
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+@pytest.mark.parametrize("waiters", [3, 8])
+@pytest.mark.parametrize("entry", ["expired", "refused"])
+async def test_a_shared_refresh_can_return_the_same_password(monkeypatch, waiters, entry):
+    now = 100.0
+    started, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def get_password():
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            started.set()
+            await release.wait()
+        return "unchanged-token"
+
+    monkeypatch.setattr("hare.dialects.base.client.password_provider.time", SimpleNamespace(monotonic=lambda: now))
+    provider = PasswordProvider(get_password, refresh_seconds=60)
+    assert await provider.get() == "unchanged-token"
+    now += 61
+    # Admit all callers behind the same lock before allowing the refresh to finish.
+    await provider._fetch_lock.acquire()
+    tasks = [
+        asyncio.create_task(provider.get() if entry == "expired" else provider.fetch(provider.password))
+        for _ in range(waiters)
+    ]
+    await asyncio.sleep(0)
+    provider._fetch_lock.release()
+    await started.wait()
+    release.set()
+    assert await asyncio.gather(*tasks) == ["unchanged-token"] * waiters
+    assert calls == 2
 
 
 @pytest.mark.database_independent

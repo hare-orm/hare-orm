@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 from hare.dialects.base.schema.tables.table_definition import TableDefinition
 from hare.models import Model
+from hare.models.model_binding import ModelBinding
 
 
 @dataclass
@@ -27,7 +28,7 @@ class ModelSqlData:
     """
 
     table_key: tuple[str | None, str]
-    model: type[Model]
+    binding: ModelBinding
     table_sql: str
     definition: TableDefinition
     constraint_sqls: list[str]
@@ -42,3 +43,8 @@ class ModelSqlData:
             The table's statements followed by its constraints', each closed with a semicolon.
         """
         return "\n".join([self.table_sql, *(f"{constraint_sql};" for constraint_sql in self.constraint_sqls)])
+
+    @property
+    def model(self) -> type[Model]:
+        """The ordinary Python class of the prepared schema node."""
+        return self.binding._model

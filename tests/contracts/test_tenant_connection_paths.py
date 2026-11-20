@@ -3,6 +3,7 @@
 import pytest
 import pytest_asyncio
 
+from hare import Model, fields
 from hare.contrib.test import hare_test_context
 from hare.exceptions import ConfigurationError, QueryError
 from hare.migrations import Migration, MigrationRunner, State
@@ -39,12 +40,31 @@ async def tenant_connection(request):
             Migration("shared_tables", "models", operations=before.get_operations(public, "models").operations),
             before,
         )
-        shared_note = after.apps.get_model("models.SchemaNote")
-        shared_edition = after.apps.get_model("models.SchemaEdition")
-        note = await shared_note.objects.create(id=1, text="shared")
-        edition = await shared_edition.objects.create(number=1, revision=2, text="shared", note_id=1)
+        shared_note_apps = after.apps
+        shared_note = shared_note_apps.get_model("models.SchemaNote")
+        shared_edition_apps = after.apps
+        shared_edition = shared_edition_apps.get_model("models.SchemaEdition")
+        note = await shared_note_apps.get_queryset(shared_note).create(id=1, text="shared")
+        edition = await shared_edition_apps.get_queryset(shared_edition).create(
+            number=1, revision=2, text="shared", note_id=1
+        )
         await note.selected_editions.add(edition)
-        yield connection, QueryError if request.param else ConfigurationError, request.param, shared_note
+        binding = shared_note_apps.get_binding(shared_note)
+        shared_model = type(
+            "SharedSchemaNote",
+            (Model,),
+            {
+                "id": fields.IntField(primary_key=True, generated=False),
+                "text": fields.TextField(),
+                "Meta": type("Meta", (), {"table": binding.db_table, "schema": binding.schema}),
+            },
+        )
+        query_apps = State.from_models(
+            [shared_model, SchemaNote, SchemaEdition],
+            app_label="models",
+            default_connections={"models": connection.connection_alias},
+        ).apps
+        yield connection, QueryError if request.param else ConfigurationError, request.param, query_apps
 
 
 @pytest.fixture(params=(SchemaNote, SchemaEdition))
@@ -160,10 +180,10 @@ async def test_a_selected_tenant_client_keeps_working(tenant_connection):
 
 @pytest.mark.asyncio
 async def test_embedded_tenant_queries_check_the_outer_client(tenant_connection, tenant_model):
-    connection, error, _, shared_note = tenant_connection
+    connection, error, _, query_apps = tenant_connection
     for using in (None, connection.connection_alias, connection):
-        outer = shared_note.objects.using(using)
-        source = tenant_model.objects.values("text")
+        outer = query_apps.get_queryset("models.SharedSchemaNote").using(using)
+        source = query_apps.get_queryset(f"models.{tenant_model.__name__}").values("text")
         for operation in (
             lambda: outer.filter(text__in=source),
             lambda: outer.filter(text__in=source).count(),

@@ -27,11 +27,11 @@ class AsyncpgParameters:
         ``TIMETZ``, and the codec rejects a naive time.
         """
         if type(value) in FAST_SCALAR_BIND_TYPES:
-            if type(value) is datetime.time and value.tzinfo is None:
+            if type(value) is datetime.time and value.utcoffset() is None:
                 return value.replace(tzinfo=datetime.UTC)
             if (
                 type(value) is datetime.datetime
-                and value.tzinfo is None
+                and value.utcoffset() is None
                 and value.year < EPOCH_YEAR
                 and value not in NAIVE_INFINITY_DATETIMES
             ):
@@ -50,21 +50,15 @@ class AsyncpgParameters:
                 ):
                     return [AsyncpgParameters.get_bound_value(element) for element in value]
             return value
-        if (
-            hasattr(value, "lower_inc")
-            and hasattr(value, "upper_inc")
-            and hasattr(value, "lower")
-            and hasattr(value, "upper")
-        ):
-            # empty= is passed on: an empty range has the same None bounds as an unbounded one.
-            return asyncpg.Range(
-                value.lower,
-                value.upper,
-                lower_inc=value.lower_inc,
-                upper_inc=value.upper_inc,
-                empty=getattr(value, "is_empty", False),
-            )
-        return value
+        try:
+            lower_inc, upper_inc = value.lower_inc, value.upper_inc
+            lower, upper = value.lower, value.upper
+        except AttributeError:
+            return value
+        # An empty range has the same None bounds as an unbounded one.
+        return asyncpg.Range(
+            lower, upper, lower_inc=lower_inc, upper_inc=upper_inc, empty=getattr(value, "is_empty", False)
+        )
 
     @staticmethod
     def get_bindable_pre_epoch_datetime(value: datetime.datetime) -> datetime.datetime:

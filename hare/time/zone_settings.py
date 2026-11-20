@@ -8,6 +8,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar
 from zoneinfo import ZoneInfo
 
+from hare.classes.deferred_import import DeferredImport
 from hare.core.caching.cache_bucket import CacheBucket
 from hare.time.constants import DEFAULT_TIMEZONE, NAIVE_DATETIMES_ZONE_KEY_MARK
 from hare.time.system_zone import SystemZone
@@ -35,7 +36,9 @@ class ZoneSettings:
 
     #: ``hare.core.hare_context.HareContext``, bound on first use by ``get_current_context()`` - that
     #: package imports this module, so importing it here at module level would be circular.
-    context_class: ClassVar[type[HareContext] | None] = None
+    context_class: ClassVar[DeferredImport[type[HareContext]]] = DeferredImport(
+        "hare.core.hare_context", "HareContext"
+    )
 
     @staticmethod
     def get_use_timezone() -> bool:
@@ -128,20 +131,7 @@ class ZoneSettings:
         Returns:
             The context, or None when none is active.
         """
-        return (ZoneSettings.context_class or ZoneSettings.get_context_class()).get_current()
-
-    @staticmethod
-    def get_context_class() -> type[HareContext]:
-        """``HareContext``, imported on the first read and kept in ``context_class``.
-
-        Returns:
-            The class.
-        """
-        # Imported here: the context module imports this one.
-        from hare.core.hare_context import HareContext
-
-        ZoneSettings.context_class = HareContext
-        return HareContext
+        return ZoneSettings.context_class.get_current()
 
     @staticmethod
     @contextmanager

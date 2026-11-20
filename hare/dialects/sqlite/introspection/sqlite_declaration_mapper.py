@@ -4,22 +4,23 @@ from collections import Counter
 from operator import itemgetter
 from typing import TYPE_CHECKING, Any
 
+from hare.ddl.enums import GeneratedNamePrefix
+from hare.ddl.generated_names import GeneratedNames
 from hare.ddl.schema_objects.trigger import Trigger
 from hare.dialects.sqlite.constants import (
     SPATIALITE_INDEX_TYPE,
     SPATIALITE_TRIGGER_NAME_PREFIXES,
     SQLITE_AUTOINDEX_PREFIX,
+    SQLITE_DEFAULT_COLLATION,
     SQLITE_FULL_TEXT_DELETE_TRIGGER_SUFFIX,
     SQLITE_FULL_TEXT_INSERT_TRIGGER_SUFFIX,
     SQLITE_FULL_TEXT_UPDATE_TRIGGER_SUFFIX,
-    SQLITE_INDEX_TERM_COLLATE_RE,
-    SQLITE_INDEX_TERM_MODIFIER_RE,
-    SQLITE_INDEX_TERM_ORDER_RE,
-    SQLITE_MAIN_SCHEMA,
     SQLITE_PRIMARY_KEY_INDEX_ORIGIN,
 )
 from hare.dialects.sqlite.introspection.sqlite_constraint_clauses import SqliteConstraintClauses
 from hare.dialects.sqlite.introspection.sqlite_foreign_key_clauses import SqliteForeignKeyClauses
+from hare.dialects.sqlite.introspection.sqlite_index_info import SqliteIndexInfo
+from hare.dialects.sqlite.literals.constants import SQLITE_MAIN_SCHEMA
 from hare.fields.enums import OnDelete
 from hare.inspectdb.enums import CatalogDiagnosticCode
 from hare.inspectdb.introspection.catalog_diagnostic import CatalogDiagnostic
@@ -91,12 +92,16 @@ class SqliteDeclarationMapper:
         table_description, column_descriptions = self.introspector.get_comments(table_sql)
         for column in columns:
             column.description = column_descriptions.get(column.name)
+        foreign_key_groups = SqliteForeignKeyClauses.get_ordered_groups(raw["foreign_keys"])
         (
             foreign_keys,
             composite_foreign_keys,
             unparsed_foreign_keys,
         ) = self.get_foreign_keys(
-            raw["foreign_keys"], target_columns, table, SqliteForeignKeyClauses.get_deferrals(raw, target_columns)
+            foreign_key_groups,
+            target_columns,
+            table,
+            SqliteForeignKeyClauses.get_deferrals(raw, target_columns, foreign_key_groups),
         )
         extension_indexes, index_trigger_names = self.get_extension_indexes(
             table, [row["name"] for row in column_rows], virtual_tables, raw["spatial_columns"]
@@ -139,7 +144,9 @@ class SqliteDeclarationMapper:
             triggers=triggers,
             composite_foreign_keys=composite_foreign_keys,
             check_constraints=check_constraints,
-            table_options=self.introspector._get_table_options(self.table_options_class, table_sql),
+            table_options=self.table_options_class.from_observed(raw["table_options"])
+            if self.table_options_class is not None
+            else None,
             table_description=table_description,
         )
 
@@ -177,73 +184,32 @@ class SqliteDeclarationMapper:
                 if raw_sql:
                     unparsed_indexes.append((index_row["name"], raw_sql))
                 continue
+            key_orders = [Order.DESC.value if key["desc"] else Order.ASC.value for key in index_column_rows]
+            expression_terms = None
             if None in index_columns:
-                # At least one index term is an expression, not a plain column (PRAGMA
-                # index_info reports a NULL name for it) - rebuilt as Index(*RawSQLTerm) from the
-                # literal CREATE INDEX text, unless a term carries a collation; each term's sort order
-                # is read apart.
-                expression_key_orders: list[str] = []
-                if index_terms is not None and not any(
-                    SQLITE_INDEX_TERM_COLLATE_RE.search(term) for term in index_terms
-                ):
-                    expression_key_orders = self.introspector._get_sqlite_key_details(index_terms)[0]
-                    # The parentheses hare writes around an expression key are no part of it.
-                    index_terms = [
-                        SchemaIntrospector.strip_outer_parentheses(SQLITE_INDEX_TERM_ORDER_RE.sub("", term)) or ""
-                        for term in index_terms
-                    ]
-                if index_terms is None or any(SQLITE_INDEX_TERM_MODIFIER_RE.search(term) for term in index_terms):
+                if index_terms is None or len(index_terms) != len(index_columns):
                     if raw_sql:
                         unparsed_indexes.append((index_row["name"], raw_sql))
                     continue
-                indexes.append(
-                    IndexInfo(
-                        columns=[],
-                        is_unique=is_unique,
-                        name=index_row["name"],
-                        expression_terms=index_terms,
-                        key_orders=expression_key_orders,
-                        condition_sql=SchemaIntrospector.strip_outer_parentheses(raw_condition),
-                    )
-                )
-                continue
-            key_orders, collated_terms, unrepresentable_properties = self.introspector._get_sqlite_key_details(
-                # The index of a UNIQUE constraint has no text - each key in its default order.
-                index_terms if index_terms is not None else [""] * len(index_columns)
-            )
-            if collated_terms is not None:
-                # A collated key can only be declared as an expression, e.g. Collate("title", "NOCASE").
-                indexes.append(
-                    IndexInfo(
-                        columns=[],
-                        is_unique=is_unique,
-                        name=index_row["name"],
-                        expression_terms=collated_terms,
-                        condition_sql=SchemaIntrospector.strip_outer_parentheses(raw_condition),
-                    )
-                )
-                continue
-            if raw_condition is not None:
-                indexes.append(
-                    IndexInfo(
-                        columns=index_columns,
-                        is_unique=is_unique,
-                        name=index_row["name"],
-                        condition_sql=SchemaIntrospector.strip_outer_parentheses(raw_condition),
-                        unrepresentable_properties=unrepresentable_properties,
-                        key_orders=key_orders,
-                    )
-                )
-                continue
-            index_info = IndexInfo(
-                columns=index_columns,
+                expression_terms = index_terms
+            elif any(key["coll"].casefold() != SQLITE_DEFAULT_COLLATION for key in index_column_rows):
+                # Plain fields cannot carry an index-specific collation. This also covers the
+                # keys of a UNIQUE constraint, which has no CREATE INDEX text of its own.
+                quote = SchemaIntrospector.quote_identifier
+                expression_terms = [
+                    f"{quote(key['name'])} COLLATE {quote(key['coll'])} {Order.DESC if key['desc'] else Order.ASC}"
+                    for key in index_column_rows
+                ]
+            index_info = SqliteIndexInfo(
+                columns=[] if expression_terms is not None else index_columns,
                 is_unique=is_unique,
                 name=index_name,
                 catalog_name=index_row["name"],
-                unrepresentable_properties=unrepresentable_properties,
+                expression_terms=expression_terms,
+                condition_sql=SchemaIntrospector.strip_outer_parentheses(raw_condition),
                 key_orders=key_orders,
             )
-            if len(index_columns) == 1 and all(key_order == Order.ASC_NULLS_LAST for key_order in key_orders):
+            if len(index_columns) == 1 and not index_info.is_special() and key_orders == [Order.ASC]:
                 if is_unique:
                     unique_columns.add(index_columns[0])
                 else:
@@ -256,22 +222,18 @@ class SqliteDeclarationMapper:
 
     @staticmethod
     def get_foreign_keys(
-        foreign_key_rows: list[dict[str, Any]],
+        foreign_key_groups: dict[int, list[dict[str, Any]]],
         target_columns: dict[str, list[dict[str, Any]]],
         table: str,
         deferrals: dict[int, str | None],
     ) -> tuple[dict[str, ForeignKeyInfo], list[CompositeForeignKeyInfo], list[tuple[str, tuple[str, ...]]]]:
         """Map constraints from catalog records, including keys of external target tables."""
-        foreign_key_rows_by_id: dict[int, list[dict[str, Any]]] = {}
-        for row in foreign_key_rows:
-            foreign_key_rows_by_id.setdefault(row["id"], []).append(row)
-
         foreign_keys: dict[str, ForeignKeyInfo] = {}
         composite_foreign_keys: list[CompositeForeignKeyInfo] = []
         unparsed_foreign_keys: list[tuple[str, tuple[str, ...]]] = []
-        column_counts = Counter(row["from"] for row in foreign_key_rows)
-        for foreign_key_id, rows in foreign_key_rows_by_id.items():
-            member_columns = tuple(row["from"] for row in sorted(rows, key=itemgetter("seq")))
+        column_counts = Counter(row["from"] for rows in foreign_key_groups.values() for row in rows)
+        for foreign_key_id, rows in foreign_key_groups.items():
+            member_columns = tuple(row["from"] for row in rows)
             if any(column_counts[column] > 1 for column in member_columns):
                 unparsed_foreign_keys.append((f"{table}_fk_{foreign_key_id}", member_columns))
                 continue
@@ -282,12 +244,13 @@ class SqliteDeclarationMapper:
                 target_row["name"] for target_row in sorted(target_pk_rows, key=itemgetter("pk")) if target_row["pk"]
             ]
             if len(rows) > 1:
-                ordered_rows = sorted(rows, key=itemgetter("seq"))
+                # The target is reconstructed without a primary key when any component is nullable.
+                if any(target_row["pk"] and not target_row["notnull"] for target_row in target_pk_rows):
+                    unparsed_foreign_keys.append((f"{table}_fk_{foreign_key_id}", member_columns))
+                    continue
                 # "to" is NULL for a bare "REFERENCES target" - that names the target's own PK.
                 referenced_columns = (
-                    [row["to"] for row in ordered_rows]
-                    if all(row["to"] is not None for row in ordered_rows)
-                    else target_pk_columns
+                    [row["to"] for row in rows] if all(row["to"] is not None for row in rows) else target_pk_columns
                 )
                 match = (
                     SchemaIntrospector.match_composite_foreign_key_naming(
@@ -304,13 +267,11 @@ class SqliteDeclarationMapper:
                     CompositeForeignKeyInfo(
                         field_name=field_name,
                         columns=ordered_columns,
-                        target_table=ordered_rows[0]["table"],
+                        target_table=rows[0]["table"],
                         on_delete=(
-                            OnDelete(ordered_rows[0]["on_delete"])
-                            if ordered_rows[0]["on_delete"] in OnDelete
-                            else OnDelete.CASCADE
+                            OnDelete(rows[0]["on_delete"]) if rows[0]["on_delete"] in OnDelete else OnDelete.CASCADE
                         ),
-                        on_update=ordered_rows[0]["on_update"],
+                        on_update=rows[0]["on_update"],
                         deferral=deferrals[foreign_key_id],
                     )
                 )
@@ -354,7 +315,14 @@ class SqliteDeclarationMapper:
         }
         # So is a SpatialiteIndex - its triggers SpatiaLite's own.
         spatial_indexes = [
-            IndexInfo(columns=[column_name], is_unique=False, index_type=SPATIALITE_INDEX_TYPE)
+            IndexInfo(
+                columns=[column_name],
+                is_unique=False,
+                name=GeneratedNames.get_index_name(
+                    GeneratedNamePrefix.INDEX, table, [column_name], (SPATIALITE_INDEX_TYPE,)
+                ),
+                index_type=SPATIALITE_INDEX_TYPE,
+            )
             for row in spatial_columns
             for column_name in column_names
             if column_name.lower() == row["f_geometry_column"].lower()

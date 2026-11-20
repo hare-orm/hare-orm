@@ -69,6 +69,10 @@ class ClickhouseMaterializedView(MaterializedView):
     append: bool = False
     depends_on: tuple[str, ...] = ()
 
+    @property
+    def has_internal_storage(self) -> bool:
+        return self.to is None
+
     def __post_init__(self) -> None:
         super().__post_init__()
         owner = f"ClickhouseMaterializedView {self.name!r}"

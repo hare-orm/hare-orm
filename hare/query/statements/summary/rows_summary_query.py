@@ -3,16 +3,19 @@ from __future__ import annotations
 from copy import copy
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 
+from hare.query.execution.query_execution import QueryExecution
 from hare.query.expressions.subqueries.outer_scope import OuterScope
 from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
 from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
+from hare.query.plans.constants import NO_CALL_PLAN
 from hare.query.plans.description.plan_context import PlanContext
 from hare.query.plans.description.plan_description import PlanDescription
 from hare.query.plans.enums import PlanKeyForm
+from hare.query.plans.statement.declarations import CallPlanHit, CallPlanLookup
 from hare.query.plans.statement.declared_plan_slots import DeclaredPlanSlots
 from hare.query.plans.statement.statement_plan import StatementPlan
 from hare.query.plans.statement.statement_plan_descriptions import StatementPlanDescriptions
-from hare.query.plans.statement.statement_plans import StatementPlans
+from hare.query.plans.statement.statement_plan_runs import StatementPlanRuns
 from hare.query.queryset.extensions.query_set_extensions import QuerySetExtensions
 from hare.query.queryset.query_specification import QuerySpecification
 from hare.query.statements.awaitable_query import AwaitableQuery
@@ -23,6 +26,8 @@ from hare.query.statements.rows_source_query import RowsSourceQuery
 from hare.query.statements.summary.summary_source import SummarySource
 
 if TYPE_CHECKING:
+    from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset.queryset import QuerySet
     from hare.sql.builder.queries.query_builder import QueryBuilder
 
@@ -33,7 +38,8 @@ class RowsSummaryQuery(RowsSourceQuery):
     operation, or the queryset's own rows when they repeat) selected from as a derived table.
     """
 
-    # Never built into another query - it keeps plans of its own only.
+    # Nested terminal summaries do not contribute a reusable plan description by default.
+    # ExistsQuery supplies its own description when embedded in Exists(...).
     plannable = False
 
     __slots__ = ("_rows_query", "_bound_rows_query", "_extension_source", "_selected_rows", "_selected_rows_arguments")
@@ -81,11 +87,7 @@ class RowsSummaryQuery(RowsSourceQuery):
             super().__init__(source, keeps_grouping=self.keeps_grouping)
         else:
             QuerySpecification.__init__(self, source.model)
-            self._apply_connection(source._connection)
-            self._connection_explicitly_chosen = source._connection_explicitly_chosen
-            self._router_fallback_connection = source._router_fallback_connection
-            self._instance_connection_alias = source._instance_connection_alias
-            self._instance_connection_model = source._instance_connection_model
+            source._share_connection(self)
             self._limit = source._limit
             self._offset = source._offset
             self._is_none = source._is_none
@@ -93,7 +95,6 @@ class RowsSummaryQuery(RowsSourceQuery):
             source._share_default_scope(self)
             # The rows query applies the calls of the dialect's QuerySet methods - the summary reads
             # its rows as they are.
-            self._options = self._options.updated(extension_calls=())
             self._init_build_state()
         self._rows_query = rows_query
         self._selected_rows = selected_rows
@@ -197,6 +198,17 @@ class RowsSummaryQuery(RowsSourceQuery):
         """
         raise NotImplementedError()
 
+    def _group_by_primary_key(self) -> None:
+        """Group by the base table's primary key so joined rows form one group per model row."""
+        effective_table = self._effective_basetable()
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        self.query = self.query.groupby(
+            *(
+                effective_table[model_binding.fields_db_projection[attribute_name]]
+                for attribute_name in model_binding.primary_key_attribute_names
+            )
+        )
+
     def _get_rows_summary_description(self) -> PlanDescription | None:
         """What else of this summary is part of its plan over the rows query - bound after the rows
         query's values.
@@ -226,6 +238,39 @@ class RowsSummaryQuery(RowsSourceQuery):
             rows_query._apply_connection(self._connection)
         self._bound_rows_query = rows_query
 
+    def _find_call_plan(self, connection: DatabaseClient) -> CallPlanHit | CallPlanLookup:
+        """Look up the summary's plan by its queryset's calls."""
+        return StatementPlanRuns.find_call_plan(type(self), self, connection, self._get_call_signature_type_part())
+
+    def _get_execution_query_to_build(self, lookup: CallPlanLookup, connection: DatabaseClient | None) -> Self:
+        """Prepare a copy to build on a miss, keeping any call signature to record."""
+        query = self._get_execution_query(connection=connection)
+        if connection is not None and query._connection is not connection:
+            query._apply_connection(connection)
+        if lookup.record_key is not None:
+            StatementPlanRuns.prepare_call_plan_record(query, lookup)
+        return query
+
+    async def _execute_scalar_summary(self) -> Any:
+        lookup = NO_CALL_PLAN
+        connection: DatabaseClient | None = None
+        if self._call_signature is not None:
+            connection = self.get_connection()
+            call_plan = self._find_call_plan(connection)
+            if isinstance(call_plan, CallPlanHit):
+                return await QueryExecution.read(
+                    self, connection, self._read_scalar_summary(connection, call_plan.sql, call_plan.parameters)
+                )
+            lookup = call_plan
+        query = self._get_execution_query_to_build(lookup, connection)
+        statement = query._make_query_to_run()
+        return await QueryExecution.read(
+            query, query._connection, query._read_scalar_summary(query._connection, *statement)
+        )
+
+    async def _read_scalar_summary(self, connection: DatabaseClient, sql: str, parameters: list[Any]) -> Any:
+        raise NotImplementedError
+
     def _get_plan(self) -> tuple[PlanDescription | None, StatementPlan | None]:
         """Over a rows query the key holds its structure (its ``get_plan_description()``); the
         values are its values and the OFFSET applied over it."""
@@ -234,10 +279,7 @@ class RowsSummaryQuery(RowsSourceQuery):
         # Inside a correlated subquery the plan also depends on the enclosing query.
         if OuterScope.current_expression_context.get() is not None:
             return None, None
-        description = self._get_build_plan_description()
-        if description is None:
-            return None, None
-        return description, StatementPlans.find(self.model, description.structure)
+        return self._find_plan_from_description()
 
     def _describe_over_rows(self, built_into_another: bool) -> PlanDescription | None:
         """Describes the statement over a rows query from ``rows_plan_slots`` (``QueryKeyCompiler``).
@@ -260,10 +302,7 @@ class RowsSummaryQuery(RowsSourceQuery):
             True - the statement can be kept as a plan.
         """
         rows_query: AwaitableQuery[Any] = self._bound_rows_query  # type: ignore[assignment]
-        if value_wrapper_references is not None:
-            rows_query._make_subquery(value_wrapper_references=value_wrapper_references)
-        else:
-            rows_query._make_subquery()
+        rows_query._make_subquery(value_wrapper_references=value_wrapper_references)
         self.query = self._get_query_over_rows(rows_query, value_wrapper_references)
         if value_wrapper_references is not None and self.query._offset is not None:
             ExpressionArguments.record_literal(value_wrapper_references, self, "_offset_over_rows", self.query._offset)

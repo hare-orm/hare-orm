@@ -3,7 +3,7 @@
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyBytes, PyDict, PyString};
+use pyo3::types::{PyBytes, PyDelta, PyDeltaAccess, PyDict, PyString};
 
 /// `orjson.dumps`, imported on the first encode.
 static ORJSON_DUMPS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -39,10 +39,16 @@ pub fn get_timedelta_microseconds<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bo
 
 /// The microseconds of a `timedelta`.
 pub fn count_microseconds(value: &Bound<'_, PyAny>) -> PyResult<i128> {
-    let py = value.py();
-    let days: i128 = value.getattr(intern!(py, "days"))?.extract()?;
-    let seconds: i128 = value.getattr(intern!(py, "seconds"))?.extract()?;
-    let microseconds: i128 = value.getattr(intern!(py, "microseconds"))?.extract()?;
+    let (days, seconds, microseconds): (i128, i128, i128) = if let Ok(delta) = value.cast_exact::<PyDelta>() {
+        (delta.get_days().into(), delta.get_seconds().into(), delta.get_microseconds().into())
+    } else {
+        let py = value.py();
+        (
+            value.getattr(intern!(py, "days"))?.extract()?,
+            value.getattr(intern!(py, "seconds"))?.extract()?,
+            value.getattr(intern!(py, "microseconds"))?.extract()?,
+        )
+    };
     Ok((days * 86_400 + seconds) * 1_000_000 + microseconds)
 }
 

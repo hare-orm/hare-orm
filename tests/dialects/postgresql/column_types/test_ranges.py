@@ -4,6 +4,7 @@ from decimal import Decimal
 import pytest
 
 from hare.contrib import test
+from hare.core.hare_context import HareContext
 from hare.dialects.postgresql.constants import POSTGRESQL_DIALECT
 from hare.dialects.postgresql.fields.ranges import (
     BigIntRangeField,
@@ -399,7 +400,7 @@ async def test_created_range_in_memory_matches_the_stored_one(db_ranges):
 async def test_infinite_bounds_read_the_same_on_both_drivers_and_write_back_as_their_extremes(db_ranges):
     """asyncpg read a tstzrange infinity bound naive - both drivers now read it UTC-aware, as the
     Python extreme, and write that extreme back as the moment or the day it is."""
-    client = DateTimeRangeThing._meta.connection
+    client = HareContext.require_current().apps.get_queryset(DateTimeRangeThing).get_connection()
     await client.execute_script(
         "INSERT INTO datetimerangething (id, span) VALUES (1, '[-infinity,infinity)'), "
         "(2, '[-infinity,\"2026-01-01 00:00+00\")');"

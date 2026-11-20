@@ -24,14 +24,14 @@ class TenantScope(RowScope):
         """
         if visibility.all_tenants:
             return None
-        model = self.model
+        model = self._binding._model
         tenant = visibility.tenant
         if tenant is AMBIENT_TENANT_NOT_OVERRIDDEN:
             tenant = RowVisibility.active_tenant.get()
         tenant_class = type(tenant)
         names_models = tenant_class is ModelTenants
         if names_models:
-            tenant = tenant.get_for_model(model)
+            tenant = tenant.get_for_model(self._binding)
             tenant_class = type(tenant)
         if tenant is None:
             reason = (
@@ -40,15 +40,15 @@ class TenantScope(RowScope):
                 else "no tenant is active"
             )
             raise QueryError(
-                f"{model.__name__} has Meta.tenant_field {model._meta.tenant_field!r} set but "
+                f"{model.__name__} has Meta.tenant_field {self._binding.tenant_field!r} set but "
                 f"{reason} - wrap this call in Tenancy.scope(...), or use "
                 f"{model.__name__}.objects.all_tenants() (.all_tenants() on the queried model for a query "
                 f"reaching {model.__name__} through a relation, clear(all_tenants=True) on a "
                 "many-to-many relation) to intentionally query across every tenant"
             )
         if tenant_class is TenantValues or tenant_class is AllTenants:
-            return self.get_scope_filter(model._meta.tenant_field, tenant)  # type: ignore[arg-type]
-        return model._meta.tenant_field, tenant  # type: ignore[return-value]
+            return self.get_scope_filter(self._binding.tenant_field, tenant)  # type: ignore[arg-type]
+        return self._binding.tenant_field, tenant  # type: ignore[return-value]
 
     @staticmethod
     def get_scope_filter(tenant_field: str, scope: Any) -> tuple[str, Any] | None:

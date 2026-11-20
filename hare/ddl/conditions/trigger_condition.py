@@ -7,7 +7,7 @@ from hare.ddl.raw_sql_term import RawSQLTerm
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.expressions import Q
 
 
@@ -16,7 +16,7 @@ class TriggerCondition:
     ``Q`` over the model's own fields against the trigger's row with its values inline."""
 
     @staticmethod
-    def get_sql(condition: Q | RawSQLTerm, row: str, model: type[Model], client: DatabaseClient) -> str:
+    def get_sql(condition: Q | RawSQLTerm, row: str, model: ModelBinding, client: DatabaseClient) -> str:
         """Renders a trigger's condition.
 
         Args:

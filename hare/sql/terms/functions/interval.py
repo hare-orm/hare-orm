@@ -4,7 +4,6 @@ import math
 import re
 
 from hare.exceptions import UnSupportedError
-from hare.sql.constants import DEFAULT_SQL_CONTEXT
 from hare.sql.enums import DatePart
 from hare.sql.exceptions import QueryException
 from hare.sql.sql_context import SqlContext
@@ -84,9 +83,6 @@ class Interval(Term):
                     self.largest = label
                     self.is_negative = int_value < 0
                 self.smallest = label
-
-    def __str__(self) -> str:
-        return self.get_sql(DEFAULT_SQL_CONTEXT)
 
     def get_expression_and_unit(self) -> tuple[str, str]:
         """The interval's quantity text and its unit (``DAY``, ``HOUR_MINUTE``, ...)."""

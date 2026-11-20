@@ -32,7 +32,7 @@ class PlanCoverage:
                 cls.built_without_plan += 1
             return statement
 
-        AwaitableQuery._make_query_to_run = make_query_to_run  # type: ignore[method-assign]
+        AwaitableQuery._make_query_to_run = make_query_to_run  # type: ignore[method-assign, assignment]
 
     @classmethod
     def get_summary(cls, made: int, built_without_plan: int) -> str:

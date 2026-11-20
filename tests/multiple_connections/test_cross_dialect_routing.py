@@ -16,6 +16,7 @@ from hare.exceptions import QueryError
 from hare.models import Model
 from hare.query.expressions import Case, Exists, F, OuterReference, Q, Subquery, Value, When
 from hare.query.functions import Coalesce, Count, Length, Round, Upper
+from tests.utils.database_under_test import DatabaseUnderTest
 from tests.utils.timezone_context import override_timezone
 
 MODULE_NAME = "tests._cross_dialect_routing_models"
@@ -48,7 +49,7 @@ def get_postgresql_url() -> str | None:
     raw_db_url = os.getenv("HARE_TEST_DB", "")
     if not raw_db_url.startswith("postgresql"):
         return None
-    return raw_db_url.replace("\\{", "{").replace("\\}", "}")
+    return DatabaseUnderTest.normalize_url_template(raw_db_url)
 
 
 ROUTED_TABLE_SQL = {
@@ -204,7 +205,7 @@ async def test_subquery_and_exists_run_on_the_outer_query_connection(routed_cont
 @pytest.mark.asyncio
 async def test_subquery_pinned_to_another_connection_is_rejected(routed_context):
     routed = routed_context
-    default = RoutedItem._meta.connection
+    default = HareContext.require_current().apps.get_queryset(RoutedItem).get_connection()
     pinned_tags = RoutedTag.objects.filter(item_id=OuterReference("id")).using(default).values("label")
     with pytest.raises(QueryError, match="different database connection"):
         await RoutedItem.objects.all().using(routed).annotate(label=Subquery(pinned_tags)).values_list("label")

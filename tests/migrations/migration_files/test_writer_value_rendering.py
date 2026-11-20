@@ -3,14 +3,12 @@ from __future__ import annotations
 import collections.abc
 import datetime
 import functools
-import importlib.util
 import inspect
 import math
-import sys
 import types
 import typing
 from decimal import Decimal
-from enum import IntFlag
+from enum import Enum, IntEnum, IntFlag, StrEnum
 
 import pytest
 
@@ -23,6 +21,10 @@ from hare.dialects.dialect_registry import DialectRegistry
 from hare.exceptions import ConfigurationError
 from hare.migrations.operations import RunPython
 from hare.migrations.writer import MigrationWriter
+from tests.migrations.migration_files.fixed_hex_default import FixedHexDefault
+from tests.migrations.migration_files.fixed_uuid_default import FixedUuidDefault
+from tests.migrations.migration_files.label_now import LabelNow
+from tests.utils.module_loader import ModuleLoader
 
 pytestmark = pytest.mark.database_independent
 
@@ -31,6 +33,15 @@ class Permission(IntFlag):
     READ = 1
     WRITE = 2
     EXECUTE = 4
+
+
+FunctionalStatus = Enum(
+    "FunctionalStatus", {"Ready state": "ready", "class": "reserved", "3rd": "third", "READY": "normal"}
+)
+FunctionalTextStatus = StrEnum(
+    "FunctionalTextStatus", {"Ready state": "ready", "class": "reserved", "3rd": "third", "READY": "normal"}
+)
+FunctionalIntStatus = IntEnum("FunctionalIntStatus", {"Ready state": 1, "class": 2, "3rd": 3, "READY": 4})
 
 
 Item = typing.TypeVar("Item")
@@ -52,12 +63,25 @@ def render_and_evaluate(value: object) -> object:
     imports = ImportManager()
     source = DeclarationValueSerializer.render_value(value, imports)
     namespace: dict[str, object] = {}
-    exec("\n".join(imports.render()), namespace)  # noqa: S102
+    exec("\n".join([*imports.render(), *imports.enum_declarations]), namespace)  # noqa: S102
     return eval(source, namespace)  # noqa: S307
 
 
 def migration_value(value=Decimal("1.25")):
     return value
+
+
+@pytest.mark.parametrize(
+    "value,expected_sql",
+    [(LabelNow("fixed now"), "'fixed now'"), (FixedHexDefault(), "'fixed hex'"), (FixedUuidDefault(), "'fixed uuid'")],
+)
+def test_builtin_default_subclasses_keep_their_deconstruction_and_sql(value, expected_sql):
+    rebuilt = render_and_evaluate(value)
+    assert type(rebuilt) is type(value)
+    assert rebuilt.deconstruct() == value.deconstruct()
+    dialect = DialectRegistry.get_dialect("sqlite")
+    assert value.get_sql(dialect) == expected_sql
+    assert rebuilt.get_sql(dialect) == expected_sql
 
 
 def test_environment_source_serializes_its_reference_and_only_runtime_sql_reads_its_value(monkeypatch):
@@ -92,6 +116,21 @@ def test_flag_value_renders_to_source_that_rebuilds_the_same_value(value: Permis
 
     assert rebuilt == value
     assert type(rebuilt) is Permission
+
+
+@pytest.mark.parametrize("enum_class", [FunctionalStatus, FunctionalTextStatus, FunctionalIntStatus, None])
+@pytest.mark.parametrize("name", ["Ready state", "class", "3rd", "READY"])
+def test_enum_member_names_need_not_be_python_attribute_identifiers(enum_class, name):
+    status = (
+        enum_class
+        if enum_class is not None
+        else Enum("RuntimeStatus", {"Ready state": 1, "class": 2, "3rd": 3, "READY": 4})
+    )
+    rebuilt = render_and_evaluate(status[name])
+    assert rebuilt.name == name
+    assert rebuilt.value == status[name].value
+    if enum_class is not None:
+        assert rebuilt is status[name]
 
 
 @pytest.mark.parametrize("value", [math.inf, -math.inf])
@@ -245,14 +284,11 @@ def test_copied_function_rebinds_import_aliases_at_expression_roots(tmp_path, mo
         )
     path = tmp_path / "copied_function.py"
     path.write_text("date = pi = contextmanager = None\n" + source, encoding="utf-8")
-    specification = importlib.util.spec_from_file_location("copied_function_for_migration", path)
-    module = importlib.util.module_from_spec(specification)
-    monkeypatch.setitem(sys.modules, specification.name, module)
-    specification.loader.exec_module(module)
+    module = ModuleLoader.load("copied_function_for_migration", path, monkeypatch)
     imports = ImportManager()
     # Force a second spelling of each imported name, as another declaration may already use it.
     for imported_name in ("date", "pi", "contextmanager"):
-        imports.add_from(specification.name, imported_name)
+        imports.add_from(module.__name__, imported_name)
     name = DeclarationValueSerializer.declare_function(module.copied, imports)
     namespace = {}
     exec("\n".join([*imports.render(), *imports.function_declarations]), namespace)  # noqa: S102
@@ -281,10 +317,7 @@ def test_copied_callback_preserves_postponed_annotations(tmp_path, monkeypatch, 
     )
     path = tmp_path / "0001_initial.py"
     path.write_text(source, encoding="utf-8")
-    specification = importlib.util.spec_from_file_location("migration_callbacks.0001_initial", path)
-    module = importlib.util.module_from_spec(specification)
-    monkeypatch.setitem(sys.modules, specification.name, module)
-    specification.loader.exec_module(module)
+    module = ModuleLoader.load("migration_callbacks.0001_initial", path, monkeypatch)
     callback = functools.partial(module.copied, amount=9) if partial else module.copied
     generated = MigrationWriter("0001_squashed", "books", [RunPython(callback)]).as_string()
     namespace = {}
@@ -346,10 +379,7 @@ def test_copied_callback_preserves_postponed_annotations(tmp_path, monkeypatch, 
 async def test_copied_functions_keep_bindings_when_name_is_reserved(tmp_path, monkeypatch, source, expected):
     path = tmp_path / "function_source.py"
     path.write_text(source, encoding="utf-8")
-    specification = importlib.util.spec_from_file_location("function_bindings_for_migration", path)
-    module = importlib.util.module_from_spec(specification)
-    monkeypatch.setitem(sys.modules, specification.name, module)
-    specification.loader.exec_module(module)
+    module = ModuleLoader.load("function_bindings_for_migration", path, monkeypatch)
     imports = ImportManager()
     imports.reserved_names |= {"copied", "pi", "os", "path"}
     imports.add_from("math", "pi")

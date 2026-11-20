@@ -5,16 +5,13 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Any
 
 from hare.cli.commands.interactive_rename_questions import InteractiveRenameQuestions
-from hare.cli.constants import MIGRATION_GRAPH_ERRORS
 from hare.cli.context.cli_context import CLIContext
 from hare.cli.context.command_context import CommandContext
 from hare.cli.exceptions import CLIError, CLIUsageError
 from hare.cli.output.output_formatter import OutputFormatter
 from hare.cli.output.terminal_colors import TerminalColors
-from hare.core.config import HareConfig
 from hare.core.connections.connections import Connections
 from hare.exceptions import (
     ConfigurationError,
@@ -112,8 +109,8 @@ class MigrationCommands:
             MigrationCommands.get_renames(renames), asks=not no_input and sys.stdin.isatty()
         )
         hare_config = CommandContext.load_config(cli_context)
-        MigrationCommands.raise_for_unknown_app_labels(hare_config, app_labels)
-        try:
+        CommandContext.check_app_labels(hare_config, app_labels)
+        with CommandContext.migration_graph_error_boundary():
             changes = await makemigrations_api(
                 config=hare_config,
                 app_labels=list(app_labels) or None,
@@ -122,8 +119,6 @@ class MigrationCommands:
                 name=name,
                 rename_questions=rename_questions,
             )
-        except MIGRATION_GRAPH_ERRORS as error:
-            raise CLIError(str(error)) from None
         MigrationCommands.print_change_warnings(changes)
         if not changes.writers:
             print(f"{TerminalColors.DIM}No changes detected{TerminalColors.RESET}")
@@ -203,8 +198,8 @@ class MigrationCommands:
             raise CLIUsageError("squashmigrations takes [START] END - at most two migration names")
         start_name, end_name = (None, migration_names[0]) if len(migration_names) == 1 else migration_names
         hare_config = CommandContext.load_config(cli_context)
-        MigrationCommands.raise_for_unknown_app_labels(hare_config, (app_label,))
-        try:
+        CommandContext.get_app_config(hare_config, app_label)
+        with CommandContext.migration_graph_error_boundary(unknown_is_usage=True):
             squashed = await squashmigrations_api(
                 config=hare_config,
                 app_label=app_label,
@@ -212,10 +207,6 @@ class MigrationCommands:
                 start_name=start_name,
                 squashed_name=squashed_name,
             )
-        except UnknownMigrationError as error:
-            raise CLIUsageError(str(error)) from None
-        except MIGRATION_GRAPH_ERRORS as error:
-            raise CLIError(str(error)) from None
         writer = squashed.writer
         if writer is None:
             print(
@@ -253,12 +244,10 @@ class MigrationCommands:
         """Checks the migrations not applied yet against the database - see
         ``hare.migrations.api.checkmigrations()``. Exits with 1 when a risk isn't exempted."""
         hare_config = CommandContext.load_config(cli_context)
-        MigrationCommands.raise_for_unknown_app_labels(hare_config, app_labels)
+        CommandContext.check_app_labels(hare_config, app_labels)
         async with CommandContext.database_error_boundary():
-            try:
+            with CommandContext.migration_graph_error_boundary():
                 risks = await checkmigrations_api(config=hare_config, app_labels=list(app_labels) or None)
-            except MIGRATION_GRAPH_ERRORS as error:
-                raise CLIError(str(error)) from None
         if not risks:
             print(f"{TerminalColors.DIM}No risky operations in the migrations to apply{TerminalColors.RESET}")
             return None
@@ -282,34 +271,6 @@ class MigrationCommands:
             print(f"    {TerminalColors.DIM}Safely: {risk.safe_alternative}{TerminalColors.RESET}")
 
     @staticmethod
-    def raise_for_unknown_app_labels(hare_config: HareConfig, app_labels: tuple[str, ...]) -> None:
-        """Refuses app labels the configuration doesn't have.
-
-        Args:
-            hare_config: The configuration.
-            app_labels: The labels given on the command line.
-
-        Raises:
-            CLIUsageError: A label names no configured app.
-        """
-        for app_label in app_labels:
-            if app_label not in hare_config.apps:
-                raise CLIUsageError(f"Unknown app label {app_label}")
-
-    @staticmethod
-    def get_apps_with_existing_modules(apps_config: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-        """The apps with their migrations modules resolved - see
-        ``MigrationsModules.get_apps_with_existing_modules()``.
-
-        Raises:
-            CLIError: Two apps share a migrations module.
-        """
-        try:
-            return MigrationsModules.get_apps_with_existing_modules(apps_config)
-        except ConfigurationError as error:
-            raise CLIError(str(error)) from None
-
-    @staticmethod
     def _split_dotted_app_label(app_label: str | None, migration: str | None) -> tuple[str | None, str | None]:
         """Splits a bare "app.migration"-style positional app_label into its two parts, when no
         separate migration argument was already given."""
@@ -331,8 +292,8 @@ class MigrationCommands:
         hare_config = CommandContext.load_config(cli_context)
         target: str | None = None
         app_label, migration = MigrationCommands._split_dotted_app_label(app_label, migration)
-        if app_label is not None and app_label not in hare_config.apps:
-            raise CLIUsageError(f"Unknown app label {app_label}")
+        if app_label is not None:
+            CommandContext.get_app_config(hare_config, app_label)
         if app_label and not migration:
             target = f"{app_label}.{LATEST_MIGRATION}"
         elif migration:
@@ -413,25 +374,23 @@ class MigrationCommands:
         # get_apps_with_existing_modules() finds the "migrations" module of every app that didn't set
         # one - without it, MigrationLoader.load_disk() treats that app as unmigrated
         # and reports "(no heads)" even when migrations genuinely exist on disk.
-        full_apps_dict = MigrationCommands.get_apps_with_existing_modules(
-            {label: app.to_dict() for label, app in full_apps_config.items()}
-        )
+        try:
+            full_apps_dict = MigrationsModules.get_apps_with_existing_modules(
+                {label: app.to_dict() for label, app in full_apps_config.items()}
+            )
+        except ConfigurationError as error:
+            raise CLIError(str(error)) from None
 
         apps_config = CommandContext.select_apps(hare_config, app_labels or None)
-        apps_dict = {label: app.to_dict() for label, app in apps_config.items()}
+        apps_dict = {label: full_apps_dict[label] for label in apps_config}
         apps_by_connection = CommandContext.group_apps_by_connection(apps_dict)
 
         loader = MigrationLoader(full_apps_dict, NoopRecorder())
         # Hare is initialized without connecting - a migration file naming a swappable model reads its
         # setting as it is imported.
         async with CommandContext.hare_cli_context(hare_config, connect=False):
-            try:
+            with CommandContext.migration_graph_error_boundary():
                 await loader.build_graph()
-            except MIGRATION_GRAPH_ERRORS as error:
-                # Mirrors migrate()'s own translation - a circular dependency, a dangling
-                # dependency on a removed migration or a broken migration file is shown as an
-                # error, not a raw traceback.
-                raise CLIError(str(error)) from None
 
         for connection_alias, subset in apps_by_connection.items():
             OutputFormatter.emit_heads(loader, connection_alias, subset)
@@ -462,21 +421,15 @@ class MigrationCommands:
                 raise CLIUsageError(f"app_label is required. Available app labels: {available}")
             raise CLIUsageError(f"migration_name is required. Usage: sqlmigrate {app_label} <migration_name>")
 
-        if app_label not in config.apps:
-            raise CLIUsageError(f"Unknown app label {app_label}")
+        CommandContext.get_app_config(config, app_label)
 
-        try:
+        with CommandContext.migration_graph_error_boundary(unknown_is_usage=True):
             statements = await sqlmigrate_api(
                 config=config,
                 app_label=app_label,
                 migration_name=migration_name,
                 backward=backward,
             )
-        except UnknownMigrationError as error:
-            raise CLIUsageError(str(error)) from None
-        except MIGRATION_GRAPH_ERRORS as error:
-            # Mirrors migrate()'s/heads()'s own translation - no raw traceback for the user.
-            raise CLIError(str(error)) from None
 
         if not statements:
             print(f"{TerminalColors.DIM}-- (no SQL statements){TerminalColors.RESET}")

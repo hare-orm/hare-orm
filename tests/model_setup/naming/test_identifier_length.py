@@ -1,6 +1,5 @@
 """Names longer than Postgres's identifier limit: generated ones are shortened, explicit ones rejected."""
 
-import os
 import sys
 import types
 import uuid
@@ -21,13 +20,9 @@ from hare.ddl.security.policy import Policy
 from hare.exceptions import ConfigurationError
 from hare.migrations.drift import detect_drift_for_alias
 from hare.models import Model
+from tests.utils.database_under_test import DatabaseUnderTest
 
 LIMIT = 63
-
-
-def get_test_db_url() -> str:
-    raw_db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:").replace("\\{", "{").replace("\\}", "}")
-    return raw_db_url.format(uuid.uuid4().hex) if "{}" in raw_db_url else raw_db_url
 
 
 def register_module(**models: Any) -> str:
@@ -61,9 +56,12 @@ async def test_generated_long_names_are_shortened_distinctly_and_leave_no_drift(
     alpha, bravo = make_long_named_models()
     module_name = register_module(Alpha=alpha, Bravo=bravo)
     try:
-        async with hare_test_context([module_name], db_url=get_test_db_url()):
-            tables = [alpha._meta.db_table, bravo._meta.db_table]
-            through = bravo._meta.fields_map["items"]
+        async with hare_test_context([module_name], db_url=DatabaseUnderTest.get_fresh_url()):
+            tables = [
+                HareContext.require_current().apps.get_binding(alpha).db_table,
+                HareContext.require_current().apps.get_binding(bravo).db_table,
+            ]
+            through = HareContext.require_current().apps.get_binding(bravo).fields_map["items"]
             names = [*tables, through.through, through.forward_key, through.backward_key]
             assert all(len(name.encode()) <= LIMIT for name in names), names
             assert len(set(tables)) == 2

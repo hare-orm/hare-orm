@@ -4,6 +4,7 @@ import pytest
 
 from hare import fields
 from hare.contrib.test import hare_test_context
+from hare.core.hare_context import HareContext
 from hare.fields.constants import ROLLBACK_RESTORE_UNSET
 from hare.models import Model
 from hare.models.write.instance_snapshot import InstanceSnapshot
@@ -33,7 +34,9 @@ async def test_captured_snapshots_of_many_objects_equal_the_snapshot_of_each():
         given_key = Tally(id=50, amount=4)
         objects = [saved, fresh, given_key]
 
-        snapshots = InstanceSnapshot.capture_persistence_of_all(Tally, objects)
+        snapshots = InstanceSnapshot.capture_persistence_of_all(
+            HareContext.require_current().apps.get_binding(Tally), objects
+        )
 
         assert [snapshot.instance for snapshot in snapshots] == objects
         assert [snapshot.values for snapshot in snapshots] == [
@@ -44,10 +47,10 @@ async def test_captured_snapshots_of_many_objects_equal_the_snapshot_of_each():
             "_custom_generated_pk",
             "_connection_alias",
             "_dirty_snapshot",
-            "pk",
+            "id",
         ]
-        assert snapshots[0].values["pk"] == saved.pk
-        assert snapshots[1].values["pk"] is None
+        assert snapshots[0].values["id"] == saved.pk
+        assert snapshots[1].values["id"] is None
 
 
 @pytest.mark.asyncio
@@ -58,7 +61,9 @@ async def test_captured_snapshot_copies_the_dirty_baseline_and_marks_missing_sta
         fresh = Tally(amount=3)
         assert "_custom_generated_pk" not in fresh.__dict__
 
-        saved_snapshot, fresh_snapshot = InstanceSnapshot.capture_persistence_of_all(Tally, [saved, fresh])
+        saved_snapshot, fresh_snapshot = InstanceSnapshot.capture_persistence_of_all(
+            HareContext.require_current().apps.get_binding(Tally), [saved, fresh]
+        )
 
         baseline = saved.__dict__["_dirty_snapshot"]
         assert saved_snapshot.values["_dirty_snapshot"] == baseline
@@ -69,9 +74,11 @@ async def test_captured_snapshot_copies_the_dirty_baseline_and_marks_missing_sta
 @pytest.mark.asyncio
 async def test_captured_snapshot_without_primary_key_leaves_pk_out():
     async with hare_test_context([__name__], db_url="sqlite+aiosqlite://:memory:"):
-        (snapshot,) = InstanceSnapshot.capture_persistence_of_all(Tally, [Tally(amount=1)], include_primary_key=False)
+        (snapshot,) = InstanceSnapshot.capture_persistence_of_all(
+            HareContext.require_current().apps.get_binding(Tally), [Tally(amount=1)], include_primary_key=False
+        )
 
-        assert "pk" not in snapshot.values
+        assert "id" not in snapshot.values
 
 
 @pytest.mark.asyncio

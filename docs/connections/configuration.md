@@ -46,6 +46,47 @@ that doesn't exist — raises `ConfigurationError`.
 `table_name_generator` belongs to the context and its model registry. The context publishes it,
 and updates the process-wide `slow_query_threshold_ms`, only after `init()` succeeds.
 
+Each registry prepares a separate graph of bindings from Python class declarations. The same model
+class can belong to concurrent contexts with different tables, applications and connections. The
+class holds its declaration; prepared fields, relations and SQL metadata belong to the `ModelBinding`
+returned by `context.apps.get_binding(Book)`. Leaving a nested context restores the task's current
+context without replacing class attributes.
+
+A query and an instance retain their originating graph and context. Executing an earlier query under
+another current context uses its original application, including routing, encryption and timezone
+settings. Explicitly bound queries and related instances from different graphs or contexts cannot be
+combined. An unbound nested template takes the outer query's graph.
+
+A database client belonging to another `HareContext` cannot be passed to that query or
+instance: `ConfigurationError` is raised before SQL, even if both clients have the same alias.
+Build the query through the other context's registry to use its database. Transactions,
+independent clients and tenant clients retain the context of the connection they came from.
+
+Fields and Meta options are captured when the Python class is created, including nested mutable schema
+options. Later changes to the original Meta or option objects do not reconfigure existing or future
+graphs. Callbacks retain their normal identity and execute under the selected application's settings.
+
+Registry getters only read registered nodes. Preparation adds nodes explicitly and permits no database
+execution through an unpublished graph, including objects retained by a failed extension hook.
+An instance's `save()` rejects such a graph before awaiting defaults or preparing field values.
+Every registry preparation, including unregistration, runs its callbacks in that registry's
+application context and restores the caller's current context on success or failure.
+Manager and request-schema caches follow their registry's published version; preparing a historical
+registry does not invalidate another registry's entries.
+
+A detached view or projection declaration needs an explicit database client to compile SQL. Bound
+sources retain their originating settings and reject clients belonging to another application.
+An offline client with no connection handler can compile detached declarations without an
+application context.
+
+Registration and unregistration atomically publish a complete new graph. Failure preserves the
+previous graph. Existing queries and instances retain their earlier graph; external database schema
+changes can still invalidate their SQL. Every relation target must belong to the selected registry:
+a Python class reference does not borrow another application's configuration.
+
+A `HareContext` is initialized once per lifetime. Create another context for a different configuration.
+Queries and objects cannot perform database IO after their originating context has closed.
+
 | Argument | Meaning |
 |---|---|
 | `config` | A dict, a `HareConfig`, a file path or `"module.VARIABLE"` — see above; the shape is below. |
@@ -59,10 +100,9 @@ and updates the process-wide `slow_query_threshold_ms`, only after `init()` succ
 
 ### <a id="table-name-generator"></a>`table_name_generator`
 
-`Callable[[type[Model]], str]` to override the default table-naming scheme. A generated name is
-recomputed by every `init()` (a later `init()` with another generator, or none, renames the model's
-table); an explicit `Meta.table` always wins. Names derived from the table when relations were first set
-up — an auto-created M2M through table, its columns, a default `related_name` — keep that first value.
+`Callable[[type[Model]], str]` supplies table names for one registry. An explicit `Meta.table`
+takes precedence. Another context may use another generator for the same classes; table names
+and automatically derived relation names are prepared independently in each graph.
 
 ## <a id="the-config-dict"></a>The `config` dict
 
@@ -164,7 +204,8 @@ objects, for example a list or tuple; the iterable is consumed once.
 `migrations` takes `lock_timeout`: seconds a migration's statement may wait for a lock another session
 holds before `migrate` fails — see [Lock timeout](../migrations/migrations.md#lock-timeout); and
 `safety`, the migration safety check's settings: `{"large_table_rows": 100000}` — the rows from which
-`checkmigrations` counts a table as large — see [Checking migrations](../migrations/zero-downtime.md#checking-migrations).
+`checkmigrations` counts a table as large — see [Checking
+migrations](../migrations/zero-downtime.md#checking-migrations).
 
 ### <a id="swappable-settings"></a>The `swappable` section
 
@@ -238,48 +279,51 @@ ORM](../observability/observers.md#where-observers-live)). `HareContext.get_curr
 current context or `None`, `HareContext.require_current()` the current context or raises
 `ConfigurationError`.
 
-Model classes are shared by every context that loads their module: a context set up inside another one
-binds them (connection, table names, relations) to its own configuration, and leaving it — `with` or
-`async with` — binds them back to the context current again.
+Contexts that load a model's module share its class. Each context has its own bindings for connection,
+table names and relations. Leaving a nested context restores the outer context as current. Queries
+already bound to a registry and model instances retain their original bindings.
 
-## <a id="querysets-before-init"></a>Querysets built before `init()`
+`Model.objects` selects the active registry when creating a query; `apps.get_queryset(Model)`
+selects an explicit registry. The low-level `QuerySet(Model)` constructor creates an unbound
+declaration even when an application is active. Use the manager or the registry factory to retain
+a particular application before executing it.
 
-A queryset may be built before `Hare.init()` — at import time, as a module-level constant or a class
-attribute:
+## <a id="querysets-before-init"></a>Querysets built before initialization
+
+A query made before registry preparation remains an unchanged template:
 
 ```python
-PUBLISHED = Book.objects.filter(published=True).order_by("-rating")   # no init() yet
-
+PUBLISHED = Book.objects.filter(published=True).order_by("-rating")
 
 async def list_published() -> list[Book]:
-    return await PUBLISHED.limit(20)          # after init(): an ordinary queryset
+    return await PUBLISHED.limit(20)
 ```
 
-Until the models are bound the chain can't be checked against them (relations aren't set up yet), so each
-such queryset is remembered, and `init()` replays its calls right after binding the models. From then on
-it is an ordinary, fully built queryset — nothing about it is lazy. A mistake in such a chain (an unknown
-field, a wrong lookup) therefore raises `ConfigurationError` from `Hare.init()` (or
-`Hare.bind_models()`), naming the error the call would raise after `init()`. Running a query before
-`init()` raises `ConfigurationError`.
+Execution replays the chain into a local copy using the current application's graph. `PUBLISHED`
+itself is never changed and can be reused independently by another application. Deferred calls are
+validated when bound, rather than by `init()`. For early validation, start a query through
+`apps.get_queryset(Book)` on an explicitly prepared registry. Executing a template without an
+application raises `ConfigurationError`.
 
-## <a id="bind-models"></a>Binding the models without a database
-
-Model module entries can be imported module objects, including runtime modules absent from
-`sys.modules`; configuration retains these objects instead of replacing them with import paths.
-Failed binding restores model metadata and leaves deferred queries pending. Correct the declaration
-or query before retrying initialization. Reinitialization also retains the previous connections and
-router when preparation fails; it does not replay the old binding to reconstruct its state.
+## <a id="bind-models"></a>Preparing a registry without a database
 
 ```python
-Hare.bind_models(config, table_name_generator=None)   # synchronous
+apps = Hare.bind_models(CONFIG)
+binding = apps.get_binding(Book)
+info = binding.get_lookup_info("author__name__icontains")
+queryset = apps.get_queryset(Book).order_by("title")
+book = apps.new(Book, title="Example")
+trusted = apps.construct(Book, id=1, title="Example")
 ```
 
-Binds the models of a configuration — relations, swappable models, filters and orderings — without
-connecting and without leaving a context current. It is for code that needs the models before the
-application starts: a web framework building its handlers' signatures from
-[`lookup_info`](../querying/describing-filters.md) at import time. `Hare.init()` later sets the
-connections up as usual. `await Hare.init(config, connect=False)` is the asynchronous form that does
-leave a context current — with models, routers and connection settings, but no connection made.
+`bind_models()` synchronously prepares fields, relations and query descriptions without opening
+connections or changing the current context. Use the returned `Apps` explicitly. `apps.new()` uses
+the ordinary constructor, including a custom `__init__`; `apps.construct()` uses the ordinary trusted
+constructor without validation. These objects have no application for IO. Use an initialized context's
+registry or explicitly call `context.attach(book)` before database operations.
+
+Model entries may be module objects, including modules absent from `sys.modules`. Failed preparation
+does not change published graphs or deferred templates.
 
 ## <a id="closing-connections"></a>Closing connections
 
@@ -325,7 +369,8 @@ await Hare.close_connections()
   `Hare.unregister_live_models(models)` — see
   [Registering a model at runtime](../models/runtime-models.md).
 
-To describe a model — its fields, relations, the filters and orderings each accepts — read `Model._meta`
+To describe a model — its fields, relations, the filters and orderings each accepts — read
+`apps.get_binding(Model)`
 and [`lookup_info`](../querying/describing-filters.md); a field's constructor arguments come from
 `field.deconstruct()`.
 

@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import inspect
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from typing import TYPE_CHECKING, Any
 
-from hare.core.caching.caches import Caches
-from hare.core.connections.model_connection_choice import ModelConnectionChoice
-from hare.core.hare_context import HareContext
+from hare.core.caching.cache import Cache
 from hare.ddl.constraints.unique_constraint import UniqueConstraint
 from hare.ddl.enums import RowLevelSecurity
 from hare.ddl.indexes.index import Index
@@ -20,9 +17,10 @@ from hare.ddl.security.policy import Policy
 from hare.ddl.table_options import TableOptions
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.dialects.base.literals.constants import SQL_NULL_BYTE
-from hare.exceptions import ConfigurationError, HareError
-from hare.fields.constants import FOREIGN_KEY_COLUMN_SUFFIX, SCHEMA_TEXT_NULL_BYTE_MESSAGE
+from hare.exceptions import ConfigurationError, HareError, QueryError
+from hare.fields.constants import FOREIGN_KEY_COLUMN_SUFFIX, SCHEMA_TEXT_NULL_BYTE_MESSAGE, SENSITIVE_VALUE_PLACEHOLDER
 from hare.fields.field import Field
+from hare.fields.generated_field import GeneratedField
 from hare.fields.relations.fields.backward_foreign_key_relation import BackwardForeignKeyRelation
 from hare.fields.relations.fields.declarations import BackwardOneToOneRelation
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
@@ -32,8 +30,7 @@ from hare.fields.relations.fields.one_to_one_field_instance import OneToOneField
 from hare.instrumentation.capture.change_capturing import ChangeCapturing
 from hare.models.class_building.lazy_relation_fields import LazyRelationFields
 from hare.models.class_building.model_definition_checks import ModelDefinitionChecks
-from hare.models.class_building.schema_object_declarations import SchemaObjectDeclarations
-from hare.models.constants import META_ORDERING_ALIAS_PREFIX
+from hare.models.constants import META_ORDERING_ALIAS_PREFIX, UNBOUND_MODEL_MESSAGE
 from hare.models.enums import ModelOption
 from hare.models.tenancy.tenant_connection_checks import TenantConnectionChecks
 from hare.query.constants import PRIMARY_KEY_ALIAS
@@ -41,12 +38,12 @@ from hare.query.expressions.ordering import Ordering
 from hare.query.lookup_info.lookup_info import LookupInfo
 from hare.query.lookup_info.lookup_info_builder import LookupInfoBuilder
 from hare.query.lookup_info.ordering_info import OrderingInfo
-from hare.query.managers.manager import Manager
 from hare.query.rows.native.hydration_layout import HydrationLayout
 from hare.sql import Order, Query, Table
 from hare.sql.builder.queries.query_builder import QueryBuilder
 
 if TYPE_CHECKING:
+    from hare.core.apps.model_binding_graph import ModelBindingGraph
     from hare.ddl.constraints.check_constraint import CheckConstraint
     from hare.ddl.constraints.exclusion_constraint import ExclusionConstraint
     from hare.ddl.constraints.foreign_key_constraint import ForeignKeyConstraint
@@ -54,17 +51,26 @@ if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.instrumentation.capture.capture_needs import CaptureNeeds
     from hare.instrumentation.capture.change_sink import ChangeSink
+    from hare.models.class_building.generic_schema_binding import GenericSchemaBinding
     from hare.models.model import Model
+    from hare.models.model_declaration import ModelDeclaration
     from hare.query.expressions.expression import Expression
 
     ModelConstraint = UniqueConstraint | CheckConstraint | ExclusionConstraint | ForeignKeyConstraint
 
 
-class MetaInfo:
-    """What a model declares and what is derived from it: its Meta options, its fields by type, its
-    table and connection, and the caches of how its rows are read and its lookups described."""
+class ModelBinding:
+    """Prepared fields, relations, table identity and cached layouts in one model graph.
+
+    Class declarations are retained separately; an application binding never replaces them.
+    Runtime connections remain execution inputs, outside this structural object.
+    """
 
     __slots__ = (
+        "__weakref__",
+        "declaration",
+        "graph",
+        "relation_accessors",
         "_default_ordering",
         "_foreign_key_or_one_to_one_inited",
         "_inited",
@@ -76,6 +82,7 @@ class MetaInfo:
         "backward_foreign_key_fields",
         "backward_one_to_one_fields",
         "generic_foreign_key_fields",
+        "generic_schema_binding",
         "registered_live",
         "basequery",
         "basequery_all_fields",
@@ -120,7 +127,7 @@ class MetaInfo:
         "schema",
         "sensitive_fields",
         "blind_index_fields",
-        "plan_cache_buckets",
+        "cache_buckets",
         "soft_delete_field",
         "soft_delete_hard_cascade",
         "swappable",
@@ -147,18 +154,108 @@ class MetaInfo:
         "row_level_security",
     )
 
-    def __init__(self, meta: type[Model.Meta] | None) -> None:
-        """Reads the model's Meta options; the fields come from the class building.
-
-        Args:
-            meta: The model's Meta, None for the base model.
-        """
+    def __init__(self, declaration: ModelDeclaration, graph: ModelBindingGraph) -> None:
+        """Allocate runtime state only from an existing class declaration and graph."""
+        meta = declaration.meta
+        self.declaration = declaration
+        self.graph = graph
+        self.relation_accessors: dict[str, Any] = {}
         self._read_table_names(meta)
         self._read_schema_objects(meta)
         self._read_query_options(meta)
         self._init_fields(meta)
         self._read_row_options(meta)
         self._init_derived_state(meta)
+        self._model = declaration.model
+        self.abstract = declaration.abstract
+
+    def __copy__(self) -> ModelBinding:
+        return self
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> ModelBinding:
+        memo[id(self)] = self
+        return self
+
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...]]:
+        """Serialize structural identity through the graph recipe, leaving cache buckets behind."""
+        from hare.core.apps.model_binding_graph import ModelBindingGraph
+
+        return ModelBindingGraph.get_saved_binding, (self.graph, self._model)
+
+    @classmethod
+    def from_declaration(cls, declaration: ModelDeclaration, graph: ModelBindingGraph) -> ModelBinding:
+        """Prepare fresh runtime fields from one class declaration, without changing the class.
+
+        The graph allocates every model before it links relations. This method does not
+        select a connection, run defaults or inspect another registry's prepared fields.
+        """
+        from hare.fields.declaration_snapshot import DeclarationSnapshot
+        from hare.models.class_building.generic_foreign_keys import GenericForeignKeys
+        from hare.models.class_building.model_field_collection import ModelFieldCollection
+        from hare.models.class_building.primary_key_declaration import PrimaryKeyDeclaration
+
+        memo: dict[int, Any] = {}
+        fields = {name: field.snapshot(memo=memo) for name, field in declaration.fields_map.items()}
+        projection: dict[str, str] = {}
+        foreign_keys, many_to_many, one_to_one = ModelFieldCollection.dispatch_fields(fields, projection)
+        binding = cls(declaration, graph)
+        binding.fields_map = fields
+        binding.fields_db_projection = projection
+        binding.foreign_key_fields = foreign_keys
+        binding.one_to_one_fields = one_to_one
+        binding.many_to_many_fields = many_to_many
+        primary_key = declaration.primary_key_attribute
+        binding.primary_key_attribute = primary_key
+        binding.declared_field_names = declaration.declared_field_names
+        if isinstance(primary_key, tuple):
+            binding.pk_fields = tuple(
+                fields[PrimaryKeyDeclaration.get_component_name(fields, name)] for name in primary_key
+            )
+        elif pk_field := fields.get(primary_key):
+            binding.pk = pk_field
+            binding.pk_fields = (pk_field,)
+            binding.db_pk_column = pk_field.source_field or (
+                f"{primary_key}_id" if isinstance(pk_field, OneToOneFieldInstance) else primary_key
+            )
+        binding.pk_without_overlaps = declaration.pk_without_overlaps
+        binding.table_description = declaration.table_description
+        binding.manager = declaration.manager
+        # Every graph owns its mutable schema declarations, including nested predicates/options.
+        schema_values = {
+            option.value: getattr(binding, option.value)
+            for option in (
+                ModelOption.INDEXES,
+                ModelOption.CONSTRAINTS,
+                ModelOption.TRIGGERS,
+                ModelOption.VIEWS,
+                ModelOption.MATERIALIZED_VIEWS,
+                ModelOption.DICTIONARIES,
+                ModelOption.FUNCTIONS,
+                ModelOption.SEQUENCES,
+                ModelOption.POLICIES,
+                ModelOption.GRANTS,
+                ModelOption.TABLE_OPTIONS,
+                ModelOption.CHANGE_CAPTURE,
+            )
+        }
+        schema_values["ordering_expressions"] = binding.ordering_expressions
+        for name, value in DeclarationSnapshot.copy_values(schema_values, {}).items():
+            setattr(binding, name, value)
+        for name, field in binding.fields_map.items():
+            field.bind_to_model(declaration.model, name)
+            field.get_binding().model_binding = binding
+            if isinstance(field, GeneratedField):
+                field.output_field.bind_to_model(declaration.model, name)
+                field.output_field.get_binding().model_binding = binding
+        generic_fields = {name: field.snapshot() for name, field in declaration.generic_foreign_key_fields.items()}
+        GenericForeignKeys.bind(binding, generic_fields, declaration.abstract)
+        for generic_field in generic_fields.values():
+            generic_field._binding = binding
+            for branch_name in generic_field.branch_names:
+                if branch_name in fields:
+                    fields[branch_name].generic_relation = generic_field  # type: ignore[attr-defined]
+        binding.finalise_fields()
+        return binding
 
     def _read_table_names(self, meta: type[Model.Meta] | None) -> None:
         """The options naming the model's table, and its manager.
@@ -169,14 +266,8 @@ class MetaInfo:
         #: The model's Meta, the Meta of its abstract ancestors merged in - an extension reads its own
         #: options off it (an outbox model's ``Meta.outbox_wakeup``).
         self.meta = meta
-        ModelDefinitionChecks.raise_if_unsupported_option_declared(meta)
-        ModelDefinitionChecks.raise_if_option_values_mistyped(meta)
-        self.abstract: bool = getattr(meta, ModelOption.ABSTRACT, False)
-        # A fresh manager, never the Meta attribute's own object: an abstract base's Meta.manager is
-        # one object for every subclass, and each model binds its manager to itself. Read without
-        # running the descriptor - off a class it gives a queryset.
-        declared_manager: Manager | None = inspect.getattr_static(meta, ModelOption.MANAGER, None)
-        self.manager: Manager = declared_manager.copy_unbound() if declared_manager is not None else Manager()
+        self.abstract = getattr(meta, ModelOption.ABSTRACT, False)
+        self.manager = self.declaration.manager
         self.db_table: str = getattr(meta, ModelOption.TABLE, "")
         # Whether Meta.table was declared rather than left to be derived from the class name - a
         # RenameModel tells the two apart. `meta.table_is_explicit` overrides it: a Meta rebuilt
@@ -198,28 +289,15 @@ class MetaInfo:
         """
         self.constraints: tuple[ModelConstraint, ...] = tuple(getattr(meta, ModelOption.CONSTRAINTS, ()))
         self.triggers: tuple[Trigger, ...] = tuple(getattr(meta, ModelOption.TRIGGERS, ()))
-        self.views: tuple[View, ...] = SchemaObjectDeclarations.get_schema_objects(
-            meta, ModelOption.VIEWS, View, MaterializedView
-        )
-        self.materialized_views: tuple[MaterializedView, ...] = SchemaObjectDeclarations.get_schema_objects(
-            meta, ModelOption.MATERIALIZED_VIEWS, MaterializedView
-        )
-        self.dictionaries: tuple[Dictionary, ...] = SchemaObjectDeclarations.get_schema_objects(
-            meta, ModelOption.DICTIONARIES, Dictionary
-        )
-        self.functions: tuple[DatabaseFunction, ...] = SchemaObjectDeclarations.get_schema_objects(
-            meta, ModelOption.FUNCTIONS, DatabaseFunction
-        )
-        self.sequences: tuple[DatabaseSequence, ...] = SchemaObjectDeclarations.get_schema_objects(
-            meta, ModelOption.SEQUENCES, DatabaseSequence
-        )
-        self.policies: tuple[Policy, ...] = SchemaObjectDeclarations.get_schema_objects(
-            meta, ModelOption.POLICIES, Policy
-        )
-        self.grants: tuple[Grant, ...] = SchemaObjectDeclarations.get_schema_objects(meta, ModelOption.GRANTS, Grant)
-        ModelDefinitionChecks.raise_if_relation_names_repeat(self)
-        self.row_level_security: RowLevelSecurity | None = SchemaObjectDeclarations.get_row_level_security(meta)
-        self.indexes: tuple[tuple[str, ...] | Index, ...] = self._get_indexes(meta)
+        self.views: tuple[View, ...] = tuple(getattr(meta, "views", ()))
+        self.materialized_views: tuple[MaterializedView, ...] = tuple(getattr(meta, "materialized_views", ()))
+        self.dictionaries: tuple[Dictionary, ...] = tuple(getattr(meta, "dictionaries", ()))
+        self.functions: tuple[DatabaseFunction, ...] = tuple(getattr(meta, "functions", ()))
+        self.sequences: tuple[DatabaseSequence, ...] = tuple(getattr(meta, "sequences", ()))
+        self.policies: tuple[Policy, ...] = tuple(getattr(meta, "policies", ()))
+        self.grants: tuple[Grant, ...] = tuple(getattr(meta, "grants", ()))
+        self.row_level_security: RowLevelSecurity | None = getattr(meta, ModelOption.ROW_LEVEL_SECURITY, None)
+        self.indexes: tuple[tuple[str, ...] | Index, ...] = getattr(meta, ModelOption.INDEXES, ())
         self.extensions: tuple[str, ...] = tuple(getattr(meta, ModelOption.EXTENSIONS, ()))
 
     def _read_query_options(self, meta: type[Model.Meta] | None) -> None:
@@ -260,6 +338,7 @@ class MetaInfo:
         self.backward_one_to_one_fields: set[str] = set()
         #: The generic foreign keys by name - each is no field of its own, its branches are.
         self.generic_foreign_key_fields: dict[str, GenericForeignKeyFieldInstance[Any]] = {}
+        self.generic_schema_binding: GenericSchemaBinding | None = None
         #: Whether ``register_live_models()`` registered the model.
         self.registered_live = False
         #: Backward FK/O2O relations of forward fields declared with ``related_name=False``, keyed
@@ -352,18 +431,22 @@ class MetaInfo:
         self.next_setattr: Callable[[Any, str, Any], None] = object.__setattr__
         #: The single-column primary key is supplied outside database generation.
         self.default_custom_generated_pk: bool = False
-        self._model: type[Model] = None  # type: ignore[assignment]
         self.table_description: str = getattr(meta, ModelOption.TABLE_DESCRIPTION, "")
         if isinstance(self.table_description, str) and SQL_NULL_BYTE in self.table_description:
             raise ConfigurationError(SCHEMA_TEXT_NULL_BYTE_MESSAGE.format(owner="Meta", parameter="table_description"))
-        self.table_options: tuple[TableOptions, ...] = SchemaObjectDeclarations.get_declared_table_options(meta)
+        self.table_options: tuple[TableOptions, ...] = getattr(meta, ModelOption.TABLE_OPTIONS, ())
         self.pk: Field[Any] = None  # type: ignore[assignment]
         self.db_pk_column: str = ""
         #: Cache.bucket_id -> this model's bucket of that Cache (the statement plans, the decode
-        #: plans, the descriptions of its filter keys) - held here so the entries live exactly as
-        #: long as the model class.
-        self.plan_cache_buckets: dict[int, Any] = {}
+        #: plans, the descriptions of its filter keys) - retained by this graph node and
+        #: released with the binding, independently of other graphs of the same model.
+        self.cache_buckets: dict[int, Any] = {}
         self.db_default_db_columns: tuple[str, ...] = ()
+
+    @property
+    def forward_key_relation_names(self) -> set[str]:
+        """The forward foreign keys and one-to-one relations with local key columns."""
+        return self.foreign_key_fields | self.one_to_one_fields
 
     def get_table_options(self, dialect: Dialect) -> TableOptions | None:
         """Returns the table options of one dialect.
@@ -404,10 +487,7 @@ class MetaInfo:
             ConfigurationError: The model isn't bound.
         """
         if not self._inited:
-            raise ConfigurationError(
-                f"{self._model.__name__} is not bound yet: call Hare.bind_models() or Hare.init() "
-                "before describing its filters or orderings"
-            )
+            raise ConfigurationError(UNBOUND_MODEL_MESSAGE.format(model_name=self._model.__name__))
 
     @property
     def has_primary_key(self) -> bool:
@@ -482,14 +562,18 @@ class MetaInfo:
             field_object = self.fields_map.get(field_name)
             if field_object is None:
                 column_names.append(field_name)
-            elif isinstance(field_object, ForeignKeyFieldInstance) and len(field_object.db_column_names) > 1:
-                column_names.extend(field_object.db_column_names)
             elif isinstance(field_object, ForeignKeyFieldInstance):
-                key_field_name = field_object.source_field or f"{field_name}{FOREIGN_KEY_COLUMN_SUFFIX}"
-                key_field_object = self.fields_map.get(key_field_name)
-                column_names.append(
-                    key_field_object.source_field or key_field_name if key_field_object is not None else key_field_name
-                )
+                relation_column_names = field_object.db_column_names
+                if len(relation_column_names) > 1:
+                    column_names.extend(relation_column_names)
+                else:
+                    key_field_name = field_object.source_field or f"{field_name}{FOREIGN_KEY_COLUMN_SUFFIX}"
+                    key_field_object = self.fields_map.get(key_field_name)
+                    column_names.append(
+                        key_field_object.source_field or key_field_name
+                        if key_field_object is not None
+                        else key_field_name
+                    )
             else:
                 column_names.append(field_object.source_field or field_name)
         return column_names
@@ -510,11 +594,20 @@ class MetaInfo:
             if (
                 isinstance(relation_field, ForeignKeyFieldInstance)
                 and relation_field.index
-                and len(relation_field.source_fields) > 1
-                and relation_field.source_fields[0] == field_name
+                and len(source_fields := relation_field.source_fields) > 1
+                and source_fields[0] == field_name
             ):
-                field_index_columns.append((relation_field.model_field_name, tuple(relation_field.db_column_names)))
+                field_index_columns.append((relation_field.model_field_name, relation_field.db_column_names))
         return field_index_columns
+
+    def iter_field_unique_columns(self) -> Iterator[tuple[str, str]]:
+        """Yield the field and column names for single-column UNIQUE constraints in projection order."""
+        for field_name, column in self.fields_db_projection.items():
+            field = self.fields_map[field_name]
+            reference = getattr(field, "reference", None)
+            # A key field of a relation to a composite key is unique only with the others.
+            if field.unique and not field.pk and not (reference is not None and len(reference.to_field_instances) > 1):
+                yield field_name, column
 
     def get_leading_index_entries(self) -> list[tuple[str, ...]]:
         """The field names of every index a lookup on its leading columns can use: plain btree
@@ -606,33 +699,29 @@ class MetaInfo:
         Raises:
             ConfigurationError: The model already has a field of that name.
         """
+        if self.graph.sealed:
+            raise ConfigurationError("A published model graph cannot be modified; prepare a new registry version")
         if name in self.fields_map:
             raise ConfigurationError(f"Field {name} already present in meta")
         value.bind_to_model(self._model, name)
+        value.get_binding().model_binding = self
         self.fields_map[name] = value
 
         if value.has_db_field:
             self.fields_db_projection[name] = value.source_field or name
 
-        # Dropped, not recomputed: apps are registered incrementally, so a relation can arrive after
-        # the deletion caches were filled - the transitive ones of other models included.
         if isinstance(value, ManyToManyFieldInstance):
             self.many_to_many_fields.add(name)
-            Caches.forget_model_caches((self._model,))
         elif isinstance(value, OneToOneFieldInstance):
             self.one_to_one_fields.add(name)
-            Caches.forget_model_caches((self._model,))
         elif isinstance(value, ForeignKeyFieldInstance):
             self.foreign_key_fields.add(name)
-            Caches.forget_model_caches((self._model,))
         elif isinstance(value, BackwardOneToOneRelation):
             self.backward_one_to_one_fields.add(name)
-            Caches.forget_model_caches((self._model,))
         elif isinstance(value, BackwardForeignKeyRelation):
             self.backward_foreign_key_fields.add(name)
-            Caches.forget_model_caches((self._model,))
 
-        LookupInfoBuilder.forget_descriptions()
+        Cache.clear_holder(self)
         self.finalise_fields()
 
     def add_hidden_backward_relation(self, key: str, value: BackwardForeignKeyRelation[Any]) -> None:
@@ -642,21 +731,12 @@ class MetaInfo:
             key: The forward field's ``"app.Model.field"``; re-registering a key replaces it.
             value: The backward relation.
         """
+        if self.graph.sealed:
+            raise ConfigurationError("A published model graph cannot be modified; prepare a new registry version")
         value.bind_to_model(self._model, key)
+        value.get_binding().model_binding = self
         self.hidden_backward_relations[key] = value
-        LookupInfoBuilder.forget_descriptions()
-        Caches.forget_model_caches((self._model,))
-
-    def remove_hidden_backward_relation(self, key: str) -> None:
-        """Reverses ``add_hidden_backward_relation()``.
-
-        Args:
-            key: The forward field's ``"app.Model.field"``.
-        """
-        if self.hidden_backward_relations.pop(key, None) is None:
-            return
-        LookupInfoBuilder.forget_descriptions()
-        Caches.forget_model_caches((self._model,))
+        Cache.clear_holder(self)
 
     def place_key_columns(self) -> None:
         """Puts the key columns of each relation where the relation is declared among the columns -
@@ -689,6 +769,8 @@ class MetaInfo:
         Raises:
             ConfigurationError: No field named ``name`` exists.
         """
+        if self.graph.sealed:
+            raise ConfigurationError("A published model graph cannot be modified; prepare a new registry version")
         value = self.fields_map.pop(name, None)
         if value is None:
             raise ConfigurationError(f"Field {name} not present in meta")
@@ -699,10 +781,8 @@ class MetaInfo:
         self.foreign_key_fields.discard(name)
         self.one_to_one_fields.discard(name)
         self.foreign_key_shadow_columns.pop(name, None)
-        LookupInfoBuilder.forget_descriptions()
-        if isinstance(self._model.__dict__.get(name), property):
-            delattr(self._model, name)
-        Caches.forget_model_caches((self._model,))
+        self.relation_accessors.pop(name, None)
+        Cache.clear_holder(self)
         self.finalise_fields()
 
     def check_not_swapped(self) -> None:
@@ -715,15 +795,6 @@ class MetaInfo:
                 f"{self.full_name!r} has been swapped for {self.swapped!r} by the {self.swappable} setting - "
                 f"query {self.swapped!r} instead"
             )
-
-    @property
-    def connection(self) -> DatabaseClient:
-        """The client of the model's default connection, unrouted.
-
-        Raises:
-            ConfigurationError: No context is active, or the model has no default connection.
-        """
-        return ModelConnectionChoice.get_default(HareContext.require_current(), self._model)
 
     def check_tenant_client(self, client: DatabaseClient) -> None:
         """Checks a query of the model may run on a client - a ``Meta.tenant_schema`` model's on a
@@ -776,7 +847,7 @@ class MetaInfo:
             )
         if self._default_ordering and any(field_name == PRIMARY_KEY_ALIAS for field_name, _ in self._default_ordering):
             # Resolved here, not in finalise_fields(): self.primary_key_attribute is only final after
-            # build_meta(). "pk" orders by every primary key column.
+            # class construction. "pk" orders by every primary key column.
             self._default_ordering = tuple(
                 (ordering_field_name, order)
                 for field_name, order in self._default_ordering
@@ -817,10 +888,10 @@ class MetaInfo:
         Returns:
             The description.
         """
-        lookup_infos = LookupInfoBuilder.lookup_infos.get_bucket(self._model)
+        lookup_infos = LookupInfoBuilder.lookup_infos.get_bucket(self)
         lookup_info = lookup_infos.get(key)
         if lookup_info is None:
-            lookup_info = lookup_infos.store(key, LookupInfoBuilder.get_lookup_info(self._model, key, label=label))
+            lookup_info = lookup_infos.store(key, LookupInfoBuilder.get_lookup_info(self, key, label=label))
         return lookup_info
 
     def get_lookups(self, path: str, dialect: Dialect | None = None) -> dict[str, LookupInfo]:
@@ -841,12 +912,12 @@ class MetaInfo:
         """
         self._check_bound()
         if dialect is None:
-            dialect = self._model.get_connection().dialect
-        lookups_by_path = LookupInfoBuilder.lookups_by_path.get_bucket(self._model)
+            dialect = self.graph.get_dialect(self.default_connection)
+        lookups_by_path = LookupInfoBuilder.lookups_by_path.get_bucket(self)
         cache_key = (path, dialect)
         lookups = lookups_by_path.get(cache_key)
         if lookups is None:
-            lookups = lookups_by_path.store(cache_key, LookupInfoBuilder.get_lookups(self._model, path, dialect))
+            lookups = lookups_by_path.store(cache_key, LookupInfoBuilder.get_lookups(self, path, dialect))
         return dict(lookups)
 
     def get_ordering_info(self, name: str) -> OrderingInfo:
@@ -865,21 +936,23 @@ class MetaInfo:
             ConfigurationError: The model isn't bound yet (``is_bound``).
         """
         self._check_bound()
-        ordering_infos = LookupInfoBuilder.ordering_infos.get_bucket(self._model)
+        ordering_infos = LookupInfoBuilder.ordering_infos.get_bucket(self)
         ordering_info = ordering_infos.get(name)
         if ordering_info is None:
-            ordering_info = ordering_infos.store(name, LookupInfoBuilder.get_ordering_info(self._model, name))
+            ordering_info = ordering_infos.store(name, LookupInfoBuilder.get_ordering_info(self, name))
         return ordering_info
 
     def finalise_model(self) -> None:
         """Completes the model once every model is registered and its relations are wired: the field
         sets, the relation fields declared lazily, the table options naming relation keys, and the checks
         of the definition that need the fields."""
+        if self.graph.sealed:
+            raise ConfigurationError("A published model graph cannot be modified; prepare a new registry version")
         self.finalise_fields()
-        LookupInfoBuilder.forget_descriptions()
+        Cache.clear_holder(self)
         LazyRelationFields.generate_lazy_foreign_key_and_many_to_many_fields(self)
-        # The layout rows of the model are read by is built anew over its final fields.
-        HydrationLayout.layouts.forget_model(self._model)
+        self.views = tuple(view.for_binding(self) for view in self.views)
+        self.materialized_views = tuple(view.for_binding(self) for view in self.materialized_views)
         self.table_options = tuple(options.with_relation_keys(self) for options in self.table_options)
         ModelDefinitionChecks.validate_distinct_columns(self)
         ModelDefinitionChecks.validate_triggers_fire_on_a_table(self)
@@ -922,7 +995,7 @@ class MetaInfo:
                 for klass in mro[mro.index(Model) + 1 :]
                 if "__setattr__" in klass.__dict__
             )
-            hooks = {*self.foreign_key_fields, *self.one_to_one_fields, *self.foreign_key_shadow_columns}
+            hooks = {*self.relation_accessors, *self.foreign_key_shadow_columns}
             if self.soft_delete_field is not None:
                 hooks.add(self.soft_delete_field)
             if self.generated_pk_field_name is not None:
@@ -1008,28 +1081,12 @@ class MetaInfo:
         Returns:
             The layout.
         """
-        layouts = HydrationLayout.layouts.get_bucket(self._model)
+        layouts = HydrationLayout.layouts.get_bucket(self)
         key = (connection.native_python_types, connection.dialect)
         layout = layouts.get(key)
         if layout is None:
             layout = layouts[key] = HydrationLayout.build(self, connection)
         return layout
-
-    @staticmethod
-    def _get_indexes(meta: type[Model.Meta] | None) -> tuple[tuple[str, ...] | Index, ...]:
-        """``Meta.indexes`` as a tuple of entries - a single list of field names is one entry. The
-        entries are checked once the model's fields are known.
-
-        Args:
-            meta: The model's Meta.
-
-        Returns:
-            The entries; empty without the option.
-        """
-        indexes = getattr(meta, ModelOption.INDEXES.value, ()) or ()
-        if indexes and isinstance(indexes, (list, tuple)) and isinstance(indexes[0], str):
-            indexes = (indexes,)
-        return tuple(indexes)
 
     @staticmethod
     def _get_latest_by_fields(meta: type[Model.Meta] | None) -> tuple[str, ...]:
@@ -1043,6 +1100,32 @@ class MetaInfo:
         """
         declared = getattr(meta, ModelOption.GET_LATEST_BY, ())
         return (declared,) if isinstance(declared, str) else tuple(declared)
+
+    def get_composite_primary_key_parts(self, value: Any) -> Iterator[tuple[str, Any]]:
+        """Validate and split a composite key before assigning its fields."""
+        names = self.primary_key_attribute_names
+        if not isinstance(value, tuple) or len(value) != len(names):
+            raise QueryError(
+                f"Composite pk must be set to a {len(names)}-tuple matching "
+                f"{names}, got {self.get_shown_primary_key(value)}"
+            )
+        return zip(names, value, strict=True)
+
+    def get_shown_primary_key(self, value: Any) -> str:
+        """Format a supplied key using each component's diagnostic policy.
+
+        A malformed composite value cannot be split safely and is hidden entirely
+        when any component is sensitive. Non-sensitive keys retain their str form.
+        """
+        fields = self.pk_fields
+        if not any(field.sensitive for field in fields):
+            return str(value)
+        if not self.has_composite_primary_key:
+            return fields[0].get_value_for_message(value)
+        if not isinstance(value, tuple) or len(value) != len(fields):
+            return SENSITIVE_VALUE_PLACEHOLDER
+        parts = (field.get_value_for_message(part) for field, part in zip(fields, value, strict=True))
+        return f"({', '.join(parts)})"
 
     def _prepare_default_ordering(self, meta: type[Model.Meta] | None) -> tuple[tuple[str, Order], ...]:
         """``Meta.ordering`` as names and directions - an expression named by an alias of its own,

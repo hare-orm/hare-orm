@@ -28,8 +28,10 @@ def test_totals_and_ordinary_rows_share_the_result_layout(by_position, flat):
         converted.append(value)
         return int(value)
 
-    read_row = reader.get_result_reader(connection, result, [("total", decode)])
-    rows = [read_row(row) for row in result.rows]
+    converters = [("total", decode)]
+    layout = reader.get_result_layout(connection, result, converters)
+    rows = reader.convert_batch(connection, result, converters, layout=layout)
+    read_row = reader.get_result_reader(layout)
     output = ClickhouseTotals.transform_result(QuerySetExtensionResult(rows, result, read_row))
     assert output == ([2] if flat else [{"total": 2}])
     assert output.totals == (7 if flat else {"total": 7})

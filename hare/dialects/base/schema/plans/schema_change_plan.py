@@ -32,5 +32,6 @@ class SchemaChangePlan:
 
     async def execute(self, editor: BaseSchemaEditor) -> None:
         """Apply each prepared step once, using collection behavior on a preview editor."""
-        for step in self.steps:
-            await step.execute(editor)
+        async with editor.schema_plan_scope(self):
+            for step in self.steps:
+                await step.execute(editor)

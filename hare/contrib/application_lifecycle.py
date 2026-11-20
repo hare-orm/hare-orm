@@ -4,17 +4,21 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Generator, Iterable, Mapping
 from contextlib import asynccontextmanager, contextmanager
-from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, ClassVar
+from contextvars import ContextVar, Token
+from typing import Any, ClassVar
 
+from hare.core.config.hare_config import HareConfig
 from hare.core.connections.messages import CONNECTION_RELEASE_FAILED
 from hare.core.constants import INITIALIZATION_RELEASE_FAILED
+from hare.core.enums import ApplicationScope
 from hare.core.hare_context import HareContext
+from hare.core.resource_completion import ResourceCompletion
 from hare.exceptions import ConfigurationError
 from hare.transactions.atomic.atomic import Atomic
 
-if TYPE_CHECKING:
-    from hare.core.config import HareConfig
+type ApplicationLifecycleTokens = tuple[
+    Token[HareContext | ApplicationScope | None], Token[ApplicationLifecycle | None]
+]
 
 
 class ApplicationLifecycle:
@@ -50,7 +54,12 @@ class ApplicationLifecycle:
         self.transaction_connection_names = self.get_transaction_connection_names(transactions, transactions_option)
         self.context: HareContext | None = None
         self.provided_context = context
-        self.close_created_context = context is None
+
+    def get_config(self) -> HareConfig:
+        """Load the configuration once for model discovery and each start of this application."""
+        config = HareConfig.load(self.config)
+        self.config = config
+        return config
 
     @staticmethod
     def get_transaction_connection_names(
@@ -105,11 +114,11 @@ class ApplicationLifecycle:
         """
         if self.context is not None:
             raise ConfigurationError("The Hare context of the application is open already")
-        self.context = self.provided_context or HareContext()
+        self.context = HareContext() if self.provided_context is None else self.provided_context
         try:
             with self.scope():
-                if self.close_created_context:
-                    await self.context.init(config=self.config, _enable_global_fallback=False)
+                if self.provided_context is None:
+                    await self.context.init(config=self.get_config(), _enable_global_fallback=False)
                 aliases = self.context.connections.aliases()
                 for connection_alias in self.transaction_connection_names:
                     if connection_alias is not None and connection_alias not in aliases:
@@ -120,23 +129,43 @@ class ApplicationLifecycle:
                     await self.raise_if_without_transactions(connection_alias)
                 self.check_application()
         except BaseException as error:
-            try:
+            with ResourceCompletion.preserve_error(error, INITIALIZATION_RELEASE_FAILED):
                 await self.stop()
-            except BaseException as release_error:
-                raise BaseExceptionGroup(INITIALIZATION_RELEASE_FAILED, [error, release_error]) from None
             raise
 
     @contextmanager
     def scope(self) -> Generator[HareContext]:
         """Activate this application's context for one request, task or lifespan callback."""
         context = self.get_context()
-        token = HareContext.current_context.set(context)
-        application_token = self.active.set(self)
+        tokens = ApplicationLifecycle._enter_scope(self, context, self)
         try:
             yield context
         finally:
-            self.active.reset(application_token)
-            HareContext.current_context.reset(token)
+            ApplicationLifecycle._restore_scope(tokens)
+
+    @staticmethod
+    def _enter_scope(
+        lifecycle: ApplicationLifecycle,
+        context: HareContext,
+        active_owner: ApplicationLifecycle | type[ApplicationLifecycle],
+    ) -> ApplicationLifecycleTokens:
+        """Activate the context and application as one pair of restorable tokens."""
+        context_token = HareContext.current_context.set(context)
+        try:
+            application_token = active_owner.active.set(lifecycle)
+        except BaseException:
+            HareContext.current_context.reset(context_token)
+            raise
+        return context_token, application_token
+
+    @staticmethod
+    def _restore_scope(tokens: ApplicationLifecycleTokens | None) -> None:
+        """Restore a completed activation in reverse order, leaving an absent one alone."""
+        if tokens is None:
+            return
+        context_token, application_token = tokens
+        application_token.var.reset(application_token)
+        context_token.var.reset(context_token)
 
     def get_context(self) -> HareContext:
         """Return the started context for adapters with separate begin/end hooks."""
@@ -170,7 +199,7 @@ class ApplicationLifecycle:
     async def stop(self) -> None:
         """Release this application's context once; a supplied context remains open."""
         context, self.context = self.context, None
-        if context is None or not self.close_created_context:
+        if context is None or context is self.provided_context:
             return
         token = HareContext.current_context.set(context)
         try:
@@ -187,14 +216,18 @@ class ApplicationLifecycle:
             BaseExceptionGroup: Both application work and context cleanup fail.
         """
         await self.start()
+        async with self.scope_until_stop():
+            yield
+
+    @asynccontextmanager
+    async def scope_until_stop(self) -> AsyncGenerator[None]:
+        """Activate the started context for the body, then stop it after leaving the scope."""
         try:
             with self.scope():
                 yield
         except BaseException as error:
-            try:
+            with ResourceCompletion.preserve_error(error, CONNECTION_RELEASE_FAILED):
                 await self.stop()
-            except BaseException as release_error:
-                raise BaseExceptionGroup(CONNECTION_RELEASE_FAILED, [error, release_error]) from None
             raise
         else:
             await self.stop()

@@ -11,17 +11,6 @@ from tests.utils.driver_classes import DriverClasses
 CLIENT_CLASSES = DriverClasses.get_parameters(*POSTGRES_CLIENT_PATHS)
 
 
-def _make_client(client_class, **credentials):
-    return client_class(
-        user="postgres",
-        password="postgres",
-        database="test",
-        host="127.0.0.1",
-        connection_alias="models",
-        **credentials,
-    )
-
-
 # The check is the clients' shared __init__: every value on rust_pg's client class, the first value
 # on asyncpg's.
 INVALID_POOL_CREDENTIALS = [
@@ -45,7 +34,7 @@ INVALID_POOL_CREDENTIALS = [
 )
 def test_invalid_pool_credentials_are_rejected(client_class, credentials, message):
     with pytest.raises(ConfigurationError, match=message):
-        _make_client(client_class, **credentials)
+        DriverClasses.make_postgresql_client(client_class, **credentials)
 
 
 @pytest.mark.database_independent
@@ -63,8 +52,10 @@ def test_invalid_pool_credentials_are_rejected(client_class, credentials, messag
     ],
 )
 def test_valid_pool_credentials_are_accepted(client_class, credentials, expected):
-    client = _make_client(client_class, **credentials)
+    client = DriverClasses.make_postgresql_client(client_class, **credentials)
     assert (client.pool_minsize, client.pool_maxsize, client.pool_acquire_timeout) == expected
+    if expected[2] is None:
+        assert client.pool_acquire_timeout is None
 
 
 @pytest.mark.database_independent

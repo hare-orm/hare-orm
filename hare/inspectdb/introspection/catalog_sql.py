@@ -49,6 +49,13 @@ class CatalogSql:
             position += len(value)
 
     @classmethod
+    def get_first_unquoted_nonspace_offset(cls, sql: str) -> int | None:
+        """The first non-whitespace offset outside quoted text and comments."""
+        return next(
+            (offset for offset, character, _ in cls.get_unquoted_characters(sql) if not character.isspace()), None
+        )
+
+    @classmethod
     def split_terms(cls, sql: str, separator: str = ",") -> list[str]:
         """Split at top-level delimiters or operators, preserving each term as reported."""
         terms = []
@@ -63,25 +70,35 @@ class CatalogSql:
     @classmethod
     def get_parenthesized_terms(cls, sql: str) -> list[str]:
         """Read terms in the first outer parenthesis pair of a catalog declaration."""
-        opening = next(
-            (
-                position
-                for position, character, depth in cls.get_unquoted_characters(sql)
-                if character == "(" and depth == 0
-            ),
-            None,
-        )
-        if opening is None:
-            return []
-        body = cls.extract_parentheses(sql, opening)
+        _, body, _ = cls.get_parenthesized_parts(sql)
         return cls.split_terms(body) if body is not None else []
+
+    @classmethod
+    def get_parenthesized_parts(cls, sql: str) -> tuple[str, str | None, str]:
+        """Read the stripped prefix, the first outer pair's body and any verbatim suffix.
+
+        The body is None when no complete pair exists.
+        """
+        opening, closing = cls._get_parenthesis_bounds(sql)
+        prefix = sql[:opening].strip()
+        if opening is None or closing is None:
+            return prefix, None, ""
+        return prefix, sql[opening + 1 : closing], sql[closing + 1 :]
 
     @classmethod
     def extract_parentheses(cls, sql: str, opening: int) -> str | None:
         """Read one balanced pair; delimiters inside strings and comments do not count."""
         if sql[opening : opening + 1] != "(":
             return None
-        for position, character, depth in cls.get_unquoted_characters(sql[opening:]):
-            if character == ")" and depth == 1:
-                return sql[opening + 1 : opening + position]
-        return None
+        _, closing = cls._get_parenthesis_bounds(sql[opening:])
+        return sql[opening + 1 : opening + closing] if closing is not None else None
+
+    @classmethod
+    def _get_parenthesis_bounds(cls, sql: str) -> tuple[int | None, int | None]:
+        opening = None
+        for position, character, depth in cls.get_unquoted_characters(sql):
+            if character == "(" and depth == 0 and opening is None:
+                opening = position
+            elif character == ")" and depth == 1 and opening is not None:
+                return opening, position
+        return opening, None

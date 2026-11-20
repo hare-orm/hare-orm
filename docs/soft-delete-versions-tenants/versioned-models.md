@@ -75,6 +75,11 @@ copied from the old version. An instance loaded with `.only()`/`.defer()` raises
 `IncompleteInstanceError` naming the unfetched fields, unless they are passed as overrides;
 database-computed and `auto_now` columns never need to be loaded.
 
+The logical name of a `GenericForeignKeyField` covers the stored key columns of every branch.
+Overriding it replaces the complete generic relation; excluding it leaves all branches to the
+field's normal default. Those replaced or excluded columns need not be loaded on a partial
+instance. A branch name or a physical component can still be overridden separately.
+
 `create_new_version()` creates a new row with the supplied object's version plus one,
 without changing that object or looking up the highest version.
 An existing `(id, version + 1)` raises `IntegrityError` where the database enforces that key.

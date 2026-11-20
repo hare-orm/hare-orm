@@ -6,6 +6,7 @@ import pytest
 
 from hare.contrib.test import requires_features
 from hare.core.caching.caches import Caches
+from hare.core.hare_context import HareContext
 from hare.query.plans.statement.statement_plans import StatementPlans
 from tests.shared_models.testmodels import Tournament
 
@@ -16,12 +17,14 @@ pytestmark = pytest.mark.plan_verification_after_test
 @pytest.mark.asyncio
 async def test_fixed_projection_columns_are_shared_reused_and_invalidated(db):
     obj = await Tournament.objects.create(name="prepared columns")
-    Caches.forget_model_caches([Tournament])
+    Caches.forget_model_caches([HareContext.require_current().apps.get_binding(Tournament)])
     assert (await Tournament.objects.get(pk=obj.pk)).name == obj.name
     assert (await Tournament.objects.get(name=obj.name)).pk == obj.pk
     layouts = [
         plan.result_reading.prepared_columns
-        for plan in StatementPlans.plans.get_bucket(Tournament).values()
+        for plan in StatementPlans.plans.get_bucket(
+            HareContext.require_current().apps.get_binding(Tournament)
+        ).values()
         if plan.result_reading is not None
     ]
     assert len(layouts) >= 2
@@ -34,11 +37,13 @@ async def test_fixed_projection_columns_are_shared_reused_and_invalidated(db):
     ):
         assert (await Tournament.objects.get(pk=obj.pk)).name == obj.name
 
-    Caches.forget_model_caches([Tournament])
+    Caches.forget_model_caches([HareContext.require_current().apps.get_binding(Tournament)])
     assert (await Tournament.objects.get(pk=obj.pk)).name == obj.name
     fresh_layouts = [
         plan.result_reading.prepared_columns
-        for plan in StatementPlans.plans.get_bucket(Tournament).values()
+        for plan in StatementPlans.plans.get_bucket(
+            HareContext.require_current().apps.get_binding(Tournament)
+        ).values()
         if plan.result_reading is not None
     ]
     assert fresh_layouts
@@ -51,10 +56,12 @@ async def test_named_rows_keep_result_based_column_reading(db):
     obj = await Tournament.objects.create(name="named columns")
     connection = Tournament.get_connection()
     with patch.object(connection, "features", connection.features.replace(supports_positional_rows=False)):
-        Caches.forget_model_caches([Tournament])
+        Caches.forget_model_caches([HareContext.require_current().apps.get_binding(Tournament)])
         assert (await Tournament.objects.get(pk=obj.pk)).name == obj.name
         assert (await Tournament.objects.get(name=obj.name)).pk == obj.pk
-        plans = list(StatementPlans.plans.get_bucket(Tournament).values())
+        plans = list(
+            StatementPlans.plans.get_bucket(HareContext.require_current().apps.get_binding(Tournament)).values()
+        )
         assert plans
         assert all(plan.result_reading.prepared_columns is None for plan in plans)
 
@@ -66,7 +73,7 @@ async def test_a_call_plan_keeps_one_reader_without_a_connection(db):
     from hare.query.rows.model_rows.model_rows import ModelRows
 
     obj = await Tournament.objects.create(name="kept reader")
-    Caches.forget_model_caches([Tournament])
+    Caches.forget_model_caches([HareContext.require_current().apps.get_binding(Tournament)])
     await Tournament.objects.get(pk=obj.pk)
     readers = []
     connections = []
@@ -94,7 +101,7 @@ async def test_prepared_columns_keep_one_native_layout_for_every_query(db):
     from hare.query.rows.model_rows.model_rows import ModelRows
 
     obj = await Tournament.objects.create(name="kept layout")
-    Caches.forget_model_caches([Tournament])
+    Caches.forget_model_caches([HareContext.require_current().apps.get_binding(Tournament)])
     await Tournament.objects.get(pk=obj.pk)
     layouts = []
     read_batch = ModelRows.read_batch

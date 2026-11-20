@@ -9,16 +9,15 @@ from hare import fields
 from hare.ddl import RawSQLTerm
 from hare.ddl.generated_names import GeneratedNames
 from hare.ddl.indexes import Index, PartialIndex
-from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-from hare.dialects.base.schema.tables.table_comments import TableComments
 from hare.dialects.postgresql.fields.ts_vector_field import TSVectorField
 from hare.dialects.postgresql.indexes import BloomIndex, BrinIndex, GinIndex, GistIndex, IvfflatIndex, SpGistIndex
 from hare.dialects.postgresql.schema.postgresql_schema_editor import PostgresqlSchemaEditor
 from hare.exceptions import ConfigurationError
-from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
 from hare.vectors import VectorField
 from tests.utils.fake_client import FakeClient
+from tests.utils.model_bindings import ModelBindings
+from tests.utils.schema_editor import TestSchemaEditor
 
 pytestmark = pytest.mark.database_independent
 
@@ -50,22 +49,6 @@ async def test_failed_schema_script_keeps_error_until_cache_refresh_finishes(mon
     assert isinstance(caught.value.exceptions[1], asyncio.CancelledError)
 
 
-class TestSchemaEditorTableComments(TableComments):
-    __test__ = False
-
-    def get_table_comment_sql(self, table: str, comment: str) -> str:
-        return ""
-
-    def get_column_comment_sql(self, table: str, column: str, comment: str) -> str:
-        return ""
-
-
-class TestSchemaEditor(BaseSchemaEditor):
-    __test__ = False
-
-    table_comments_class = TestSchemaEditorTableComments
-
-
 class Widget(Model):
     id = fields.IntField(primary_key=True)
     name = fields.TextField()
@@ -75,11 +58,7 @@ class Widget(Model):
         app = "models"
 
 
-def init_apps(*models: type[Model]) -> None:
-    apps = StateApps()
-    for model in models:
-        apps.register_model("models", model)
-    apps.init_relations()
+schema_apps = ModelBindings.prepare(Widget)
 
 
 @pytest.mark.asyncio
@@ -87,7 +66,7 @@ async def test_create_model_generates_table_sql() -> None:
     client = FakeClient("sql")
     editor = TestSchemaEditor(client)
 
-    await editor.create_model(Widget)
+    await editor.create_model(schema_apps.get_binding(Widget))
 
     assert len(client.executed) == 1
     sql = client.executed[0]
@@ -101,7 +80,7 @@ async def test_add_field_generates_add_column_sql() -> None:
     client = FakeClient("sql")
     editor = TestSchemaEditor(client)
 
-    await editor.add_field(Widget, Widget, "name")
+    await editor.add_field(schema_apps.get_binding(Widget), schema_apps.get_binding(Widget), "name")
 
     assert len(client.executed) == 1
     sql = client.executed[0]
@@ -114,7 +93,11 @@ async def test_remove_field_generates_drop_column_sql() -> None:
     client = FakeClient("sql")
     editor = TestSchemaEditor(client)
 
-    await editor.remove_field(Widget, Widget, Widget._meta.fields_map["name"])
+    await editor.remove_field(
+        schema_apps.get_binding(Widget),
+        schema_apps.get_binding(Widget),
+        schema_apps.get_binding(Widget).fields_map["name"],
+    )
 
     assert len(client.executed) == 1
     assert client.executed[0] == 'ALTER TABLE "widget" DROP COLUMN "name" CASCADE'
@@ -138,12 +121,12 @@ async def test_add_field_m2m_generates_table_sql() -> None:
             table = "widget"
             app = "models"
 
-    init_apps(Tag, WidgetWithTags)
+    apps_1 = ModelBindings.prepare(Tag, WidgetWithTags)
 
     client = FakeClient("sql")
     editor = TestSchemaEditor(client)
 
-    await editor.add_field(WidgetWithTags, WidgetWithTags, "tags")
+    await editor.add_field(apps_1.get_binding(WidgetWithTags), apps_1.get_binding(WidgetWithTags), "tags")
 
     assert client.executed
     assert 'CREATE TABLE "widget_tag"' in client.executed[0]
@@ -151,6 +134,7 @@ async def test_add_field_m2m_generates_table_sql() -> None:
 
 @pytest.mark.asyncio
 async def test_create_model_generates_generated_column_sql() -> None:
+
     class Document(Model):
         id = fields.IntField(primary_key=True)
         title = fields.TextField()
@@ -165,17 +149,19 @@ async def test_create_model_generates_generated_column_sql() -> None:
             table = "document"
             app = "models"
 
+    prepared_apps = ModelBindings.prepare(Document)
+
     client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
 
-    await editor.create_model(Document)
+    await editor.create_model(prepared_apps.get_binding(Document))
 
     assert client.executed
     sql = client.executed[0]
     assert 'CREATE TABLE "document"' in sql
     assert (
-        "\"search_vector\" TSVECTOR GENERATED ALWAYS AS ((SETWEIGHT(TO_TSVECTOR('english',"
-        "COALESCE(\"title\",'')),'A') || SETWEIGHT(TO_TSVECTOR('english',"
+        "\"search_vector\" TSVECTOR GENERATED ALWAYS AS ((SETWEIGHT(TO_TSVECTOR(CAST('english' AS regconfig),"
+        "COALESCE(\"title\",'')),'A') || SETWEIGHT(TO_TSVECTOR(CAST('english' AS regconfig),"
         "COALESCE(\"body\",'')),'B'))) STORED"
     ) in sql
 
@@ -196,23 +182,26 @@ async def test_add_field_generates_generated_column_sql() -> None:
             table = "document"
             app = "models"
 
+    prepared_apps = ModelBindings.prepare(Document)
+
     client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
 
-    await editor.add_field(Document, Document, "search_vector")
+    await editor.add_field(prepared_apps.get_binding(Document), prepared_apps.get_binding(Document), "search_vector")
 
     assert client.executed
     sql = client.executed[0]
     assert 'ALTER TABLE "document" ADD COLUMN' in sql
     assert (
-        "\"search_vector\" TSVECTOR GENERATED ALWAYS AS ((SETWEIGHT(TO_TSVECTOR('english',"
-        "COALESCE(\"title\",'')),'A') || SETWEIGHT(TO_TSVECTOR('english',"
+        "\"search_vector\" TSVECTOR GENERATED ALWAYS AS ((SETWEIGHT(TO_TSVECTOR(CAST('english' AS regconfig),"
+        "COALESCE(\"title\",'')),'A') || SETWEIGHT(TO_TSVECTOR(CAST('english' AS regconfig),"
         "COALESCE(\"body\",'')),'B'))) STORED"
     ) in sql
 
 
 @pytest.mark.asyncio
 async def test_add_index_generates_gin_tsvector_sql() -> None:
+
     class Document(Model):
         id = fields.IntField(primary_key=True)
         search_vector = TSVectorField()
@@ -222,14 +211,18 @@ async def test_add_index_generates_gin_tsvector_sql() -> None:
             app = "models"
             indexes = [GinIndex(fields=("search_vector",))]
 
+    prepared_apps = ModelBindings.prepare(Document)
+
     client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
 
-    index: Index = Document._meta.indexes[0]
-    await editor.add_index(Document, index)
+    index: Index = prepared_apps.get_binding(Document).indexes[0]
+    await editor.add_index(prepared_apps.get_binding(Document), index)
 
     assert client.executed
-    expected_name = GeneratedNames.get_index_name("idx", Document, ["search_vector"], ("GIN",))
+    expected_name = GeneratedNames.get_index_name(
+        "idx", prepared_apps.get_binding(Document).db_table, ["search_vector"], ("GIN",)
+    )
     assert (f'CREATE INDEX "{expected_name}" ON "document" USING GIN ("search_vector");') == client.executed[0]
 
 
@@ -252,18 +245,22 @@ async def test_add_index_renders_with_storage_params_before_where_condition() ->
             app = "models"
             indexes = [IvfflatIndex(fields=("embedding",), lists=100, condition=RawSQLTerm("active"))]
 
+    prepared_apps = ModelBindings.prepare(Item)
+
     client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
 
-    index: Index = Item._meta.indexes[0]
-    await editor.add_index(Item, index)
+    index: Index = prepared_apps.get_binding(Item).indexes[0]
+    await editor.add_index(prepared_apps.get_binding(Item), index)
 
     assert client.executed
     sql = client.executed[0]
     with_pos = sql.index("WITH (lists=100)")
     where_pos = sql.index("WHERE")
     assert with_pos < where_pos, f"WITH must come before WHERE: {sql!r}"
-    expected_name = GeneratedNames.get_index_name("idx", Item, ["embedding"], index.get_name_parts())
+    expected_name = GeneratedNames.get_index_name(
+        "idx", prepared_apps.get_binding(Item).db_table, ["embedding"], index.get_name_parts()
+    )
     assert sql == (
         f'CREATE INDEX "{expected_name}" ON "item" USING IVFFLAT ("embedding") WITH (lists=100) WHERE (active);'
     )
@@ -289,6 +286,7 @@ def test_generate_index_name_resists_collisions_across_similarly_named_tables() 
 
 @pytest.mark.asyncio
 async def test_alter_generated_field_raises() -> None:
+
     class OldDocument(Model):
         id = fields.IntField(primary_key=True)
         title = fields.TextField()
@@ -315,11 +313,15 @@ async def test_alter_generated_field_raises() -> None:
             table = "document"
             app = "models"
 
+    prepared_apps = ModelBindings.prepare(OldDocument, NewDocument)
+
     client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
 
     with pytest.raises(ConfigurationError):
-        await editor.alter_field(OldDocument, NewDocument, "search_vector")
+        await editor.alter_field(
+            prepared_apps.get_binding(OldDocument), prepared_apps.get_binding(NewDocument), "search_vector"
+        )
     assert not client.executed
 
 
@@ -335,10 +337,12 @@ async def test_create_model_includes_db_default() -> None:
             table = "widget"
             app = "models"
 
+    prepared_apps = ModelBindings.prepare(WidgetWithDefault)
+
     client = FakeClient("sql")
     editor = TestSchemaEditor(client)
 
-    await editor.create_model(WidgetWithDefault)
+    await editor.create_model(prepared_apps.get_binding(WidgetWithDefault))
 
     assert len(client.executed) == 1
     sql = client.executed[0]
@@ -365,12 +369,12 @@ async def test_create_model_includes_db_default_on_fk() -> None:
             table = "app"
             app = "models"
 
-    init_apps(Dc, App)
+    apps_1 = ModelBindings.prepare(Dc, App)
 
     client = FakeClient("sql")
     editor = TestSchemaEditor(client)
 
-    await editor.create_model(App)
+    await editor.create_model(apps_1.get_binding(App))
 
     assert len(client.executed) == 1
     sql = client.executed[0]

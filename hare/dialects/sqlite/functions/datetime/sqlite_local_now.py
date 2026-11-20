@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar
-
 import aiosqlite
 
 from hare.dialects.sqlite.constants import (
@@ -18,9 +16,6 @@ class SqliteLocalNow:
     """Backs ``SQLITE_LOCAL_NOW_FUNCTION_NAME`` - the current date or wall-clock time in a zone
     with DST rules, which SQLite's own date functions can't apply (a ``Now()`` default of a
     ``DateField``/``TimeField``)."""
-
-    #: Keeps the owner bucket of ``ZoneNames.ZONES`` the native function reads its zones from.
-    cache_buckets: ClassVar[dict[int, Any]] = {}
 
     @staticmethod
     def get_local_now_text(zone_name: str, value_type: str) -> str:
@@ -47,6 +42,6 @@ class SqliteLocalNow:
             connection: The SQLite connection to register the function on.
         """
         get_local_now_text = SqliteNativeFunctions.module.LocalNow(
-            ZoneNames.parse, ZoneNames.ZONES.get_bucket(cls), cls.get_local_now_text
+            ZoneNames.parse, SqliteNativeFunctions.named_zones, cls.get_local_now_text
         ).get_local_now_text
         await connection.create_function(SQLITE_LOCAL_NOW_FUNCTION_NAME, 2, get_local_now_text)

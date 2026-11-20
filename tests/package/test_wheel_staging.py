@@ -10,8 +10,10 @@ pytestmark = pytest.mark.database_independent
 
 
 @pytest.fixture
-def wheel_builder(tmp_path):
-    module = runpy.run_path(str(Path(__file__).parents[2] / ".github/scripts/build_wheel.py"))
+def wheel_builder(tmp_path, monkeypatch):
+    scripts = Path(__file__).parents[2] / ".github/scripts"
+    monkeypatch.syspath_prepend(str(scripts))
+    module = runpy.run_path(str(scripts / "build_wheel.py"))
     repository = tmp_path / "checkout"
     repository.mkdir()
     (repository / "hare").mkdir()
@@ -92,7 +94,7 @@ def test_failed_or_successful_build_never_mutates_checkout(wheel_builder, monkey
         for path in wheel_builder.repository.rglob("*")
         if path.is_file()
     } == original
-    assert not list(wheel_builder.out.glob("*.tmp"))
+    assert list(wheel_builder.out.iterdir()) == [published]
 
 
 def test_each_abi_uses_only_its_selected_extension_and_libraries(wheel_builder, monkeypatch, tmp_path):

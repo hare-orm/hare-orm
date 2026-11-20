@@ -3,7 +3,6 @@ or a database of the reusable test database pool when HARE_TEST_DB points at a s
 
 from __future__ import annotations
 
-import os
 import sys
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -23,10 +22,10 @@ from tests.utils.database_under_test import DatabaseUnderTest
 
 
 def get_postgres_database_template() -> str | None:
-    raw_database_url = os.environ.get("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+    raw_database_url = DatabaseUnderTest.get_url()
     if DatabaseUnderTest.is_file_database(raw_database_url):
         return None
-    return raw_database_url.replace("\\{", "{").replace("\\}", "}")
+    return DatabaseUnderTest.normalize_url_template(raw_database_url)
 
 
 @pytest_asyncio.fixture

@@ -45,6 +45,9 @@ class BooleanField(Field[TBool]):
             self.raise_if_not_boolean(value)
         return super().to_db_value(value, instance)
 
+    def get_assign_normalized_types(self) -> frozenset[type]:
+        return self._get_unchanged_assign_types(BooleanField.to_python, self.field_type)
+
     def to_python(self, value: Any) -> Any:
         if value is not None and type(value) is not bool:
             self.raise_if_not_boolean(value)

@@ -74,6 +74,8 @@ class PoolMetricsRecorder:
     def unsubscribe(cls, recorder: Callable[[PoolMeasurement], None]) -> None:
         """Stop future dispatches without retaining closed clients or consuming another reader's data."""
         with cls.lock:
+            if not cls.subscribers:
+                return
             cls.subscribers = tuple(item for item in cls.subscribers if item != recorder)
             if not cls.subscribers:
                 for client in tuple(cls.clients):

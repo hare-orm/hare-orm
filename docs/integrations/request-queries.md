@@ -107,7 +107,8 @@ A parametrized type takes the value of its class: `dict[str, str] | None` for a 
 (`HStoreField`'s `contains`).
 
 The parameters are added once the models are bound — by `Hare.bind_models()`, which needs no connection,
-or `Hare.init()` — when a framework adapter reads the parameters for the handlers' signatures
+or `Hare.init()` — and selected by `prepare_parameters(apps=apps)` or the current application.
+A framework adapter prepares them when reading the handlers' signatures
 (`HarePlugin` binds the models itself), when the query is first built, or on `prepare_parameters()`. A
 subclass gets the parameters of the `Meta.filters` it inherits.
 
@@ -127,9 +128,10 @@ adapter = TypeAdapter(BookParameters)
 `isinstance(query, BookQuery)` remains true. The source class's `model_fields` contains its
 declared fields and option parameters; it is not mutated when filters are prepared.
 Use the returned class also for nested Pydantic annotations and `model_validate*()` calls.
+For preparation before startup, pass the registry explicitly: `BookQuery.prepare_parameters(apps=apps)`.
 Preparation failure publishes nothing. Concurrent preparation is serialized; invalidation
 builds a new generation on the next call. Existing instances and explicitly retained schema
-classes keep their fields and declaration. This does not keep an unregistered ORM model usable.
+classes keep their fields and declaration, including the selected model graph.
 Frameworks compile handler signatures and OpenAPI during application setup. Rebuild the application's
 routes when changing a declaration's parameter names or types; cache invalidation does not rewrite
 an already registered route or its OpenAPI document.
@@ -353,6 +355,9 @@ An untyped `JSONField` keeps its JSON values in the cursor, including scalars; t
 a `GeneratedField` with that output field. The boundary is compared in the field's JSON ordering.
 Container boundaries retain their element types, including UUIDs and binary data, and named
 `TupleField` values retain their named elements when the cursor is read.
+Enum fields identify members by name inside the opaque cursor, so an enum whose values are
+bytes, tuples, dates or other Python values can be read back without changing its value.
+The same conversion applies to enum elements nested in arrays, tuples and maps.
 
 Page sizes are checked when the option is created: `1 <= default_limit <= max_limit`.
 The application chooses `max_limit`; request parameters must stay between `1` and that limit.
@@ -704,24 +709,32 @@ works wherever a declared one does — `RequestQueryDIPlugin.provide()`,
 `RequestQueryDependency.provide()`, a Robyn handler's parameter, `PageSchema[...]`, `HareDTO` — and is
 held weakly: once nothing holds it, it leaves the declarations and `get_concrete_subclasses()`.
 
-A request query class forgets its declaration and its parameters with every model they read — its
-queryset's model, and each model its filters, search, orderings, `fields` or `include` cross. That
-happens when such a model is unregistered or registered again (`Hare.unregister_live_models()`,
-`register_live_models()`), when a relation is added to it, and after any registration in `Registries` (a
-lookup, a renderer, a type mapping, a QuerySet method, a driver). The next use builds them again from the
-models as they are now: a parameter of `Meta.filters` gets the type its field has now, a field that is
-gone is a `ConfigurationError`. A class whose `Meta.queryset` is of an unregistered model refuses to run
-with a `ConfigurationError` — build the class again for the model registered in its place.
-`check_declaration()` rebuilds and checks one class.
+An explicitly bound `Meta.queryset` selects its original model graph and application. Its
+completed schemas and request objects retain that origin after live registration publishes a new
+graph. Removing the model from the new registry does not alter already retained query objects;
+closing their originating application prevents further database operations.
+
+An unbound `Meta.queryset` is a reusable template. `prepare_parameters()` selects the active
+application's graph; `prepare_parameters(apps=apps)` selects an explicit registry, including the
+offline registry returned by `Hare.bind_models(config)`. Each graph has a separate completed schema.
+For a dynamically built declaration the same explicit registry is accepted by
+`RequestQuery.for_model(Model, apps=apps, ...)`. An offline declaration remains a template for runtime
+requests. A missing model or field in the selected graph raises `ConfigurationError`.
+
+Extension registration and explicit `check_declaration()`/`forget_parameters()` invalidate future
+generations. Completed schemas and existing request objects keep their fields and checked declaration.
+An explicitly bound declaration owns its cache, so the application does not retain a dynamic class
+through its schema. Template generations are bounded by their selected application or offline binding.
 
 ## <a id="describe-parameters"></a>Describing the parameters: `describe_parameters()`
 
 `describe_parameters()` says what each parameter is — what a filter panel, a relation picker or a sort
-menu needs beyond the JSON schema. It needs the models bound, not the connections, so it works after
-`Hare.bind_models()`:
+menu needs beyond the JSON schema. Select an offline registry explicitly with `apps=`; this opens no
+connection. Within an active application, omitting `apps` selects that application:
 
 ```python
-for parameter in BookQuery.describe_parameters():
+apps = Hare.bind_models(HARE_CONFIG)
+for parameter in BookQuery.describe_parameters(apps=apps):
     print(parameter.name, parameter.parameter_type, parameter.filter_key, parameter.relation)
 ```
 

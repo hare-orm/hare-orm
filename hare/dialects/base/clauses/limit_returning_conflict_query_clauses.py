@@ -138,9 +138,7 @@ class LimitReturningConflictQueryClauses(QueryClauses):
         # Local import: the SQL builder package imports the dialects, which load this module.
         from hare.sql.builder.queries.query_sql_rendering import QuerySqlRendering
 
-        querystring = QuerySqlRendering.with_sql(builder._with, sql_context) if builder._with else ""
-        querystring += QuerySqlRendering.update_sql(builder, sql_context)
-        querystring += QuerySqlRendering.set_sql(builder, sql_context)
+        querystring = QuerySqlRendering.update_sql(builder, sql_context)
 
         # A local list - get_sql() may run several times and must not change the builder.
         from_selectables = list(builder._from)

@@ -67,6 +67,15 @@ Hare restores the instance's prior connection alias, saved/generated-key flags a
 as well as automatic and returned values. Returned values are registered for rollback before
 assignment, so a custom setter that raises after changing an attribute can still be undone.
 
+If preparing an async default fails or is cancelled before the write starts, the pending
+factory and the automatic values already assigned during preparation are restored, including
+a tenant filled from the active scope. Retrying can evaluate the factory again. A transaction
+rollback restores that pending work too.
+The same preparation is undone when validation or SQL rejects the write. An originally absent
+primary-key component remains absent, with its factory pending, rather than becoming `None`.
+A reporting-listener error after a successful write does not turn that write into a non-write;
+outside a transaction its stored row and prepared values remain.
+
 ### <a id="delete"></a>`delete()`
 
 ```python
@@ -235,6 +244,22 @@ and private slots; uninitialized slots stay unset. Copying, deep-copying and pic
 transaction rollback callbacks. `copy.copy()` and `clone()` isolate mutable field values and reverse
 relation caches while retaining forward-related object identity.
 
+In-process copies (`copy.copy`, `copy.deepcopy`, `clone`) retain the originating graph and context.
+`pickle` retains values, loaded relations and a structural graph recipe, excluding connections,
+the application context and cache contents. Model classes and custom types must be importable under
+Python's normal serialization rules. Restoring an object opens no database connection.
+
+```python
+restored = pickle.loads(pickle.dumps(book))
+context.attach(restored)
+await restored.save()
+```
+
+A restored object performs no IO before `attach()`. Attachment validates the whole loaded relation
+graph before assigning the context, preserving its graph and data. An instance already belonging to
+another application cannot be reassigned. Unloaded relations remain unloaded and subsequently read
+through the explicitly selected context.
+
 ### <a id="to-dict"></a>`to_dict()`
 
 ```python
@@ -296,6 +321,19 @@ unloaded rather than becoming `None`. Restoration attempts every captured field 
 custom setter fails, then reports all restoration errors. Persistence bookkeeping bypasses
 custom field setters.
 
+A partial save or `bulk_update()` also refreshes the dirty baseline of recomputed generated
+fields: returned values become clean; a value left unloaded loses its previous baseline.
+The same applies to soft-delete and restore. Tracking uses model attribute names even when
+`source_field` gives a generated column a different storage name.
+Other unsaved fields stay dirty. For a `JSONField(field_type=...)`, comparisons use the field's
+JSON representation, including nested Pydantic models and dataclasses. Changing `1` to `True`
+or `1.0` therefore counts as a change even when the document's Python equality treats them as equal;
+the diff still returns the original typed values.
+
+Assigning a value to a field omitted by `only()`/`defer()` makes it dirty, including assigning
+`None`. Its unknown previous value is reported as `None`, so `(None, None)` can represent a new
+explicit assignment; `save(changed_only=True)` writes that field. Fields still unloaded remain clean.
+
 This is the mechanism to reach for instead of a manual "fetch a fresh copy and diff `to_dict()` against
 it" pattern before publishing an event — the diff is computed for you, from an in-memory snapshot rather
 than an extra `SELECT`.
@@ -336,6 +374,8 @@ book.snapshot(fields=["status"])        # only these fields are captured and com
   depth, or a JSON field's top-level `1` to `True` — counts as changed, since the database stores it
   differently. Other values compare with `==` (`Decimal("1.50")` and `Decimal("1.5")` are equal).
   `get_dirty_fields()` uses the same comparison.
+  This also applies to JSON held in arrays, maps, tuples and nested rows. Typed documents are compared
+  through their declared JSON representation, including dataclasses whose equality equates `1` and `True`.
 - Nothing happens automatically: loading and `save()` never take a snapshot unless the model has
   `Meta.track_dirty_fields`, so models that don't call `snapshot()` pay nothing.
 - `fields=` takes any iterable of direct field names (an FK's shadow column such as `author_id`, not the
@@ -442,6 +482,16 @@ already-fetched. The instance is unsaved by default; `_saved_in_db=True` marks i
 querying the database. An unsaved instance given an auto-generated pk is inserted with that pk;
 `get_dirty_fields()` on a `track_dirty_fields` model reports every field until the first `save()`.
 
+The writable `pk=` alias fills the actual primary-key columns, including every component of a
+composite key. Defaults do not overwrite those explicitly supplied components.
+
+A logical `GenericForeignKeyField` value uses the same branch mapping as normal construction:
+a target object supplies its branch's keys and remains cached by identity, a complete tagged dict
+supplies raw key columns, and `None` clears every branch. These populated columns are retained
+when defaults are filled. As with other relations in `construct()`, the target may be unsaved and
+`None` is accepted even for a non-nullable declaration; ordinary construction and assignment
+retain their validation. Omitted generic relations do not evaluate their relation defaults here.
+
 ### <a id="model-getitem"></a>`Model[pk]`
 
 ```python
@@ -451,10 +501,16 @@ await Model[some_pk]  # -> Self, or raises DoesNotExist
 the primary key field
 (`Book["abc"]` for an integer key) is `DoesNotExist` too.
 
-## <a id="model-meta"></a>`Model._meta`
+## <a id="model-meta"></a>`ModelBinding`
 
-`Model._meta` — a `MetaInfo` (`hare.models`) — describes the model's table and fields. These attributes
-are public and read-only — set them through `Meta` options, never by assigning to `_meta`:
+`apps = context.apps` explicitly selects the model registry being described. `apps.get_binding(Book)`
+returns that graph's binding; switching the current context does not replace it. An instance retains
+its originating binding as `obj._binding`. `Book._declaration` separately holds the class declaration,
+without prepared relations or application connections.
+
+`apps.get_binding(Model)` — a `ModelBinding` (`hare.models`) — describes the model's table and fields. These
+attributes
+are public and read-only — set them through `Meta` options, never by assigning to `ModelBinding`:
 
 | Attribute | Holds |
 |---|---|
@@ -486,7 +542,7 @@ A field tells its own type through its attributes — `relation_type`, `encrypte
 ```python
 from hare.fields import RelationType
 
-for name, field in Book._meta.fields_map.items():
+for name, field in apps.get_binding(Book).fields_map.items():
     if field.relation_type is RelationType.MANY_TO_MANY:
         ...
 ```

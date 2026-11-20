@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from uuid import UUID
 
 from hare.classes.container_traversal import ContainerTraversal
+from hare.core.caching.cache import Cache
 from hare.dialects.enums import ParameterPosition
 from hare.exceptions import UnSupportedError
 from hare.fields.data.binary_field import BinaryField
@@ -19,7 +20,7 @@ from hare.fields.data.temporal.time_delta_field import TimeDeltaField
 from hare.fields.data.temporal.time_field import TimeField
 from hare.fields.data.uuid_field import UUIDField
 from hare.fields.field import Field
-from hare.gis.enums import GeometryType
+from hare.gis.constants import DEFAULT_SRID
 from hare.gis.fields.geometry_field import GeometryField
 from hare.gis.geometries.geometry import Geometry
 from hare.gis.terms.geometry_value import GeometryValue
@@ -77,13 +78,8 @@ class Value(Expression):
         (bytes, BinaryField()),
     )
 
-    #: The output field of a geometry literal, by its type and dimensions - a database reading a geometry of
-    #: a known type its own way (a point as a tuple) decodes it by the field of that type.
-    GEOMETRY_OUTPUT_FIELDS: ClassVar[dict[tuple[GeometryType, int], GeometryField]] = {
-        (geometry_type, dimensions): GeometryField(geometry_type, dimensions=dimensions)
-        for geometry_type in GeometryType
-        for dimensions in (2, 3)
-    }
+    #: Geometry descriptors include the SRID used by nested spatial expressions.
+    GEOMETRY_OUTPUT_FIELDS: ClassVar[Cache[GeometryField]] = Cache()
 
     #: Encodes a dict literal to JSON text, kept alive for the same reason as LITERAL_OUTPUT_FIELDS.
     JSON_LITERAL_FIELD: ClassVar[JSONField[Any]] = JSONField()
@@ -119,7 +115,15 @@ class Value(Expression):
                 return NumericTyping.DECIMAL_QUOTIENT_OUTPUT_FIELD
             return decimal_output_field
         if isinstance(value, Geometry):
-            return cls.GEOMETRY_OUTPUT_FIELDS[(value.GEOMETRY_TYPE, 3 if value.has_z else 2)]
+            key = value.GEOMETRY_TYPE, 3 if value.has_z else 2, value.srid
+            output_field = cls.GEOMETRY_OUTPUT_FIELDS.get(key)
+            if output_field is None:
+                output_field = GeometryField(
+                    key[0], dimensions=key[1], srid=DEFAULT_SRID if key[2] is None else key[2]
+                )
+                output_field.srid = key[2]  # type: ignore[assignment]
+                cls.GEOMETRY_OUTPUT_FIELDS[key] = output_field
+            return output_field
         for literal_type, output_field in cls.LITERAL_OUTPUT_FIELDS:
             if isinstance(value, literal_type):
                 return output_field
@@ -247,7 +251,9 @@ class Value(Expression):
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
         if isinstance(self.value, Geometry):
             # As a geometry from Python is given to a spatial function - the driver binds no geometry.
-            return ExpressionResult(term=GeometryValue(self.value, self.value.srid, False))  # type: ignore[arg-type]
+            return ExpressionResult(
+                term=GeometryValue(self.value, self.value.srid, False, dialect=expression_context.dialect)
+            )
         return self.get_encoded_result(
             expression_context, self.get_literal_encoder(self.value, expression_context.dialect)
         )

@@ -68,11 +68,11 @@ class ClickhouseVariantValues:
     def prepare_db(self, field: Field[Any]) -> Callable[[Any, Any], Any]:
         """Validate the declared alternatives once and retain their storage conversion."""
         held_type = self.get_column_type(field)
-        write = self.prepare_lookup(field)
+        write = self._prepare_alternative(field)
 
         def write_value(value: Any, instance: Any) -> Any:
+            field.validate(value)
             if value is None:
-                field.validate(value)
                 return ClickhouseTypedValue(None, ClickhouseTypeName.NOTHING, held_type)
             typed_value = write(value, instance)
             return ClickhouseTypedValue(typed_value.value, typed_value.column_type, held_type)
@@ -80,9 +80,20 @@ class ClickhouseVariantValues:
         return write_value
 
     def prepare_lookup(self, field: Field[Any]) -> Callable[[Any, Any], Any]:
-        """Prepare alternative writers; choosing an alternative still depends on each value."""
+        """Validate comparison inputs without rejecting a lookup of NULL."""
+        write = self._prepare_alternative(field)
+
+        def write_value(value: Any, instance: Any) -> Any:
+            if value is not None:
+                field.validate(value)
+            return write(value, instance)
+
+        return write_value
+
+    def _prepare_alternative(self, field: Field[Any]) -> Callable[[Any, Any], Any]:
+        """Choose and convert an alternative; callers validate the wrapping field once."""
         variant_field: VariantField = field  # type: ignore[assignment]
-        writers = tuple(TypeRegistry.get_db_writer(self.types, child) for child in variant_field.variant_fields)
+        writers = tuple(self.types.get_db_writer(child) for child in variant_field.variant_fields)
         server_types = variant_field.server_types
 
         def write_value(value: Any, instance: Any) -> Any:
@@ -98,7 +109,7 @@ class ClickhouseVariantValues:
         variant_field: VariantField = field  # type: ignore[assignment]
         readers: dict[type, Callable[[Any], Any]] = {}
         for child, python_types in zip(variant_field.variant_fields, variant_field.read_python_types, strict=True):
-            read = TypeRegistry.get_python_reader(self.types, child)
+            read = self.types.get_python_reader(child)
             for python_type in python_types:
                 readers.setdefault(python_type, read)
 

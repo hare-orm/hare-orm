@@ -9,7 +9,9 @@ import pytest
 from hare.cli import hare_cli as cli_module
 from hare.cli.plugins.cli_command_registry import CLICommandRegistry
 from hare.core.config import HareConfig
+from hare.core.hare_context import HareContext
 from tests.utils.cli_commands import CliCommands
+from tests.utils.project_imports import ProjectImports
 from tests.utils.project_sources import ProjectSources
 
 PLUGIN_MODULE_SOURCE = textwrap.dedent(
@@ -66,6 +68,39 @@ PLUGIN_MODULE_SOURCE = textwrap.dedent(
 
         async def run(self, ctx, args):
             print("never")
+
+
+    class ArgumentNamesCommand(CLICommand):
+        name = "argument-names"
+
+        def add_arguments(self, parser):
+            parser.add_argument("func")
+            parser.add_argument("config")
+            parser.add_argument("command")
+            parser.add_argument("--callback", dest="handler", default="payload")
+
+        async def run(self, ctx, args):
+            print(f"{args.func}|{args.config}|{args.command}|{args.handler}|{ctx.config}")
+            return 7
+
+
+    class CaptureFlagCommand(CLICommand):
+        name = "capture-flag"
+
+        def add_arguments(self, parser):
+            parser.add_argument("-custom", "-count", "--custom", dest="enabled", action="store_true")
+
+        async def run(self, ctx, args):
+            print(f"{args.enabled}|{ctx.config}")
+            return 8
+
+
+    class CaptureModelsCommand(CLICommand):
+        name = "capture-models"
+
+        async def run(self, ctx, args):
+            config = CommandContext.load_config(ctx)
+            print(list(config.apps["models"].models))
     """
 )
 
@@ -103,6 +138,146 @@ async def test_config_listed_command_runs_with_its_arguments_and_exit_code(tmp_p
     assert result.exit_code == 3
     assert result.stdout.strip() == "hello team from ['models']"
     assert result.stderr == ""
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+async def test_plugin_argument_destinations_do_not_replace_execution_metadata(tmp_path, monkeypatch):
+    _use_entry_points(monkeypatch, {})
+    config = _write_project(tmp_path, monkeypatch, ["cli_plugin_commands:ArgumentNamesCommand"])
+    result = await CliCommands.run(
+        ["-c", config, "argument-names", "count", "plugin.cfg", "payload-command"], project=tmp_path
+    )
+    assert result.exit_code == 7
+    assert result.stdout.strip() == f"count|plugin.cfg|payload-command|payload|{config}"
+    assert result.stderr == ""
+
+
+@pytest.mark.database_independent
+def test_synchronous_dispatch_also_keeps_plugin_arguments_separate(tmp_path, monkeypatch, capsys):
+    _use_entry_points(monkeypatch, {})
+    config = _write_project(tmp_path, monkeypatch, ["cli_plugin_commands:ArgumentNamesCommand"])
+    assert cli_module.HareCLI.run_cli(["-c", config, "argument-names", "count", "plugin.cfg", "payload-command"]) == 7
+    captured = capsys.readouterr()
+    assert captured.out.strip() == f"count|plugin.cfg|payload-command|payload|{config}"
+    assert captured.err == ""
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag", ["-custom", "-count", "--custom"])
+async def test_plugin_option_prefixes_are_not_global_config_options(tmp_path, monkeypatch, flag):
+    _use_entry_points(monkeypatch, {})
+    config = _write_project(tmp_path, monkeypatch, ["cli_plugin_commands:CaptureFlagCommand"])
+    result = await CliCommands.run(["--config", config, "capture-flag", flag], project=tmp_path)
+    assert result.exit_code == 8
+    assert result.stdout.strip() == f"True|{config}"
+    assert result.stderr == ""
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+@pytest.mark.parametrize("iterable", ["(name for name in ['cli_plugin_models'])", "iter(['cli_plugin_models'])"])
+async def test_discovery_and_execution_share_a_config_with_one_pass_model_modules(tmp_path, monkeypatch, iterable):
+    _use_entry_points(monkeypatch, {})
+    config = _write_project(tmp_path, monkeypatch, ["cli_plugin_commands:CaptureModelsCommand"])
+    settings = tmp_path / "cli_plugin_settings.py"
+    settings.write_text(
+        settings.read_text(encoding="utf-8") + f"HARE_ORM['apps']['models']['models'] = {iterable}\n",
+        encoding="utf-8",
+    )
+    result = await CliCommands.run(["-c", config, "capture-models"], project=tmp_path)
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "['cli_plugin_models']"
+    assert result.stderr == ""
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+@pytest.mark.parametrize("composite", [False, True], ids=["scalar", "composite"])
+async def test_stubs_keeps_raw_config_model_generators_through_discovery(tmp_path, monkeypatch, composite):
+    _use_entry_points(monkeypatch, {})
+    config = _write_project(tmp_path, monkeypatch, ["cli_plugin_commands:ExportCommand"])
+    model_source = (
+        "from hare import Model, fields\n\nclass Entry(Model):\n"
+        f"    number = fields.IntField(primary_key={not composite!r}, generated=False)\n"
+        "    title = fields.TextField()\n"
+    )
+    if composite:
+        model_source += '    region = fields.IntField()\n    pk = fields.CompositePrimaryKey("region", "number")\n'
+    (tmp_path / "cli_plugin_models.py").write_text(model_source, encoding="utf-8")
+    settings = tmp_path / "cli_plugin_settings.py"
+    settings.write_text(
+        settings.read_text(encoding="utf-8")
+        + "HARE_ORM['apps']['models']['models'] = (name for name in ['cli_plugin_models'])\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "typings"
+    result = await CliCommands.run(["-c", config, "stubs", "--output", str(output)], project=tmp_path)
+    assert result.exit_code == 0, result.stderr
+    stub = output / "cli_plugin_models.pyi"
+    assert stub.is_file()
+    stub_source = stub.read_text(encoding="utf-8")
+    assert "class Entry(" in stub_source
+    assert "title" in stub_source
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+@pytest.mark.parametrize("composite", [False, True], ids=["scalar", "composite"])
+@pytest.mark.parametrize("secondary_exists", [False, True], ids=["missing-alias", "other-rows"])
+async def test_stubs_keeps_typing_bindings_only_for_the_generation_scope(
+    tmp_path, monkeypatch, composite, secondary_exists
+):
+    _use_entry_points(monkeypatch, {})
+    source = (
+        "from hare import Model, fields\nclass Entry(Model):\n"
+        f"    number = fields.IntField(primary_key={not composite!r}, generated=False)\n"
+        "    label = fields.TextField()\n"
+    )
+    if composite:
+        source += '    region = fields.IntField(default=7)\n    pk = fields.CompositePrimaryKey("region", "number")\n'
+    source += '    class Meta:\n        table = "stubs_active_entry"\n'
+    sources = ProjectSources(tmp_path)
+    sources.write_module("active_typing_models", source)
+    sources.write_module(
+        "typing_config",
+        "HARE_ORM = {'connections': {'secondary': 'sqlite+aiosqlite://:memory:'}, "
+        "'apps': {'books': {'models': ['active_typing_models'], 'default_connection': 'secondary'}}}\n",
+    )
+    connections = {"primary": "sqlite+aiosqlite://:memory:"}
+    if secondary_exists:
+        connections["secondary"] = "sqlite+aiosqlite://:memory:"
+    with ProjectImports(tmp_path).activate():
+        async with HareContext() as owner:
+            await owner.init(
+                config={
+                    "connections": connections,
+                    "apps": {"books": {"models": ["active_typing_models"], "default_connection": "primary"}},
+                }
+            )
+            model = owner.apps["books"]["Entry"]
+            await owner.generate_schemas()
+            await model.objects.create(number=1, label="kept")
+            if secondary_exists:
+                await owner.get_connection("secondary").execute_script(
+                    "CREATE TABLE stubs_active_entry(number INTEGER, region INTEGER, label TEXT);"
+                    "INSERT INTO stubs_active_entry VALUES(2,7,'other');"
+                )
+            assert await model.objects.values_list("label", flat=True) == ["kept"]
+            output = tmp_path / "typings"
+            assert (
+                await cli_module.HareCLI.run_cli_async(
+                    ["-c", "typing_config.HARE_ORM", "stubs", "--output", str(output)]
+                )
+                == 0
+            )
+            assert (output / "active_typing_models.pyi").is_file()
+            assert HareContext.get_current() is owner
+            assert HareContext.require_current().apps.get_binding(model).default_connection == "primary"
+            assert await model.objects.values_list("label", flat=True) == ["kept"]
+            if secondary_exists:
+                assert await model.objects.using("secondary").values_list("label", flat=True) == ["other"]
 
 
 @pytest.mark.database_independent
@@ -148,10 +323,13 @@ async def test_plugin_cannot_replace_a_built_in_command(tmp_path, monkeypatch):
     _write_project(tmp_path, monkeypatch, None)
     _use_entry_points(monkeypatch, {"heads": "cli_plugin_commands:ShadowingCommand"})
 
-    parser = cli_module.ArgParserBuilder.build_parser(CLICommandRegistry.discover(cli_module.CLIContext(None)))
+    handlers = {}
+    parser = cli_module.ArgParserBuilder.build_parser(
+        CLICommandRegistry.discover(cli_module.CLIContext(None)), command_handlers=handlers
+    )
 
-    assert parser.parse_args(["heads"]).func is not None
-    assert parser.parse_args(["heads"]).func.__qualname__ != "ShadowingCommand.run"
+    assert parser.parse_args(["heads"]).command == "heads"
+    assert handlers["heads"].__qualname__ != "ShadowingCommand.run"
 
 
 @pytest.mark.database_independent

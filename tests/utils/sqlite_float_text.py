@@ -18,8 +18,3 @@ class SqliteFloatText:
         """The JSON number written by SQLite, independently of CAST's formatting."""
         with closing(sqlite3.connect(":memory:")) as connection:
             return connection.execute("SELECT json_quote(?)", (value,)).fetchone()[0]
-
-    @classmethod
-    def keeps_every_digit(cls) -> bool:
-        """Whether the text reads back as the same double - a double needs 17 significant digits."""
-        return float(cls.get(0.1 + 0.2)) == 0.1 + 0.2

@@ -1,6 +1,5 @@
 //! Physical row selection and conversion before logical composite grouping.
 
-use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 use pyo3::{PyTraverseError, PyVisit};
@@ -16,17 +15,9 @@ pub struct ValueLayout {
 #[pymethods]
 impl ValueLayout {
     #[new]
-    pub fn new(layout: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let py = layout.py();
-        let raw_columns = layout.getattr(intern!(py, "columns"))?.cast_into::<PyTuple>()?;
-        let mut columns = Vec::with_capacity(raw_columns.len());
-        for column in raw_columns.iter() {
-            columns.push((
-                column.getattr(intern!(py, "key"))?.unbind(),
-                ColumnReader::new(column.getattr(intern!(py, "reader"))?),
-            ));
-        }
-        let groups: Vec<usize> = layout.getattr(intern!(py, "groups"))?.extract()?;
+    pub fn new(raw_columns: Vec<(Bound<'_, PyAny>, Bound<'_, PyAny>)>, groups: Vec<usize>) -> PyResult<Self> {
+        let columns: Vec<_> =
+            raw_columns.into_iter().map(|(key, reader)| (key.unbind(), ColumnReader::new(reader))).collect();
         if !groups.is_empty() && (groups.contains(&0) || groups.iter().sum::<usize>() != columns.len()) {
             return Err(pyo3::exceptions::PyValueError::new_err("composite groups do not cover the selected columns"));
         }
@@ -40,13 +31,13 @@ impl ValueLayout {
         }
         Ok(())
     }
+
+    fn read<'py>(&self, row: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(row.py(), self.read_values(row)?)
+    }
 }
 
 impl ValueLayout {
-    pub fn read<'py>(&self, row: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyTuple>> {
-        PyTuple::new(row.py(), self.read_values(row)?)
-    }
-
     /// The row's values in output order - composite groups collapsed - as a vector: a dict, a tuple or a
     /// flat value is made of it without an intermediate tuple.
     pub fn read_values<'py>(&self, row: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyAny>>> {
@@ -64,24 +55,20 @@ impl ValueLayout {
         if self.groups.is_empty() {
             return Ok(values);
         }
-        let mut grouped = Vec::with_capacity(self.groups.len());
         let mut position = 0;
-        for width in &self.groups {
+        for (group, width) in self.groups.iter().enumerate() {
             let components = &values[position..position + width];
-            grouped.push(if *width == 1 {
+            let grouped_value = if *width == 1 {
                 components[0].clone()
             } else if components.iter().all(Bound::is_none) {
                 py.None().into_bound(py)
             } else {
                 PyTuple::new(py, components)?.into_any()
-            });
+            };
+            values[group] = grouped_value;
             position += width;
         }
-        Ok(grouped)
+        values.truncate(self.groups.len());
+        Ok(values)
     }
-}
-
-#[pyfunction]
-pub fn read_row_values<'py>(row: &Bound<'py, PyAny>, layout: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyTuple>> {
-    layout.getattr(intern!(layout.py(), "native_layout"))?.cast_into::<ValueLayout>()?.get().read(row)
 }

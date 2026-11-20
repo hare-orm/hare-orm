@@ -23,9 +23,8 @@ def conn_handler():
 async def test_init(mocked_init_connections, conn_handler):
     db_config = {"default": {"HOST": "some_host", "PORT": "1234"}}
     await conn_handler._init(db_config, True)
-    mocked_init_connections.assert_awaited_once()
+    mocked_init_connections.assert_awaited_once_with(create_db=True)
     assert db_config == conn_handler._db_config
-    assert conn_handler._create_db is True
 
 
 @pytest.mark.database_independent
@@ -95,7 +94,7 @@ async def test_init_connections_no_db_create(mocked_get, mocked_db_config, conn_
         "default": {"HOST": "some_host", "PORT": "1234"},
         "other": {"HOST": "some_other_host", "PORT": "1234"},
     }
-    await conn_handler._init_connections()
+    await conn_handler._init_connections(create_db=False)
     mocked_db_config.assert_called_once()
     mocked_get.assert_has_calls([call("default"), call("other")], any_order=True)
     conn_1.db_create.assert_not_awaited()
@@ -107,14 +106,13 @@ async def test_init_connections_no_db_create(mocked_get, mocked_db_config, conn_
 @patch("hare.core.connections.connection_handler.ConnectionHandler.db_config", new_callable=PropertyMock)
 @patch("hare.core.connections.connection_handler.ConnectionHandler.get")
 async def test_init_connections_db_create(mocked_get, mocked_db_config, conn_handler):
-    conn_handler._create_db = True
     conn_1, conn_2 = AsyncMock(spec=DatabaseClient), AsyncMock(spec=DatabaseClient)
     mocked_get.side_effect = [conn_1, conn_2]
     mocked_db_config.return_value = {
         "default": {"HOST": "some_host", "PORT": "1234"},
         "other": {"HOST": "some_other_host", "PORT": "1234"},
     }
-    await conn_handler._init_connections()
+    await conn_handler._init_connections(create_db=True)
     mocked_db_config.assert_called_once()
     mocked_get.assert_has_calls([call("default"), call("other")], any_order=True)
     conn_1.db_create.assert_awaited_once()

@@ -5,6 +5,7 @@ import importlib
 import inspect
 import sys
 import tomllib
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -16,6 +17,7 @@ from hare.contrib.mypy.constants import (
     PYPROJECT_FILE_NAME,
 )
 from hare.core.config import HareConfig
+from hare.core.hare import Hare
 from hare.exceptions import FieldError
 from hare.fields.data.containers.container_field import ContainerField
 from hare.fields.field import Field
@@ -31,7 +33,8 @@ if TYPE_CHECKING:
     from mypy.options import Options
 
     from hare.dialects.base.dialect import Dialect
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
+    from hare.typing_info.declarations import ValueType
 
 
 class ModelRegistry:
@@ -45,8 +48,8 @@ class ModelRegistry:
 
     def __init__(self, options: Options) -> None:
         self.options = options
-        #: The models by the full name of their class - None until loaded.
-        self.models_by_fullname: dict[str, type[Model]] | None = None
+        #: The captured bindings by the full name of their class - None until loaded.
+        self.bindings_by_fullname: dict[str, ModelBinding] | None = None
         #: The models bound without a database - None until loaded.
         self.bound_models: BoundModels | None = None
         #: Why the models couldn't be loaded, None when they could.
@@ -58,37 +61,31 @@ class ModelRegistry:
 
     def load(self) -> None:
         """Loads the models, once; a failure is kept in ``load_error``."""
-        if self.models_by_fullname is not None:
+        if self.bindings_by_fullname is not None:
             return
-        self.models_by_fullname = {}
+        self.bindings_by_fullname = {}
         try:
             self._load_models()
         except Exception as error:  # any failure of the project's code is reported to mypy
             self.load_error = MODELS_NOT_LOADED_MESSAGE.format(error=f"{type(error).__name__}: {error}")
             self.fingerprint = self.load_error
 
-    def get_model(self, fullname: str) -> type[Model] | None:
-        """The model of a class.
-
-        Args:
-            fullname: The full name of the class (``module.ClassName``).
-
-        Returns:
-            The model, None for a class that isn't a bound model.
-        """
+    def get_binding(self, fullname: str) -> ModelBinding | None:
+        """The offline registry's prepared node for this Python class name."""
         self.load()
-        return (self.models_by_fullname or {}).get(fullname)
+        bindings = self.bindings_by_fullname
+        return None if bindings is None else bindings.get(fullname)
 
-    def get_dialect(self, model: type[Model]) -> Dialect | None:
+    def get_dialect(self, binding: ModelBinding) -> Dialect | None:
         """The dialect of the connection a model's queries run on.
 
         Args:
-            model: The model.
+            binding: The model.
 
         Returns:
             The dialect, None when the model has no connection of the configuration.
         """
-        return None if self.bound_models is None else self.bound_models.get_dialect(model)
+        return None if self.bound_models is None else self.bound_models.get_dialect(binding)
 
     def _load_models(self) -> None:
         project_path = Path(self.options.config_file).resolve().parent if self.options.config_file else Path.cwd()
@@ -100,9 +97,10 @@ class ModelRegistry:
             raise ValueError(CONFIG_NOT_SET_MESSAGE)
         for module_name in self._get_mypy_imports(pyproject_path):
             importlib.import_module(module_name)
-        self.bound_models = BoundModels(HareConfig.load(config_source))
-        models = self.bound_models.models
-        self.models_by_fullname = {BoundModels.get_fullname(model): model for model in models}
+        self.bound_models = BoundModels(Hare.bind_models(HareConfig.load(config_source)))
+        self.bindings_by_fullname = {
+            BoundModels.get_fullname(binding._model): binding for binding in self.bound_models.bindings
+        }
         self.fingerprint = self._get_fingerprint(config_source, self.bound_models)
 
     @staticmethod
@@ -132,22 +130,29 @@ class ModelRegistry:
                     for parameter in implementation.get_call_signature().parameters.values()
                 )
                 descriptions.append(repr((name, BoundModels.get_fullname(dialect_class), parameters)))
-        for model in bound_models.models:
-            meta = model._meta
-            dialect = bound_models.get_dialect(model)
+        for meta in bound_models.bindings:
+            model = meta._model
+            dialect = bound_models.get_dialect(meta)
             descriptions.append(f"{BoundModels.get_fullname(model)}@{meta.default_connection}")
             descriptions.append(repr(meta.primary_key_attribute_names))
-            descriptions.append(repr(WriteValueTypes.get_all(model)))
-            descriptions.append(
-                repr(WriteValueTypes.get_all(model, accepts_expressions=True, write_type=WriteType.UPDATE))
-            )
+            for accepts_expressions, write_type in ((False, WriteType.INSERT), (True, WriteType.UPDATE)):
+                descriptions.append(
+                    repr(
+                        tuple(
+                            (name, ModelRegistry._get_value_type_description(value_type))
+                            for name, value_type in WriteValueTypes.get_all(
+                                meta, accepts_expressions=accepts_expressions, write_type=write_type
+                            ).items()
+                        )
+                    )
+                )
             for name, generic_field in sorted(meta.generic_foreign_key_fields.items()):
                 branches = sorted(
                     (branch, BoundModels.get_fullname(target))
                     for target, branch in generic_field.branch_by_model.items()
                 )
                 descriptions.append(repr((name, generic_field.null, branches)))
-            for field_name, field in meta.fields_map.items():
+            for field_name, field in sorted(meta.fields_map.items()):
                 related_model = getattr(field, "related_model", None)
                 descriptions.append(
                     repr(
@@ -160,7 +165,7 @@ class ModelRegistry:
                 )
             if dialect is None:
                 continue
-            for path in (*meta.fields_map, *((PRIMARY_KEY_ALIAS,) if meta.has_primary_key else ())):
+            for path in (*sorted(meta.fields_map), *((PRIMARY_KEY_ALIAS,) if meta.has_primary_key else ())):
                 try:
                     lookups = meta.get_lookups(path, dialect)
                 except FieldError:
@@ -176,12 +181,25 @@ class ModelRegistry:
                                 lookup.transforms,
                                 lookup.crosses_to_many,
                                 lookup.requires_extension,
-                                FilterValueTypes.get_filter_value_type(lookup),
-                                FilterValueTypes.get_selected_value_type(lookup),
+                                ModelRegistry._get_value_type_description(
+                                    FilterValueTypes.get_filter_value_type(lookup)
+                                ),
+                                ModelRegistry._get_value_type_description(
+                                    FilterValueTypes.get_selected_value_type(lookup)
+                                ),
                             )
                         )
                     )
         return hashlib.sha256("\n".join(descriptions).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _get_value_type_description(value_type: ValueType) -> tuple[ValueType, tuple[str, str | None, str] | None]:
+        """Hash a declaration reference by its symbol, excluding the binding object's identity."""
+        declared = value_type.declared_in
+        symbol = (
+            None if declared is None else (BoundModels.get_fullname(declared[0]._model), declared[0].app, declared[1])
+        )
+        return replace(value_type, declared_in=None), symbol
 
     @staticmethod
     def _get_field_description(field: Field[Any]) -> tuple[Any, ...]:

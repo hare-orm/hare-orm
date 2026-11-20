@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from hare.migrations.operations.partitions.partition_operation import PartitionOperation
+from hare.migrations.reports.operation_effect import OperationEffect
 from hare.migrations.state.state import State
 
 if TYPE_CHECKING:
@@ -22,8 +23,13 @@ class RemovePartition(PartitionOperation):
     def describe(self) -> str:
         return f"Remove partition {self.partition.name} of {self.model_name} with its rows"
 
+    def get_effect(
+        self, app_label: str, old_state: State, new_state: State, schema_editor: BaseSchemaEditor
+    ) -> OperationEffect:
+        return OperationEffect(operation=self, reversible=self.reversible, loses_data=True, reason=self.describe())
+
     def state_forward(self, app_label: str, state: State) -> None:
-        self._set_partition_in_state(app_label, state, present=False)
+        self._change_partition_in_state(app_label, state, remove=self.partition, add=None)
 
     async def database_forward(
         self, app_label: str, old_state: State, new_state: State, state_editor: BaseSchemaEditor | None = None

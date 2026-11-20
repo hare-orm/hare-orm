@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
 from hare.query.execution.write_statements import BoundWriteValue
@@ -23,11 +23,17 @@ class PreparedWrite:
         dialect: Dialect,
         assignments: Iterable[tuple[str, int, Field[Any], Any]],
         automatic_values: Iterable[tuple[str, Field[Any], Any]],
+        *,
+        bound_values: Mapping[tuple[str, int], BoundWriteValue] | None = None,
     ) -> None:
-        self.values = {
-            (name, index): BoundWriteValue(field, value, dialect.types.get_db_value(field, value, None))
-            for name, index, field, value in assignments
-        }
+        self.values = (
+            dict(bound_values)
+            if bound_values is not None
+            else {
+                (name, index): BoundWriteValue(field, value, dialect.types.get_db_value(field, value, None))
+                for name, index, field, value in assignments
+            }
+        )
         self.automatic_values = tuple(
             (name, BoundWriteValue(field, value, dialect.types.get_db_value(field, value, None)))
             for name, field, value in automatic_values

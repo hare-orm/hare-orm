@@ -1,7 +1,6 @@
 """pg_trgm lookups and similarity/distance functions, and the unaccent transform."""
 
 import os
-import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -10,6 +9,7 @@ import pytest_asyncio
 
 from hare.contrib.test.databases.model_truncation import truncate_all_models
 from hare.contrib.test.isolated_contexts import hare_test_context
+from hare.core.hare_context import HareContext
 from hare.dialects.postgresql.functions.trigram import (
     TrigramDistance,
     TrigramSimilarity,
@@ -24,13 +24,13 @@ from hare.query.functions import Concat, Upper
 from hare.query.plans.statement.statement_plans import StatementPlans
 from tests.dialects.postgresql.conftest import skip_if_not_postgres
 from tests.shared_models.typed_row_models import TypedRow, TypedRowNote
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 @pytest_asyncio.fixture(scope="module")
 async def text_context() -> AsyncGenerator[Any]:
     skip_if_not_postgres()
-    db_url = os.environ["HARE_TEST_DB"].replace("\\{", "{").replace("\\}", "}")
-    db_url = db_url.format(uuid.uuid4().hex) if "{}" in db_url else db_url
+    db_url = DatabaseUnderTest.get_fresh_url(os.environ["HARE_TEST_DB"])
     async with hare_test_context(["tests.shared_models.typed_row_models"], db_url=db_url) as ctx:
         await ctx.get_connection().execute_script(
             "CREATE EXTENSION IF NOT EXISTS pg_trgm; CREATE EXTENSION IF NOT EXISTS unaccent"
@@ -69,7 +69,7 @@ async def test_trigram_lookups_of_annotations_and_relations(names):
     ) == [10]
     described = shouted.get_lookup_info("shouted__trigram_similar")
     assert (described.requires_extension, described.value_type) == ("pg_trgm", str)
-    of_field = TypedRow._meta.get_lookup_info("name__trigram_similar")
+    of_field = HareContext.require_current().apps.get_binding(TypedRow).get_lookup_info("name__trigram_similar")
     assert of_field.requires_extension == "pg_trgm"
 
 

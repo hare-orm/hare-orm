@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.exceptions import (
     ConfigurationError,
     QueryError,
@@ -133,7 +134,7 @@ async def test_custom_manager_combined_with_tenant_and_soft_delete(db, predicate
             # A cross-tenant link, written as trusted seed data.
             await TenantActiveAuthorBook.objects.create(title="OtherTenant", author_id=other_tenant.id)
 
-        provider = TenantActiveAuthor._meta.manager.scope
+        provider = HareContext.require_current().apps.get_binding(TenantActiveAuthor).manager.scope
         condition = F("is_active") if predicate == "boolean_f" else Q(is_active=True)
         with patch.object(provider, "get_condition", return_value=condition):
             assert await TenantActiveAuthor.objects.all() == [visible]
@@ -160,7 +161,7 @@ async def test_provider_rejects_non_boolean_field_expression(db, shape):
             query = TenantActiveAuthorBook.objects.select_related("author")
         else:
             query = TenantActiveAuthorBook.objects.prefetch_related("author")
-        provider = TenantActiveAuthor._meta.manager.scope
+        provider = HareContext.require_current().apps.get_binding(TenantActiveAuthor).manager.scope
         with patch.object(provider, "get_condition", return_value=F("name")):
             with pytest.raises(QueryError, match="must return a boolean value"):
                 await query
@@ -257,13 +258,18 @@ async def test_a_default_scope_a_join_cannot_carry_raises_clear_error(db, model_
 
 @pytest.mark.asyncio
 async def test_raw_criterion_includes_custom_manager_filter(db):
-    criterion = RowScopes.of(ActiveAuthor).get_criterion(
-        Table("activeauthor"), dialect=ActiveAuthor._meta.connection.dialect, connection=None
+    criterion = RowScopes.of(HareContext.require_current().apps.get_binding(ActiveAuthor)).get_criterion(
+        Table("activeauthor"),
+        dialect=HareContext.require_current().apps.get_queryset(ActiveAuthor).get_connection().dialect,
+        connection=None,
     )
     assert criterion is not None
     table = Table("activeauthor")
     sql, _ = (
-        ActiveAuthor._meta.connection.query_class.from_(table)
+        HareContext.require_current()
+        .apps.get_queryset(ActiveAuthor)
+        .get_connection()
+        .query_class.from_(table)
         .select(table.id)
         .where(criterion)
         .get_parameterized_sql()
@@ -276,8 +282,10 @@ async def test_raw_criterion_none_for_unscoped_default_manager(db):
     from tests.shared_models.testmodels import Tournament
 
     assert (
-        RowScopes.of(Tournament).get_criterion(
-            Table("tournament"), dialect=Tournament._meta.connection.dialect, connection=None
+        RowScopes.of(HareContext.require_current().apps.get_binding(Tournament)).get_criterion(
+            Table("tournament"),
+            dialect=HareContext.require_current().apps.get_queryset(Tournament).get_connection().dialect,
+            connection=None,
         )
         is None
     )
@@ -398,8 +406,8 @@ async def test_default_manager_join_scope_unchanged_for_plain_tenant_model(db):
         widgets = {w.name: w for w in await TenantScopedWidget.objects.all().select_related("factory")}
     assert widgets["W1"].factory is not None
     assert widgets["W2"].factory is None
-    assert TenantScopedFactory._meta.manager.scope is None
-    assert ActiveAuthor._meta.manager.scope is not None
+    assert HareContext.require_current().apps.get_binding(TenantScopedFactory).manager.scope is None
+    assert HareContext.require_current().apps.get_binding(ActiveAuthor).manager.scope is not None
 
 
 @pytest.mark.asyncio

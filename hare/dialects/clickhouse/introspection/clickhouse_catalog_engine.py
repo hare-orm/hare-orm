@@ -11,6 +11,7 @@ from hare.dialects.clickhouse.introspection.constants import (
 )
 from hare.dialects.clickhouse.schema.messages import ENGINE_UNKNOWN_DATABASE_PATH
 from hare.exceptions import UnSupportedError
+from hare.inspectdb.introspection.catalog_sql import CatalogSql
 from hare.query.expressions import F
 
 if TYPE_CHECKING:
@@ -27,9 +28,8 @@ class ClickhouseCatalogEngine:
 
     @staticmethod
     def get(sql: str, default_database: str | None = None) -> str | ClickhouseEngine:
-        name = ClickhouseSqlParts.get_before_parentheses(sql)
-        arguments_sql, suffix = ClickhouseSqlParts.get_parenthesised(sql)
-        arguments = ClickhouseSqlParts.split(arguments_sql)
+        name, arguments_sql, suffix = CatalogSql.get_parenthesized_parts(sql)
+        arguments = ClickhouseSqlParts.split(arguments_sql or "")
         engine = ClickhouseEngine(name)
         family = engine.get_family()
         options: dict[str, Any] = {}
@@ -39,35 +39,35 @@ class ClickhouseCatalogEngine:
             return name
         if (
             engine.is_replicated()
-            and arguments[0].strip().startswith("'")
+            and arguments[0].startswith("'")
             and not (family == "GraphiteMergeTree" and len(arguments) == 1)
         ):
-            if len(arguments) < 2 or not arguments[1].strip().startswith("'"):
+            if len(arguments) < 2 or not arguments[1].startswith("'"):
                 return ClickhouseEngine(name, sql=RawSQLTerm(sql))
             options.update(
-                replica_path=ClickhouseSqlParts.get_string_text(arguments.pop(0).strip()),
-                replica_name=ClickhouseSqlParts.get_string_text(arguments.pop(0).strip()),
+                replica_path=ClickhouseSqlParts.get_string_text(arguments.pop(0)),
+                replica_name=ClickhouseSqlParts.get_string_text(arguments.pop(0)),
             )
         values: list[Any] = []
         if family in CLICKHOUSE_ENGINE_COLUMN_ARGUMENTS:
             for argument in arguments:
-                identifier = ClickhouseSqlParts.get_name_argument(argument.strip())
+                identifier = ClickhouseSqlParts.get_name_argument(argument)
                 if identifier is None:
                     return ClickhouseEngine(name, sql=RawSQLTerm(sql), **options)
                 values.append(F(identifier))
         elif family in ("SummingMergeTree", "CoalescingMergeTree"):
             for argument in arguments:
                 columns = [
-                    ClickhouseSqlParts.get_identifier(item.strip())
+                    ClickhouseSqlParts.get_identifier(item)
                     for item in ClickhouseSqlParts.split(ClickhouseSqlParts.get_unwrapped(argument))
                 ]
                 if any(column is None for column in columns):
                     return ClickhouseEngine(name, sql=RawSQLTerm(sql), **options)
                 values.append(tuple(F(column) for column in columns))  # type: ignore[arg-type]
         elif family == "GraphiteMergeTree":
-            if len(arguments) != 1 or not arguments[0].strip().startswith("'"):
+            if len(arguments) != 1 or not arguments[0].startswith("'"):
                 return ClickhouseEngine(name, sql=RawSQLTerm(sql), **options)
-            values = [ClickhouseSqlParts.get_string_text(arguments[0].strip())]
+            values = [ClickhouseSqlParts.get_string_text(arguments[0])]
         elif name == "Distributed" and len(arguments) >= 3:
             values = [
                 ClickhouseSqlParts.get_name_argument(argument) or RawSQLTerm(argument) for argument in arguments[:3]
@@ -82,11 +82,10 @@ class ClickhouseCatalogEngine:
     @staticmethod
     def get_shadow_database_sql(sql: str, prefix: str, literals: SqlLiterals) -> str:
         """Isolate the first path argument of catalog ``Replicated`` database engines."""
-        name = ClickhouseSqlParts.get_before_parentheses(sql)
-        arguments_sql, suffix = ClickhouseSqlParts.get_parenthesised(sql)
-        arguments = ClickhouseSqlParts.split(arguments_sql)
-        if name != "Replicated" or len(arguments) != 3 or not arguments[0].strip().startswith("'"):
+        name, arguments_sql, suffix = CatalogSql.get_parenthesized_parts(sql)
+        arguments = ClickhouseSqlParts.split(arguments_sql or "")
+        if name != "Replicated" or len(arguments) != 3 or not arguments[0].startswith("'"):
             raise UnSupportedError(ENGINE_UNKNOWN_DATABASE_PATH)
-        path = ClickhouseSqlParts.get_string_text(arguments[0].strip())
+        path = ClickhouseSqlParts.get_string_text(arguments[0])
         arguments[0] = literals.get_string_literal_sql(f"/{prefix}/{path.lstrip('/')}")
         return f"{name}({', '.join(arguments)}){suffix}"

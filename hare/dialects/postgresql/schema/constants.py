@@ -28,8 +28,6 @@ POSTGRESQL_RESYNC_SEQUENCE_TEMPLATE = (
     "COALESCE((SELECT MAX({column}) FROM {table}), 0) + 1, false)"
 )
 
-#: The suffix of the table a rebuild keeps a table's rows in while the table is created anew.
-POSTGRESQL_TABLE_COPY_SUFFIX = "__copy"
 
 #: Creates one partition of a partitioned table.
 POSTGRESQL_PARTITION_CREATE_TEMPLATE = "CREATE TABLE {exists}{partition} PARTITION OF {table} {bound}{storage};"
@@ -208,7 +206,6 @@ POSTGRESQL_ENUM_LABELS_HELD_SQL = "SELECT count(*) AS held_count FROM {table} WH
 POSTGRESQL_ENUM_ARRAY_LABELS_HELD_SQL = "SELECT count(*) AS held_count FROM {table} WHERE {column}::text[] && $1"  # nosec B608
 
 #: The suffix of the name an ENUM type is renamed to while a new one of its name replaces it.
-POSTGRESQL_REPLACED_ENUM_TYPE_SUFFIX = "__hare_old"
 
 #: Preview is a runtime catalog step, not a misleading executable sequence with invented defaults.
 POSTGRESQL_ENUM_REPLACEMENT_PREVIEW = (

@@ -4,7 +4,6 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.sql.enums import Boolean
-from hare.sql.sql_context import SqlContext
 from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
@@ -71,6 +70,3 @@ class Criterion(Term):
             criterion &= term
 
         return criterion
-
-    def get_sql(self, sql_context: SqlContext) -> str:
-        raise NotImplementedError()

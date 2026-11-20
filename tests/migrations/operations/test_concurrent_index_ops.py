@@ -7,7 +7,6 @@ from hare.exceptions import ConfigurationError
 from hare.fields.data.numeric import IntField
 from hare.fields.data.text import CharField
 from hare.migrations import operations as ops
-from hare.migrations.drift import detect_drift
 from hare.migrations.migration import Migration
 from hare.migrations.writer import MigrationWriter
 from tests.migrations.round_trips.test_round_trip_real_db import APP_LABEL, RoundTrip, build_live_state, build_model
@@ -52,12 +51,12 @@ async def test_concurrent_index_operations_build_and_drop_the_index(db_isolated_
     round_trip = RoundTrip(db_isolated_no_schema.get_connection())
     book = build_model("Book", "conc_book", book_fields())
     await round_trip.migrate_to(book)
-    before = round_trip.tracked_state.clone()
+    before = round_trip.tracked_state
 
     migration = await apply_non_atomic(round_trip, [ops.AddIndex(model_name="Book", index=INDEX, concurrently=True)])
     indexed = build_model("Book", "conc_book", book_fields(), {"indexes": [INDEX]})
     assert round_trip.get_pending_operations(indexed) == []
-    assert (await detect_drift(round_trip.connection, build_live_state(indexed), [APP_LABEL])).operations == []
+    assert (await round_trip.get_drift(build_live_state(indexed))).operations == []
     assert "book_title_concurrently" in await round_trip.get_index_definitions("conc_book")
 
     editor = type(round_trip.editor)(round_trip.connection, atomic=False, collect_sql=False)
@@ -69,7 +68,7 @@ async def test_concurrent_index_operations_build_and_drop_the_index(db_isolated_
         round_trip, [ops.RemoveIndex(model_name="Book", name="book_title_concurrently", concurrently=True)]
     )
     assert "book_title_concurrently" not in await round_trip.get_index_definitions("conc_book")
-    assert (await detect_drift(round_trip.connection, build_live_state(book), [APP_LABEL])).operations == []
+    assert (await round_trip.get_drift(build_live_state(book))).operations == []
 
 
 @pytest.mark.asyncio
@@ -78,8 +77,8 @@ async def test_concurrent_index_needs_a_non_atomic_migration_on_postgres(db_isol
     if round_trip.dialect != "postgresql":
         pytest.skip("SQLite builds the index the plain way inside the migration's transaction")
     await round_trip.migrate_to(build_model("Book", "conc_book", book_fields()))
-    # The refused operation has already put its index into the state it was given.
-    before = round_trip.tracked_state.clone()
+    # A refused migration leaves its input state available for SQL collection.
+    before = round_trip.tracked_state
     with pytest.raises(ConfigurationError, match="set atomic = False on the migration"):
         await round_trip.apply([ops.AddIndex(model_name="Book", index=INDEX, concurrently=True)])
 

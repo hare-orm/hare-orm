@@ -7,7 +7,7 @@ from hare.models.enums import ModelOption
 
 if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class DictionaryObjectType(SchemaObjectType):
@@ -19,7 +19,7 @@ class DictionaryObjectType(SchemaObjectType):
     feature: ClassVar[str | None] = "supports_dictionaries"
 
     @classmethod
-    async def add(cls, editor: BaseSchemaEditor, model: type[Model], schema_object: Any, **options: Any) -> None:
+    async def add(cls, editor: BaseSchemaEditor, model: ModelBinding, schema_object: Any, **options: Any) -> None:
         cls.raise_if_unsupported(editor)
         await editor.dictionaries.create_dictionary(model, schema_object)
 
@@ -27,8 +27,8 @@ class DictionaryObjectType(SchemaObjectType):
     async def remove(
         cls,
         editor: BaseSchemaEditor,
-        model: type[Model],
-        remaining_model: type[Model],
+        model: ModelBinding,
+        remaining_model: ModelBinding,
         schema_object: Any,
         **options: Any,
     ) -> None:
@@ -36,11 +36,11 @@ class DictionaryObjectType(SchemaObjectType):
         await editor.dictionaries.drop_dictionary(model, schema_object)
 
     @classmethod
-    async def rename(cls, editor: BaseSchemaEditor, model: type[Model], old_object: Any, new_object: Any) -> None:
+    async def rename(cls, editor: BaseSchemaEditor, model: ModelBinding, old_object: Any, new_object: Any) -> None:
         cls.raise_if_unsupported(editor)
         await editor.dictionaries.rename_dictionary(model, old_object, new_object)
 
     @classmethod
-    async def alter(cls, editor: BaseSchemaEditor, model: type[Model], old_object: Any, new_object: Any) -> None:
+    async def alter(cls, editor: BaseSchemaEditor, model: ModelBinding, old_object: Any, new_object: Any) -> None:
         cls.raise_if_unsupported(editor)
         await editor.dictionaries.alter_dictionary(model, old_object, new_object)

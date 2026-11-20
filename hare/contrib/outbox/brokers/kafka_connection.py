@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Callable
 from typing import Any
 
-from hare.contrib.outbox.constants import OUTBOX_RELEASE_FAILED
+from hare.contrib.outbox.outbox_release import OutboxRelease
 from hare.core.resource_completion import ResourceCompletion
 
 
@@ -33,12 +33,7 @@ class KafkaConnection:
                 try:
                     await producer.start()
                 except BaseException as error:
-                    try:
-                        await ResourceCompletion.wait(producer.stop())
-                    except BaseException as release_error:
-                        if release_error is error:
-                            raise
-                        raise BaseExceptionGroup(OUTBOX_RELEASE_FAILED, [error, release_error]) from None
+                    await OutboxRelease.finish(producer.stop, after_error=error)
                     raise
                 self.producer = producer
             return self.producer

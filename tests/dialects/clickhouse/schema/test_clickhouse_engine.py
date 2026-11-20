@@ -4,6 +4,7 @@ import pytest
 
 from hare import Model, fields
 from hare.classes.comparable_values import ComparableValues
+from hare.ddl.enums import SchemaPartType
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.dialects.clickhouse.clickhouse_engine import ClickhouseEngine
 from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
@@ -11,9 +12,9 @@ from hare.dialects.clickhouse.constants import CLICKHOUSE_DIALECT
 from hare.dialects.clickhouse.introspection.clickhouse_catalog_engine import ClickhouseCatalogEngine
 from hare.dialects.clickhouse.introspection.clickhouse_catalog_identities import ClickhouseCatalogIdentities
 from hare.exceptions import ConfigurationError, UnSupportedError
-from hare.inspectdb.enums import SchemaPartType
 from hare.inspectdb.introspection.schema_part import SchemaPart
 from hare.query.expressions import F
+from tests.utils.model_bindings import ModelBindings
 
 pytestmark = pytest.mark.database_independent
 
@@ -36,14 +37,18 @@ class Book(Model):
     ],
 )
 def test_engine_dependencies_and_renames_preserve_literal_arguments(prefix, family, arguments, columns):
+    prepared_models = ModelBindings.prepare(Book)
     engine = ClickhouseEngine(prefix + family, *arguments)
-    assert engine.get_column_names(Book, CLICKHOUSE_DIALECT) == columns
+    assert engine.get_column_names(prepared_models.get_binding(Book), CLICKHOUSE_DIALECT) == columns
     renamed = engine.with_renamed_field("version", "next_version")
     expected = (columns - {"revision number"}) | ({"next revision"} if "revision number" in columns else set())
-    assert renamed.get_column_names(Book, CLICKHOUSE_DIALECT) == expected
-    assert engine.get_column_names(Book, CLICKHOUSE_DIALECT) == columns
+    assert renamed.get_column_names(prepared_models.get_binding(Book), CLICKHOUSE_DIALECT) == expected
+    assert engine.get_column_names(prepared_models.get_binding(Book), CLICKHOUSE_DIALECT) == columns
     if family == "GraphiteMergeTree":
-        assert renamed.get_sql(Book, CLICKHOUSE_DIALECT) == f"{prefix}GraphiteMergeTree('version')"
+        assert (
+            renamed.get_sql(prepared_models.get_binding(Book), CLICKHOUSE_DIALECT)
+            == f"{prefix}GraphiteMergeTree('version')"
+        )
     path, args, options = engine.deconstruct()
     assert path.endswith("ClickhouseEngine")
     assert ComparableValues.are_equal(ClickhouseEngine(*args, **options), engine)
@@ -52,6 +57,7 @@ def test_engine_dependencies_and_renames_preserve_literal_arguments(prefix, fami
 @pytest.mark.parametrize("prefix", ["Replicated", "Shared"])
 @pytest.mark.parametrize("keeper", ["", "aux:"])
 def test_shadow_replica_paths_are_isolated_and_catalog_identity_is_restored(prefix, keeper):
+    prepared_models = ModelBindings.prepare(Book)
     engine = ClickhouseEngine(
         prefix + "ReplacingMergeTree",
         F("version"),
@@ -61,18 +67,26 @@ def test_shadow_replica_paths_are_isolated_and_catalog_identity_is_restored(pref
     shadow = engine.for_shadow("shadow")
     assert shadow.replica_path == keeper + "/shadow/tables/{uuid}/{shard}"
     mapper = ClickhouseCatalogIdentities({}, "shadow", CLICKHOUSE_DIALECT.literals)
-    assert mapper.map_engine(shadow.get_sql(Book, CLICKHOUSE_DIALECT)) == engine.get_sql(Book, CLICKHOUSE_DIALECT)
+    assert mapper.map_engine(shadow.get_sql(prepared_models.get_binding(Book), CLICKHOUSE_DIALECT)) == engine.get_sql(
+        prepared_models.get_binding(Book), CLICKHOUSE_DIALECT
+    )
 
 
 def test_catalog_unknown_arguments_remain_raw_and_are_not_guessed_as_columns():
+    prepared_models = ModelBindings.prepare(Book)
     sql = "CustomEngine(version, 'version')"
     engine = ClickhouseCatalogEngine.get(sql)
     assert isinstance(engine, ClickhouseEngine)
-    assert engine.get_sql(Book, CLICKHOUSE_DIALECT) == sql
-    assert engine.get_column_names(Book, CLICKHOUSE_DIALECT) == frozenset()
+    assert engine.get_sql(prepared_models.get_binding(Book), CLICKHOUSE_DIALECT) == sql
+    assert engine.get_column_names(prepared_models.get_binding(Book), CLICKHOUSE_DIALECT) == frozenset()
     explicit = ClickhouseEngine("CustomEngine", read_fields=("version",), sql=RawSQLTerm(sql))
-    assert explicit.get_column_names(Book, CLICKHOUSE_DIALECT) == {"revision number"}
-    assert explicit.with_renamed_field("version", "next_version").get_sql(Book, CLICKHOUSE_DIALECT) == sql
+    assert explicit.get_column_names(prepared_models.get_binding(Book), CLICKHOUSE_DIALECT) == {"revision number"}
+    assert (
+        explicit.with_renamed_field("version", "next_version").get_sql(
+            prepared_models.get_binding(Book), CLICKHOUSE_DIALECT
+        )
+        == sql
+    )
     with pytest.raises(UnSupportedError, match="shadow"):
         ClickhouseEngine("ReplicatedMergeTree", sql=RawSQLTerm("ReplicatedMergeTree()")).for_shadow("shadow")
 
@@ -96,18 +110,23 @@ def test_safe_server_defaults_stay_implicit_in_shadow_engines(path, prefix):
 
 
 def test_distributed_engine_keeps_names_literal_and_binds_the_sharding_expression():
+    prepared_models = ModelBindings.prepare(Book)
     engine = ClickhouseTableOptions(distributed_over="books", sharding_key="version").get_distributed_engine(
-        Book, "cluster's", "books"
+        prepared_models.get_binding(Book), "cluster's", "books"
     )
     assert engine.arguments[:3] == ("cluster's", RawSQLTerm("currentDatabase()"), "books")
-    assert engine.get_column_names(Book, CLICKHOUSE_DIALECT) == {"revision number"}
-    assert engine.get_sql(Book, CLICKHOUSE_DIALECT).endswith(', "revision number")')
+    assert engine.get_column_names(prepared_models.get_binding(Book), CLICKHOUSE_DIALECT) == {"revision number"}
+    assert engine.get_sql(prepared_models.get_binding(Book), CLICKHOUSE_DIALECT).endswith(', "revision number")')
 
 
 def test_catalog_column_names_are_mapped_to_generated_fields_without_touching_literals():
+    prepared_models = ModelBindings.prepare(Book)
     engine = ClickhouseCatalogEngine.get("ReplacingMergeTree(`revision number`)")
     options = ClickhouseTableOptions(engine=engine).with_field_names({"revision number": "version"})
-    assert options.get_engine().get_sql(Book, CLICKHOUSE_DIALECT) == 'ReplacingMergeTree("revision number")'
+    assert (
+        options.get_engine().get_sql(prepared_models.get_binding(Book), CLICKHOUSE_DIALECT)
+        == 'ReplacingMergeTree("revision number")'
+    )
     literal = ClickhouseEngine("GraphiteMergeTree", "revision number")
     assert literal.with_field_names({"revision number": "version"}).arguments == ("revision number",)
 

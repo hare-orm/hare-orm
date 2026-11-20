@@ -10,7 +10,7 @@ from hare.dialects.clickhouse.schema_objects.clickhouse_materialized_view import
 if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
     from hare.dialects.clickhouse.schema.clickhouse_schema_editor import ClickhouseSchemaEditor
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,8 +22,8 @@ class ClickhouseRebuildCheck:
     collection describes the precondition without contacting the cluster.
     """
 
-    old_model: type[Model]
-    new_model: type[Model]
+    old_binding: ModelBinding
+    new_binding: ModelBinding
     effects: ClassVar[frozenset[SchemaEffect]] = frozenset({SchemaEffect.READ_CATALOG, SchemaEffect.CHECK_ROWS})
 
     async def execute(self, editor: BaseSchemaEditor) -> None:
@@ -32,12 +32,12 @@ class ClickhouseRebuildCheck:
         if schema_editor.collect_sql:
             schema_editor.collected_sql.append(CLICKHOUSE_REBUILD_CHECK_PREVIEW)
             return
-        await schema_editor.table_rebuild.check_database_exchange(self.new_model)
-        await schema_editor.table_rebuild.check_storage_target(self.old_model, self.new_model)
-        replica_path = await schema_editor.table_rebuild.raise_if_default_replica_path_is_fixed(self.new_model)
-        await schema_editor.table_rebuild.raise_if_rows_are_scattered(self.old_model)
-        await schema_editor.table_rebuild.raise_if_rows_are_scattered(self.new_model, replica_path=replica_path)
-        for view in self.new_model._meta.materialized_views:
+        await schema_editor.table_rebuild.check_database_exchange(self.new_binding)
+        await schema_editor.table_rebuild.check_storage_target(self.old_binding, self.new_binding)
+        replica_path = await schema_editor.table_rebuild.raise_if_default_replica_path_is_fixed(self.new_binding)
+        await schema_editor.table_rebuild.raise_if_rows_are_scattered(self.old_binding)
+        await schema_editor.table_rebuild.raise_if_rows_are_scattered(self.new_binding, replica_path=replica_path)
+        for view in self.new_binding.materialized_views:
             declaration = ClickhouseMaterializedView.from_materialized_view(view)
             if view.with_data and declaration.refresh is None and declaration.to is None:
-                await schema_editor.materialized_views.raise_if_filled_on_one_server(self.new_model, view)
+                await schema_editor.materialized_views.raise_if_filled_on_one_server(self.new_binding, view)

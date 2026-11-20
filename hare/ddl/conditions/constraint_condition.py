@@ -17,7 +17,7 @@ from hare.exceptions import ConfigurationError, FieldError, QueryError
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.expressions import Q
     from hare.sql import Table
 
@@ -26,6 +26,24 @@ class ConstraintCondition:
     """The SQL a constraint's or partial index's condition is written into DDL as - a
     ``RawSQLTerm`` as given, a ``Q`` against the model's own columns with its values inline, an
     ``ExclusiveArcCondition`` as the dialect writes it, an ``EnumMembersCondition`` as the members' values."""
+
+    @staticmethod
+    def get_table_conditions(binding: ModelBinding) -> list[Q | RawSQLTerm | DialectCondition | None]:
+        """Collect conditions from constraints and partial indexes in declaration order."""
+        # Local imports: these declarations use ConstraintCondition for validation.
+        from hare.ddl.constraints.check_constraint import CheckConstraint
+        from hare.ddl.constraints.exclusion_constraint import ExclusionConstraint
+        from hare.ddl.constraints.unique_constraint import UniqueConstraint
+        from hare.ddl.indexes.partial_index import PartialIndex
+
+        conditions: list[Q | RawSQLTerm | DialectCondition | None] = []
+        for constraint in binding.constraints:
+            if isinstance(constraint, (UniqueConstraint, ExclusionConstraint)):
+                conditions.append(constraint.condition)
+            elif isinstance(constraint, CheckConstraint):
+                conditions.append(constraint.check)
+        conditions.extend(index.condition for index in binding.indexes if isinstance(index, PartialIndex))
+        return conditions
 
     @staticmethod
     def raise_if_not_condition(condition: Any, owner: str) -> None:
@@ -52,7 +70,7 @@ class ConstraintCondition:
     @staticmethod
     def get_sql(
         condition: Q | RawSQLTerm | DialectCondition,
-        model: type[Model],
+        binding: ModelBinding,
         client: DatabaseClient,
         *,
         table: Table | None = None,
@@ -62,7 +80,7 @@ class ConstraintCondition:
         Args:
             condition: Raw SQL, a ``Q`` over the model's own fields, or a condition the dialect writes -
                 an exclusive arc, an enum's members, a policy's tenant condition.
-            model: The model whose table the constraint or index belongs to.
+            binding: The model whose table the constraint or index belongs to.
             client: The client of the database the DDL runs on.
             table: The table a ``Q`` reads the columns of - the model's own table, unqualified, when None.
 
@@ -74,10 +92,11 @@ class ConstraintCondition:
             UnSupportedError: It needs a function the dialect only has on hare's own connections,
                 which a constraint or index in the database can't call.
         """
+        model = binding._model
         if isinstance(condition, RawSQLTerm):
             return condition.sql
         if isinstance(condition, DialectCondition):
-            return condition.get_condition_sql(model, client)
+            return condition.get_condition_sql(binding, client)
         # Local imports: hare.ddl is imported by the field and model modules the query package
         # itself depends on.
         from hare.query.expressions.expression_context import ExpressionContext
@@ -85,12 +104,11 @@ class ConstraintCondition:
 
         if not condition:
             raise ConfigurationError(f"{model.__name__}: a constraint or index condition can't be empty")
-        ConstraintCondition.raise_if_reads_other_columns(condition, model)
-        meta = model._meta
+        ConstraintCondition.raise_if_reads_other_columns(condition, binding)
         modifier = condition.get_result(
             ExpressionContext(
-                model=model,
-                table=table if table is not None else SqlTable(meta.db_table),
+                binding=binding,
+                table=table if table is not None else SqlTable(binding.db_table),
                 annotations={},
                 dialect=client.dialect,
                 connection=None,
@@ -105,7 +123,7 @@ class ConstraintCondition:
         return DdlTermSql.get_sql(modifier.where_criterion, context, model, condition)
 
     @staticmethod
-    def raise_if_reads_other_columns(condition: Any, model: type[Model]) -> None:
+    def raise_if_reads_other_columns(condition: Any, binding: ModelBinding) -> None:
         """Check declaration dependencies before any dialect renders SQL.
 
         Forward relation comparisons read local key columns. Related column paths,
@@ -113,6 +131,7 @@ class ConstraintCondition:
         Scalar functions are checked by the actual dialect when DDL is rendered.
         """
         # Local imports: model binding imports the DDL package before query setup.
+        model = binding._model
         from hare.query.enums import LookupTarget
         from hare.query.expressions import Aggregate, Q, Window
         from hare.query.expressions.structure.expression_declaration import ExpressionDeclaration
@@ -122,7 +141,7 @@ class ConstraintCondition:
 
         if not isinstance(condition, Q):
             return
-        relation_names = model._meta.foreign_key_fields | model._meta.one_to_one_fields
+        relation_names = binding.forward_key_relation_names
         try:
             for node in ExpressionTraversal.walk(condition):
                 if isinstance(node, (Aggregate, Window, QuerySpecification)) or (
@@ -133,10 +152,10 @@ class ConstraintCondition:
                 if reference.outer_scopes:
                     raise QueryError(ROW_CONDITION_OUTER_MESSAGE)
                 if not reference.lookup:
-                    if LookupInfoBuilder.get_ordering_info(model, reference.path).relations:
+                    if LookupInfoBuilder.get_ordering_info(binding, reference.path).relations:
                         raise QueryError(ROW_CONDITION_RELATION_MESSAGE)
                     continue
-                lookup = LookupInfoBuilder.get_lookup_info(model, reference.path)
+                lookup = LookupInfoBuilder.get_lookup_info(binding, reference.path)
                 if not lookup.relations:
                     continue
                 local_relation = (

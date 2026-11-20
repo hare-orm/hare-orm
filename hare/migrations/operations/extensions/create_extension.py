@@ -19,14 +19,15 @@ class CreateExtension(HareOperation):
     def __init__(self, extension_name: str) -> None:
         self.extension_name = extension_name
 
-    def get_provided_dependencies(self, app_label: str) -> list[OperationDependency]:
+    def get_provided_dependencies(self, app_label: str, state: State) -> list[OperationDependency]:
         return [OperationDependency.of_extension(self.extension_name, DependencyType.CREATED)]
 
     def describe(self) -> str:
         return f"Create extension {self.extension_name}"
 
     def state_forward(self, app_label: str, state: State) -> None:
-        state.extensions.add(self.extension_name)
+        state.extensions.add((state.default_connections.get(app_label), self.extension_name))
+        state.record_native_operation(app_label, self)
 
     async def database_forward(
         self,

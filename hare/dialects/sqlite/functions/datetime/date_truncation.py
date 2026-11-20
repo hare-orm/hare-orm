@@ -1,25 +1,15 @@
 from __future__ import annotations
 
 import datetime
-from typing import Any, ClassVar
 from zoneinfo import ZoneInfo
 
-import aiosqlite
-
-from hare.dialects.sqlite.constants import SQLITE_TRUNC_FUNCTION_NAME
 from hare.dialects.sqlite.functions.constants import DATE_TEXT_LENGTH
-from hare.dialects.sqlite.functions.sqlite_function_errors import SqliteFunctionErrors
-from hare.dialects.sqlite.functions.sqlite_native_functions import SqliteNativeFunctions
 from hare.sql.enums import TruncType
 from hare.time.system_zone import SystemZone
-from hare.time.zone_names import ZoneNames
 
 
 class DateTruncation:
     """Backs ``SQLITE_TRUNC_FUNCTION_NAME`` (see ``DateTrunc``) - SQLite has no ``DATE_TRUNC()``."""
-
-    #: Keeps the owner bucket of ``ZoneNames.ZONES`` the native function reads its zones from.
-    cache_buckets: ClassVar[dict[int, Any]] = {}
 
     @staticmethod
     def truncate_date(trunc_type: str, value: datetime.date) -> datetime.date:
@@ -90,22 +80,3 @@ class DateTruncation:
         if is_naive:
             return SystemZone.get_system_local_naive(truncated).isoformat(" ")
         return truncated.astimezone(datetime.UTC).isoformat(" ")
-
-    @classmethod
-    async def install(cls, connection: aiosqlite.Connection, function_errors: SqliteFunctionErrors) -> None:
-        """Registers ``truncate`` on ``connection`` as ``SQLITE_TRUNC_FUNCTION_NAME``.
-
-        Args:
-            connection: The SQLite connection.
-            function_errors: The connection's function errors.
-        """
-        # Imported here: the module imports this one.
-        from hare.dialects.sqlite.functions.datetime.sqlite_date_part_extraction import SqliteDatePartExtraction
-
-        truncate = SqliteNativeFunctions.module.DateFunctions(
-            ZoneInfo,
-            ZoneNames.ZONES.get_bucket(cls),
-            function_errors.wrap(SqliteDatePartExtraction.extract),
-            function_errors.wrap(cls.truncate),
-        ).truncate
-        await connection.create_function(SQLITE_TRUNC_FUNCTION_NAME, 3, truncate, deterministic=True)

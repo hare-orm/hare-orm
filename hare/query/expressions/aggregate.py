@@ -286,7 +286,8 @@ class Aggregate(Function):
             function = function.distinct()  # type: ignore[attr-defined]
         return function  # type: ignore[return-value]
 
-    def raise_if_values_not_ordered(self, dialect: Dialect, output_field: Field[Any]) -> None:
+    @classmethod
+    def check_field_orderability(cls, dialect: Dialect, output_field: Field[Any]) -> None:
         """Refuses ``Min()``/``Max()`` of a value the database orders none of - before any SQL.
 
         Args:
@@ -294,36 +295,28 @@ class Aggregate(Function):
             output_field: The field of the argument's value.
 
         Raises:
+            FieldError: Comparing JSON here would compare its serialized text.
             UnSupportedError: The value's field isn't orderable, or the database has no ``MIN``/``MAX`` of
                 its column type.
         """
+        if cls.keyed_function_name is None:
+            return
         value_field = GeneratedField.get_effective_field(output_field)
+        if isinstance(value_field, JSONField) and not dialect.features.orders_json_values_in_aggregates:
+            raise FieldError(
+                f"{cls.__name__}() of a JSON value would compare its text on {dialect.name} - convert it with Cast()"
+            )
         if not value_field.is_orderable or not dialect.has_min_max_of(value_field.get_column_type(dialect)):
             raise UnSupportedError(
-                f"{type(self).__name__}() of a {type(value_field).__name__} - the {dialect.name} database has no "
-                f"{self.function_name} of its values"
+                f"{cls.__name__}() of a {type(value_field).__name__} - the {dialect.name} database has no "
+                f"{cls.function_name} of its values"
             )
 
     def _wrap_argument(
         self, expression_context: ExpressionContext, function_arg: ExpressionResult
     ) -> ExpressionResult:
-        if (
-            self.keyed_function_name is not None
-            and isinstance(
-                GeneratedField.get_effective_field(function_arg.output_field)
-                if function_arg.output_field is not None
-                else None,
-                JSONField,
-            )
-            and not expression_context.dialect.features.orders_json_values_in_aggregates
-        ):
-            # An aggregate comparing values would compare the JSON text (Features.orders_json_values_in_aggregates).
-            raise FieldError(
-                f"{type(self).__name__}() of a JSON value would compare its text on "
-                f"{expression_context.dialect.name} - convert it with Cast()"
-            )
         if self.keyed_function_name is not None and function_arg.output_field is not None:
-            self.raise_if_values_not_ordered(expression_context.dialect, function_arg.output_field)
+            self.check_field_orderability(expression_context.dialect, function_arg.output_field)
         function_arg = self._with_argument_orderings(expression_context, function_arg)
         missing_row_guard = self.get_missing_row_guard(expression_context, function_arg)
         if not self.filter:
@@ -376,11 +369,11 @@ class Aggregate(Function):
             or field.model is None
             or term.table is None
             or term.table is expression_context.table
-            or not field.model._meta.has_primary_key
+            or not field.get_binding().model_binding.has_primary_key  # type: ignore[union-attr]
             or expression_context.dialect.types.holds_null(field)
         ):
             return None
-        return term.table[KeyColumns.get_source_columns(field.model._meta)[0]].notnull()
+        return term.table[KeyColumns.get_source_columns(field.get_binding().model_binding)[0]].notnull()  # type: ignore[arg-type]
 
     def _with_argument_orderings(
         self, expression_context: ExpressionContext, function_arg: ExpressionResult

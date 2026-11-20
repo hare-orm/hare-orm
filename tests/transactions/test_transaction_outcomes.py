@@ -104,7 +104,6 @@ async def test_finished_driver_handle_does_not_prove_commit(monkeypatch):
         _is_connection_lost=lambda error: False,
         _is_commit_rejection=lambda error: False,
         _is_transaction_finished_error=lambda error: error is failure,
-        _do_nothing=lambda: None,
         _mark_top_level_operation_abandoned=Mock(),
         _transaction_context_reference=None,
         _on_commit_callbacks=[SimpleNamespace(callback=Mock())],

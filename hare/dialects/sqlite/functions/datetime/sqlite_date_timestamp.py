@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import datetime
-from typing import Any, ClassVar
+from typing import Any
 
 import aiosqlite
 
@@ -14,9 +14,6 @@ from hare.time.zone_names import ZoneNames
 
 class SqliteDateTimestamp:
     """The stored text of a day's first moment, for comparing a date with a timestamp on SQLite."""
-
-    #: Keeps the owner bucket of ``ZoneNames.ZONES`` the native function reads its zones from.
-    cache_buckets: ClassVar[dict[int, Any]] = {}
 
     @staticmethod
     def get_start_text(value: Any, zone_name: str | None) -> str | None:
@@ -41,6 +38,6 @@ class SqliteDateTimestamp:
     async def install(cls, connection: aiosqlite.Connection) -> None:
         """Registers ``get_start_text`` on ``connection``."""
         get_start_text = SqliteNativeFunctions.module.DateTimestamp(
-            ZoneNames.parse, ZoneNames.ZONES.get_bucket(cls), cls.get_start_text
+            ZoneNames.parse, SqliteNativeFunctions.named_zones, cls.get_start_text
         ).get_start_text
         await connection.create_function(SQLITE_DATE_TIMESTAMP_FUNCTION_NAME, 2, get_start_text, deterministic=True)

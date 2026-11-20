@@ -61,6 +61,11 @@ await Book.objects.published().by(author).order_by("title")
 у получателя уже заполнены. Подготовка SQL-запроса переносит только декларацию ORM: пользовательские
 методы выражают своё влияние на SQL через фильтры, аннотации и параметры QuerySet.
 
+Пользовательский конструктор `QuerySet` принимает и передаёт `binding=` и `context=` в `super()`.
+Если переопределён `Manager.get_queryset()`, его контракт — `get_queryset(*, binding=None,
+context=None)`; передайте эти значения в `super().get_queryset(binding=binding, context=context)`.
+Фабрики реестра и связей используют тот же путь, не обращаясь к текущему приложению повторно.
+
 ## <a id="default-filter"></a>Видимость строк: `RowScopeProvider`
 
 Объявляйте условие через `Manager(scope=...)`. Метод провайдера

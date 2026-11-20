@@ -13,10 +13,10 @@ from hare.fields.field import Field
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.models import Model
-from hare.sql.identifiers import Identifiers
 
 if TYPE_CHECKING:
     from hare.dialects.sqlite.schema.sqlite_schema_editor import SqliteSchemaEditor
+    from hare.models.model_binding import ModelBinding
 
 
 class SqliteForeignKeyRebuild(ForeignKeyRebuild):
@@ -28,58 +28,59 @@ class SqliteForeignKeyRebuild(ForeignKeyRebuild):
 
     def get_referenced_field_change_plan(
         self,
-        model: type[Model],
+        binding: ModelBinding,
         old_field: Field[Any],
         new_field: Field[Any],
         referencing_key_columns: list[ReferencingKeyColumns],
     ) -> SchemaChangePlan:
         """Rebuilds the altered table, then every table whose key columns reference it - a rebuilt
         table takes its key column types from the referenced columns' current definitions."""
-        steps = list(self.editor.get_alter_column_plan(model, old_field, new_field).steps)
-        remade_model_keys = {(model._meta.app, model.__name__)}
+        model = binding._model
+        steps = list(self.editor.get_alter_column_plan(binding, old_field, new_field).steps)
+        remade_model_keys = {(binding.app, model.__name__)}
         for referencing in referencing_key_columns:
             if isinstance(referencing.relation_field, ManyToManyFieldInstance):
-                steps.extend(self.get_many_to_many_rebuild_plan(referencing.model, referencing.relation_field).steps)
+                steps.extend(self.get_many_to_many_rebuild_plan(referencing.binding, referencing.relation_field).steps)
                 continue
-            referencing_model_key = (referencing.model._meta.app, referencing.model.__name__)
+            referencing_model_key = (referencing.binding.app, referencing.model.__name__)
             if referencing_model_key in remade_model_keys:
                 continue
             remade_model_keys.add(referencing_model_key)
-            steps.extend(self.editor.table_rebuild.get_rebuild_plan(referencing.model, referencing.model).steps)
+            steps.extend(self.editor.table_rebuild.get_rebuild_plan(referencing.binding, referencing.binding).steps)
         return SchemaChangePlan(tuple(steps))
 
     def get_composite_index_change_plan(
-        self, model: type[Model], old_field: Field[Any], new_field: Field[Any], *, index_dropped: bool = False
+        self, binding: ModelBinding, old_field: Field[Any], new_field: Field[Any], *, index_dropped: bool = False
     ) -> SchemaChangePlan:
         """The column rebuild already includes the target indexes."""
         return SchemaChangePlan(())
 
     def get_relation_foreign_key_restore_plan(
-        self, model: type[Model], relation_field: Field[Any]
+        self, binding: ModelBinding, relation_field: Field[Any]
     ) -> SchemaChangePlan:
         """The key-column rebuild already restored its foreign keys."""
         return SchemaChangePlan(())
 
     def get_foreign_key_rebuild_plan(
-        self, model: type[Model], field: ForeignKeyFieldInstance[Model]
+        self, binding: ModelBinding, field: ForeignKeyFieldInstance[Model]
     ) -> SchemaChangePlan:
         """A changed foreign key is recreated with its table."""
-        return self.editor.table_rebuild.get_rebuild_plan(model, model)
+        return self.editor.table_rebuild.get_rebuild_plan(binding, binding)
 
     def get_many_to_many_rebuild_plan(
         self,
-        model: type[Model],
+        binding: ModelBinding,
         field: ManyToManyFieldInstance[Model],
     ) -> SchemaChangePlan:
         """Rebuilds the auto-managed through table from the field's current metadata, keeping
         its rows."""
-        schema = model._meta.schema
+        schema = binding.schema
         rebuilt_field = copy(field)
-        rebuilt_field.through = Identifiers.get_within_limit(f"new__{field.through}")
+        rebuilt_field.through = self.editor.table_rebuild.get_rebuilt_table_name(field.through)
         # The indexes are created after the rename below, so they get the real table's name.
         rebuilt_field.unique = False
         rebuilt_field.index = False
-        definition = self.editor.table_creation.get_many_to_many_table_definition(model, rebuilt_field)
+        definition = self.editor.table_creation.get_many_to_many_table_definition(binding, rebuilt_field)
         if definition is None:
             return SchemaChangePlan(())
         steps: list[SchemaStep] = [SchemaStatement(definition)]

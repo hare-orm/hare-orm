@@ -14,6 +14,7 @@ from hare.contrib.test.databases.test_database_resource import TestDatabaseResou
 from hare.contrib.test.messages import TEMPORARY_DATABASES_ACTIVE
 from hare.core.config import ConnectionConfig, HareConfig
 from hare.core.hare_context import HareContext
+from hare.core.resource_completion import ResourceCompletion
 from hare.exceptions import ConfigurationError
 from hare.warnings import HareLoopSwitchWarning
 
@@ -112,8 +113,8 @@ class TemporaryDatabases:
                 self.resources.append(resource)
                 self.cleanup.push(connection.close)
                 if self.create_databases:
-                    await resource.create()
-                if self.drop_databases:
+                    await ResourceCompletion.wait(self._create_database(resource))
+                elif self.drop_databases:
                     self.cleanup.push(resource.release)
             # A failed table creation must still drop the databases it was creating them in.
             if self.generate_schemas:
@@ -123,6 +124,12 @@ class TemporaryDatabases:
             await self._end(type(error), error, error.__traceback__)
             raise
         return self.context
+
+    async def _create_database(self, resource: TestDatabaseResource) -> None:
+        """Register cleanup in the task that acquires the database."""
+        await resource.create()
+        if self.drop_databases:
+            self.cleanup.push(resource.release)
 
     async def __aexit__(
         self,
@@ -139,7 +146,8 @@ class TemporaryDatabases:
         try:
             try:
                 # Registered last, closing pools runs before any database is released.
-                self.cleanup.push(self.context.connections.close_all, discard=False)
+                if self.context._connections is not None:
+                    self.cleanup.push(self.context._connections.close_all, discard=False)
                 await self.cleanup.close()
             finally:
                 # A reusable database whose db_delete() never ran goes back to the pool marked for a

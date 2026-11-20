@@ -1,7 +1,6 @@
 """truncate_all_models() with Meta.schema/Meta.managed = False models, generate_schemas() with the
 same table name in two schemas, and hare_test_context() cleanup after a failed schema generation."""
 
-import os
 import uuid
 from pathlib import Path
 
@@ -15,7 +14,7 @@ from tests.utils.attached_databases import get_url_with_attached_databases
 from tests.utils.database_under_test import DatabaseUnderTest
 from tests.utils.server_session import ServerSession
 
-TEST_DB_URL = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+TEST_DB_URL = DatabaseUnderTest.get_url()
 IS_POSTGRES = DatabaseUnderTest.get_dialect().name == "postgresql"
 requires_postgres = pytest.mark.skipif(not IS_POSTGRES, reason="needs Postgres schemas")
 

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from hare import Model, fields
+from hare.core.apps.model_binding_graph import ModelBindingGraph
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.instrumentation.capture.capture_needs import CaptureNeeds
 from hare.instrumentation.capture.captured_write import CapturedWrite
@@ -12,12 +13,14 @@ pytestmark = pytest.mark.database_independent
 
 
 def test_returned_batches_share_the_time_of_the_first_change():
+    declaration_graph = ModelBindingGraph()
+
     class Book(Model):
         id = fields.IntField(primary_key=True)
         title = fields.TextField()
 
     needs = CaptureNeeds(
-        sink=SimpleNamespace(check_connection=lambda connection: None),
+        sink=SimpleNamespace(check_connection=lambda binding, connection: None),
         payload=ChangePayload.BEFORE_AND_AFTER,
         operations=frozenset(RowOperation),
         field_names=("id", "title"),
@@ -25,7 +28,7 @@ def test_returned_batches_share_the_time_of_the_first_change():
         tenant_field_name=None,
     )
     connection = SimpleNamespace(dialect=DialectRegistry.get_dialect("sqlite"))
-    captured = CapturedWrite(Book, needs, connection, RowOperation.UPDATE)
+    captured = CapturedWrite(declaration_graph.include(Book), needs, connection, RowOperation.UPDATE)
     (first,) = captured.get_returned_changes(
         [{"id": 1, "title": "after"}], before_by_pk={1: {"id": 1, "title": "before"}}
     )

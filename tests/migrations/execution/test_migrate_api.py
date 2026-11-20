@@ -1,9 +1,13 @@
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
 from hare.core.config import AppConfig, ConnectionConfig, HareConfig
 from hare.migrations.api import MigrationSession, migrate
+from hare.migrations.loading.graph.migration_key import MigrationKey
+from hare.migrations.operations import CreateModel
+from tests.utils.project_sources import ProjectSources
 
 pytestmark = pytest.mark.sqlite_only
 
@@ -23,12 +27,8 @@ async def test_migrate_accepts_dataclass_config() -> None:
 
 
 def _write_create_model_migration(tmp_path: Path, app_label: str, model_name: str, table_name: str) -> str:
-    package_dir = tmp_path / app_label
-    migrations_dir = package_dir / "migrations"
-    migrations_dir.mkdir(parents=True)
-    (package_dir / "__init__.py").write_text("", encoding="ascii")
-    (package_dir / "models.py").write_text("", encoding="ascii")
-    (migrations_dir / "__init__.py").write_text("", encoding="ascii")
+    sources = ProjectSources(tmp_path)
+    migrations_dir = sources.prepare_migrations(sources.write_package(app_label))
     (migrations_dir / "0001_initial.py").write_text(
         "\n".join(
             [
@@ -98,12 +98,8 @@ async def test_migrate_with_scoped_target_does_not_touch_unrelated_connections(
 def _write_migration_with_dependencies(
     tmp_path: Path, app_label: str, model_name: str, table_name: str, dependencies: list[tuple[str, str]]
 ) -> str:
-    package_dir = tmp_path / app_label
-    migrations_dir = package_dir / "migrations"
-    migrations_dir.mkdir(parents=True)
-    (package_dir / "__init__.py").write_text("", encoding="ascii")
-    (package_dir / "models.py").write_text("", encoding="ascii")
-    (migrations_dir / "__init__.py").write_text("", encoding="ascii")
+    sources = ProjectSources(tmp_path)
+    migrations_dir = sources.prepare_migrations(sources.write_package(app_label))
     (migrations_dir / "0001_initial.py").write_text(
         "\n".join(
             [
@@ -318,3 +314,36 @@ async def test_a_migration_waits_for_the_migration_of_another_connection_it_depe
             ("rollback_start", "provider"),
             ("rollback_done", "provider"),
         ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dry_run", [False, True])
+async def test_fake_migrate_does_not_replay_applied_state_callbacks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dry_run: bool
+) -> None:
+    app_label = "fake_state_app"
+    migrations_module = _write_create_model_migration(tmp_path, app_label, "Book", "book")
+    migrations_dir = tmp_path / app_label / "migrations"
+    (migrations_dir / "0002_empty.py").write_text(
+        "from hare import migrations\n"
+        "class Migration(migrations.Migration):\n"
+        f"    dependencies = [({app_label!r}, '0001_initial')]\n"
+        "    operations = []\n",
+        encoding="ascii",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    config = {
+        "connections": {"default": {"engine": "sqlite+aiosqlite", "credentials": {"file_path": ":memory:"}}},
+        "apps": {app_label: {"models": [], "default_connection": "default", "migrations": migrations_module}},
+    }
+    async with MigrationSession(config) as session:
+        await session.migrate(target=f"{app_label}.0001_initial")
+        state_callback = Mock(side_effect=AssertionError("fake migrations must not replay state callbacks"))
+        monkeypatch.setattr(CreateModel, "state_forward", state_callback)
+        await session.migrate(target=f"{app_label}.0002_empty", fake=True, dry_run=dry_run)
+        state_callback.assert_not_called()
+        executor = next(iter(session.create_executors().values()))
+        expected = {MigrationKey(app_label, "0001_initial")}
+        if not dry_run:
+            expected.add(MigrationKey(app_label, "0002_empty"))
+        assert set(await executor.recorder.applied_migrations()) == expected

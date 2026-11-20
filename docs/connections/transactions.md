@@ -1,12 +1,5 @@
 # Transactions
 
-The native PostgreSQL client defers `BEGIN` until its first operation. Enclosing
-savepoints are created through the shared cancellation-protected control path before
-that scope's first statement. Control and statement responses are drained before returning.
-A transaction with no statements needs no
-`BEGIN` or ending command. Persistence undo retains complete snapshots; field entries
-are combined only on rollback, keeping the first captured value in each savepoint scope.
-
 `Transactions` (`from hare import Transactions`) runs code in a database transaction: `atomic()` as a
 block or a decorator, running a transaction again after a conflict, `autonomous()` for a transaction of
 its own beside the current one, and callbacks after a commit or a rollback.
@@ -75,11 +68,11 @@ otherwise the connection every registered app resolves its models to, if they al
 `default_connection`; otherwise a connection literally named `"default"`, if one exists. Otherwise
 `QueryError`, listing the configured connection aliases.
 
-The block takes a connection from the pool when it starts. `rust_pg` sends `BEGIN` and waits for the
-server's acknowledgement before entering the block; even an empty native transaction sends its
-`COMMIT` or `ROLLBACK`. With asyncpg and SQLite, `BEGIN` is deferred until just before the first
-statement, and an empty block sends no transaction commands. PostgreSQL takes a transaction's snapshot
-at its first statement, not at `BEGIN`; SQLite's deferred `BEGIN` takes no lock before its first statement.
+SQLite and both PostgreSQL drivers defer `BEGIN` until the first operation that needs it. The
+native PostgreSQL driver reserves a pool connection on entry and queues `BEGIN` on it. A block
+that neither runs a statement nor needs to apply transaction settings sends no `BEGIN`, `COMMIT`
+or `ROLLBACK`. PostgreSQL takes a transaction's snapshot at its first statement. SQLite's deferred
+`BEGIN` takes no lock before its first statement.
 
 ### <a id="nesting-and-concurrent-siblings"></a>Nesting and concurrent siblings
 
@@ -398,11 +391,16 @@ connection breaks while the `COMMIT` itself is in flight is the outcome unknown 
 `error` attribute, and `DBConnectionError` propagates.
 
 Like `on_commit()` callbacks, these run after the transaction is over and may query and open
-transactions. A transaction whose `COMMIT` is rejected (for example a deferred constraint violation)
+transactions. Hare restores instance bookkeeping and invalidates rolled-back relation caches before
+running application callbacks, so a new write from a callback keeps its published state. Within a
+transaction or savepoint, restoration uses the earliest captured value for each field. Application
+callbacks retain their registration order, and all are attempted even if restoration fails.
+A transaction whose `COMMIT` is rejected (for example a deferred constraint violation)
 counts as rolled back: its `on_rollback()` callbacks run and the `IntegrityError` still propagates. If
 the block itself raised, that exception is the one that propagates — a failing `on_rollback()` callback
 (or any other failure while rolling back) is logged and attached to it as a note instead of replacing it.
-The same holds for a nested block (a savepoint).
+The same holds for a nested block (a savepoint). If the caller is cancelled while waiting for the
+rollback, the cancellation reaches the caller after cleanup, even when the block had already raised.
 
 > [!NOTE]
 > **Not a real distributed rollback across different databases**

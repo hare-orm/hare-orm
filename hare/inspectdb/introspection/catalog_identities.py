@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING, Any
 from sqlparse import tokens
 from sqlparse.lexer import tokenize
 
+from hare.ddl.enums import SchemaPartType
 from hare.dialects.base.constants import SQL_DIALECT
 from hare.inspectdb.constants import CATALOG_SCHEMA_MEMBERS, CATALOG_SQL_MEMBERS, CATALOG_SQL_POSITIONAL_DECLARATIONS
-from hare.inspectdb.enums import SchemaPartType
 from hare.inspectdb.introspection.constants import CATALOG_SQL_TEXT_PARTS
 
 if TYPE_CHECKING:

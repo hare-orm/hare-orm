@@ -1,4 +1,3 @@
-import os
 import uuid
 
 import pytest
@@ -7,7 +6,6 @@ from pydantic import ValidationError
 
 from hare.contrib.pydantic import PydanticModel, pydantic_model_creator, pydantic_queryset_creator
 from hare.contrib.test import RollbackIsolation, assert_query_count
-from hare.contrib.test.isolated_contexts import hare_test_context
 from tests.contrib.models_pydantic_relation_ids import (
     RelationIdCodeTarget,
     RelationIdItem,
@@ -17,16 +15,12 @@ from tests.contrib.models_pydantic_relation_ids import (
     RelationIdTag,
     RelationIdUuidTarget,
 )
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 @pytest_asyncio.fixture(scope="module")
 async def db_relation_ids_module():
-    async with hare_test_context(
-        modules=["tests.contrib.models_pydantic_relation_ids"],
-        db_url=os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:"),
-        app_label="models",
-        connection_label="models",
-    ) as ctx:
+    async with DatabaseUnderTest.open_model_context(["tests.contrib.models_pydantic_relation_ids"]) as ctx:
         yield ctx
 
 

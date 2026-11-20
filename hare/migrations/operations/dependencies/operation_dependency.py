@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 
+from hare.migrations.operations.dependencies.constants import DATABASE_DEPENDENCY_SUBJECTS
 from hare.migrations.operations.enums import DependencySubject, DependencyType
 
 
@@ -25,6 +26,14 @@ class OperationDependency:
     model_name: str | None
     name: str | None
     dependency_type: DependencyType
+    #: Native objects belong to a database namespace, independently of their declaring app.
+    database_alias: str | None = field(default=None, kw_only=True)
+
+    def for_database(self, alias: str | None) -> OperationDependency:
+        """Bind native-object requirements to one database; model requirements retain their apps."""
+        if self.subject not in DATABASE_DEPENDENCY_SUBJECTS or self.database_alias is not None or alias is None:
+            return self
+        return replace(self, database_alias=alias)
 
     def __post_init__(self) -> None:
         if self.model_name is not None:
@@ -54,6 +63,13 @@ class OperationDependency:
             dependency_type: What is done to it.
         """
         return cls(DependencySubject.FIELD, app_label, model_name, field_name, dependency_type)
+
+    @classmethod
+    def of_schema_object(
+        cls, app_label: str, model_name: str, name: str, dependency_type: DependencyType
+    ) -> OperationDependency:
+        """A named schema object declared by a model."""
+        return cls(DependencySubject.SCHEMA_OBJECT, app_label, model_name, name, dependency_type)
 
     @classmethod
     def of_extension(cls, name: str, dependency_type: DependencyType) -> OperationDependency:

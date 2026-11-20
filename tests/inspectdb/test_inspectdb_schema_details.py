@@ -4,11 +4,11 @@ partitioned tables, index details, constraint names and wording - and flagging t
 import pytest
 
 from hare.contrib.test import requires_features
-from hare.core.connections.connections import Connections
 from hare.ddl.constraints import UniqueConstraint
+from hare.ddl.enums import SchemaPartType
 from hare.ddl.indexes.index import Index
 from hare.dialects.postgresql.introspection.postgresql_catalog_reader import PostgresqlCatalogReader
-from hare.exceptions import HareError
+from hare.exceptions import HareError, IntegrityError
 from hare.fields.data.numeric import IntField
 from hare.fields.data.text import CharField
 from hare.inspectdb import SchemaIntrospector
@@ -18,12 +18,6 @@ from hare.migrations.drift import detect_drift
 from tests.migrations.round_trips.test_round_trip_real_db import APP_LABEL, RoundTrip, build_live_state, build_model
 from tests.utils.database_under_test import DatabaseUnderTest
 from tests.utils.model_source_generator import ModelSourceGenerator
-
-
-@pytest.fixture
-def connection(db):
-    alias = next(iter(Connections.current().db_config))
-    return Connections.get(alias)
 
 
 async def generated_source(connection, table: str, schema: str | None = None) -> str:
@@ -155,9 +149,11 @@ async def test_a_partitioning_no_model_declares_is_drift(db_isolated_no_schema):
         "CREATE TABLE inspect_expression_drift_default PARTITION OF inspect_expression_drift DEFAULT"
     )
 
-    operations = (await detect_drift(round_trip.connection, build_live_state(reading), [APP_LABEL])).operations
+    drift = await detect_drift(round_trip.connection, build_live_state(reading), [APP_LABEL])
 
-    assert [type(operation).__name__ for operation in operations] == ["AlterModelOptions"]
+    assert drift.operations == []
+    assert len(drift.mismatched_objects) == 1
+    assert drift.mismatched_objects[0].part_type is SchemaPartType.UNPARSED_PARTITIONING
 
 
 @requires_features(dialect="postgresql")
@@ -181,10 +177,14 @@ async def test_an_invalid_index_is_flagged_and_drift(db_isolated_no_schema):
         {"indexes": [Index(fields=["status"], name="inspect_invalid_status", unique=True)]},
     )
 
-    operations = (await detect_drift(round_trip.connection, build_live_state(indexed_loan), [APP_LABEL])).operations
+    result = await detect_drift(round_trip.connection, build_live_state(indexed_loan), [APP_LABEL])
     source = await generated_source(round_trip.connection, "inspect_invalid_index")
 
-    assert [type(operation).__name__ for operation in operations] == ["RemoveIndex", "AddIndex"]
+    assert result.has_drift
+    assert result.operations == []
+    assert [(item.part_type, item.table, item.name) for item in result.mismatched_objects] == [
+        (SchemaPartType.INDEX, "inspect_invalid_index", "inspect_invalid_status")
+    ]
     assert "# TODO: index 'inspect_invalid_status' is invalid in the database" in source
 
 
@@ -204,10 +204,13 @@ async def test_index_details_a_model_cant_declare_are_flagged(connection):
         else ""
     )
     await connection.execute_script(
+        'CREATE SCHEMA inspect_collations; CREATE COLLATION inspect_collations.sort_text FROM pg_catalog."C"; '
         "CREATE TABLE inspect_index_details (id serial PRIMARY KEY, a int NOT NULL, b int, c text, d text); "
         "CREATE INDEX inspect_index_covering ON inspect_index_details (a) INCLUDE (b); "
         "CREATE INDEX inspect_index_descending ON inspect_index_details (a DESC, b); "
         'CREATE INDEX inspect_index_collated ON inspect_index_details (d COLLATE "C"); '
+        "CREATE INDEX inspect_index_local_collation ON inspect_index_details "
+        "(d COLLATE inspect_collations.sort_text); "
         "CREATE INDEX inspect_index_expression_desc ON inspect_index_details (lower(c) DESC); "
         f"{nulls_index_sql}"
         "ALTER TABLE inspect_index_details ADD CONSTRAINT inspect_index_deferred UNIQUE (d) "
@@ -221,17 +224,19 @@ async def test_index_details_a_model_cant_declare_are_flagged(connection):
     assert indexes_by_name["inspect_index_covering"].columns == ["a"]
     assert indexes_by_name["inspect_index_covering"].opclasses == []
     assert indexes_by_name["inspect_index_covering"].include == ["b"]
-    assert indexes_by_name["inspect_index_covering"].unrepresentable_properties == []
-    assert indexes_by_name["inspect_index_descending"].unrepresentable_properties == []
     assert indexes_by_name["inspect_index_collated"].expression_terms == ['d COLLATE "C"']
-    assert indexes_by_name["inspect_index_expression_desc"].unrepresentable_properties == []
+    assert indexes_by_name["inspect_index_local_collation"].expression_terms == [
+        "d COLLATE inspect_collations.sort_text"
+    ]
     if has_nulls_distinct:
         assert indexes_by_name["inspect_index_nulls"].nulls_not_distinct is True
-        assert indexes_by_name["inspect_index_nulls"].unrepresentable_properties == []
         assert "UniqueConstraint(fields=['c'], name='inspect_index_nulls', nulls_distinct=False)" in source
     assert "Index(fields=['a'], name='inspect_index_covering', include=['b'])" in source
     assert "Index(fields=['-a', 'b'], name='inspect_index_descending')" in source
     assert """Index(RawSQLTerm('d COLLATE "C"'), name='inspect_index_collated')""" in source
+    assert (
+        "Index(RawSQLTerm('d COLLATE inspect_collations.sort_text'), name='inspect_index_local_collation')" in source
+    )
     assert (
         "Index(OrderedIndexKey(RawSQLTerm('lower(c)'), Order.DESC_NULLS_FIRST), name='inspect_index_expression_desc')"
         in source
@@ -259,8 +264,9 @@ async def test_sqlite_sort_order_of_an_index_key_is_declared(connection):
     source = await generated_source(connection, "inspect_sqlite_desc")
 
     assert "Index(fields=['-a', 'b'], name='inspect_sqlite_desc_index')" in source
-    assert "Index(RawSQLTerm('b COLLATE NOCASE'), name='inspect_sqlite_collated')" in source
-    assert "# TODO: index 'inspect_sqlite_collated_desc' has b COLLATE NOCASE DESC in the database" in source
+    assert 'CatalogIndexKey(RawSQLTerm(\'"b" COLLATE "NOCASE" ASC\'), Order.ASC)' in source
+    assert 'CatalogIndexKey(RawSQLTerm(\'"b" COLLATE "NOCASE" DESC\'), Order.DESC)' in source
+    assert "TODO: index" not in source
 
 
 @requires_features(supports_unique_constraints=True)
@@ -316,6 +322,31 @@ async def test_a_column_of_a_type_no_field_writes_is_flagged(connection):
     source = await generated_source(connection, "inspect_typed")
 
     assert f"# TODO: the column is {column_type!r}, the field writes {written_type!r}" in source
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+async def test_drift_reports_a_domain_without_suggesting_a_noop_repair(db_isolated_no_schema):
+    round_trip = RoundTrip(db_isolated_no_schema.get_connection())
+    model = build_model("Reading", "domain_reading", {"id": IntField(primary_key=True), "amount": IntField()}, {})
+    await round_trip.migrate_to(model)
+    connection = round_trip.connection
+    await connection.execute_script(
+        "INSERT INTO domain_reading VALUES (1, 11); "
+        "CREATE SCHEMA domain_catalog; "
+        "CREATE DOMAIN domain_catalog.positive AS integer CHECK (VALUE > 0); "
+        "ALTER TABLE domain_reading ALTER COLUMN amount TYPE domain_catalog.positive"
+    )
+
+    drift = await detect_drift(connection, build_live_state(model), [APP_LABEL])
+    assert drift.has_drift
+    assert drift.operations == []
+    assert [(difference.table, difference.name) for difference in drift.mismatched_objects] == [
+        ("domain_reading", "amount")
+    ]
+    assert await connection.execute_dicts("SELECT id, amount FROM domain_reading") == [{"id": 1, "amount": 11}]
+    with pytest.raises(IntegrityError):
+        await connection.execute_script("INSERT INTO domain_reading VALUES (2, -1)")
 
 
 @requires_features(dialect="sqlite")

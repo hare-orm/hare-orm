@@ -31,9 +31,9 @@ pub(crate) fn decode_composite<'a>(
         };
         let field_type = match fields.and_then(|fields| fields.get(index)) {
             Some(field) => field.type_().clone(),
-            None => {
-                Type::from_oid(oid).unwrap_or_else(|| Type::new(String::new(), oid, TypeShape::Simple, String::new()))
-            }
+            None => Type::from_oid(oid)
+                .or_else(|| forms.get_field_type(oid).cloned())
+                .unwrap_or_else(|| Type::new(String::new(), oid, TypeShape::Simple, String::new())),
         };
         values.push(decode_value_with_context(&field_type, bytes, forms, context)?);
     }

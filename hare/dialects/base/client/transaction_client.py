@@ -3,7 +3,8 @@ from __future__ import annotations
 import abc
 import asyncio
 import weakref
-from typing import Any, ClassVar
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.dialects.base.client.constants import (
     TRANSACTION_BEGIN_ABANDONED_MESSAGE,
@@ -29,6 +30,9 @@ from hare.exceptions import (
 from hare.instrumentation.declarations import PoolStatus
 from hare.transactions.enums import TransactionEventType, TransactionOutcome, TransactionPhase
 from hare.transactions.transaction_options import TransactionOptions
+
+if TYPE_CHECKING:
+    from hare.dialects.base.transactions.contexts.top_level_transaction_context import TopLevelTransactionContext
 
 
 class TransactionClient(DatabaseClient, abc.ABC):
@@ -294,7 +298,7 @@ class TransactionClient(DatabaseClient, abc.ABC):
     #: Set by the owning top-level transaction context. Weak, so a client abandoned without its
     #: context exiting is still freed by plain reference counting - which is what returns a
     #: pinned connection to its pool.
-    _transaction_context_reference: weakref.ref[TransactionContext] | None = None
+    _transaction_context_reference: weakref.ref[TopLevelTransactionContext] | None = None
     #: The error a failed ``TransactionEnding.release_transaction_resources()`` raised, kept for the owning
     #: context's __aexit__ to report - it knows whether the block's own exception is already in
     #: flight, which a failed release must never replace.
@@ -481,10 +485,6 @@ class TransactionClient(DatabaseClient, abc.ABC):
         self.transaction_state.phase = TransactionPhase.ENDING
         self._commit_refusal = TRANSACTION_BEGIN_ABANDONED_MESSAGE
 
-    @staticmethod
-    def _do_nothing() -> None:
-        """``on_landed`` of a shielded call that has nothing to record."""
-
     async def begin(self) -> None:
         """Begins the transaction - shielded from cancellation, so the connection never goes back to the
         pool inside it.
@@ -522,17 +522,22 @@ class TransactionClient(DatabaseClient, abc.ABC):
             self._savepoint_pending = False
             self._get_top_level_transaction()._pending_savepoints.remove(self)
 
+    def _require_active_savepoint_name(self) -> str:
+        """Require a savepoint on an unfinished transaction."""
+        savepoint_name = self._savepoint_name
+        if savepoint_name is None:
+            raise TransactionManagementError("Transaction is in invalid state")
+        if self._is_transaction_finished():
+            raise TransactionManagementError(TRANSACTION_FINALISED_MESSAGE)
+        return savepoint_name
+
     async def release_savepoint(self) -> None:
         """Releases the savepoint of a nested transaction - nothing is sent when no statement ran under it.
 
         Raises:
             TransactionManagementError: The client has no savepoint, or the transaction is finished.
         """
-        savepoint_name = self._savepoint_name
-        if savepoint_name is None:
-            raise TransactionManagementError("Transaction is in invalid state")
-        if self._is_transaction_finished():
-            raise TransactionManagementError(TRANSACTION_FINALISED_MESSAGE)
+        savepoint_name = self._require_active_savepoint_name()
         self._check_savepoint_allowed()
         if self._savepoint_pending:
             # No statement ran under it - nothing was sent, nothing is released.
@@ -546,17 +551,13 @@ class TransactionClient(DatabaseClient, abc.ABC):
             on_timeout=self._mark_savepoint_operation_abandoned,
         )
 
-    async def savepoint_rollback(self) -> None:
+    async def savepoint_rollback(self, *, _on_wait_cancelled: Callable[[], None] | None = None) -> None:
         """Rolls back to the savepoint of a nested transaction, and runs its ``on_rollback()`` callbacks.
 
         Raises:
             TransactionManagementError: The client has no savepoint, or the transaction is finished.
         """
-        savepoint_name = self._savepoint_name
-        if savepoint_name is None:
-            raise TransactionManagementError("Transaction is in invalid state")
-        if self._is_transaction_finished():
-            raise TransactionManagementError(TRANSACTION_FINALISED_MESSAGE)
+        savepoint_name = self._require_active_savepoint_name()
 
         async def roll_back_and_fire_callbacks() -> None:
             # One shielded coroutine: a cancellation between the ROLLBACK TO and the callbacks
@@ -571,8 +572,8 @@ class TransactionClient(DatabaseClient, abc.ABC):
 
         await TransactionEnding.run_shielded_from_cancellation(
             roll_back_and_fire_callbacks(),
-            on_landed=self._do_nothing,
             on_timeout=self._mark_savepoint_operation_abandoned,
+            on_wait_cancelled=_on_wait_cancelled,
         )
 
     async def commit(self) -> None:
@@ -600,11 +601,13 @@ class TransactionClient(DatabaseClient, abc.ABC):
             return
         await TransactionEnding.end_top_level(self, TransactionEventType.COMMIT)
 
-    async def rollback(self) -> None:
+    async def rollback(self, *, _on_wait_cancelled: Callable[[], None] | None = None) -> None:
         if self._savepoint_name is not None:
-            await self.savepoint_rollback()
+            await self.savepoint_rollback(_on_wait_cancelled=_on_wait_cancelled)
             return
-        await TransactionEnding.end_top_level(self, TransactionEventType.ROLLBACK)
+        await TransactionEnding.end_top_level(
+            self, TransactionEventType.ROLLBACK, on_wait_cancelled=_on_wait_cancelled
+        )
 
     def check_stream_open(self) -> None:
         """Refuses to hand out a streamed row once the transaction has ended or is ending - a row

@@ -344,7 +344,7 @@ async def test_builder_functions_run_on_every_dialect(db) -> None:
     await Tournament.objects.create(id=1, name="abc")
     await Tournament.objects.create(id=2, name="xyz")
     table = Tournament.get_table()
-    connection = Tournament._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Tournament).get_connection()
 
     row_query = Query.from_(table).select(functions.Now().as_("now")).where(table.id == 1)
     rows = (await execute_sql(row_query, using=connection)).rows

@@ -13,6 +13,7 @@ from hare.exceptions import ConfigurationError, NoValuesFetched
 
 if TYPE_CHECKING:
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class HareDTOExtraFields:
@@ -40,11 +41,11 @@ class HareDTOExtraFields:
 
     #: The extra fields each set of extra fields found for a class of rows through the class's bases, kept in a
     #: bucket of the set.
-    found_row_class_fields: ClassVar[Cache[Any]] = Cache(holds_sql=False)
+    found_row_class_fields: ClassVar[Cache[Any]] = Cache()
 
     def __init__(
         self,
-        model_type: type[Model],
+        binding: ModelBinding,
         extra_fields: Mapping[str, Any],
         computed: tuple[str, ...],
         related_values: Mapping[str, str],
@@ -61,24 +62,25 @@ class HareDTOExtraFields:
             HareDTOExtraFields.found_row_class_fields.get_bucket(self)
         )
         for path, annotation in extra_fields.items():
-            owner, name = HareDTOExtraFields.get_owner(model_type, path, "extra_fields")
+            owner, name = HareDTOExtraFields.get_owner(binding, path, "extra_fields")
             self.add(owner, name, DTOExtraField(annotation | None, HareDTOExtraFields.get_attribute_reader(name)))
         for path in computed:
-            owner, name = HareDTOExtraFields.get_owner(model_type, path, "computed")
-            self.add(owner, name, HareDTOExtraFields.get_computed_field(owner, name))
-            self.computed_names_by_model.setdefault(owner, set()).add(name)
+            owner, name = HareDTOExtraFields.get_owner(binding, path, "computed")
+            self.add(owner, name, HareDTOExtraFields.get_computed_field(owner._model, name))
+            self.computed_names_by_model.setdefault(owner._model, set()).add(name)
         for path, value_path in related_values.items():
-            owner, name = HareDTOExtraFields.get_owner(model_type, path, "related_values")
+            owner, name = HareDTOExtraFields.get_owner(binding, path, "related_values")
             self.add(owner, name, HareDTOExtraFields.get_related_value_field(owner, name, value_path, read_attribute))
 
-    def add(self, owner: type[Model], name: str, extra_field: DTOExtraField) -> None:
+    def add(self, owner_binding: ModelBinding, name: str, extra_field: DTOExtraField) -> None:
         """Adds an extra field of a model.
 
         Raises:
             ConfigurationError: The name is a field of the model or declared already.
         """
+        owner = owner_binding._model
         model_fields = self.fields_by_model.setdefault(owner, {})
-        if name in owner._meta.fields_map or name in model_fields:
+        if name in owner_binding.fields_map or name in model_fields:
             raise ConfigurationError(
                 f"HareDTO of {owner.__name__}: {name!r} is a field of the model or declared twice - an extra "
                 "field takes a name of its own"
@@ -134,11 +136,11 @@ class HareDTOExtraFields:
         return row_class_fields
 
     @staticmethod
-    def get_owner(model_type: type[Model], path: str, option: str) -> tuple[type[Model], str]:
+    def get_owner(binding: ModelBinding, path: str, option: str) -> tuple[ModelBinding, str]:
         """The model a declared name belongs to, and the name on it.
 
         Args:
-            model_type: The model of the DTO.
+            binding: The binding of the DTO's model.
             path: The name, written as a path through the relations or not.
             option: The option it is declared in, for the error message.
 
@@ -149,16 +151,17 @@ class HareDTOExtraFields:
             ConfigurationError: A part of the path before the name is no relation of its model.
         """
         *relation_names, name = path.split(DTO_PATH_SEPARATOR)
-        owner = model_type
+        model_type = binding._model
+        owner_binding = binding
         for relation_name in relation_names:
-            field = owner._meta.fields_map.get(relation_name)
+            field = owner_binding.fields_map.get(relation_name)
             if field is None or field.relation_type is None:
                 raise ConfigurationError(
                     f"HareDTO of {model_type.__name__}, {option}: {path!r} - {relation_name!r} is no relation of "
-                    f"{owner.__name__}"
+                    f"{owner_binding._model.__name__}"
                 )
-            owner = field.related_model  # type: ignore[attr-defined]
-        return owner, name
+            owner_binding = field.get_related_binding()  # type: ignore[attr-defined]
+        return owner_binding, name
 
     @staticmethod
     def get_attribute_reader(name: str) -> Callable[[object], Any]:
@@ -225,7 +228,7 @@ class HareDTOExtraFields:
 
     @staticmethod
     def get_related_value_field(
-        owner: type[Model], name: str, value_path: str, read_attribute: Callable[[object, str], Any]
+        owner_binding: ModelBinding, name: str, value_path: str, read_attribute: Callable[[object, str], Any]
     ) -> DTOExtraField:
         """The extra field of a value of a related row - each step read with ``read_attribute``.
 
@@ -234,16 +237,17 @@ class HareDTOExtraFields:
                 field.
         """
         *relation_names, field_name = value_path.split(DTO_PATH_SEPARATOR)
-        related_model = owner
+        owner = owner_binding._model
+        related_model = owner_binding
         for relation_name in relation_names:
-            field = related_model._meta.fields_map.get(relation_name)
+            field = related_model.fields_map.get(relation_name)
             if field is None or field.relation_type is None or field.relation_type in TO_MANY_RELATION_TYPES:
                 raise ConfigurationError(
                     f"HareDTO of {owner.__name__}, related_values: {name!r} - {relation_name!r} is no relation of "
-                    f"{related_model.__name__} to one row"
+                    f"{related_model._model.__name__} to one row"
                 )
-            related_model = field.related_model  # type: ignore[attr-defined]
-        value_field = related_model._meta.fields_map.get(field_name)
+            related_model = field.get_related_binding()  # type: ignore[attr-defined]
+        value_field = related_model.fields_map.get(field_name)
         if not relation_names or value_field is None or value_field.relation_type is not None:
             raise ConfigurationError(
                 f"HareDTO of {owner.__name__}, related_values: {name!r} - {value_path!r} names no value field of a "

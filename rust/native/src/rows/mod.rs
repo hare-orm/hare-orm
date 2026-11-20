@@ -63,7 +63,6 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(postgres_value_text::read_tsvector_text, module)?)?;
     module.add_function(wrap_pyfunction!(postgres_value_text::read_hstore_text, module)?)?;
     module.add_function(wrap_pyfunction!(value_types::are_all_of_types, module)?)?;
-    module.add_function(wrap_pyfunction!(value_layout::read_row_values, module)?)?;
     module.add_function(wrap_pyfunction!(value_rows::read_values_row, module)?)?;
     module.add_function(wrap_pyfunction!(value_rows::read_values_batch, module)?)?;
     module.add_function(wrap_pyfunction!(prefetched_rows::group_by_item, module)?)?;

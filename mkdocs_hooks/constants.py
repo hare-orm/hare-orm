@@ -20,8 +20,6 @@ RUSSIAN_CALLOUT_TITLES = {
 }
 #: A heading whose anchor an inline ``<a id="...">`` names - the form GitHub reads.
 HTML_ANCHORED_HEADING = re.compile(r'^(?P<level>#{1,6}) <a id="(?P<anchor>[A-Za-z0-9_-]+)"></a>(?P<title>.*)$', re.M)
-#: A fenced code block, its fences included - left as it is.
-FENCED_CODE = re.compile(r"(^[ \t>]*```.*?^[ \t>]*```)", re.M | re.S)
 #: The suffix of a Russian page - its English sibling has the same name without ``.ru``.
 RUSSIAN_PAGE_SUFFIX = ".ru.md"
 #: The language of the site build the pages are checked in - the i18n plugin builds the site once per

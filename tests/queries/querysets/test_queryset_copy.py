@@ -7,6 +7,8 @@ import pytest
 from hare.query.queryset.specification_copying import SpecificationCopying
 from tests.shared_models.testmodels import Tournament
 
+pytestmark = pytest.mark.usefixtures("model_conversion_context")
+
 
 @pytest.mark.asyncio
 async def test_copy_preserves_every_clone_slot_value(db):
@@ -64,8 +66,8 @@ def test_custom_queryset_copies_mutable_state_through_its_hook(uses_slots):
     class TaggedQuerySet(QuerySet):
         __slots__ = ("tags", "__label", "optional") if uses_slots else ("__dict__",)
 
-        def __init__(self, model):
-            super().__init__(model)
+        def __init__(self, model, *, binding=None, context=None):
+            super().__init__(model, binding=binding, context=context)
             self.tags = ["root"]
             self.__label = "declared"
 
@@ -117,7 +119,10 @@ def test_manager_base_identity_does_not_follow_a_copy(copy_method):
 
     manager = Manager()
     manager._model = Tournament
-    source = manager._get_unchanged_queryset()
+    from hare.core.hare_context import HareContext
+
+    context = HareContext.require_current()
+    source = manager.get_bound_queryset(context.apps.get_binding(Tournament), context)
     if copy_method == "copy":
         branch = copy(source)
     elif copy_method == "keeping_calls":
@@ -142,19 +147,19 @@ async def test_get_keeps_a_custom_manager_filter_and_queryset_state(db):
     class TaggedQuerySet(QuerySet):
         __slots__ = ("tag",)
 
-        def __init__(self, model):
-            super().__init__(model)
+        def __init__(self, model, *, binding=None, context=None):
+            super().__init__(model, binding=binding, context=context)
             self.tag = "from manager"
 
     class FilteredManager(Manager):
-        def get_queryset(self):
-            return super().get_queryset().filter(name="visible")
+        def get_queryset(self, *, binding=None, context=None):
+            return super().get_queryset(binding=binding, context=context).filter(name="visible")
 
     visible = await Tournament.objects.create(name="visible")
     hidden = await Tournament.objects.create(name="hidden")
     manager = FilteredManager(TaggedQuerySet)
     manager._model = Tournament
-    base = manager._get_unchanged_queryset()
+    base = manager.get_bound_queryset(visible._binding, visible._context)
     branch = base._get_single_queryset(
         (),
         {"id": visible.id},

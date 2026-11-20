@@ -5,7 +5,7 @@ use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{
     PyBool, PyBytes, PyDate, PyDateAccess, PyDateTime, PyDelta, PyDeltaAccess, PyDict, PyFloat, PyInt, PyList,
-    PyString, PyTime, PyTimeAccess, PyTzInfo, PyTzInfoAccess,
+    PyString, PyTime, PyTimeAccess, PyTzInfo,
 };
 use pyo3::Borrowed;
 
@@ -51,33 +51,35 @@ impl Value {
         }
         // datetime must be checked before date (datetime subclasses date).
         if object.is_instance_of::<PyDateTime>() {
-            if let Ok(dt) = object.extract::<DateTime<FixedOffset>>() {
-                return Ok(Value::TimestampTz(dt.with_timezone(&Utc)));
-            }
-            // A variable-offset tzinfo (zoneinfo.ZoneInfo of any zone with DST) fails the
-            // extraction above - its offset at this instant is asked of the tzinfo.
             let datetime = object.cast::<PyDateTime>()?;
-            if datetime.get_tzinfo().is_some() {
-                let offset = object.call_method0(intern!(object.py(), "utcoffset"))?;
-                if let Ok(offset) = offset.cast::<PyDelta>() {
-                    if let Some(instant) = get_utc_instant(datetime, offset) {
-                        return Ok(Value::TimestampTz(instant));
-                    }
-                }
-                // No offset (system local time), or an instant past the datetime range - as
-                // Python converts it, or fails to.
-                let utc = object.call_method1(intern!(object.py(), "astimezone"), (PyTzInfo::utc(object.py())?,))?;
-                return Ok(Value::TimestampTz(utc.extract::<DateTime<Utc>>()?));
+            let offset = object.call_method0(intern!(object.py(), "utcoffset"))?;
+            if offset.is_none() {
+                let wall_clock = get_wall_clock_datetime(datetime)
+                    .ok_or_else(|| to_pyerr(DriverError::Conversion("datetime components are out of range".into())))?;
+                return Ok(Value::Timestamp(wall_clock));
             }
-            return Ok(Value::Timestamp(object.extract::<NaiveDateTime>()?));
+            let offset = offset.cast::<PyDelta>()?;
+            if let Some(instant) = get_utc_instant(datetime, offset) {
+                return Ok(Value::TimestampTz(instant));
+            }
+            // Preserve Python's range handling when the UTC instant is outside datetime's range.
+            let utc = object.call_method1(intern!(object.py(), "astimezone"), (PyTzInfo::utc(object.py())?,))?;
+            return Ok(Value::TimestampTz(utc.extract::<DateTime<Utc>>()?));
         }
         if object.is_instance_of::<PyDate>() {
             return Ok(Value::Date(object.extract::<NaiveDate>()?));
         }
         if object.is_instance_of::<PyTime>() {
             let naive = object.extract::<NaiveTime>()?;
-            if let Some(tzinfo) = object.cast::<PyTime>()?.get_tzinfo() {
-                return Ok(Value::TimeTz(naive, tzinfo.extract::<FixedOffset>()?));
+            let offset = object.call_method0(intern!(object.py(), "utcoffset"))?;
+            if !offset.is_none() {
+                let delta = offset.cast::<PyDelta>()?;
+                let seconds = i64::from(delta.get_days()) * 86_400 + i64::from(delta.get_seconds());
+                let offset = i32::try_from(seconds)
+                    .ok()
+                    .and_then(FixedOffset::east_opt)
+                    .ok_or_else(|| to_pyerr(DriverError::Conversion("time offset is out of range".into())))?;
+                return Ok(Value::TimeTz(naive, offset));
             }
             return Ok(Value::Time(naive));
         }
@@ -133,16 +135,20 @@ impl Value {
     }
 }
 
+/// The wall-clock components, independent of whether tzinfo supplies an offset.
+fn get_wall_clock_datetime(datetime: &Bound<'_, PyDateTime>) -> Option<NaiveDateTime> {
+    NaiveDate::from_ymd_opt(datetime.get_year(), datetime.get_month().into(), datetime.get_day().into())?
+        .and_hms_micro_opt(
+            datetime.get_hour().into(),
+            datetime.get_minute().into(),
+            datetime.get_second().into(),
+            datetime.get_microsecond(),
+        )
+}
+
 /// The UTC instant of an aware datetime at `offset` - None past the range of a Python datetime.
 fn get_utc_instant(datetime: &Bound<'_, PyDateTime>, offset: &Bound<'_, PyDelta>) -> Option<DateTime<Utc>> {
-    let wall_clock =
-        NaiveDate::from_ymd_opt(datetime.get_year(), datetime.get_month().into(), datetime.get_day().into())?
-            .and_hms_micro_opt(
-                datetime.get_hour().into(),
-                datetime.get_minute().into(),
-                datetime.get_second().into(),
-                datetime.get_microsecond(),
-            )?;
+    let wall_clock = get_wall_clock_datetime(datetime)?;
     let offset = TimeDelta::days(offset.get_days().into())
         + TimeDelta::seconds(offset.get_seconds().into())
         + TimeDelta::microseconds(offset.get_microseconds().into());

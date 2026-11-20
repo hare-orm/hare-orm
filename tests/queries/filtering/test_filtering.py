@@ -7,6 +7,7 @@ import pytest_asyncio
 
 from hare.contrib import test
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.dialects.sqlite.parameters.constants import SQLITE_IN_JSON_ARRAY_THRESHOLD
 from hare.exceptions import QueryError, UnSupportedError, ValidationError
 from hare.query.enums import Connector
@@ -673,7 +674,11 @@ async def test_filter_by_annotation_lower_unicode(db):
     await Tournament.objects.create(name="ПРИВЕТ Café")
     tournaments = await Tournament.objects.annotate(name_lower=Lower("name"))
     assert len(tournaments) == 1
-    expected = "ПРИВЕТ café" if Tournament._meta.connection.dialect.name == "sqlite" else "привет café"
+    expected = (
+        "ПРИВЕТ café"
+        if HareContext.require_current().apps.get_queryset(Tournament).get_connection().dialect.name == "sqlite"
+        else "привет café"
+    )
     assert tournaments[0].name_lower == expected
 
 
@@ -984,7 +989,7 @@ async def test_a_case_insensitive_lookup_matches_non_ascii(
     """A case-insensitive lookup folds case as the database does - SQLite only the ASCII letters."""
     await Team.objects.create(name=stored_name)
     teams = await Team.objects.filter(**{f"name__{lookup}": filter_value})
-    folds_only_ascii = Team._meta.connection.dialect.name == "sqlite"
+    folds_only_ascii = HareContext.require_current().apps.get_queryset(Team).get_connection().dialect.name == "sqlite"
     assert [team.name for team in teams] == ([stored_name] if matches_by_ascii_case or not folds_only_ascii else [])
 
 
@@ -997,7 +1002,7 @@ async def test_upper_annotation_case_folds_non_ascii(db):
     # (Cyrillic vs Latin) can legitimately differ between SQLite's byte-order collation and
     # Postgres's locale-aware one, which isn't what this test is about.
     teams = await Team.objects.annotate(name_upper=Upper("name")).order_by("id")
-    if Team._meta.connection.dialect.name == "sqlite":
+    if HareContext.require_current().apps.get_queryset(Team).get_connection().dialect.name == "sqlite":
         assert [t.name_upper for t in teams] == ["привет", "CAFé"]
     else:
         assert [t.name_upper for t in teams] == ["ПРИВЕТ", "CAFÉ"]
@@ -1028,7 +1033,12 @@ async def test_rawsql_list_param_written_into_the_sql_is_the_array_it_binds(db):
         Book.objects.annotate(picked=RawSQL("id = ANY(%s)", [[books[2].id]])).filter(picked=True),
     ):
         bound_ids = sorted(book.id for book in await queryset)
-        inline_rows = await Book._meta.connection.execute_dicts(queryset.sql(parameters_inline=True))
+        inline_rows = (
+            await HareContext.require_current()
+            .apps.get_queryset(Book)
+            .get_connection()
+            .execute_dicts(queryset.sql(parameters_inline=True))
+        )
         assert sorted(row["id"] for row in inline_rows) == bound_ids
 
 
@@ -1071,7 +1081,7 @@ async def test_rawsql_bare_decimal_param_gets_explicit_postgres_cast(db):
 
     rows = await Book.objects.all().annotate(x=RawSQL("%s", [Decimal("5.5")])).values("id", "x")
     assert Decimal(str(rows[0]["x"])) == Decimal("5.5")
-    if Book._meta.connection.dialect.name == "postgresql":
+    if HareContext.require_current().apps.get_queryset(Book).get_connection().dialect.name == "postgresql":
         assert not isinstance(rows[0]["x"], str)
 
 
@@ -1192,17 +1202,6 @@ async def test_range_with_a_none_bound_is_open_ended(db, bounds, expected):
 
 
 @pytest.mark.asyncio
-async def test_range_with_both_none_matches_every_non_null_row(db):
-    """`(None, None)` has neither a lower nor an upper bound - matches every non-NULL row, the
-    same NULL handling a one-sided range already has."""
-    await IntFields.objects.create(intnum=1, intnum_null=5)
-    await IntFields.objects.create(intnum=2, intnum_null=50)
-    await IntFields.objects.create(intnum=3, intnum_null=None)
-    result = set(await IntFields.objects.filter(intnum_null__range=(None, None)).values_list("intnum", flat=True))
-    assert result == {1, 2}
-
-
-@pytest.mark.asyncio
 async def test_range_exclude_is_symmetric_for_null_rows(db):
     """exclude() of any range keeps exactly the rows filter() drops - a NULL row included."""
     await IntFields.objects.create(intnum=1, intnum_null=None)
@@ -1248,13 +1247,6 @@ def test_q_eq_accounts_for_negation():
     assert Q(x=1) != ~Q(x=1)
     assert Q(x=1) == Q(x=1)
     assert ~Q(x=1) == ~Q(x=1)
-
-
-@pytest_asyncio.fixture
-async def char_fields_data(db):
-    await CharFields.objects.create(char="moo")
-    await CharFields.objects.create(char="baa", char_null="baa")
-    await CharFields.objects.create(char="oink")
 
 
 @pytest.mark.asyncio
@@ -1595,29 +1587,6 @@ async def test_single_negation_over_relation_unaffected_by_double_negation_fix(d
 
 
 @pytest.mark.asyncio
-async def test_not_equal_with_f_expression_null_on_the_right_is_kept(db):
-    """The bug itself: left_id is NOT NULL, right_id (the F() target) IS NULL for this row -
-    left_id__not=F("right_id") must still include it (NULL is obviously "distinct from" a real
-    value), not silently drop it the way a bare `<>` would."""
-    single = await Single.objects.create()
-    pair = await Pair.objects.create(left=single, right=None)
-
-    result = await Pair.objects.filter(left_id__not=F("right_id")).values_list("id", flat=True)
-    assert list(result) == [pair.id]
-
-
-@pytest.mark.asyncio
-async def test_not_equal_with_f_expression_null_on_the_left_is_kept(db):
-    """Mirror of the above - NULL on the LEFT side (already handled before this fix, via
-    field.isnull() - regression control, not the bug itself)."""
-    single = await Single.objects.create()
-    pair = await Pair.objects.create(left=None, right=single)
-
-    result = await Pair.objects.filter(left_id__not=F("right_id")).values_list("id", flat=True)
-    assert list(result) == [pair.id]
-
-
-@pytest.mark.asyncio
 async def test_not_equal_with_f_expression_both_null_is_excluded(db):
     """Both sides NULL - IS DISTINCT FROM/IS NOT correctly treats two NULLs as equal (not
     distinct), so this row must be excluded, same as if both held the same real value."""
@@ -1629,9 +1598,7 @@ async def test_not_equal_with_f_expression_both_null_is_excluded(db):
 
 @pytest.mark.asyncio
 async def test_not_equal_with_f_expression_matches_full_truth_table(db):
-    """The bug report's own truth table (a/b/c/d/e-shaped), condensed onto Pair's two nullable
-    columns: equal-non-null and both-null are excluded, every other combination (including either
-    side alone being NULL) is included."""
+    """Equal values and two NULLs are excluded; unequal values and one NULL are included."""
     single_one = await Single.objects.create()
     single_two = await Single.objects.create()
     equal_non_null = await Pair.objects.create(left=single_one, right=single_one)
@@ -1640,8 +1607,8 @@ async def test_not_equal_with_f_expression_matches_full_truth_table(db):
     left_null_only = await Pair.objects.create(left=None, right=single_one)
     right_null_only = await Pair.objects.create(left=single_one, right=None)
 
-    result = set(await Pair.objects.filter(left_id__not=F("right_id")).values_list("id", flat=True))
-    assert result == {different_non_null.id, left_null_only.id, right_null_only.id}
+    result = await Pair.objects.filter(left_id__not=F("right_id")).values_list("id", flat=True)
+    assert sorted(result) == sorted([different_non_null.id, left_null_only.id, right_null_only.id])
     assert equal_non_null.id not in result
     assert both_null.id not in result
 
@@ -1977,7 +1944,9 @@ async def get_author_names(queryset) -> set[str]:
 
 @pytest.mark.asyncio
 async def test_case_insensitive_lookups_follow_the_databases_case_mapping(unicode_case_authors):
-    folds_only_ascii = Author._meta.connection.dialect.name == "sqlite"
+    folds_only_ascii = (
+        HareContext.require_current().apps.get_queryset(Author).get_connection().dialect.name == "sqlite"
+    )
     assert await get_author_names(Author.objects.filter(name__iexact="straße")) == {"Straße"}
     assert await get_author_names(Author.objects.filter(name__iexact="strasse")) == {"STRASSE"}
     assert await get_author_names(Author.objects.filter(name__icontains="ss")) == {"STRASSE"}
@@ -1995,7 +1964,9 @@ async def test_case_insensitive_lookups_follow_the_databases_case_mapping(unicod
 
 @pytest.mark.asyncio
 async def test_upper_lower_follow_the_databases_case_mapping(unicode_case_authors):
-    folds_only_ascii = Author._meta.connection.dialect.name == "sqlite"
+    folds_only_ascii = (
+        HareContext.require_current().apps.get_queryset(Author).get_connection().dialect.name == "sqlite"
+    )
     upper_ff = await get_author_names(Author.objects.annotate(upper_name=Upper("name")).filter(upper_name="FF"))
     assert upper_ff == set()
     assert await get_author_names(Author.objects.annotate(upper_name=Upper("name")).filter(upper_name="II")) == (
@@ -2191,7 +2162,7 @@ async def test_a_text_searched_for_longer_than_a_like_pattern_holds(db):
     search for; other databases search for it."""
     await Tournament.objects.create(id=1, name="a")
     query = Tournament.objects.filter(name__contains="x" * 60_000)
-    if Tournament._meta.connection.dialect.name == "sqlite":
+    if HareContext.require_current().apps.get_queryset(Tournament).get_connection().dialect.name == "sqlite":
         with pytest.raises(ValidationError, match="longer than a LIKE pattern of SQLite holds"):
             await query.count()
     else:

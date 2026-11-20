@@ -14,6 +14,7 @@ import pytest_asyncio
 from hare import Connections
 from hare.contrib import test
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.dialects.postgresql.query import PostgresqlQuery
 from hare.exceptions import (
     DoesNotExist,
@@ -1999,9 +2000,9 @@ async def test_combined_rows_raise_on_unmatched_model_column(db):
 
     with pytest.raises(QueryError, match="none of the models"):
         list(
-            ModelRows(Tournament, db_client.dialect.types).read_combined(
-                db_client, rows, list(rows[0].keys()), {Tournament}, "hare_app", "hare_model"
-            )
+            ModelRows(
+                HareContext.require_current().apps.get_binding(Tournament), db_client.dialect.types
+            ).read_combined(db_client, rows, list(rows[0].keys()), {Tournament}, "hare_app", "hare_model")
         )
 
 
@@ -2021,9 +2022,11 @@ async def test_combined_rows_annotations_survive_hydration(db):
     )
 
     instances = list(
-        ModelRows(Tournament, db_client.dialect.types, annotations=["extra_col"]).read_combined(
-            db_client, rows, list(rows[0].keys()), {Tournament}, "hare_app", "hare_model"
-        )
+        ModelRows(
+            HareContext.require_current().apps.get_binding(Tournament),
+            db_client.dialect.types,
+            annotations=["extra_col"],
+        ).read_combined(db_client, rows, list(rows[0].keys()), {Tournament}, "hare_app", "hare_model")
     )
     assert len(instances) == 1
     assert instances[0].extra_col == 42
@@ -2479,7 +2482,7 @@ async def test_mixed_set_operations_apply_in_chain_order(db):
 
 @pytest.mark.asyncio
 async def test_update_limit_order_by_with_join(db):
-    event_db = Event._meta.connection
+    event_db = HareContext.require_current().apps.get_queryset(Event).get_connection()
     event_db.features = event_db.features.replace(supports_update_limit_order_by=True)
     try:
         t1 = await Tournament.objects.create(name="T1")
@@ -2501,7 +2504,7 @@ async def test_update_limit_order_by_with_join(db):
 
 @pytest.mark.asyncio
 async def test_delete_limit_order_by_with_join(db):
-    event_db = Event._meta.connection
+    event_db = HareContext.require_current().apps.get_queryset(Event).get_connection()
     event_db.features = event_db.features.replace(supports_update_limit_order_by=True)
     try:
         t1 = await Tournament.objects.create(name="T1")
@@ -2526,6 +2529,7 @@ def test_capabilities_resolves_from_bound_connection_not_model_default(db):
     from hare.dialects.postgresql.constants import POSTGRESQL_DIALECT
 
     class FakeDB:
+        connection_handler = None
         dialect = POSTGRESQL_DIALECT
         features = Features()
         query_class = PostgresqlQuery
@@ -2533,7 +2537,7 @@ def test_capabilities_resolves_from_bound_connection_not_model_default(db):
     qs = Event.objects.all()
     qs._apply_connection(FakeDB())
     assert qs.features is FakeDB.features
-    assert qs.features is not Event._meta.connection.features
+    assert qs.features is not HareContext.require_current().apps.get_queryset(Event).get_connection().features
 
 
 def test_capabilities_cache_invalidated_by_apply_db(db):
@@ -2549,6 +2553,7 @@ def test_capabilities_cache_invalidated_by_apply_db(db):
     from hare.dialects.postgresql.constants import POSTGRESQL_DIALECT
 
     class FakeDB:
+        connection_handler = None
         dialect = POSTGRESQL_DIALECT
         features = Features()
         query_class = PostgresqlQuery

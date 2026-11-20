@@ -40,3 +40,12 @@ class SqliteConvertedValueType(StrEnum):
     DATE = "date"
     TIMESTAMP = "timestamp"
     TIME = "time"
+
+
+class SqliteStorageState(StrEnum):
+    """The lifecycle of the native or explicitly resolved deletion target."""
+
+    UNOPENED = "unopened"
+    NOT_CREATED = "not_created"
+    OPENING = "opening"
+    OBSERVED = "observed"

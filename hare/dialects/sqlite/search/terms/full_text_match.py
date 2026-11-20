@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
+from hare.dialects.sqlite.search.sqlite_search_renderers import SqliteSearchRenderers
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms.criteria.criterion import Criterion
 from hare.sql.terms.node import Node
@@ -40,9 +41,8 @@ class FullTextMatch(Criterion):
         yield self.query
 
     def get_sql(self, sql_context: SqlContext) -> str:
-        index_table_sql = sql_context.quote(self.index_table_name)
-        qualified_index_table_sql = (
-            f"{sql_context.quote(self.index_schema)}.{index_table_sql}" if self.index_schema else index_table_sql
+        index_table_sql, qualified_index_table_sql = SqliteSearchRenderers.get_index_table_names_sql(
+            sql_context, self.index_table_name, self.index_schema
         )
         row_key_sql = self.row_key.get_sql(sql_context.copy(with_alias=False))
         query_sql = self.query.get_sql(sql_context.copy(with_alias=False))

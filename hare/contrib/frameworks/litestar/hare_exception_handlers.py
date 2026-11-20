@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 from litestar.exceptions import HTTPException, ValidationException
 from litestar.exceptions.responses import create_exception_response
 
-from hare.contrib.frameworks.constants import PATH_PARAMETER_SOURCE, QUERY_PARAMETER_SOURCE, STATUS_BY_ERROR
+from hare.contrib.frameworks.constants import PATH_PARAMETER_SOURCE, QUERY_PARAMETER_SOURCE
 from hare.contrib.frameworks.error_answers import ErrorAnswers
 from hare.contrib.request_query.exceptions import InvalidRequestQuery, RequestQueryForbidden
 
@@ -74,4 +74,4 @@ class HareExceptionHandlers:
         Returns:
             The map for ``Litestar(exception_handlers=...)``.
         """
-        return {**dict.fromkeys(STATUS_BY_ERROR, cls.answer), InvalidRequestQuery: cls.invalid_request_query}
+        return ErrorAnswers.get_handlers(cls.answer, cls.invalid_request_query)  # type: ignore[return-value]

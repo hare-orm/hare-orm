@@ -10,7 +10,7 @@ from hare.dialects.postgresql.partitioning.partitions.range_partition import Ran
 from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclasses.dataclass(frozen=True)
@@ -28,18 +28,19 @@ class RangePartitioning(ExplicitPartitioning):
     strategy: ClassVar[PartitionStrategy] = PartitionStrategy.RANGE
     partition_class: ClassVar[type[Partition]] = RangePartition
 
-    def raise_if_partitions_unsupported(self, model: type[Model], key_column_count: int) -> None:
+    def raise_if_partitions_unsupported(self, binding: ModelBinding, key_column_count: int) -> None:
         """Rejects partitions sharing a name, a bound without one value per key column and
         overlapping ranges.
 
         Args:
-            model: The partitioned model.
+            binding: The partitioned model binding.
             key_column_count: The number of key columns.
 
         Raises:
             ConfigurationError: The partitions don't fit.
         """
-        super().raise_if_partitions_unsupported(model, key_column_count)
+        model = binding._model
+        super().raise_if_partitions_unsupported(binding, key_column_count)
         for partition in self.partitions:
             for bound in (partition.from_values, partition.to_values):
                 if len(bound) != key_column_count:

@@ -6,7 +6,7 @@ import contextlib
 import datetime
 import decimal
 import logging
-from collections.abc import AsyncGenerator, Callable, Mapping
+from collections.abc import AsyncGenerator, Callable, Coroutine, Mapping
 from contextlib import AbstractAsyncContextManager
 from functools import partial
 from types import MappingProxyType
@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from hare.dialects.base.client.statement_recovery import StatementRecovery
     from hare.dialects.base.client.transaction_client import TransactionClient
     from hare.dialects.base.connection.driver import Driver
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.sql.builder.tables.table import Table
     from hare.sql.sql_context import SqlContext
 
@@ -341,7 +341,8 @@ class DatabaseClient(abc.ABC):
 
     def create_independent_client(self, settings: Mapping[str, Any] | None = None) -> DatabaseClient:
         """A new connection to this client's database, apart from it and in the same tenant schema.
-        The caller closes it.
+        The caller closes it. A context-owned source retains its handler; a standalone
+        source gives the new client an isolated handler from its captured settings.
 
         Args:
             settings: Settings replacing the connection's own.
@@ -592,6 +593,10 @@ class DatabaseClient(abc.ABC):
         """
         raise NotImplementedError()
 
+    async def db_create_exclusive(self) -> None:
+        """Create a fresh database, refusing an existing database of the same name."""
+        await self.db_create()
+
     async def db_delete(self) -> None:
         """Drops the database on the server - for the test runner. Needs
         ``create_connection(with_db=False)`` first.
@@ -777,6 +782,12 @@ class DatabaseClient(abc.ABC):
         """
         raise NotImplementedError()
 
+    def _execute_built(
+        self, query: str, values: list[Any] | None = None, **options: Any
+    ) -> Coroutine[Any, Any, StatementResult]:
+        """Execute SQL and parameters built together by Hare."""
+        return self.execute(query, values, **options)
+
     async def execute_dicts(
         self, query: str, values: list[Any] | None = None, *, retry_read: bool = False
     ) -> list[dict[str, Any]]:
@@ -844,6 +855,12 @@ class DatabaseClient(abc.ABC):
         """
         return StatementExecution.stream(self, query, values, chunk_size)
 
+    def _stream_built_batches(
+        self, query: str, values: list[Any] | None = None, chunk_size: int = 0
+    ) -> AsyncGenerator[list[Any]]:
+        """Stream SQL and parameters built together by Hare."""
+        return self.stream_batches(query, values, chunk_size)
+
     async def stream(self, query: str, values: list[Any] | None = None, chunk_size: int = 0) -> AsyncGenerator[Any]:
         """``stream_batches()`` a row at a time - reading a row after the stream's transaction ended
         raises.
@@ -881,12 +898,12 @@ class DatabaseClient(abc.ABC):
         raise UnSupportedError(f"{self.dialect.name} has no server-side streaming support")
         yield  # type: ignore[unreachable]
 
-    async def take_generated_keys(self, model: type[Model], count: int) -> list[Any]:
+    async def take_generated_keys(self, binding: ModelBinding, count: int) -> list[Any]:
         """Takes the next keys of a model's series - of a database handing them out before the rows
         are written (``Features.takes_keys_before_insert``).
 
         Args:
-            model: The model.
+            binding: The model.
             count: How many keys.
 
         Returns:
@@ -896,6 +913,14 @@ class DatabaseClient(abc.ABC):
             UnSupportedError: The database generates keys as it writes the rows.
         """
         raise UnSupportedError(f"The {self.dialect} database generates keys as it writes the rows")
+
+    def get_non_transactional_client(self) -> DatabaseClient:
+        """Return this exact non-transactional client without selecting an ambient alias or tenant.
+
+        Transaction wrappers return the non-transactional client they were opened on;
+        ordinary clients retain identity, including their schema and application owner.
+        """
+        return self
 
     def get_shared_table_name(self, table: str) -> str:
         """The name a statement of the client reaches a table of hare's own bookkeeping by - kept in the
@@ -909,25 +934,25 @@ class DatabaseClient(abc.ABC):
         """
         return table
 
-    async def get_generated_key_sql(self, model: type[Model]) -> str | None:
+    async def get_generated_key_sql(self, binding: ModelBinding) -> str | None:
         """The SQL expression giving each row of a statement inserting a model's rows the next key of the
         model's series - for rows written by SQL of hare's own, such as rows carried over between tables.
 
         Args:
-            model: The model.
+            binding: The model.
 
         Returns:
             The expression; None when the database generates the keys as it writes the rows - by default.
         """
         return None
 
-    async def synchronize_key_series(self, model: type[Model]) -> None:
+    async def synchronize_key_series(self, binding: ModelBinding) -> None:
         """Moves a model's series of keys past the greatest key its table holds - rows written with
         keys of their own leave the series behind. Nothing by default: a database generating keys as
         it writes the rows keeps up by itself.
 
         Args:
-            model: The model.
+            binding: The model.
         """
 
     async def execute_many(
@@ -942,6 +967,10 @@ class DatabaseClient(abc.ABC):
             recovery: Failure metadata shared by executions of the same prepared statement.
         """
         raise NotImplementedError()
+
+    def _execute_many_built(self, query: str, values: list[list[Any]], **options: Any) -> Coroutine[Any, Any, None]:
+        """Execute a statement built by Hare for each parameter row."""
+        return self.execute_many(query, values, **options)
 
     async def copy(
         self,

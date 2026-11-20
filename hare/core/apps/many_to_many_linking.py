@@ -7,7 +7,6 @@ from hare.exceptions import ConfigurationError
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.fields.relations.swappable_model_reference import SwappableModelReference
 from hare.models import Model
-from hare.query.lookup_info.lookup_info_builder import LookupInfoBuilder
 from hare.sql.identifiers import Identifiers
 
 if TYPE_CHECKING:
@@ -31,6 +30,7 @@ class ManyToManyLinking:
         its backward name, and the generated field of the other side.
 
         Args:
+            apps: The registry used to look up and register related and through models.
             app_name: The model's app.
             model_name: The model's name in it.
             model: The model.
@@ -41,58 +41,66 @@ class ManyToManyLinking:
             ConfigurationError: A model of the relation has no primary key, a self-referential
                 relation goes through a model, or the backward name is taken or reserved.
         """
-        many_to_many_object: ManyToManyFieldInstance[Any] = model._meta.fields_map[field]  # type: ignore[assignment]
+        declaring_binding = apps.get_binding(model)
+        many_to_many_object: ManyToManyFieldInstance[Any] = declaring_binding.fields_map[field]  # type: ignore[assignment]
         if many_to_many_object._generated:
             return
 
         related_model, related_model_name = RelationLinking.get_related_model(apps, many_to_many_object.model_name)
         many_to_many_object.related_model = related_model
         # A link row names both rows by their keys.
-        model._meta.raise_if_no_primary_key(f'ManyToManyField "{model.__name__}.{field}"')
-        related_model._meta.raise_if_no_primary_key(f'ManyToManyField "{model.__name__}.{field}" to it')
+        declaring_binding.raise_if_no_primary_key(f'ManyToManyField "{model.__name__}.{field}"')
+        related_binding = apps.get_binding(related_model)
+        related_binding.raise_if_no_primary_key(f'ManyToManyField "{model.__name__}.{field}" to it')
 
         through_model, forward_keys, backward_keys, generated_on_delete = (
             ManyToManyLinking._get_many_to_many_through_keys(apps, model, field, many_to_many_object, related_model)
         )
+        through_binding = many_to_many_object.get_through_binding()
         many_to_many_object.forward_key, many_to_many_object.forward_keys = forward_keys[0], forward_keys
         many_to_many_object.backward_key, many_to_many_object.backward_keys = backward_keys[0], backward_keys
 
         backward_relation_name = many_to_many_object.related_name = RelationLinking.get_backward_relation_name(  # type: ignore[assignment]
-            many_to_many_object.related_name, model._meta.db_table, model._meta.app, model.__name__
+            many_to_many_object.get_declaration_values()["related_name"],
+            declaring_binding.db_table,
+            declaring_binding.app,
+            model.__name__,
         )
-        is_swapped = model._meta.swapped is not None
-        existing_relation = related_model._meta.fields_map.get(backward_relation_name)  # type: ignore[arg-type]
-        previous_relation = (
-            existing_relation.related_model._meta.fields_map.get(field)
-            if isinstance(existing_relation, ManyToManyFieldInstance) and existing_relation._generated
-            else None
-        )
-        shares_backward_relation = (
-            isinstance(existing_relation, ManyToManyFieldInstance)
-            and isinstance(previous_relation, ManyToManyFieldInstance)
-            and existing_relation.related_name == field
-            and existing_relation.forward_keys == backward_keys
-            and existing_relation.backward_keys == forward_keys
-            and apps.get_table_identity(
-                existing_relation.related_model,
-                existing_relation.related_model._meta.schema,
-                existing_relation.related_model._meta.db_table,
-            )
-            == apps.get_table_identity(model, model._meta.schema, model._meta.db_table)
-            and (
-                previous_relation.declared_through == many_to_many_object.declared_through
-                or (
-                    through_model is not None
-                    and existing_relation.through_model_class is not None
-                    and apps.get_table_identity(
-                        existing_relation.through_model_class,
-                        existing_relation.through_model_class._meta.schema,
-                        existing_relation.through_model_class._meta.db_table,
+        is_swapped = declaring_binding.swapped is not None
+        existing_relation = related_binding.fields_map.get(backward_relation_name)  # type: ignore[arg-type]
+        shares_backward_relation = False
+        if isinstance(existing_relation, ManyToManyFieldInstance) and existing_relation._generated:
+            existing_source_binding = apps.get_binding(existing_relation.related_model)
+            previous_relation = existing_source_binding.fields_map.get(field)
+            shares_backward_relation = (
+                isinstance(previous_relation, ManyToManyFieldInstance)
+                and existing_relation.related_name == field
+                and existing_relation.forward_keys == backward_keys
+                and existing_relation.backward_keys == forward_keys
+                and apps.get_table_identity(
+                    existing_relation.related_model,
+                    existing_source_binding.schema,
+                    existing_source_binding.db_table,
+                )
+                == apps.get_table_identity(model, declaring_binding.schema, declaring_binding.db_table)
+                and (
+                    previous_relation.declared_through == many_to_many_object.declared_through
+                    or (
+                        through_binding is not None
+                        and existing_relation.through_model_class is not None
+                        and apps.get_table_identity(
+                            existing_relation.through_model_class,
+                            (
+                                existing_through_binding := apps.get_binding(existing_relation.through_model_class)
+                            ).schema,
+                            existing_through_binding.db_table,
+                        )
+                        == apps.get_table_identity(
+                            through_binding._model, through_binding.schema, through_binding.db_table
+                        )
                     )
-                    == apps.get_table_identity(through_model, through_model._meta.schema, through_model._meta.db_table)
                 )
             )
-        )
         if not is_swapped and existing_relation is not None and not shares_backward_relation:
             raise ConfigurationError(
                 f"backward relation {backward_relation_name!r} duplicates in model {related_model_name}"
@@ -122,12 +130,12 @@ class ManyToManyLinking:
         many_to_many_relation.through_schema = many_to_many_object.through_schema
         many_to_many_relation.through_model = through_model
         many_to_many_relation.through_model_class = through_model
+        many_to_many_relation.get_relation_binding().through_binding = through_binding
         # Swapped from the owning side, which already resolved both sides.
         many_to_many_relation.forward_keys = many_to_many_object.backward_keys
         many_to_many_relation.backward_keys = many_to_many_object.forward_keys
-        LookupInfoBuilder.forget_descriptions()
         if not is_swapped and not shares_backward_relation:
-            related_model._meta.add_field(backward_relation_name, many_to_many_relation)  # type: ignore[arg-type]
+            related_binding.add_field(backward_relation_name, many_to_many_relation)  # type: ignore[arg-type]
 
     @staticmethod
     def _get_many_to_many_through_keys(
@@ -141,6 +149,7 @@ class ManyToManyLinking:
         ``on_delete`` of the generated other side.
 
         Args:
+            apps: The registry used to look up and register related and through models.
             model: The model declaring the field.
             field: The field's name.
             many_to_many_object: The field.
@@ -160,6 +169,7 @@ class ManyToManyLinking:
             # declared.
             through_model, _ = RelationLinking.get_related_model(apps, many_to_many_object.through_model)
             many_to_many_object.through_model_class = through_model
+            many_to_many_object.get_relation_binding().through_binding = apps.get_binding(through_model)
             RelationLinking.ensure_foreign_key_or_one_to_one_inited(apps, through_model)
             if apps.model_identity(model) == apps.model_identity(related_model):
                 raise ConfigurationError(
@@ -177,9 +187,7 @@ class ManyToManyLinking:
             )
             forward_keys = forward_foreign_key.db_column_names
             backward_keys = backward_foreign_key.db_column_names
-            # The declared on_delete, taken before the reconciliations below overwrite
-            # it.
-            declared_on_delete = many_to_many_object.on_delete
+            declared_on_delete = many_to_many_object.get_declaration_values()["on_delete"]
             many_to_many_object.on_delete = RelationLinking.reconcile_many_to_many_through_on_delete(
                 declared_on_delete, backward_foreign_key, field, model.__name__
             )
@@ -193,18 +201,19 @@ class ManyToManyLinking:
             forward_keys = RelationLinking.expand_many_to_many_key(
                 many_to_many_object.declared_forward_key,
                 related_model.__name__.lower(),
-                related_model._meta.primary_key_attribute_names,
+                apps.get_binding(related_model).primary_key_attribute_names,
             )
+            declaring_binding = apps.get_binding(model)
             backward_keys = RelationLinking.expand_many_to_many_key(
                 many_to_many_object.declared_backward_key,
-                model._meta.db_table,
-                model._meta.primary_key_attribute_names,
+                declaring_binding.db_table,
+                declaring_binding.primary_key_attribute_names,
             )
             if not many_to_many_object.declared_backward_key and backward_keys == forward_keys:
                 # Self-referential: the default backward side would collide with the
                 # forward side's columns.
                 backward_keys = RelationLinking.expand_many_to_many_key(
-                    "", f"{model._meta.db_table}_rel", model._meta.primary_key_attribute_names
+                    "", f"{declaring_binding.db_table}_rel", declaring_binding.primary_key_attribute_names
                 )
             # Both sides are columns of one table hare creates - a name twice, as its database tells names
             # apart, failed its CREATE TABLE.
@@ -236,6 +245,7 @@ class ManyToManyLinking:
         declared table, else one named after both models.
 
         Args:
+            apps: The registry used to look up and register related and through models.
             model: The model declaring the field.
             field: The field's name.
             many_to_many_object: The field.
@@ -249,23 +259,27 @@ class ManyToManyLinking:
         """
         if through_model is not None:
             # The through model's own table, in its own schema.
-            many_to_many_object.through = through_model._meta.db_table
-            many_to_many_object.through_schema = through_model._meta.schema
+            through_binding = apps.get_binding(through_model)
+            many_to_many_object.through = through_binding.db_table
+            many_to_many_object.through_schema = through_binding.schema
         else:
+            declaring_binding = apps.get_binding(model)
             if not many_to_many_object.through:
                 # A model referenced by class but not registered here gets the name its
                 # registry's generator would give.
-                related_model_table_name = related_model._meta.db_table or apps.get_generated_table_name(related_model)
+                related_model_table_name = apps.get_binding(related_model).db_table or apps.get_generated_table_name(
+                    related_model
+                )
                 # A swappable target is named by the field, not by the model the
                 # setting happens to point at - the table must not depend on it.
                 through = (
-                    f"{model._meta.db_table}_{field}"
+                    f"{declaring_binding.db_table}_{field}"
                     if isinstance(many_to_many_object.model_name, SwappableModelReference)
-                    else f"{model._meta.db_table}_{related_model_table_name}"
+                    else f"{declaring_binding.db_table}_{related_model_table_name}"
                 )
                 # Shortened with a digest to fit the identifier limit.
                 through = Identifiers.get_within_limit(through)
                 if not is_swapped:
                     RelationLinking.check_auto_through_table_name_free(apps, table_holders, through, model, field)
                 many_to_many_object.through = through
-            many_to_many_object.through_schema = model._meta.schema
+            many_to_many_object.through_schema = declaring_binding.schema

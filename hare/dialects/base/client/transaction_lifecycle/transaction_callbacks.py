@@ -46,15 +46,31 @@ class TransactionCallbacks:
         client._get_top_level_transaction()._on_commit_callbacks.append(callback_entry)
 
     @staticmethod
-    def add_on_rollback_callback(client: TransactionClient, callback: Callable[[], Any]) -> None:
+    def add_on_rollback_callback(
+        client: TransactionClient, callback: Callable[[], Any], *, is_user_callback: bool = True
+    ) -> None:
         """Registers an on_rollback() callback at the savepoint level of the calling context.
 
         Args:
             client: The transaction's client.
             callback: run once the transaction, or the savepoint it is registered in, rolls back.
+            is_user_callback: False for bookkeeping that must finish before application callbacks.
         """
-        callback_entry = TransactionCallback(callback, TransactionCallbacks.get_registration_span(client))
+        callback_entry = TransactionCallback(
+            callback, TransactionCallbacks.get_registration_span(client), is_user_callback=is_user_callback
+        )
         client._get_top_level_transaction()._on_rollback_callbacks.append(callback_entry)
+
+    @staticmethod
+    def get_rollback_callbacks(entries: list[TransactionCallback]) -> list[Callable[[], Any]]:
+        """Restore bookkeeping before application callbacks can publish another write.
+
+        Registration order is retained within both groups. The common callback runner still
+        attempts every callback if restoration or an application callback fails.
+        """
+        return [entry.callback for entry in entries if not entry.is_user_callback] + [
+            entry.callback for entry in entries if entry.is_user_callback
+        ]
 
     @staticmethod
     async def run_callbacks(callbacks: list[Callable[[], Any]], label: str) -> None:
@@ -161,10 +177,14 @@ class TransactionCallbacks:
         top_level._on_commit_callbacks = [
             entry for entry in top_level._on_commit_callbacks if not entry.is_registered_within(savepoint_span)
         ]
-        fired_entries = [
-            entry for entry in top_level._on_rollback_callbacks if entry.is_registered_within(savepoint_span)
-        ]
-        top_level._on_rollback_callbacks = [
-            entry for entry in top_level._on_rollback_callbacks if not entry.is_registered_within(savepoint_span)
-        ]
-        await TransactionCallbacks.run_callbacks([entry.callback for entry in fired_entries], "on_rollback()")
+        fired_entries = []
+        remaining_entries = []
+        for entry in top_level._on_rollback_callbacks:
+            if entry.is_registered_within(savepoint_span):
+                fired_entries.append(entry)
+            else:
+                remaining_entries.append(entry)
+        top_level._on_rollback_callbacks = remaining_entries
+        await TransactionCallbacks.run_callbacks(
+            TransactionCallbacks.get_rollback_callbacks(fired_entries), "on_rollback()"
+        )

@@ -10,6 +10,7 @@ from hare.contrib.test.constants import REUSE_DATABASES_ENVIRONMENT_VARIABLE
 from hare.contrib.test.databases.postgresql.constants import POSTGRES_KEPT_TEST_SCHEMA_COMMENT_PREFIX
 from hare.contrib.test.databases.resource_cleanup import ResourceCleanup
 from hare.core.log import logger
+from hare.dialects.base.connection.db_url_parts import DbUrlParts
 from tests.resources.constants import (
     APPLICATION_NAME_PREFIX,
     TAGGED_DATABASE_PATTERN,
@@ -54,11 +55,18 @@ class TestRunResources:
         )
         if untagged is not None:
             self.environment[UNTAGGED_URL_ENVIRONMENT_VARIABLE] = untagged
-            template = untagged.replace("\\{", "{").replace("\\}", "}")
+            template = DatabaseUnderTest.normalize_url_template(untagged)
             if "{}" in template and not DatabaseUnderTest.is_file_database(template):
-                self.environment[TEST_DATABASE_ENVIRONMENT_VARIABLE] = template.replace(
-                    "{}", f"{self.run_tag}_{{}}", 1
-                )
+                if DatabaseUnderTest.get_dialect(template).name == "postgresql":
+                    parts = DbUrlParts.parse(template, has_userinfo=True).parsed
+                    if "{}" in parts.path:
+                        # Use the same database-name grammar as the orphan sweeper.
+                        template = f"{parts.scheme}://{parts.netloc}/test_{self.run_tag}_{{}}"
+                        if parts.query:
+                            template += f"?{parts.query}"
+                else:
+                    template = template.replace("{}", f"{self.run_tag}_{{}}", 1)
+                self.environment[TEST_DATABASE_ENVIRONMENT_VARIABLE] = template
         self.environment.setdefault(REUSE_DATABASES_ENVIRONMENT_VARIABLE, "1")
 
     def restore_environment(self) -> None:

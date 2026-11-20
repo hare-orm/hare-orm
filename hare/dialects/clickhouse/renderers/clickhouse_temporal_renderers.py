@@ -20,6 +20,7 @@ from hare.sql.constants import MICROSECONDS_PER_DAY
 from hare.sql.enums import DatetimeCastTarget, DateTruncSource, TruncType
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms import functions as term_functions
+from hare.time import Timezone
 from hare.time.system_zone import SystemZone
 from hare.time.zone_settings import ZoneSettings
 
@@ -96,19 +97,29 @@ class ClickhouseTemporalRenderers:
         return f"toTimeZone({term_sql}, {cls.get_zone_sql(zone_name, sql_context)})"
 
     @staticmethod
-    def get_time_text_sql(moment_sql: str, zone_sql: str) -> str:
+    def get_wall_clock_text_sql(moment_sql: str, zone_sql: str) -> str:
+        """A local time of day, with its fractional seconds when present."""
+        text_sql = f"formatDateTime({moment_sql}, '{CLICKHOUSE_TIME_TEXT_FORMAT}', {zone_sql})"
+        return f"replaceRegexpOne({text_sql}, '{CLICKHOUSE_WHOLE_SECOND_FRACTION_PATTERN}', '')"
+
+    @classmethod
+    def get_time_text_sql(cls, moment_sql: str, zone_sql: str, sql_context: SqlContext) -> str:
         """A moment's time of day at a zone, as ``datetime.time.isoformat()`` writes it - its
-        microseconds only when it has any.
+        microseconds only when it has any, with the configured fixed offset for an aware time.
 
         Args:
             moment_sql: The moment.
             zone_sql: The zone's literal.
+            sql_context: The rendering context.
 
         Returns:
             The SQL.
         """
-        text_sql = f"formatDateTime({moment_sql}, '{CLICKHOUSE_TIME_TEXT_FORMAT}', {zone_sql})"
-        return f"replaceRegexpOne({text_sql}, '{CLICKHOUSE_WHOLE_SECOND_FRACTION_PATTERN}', '')"
+        time_sql = cls.get_wall_clock_text_sql(moment_sql, zone_sql)
+        if ZoneSettings.get_use_timezone():
+            offset_sql = sql_context.dialect.literals.get_string_literal_sql(Timezone.get_fixed_offset_text())
+            return f"concat({time_sql}, {offset_sql})"
+        return time_sql
 
     @staticmethod
     def render_now(function: functions.Now, sql_context: SqlContext) -> str:
@@ -133,7 +144,7 @@ class ClickhouseTemporalRenderers:
         zone_sql = cls.get_zone_sql(zone_name, sql_context)
         if default.value_type == NowValueType.DATE:
             return f"toDate32({CLICKHOUSE_NOW_SQL}, {zone_sql})"
-        return cls.get_time_text_sql(CLICKHOUSE_NOW_SQL, zone_sql)
+        return cls.get_time_text_sql(CLICKHOUSE_NOW_SQL, zone_sql, sql_context)
 
     @classmethod
     def render_extract(cls, function: functions.Extract, sql_context: SqlContext) -> str:
@@ -154,7 +165,7 @@ class ClickhouseTemporalRenderers:
             if function.trunc_type == TruncType.DATE:
                 return f"toDate32({field_sql}, {zone_sql})"
             if function.trunc_type == TruncType.TIME:
-                return cls.get_time_text_sql(field_sql, zone_sql)
+                return cls.get_time_text_sql(field_sql, zone_sql, sql_context)
             remainder_unit_microseconds = CLICKHOUSE_REMAINDER_TRUNC_MICROSECONDS.get(function.trunc_type)
             if remainder_unit_microseconds is not None:
                 moment_sql = f"toDateTime64({field_sql}, {CLICKHOUSE_DATETIME_PRECISION}, 'UTC')"
@@ -171,7 +182,9 @@ class ClickhouseTemporalRenderers:
             return f"toDate32(dateTrunc({unit_sql}, toDateTime64({field_sql}, 0, 'UTC')))"
         if function.trunc_type == TruncType.TIME:
             return field_sql
-        return cls.get_time_text_sql(f"dateTrunc({unit_sql}, {cls.get_time_moment_sql(field_sql)})", "'UTC'")
+        return cls.get_time_text_sql(
+            f"dateTrunc({unit_sql}, {cls.get_time_moment_sql(field_sql)})", "'UTC'", sql_context
+        )
 
     @staticmethod
     def get_time_moment_sql(time_text_sql: str) -> str:
@@ -190,12 +203,12 @@ class ClickhouseTemporalRenderers:
 
     @classmethod
     def render_datetime_cast(cls, function: functions.DatetimeCast, sql_context: SqlContext) -> str:
-        """The date or the time of day of a moment, at its zone."""
+        """The date or the wall clock of a moment for a ``__date`` or ``__time`` lookup."""
         zone_sql = cls.get_zone_sql(cls.get_function_zone_name(function) or "UTC", sql_context)
         field_sql = function.field.get_sql(sql_context)
         if function.target == DatetimeCastTarget.DATE:
             return f"toDate32({field_sql}, {zone_sql})"
-        return cls.get_time_text_sql(field_sql, zone_sql)
+        return cls.get_wall_clock_text_sql(field_sql, zone_sql)
 
     @staticmethod
     def render_temporal_shift(function: functions.TemporalShift, sql_context: SqlContext) -> str:

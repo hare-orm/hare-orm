@@ -14,9 +14,7 @@ ASYNCPG_TOO_MANY_ARGUMENTS_MESSAGE = "the number of query arguments cannot excee
 #: How long to wait for the connection pool to close gracefully before terminating it.
 POOL_CLOSE_TIMEOUT_SECONDS = 10
 
-#: Types AsyncpgClient._asyncpg_bind_value() can identify as never duck-type-matching
-#: hare.dialects.postgresql.fields.ranges.Range (none of them can carry a lower_inc attribute) via a single
-#: type() membership check, skipping that check's 1-4 hasattr() calls for the common case.
+#: Exact scalar types AsyncpgParameters can bind without checking for a range's attributes.
 FAST_SCALAR_BIND_TYPES = frozenset(
     {bytes, str, int, float, bool, type(None), decimal.Decimal, datetime.datetime, datetime.date, datetime.time}
 )
@@ -43,7 +41,17 @@ DEFAULT_STREAM_PREFETCH = 1000
 #: Connection parameters only asyncpg.create_pool() accepts - left out of the dedicated
 #: asyncpg.connect() connection listen() opens, which rejects them with a TypeError.
 ASYNCPG_POOL_ONLY_PARAMETERS = frozenset(
-    {"min_size", "max_size", "max_queries", "max_inactive_connection_lifetime", "setup", "init", "reset", "connect"}
+    {
+        "init_size",
+        "min_size",
+        "max_size",
+        "max_queries",
+        "max_inactive_connection_lifetime",
+        "setup",
+        "init",
+        "reset",
+        "connect",
+    }
 )
 
 #: The root certificate setting of a DB_URL - asyncpg reads it only from a DSN, as ``sslrootcert``.
@@ -104,3 +112,16 @@ TSVECTOR_WHITESPACE = frozenset(" \t\n\r\v\f")
 TSVECTOR_WEIGHTS_BY_LETTER = {"a": 3, "A": 3, "*": 3, "b": 2, "B": 2, "c": 1, "C": 1, "d": 0, "D": 0}
 #: Where a ``tsvector`` position's weight starts in its 16 bits.
 TSVECTOR_WEIGHT_SHIFT = 14
+
+#: Stay below the server's result-column limit while preparing domain metadata.
+ASYNCPG_DOMAIN_TYPES_BATCH_SIZE = 256
+
+#: Accessible domain arrays let asyncpg prepare domain codecs used inside anonymous records.
+ASYNCPG_DOMAIN_TYPES_SQL = (
+    "SELECT n.nspname, t.typname, t.oid, t.typarray FROM pg_type t "
+    "JOIN pg_namespace n ON n.oid = t.typnamespace "
+    "WHERE t.typtype = 'd' AND t.typarray <> 0 "
+    "AND n.nspname <> 'pg_catalog' "
+    "AND NOT pg_is_other_temp_schema(n.oid) "
+    "AND has_schema_privilege(n.oid, 'USAGE') AND has_type_privilege(t.oid, 'USAGE')"
+)

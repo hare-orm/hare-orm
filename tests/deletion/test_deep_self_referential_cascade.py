@@ -6,6 +6,7 @@ Python's own call stack for a chain this deep. Walked iteratively now (see hare/
 import pytest
 
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.dialects.sqlite.exceptions import SqliteTriggerRecursionLimitError
 from hare.exceptions import CascadeDepthLimitError, IntegrityError, StaleObjectError
 from tests.shared_models.testmodels import (
@@ -175,7 +176,7 @@ async def test_raw_delete_past_the_native_cascade_depth_raises_cascade_depth_lim
     such retry and raises it as is."""
     await _create_hard_delete_chain(HARD_DELETE_CHAIN_LENGTH)
     connection = HardDeleteSelfReferentialChain.get_connection(for_write=True)
-    table = HardDeleteSelfReferentialChain._meta.db_table
+    table = HareContext.require_current().apps.get_binding(HardDeleteSelfReferentialChain).db_table
 
     with pytest.raises(CascadeDepthLimitError) as exc_info:
         await connection.execute(f'DELETE FROM "{table}" WHERE "id" = ?', [1])

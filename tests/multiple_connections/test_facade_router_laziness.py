@@ -18,9 +18,8 @@ import pytest
 import pytest_asyncio
 
 from hare import fields
-from hare.contrib.test.databases.test_database_config import TestDatabaseConfig as DatabaseConfig
-from hare.core.hare_context import HareContext
 from hare.models import Model
+from tests.utils.multi_database_context import MultiDatabaseTestContext
 
 pytestmark = pytest.mark.sqlite_only
 
@@ -52,7 +51,14 @@ class InstrumentedRouter:
         return InstrumentedRouter.ALIAS
 
 
-async def _make_context(tmp_path, app_label: str):
+@pytest_asyncio.fixture
+async def instrumented(tmp_path, monkeypatch):
+    InstrumentedRouter.ALIAS = "shard_a"
+    InstrumentedRouter.RAISE = False
+    InstrumentedRouter.READ_CALLS = 0
+    InstrumentedRouter.WRITE_CALLS = 0
+    app_label = "facade_router_laziness"
+
     class Widget(Model):
         id = fields.IntField(primary_key=True)
         name = fields.CharField(max_length=50)
@@ -62,42 +68,16 @@ async def _make_context(tmp_path, app_label: str):
 
     module = types.ModuleType(MODULE_NAME)
     setattr(module, "Widget", Widget)  # noqa: B010
-    sys.modules[MODULE_NAME] = module
+    monkeypatch.setitem(sys.modules, MODULE_NAME, module)
 
-    connections = {
-        name: DatabaseConfig.from_url(f"sqlite+aiosqlite:///{tmp_path / f'{name}.sqlite'}?synchronous=OFF").config
-        for name in ("shard_a", "shard_b")
-    }
-    context = HareContext()
-    await context.__aenter__()
-    await context.init(
-        config={
-            "connections": connections,
-            "apps": {app_label: {"models": [MODULE_NAME], "default_connection": "shard_a"}},
-        },
-        routers=[InstrumentedRouter],
-        _create_db=True,
-    )
-    await context.generate_schemas()
-    first_connection = context.connections.get("shard_a")
-    await context.connections.get("shard_b").execute_script(first_connection.get_schema_sql(safe=True))
-    return context, Widget
-
-
-@pytest_asyncio.fixture
-async def instrumented(tmp_path):
-    InstrumentedRouter.ALIAS = "shard_a"
-    InstrumentedRouter.RAISE = False
-    InstrumentedRouter.READ_CALLS = 0
-    InstrumentedRouter.WRITE_CALLS = 0
-    context, widget = await _make_context(tmp_path, "facade_router_laziness")
-    try:
-        yield context, widget
-    finally:
-        InstrumentedRouter.ALIAS = "shard_a"
-        InstrumentedRouter.RAISE = False
-        await context.__aexit__(None, None, None)
-        sys.modules.pop(MODULE_NAME, None)
+    async with MultiDatabaseTestContext.open_fixed_sqlite_routes(
+        tmp_path, ("shard_a", "shard_b"), app_label=app_label, module_name=MODULE_NAME, router=InstrumentedRouter
+    ) as context:
+        try:
+            yield context, Widget
+        finally:
+            InstrumentedRouter.ALIAS = "shard_a"
+            InstrumentedRouter.RAISE = False
 
 
 # --- router config change between construction and await lands on the await-time choice ---

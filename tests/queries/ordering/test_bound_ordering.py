@@ -26,6 +26,7 @@ pytestmark = pytest.mark.database_independent
 
 @pytest.fixture
 def ordering_context():
+
     class Book(Model):
         id = fields.IntField(primary_key=True)
         title = fields.TextField(null=True)
@@ -33,13 +34,13 @@ def ordering_context():
     apps = StateApps()
     apps.register_model("models", Book)
     apps.init_relations()
-    return ExpressionContext(Book, Table("book"), {}, dialect=SqliteDialect(), connection=None)
+    return ExpressionContext(apps.get_binding(Book), Table("book"), {}, dialect=SqliteDialect(), connection=None)
 
 
 @pytest.mark.parametrize("ascending", [True, False])
 def test_cursor_ties_use_the_same_custom_key_as_ordering(ordering_context, monkeypatch, ascending):
     context = ordering_context
-    title_field = context.model._meta.fields_map["title"]
+    title_field = context.binding.fields_map["title"]
     original = context.dialect.types.get_ordering_key
     monkeypatch.setattr(
         context.dialect.types,
@@ -52,6 +53,8 @@ def test_cursor_ties_use_the_same_custom_key_as_ordering(ordering_context, monke
         model=context.model,
         dialect=context.dialect,
         _connection=None,
+        _context=None,
+        _binding=context.binding,
         _visibility=RowVisibility.DEFAULT,
         _annotations={},
         _select_related_extra_conditions={},
@@ -59,7 +62,7 @@ def test_cursor_ties_use_the_same_custom_key_as_ordering(ordering_context, monke
         _apply_default_ordering=lambda items: items,
         query=Query.from_(context.table).select(context.table.id),
     )
-    QueryOrdering.get_ordering(query, context.model, context.table, orderings, {})
+    QueryOrdering.get_ordering(query, context.binding, context.table, orderings, {})
     rows = [(1, "alpha"), (2, "ALPHA"), (3, "Beta"), (4, None)]
     nonnull = sorted(rows[:-1], key=lambda row: row[1].lower(), reverse=not ascending)
     expected = nonnull + [rows[-1]]

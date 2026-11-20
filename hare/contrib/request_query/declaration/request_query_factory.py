@@ -21,6 +21,7 @@ from hare.query.queryset import QuerySet
 
 if TYPE_CHECKING:
     from hare.contrib.request_query.request_query import RequestQuery
+    from hare.core.apps import Apps
     from hare.core.apps.declarations import ModelReference
 
 
@@ -32,6 +33,7 @@ class RequestQueryFactory:
         query_class: type[RequestQuery[Any]],
         model: ModelReference,
         *,
+        apps: Apps | None = None,
         name: str | None = None,
         queryset: QuerySet[Any] | None = None,
         filters: Iterable[FilterField] | None,
@@ -59,8 +61,10 @@ class RequestQueryFactory:
         the class is of that dialect.
 
         Args:
+            query_class: The request-query class to instantiate or subclass.
             model: The model - bound, so its filters can be checked: its class, its ``"app.Model"`` label
                 or a ``swappable()`` setting, looked up in the current context.
+            apps: The model registry used to read the model's binding.
             name: The class's name, ``<Model>RequestQuery`` by default.
             queryset: The rows the query starts from - ``model.objects`` by default.
             filters: ``Meta.filters``.
@@ -82,9 +86,15 @@ class RequestQueryFactory:
                 ``check_declarations()`` finds it.
         """
         if not isinstance(model, type):
-            model = HareContext.require_current().get_model(model)
+            model = HareContext.require_current().get_model(model) if apps is None else apps.get_model(model)
         if queryset is None:
-            queryset = model.objects.all()
+            if apps is None:
+                queryset = model.objects.all()
+            elif apps.context is None:
+                # A startup declaration is replayed into the runtime application's graph later.
+                queryset = apps.get_binding(model).manager.create_queryset()
+            else:
+                queryset = apps.get_queryset(model)
         elif queryset.model is not model:
             raise ConfigurationError(
                 f"{query_class.__qualname__}.for_model({model.__name__}) takes a queryset of {model.__name__}, "
@@ -117,5 +127,5 @@ class RequestQueryFactory:
             (base,),
             {"__module__": query_class.__module__, "__qualname__": class_name, META_CLASS_NAME: meta},
         )
-        request_query_class.check_declaration()
+        request_query_class.check_declaration(apps=apps)
         return request_query_class

@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.query.expressions import ConditionValue, Exists, OuterReference, Q
 from tests.shared_models.testmodels import OwnerScopedRows, OwnerScopedSecret, OwnerScopedSecretRef
 
@@ -24,7 +25,7 @@ async def test_reused_query_binds_provider_once_per_execution(db, shape, predica
         query = OwnerScopedSecretRef.objects.order_by("id").select_related("secret")
     else:
         query = OwnerScopedSecretRef.objects.order_by("id").prefetch_related("secret")
-    provider = OwnerScopedSecret._meta.manager.scope
+    provider = HareContext.require_current().apps.get_binding(OwnerScopedSecret).manager.scope
 
     def get_predicate(model, visibility):
         owner = OwnerScopedRows.current_owner.get()
@@ -51,7 +52,7 @@ async def test_reused_query_binds_provider_once_per_execution(db, shape, predica
 
 @pytest.mark.asyncio
 async def test_join_policy_does_not_call_queryset_factory(db):
-    manager = OwnerScopedSecret._meta.manager
+    manager = HareContext.require_current().apps.get_binding(OwnerScopedSecret).manager
     token = OwnerScopedRows.current_owner.set("alice")
     try:
         secret = await OwnerScopedSecret.objects.create(owner="alice", text="visible")

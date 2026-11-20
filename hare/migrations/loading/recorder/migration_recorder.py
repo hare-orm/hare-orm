@@ -13,6 +13,7 @@ from hare.time.system_clock import SystemClock
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
+    from hare.models.model_binding import ModelBinding
 
 
 class MigrationRecorder:
@@ -26,14 +27,14 @@ class MigrationRecorder:
         """The recorder's table, for a statement built with the connection's query class."""
         return Table(self.table_name)
 
-    def get_model(self, connection: DatabaseClient) -> type[Model]:
-        """The model of the journal's table, as a connection stores it.
+    def get_binding(self, connection: DatabaseClient) -> ModelBinding:
+        """Prepare the journal's structural metadata using the target connection's dialect.
 
         Args:
             connection: The connection the table is created on.
 
         Returns:
-            The model.
+            The prepared journal binding, without retaining the connection.
         """
         table_name = self.table_name
         journal_table_options = connection.dialect.get_journal_table_options(connection)
@@ -51,24 +52,25 @@ class MigrationRecorder:
                 app = "_migrations"
                 table_options = [journal_table_options] if journal_table_options is not None else []
 
-        return MigrationRecord
+        from hare.core.apps import Apps
+        from hare.core.apps.model_binding_preparation import ModelBindingPreparation
+        from hare.core.connections.connection_handler import ConnectionHandler
+
+        apps = Apps({}, ConnectionHandler(), validate_connections=False, dialects={"_migrations": connection.dialect})
+        with ModelBindingPreparation(apps, (MigrationRecord,)):
+            apps.apps["_migrations"] = {MigrationRecord.__name__: MigrationRecord}
+            binding = apps.get_binding(MigrationRecord)
+            binding.default_connection = "_migrations"
+            apps.init_relations()
+            apps.bind_model_base_queries(binding, connection)
+        return binding
 
     async def ensure_schema(self, schema_editor: BaseSchemaEditor) -> None:
         await schema_editor.client.execute_built_script(
-            schema_editor.table_creation.get_model_sql_data(self.get_model(schema_editor.client), safe=True).table_sql
+            schema_editor.table_creation.get_model_sql_data(
+                self.get_binding(schema_editor.client), safe=True
+            ).table_sql
         )
-
-    async def _table_exists(self, connection: DatabaseClient | None = None) -> bool:
-        """Whether the journal table exists - checked by name: a failed SELECT can be any transient
-        failure, and taking it for a missing table would apply migrations again.
-
-        Args:
-            connection: Overrides ``self.connection`` for this one call.
-        """
-        # Local import: the introspector's modules import the migrations package.
-        from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
-
-        return await DatabaseCatalog.table_exists(connection or self.connection, self.table_name)
 
     async def applied_migrations(self, connection: DatabaseClient | None = None) -> list[MigrationKey]:
         """The migrations recorded as applied.
@@ -81,13 +83,16 @@ class MigrationRecorder:
         Returns:
             Their keys, in the order they were applied.
         """
-        if not await self._table_exists(connection):
+        # Local import: the introspector's modules import the migrations package.
+        from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
+
+        reading_connection = connection or self.connection
+        if not await DatabaseCatalog.table_exists(reading_connection, self.table_name):
             # Expected on a fresh database before ensure_schema() has ever run -
             # treat as "no migrations applied yet" instead of raising.
             logger.debug("Migrations table %r not found yet", self.table_name)
             return []
         # A migration another server of the database applied is read too.
-        reading_connection = connection or self.connection
         await reading_connection.dialect.synchronize_table(reading_connection, self.table_name)
         table = self._get_table()
         query = (
@@ -95,7 +100,7 @@ class MigrationRecorder:
             .select(table.app, table.name)
             .orderby(table.applied_at, table.app, table.name)
         )
-        _, rows = await (connection or self.connection).execute(*query.get_parameterized_sql())
+        _, rows = await reading_connection._execute_built(*query.get_parameterized_sql())
         return [MigrationKey(app_label=row["app"], name=row["name"]) for row in rows]
 
     async def record_applied(self, app: str, name: str, connection: DatabaseClient | None = None) -> None:
@@ -116,7 +121,7 @@ class MigrationRecorder:
             .columns("app", "name", "applied_at")
             .insert(app, name, applied_at)
         )
-        await (connection or self.connection).execute(*query.get_parameterized_sql())
+        await (connection or self.connection)._execute_built(*query.get_parameterized_sql())
 
     async def record_unapplied(self, app: str, name: str, connection: DatabaseClient | None = None) -> None:
         """Records a migration as unapplied.
@@ -128,4 +133,4 @@ class MigrationRecorder:
         """
         table = self._get_table()
         query = self.connection.query_class.from_(table).where((table.app == app) & (table.name == name)).delete()
-        await (connection or self.connection).execute(*query.get_parameterized_sql())
+        await (connection or self.connection)._execute_built(*query.get_parameterized_sql())

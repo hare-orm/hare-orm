@@ -33,6 +33,7 @@ class RequestQueryInputs:
         Other fields sharing those roots need another accepted input or a default.
 
         Args:
+            query_class: The request-query class to instantiate or subclass.
             parameters: ``(name, value)`` pairs.
             request: The request, if any.
             values: Values of other parameters - they win over ``parameters``.

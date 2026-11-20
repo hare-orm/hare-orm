@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from hare.migrations.operations.dependencies.operation_dependency import OperationDependency
+from hare.migrations.operations.enums import DependencyType
 from hare.migrations.operations.hare_operation import HareOperation
 from hare.migrations.state.state import State
 
@@ -19,7 +21,14 @@ class RemoveExtension(HareOperation):
         return f"Remove extension {self.extension_name}"
 
     def state_forward(self, app_label: str, state: State) -> None:
-        state.extensions.discard(self.extension_name)
+        state.extensions.discard((state.default_connections.get(app_label), self.extension_name))
+        state.record_native_operation(app_label, self)
+
+    def get_provided_dependencies(self, app_label: str, state: State) -> list[OperationDependency]:
+        return [OperationDependency.of_extension(self.extension_name, DependencyType.REMOVED)]
+
+    def get_required_dependencies(self, app_label: str, state: State) -> list[OperationDependency]:
+        return [OperationDependency.of_extension(self.extension_name, DependencyType.CREATED)]
 
     async def database_forward(
         self,

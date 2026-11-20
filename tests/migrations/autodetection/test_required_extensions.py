@@ -4,7 +4,6 @@ generate_schemas() ask the same source."""
 
 from __future__ import annotations
 
-import os
 import sys
 import types
 
@@ -102,7 +101,7 @@ class ExtensionReading(Model):
 @pytest.mark.asyncio
 async def test_generate_schemas_creates_the_extensions_of_the_indexes() -> None:
     """Skips manually - the test opens its own context."""
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:").replace("\\{", "{").replace("\\}", "}")
+    db_url = DatabaseUnderTest.normalize_url_template(DatabaseUnderTest.get_url())
     if DatabaseUnderTest.get_dialect(db_url).name != "postgresql":
         pytest.skip("Capability dialect != postgres")
     module = types.ModuleType(MODULE_NAME)

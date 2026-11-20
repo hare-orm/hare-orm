@@ -11,12 +11,14 @@ import pytest
 import pytest_asyncio
 
 from hare import fields
+from hare.core.hare_context import HareContext
 from hare.dialects.clickhouse.fields import DynamicField, VariantField
 from hare.dialects.clickhouse.types.clickhouse_type_names import ClickhouseTypeNames
 from hare.exceptions import ConfigurationError, UnSupportedError, ValidationError
 from hare.query.expressions import F, Q, Window
 from hare.query.functions.window import Lag, Lead, NthValue
 from tests.dialects.clickhouse.dynamic_types.models import Sample
+from tests.utils.model_bindings import ModelBindings
 from tests.utils.operations import apply_operations
 
 MOMENT = datetime.datetime(2024, 5, 6, 7, 8, 9, 123456, tzinfo=datetime.UTC)
@@ -58,7 +60,8 @@ async def ids(**filters):
 def test_column_types():
     from hare.dialects.clickhouse.constants import CLICKHOUSE_DIALECT
 
-    fields_map = Sample._meta.fields_map
+    apps = ModelBindings.prepare(Sample)
+    fields_map = apps.get_binding(Sample).fields_map
     assert fields_map["anything"].get_column_type(CLICKHOUSE_DIALECT) == "Dynamic"
     assert fields_map["limited"].get_column_type(CLICKHOUSE_DIALECT) == "Dynamic(max_types=2)"
     assert fields_map["reading"].get_column_type(CLICKHOUSE_DIALECT) == "Variant(Array(Float64), Int32, String)"
@@ -255,18 +258,16 @@ async def test_arrays_of_dynamic_values(clickhouse_dynamic_types_db):
 async def test_inspectdb_reads_the_types_and_drift_finds_a_changed_one(clickhouse_dynamic_types_db):
     from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
     from hare.migrations.drift import detect_drift
-    from hare.migrations.state.model_state import ModelState
     from hare.migrations.state.state import State
     from tests.utils.model_source_generator import ModelSourceGenerator
 
-    connection = Sample._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Sample).get_connection()
     table = await DatabaseCatalog.inspect_table(connection, "sample")
     source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name)
     compile(source, "<generated>", "exec")
     for expected in ("anything = DynamicField(", "limited = DynamicField(max_types=2", "reading = VariantField("):
         assert expected in source, (expected, source)
-    state = State()
-    state.models[("models", "Sample")] = ModelState.make_from_model("models", Sample)
+    state = State.from_models([Sample], app_label="models")
 
     async def get_altered_fields():
         drift = await detect_drift(connection, state, ["models"])
@@ -293,7 +294,7 @@ async def test_a_variant_of_fields_read_in_their_own_ways(clickhouse_dynamic_typ
     from hare.migrations.operations import CreateModel, DeleteModel
     from hare.migrations.state.state import State
 
-    connection = Sample._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Sample).get_connection()
     # A FixedString is read as its padded bytes by one driver and as text by the other; an address
     # field takes an address object, though it converts a text too.
     field = VariantField([FixedStringField(6), fields.IPv4AddressField(), fields.BooleanField()], null=True)
@@ -340,8 +341,11 @@ async def test_a_variant_value_keeps_its_type_on_every_write(clickhouse_dynamic_
     the String."""
 
     async def get_variant_types() -> list[str]:
-        rows = await Sample._meta.connection.execute_dicts(
-            "SELECT variantType(reading) AS variant_type FROM sample ORDER BY id"
+        rows = (
+            await HareContext.require_current()
+            .apps.get_queryset(Sample)
+            .get_connection()
+            .execute_dicts("SELECT variantType(reading) AS variant_type FROM sample ORDER BY id")
         )
         return [row["variant_type"] for row in rows]
 

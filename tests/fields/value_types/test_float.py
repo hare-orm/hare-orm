@@ -3,6 +3,7 @@ from decimal import Decimal
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.exceptions import ValidationError
 from tests.shared_models import testmodels
 
@@ -10,7 +11,10 @@ from tests.shared_models import testmodels
 @pytest.mark.asyncio
 async def test_nan_is_refused_where_it_would_become_null(db):
     """SQLite stores NaN as NULL - refused there; another database stores it."""
-    if testmodels.FloatFields._meta.connection.dialect.name == "sqlite":
+    if (
+        HareContext.require_current().apps.get_queryset(testmodels.FloatFields).get_connection().dialect.name
+        == "sqlite"
+    ):
         with pytest.raises(ValidationError, match="NaN"):
             await testmodels.FloatFields.objects.create(floatnum=1.0, floatnum_null=math.nan)
         return
@@ -26,7 +30,10 @@ async def test_a_filter_by_nan_is_refused_where_it_would_compare_with_null(db, l
     """SQLite binds NaN as NULL - floatnum__not=NaN matched the rows of no value alone, not every row."""
     await testmodels.FloatFields.objects.create(floatnum=1.0)
     operand = [math.nan] if lookup.endswith("__in") else math.nan
-    if testmodels.FloatFields._meta.connection.dialect.name != "sqlite":
+    if (
+        HareContext.require_current().apps.get_queryset(testmodels.FloatFields).get_connection().dialect.name
+        != "sqlite"
+    ):
         await testmodels.FloatFields.objects.filter(**{lookup: operand}).count()
         return
     with pytest.raises(ValidationError, match="a filter by NaN"):

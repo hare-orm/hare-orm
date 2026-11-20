@@ -7,6 +7,7 @@ import os
 import pytest
 
 from hare import fields
+from hare.core.hare_context import HareContext
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.declarations.environment_value import EnvironmentValue
 from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
@@ -26,8 +27,8 @@ from hare.migrations.operations import (
     DeleteModel,
     RemoveDictionary,
     RenameDictionary,
+    SeparateDatabaseAndState,
 )
-from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state import State
 from hare.query.expressions import F, Value
 from tests.dialects.clickhouse.models import Country, Player, Team
@@ -56,7 +57,7 @@ async def run(operation, state, editor) -> State:
 
 @pytest.mark.asyncio
 async def test_a_dictionary_is_created_with_the_model_and_read_by_its_key(clickhouse_db):
-    connection = Country._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Country).get_connection()
     assert await get_dictionaries(connection, "country_") == {
         "country_names": ("ComplexKeyHashed", ["code"], ["title", "population"], 0, 300)
     }
@@ -140,7 +141,7 @@ def test_dict_get_is_checked():
 
 @pytest.mark.asyncio
 async def test_migrations_add_replace_rename_and_remove_dictionaries(clickhouse_db):
-    connection = Country._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Country).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
     state = await run(
@@ -204,7 +205,7 @@ async def test_migrations_add_replace_rename_and_remove_dictionaries(clickhouse_
 
 @pytest.mark.asyncio
 async def test_a_dictionary_follows_its_table_remade_and_renamed(clickhouse_db):
-    connection = Country._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Country).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
     by_code = ClickhouseDictionary("dict_follow", key=("code",), attributes=("city",))
@@ -251,7 +252,7 @@ async def test_a_dictionary_follows_its_table_remade_and_renamed(clickhouse_db):
 async def test_a_dictionary_takes_the_new_type_of_a_field_it_reads(clickhouse_db):
     """A field a dictionary reads changed its column type and the dictionary kept the old one - drift
     reported the dictionary changed after every migration."""
-    connection = Country._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Country).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
     by_code = ClickhouseDictionary("dict_typed", key=("code",), attributes=("city", "passengers"))
@@ -285,9 +286,13 @@ async def test_a_dictionary_takes_the_new_type_of_a_field_it_reads(clickhouse_db
 
 @pytest.mark.asyncio
 async def test_a_source_is_declared_with_its_secrets_left_out(clickhouse_db, monkeypatch):
-    connection = Country._meta.connection
+    binding = clickhouse_db.apps.get_binding(Country)
+    connection = HareContext.require_current().apps.get_queryset(Country).get_connection()
     shown = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=True)
-    (statement,) = shown.dictionaries.get_dictionary_create_sqls(Country, Country._meta.dictionaries[0])
+    (statement,) = shown.dictionaries.get_dictionary_create_sqls(
+        binding,
+        binding.dictionaries[0],
+    )
     # The SQL shown, not run, has no password in it.
     assert connection.password not in statement and "PASSWORD '[HIDDEN]'" in statement
     assert '("code" VARCHAR(2), "title" VARCHAR(50), "population" Nullable(BIGINT)) PRIMARY KEY "code"' in statement
@@ -307,38 +312,38 @@ async def test_a_source_is_declared_with_its_secrets_left_out(clickhouse_db, mon
     assert "HARE_TEST_DICTIONARY_PASSWORD" in repr(external.deconstruct())
     monkeypatch.delenv("HARE_TEST_DICTIONARY_PASSWORD", raising=False)
     monkeypatch.setenv("HARE_TEST_DICTIONARY_USER", connection.user)
-    preview = shown.dictionaries.get_dictionary_create_sqls(Country, external)[0]
+    preview = shown.dictionaries.get_dictionary_create_sqls(binding, external)[0]
     assert "PASSWORD '[HIDDEN]'" in preview and "USER '[HIDDEN]'" in preview
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     raw = "  CLICKHOUSE(TABLE '{env:HARE_TEST_DICTIONARY_PASSWORD}')  "
     literal = ClickhouseDictionary("literal", key=("code",), attributes=("name",), source=RawSQLTerm(raw))
-    assert editor.dictionaries.get_source_sql(Country, literal) == raw
+    assert editor.dictionaries.get_source_sql(binding, literal) == raw
     with pytest.raises(ConfigurationError, match="HARE_TEST_DICTIONARY_PASSWORD"):
-        editor.dictionaries.get_dictionary_create_sqls(Country, external)
+        editor.dictionaries.get_dictionary_create_sqls(binding, external)
     monkeypatch.setenv("HARE_TEST_DICTIONARY_PASSWORD", connection.password)
     assert (
         os.environ["HARE_TEST_DICTIONARY_PASSWORD"]
-        in editor.dictionaries.get_dictionary_create_sqls(Country, external)[0]
+        in editor.dictionaries.get_dictionary_create_sqls(binding, external)[0]
     )
-    await editor.dictionaries.create_dictionary(Country, external)
+    await editor.dictionaries.create_dictionary(binding, external)
     try:
         await Country.objects.create(code="it", name="Italy")
-        await editor.dictionaries.reload_dictionary(Country, external)
+        await editor.dictionaries.reload_dictionary(binding, external)
         rows = await connection.execute_dicts("SELECT dictGet('country_external', 'title', 'it') AS name")
         assert rows[0]["name"] == "Italy"
     finally:
-        await editor.dictionaries.drop_dictionary(Country, external)
+        await editor.dictionaries.drop_dictionary(binding, external)
     for wrong in (
         ClickhouseDictionary("wrong", key=("code",), attributes=("missing",)),
         ClickhouseDictionary("wrong", key=("missing",), attributes=("name",)),
     ):
         with pytest.raises(ConfigurationError, match="names no field"):
-            editor.dictionaries.get_dictionary_create_sqls(Country, wrong)
+            editor.dictionaries.get_dictionary_create_sqls(binding, wrong)
 
 
 @pytest.mark.asyncio
 async def test_a_dictionary_is_no_table_of_the_database(clickhouse_db):
-    connection = Country._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Country).get_connection()
     table_names = await DatabaseCatalog.get_table_names(connection)
     assert "country" in table_names
     assert "country_names" not in table_names
@@ -346,49 +351,56 @@ async def test_a_dictionary_is_no_table_of_the_database(clickhouse_db):
 
 @pytest.mark.asyncio
 async def test_drift_finds_no_change_of_a_declared_dictionary_and_a_changed_one(clickhouse_db):
-    connection = Country._meta.connection
-    state = State()
-    state.models[("models", "Country")] = ModelState.make_from_model("models", Country)
+    connection = HareContext.require_current().apps.get_queryset(Country).get_connection()
+    state = State.from_models([Country], app_label="models")
 
-    async def get_dictionary_operations():
-        drift = await detect_drift(connection, state, ["models"])
-        return [
-            (type(operation).__name__, operation.dictionary)
-            for operation in drift.operations
-            if "Dictionary" in type(operation).__name__
-        ]
-
-    assert await get_dictionary_operations() == []
+    result = await detect_drift(connection, state, ["models"])
+    assert result.operations == []
+    assert result.mismatched_objects == []
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
-    (declared,) = Country._meta.dictionaries
+    (declared,) = HareContext.require_current().apps.get_binding(Country).dictionaries
     changed = ClickhouseDictionary(
         "country_names", key=("code",), attributes=("name",), lifetime=(5, 10), layout="COMPLEX_KEY_SPARSE_HASHED()"
     )
     try:
-        await editor.dictionaries.alter_dictionary(Country, declared, changed)
-        # The operation bringing the database back to the declaration.
-        assert await get_dictionary_operations() == [("AlterDictionary", declared)]
-        await editor.dictionaries.drop_dictionary(Country, changed)
-        assert await get_dictionary_operations() == [("AddDictionary", declared)]
+        await editor.dictionaries.alter_dictionary(
+            HareContext.require_current().apps.get_binding(Country), declared, changed
+        )
+        result = await detect_drift(connection, state, ["models"])
+        assert result.has_drift
+        assert result.operations == []
+        assert [item.name for item in result.mismatched_objects] == ["country_names"]
+        await editor.dictionaries.drop_dictionary(HareContext.require_current().apps.get_binding(Country), changed)
+        result = await detect_drift(connection, state, ["models"])
+        prepare, add_dictionary = result.operations
+        assert isinstance(prepare, SeparateDatabaseAndState)
+        assert isinstance(add_dictionary, AddDictionary)
+        assert add_dictionary.dictionary == declared
     finally:
-        await editor.run_sqls(editor.dictionaries.get_model_drop_sqls(Country))
-        await editor.dictionaries.create_dictionary(Country, declared)
-    assert await get_dictionary_operations() == []
+        await editor.run_sqls(
+            editor.dictionaries.get_model_drop_sqls(HareContext.require_current().apps.get_binding(Country))
+        )
+        await editor.dictionaries.create_dictionary(HareContext.require_current().apps.get_binding(Country), declared)
+    result = await detect_drift(connection, state, ["models"])
+    assert result.operations == []
+    assert result.mismatched_objects == []
 
 
 @pytest.mark.asyncio
 async def test_a_direct_dictionary_is_created_without_a_lifetime(clickhouse_db):
     # It keeps no rows - the server refuses a LIFETIME for it, and hare refuses one declared.
-    connection = Country._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Country).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     direct = ClickhouseDictionary("country_direct", key=("code",), attributes=("name",), layout="COMPLEX_KEY_DIRECT()")
-    assert "LIFETIME" not in " ".join(editor.dictionaries.get_dictionary_create_sqls(Country, direct))
-    await editor.dictionaries.create_dictionary(Country, direct)
+    assert "LIFETIME" not in " ".join(
+        editor.dictionaries.get_dictionary_create_sqls(HareContext.require_current().apps.get_binding(Country), direct)
+    )
+    await editor.dictionaries.create_dictionary(HareContext.require_current().apps.get_binding(Country), direct)
     try:
         assert await get_dictionaries(connection, "country_direct") == {
             "country_direct": ("ComplexKeyDirect", ["code"], ["title"], 0, 0)
         }
     finally:
-        await editor.dictionaries.drop_dictionary(Country, direct)
+        await editor.dictionaries.drop_dictionary(HareContext.require_current().apps.get_binding(Country), direct)
     with pytest.raises(ConfigurationError, match="keeps no rows"):
         ClickhouseDictionary("country_direct", key=("code",), attributes=("name",), layout="DIRECT()", lifetime=60)

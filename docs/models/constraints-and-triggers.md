@@ -10,6 +10,13 @@ from hare.ddl import (
 )
 ```
 
+Database object names are checked in the namespace of the selected dialect. PostgreSQL trigger
+names are local to their table; SQLite trigger names are local to their database. Tables, indexes
+and views share a name scope on SQLite, including a named `UniqueConstraint`, which hare creates
+as a unique index. ClickHouse data-skipping index names are local to their table. Quoted identifier
+comparison follows the dialect; an omitted SQLite schema means `main`. Function overloads are
+checked by the server using their signatures, rather than refused by a shared bare name.
+
 ## <a id="constraints"></a>Constraints
 
 The two constraint classes of `hare.ddl`, declared in `Meta.constraints`. On ClickHouse a

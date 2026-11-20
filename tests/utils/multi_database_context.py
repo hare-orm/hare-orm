@@ -2,16 +2,48 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Iterable
+from collections.abc import AsyncGenerator, Iterable, Sequence
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hare.contrib.test.databases.temporary_databases import TemporaryDatabases
+from hare.contrib.test.databases.test_database_config import TestDatabaseConfig
 from hare.core.hare_context import HareContext
+from tests.utils.database_under_test import DatabaseUnderTest
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class MultiDatabaseTestContext:
     """Opens a HareContext with one fresh test database per connection alias."""
+
+    @staticmethod
+    @asynccontextmanager
+    async def open_fixed_sqlite_routes(
+        tmp_path: Path, aliases: Sequence[str], *, app_label: str, module_name: str, router: type
+    ) -> AsyncGenerator[HareContext]:
+        """Open each named SQLite file with the same schema and the first alias as default."""
+        connections = {
+            alias: TestDatabaseConfig.from_url(
+                DatabaseUnderTest.get_sqlite_file_url(tmp_path / f"{alias}.sqlite")
+            ).config
+            for alias in aliases
+        }
+        async with HareContext() as context:
+            await context.init(
+                config={
+                    "connections": connections,
+                    "apps": {app_label: {"models": [module_name], "default_connection": aliases[0]}},
+                },
+                routers=[router],
+                _create_db=True,
+            )
+            await context.generate_schemas()
+            first_connection = context.connections.get(aliases[0])
+            for alias in aliases[1:]:
+                await context.connections.get(alias).execute_script(first_connection.get_schema_sql(safe=True))
+            yield context
 
     @classmethod
     @asynccontextmanager

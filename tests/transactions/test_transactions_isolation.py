@@ -4,6 +4,7 @@ or at the weakest stronger one the database has."""
 import pytest
 
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.dialects.base.features import Features
 from hare.dialects.base.sql_dialect import SqlDialect
 from hare.exceptions import QueryError, UnSupportedError
@@ -23,15 +24,7 @@ class ReadCommittedOnlyDialect(SqlDialect):
     features = Features(isolation_levels=(IsolationLevel.READ_COMMITTED,))
 
 
-@pytest.fixture(autouse=True)
-def _clear_query_hooks():
-    Observers.process_observers.clear()
-    for dispatcher in Observers.process_observers.dispatchers.values():
-        dispatcher.pending_errors.clear()
-    yield
-    Observers.process_observers.clear()
-    for dispatcher in Observers.process_observers.dispatchers.values():
-        dispatcher.pending_errors.clear()
+pytestmark = pytest.mark.usefixtures("cleared_process_observers")
 
 
 async def _record_statements(isolation, **options) -> list[str]:
@@ -106,7 +99,7 @@ async def test_default_transaction_sends_no_isolation_statement(db_truncate):
 @pytest.mark.asyncio
 async def test_isolation_statement_comes_first(db_truncate):
     statements = await _record_statements(IsolationLevel.SERIALIZABLE, read_only=True)
-    if Tournament._meta.connection.dialect.name == "postgresql":
+    if HareContext.require_current().apps.get_queryset(Tournament).get_connection().dialect.name == "postgresql":
         assert statements[0] == "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"
     else:
         # Every SQLite transaction is serializable already.

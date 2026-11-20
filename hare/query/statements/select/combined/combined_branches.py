@@ -1,29 +1,30 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
 from copy import copy
 from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import QueryError
-from hare.query.constants import COMBINED_QUERY_APP_COLUMN, COMBINED_QUERY_MODEL_COLUMN
 from hare.query.expressions.term_expression import TermExpression
 from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
-from hare.query.hare_column_names import HareColumnNames
 from hare.query.query_connection import QueryConnection
 from hare.query.queryset.row_multiplication import RowMultiplication
 from hare.query.statements.constants import VALUES_SET_OPERATION_COLUMN_PREFIX
+from hare.query.statements.projections.derived_projection import DerivedProjection
 from hare.query.statements.select.model_rows.instance_hydration import InstanceHydration
 from hare.query.statements.select.model_rows_query import ModelRowsQuery
 from hare.query.statements.select.select_query import SelectQuery
 from hare.sql.builder.queries.query_builder import QueryBuilder
 from hare.sql.builder.queries.set_operation_query import SetOperationQuery
 from hare.sql.enums import SetOperation
-from hare.sql.terms.field import Field
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
+    from hare.query.queryset.query_specification import QuerySpecification
     from hare.query.queryset.queryset import QuerySet
+    from hare.query.rows.model_rows.combined_model_rows import CombinedModelRows
+    from hare.query.rows.values_rows.combined_values_rows import CombinedValuesRows
     from hare.query.statements.select.combined_query import CombinedQuery
 
 
@@ -42,8 +43,11 @@ class CombinedBranches:
         """
         # Local import: the queryset package imports the query statements.
         from hare.query.queryset.combination.queryset_combination import QuerySetCombination
+        from hare.query.queryset.pending_calls.calls_before_setup import CallsBeforeSetup
         from hare.query.queryset.selection.statement_selection import StatementSelection
 
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
+        branch = CallsBeforeSetup.bind(branch, query._context, model_binding.graph)
         if QuerySetCombination.selects_values(branch) != query._combines_values:
             raise QueryError(
                 "Cannot combine model instances with .values()/.values_list() rows - call .values()/"
@@ -86,25 +90,8 @@ class CombinedBranches:
         return models
 
     @staticmethod
-    def get_model_column_names(models: Iterable[type[Model]]) -> tuple[str, str]:
-        """The names of the two columns naming each row's model - its app and its class - free of the columns
-        of every model the rows can be instances of.
-
-        Args:
-            models: The models.
-
-        Returns:
-            The app column's name and the model column's name.
-        """
-        models = tuple(models)
-        return (
-            HareColumnNames.get_free_name(COMBINED_QUERY_APP_COLUMN, models),
-            HareColumnNames.get_free_name(COMBINED_QUERY_MODEL_COLUMN, models),
-        )
-
-    @staticmethod
     def get_prepared_branch(
-        branch: SelectQuery[Any] | CombinedQuery, model_column_names: tuple[str, str]
+        query: CombinedQuery, branch: SelectQuery[Any] | CombinedQuery
     ) -> SelectQuery[Any] | CombinedQuery:
         """A copy of a branch as it is built into the combined statement, tagged with its model
         when it returns instances. Ordering is retained when a slice, distinct selection, cursor
@@ -112,8 +99,8 @@ class CombinedBranches:
         Other branches are unordered: their row order doesn't change the combined rows.
 
         Args:
+            query: The operation the branch is built into.
             branch: The branch.
-            model_column_names: The names of the columns naming the model (``get_model_column_names()``).
 
         Returns:
             The copy.
@@ -159,7 +146,8 @@ class CombinedBranches:
             prepared_branch._orderings = list(prepared_branch._apply_default_ordering(prepared_branch._orderings))
         prepared_branch._default_ordering_disabled = True
         if isinstance(prepared_branch, ModelRowsQuery):
-            CombinedBranches.tag_branch_with_model(prepared_branch, model_column_names)
+            model_rows: CombinedModelRows = query._rows  # type: ignore[assignment]
+            CombinedBranches.tag_branch_with_model(prepared_branch, (model_rows.app_column, model_rows.model_column))
         return prepared_branch
 
     @staticmethod
@@ -189,10 +177,11 @@ class CombinedBranches:
         # SQL string literals, not bound values: constant for the branch's model, so the plan of
         # the combined statement binds none of them.
         app_column, model_column = model_column_names
+        model_binding: ModelBinding = branch._binding  # type: ignore[assignment]
         branch._annotations = {
             **branch._annotations,
-            app_column: TermExpression(ValueWrapper(branch.model._meta.app, allow_parametrize=False)),
-            model_column: TermExpression(ValueWrapper(branch.model._meta._model.__name__, allow_parametrize=False)),
+            app_column: TermExpression(ValueWrapper(model_binding.app, allow_parametrize=False)),
+            model_column: TermExpression(ValueWrapper(model_binding._model.__name__, allow_parametrize=False)),
         }
 
     @staticmethod
@@ -224,8 +213,14 @@ class CombinedBranches:
         from hare.query.statements.select.combined_query import CombinedQuery
 
         embedded_as = "a branch of union()/intersection()/difference()"
-        branch_connection = branch._connection or branch.get_connection()
-        if query._connection is not None and branch_connection.connection_alias != query._connection.connection_alias:
+        declaration: QuerySpecification[Any] = branch
+        pinned_client = declaration._connection
+        branch_connection = pinned_client or branch.get_connection()
+        if (
+            pinned_client is None
+            and query._connection is not None
+            and branch_connection.connection_alias != query._connection.connection_alias
+        ):
             # Every branch's rows live on the connection it runs on by itself - its model's own
             # connection, or the router's choice - and the combined statement runs on one.
             raise QueryError(
@@ -234,24 +229,27 @@ class CombinedBranches:
                 f"combined with ({query._connection.connection_alias!r}) - the combined statement runs on one "
                 "connection. Query each connection separately instead."
             )
-        built_branch = QueryConnection.get_bound_to(
-            CombinedBranches.get_prepared_branch(
-                branch, CombinedBranches.get_model_column_names(CombinedBranches.get_models(query))
-            ),
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
+        # Binding an existing statement keeps its executor type.
+        built_branch: SelectQuery[Any] | CombinedQuery = QueryConnection.get_bound_to(  # type: ignore[assignment]
+            CombinedBranches.get_prepared_branch(query, branch),
             query._connection,
-            query.model,
+            model_binding,
             embedded_as,
+            context=query._context,
         )
-        if value_wrapper_references is not None:
-            built_branch._make_subquery(value_wrapper_references=value_wrapper_references)
-        else:
-            built_branch._make_subquery()
-        query._rows.take_branch(built_branch, branch_index)
-        branch_query = built_branch.query
-        aliases = query._rows.get_branch_aliases(built_branch)
+        built_branch._make_subquery(value_wrapper_references=value_wrapper_references)
         if query._combines_values:
-            branch_query = CombinedBranches.get_namespaced_values_branch(branch_query, aliases)
-            aliases = [f"{VALUES_SET_OPERATION_COLUMN_PREFIX}{position}" for position in range(len(aliases))]
+            values_rows: CombinedValuesRows = query._rows  # type: ignore[assignment]
+            values_rows.take_branch(built_branch, branch_index)
+            branch_query = built_branch.query
+            aliases = values_rows.get_branch_aliases(built_branch)
+        else:
+            model_rows: CombinedModelRows = query._rows  # type: ignore[assignment]
+            public_columns = model_rows.take_branch(built_branch)
+            branch_query, aliases = model_rows.get_branch_projection(built_branch, public_columns)
+        branch_query = CombinedBranches.get_namespaced_branch(branch_query, aliases)
+        aliases = [f"{VALUES_SET_OPERATION_COLUMN_PREFIX}{position}" for position in range(len(aliases))]
         if (
             isinstance(built_branch, CombinedQuery)
             or branch_query._orderbys
@@ -264,76 +262,24 @@ class CombinedBranches:
                 *(inner_query.field(alias).as_(alias) for alias in aliases)
             )
             branch_query._with = with_clauses
-        else:
-            branch_query = CombinedBranches.get_selects_in_output_order(branch_query, aliases)
         return branch_query, dict(built_branch._with_ctes)
 
     @staticmethod
-    def get_namespaced_values_branch(branch_query: QueryBuilder, aliases: list[str]) -> QueryBuilder:
-        """Names a values branch's output columns by position before it becomes a derived table.
+    def get_namespaced_branch(branch_query: QueryBuilder, aliases: list[str]) -> QueryBuilder:
+        """Give every branch positional internal column names before it becomes a derived table.
 
-        User output names may differ only by case. They belong on the final result, where the row
-        reader preserves them, rather than on columns another SELECT addresses by name.
-
-        Args:
-            branch_query: The built branch, including its ordering and slice.
-            aliases: Its output aliases in result order.
-
-        Returns:
-            A copy with internal output names and references to those names updated.
-        """
-        names = {alias: f"{VALUES_SET_OPERATION_COLUMN_PREFIX}{position}" for position, alias in enumerate(aliases)}
-        result = copy(branch_query)
-        result._selects = [
-            copy(term).as_(name)
-            if (name := names.get(term.alias or (term.name if isinstance(term, Field) else ""))) is not None
-            else term
-            for term in branch_query._selects
-        ]
-        result._orderbys = [
-            (
-                Field(names[term.name])
-                if isinstance(term, Field) and term.table is None and term.name in names
-                else copy(term).as_(names[term.alias])
-                if term.alias in names
-                else term,
-                order,
-            )
-            for term, order in branch_query._orderbys
-        ]
-        result._groupbys = [
-            Field(names[term.name]) if isinstance(term, Field) and term.table is None and term.name in names else term
-            for term in branch_query._groupbys
-        ]
-        return result
-
-    @staticmethod
-    def get_selects_in_output_order(branch_query: Any, aliases: list[str]) -> Any:
-        """A branch's statement with its columns in the order of the combined rows' - a set operation
-        pairs the branches' columns by position, and ``values()`` selects the model's fields before its
-        annotations, whatever order the names put them in.
+        Public field and annotation names are restored by the final SELECT, where the reader
+        preserves case. Ordering and grouping references stay bound to their selected expressions.
 
         Args:
-            branch_query: The branch's statement.
-            aliases: The aliases of its columns in output order.
+            branch_query: The built branch, including ordering and slicing.
+            aliases: Its output names in result order.
 
         Returns:
-            The statement - a copy with its columns reordered, or itself when they are in order.
+            The branch with internal output names and updated references.
         """
-        selects = branch_query._selects
-        current_aliases = [select.alias or select.name for select in selects]
-        if current_aliases[: len(aliases)] == aliases:
-            return branch_query
-        alias_set = set(aliases)
-        if not alias_set <= set(current_aliases):
-            return branch_query
-        selects_by_alias = dict(zip(current_aliases, selects, strict=True))
-        ordered_query = copy(branch_query)
-        ordered_query._selects = [
-            *(selects_by_alias[alias] for alias in aliases),
-            *(select for alias, select in zip(current_aliases, selects, strict=True) if alias not in alias_set),
-        ]
-        return ordered_query
+        ordered_query = DerivedProjection.get_selects_in_output_order(branch_query, aliases)
+        return DerivedProjection(ordered_query, column_prefix=VALUES_SET_OPERATION_COLUMN_PREFIX).query
 
     @staticmethod
     def hoist_with_clauses(

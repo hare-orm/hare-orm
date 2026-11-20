@@ -61,5 +61,9 @@ class StatementResult(tuple[int | None, Sequence[Any]]):
         description = self.description
         if description is not None:
             return tuple(map(itemgetter(0), description))
-        rows = self.rows
+        return self.get_row_column_names(self.rows)
+
+    @staticmethod
+    def get_row_column_names(rows: Sequence[Any]) -> tuple[str, ...]:
+        """Read column names from the first row of a named batch."""
         return tuple(rows[0].keys()) if rows else ()

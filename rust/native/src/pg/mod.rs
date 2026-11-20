@@ -5,6 +5,8 @@
 //! `execute_many` parameter type unification (`client`), the base of `Value` (`value`) and
 //! `DriverError` (`error`).
 
+#[cfg(unix)]
+pub(crate) mod bound_parameter;
 #[cfg_attr(not(unix), allow(dead_code))]
 pub mod bounded_statement_tracker;
 #[cfg(unix)]
@@ -27,6 +29,8 @@ pub mod first_row;
 pub mod managed_connection;
 #[cfg(unix)]
 pub mod one_round_trip;
+#[cfg(unix)]
+pub(crate) mod parameter_description;
 pub(crate) mod parameter_encoding;
 #[cfg(unix)]
 pub mod parameter_value_rows;
@@ -34,6 +38,8 @@ pub mod parameter_value_rows;
 pub mod parameter_values;
 #[cfg(unix)]
 pub(crate) mod pending_statements;
+#[cfg(unix)]
+mod pinned_statements;
 pub mod result;
 pub mod result_columns;
 pub mod result_data;
@@ -57,7 +63,7 @@ use pyo3::prelude::*;
 
 /// Fills the `pg` submodule - the driver is built on Unix alone (see the crate root).
 #[cfg(unix)]
-pub fn register(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
+pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<client::Client>()?;
     module.add_class::<client::PooledConnection>()?;
     module.add_class::<client::Listener>()?;
@@ -66,7 +72,7 @@ pub fn register(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<row::PgRow>()?;
     module.add_class::<result::PgResult>()?;
     module.add_function(wrap_pyfunction!(client::connect, module)?)?;
-    error::register(py, module)?;
+    error::register(module)?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

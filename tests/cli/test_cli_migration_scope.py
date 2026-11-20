@@ -327,28 +327,25 @@ async def test_an_empty_name_exits_with_usage_error_code(blog_shop_project, argu
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
-@pytest.mark.parametrize("older_than", ["-1", "-99999999999999999999", "abc", "1.5"])
-async def test_distributed_recover_rejects_out_of_range_older_than(older_than: str, tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("older_than", "message"),
+    [
+        ("-1", "at least 0"),
+        ("-99999999999999999999", "at least 0"),
+        ("abc", "not an integer number of seconds"),
+        ("1.5", "not an integer number of seconds"),
+    ],
+)
+async def test_distributed_recover_rejects_out_of_range_older_than(older_than: str, message: str, tmp_path) -> None:
     result = await CliCommands.run(
         ["-c", "unused.HARE_ORM", "distributed-recover", "--coordinator", "coordinator", "--older-than", older_than],
         project=tmp_path,
     )
 
     assert result.exit_code == 2
-    assert "Traceback" not in result.output
-
-
-@pytest.mark.database_independent
-@pytest.mark.asyncio
-async def test_distributed_recover_older_than_error_names_the_allowed_range(tmp_path) -> None:
-    result = await CliCommands.run(
-        ["-c", "unused.HARE_ORM", "distributed-recover", "--coordinator", "coordinator", "--older-than", "-5"],
-        project=tmp_path,
-    )
-
-    assert result.exit_code == 2
     assert "--older-than" in result.output
-    assert "at least 0" in result.output
+    assert message in result.output
+    assert "Traceback" not in result.output
 
 
 @pytest.mark.database_independent
@@ -410,6 +407,49 @@ def _run_cli_subprocess(project_root: Path, *arguments: str) -> subprocess.Compl
         text=True,
         check=False,
     )
+
+
+@pytest.mark.parametrize("composite", [False, True])
+@pytest.mark.parametrize("same_table", [False, True])
+def test_apps_on_separate_databases_migrate_their_tables_independently(tmp_path, composite, same_table):
+    databases = {alias: tmp_path / f"{alias}.sqlite3" for alias in ("left", "right")}
+    apps = {}
+    for app, alias, table in (("alpha", "left", "shared"), ("beta", "right", "shared" if same_table else "separate")):
+        primary_key = (
+            '    region = fields.IntField()\n    pk = fields.CompositePrimaryKey("region", "number")\n'
+            if composite
+            else ""
+        )
+        ProjectSources(tmp_path).write_package(
+            f"{app}_models",
+            "from hare import Model, fields\n"
+            "class Record(Model):\n"
+            f"    number = fields.IntField(primary_key={not composite!r}, generated=False)\n"
+            "    label = fields.TextField()\n"
+            f"{primary_key}"
+            f"    class Meta:\n        table = {table!r}\n",
+        )
+        apps[app] = {"models": [f"{app}_models.models"], "default_connection": alias}
+    config = {
+        "connections": {alias: f"sqlite+aiosqlite://{path.as_posix()}" for alias, path in databases.items()},
+        "apps": apps,
+    }
+    (tmp_path / "flat_settings.py").write_text(f"HARE_ORM = {config!r}\n", encoding="utf-8")
+    for app, alias, table, number in (
+        ("alpha", "left", "shared", 11),
+        ("beta", "right", "shared" if same_table else "separate", 22),
+    ):
+        for arguments in (("makemigrations", app, "--no-input"), ("migrate", app)):
+            result = _run_cli_subprocess(tmp_path, *arguments)
+            assert result.returncode == 0, result.stdout + result.stderr
+        with sqlite3.connect(databases[alias]) as connection:
+            columns = "number, region, label" if composite else "number, label"
+            values = (number, 7, alias) if composite else (number, alias)
+            placeholders = ", ".join("?" for _ in values)
+            connection.execute(f"INSERT INTO {table} ({columns}) VALUES ({placeholders})", values)
+    for alias, table, number in (("left", "shared", 11), ("right", "shared" if same_table else "separate", 22)):
+        with sqlite3.connect(databases[alias]) as connection:
+            assert connection.execute(f"SELECT number, label FROM {table}").fetchall() == [(number, alias)]
 
 
 FLAT_MODELS = """

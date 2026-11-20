@@ -25,9 +25,8 @@ from hare.query.execution.query_execution import QueryExecution
 from hare.query.execution.write_statements import WriteStatement
 from hare.query.expressions.expression import Expression
 from hare.query.expressions.value import Value
+from hare.query.key_columns import KeyColumns
 from hare.query.query_connection import QueryConnection
-from hare.query.rows.row_column import RowColumn
-from hare.query.rows.row_layout import RowLayout
 from hare.query.statements.constants import INSERT_FROM_CONSTANT_PREFIX
 from hare.query.statements.select.combined.combined_derived_queries import CombinedDerivedQueries
 from hare.sql.terms.parameters.query_parameters import QueryParameters
@@ -38,6 +37,7 @@ if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.fields.field import Field
     from hare.instrumentation.capture.capture_needs import CaptureNeeds
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset.queryset import QuerySet
 
 
@@ -74,13 +74,16 @@ class InsertFromQuery:
                 f"insert_from(fields=...) takes the names of the written fields, got "
                 f"{ValueDescriptions.get_shown_value(fields)}"
             )
+        from hare.query.queryset.pending_calls.calls_before_setup import CallsBeforeSetup
+
+        model_binding: ModelBinding = target._binding  # type: ignore[assignment]
+        source = CallsBeforeSetup.bind(source, target._context, model_binding.graph)
         self.target = target
         self.field_names = tuple(fields)
-        model = target.model
-        meta = model._meta
+        meta: ModelBinding = model_binding
         #: What the insert writes - the fields refused, the stamps of the fields not named.
         self._rules = RowWriteRules.get(
-            model,
+            model_binding,
             WriteType.INSERT,
             self.field_names,
             INSERT_FROM_METHOD_NAME,
@@ -99,7 +102,11 @@ class InsertFromQuery:
         self.written_fields = [
             meta.fields_map[
                 RowWriteRules.get_stored_field_names(
-                    model, [name], INSERT_FROM_METHOD_NAME, expands_generic_keys=False, single_column_relations=True
+                    model_binding,
+                    [name],
+                    INSERT_FROM_METHOD_NAME,
+                    expands_generic_keys=False,
+                    single_column_relations=True,
                 )[0]
             ]
             for name in self.field_names
@@ -122,23 +129,23 @@ class InsertFromQuery:
         Raises:
             QueryError: See the class.
         """
-        model = self.target.model
-        meta = model._meta
+        model_binding: ModelBinding = self.target._binding  # type: ignore[assignment]
+        meta = model_binding
         written = set(self.columns)
         constants: list[tuple[str, Field[Any], Any]] = [
             (meta.fields_db_projection[name], field, value)
             for name, field, value in self._rules.get_stamp_values(Timezone.now())
         ]
         TenantWriteRules.raise_if_source_tenants_unchecked(
-            model, written, self.target._visibility.all_tenants, INSERT_FROM_METHOD_NAME
+            model_binding, written, self.target._visibility.all_tenants, INSERT_FROM_METHOD_NAME
         )
         if (
             (tenant_field := meta.tenant_field) is not None
             and meta.fields_db_projection[tenant_field] not in written
-            and (not self.target._visibility.all_tenants or Tenancy.get_scope(model) is not None)
+            and (not self.target._visibility.all_tenants or Tenancy.get_scope(model_binding) is not None)
         ):
             values: dict[str, Any] = {}
-            TenantWriteRules.fill_new_values(model, values, "insert_from")
+            TenantWriteRules.fill_new_values(model_binding, values, "insert_from")
             constants.append(
                 (meta.fields_db_projection[tenant_field], meta.fields_map[tenant_field], values[tenant_field])
             )
@@ -169,35 +176,33 @@ class InsertFromQuery:
             UnSupportedError: The primary key isn't among the fields written.
         """
         model = self.target.model
-        meta = model._meta
-        key_columns = [meta.fields_db_projection[name] for name in meta.primary_key_attribute_names]
+        meta: ModelBinding = self.target._binding  # type: ignore[assignment]
+        primary_key_names = meta.primary_key_attribute_names
+        key_columns = [meta.fields_db_projection[name] for name in primary_key_names]
         if not all(column in columns for column in key_columns):
             raise UnSupportedError(
                 f"insert_from() into {model.__name__}, whose Meta.change_capture reads the rows written, writes no "
                 f"primary key on the {connection.dialect.name} database, which returns no rows of a write - name "
-                f"the key fields ({', '.join(meta.primary_key_attribute_names)}) among fields"
+                f"the key fields ({', '.join(primary_key_names)}) among fields"
             )
         positions = [columns.index(column) for column in key_columns]
-        key_fields = [meta.fields_map[name] for name in meta.primary_key_attribute_names]
+        key_fields = [meta.fields_map[name] for name in primary_key_names]
         types = connection.dialect.types
-        captured = CapturedWrite(model, capture_needs, connection, RowOperation.INSERT)
+        captured = CapturedWrite(meta, capture_needs, connection, RowOperation.INSERT)
         async with captured.transaction() as transaction_connection:
-            result = await transaction_connection.execute(select_sql, command.parameters, returns_rows=True)
+            result = await transaction_connection._execute_built(select_sql, command.parameters, returns_rows=True)
             pks = []
             if result.rows:
                 column_names = result.column_names
-                layout = RowLayout(
-                    tuple(
-                        RowColumn(column_names[position], types.get_python_reader(field))
-                        for field, position in zip(key_fields, positions, strict=True)
-                    )
+                layout = KeyColumns.get_read_layout(
+                    key_fields, (column_names[position] for position in positions), types
                 )
                 key_values = (layout.read(row) for row in result.rows)
                 pks = list(dict.fromkeys(values[0] if len(values) == 1 else values for values in key_values))
             count = (await BoundWrite.execute_command(transaction_connection, command)).row_count
             await captured.capture_read({}, pks)
         if count != 0:
-            await WriteSteps.report(connection, model, RowOperation.INSERT, pks=pks)
+            await WriteSteps.report(connection, meta, RowOperation.INSERT, pks=pks)
         return count
 
     def hide_sensitive_parameters(self, parameters: list[Any], columns: list[str]) -> list[Any]:
@@ -211,7 +216,7 @@ class InsertFromQuery:
         Returns:
             The parameters.
         """
-        meta = self.target.model._meta
+        meta: ModelBinding = self.target._binding  # type: ignore[assignment]
         if not parameters or not meta.sensitive_fields:
             return parameters
         # A relation's columns are its key fields'.
@@ -307,7 +312,6 @@ class InsertFromQuery:
         Returns:
             The number of rows written.
         """
-        model = self.target.model
         execution_query = self.target._get_execution_query(for_write=True)
         WrittenTargetChecks.raise_if_refused_calls(execution_query, execution_query.dialect)
         connection: DatabaseClient = execution_query._connection  # type: ignore[assignment]
@@ -324,8 +328,9 @@ class InsertFromQuery:
                     for index, (_column, field, value) in enumerate(constant_columns)
                 },
             )
+        model_binding: ModelBinding = self.target._binding  # type: ignore[assignment]
         source_query = QueryConnection.get_bound_to(
-            source._get_compiler(), connection, model, "the source of insert_from()"
+            source, connection, model_binding, "the source of insert_from()", context=self.target._context
         )
         source_query._make_subquery()
         built_query = source_query.query
@@ -342,7 +347,7 @@ class InsertFromQuery:
             )
         select_sql, parameters = built_query.get_parameterized_sql()
         parameters = self.hide_sensitive_parameters(parameters, columns)
-        insert_query = connection.query_class.into(model._meta.basetable).columns(*columns)
+        insert_query = connection.query_class.into(model_binding.basetable).columns(*columns)
         insert_query._rows_source_sql = select_sql
         return await WriteSteps.get_whole_run(
             connection, self._insert(connection, insert_query, select_sql, parameters, columns)
@@ -368,8 +373,8 @@ class InsertFromQuery:
         Returns:
             The number of rows written.
         """
-        model = self.target.model
-        capture_needs = model._meta.change_capture_needs
+        model_binding: ModelBinding = self.target._binding  # type: ignore[assignment]
+        capture_needs = model_binding.change_capture_needs
         if capture_needs is not None and not capture_needs.captures(RowOperation.INSERT):
             capture_needs = None
         returns_rows = capture_needs is not None and connection.features.supports_returning
@@ -383,14 +388,16 @@ class InsertFromQuery:
             )
         if capture_needs is not None:
             # The inserted rows' keys and captured fields, captured with them in one transaction.
-            captured = CapturedWrite(model, capture_needs, connection, RowOperation.INSERT)
+            captured = CapturedWrite(model_binding, capture_needs, connection, RowOperation.INSERT)
             async with captured.transaction() as transaction_connection:
                 count, returned_rows = await BoundWrite.execute_command(transaction_connection, command)
                 changes = await captured.capture_returned(returned_rows)
             if count != 0:
-                await WriteSteps.report(connection, model, RowOperation.INSERT, pks=[change.pk for change in changes])
+                await WriteSteps.report(
+                    connection, model_binding, RowOperation.INSERT, pks=[change.pk for change in changes]
+                )
             return count
         count = (await BoundWrite.execute_command(connection, command)).row_count
         if count != 0:
-            await WriteSteps.report(connection, model, RowOperation.INSERT)
+            await WriteSteps.report(connection, model_binding, RowOperation.INSERT)
         return count

@@ -59,6 +59,7 @@ class SqliteDialect(Dialect):
         isolation_levels=(IsolationLevel.SERIALIZABLE,),
         creates_tables_with_forward_references=True,
         supports_partial_indexes=True,
+        rounds_integer_lookup_bounds=True,
         cuts_like_pattern_at_null_byte=True,
         # An index keeps NULLs first ascending and last descending.
         supports_index_nulls_order=False,

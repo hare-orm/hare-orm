@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from hare.contrib.outbox import ChangeCapture
+from hare.core.hare_context import HareContext
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.fields.generated_field import GeneratedField
 from hare.models import Model
@@ -57,10 +58,12 @@ class GeneratedFieldContract:
         return "error", exception_type
 
     async def execute(self, operation: str, field_name: str) -> Any:
-        field = self.model._meta.fields_map[field_name]
+        field = HareContext.require_current().apps.get_binding(self.model).fields_map[field_name]
         if operation == "json":
             return [
-                ChangeCapture.get_row_values(self.model, {field_name: getattr(row, field_name)})[field_name]
+                ChangeCapture.get_row_values(
+                    HareContext.require_current().apps.get_binding(self.model), {field_name: getattr(row, field_name)}
+                )[field_name]
                 for row in await self.model.objects.order_by("id")
             ]
         if operation == "json_object":

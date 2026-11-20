@@ -4,6 +4,7 @@ own, as a plan of the other features would skip a refusal or write SQL the datab
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.dialects.base.features import Features
 from hare.query.plans.statement.statement_plans import StatementPlans
 from tests.shared_models.testmodels import Tournament
@@ -28,7 +29,7 @@ async def test_a_connection_of_other_features_keeps_its_own_plans(db, monkeypatc
     assert await Tournament.objects.filter(name="second").count() == 0
     assert StatementPlans.hits == hits + 1
 
-    connection = Tournament._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Tournament).get_connection()
     other_features = connection.features.replace(max_bind_parameters=connection.features.max_bind_parameters + 1)
     monkeypatch.setattr(connection, "features", other_features)
     assert await Tournament.objects.filter(name="first").count() == 1

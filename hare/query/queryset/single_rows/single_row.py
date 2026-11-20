@@ -14,6 +14,7 @@ from hare.query.queryset.selection.statement_selection import StatementSelection
 from hare.query.queryset.single_rows.query_set_single import QuerySetSingle
 
 if TYPE_CHECKING:
+    from hare.models.model_binding import ModelBinding
     from hare.query.expressions.expression import Expression
     from hare.query.expressions.ordering import Ordering
     from hare.query.queryset.queryset import QuerySet
@@ -57,8 +58,9 @@ class SingleRow:
         clone = queryset._clone()
         if queryset._limit is None and not queryset._offset and not queryset._distinct_on:
             return clone
-        queryset.model._meta.raise_if_no_primary_key("narrowing a sliced or distinct(*fields) queryset's rows")
-        primary_key_attribute = queryset.model._meta.primary_key_attribute
+        model_binding: ModelBinding = queryset._binding  # type: ignore[assignment]
+        model_binding.raise_if_no_primary_key("narrowing a sliced or distinct(*fields) queryset's rows")
+        primary_key_attribute = model_binding.primary_key_attribute
         # A composite key compares its columns as one row value: (a, b) IN (SELECT a, b ...).
         pk_filter_key = (
             PRIMARY_KEY_IN_FILTER if isinstance(primary_key_attribute, tuple) else f"{primary_key_attribute}__in"
@@ -130,14 +132,15 @@ class SingleRow:
         method_name = "latest" if reverse else "earliest"
         QuerySetCombination.raise_if_combined(queryset, method_name)
         SingleRow.raise_if_sliced_values_rows_differ(queryset, method_name)
-        orderings = orderings or queryset.model._meta.get_latest_by
+        model_binding: ModelBinding = queryset._binding  # type: ignore[assignment]
+        orderings = orderings or model_binding.get_latest_by
         if not orderings:
             raise FieldError(LATEST_WITHOUT_FIELDS_MESSAGE.format(method=method_name))
         expression_aliases, orderings = OrderingArguments.get_expression_aliases(orderings)
         if expression_aliases:
             return getattr(queryset._alias(expression_aliases), method_name)(*orderings)
-        if type_aliases := GenericForeignKeyTypes.get_pending_type_aliases(queryset, tuple(orderings)):
-            return getattr(queryset.alias(**type_aliases), method_name)(*orderings)
+        if (aliased := GenericForeignKeyTypes.get_type_aliased_queryset(queryset, orderings)) is not None:
+            return getattr(aliased, method_name)(*orderings)
         # A path into a JSON field, a date or an array orders by an alias of its own, as in order_by().
         if path_annotations := AnnotationArguments.get_path_annotations(
             queryset, (queryset._get_ordering_name(ordering)[0] for ordering in orderings)

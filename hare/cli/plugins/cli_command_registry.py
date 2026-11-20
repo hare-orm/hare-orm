@@ -4,10 +4,13 @@ import argparse
 import importlib
 import importlib.metadata
 import sys
+from operator import attrgetter
+from typing import Any
 
 from hare.cli.constants import CLI_COMMAND_ENTRY_POINT_GROUP, CLI_COMMAND_REFERENCE_SEPARATOR
 from hare.cli.context.cli_context import CLIContext
 from hare.cli.context.command_context import CommandContext
+from hare.cli.parsed_command import CommandHandler
 from hare.cli.plugins.loaded_cli_command import LoadedCLICommand
 from hare.exceptions import ConfigurationError
 
@@ -68,10 +71,7 @@ class CLICommandRegistry:
         module_path, separator, attribute_path = reference.partition(CLI_COMMAND_REFERENCE_SEPARATOR)
         if not separator or not module_path or not attribute_path:
             raise ConfigurationError(f"expected 'package.module{CLI_COMMAND_REFERENCE_SEPARATOR}ClassName'")
-        target: object = importlib.import_module(module_path)
-        for attribute in attribute_path.split("."):
-            target = getattr(target, attribute)
-        return target
+        return attrgetter(attribute_path)(importlib.import_module(module_path))
 
     @staticmethod
     def load_config_commands(cli_context: CLIContext) -> list[LoadedCLICommand]:
@@ -100,8 +100,24 @@ class CLICommandRegistry:
         return [*CLICommandRegistry.load_entry_point_commands(), *CLICommandRegistry.load_config_commands(cli_context)]
 
     @staticmethod
+    def add_parser(
+        subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+        command_handlers: dict[str, CommandHandler],
+        handler: CommandHandler,
+        name: str,
+        **options: Any,
+    ) -> argparse.ArgumentParser:
+        """Register a parser and its execution callback without reserving argument names."""
+        parser = subparsers.add_parser(name, **options)
+        command_handlers[name] = handler
+        return parser
+
+    @staticmethod
     def register(
-        subparsers: argparse._SubParsersAction[argparse.ArgumentParser], commands: list[LoadedCLICommand]
+        subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+        commands: list[LoadedCLICommand],
+        *,
+        command_handlers: dict[str, CommandHandler],
     ) -> None:
         """Adds each command as a subcommand - one whose name is taken, or whose arguments fail to
         declare, is reported and skipped.
@@ -109,6 +125,7 @@ class CLICommandRegistry:
         Args:
             subparsers: The `hare` subcommand group, with the built-in commands already added.
             commands: The loaded plugin commands.
+            command_handlers: Execution callbacks by command name, outside parsed arguments.
         """
         sources_by_name: dict[str, str] = dict.fromkeys(subparsers.choices, "hare itself")
         for loaded_command in commands:
@@ -122,15 +139,17 @@ class CLICommandRegistry:
             # The callback receives the actual parser exactly once, including its final prog.
             # argparse exposes no removal API: roll back its name and help entry if declaration fails.
             help_count = len(subparsers._choices_actions)
-            command_parser = subparsers.add_parser(command.name, help=command.help)
+            command_parser = CLICommandRegistry.add_parser(
+                subparsers, command_handlers, command.run, command.name, help=command.help
+            )
             try:
                 command.add_arguments(command_parser)
             except Exception as error:
                 del subparsers.choices[command.name]
                 del subparsers._choices_actions[help_count:]
+                command_handlers.pop(command.name, None)
                 CLICommandRegistry.warn(
                     f"skipping CLI command {command.name!r} from {loaded_command.source}: {error!r}"
                 )
                 continue
             sources_by_name[command.name] = loaded_command.source
-            command_parser.set_defaults(func=command.run)

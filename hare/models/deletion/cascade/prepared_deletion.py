@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from hare.core.connections.relation_constraints import RelationConstraints
 from hare.fields.enums import OnDelete
 from hare.models.deletion.cascade.declarations import ForeignKeyChange, PreparedDeletionWave, ThroughChange
 from hare.models.deletion.cascade.deletion_graph import DeletionGraph
@@ -15,6 +16,7 @@ if TYPE_CHECKING:
     from hare.models import Model
     from hare.models.deletion.cascade.cascade_policy import CascadePolicy
     from hare.models.deletion.cascade.deletion_plan import DeletionPlan
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,24 +48,49 @@ class PreparedDeletion:
                 walked_pks = [pk for pk, action in rows.items() if action not in HANDED_OVER_ACTIONS]
                 if not walked_pks:
                     continue
-                for backward_field, field in policy.get_foreign_key_updates(model, connection):
-                    values = await RelatedRows.get_target_values(model, field, walked_pks, connection)
-                    querysets = RelatedRows.get_pointing_querysets(backward_field, values, connection)
+                binding = graph.root_binding.graph.get_binding(model)
+                for backward_field, field in policy.get_foreign_key_updates(
+                    binding, connection, source_model=graph.root_model
+                ):
+                    values = await RelatedRows.get_target_values(
+                        binding,
+                        field,
+                        walked_pks,
+                        connection,
+                        source_model=graph.root_model,
+                    )
+                    querysets = RelatedRows.get_pointing_querysets(
+                        backward_field, values, connection, source_model=graph.root_model
+                    )
                     if querysets:
                         foreign_key_changes.append(ForeignKeyChange(backward_field, field, tuple(querysets)))
                 clearing_pks = [
                     pk
                     for pk, action in rows.items()
                     if action in {DeletionAction.DELETE, DeletionAction.DELETE_BY_DATABASE}
-                    or (action is DeletionAction.SOFT_DELETE and model._meta.soft_delete_hard_cascade)
+                    or (action is DeletionAction.SOFT_DELETE and binding.soft_delete_hard_cascade)
                 ]
                 if not clearing_pks:
                     continue
-                for many_to_many_field in policy.get_through_actions(model, connection):
+                for many_to_many_field in policy.get_through_actions(
+                    binding, connection, source_model=graph.root_model
+                ):
                     client, table, criteria = RelatedRows.get_through_row_criteria(
-                        model, many_to_many_field, clearing_pks, connection
+                        binding,
+                        many_to_many_field,
+                        clearing_pks,
+                        connection,
+                        source_model=graph.root_model,
                     )
-                    through_changes.append(ThroughChange(model, many_to_many_field, client, table, tuple(criteria)))
+                    through_changes.append(
+                        ThroughChange(
+                            binding,
+                            many_to_many_field,
+                            client,
+                            table,
+                            tuple(criteria),
+                        )
+                    )
             waves.append(PreparedDeletionWave(rows_by_model, tuple(foreign_key_changes), tuple(through_changes)))
         return cls(graph, tuple(waves))
 
@@ -72,6 +99,8 @@ class PreparedDeletion:
         pks_by_model: dict[type[Model], list[Any]],
         physically_deleted_keys: frozenset[tuple[type[Model], Any]],
         connection: DatabaseClient | None,
+        *,
+        source_binding: ModelBinding,
     ) -> dict[tuple[type[Model], Any], tuple[type[Model], Any]]:
         """Groups the physically deleted rows by the ``DELETE`` statement removing them: a row the
         database's own cascade removes belongs to its parent's statement.
@@ -80,24 +109,38 @@ class PreparedDeletion:
             A union-find parent map over ``physically_deleted_keys``; read it through
             ``find_statement_root()``.
         """
+        from hare.core.hare_context import HareContext
+
+        source_model = source_binding._model
         statement_by_key = {key: key for key in physically_deleted_keys}
         for parent_model, parent_pks in pks_by_model.items():
             deleted_parent_pks = [pk for pk in parent_pks if (parent_model, pk) in physically_deleted_keys]
             if not deleted_parent_pks:
                 continue
-            for backward_field, foreign_key_field in DeletionGraph.get_backward_relations(parent_model):
+            for backward_field, foreign_key_field in DeletionGraph.get_backward_relations(
+                source_binding.graph.get_binding(parent_model)
+            ):
                 child_model = backward_field.related_model
                 if (
                     foreign_key_field.on_delete != OnDelete.CASCADE
-                    or not foreign_key_field.has_database_constraint
+                    or not RelationConstraints.is_enforced(
+                        foreign_key_field,
+                        HareContext.require_current(),
+                        connection=connection,
+                        source_binding=source_binding,
+                    )
                     or child_model not in pks_by_model
                 ):
                     continue
                 parent_pk_by_target_value = await RelatedRows.get_pks_by_target_values(
-                    parent_model, foreign_key_field, deleted_parent_pks, connection
+                    source_binding.graph.get_binding(parent_model),
+                    foreign_key_field,
+                    deleted_parent_pks,
+                    connection,
+                    source_model=source_model,
                 )
                 for child in await RelatedRows.get_rows_pointing_at(
-                    backward_field, list(parent_pk_by_target_value), connection
+                    backward_field, list(parent_pk_by_target_value), connection, source_model=source_model
                 ):
                     child_key = (child_model, child.pk)
                     parent_pk = parent_pk_by_target_value.get(

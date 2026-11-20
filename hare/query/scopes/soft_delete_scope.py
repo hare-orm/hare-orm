@@ -14,4 +14,4 @@ class SoftDeleteScope(RowScope):
     def get_filter(self, visibility: RowVisibility) -> tuple[str, Any] | None:
         if visibility.include_deleted:
             return None
-        return self.model._meta.soft_delete_field, None  # type: ignore[return-value]
+        return self._binding.soft_delete_field, None  # type: ignore[return-value]

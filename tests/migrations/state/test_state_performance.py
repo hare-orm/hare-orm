@@ -121,6 +121,6 @@ def test_state_clone_preserves_relations():
     parent_model = cloned.apps.get_model("app.Parent")
     child_model = cloned.apps.get_model("app.Child")
 
-    fk = child_model._meta.fields_map["parent"]
+    fk = cloned.apps.get_binding(child_model).fields_map["parent"]
     assert isinstance(fk, ForeignKeyFieldInstance)
     assert fk.related_model is parent_model

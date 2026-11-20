@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from hare.fields.data.binary_field import BinaryField
 from hare.fields.data.numeric.int_field import IntField
 from hare.fields.field import Field
+from hare.fields.generated_field import GeneratedField
 from hare.query.expressions import Function
 from hare.query.expressions.compatibility.constants import NON_TEXT_VALUE_TYPES
 from hare.query.expressions.expression_result import ExpressionResult
+from hare.sql.functions.length import Length as LengthTerm
 
 
 class Length(Function):
@@ -20,6 +23,11 @@ class Length(Function):
     LENGTH_OUTPUT_FIELD = IntField()
 
     value_field = LENGTH_OUTPUT_FIELD
+
+    def _get_function_term(self, function_arg: ExpressionResult, default_terms: list[Any]) -> LengthTerm:
+        field = function_arg.output_field
+        counts_bytes = field is not None and isinstance(GeneratedField.get_effective_field(field), BinaryField)
+        return LengthTerm(function_arg.term, counts_bytes=counts_bytes)
 
     def _get_output_field(
         self, function_arg: ExpressionResult, default_results: list[ExpressionResult]

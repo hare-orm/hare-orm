@@ -70,6 +70,8 @@ class ConnectionAcquisitionGate:
     ) -> list[TResult]:
         if client.dialect.name == "postgresql":
             target, method = client, "_pool_acquire"
+        elif client.dialect.name == "clickhouse":
+            target, method = client, "take_statement_connection"
         else:
             assert client.dialect.name == "sqlite"
             target, method = client._lock, "acquire"

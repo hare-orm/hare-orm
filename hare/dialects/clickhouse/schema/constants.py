@@ -201,7 +201,7 @@ CLICKHOUSE_UNCONVERTED_VALUE_QUERY = (
     "SELECT {column} AS value FROM {table} WHERE {column} IS NOT NULL AND ({predicate}) LIMIT 1"
 )
 #: A stored value a column's type change doesn't convert to its new type.
-CLICKHOUSE_VALUE_NOT_CONVERTED_MESSAGE = 'column {column} of table {table} holds "{value}", which is no {new_type}'
+CLICKHOUSE_VALUE_NOT_CONVERTED_MESSAGE = "column {column} of table {table} holds {value}, which is no {new_type}"
 #: A column's values the server converts to no value of the new type at all.
 CLICKHOUSE_TYPE_NOT_CONVERTED_MESSAGE = (
     "column {column} of table {table} is a {old_type}, which ClickHouse converts to no {new_type}: {error}"

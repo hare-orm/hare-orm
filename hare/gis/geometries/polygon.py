@@ -30,6 +30,8 @@ class Polygon(Geometry):
         if not exterior_ring and holes:
             raise ValidationError("An empty polygon has no holes")
         rings = (exterior_ring, *(Polygon.get_ring(hole) for hole in holes)) if exterior_ring else ()
+        if not all(rings):
+            raise ValidationError("The interior rings of a polygon cannot be empty")
         if len({len(ring[0]) for ring in rings}) > 1:
             raise ValidationError("The rings of a polygon mix 2 and 3 coordinates")
         self.rings = rings

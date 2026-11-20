@@ -11,6 +11,7 @@ import pytest
 from hare.contrib import test
 from hare.contrib.test import capture_queries, requires_features
 from hare.core.connections.connections import Connections
+from hare.core.hare_context import HareContext
 from hare.dialects.postgresql.constants import POSTGRESQL_DIALECT
 from hare.dialects.sqlite.constants import SQLITE_DIALECT
 from hare.exceptions import OperationalError, ValidationError
@@ -199,7 +200,11 @@ def _get_expected_accounts(tenant: str) -> list[tuple[str, str, int]]:
 async def test_bulk_create_upsert_binds_the_active_tenant(db, returning):
     """The single-row execute_many() template and the multi-row statement both bind the tenant
     their ON CONFLICT ... DO UPDATE is limited to."""
-    if returning and SlugTenantAccount._meta.connection.dialect.name == "sqlite":
+    if (
+        returning
+        and HareContext.require_current().apps.get_queryset(SlugTenantAccount).get_connection().dialect.name
+        == "sqlite"
+    ):
         pytest.skip("bulk_create(returning=True) is Postgres-only")
     tenant = f"{SECRET_TOKEN}{QUOTE_BREAKING_TEXT}"
     queries = await _upsert_as_tenant(tenant, returning)
@@ -215,7 +220,12 @@ async def test_bulk_create_upsert_sql_shows_the_tenant_as_a_placeholder(db):
         sql = SlugTenantAccount.objects.bulk_create(
             [SlugTenantAccount(id=1, tenant=SECRET_TOKEN, sku="SKU-1")], update_fields=["balance"], on_conflict=["sku"]
         ).sql()
-    placeholder = "$5" if SlugTenantAccount._meta.connection.dialect.name == "postgresql" else "?"
+    placeholder = (
+        "$5"
+        if HareContext.require_current().apps.get_queryset(SlugTenantAccount).get_connection().dialect.name
+        == "postgresql"
+        else "?"
+    )
     assert SECRET_TOKEN not in sql
     assert sql.endswith(f'WHERE "slugtenantaccount"."tenant"={placeholder}')
 
@@ -466,7 +476,7 @@ async def test_null_byte_in_a_like_lookup_value_is_rejected(db, lookup):
     await Tournament.objects.create(id=2, name="beta")
     # The same query shape again reuses the cached SQL and rebuilds only the pattern.
     assert await Tournament.objects.filter(**{f"name__{lookup}": "alpha"}).count() == 1
-    is_sqlite = Tournament._meta.connection.dialect.name == "sqlite"
+    is_sqlite = HareContext.require_current().apps.get_queryset(Tournament).get_connection().dialect.name == "sqlite"
     with pytest.raises(ValidationError if is_sqlite else Exception, match="null byte" if is_sqlite else None):
         await Tournament.objects.filter(**{f"name__{lookup}": "\x00zzz"}).count()
 

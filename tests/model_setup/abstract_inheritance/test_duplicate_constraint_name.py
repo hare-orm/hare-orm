@@ -15,6 +15,7 @@ import types
 import pytest
 
 from hare import fields
+from hare.core.apps.model_binding_graph import ModelBindingGraph
 from hare.core.config import HareConfig
 from hare.core.hare_context import HareContext
 from hare.ddl.constraints import CheckConstraint, UniqueConstraint
@@ -328,6 +329,8 @@ async def test_explicit_constraint_name_on_different_connections_is_not_a_collis
     ids=["field", "ordered_fields", "expression", "field_names_and_index"],
 )
 async def test_two_unnamed_indexes_getting_one_generated_name_raise_clear_error(indexes):
+    declaration_graph = ModelBindingGraph()
+
     class StockEntry(Model):
         id = fields.IntField(primary_key=True)
         sku = fields.CharField(max_length=20)
@@ -336,9 +339,9 @@ async def test_two_unnamed_indexes_getting_one_generated_name_raise_clear_error(
         class Meta:
             app = "models"
 
-    StockEntry._meta.indexes = indexes
+    declaration_graph.include(StockEntry).indexes = indexes
     with pytest.raises(ConfigurationError, match="the same unnamed index"):
-        StockEntry._meta.finalise_model()
+        declaration_graph.include(StockEntry).finalise_model()
 
 
 @pytest.mark.sqlite_only
@@ -387,11 +390,15 @@ async def test_one_model_declaring_two_objects_of_one_name_raises_clear_error(in
         class Meta:
             app = "models"
 
-    StockEntry._meta.indexes = indexes
-    StockEntry._meta.constraints = constraints
+    StockEntry = type(
+        "StockEntry",
+        (StockEntry,),
+        {"Meta": type("Meta", (), {"app": "models", "indexes": indexes, "constraints": constraints})},
+    )
+
     _register_module(StockEntry=StockEntry)
     try:
-        with pytest.raises(ConfigurationError, match="more than one constraint/index named 'one'"):
+        with pytest.raises(ConfigurationError, match="more than one object named 'one'"):
             async with HareContext() as ctx:
                 await ctx.init(HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": [MODULE_NAME]}))
     finally:

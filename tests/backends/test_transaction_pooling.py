@@ -15,17 +15,6 @@ from tests.utils.driver_classes import DriverClasses
 POSTGRES_CLIENT_CLASSES = DriverClasses.get_parameters(*POSTGRES_CLIENT_PATHS)
 
 
-def make_client(client_class, **credentials):
-    return client_class(
-        user="postgres",
-        password="postgres",
-        database="test",
-        host="127.0.0.1",
-        connection_alias="models",
-        **credentials,
-    )
-
-
 # The check is the clients' shared __init__: every value on rust_pg's client class, the first value
 # on asyncpg's.
 INVALID_POOLER_OPTIONS = [
@@ -53,13 +42,13 @@ INVALID_POOLER_OPTIONS = [
 )
 def test_pooler_options_are_checked(client_class, credentials, message):
     with pytest.raises(ConfigurationError, match=message):
-        make_client(client_class, **credentials)
+        DriverClasses.make_postgresql_client(client_class, **credentials)
 
 
 @pytest.mark.database_independent
 @pytest.mark.parametrize("client_class", POSTGRES_CLIENT_CLASSES, indirect=True)
 def test_a_session_of_its_own_goes_to_the_server_behind_the_pooler(client_class):
-    pooled = make_client(
+    pooled = DriverClasses.make_postgresql_client(
         client_class, port=6432, transaction_pooling=True, direct_host="db.internal", direct_port=5433
     )
     assert TransactionPooler.get_direct_settings(pooled) == {
@@ -74,15 +63,19 @@ def test_a_session_of_its_own_goes_to_the_server_behind_the_pooler(client_class)
     }
     assert (
         TransactionPooler.get_direct_settings(
-            make_client(client_class, port=6432, transaction_pooling=True, direct_host="db.internal")
+            DriverClasses.make_postgresql_client(
+                client_class, port=6432, transaction_pooling=True, direct_host="db.internal"
+            )
         )["port"]
         == 6432
     )
-    straight = make_client(client_class)
+    straight = DriverClasses.make_postgresql_client(client_class)
     assert TransactionPooler.get_direct_settings(straight) == {}
     assert TransactionPooler.get_direct_client(straight) is straight
     with pytest.raises(ConfigurationError, match="set direct_host"):
-        TransactionPooler.get_direct_settings(make_client(client_class, transaction_pooling=True))
+        TransactionPooler.get_direct_settings(
+            DriverClasses.make_postgresql_client(client_class, transaction_pooling=True)
+        )
 
 
 @pytest.mark.database_independent
@@ -90,7 +83,8 @@ def test_a_session_of_its_own_goes_to_the_server_behind_the_pooler(client_class)
 @pytest.mark.asyncio
 async def test_listen_behind_the_pooler_needs_the_server_address(client_class):
     with pytest.raises(ConfigurationError, match="set direct_host"):
-        await make_client(client_class, transaction_pooling=True).listen("channel", lambda *args: None)
+        client = DriverClasses.make_postgresql_client(client_class, transaction_pooling=True)
+        await client.listen("channel", lambda *args: None)
 
 
 @requires_features(dialect="postgresql")

@@ -15,6 +15,7 @@ import pytest_asyncio
 from hare import fields
 from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.core.hare import Hare
+from hare.core.hare_context import HareContext
 from hare.exceptions import FieldError
 from hare.models import Model
 from hare.query.functions import Count, Lower, Max
@@ -50,26 +51,30 @@ async def test_model_keys_are_described_once(db):
     def describe() -> None:
         Tournament.objects.filter(**dict.fromkeys(keys, "x")).exclude(name="y").order_by(*orderings)
         for ordering in orderings:
-            Tournament._meta.get_ordering_info(ordering)
-        Tournament._meta.get_lookups("events__name", dialect)
+            HareContext.require_current().apps.get_binding(Tournament).get_ordering_info(ordering)
+        HareContext.require_current().apps.get_binding(Tournament).get_lookups("events__name", dialect)
 
     describe()
     with count_builder_calls() as calls:
         for __ in range(3):
             describe()
     assert call_counts(calls) == dict.fromkeys(BUILDER_METHOD_NAMES, 0)
-    assert Tournament._meta.get_ordering_info("-name") is Tournament._meta.get_ordering_info("-name")
-    assert Tournament._meta.get_ordering_info("-name").descending
-    assert not Tournament._meta.get_ordering_info("name").descending
+    assert HareContext.require_current().apps.get_binding(Tournament).get_ordering_info(
+        "-name"
+    ) is HareContext.require_current().apps.get_binding(Tournament).get_ordering_info("-name")
+    assert HareContext.require_current().apps.get_binding(Tournament).get_ordering_info("-name").descending
+    assert not HareContext.require_current().apps.get_binding(Tournament).get_ordering_info("name").descending
 
 
 @pytest.mark.asyncio
 async def test_get_lookups_is_cached_per_dialect_and_returns_a_copy(db):
     dialect = db.get_connection().dialect
-    lookups = Tournament._meta.get_lookups("name", dialect)
+    lookups = HareContext.require_current().apps.get_binding(Tournament).get_lookups("name", dialect)
     lookups.clear()
-    assert Tournament._meta.get_lookups("name", dialect)
-    assert Tournament._meta.get_lookups("name", dialect) == Tournament._meta.get_lookups("name", dialect)
+    assert HareContext.require_current().apps.get_binding(Tournament).get_lookups("name", dialect)
+    assert HareContext.require_current().apps.get_binding(Tournament).get_lookups(
+        "name", dialect
+    ) == HareContext.require_current().apps.get_binding(Tournament).get_lookups("name", dialect)
 
 
 @pytest.mark.asyncio
@@ -80,7 +85,10 @@ async def test_composite_keys_and_relations_to_them_are_cached(db):
         VersionedDocument.objects.filter(pk=("x", 1)).order_by("-pk")
         DocumentRevisionNote.objects.filter(document__pk__in=[], document__isnull=False).order_by("document")
     assert call_counts(calls) == dict.fromkeys(BUILDER_METHOD_NAMES, 0)
-    assert VersionedDocument._meta.get_ordering_info("-pk").paths == ("id", "version")
+    assert HareContext.require_current().apps.get_binding(VersionedDocument).get_ordering_info("-pk").paths == (
+        "id",
+        "version",
+    )
 
 
 @pytest.mark.asyncio
@@ -162,7 +170,7 @@ async def test_a_model_without_a_primary_key_is_cached():
 
         def describe() -> None:
             VisitLog.objects.filter(visitor="ann", venue__name="Hall").order_by("-duration", "venue__name")
-            VisitLog._meta.get_ordering_info("-duration")
+            HareContext.require_current().apps.get_binding(VisitLog).get_ordering_info("-duration")
 
         describe()
         with count_builder_calls() as calls:
@@ -170,7 +178,7 @@ async def test_a_model_without_a_primary_key_is_cached():
         assert call_counts(calls) == dict.fromkeys(BUILDER_METHOD_NAMES, 0)
         for __ in range(2):
             with pytest.raises(FieldError, match="has no primary key"):
-                VisitLog._meta.get_ordering_info("pk")
+                HareContext.require_current().apps.get_binding(VisitLog).get_ordering_info("pk")
 
 
 def build_live_model() -> type[Model]:
@@ -190,19 +198,29 @@ def build_live_model() -> type[Model]:
 @pytest.mark.asyncio
 async def test_a_live_model_change_drops_the_descriptions(db):
     with pytest.raises(FieldError):
-        Tournament._meta.get_lookup_info("cached_notes__text")
-    Tournament._meta.get_ordering_info("name")
+        HareContext.require_current().apps.get_binding(Tournament).get_lookup_info("cached_notes__text")
+    HareContext.require_current().apps.get_binding(Tournament).get_ordering_info("name")
     note_model = build_live_model()
     Hare.register_live_models([note_model], "models", connection_alias="models")
     try:
-        assert Tournament._meta.get_lookup_info("cached_notes__text").crosses_to_many
-        assert Tournament._meta.get_ordering_info("cached_notes__text").crosses_to_many
+        assert (
+            HareContext.require_current()
+            .apps.get_binding(Tournament)
+            .get_lookup_info("cached_notes__text")
+            .crosses_to_many
+        )
+        assert (
+            HareContext.require_current()
+            .apps.get_binding(Tournament)
+            .get_ordering_info("cached_notes__text")
+            .crosses_to_many
+        )
     finally:
         Hare.unregister_live_models([note_model])
     with pytest.raises(FieldError):
-        Tournament._meta.get_lookup_info("cached_notes__text")
+        HareContext.require_current().apps.get_binding(Tournament).get_lookup_info("cached_notes__text")
     with pytest.raises(FieldError):
-        Tournament._meta.get_ordering_info("cached_notes__text")
+        HareContext.require_current().apps.get_binding(Tournament).get_ordering_info("cached_notes__text")
 
 
 @pytest_asyncio.fixture

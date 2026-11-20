@@ -9,7 +9,6 @@ from hare.exceptions import FieldError, QueryError
 from hare.fields.constants import ROLLBACK_RESTORE_UNSET
 from hare.fields.database_default import DatabaseDefault
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
-from hare.fields.relations.fields.one_to_one_field_instance import OneToOneFieldInstance
 from hare.models.write.instance_values import InstanceValues
 from hare.models.write.rules.constants import (
     BLIND_INDEX_REASON,
@@ -38,6 +37,7 @@ if TYPE_CHECKING:
     from hare.fields.data.temporal.time_field import TimeField
     from hare.fields.encrypted.blind_index_field import BlindIndexField
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class RowWriteRules:
@@ -71,13 +71,13 @@ class RowWriteRules:
     model_class: ClassVar[DeferredImport[type[Model]]] = DeferredImport("hare.models.model", "Model")
 
     #: Bounded rules of each model, by write type, names and options.
-    RULES_CACHE: ClassVar[Cache[RowWriteRules]] = Cache(Cache.max_size_from_env(), holds_sql=False)
+    RULES_CACHE: ClassVar[Cache[RowWriteRules]] = Cache(Cache.max_size_from_env())
     #: The compiled ``rust.native.rows`` - sets the values of many objects in one call, past their
     #: ``__setattr__``: a model with one of its own is stamped through it, in Python.
     native_rows: ClassVar[Any] = NativeModules.rows
 
     __slots__ = (
-        "model",
+        "_binding",
         "write_type",
         "method_name",
         "finds_rows_by_key",
@@ -98,7 +98,7 @@ class RowWriteRules:
 
     def __init__(
         self,
-        model: type[Model],
+        binding: ModelBinding,
         write_type: WriteType,
         field_names: Sequence[str] | None,
         method_name: str,
@@ -107,8 +107,7 @@ class RowWriteRules:
         single_column_relations: bool,
         finds_rows_by_key: bool,
     ) -> None:
-        meta = model._meta
-        self.model = model
+        self._binding = binding
         self.write_type = write_type
         self.method_name = method_name
         self.finds_rows_by_key = finds_rows_by_key
@@ -118,17 +117,17 @@ class RowWriteRules:
                 REFUSED_FIELD_MESSAGE.format(name=PRIMARY_KEY_ALIAS, method=method_name, reason=PRIMARY_KEY_REASON)
             )
         if field_names is None:
-            written = self.get_every_written_field_name(model, write_type)
+            written = self.get_every_written_field_name(binding, write_type)
         else:
             written = RowWriteRules.get_stored_field_names(
-                model, field_names, method_name, single_column_relations=single_column_relations
+                binding, field_names, method_name, single_column_relations=single_column_relations
             )
             for name in written:
                 self.raise_if_refused(name)
             named_field_names = tuple(written)
         #: The fields the caller named, as fields holding columns - None for a write of every field.
         self.named_field_names = named_field_names
-        blind_index_fields = meta.blind_index_fields
+        blind_index_fields = binding.blind_index_fields
         #: ``(encrypted field, its blind index)`` of each encrypted field written.
         self.blind_indexes: tuple[tuple[str, str], ...] = tuple(
             (name, blind_index_fields[name]) for name in written if name in blind_index_fields
@@ -170,7 +169,7 @@ class RowWriteRules:
             *(index for _source, index in self.blind_indexes),
         )
         #: ``Meta.optimistic_lock_field`` when the write bumps it - every write of existing rows.
-        self.version_field_name: str | None = None if write_type is WriteType.INSERT else meta.optimistic_lock_field
+        self.version_field_name: str | None = None if write_type is WriteType.INSERT else binding.optimistic_lock_field
         #: Every field a write of objects writes: the caller's ones, the blind indexes and the stamps.
         self.written_names: tuple[str, ...] = tuple(dict.fromkeys((*self.field_names, *self.stamped_names)))
         #: Every field an update of objects writes: the written ones and the version it bumps.
@@ -181,12 +180,12 @@ class RowWriteRules:
         )
         #: Whether the stamps and indexes are stored on an object directly - assigning them through the
         #: model's ``__setattr__`` does nothing more.
-        self.sets_directly = RowWriteRules.are_plain_attributes(model, self.saved_attribute_names)
+        self.sets_directly = RowWriteRules.are_plain_attributes(binding, self.saved_attribute_names)
 
     @classmethod
     def get(
         cls,
-        model: type[Model],
+        binding: ModelBinding,
         write_type: WriteType,
         field_names: Iterable[str] | None,
         method_name: str,
@@ -198,7 +197,7 @@ class RowWriteRules:
         """The rules of a write - built the first time and kept with the model.
 
         Args:
-            model: The written model.
+            binding: The written model.
             write_type: What the write does to its rows.
             field_names: The fields the caller names; None for every field the write type writes.
             method_name: The writing method, named in the messages.
@@ -218,7 +217,7 @@ class RowWriteRules:
             if stamps_named_fields and not single_column_relations and finds_rows_by_key
             else (write_type, names, method_name, stamps_named_fields, single_column_relations, finds_rows_by_key)
         )
-        rules_by_key = cls.RULES_CACHE.get_bucket(model)
+        rules_by_key = cls.RULES_CACHE.get_bucket(binding)
         try:
             rules = rules_by_key.get(key)
             hashable = True
@@ -228,7 +227,7 @@ class RowWriteRules:
             hashable = False
         if rules is None:
             rules = cls(
-                model,
+                binding,
                 write_type,
                 names,
                 method_name,
@@ -242,7 +241,7 @@ class RowWriteRules:
 
     @staticmethod
     def get_stored_field_names(
-        model: type[Model],
+        binding: ModelBinding,
         names: Iterable[Any],
         method_name: str,
         *,
@@ -253,7 +252,7 @@ class RowWriteRules:
         its key fields, a generic foreign key the key fields of every branch.
 
         Args:
-            model: The model.
+            binding: The model.
             names: The names as the caller gave them.
             method_name: The method, named in the messages.
             expands_generic_keys: Whether a generic foreign key stands for its branches - it names no column
@@ -268,62 +267,60 @@ class RowWriteRules:
                 expanded.
             QueryError: A relation to a composite key where one column is written.
         """
-        meta = model._meta
-        fields_map = meta.fields_map
+        model = binding._model
+        fields_map = binding.fields_map
         stored: dict[str, None] = {}
         for name in names:
             field = fields_map.get(name) if isinstance(name, str) else None
             if name == PRIMARY_KEY_ALIAS and field is None:
-                stored.update(dict.fromkeys(meta.primary_key_attribute_names))
-            elif isinstance(field, (ForeignKeyFieldInstance, OneToOneFieldInstance)):
-                if single_column_relations and len(field.source_fields) > 1:
+                stored.update(dict.fromkeys(binding.primary_key_attribute_names))
+            elif isinstance(field, ForeignKeyFieldInstance):
+                source_fields = field.source_fields
+                if single_column_relations and len(source_fields) > 1:
                     raise QueryError(
                         REFUSED_FIELD_MESSAGE.format(
                             name=name,
                             method=method_name,
-                            reason=COMPOSITE_RELATION_REASON.format(fields=", ".join(field.source_fields)),
+                            reason=COMPOSITE_RELATION_REASON.format(fields=", ".join(source_fields)),
                         )
                     )
-                stored.update(dict.fromkeys(field.source_fields))
-            elif isinstance(name, str) and (generic_field := meta.generic_foreign_key_fields.get(name)) is not None:
+                stored.update(dict.fromkeys(source_fields))
+            elif isinstance(name, str) and (generic_field := binding.generic_foreign_key_fields.get(name)) is not None:
                 if not expands_generic_keys:
                     raise FieldError(
                         f"{method_name} names {generic_field.get_label()} - each branch keeps its own uniqueness; "
                         f"name the branch instead ({', '.join(repr(branch) for branch in generic_field.branch_names)})"
                     )
-                for branch_name in generic_field.branch_names:
-                    branch: ForeignKeyFieldInstance[Any] = fields_map[branch_name]  # type: ignore[assignment]
-                    stored.update(dict.fromkeys(branch.source_fields))
-            elif isinstance(name, str) and name in meta.fields_db_projection:
+                stored.update(dict.fromkeys(generic_field.get_source_fields()))
+            elif isinstance(name, str) and name in binding.fields_db_projection:
                 stored[name] = None
             else:
                 raise FieldError(UNKNOWN_FIELD_MESSAGE.format(name=name, method=method_name, model=model.__name__))
         return list(stored)
 
     @staticmethod
-    def get_every_written_field_name(model: type[Model], write_type: WriteType) -> list[str]:
+    def get_every_written_field_name(binding: ModelBinding, write_type: WriteType) -> list[str]:
         """The fields a write of every field writes: an insert every stored field but a generated one; an
         update every field but the primary key, a generated field and ``Meta.soft_delete_field``.
 
         Args:
-            model: The model.
+            binding: The model.
             write_type: What the write does to its rows.
 
         Returns:
             The field names.
         """
-        meta = model._meta
-        fields_map = meta.fields_map
+        fields_map = binding.fields_map
         if write_type is WriteType.INSERT:
             return [
-                name for name in meta.fields_db_projection if not fields_map[name].generated or fields_map[name].pk
+                name for name in binding.fields_db_projection if not fields_map[name].generated or fields_map[name].pk
             ]
-        primary_key_attribute_names = meta.primary_key_attribute_names
+        primary_key_attribute_names = binding.primary_key_attribute_names
         return [
             name
-            for name in meta.fields_db_projection
+            for name in binding.fields_db_projection
             if name not in primary_key_attribute_names
-            and name != meta.soft_delete_field
+            and name != binding.soft_delete_field
             and not fields_map[name].generated
         ]
 
@@ -338,14 +335,14 @@ class RowWriteRules:
                 set, the version or the soft-delete field of an update, the tenant of a conflict update.
         """
         reason = self.get_refusal_reason(
-            self.model, name, self.write_type, self.method_name, finds_rows_by_key=self.finds_rows_by_key
+            self._binding, name, self.write_type, self.method_name, finds_rows_by_key=self.finds_rows_by_key
         )
         if reason is not None:
             raise QueryError(REFUSED_FIELD_MESSAGE.format(name=name, method=self.method_name, reason=reason))
 
     @staticmethod
     def get_refusal_reason(
-        model: type[Model],
+        binding: ModelBinding,
         name: str,
         write_type: WriteType,
         method_name: str,
@@ -361,24 +358,23 @@ class RowWriteRules:
         """
         if name == PRIMARY_KEY_ALIAS and write_type is not WriteType.INSERT:
             return PRIMARY_KEY_REASON
-        meta = model._meta
-        field = meta.fields_map[name]
+        field = binding.fields_map[name]
         source_name = getattr(field, "blind_index_source_field_name", None)
         reason: str | None = None
-        if source_name is not None and meta.blind_index_fields.get(source_name) == name:
+        if source_name is not None and binding.blind_index_fields.get(source_name) == name:
             reason = BLIND_INDEX_REASON.format(source=source_name)
         elif write_type is not WriteType.INSERT and (
-            name in meta.primary_key_attribute_names if finds_rows_by_key else field.pk
+            name in binding.primary_key_attribute_names if finds_rows_by_key else field.pk
         ):
             reason = PRIMARY_KEY_REASON
         elif field.generated and not (write_type is WriteType.INSERT and field.pk):
             reason = GENERATED_REASON
-        elif write_type in {WriteType.UPDATE, WriteType.CONFLICT_UPDATE} and name == meta.optimistic_lock_field:
+        elif write_type in {WriteType.UPDATE, WriteType.CONFLICT_UPDATE} and name == binding.optimistic_lock_field:
             reason = VERSION_REASON
-        elif write_type in {WriteType.UPDATE, WriteType.CONFLICT_UPDATE} and name == meta.soft_delete_field:
+        elif write_type in {WriteType.UPDATE, WriteType.CONFLICT_UPDATE} and name == binding.soft_delete_field:
             reason = SOFT_DELETE_REASON
-        elif write_type is WriteType.CONFLICT_UPDATE and meta.tenant_field is not None:
-            tenant_names = RowWriteRules.get_stored_field_names(model, [meta.tenant_field], method_name)
+        elif write_type is WriteType.CONFLICT_UPDATE and binding.tenant_field is not None:
+            tenant_names = RowWriteRules.get_stored_field_names(binding, [binding.tenant_field], method_name)
             if name in tenant_names:
                 reason = CONFLICT_TENANT_REASON
         return reason
@@ -396,7 +392,7 @@ class RowWriteRules:
         Returns:
             ``(name, field, only_when_unset)`` of each.
         """
-        fields_map = self.model._meta.fields_map
+        fields_map = self._binding.fields_map
         named = set() if stamps_named_fields or self.named_field_names is None else set(self.named_field_names)
         stamped: list[tuple[str, Any, bool]] = []
         for name, field in fields_map.items():
@@ -404,36 +400,33 @@ class RowWriteRules:
             auto_now_add = getattr(field, "auto_now_add", False)
             if not (auto_now or auto_now_add) or name in named:
                 continue
-            if self.write_type is WriteType.INSERT or auto_now:
+            if self.write_type is WriteType.INSERT or auto_now or (name in written_names and stamps_named_fields):
                 stamped.append((name, field, not auto_now))
-            elif name in written_names and stamps_named_fields:
-                stamped.append((name, field, True))
         return tuple(stamped)
 
     @staticmethod
-    def are_plain_attributes(model: type[Model], field_names: Iterable[str]) -> bool:
+    def are_plain_attributes(binding: ModelBinding, field_names: Iterable[str]) -> bool:
         """Whether assigning the fields on an object only stores the value - the model's ``__setattr__`` is
         ``Model.__setattr__`` and has nothing more to do for them.
 
         Args:
-            model: The model.
+            binding: The model.
             field_names: The fields.
 
         Returns:
             True when the values may be stored directly.
         """
+        model = binding._model
         if model.__setattr__ is not RowWriteRules.model_class.__setattr__:
             return False
-        meta = model._meta
-        if meta.next_setattr is not object.__setattr__:
+        if binding.next_setattr is not object.__setattr__:
             return False
-        hooks = meta.get_setattr_hooks()
+        hooks = binding.get_setattr_hooks()
         return not any(name in hooks for name in field_names)
 
     @property
     def changed_field_names(self) -> tuple[str, ...] | None:
-        """The fields a report of the write names as changed - the ones the caller named; None when the
-        caller named none (a write of every field)."""
+        """The fields the caller named, or None when it requested a write of every field."""
         return self.named_field_names
 
     def get_written_names(self) -> list[str]:
@@ -445,13 +438,15 @@ class RowWriteRules:
         return list(self.written_names)
 
     def get_updated_names(self) -> list[str]:
-        """Every field an update of objects writes: the caller's ones, the blind indexes, the stamps and the
-        version it bumps.
+        """Every model attribute an update changes, including recomputed generated values.
+
+        Unlike ``updated_names``, which names the assignments sent to the database, this
+        includes generated results whose dirty baseline must be published or invalidated.
 
         Returns:
             The field names, each once.
         """
-        return list(self.updated_names)
+        return list(dict.fromkeys((*self.updated_names, *self._binding.computed_field_names)))
 
     def get_stamp_values(self, now: datetime.datetime) -> list[tuple[str, DatetimeField[Any] | TimeField[Any], Any]]:
         """The value each stamped field takes at ``now``, as a read gives it back.
@@ -549,7 +544,7 @@ class RowWriteRules:
                         for name, value in zip(self.always_stamped_names, always_values, strict=True):
                             set_value(obj, name, value)
         if self.blind_indexes:
-            fields_map = self.model._meta.fields_map
+            fields_map = self._binding.fields_map
             for source_name, index_name in self.blind_indexes:
                 index_field: BlindIndexField = fields_map[index_name]  # type: ignore[assignment]
                 for obj in objs:
@@ -573,7 +568,7 @@ class RowWriteRules:
         # Local import: the expressions import the models package.
         from hare.query.expressions import F
 
-        blind_index_fields = self.model._meta.blind_index_fields
+        blind_index_fields = self._binding.blind_index_fields
         written = dict(values)
         for source_name, index_name in self.blind_indexes:
             if source_name not in values:
@@ -623,7 +618,7 @@ class RowWriteRules:
                 raise QueryError(
                     UNBOUND_VALUE_MESSAGE.format(
                         method=self.method_name,
-                        model=self.model.__name__,
+                        model=self._binding._model.__name__,
                         fields=sorted(found_names),
                         value_type=value_type,
                     )

@@ -9,6 +9,7 @@ import pytest
 from hare import fields, prefetch_related_objects
 from hare.contrib.test import hare_test_context
 from hare.core.connections.connections import Connections
+from hare.core.hare_context import HareContext
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.dialects.base.results.statement_result import StatementResult
 from hare.fields.database_default import DatabaseDefault
@@ -64,7 +65,9 @@ class Undo(Exception):
 async def test_executed_unknown_count_does_not_take_the_no_statement_path(monkeypatch):
     async with hare_test_context([__name__], db_url=DB_URL):
         shelf = await Shelf.objects.create()
-        no_statement = await InstanceWriter(Shelf, Shelf.get_connection()).execute_update(shelf, None)
+        no_statement = await InstanceWriter(
+            HareContext.require_current().apps.get_binding(Shelf), Shelf.get_connection()
+        ).execute_update(shelf, None)
         assert not no_statement.performed
         assert no_statement.row_count is None
 
@@ -206,7 +209,7 @@ def test_snapshot_restoration_attempts_all_fields_in_reverse_order():
     second_error = ValueError("second field")
 
     class Instance:
-        _meta = SimpleNamespace(soft_delete_field=None)
+        _binding = SimpleNamespace(soft_delete_field=None)
 
         def __setattr__(self, name, value):
             attempts.append((name, value))

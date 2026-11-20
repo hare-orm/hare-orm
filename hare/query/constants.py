@@ -3,6 +3,7 @@ from __future__ import annotations
 #: The name every model gives its primary key in filters, orderings, field lists and keyword
 #: arguments - each key field of a composite one together.
 PRIMARY_KEY_ALIAS = "pk"
+RELATED_PRIMARY_KEY_SUFFIX = "__" + PRIMARY_KEY_ALIAS
 
 #: Separator of filter and relation path components.
 LOOKUP_SEPARATOR = "__"

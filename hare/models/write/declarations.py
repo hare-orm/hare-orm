@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.transaction_client import TransactionClient
@@ -9,6 +10,14 @@ if TYPE_CHECKING:
     from hare.instrumentation.enums import RowOperation
     from hare.models.write.instance_snapshot import InstanceSnapshot
     from hare.models.write.rules.row_write_rules import RowWriteRules
+
+
+@dataclass(frozen=True, slots=True)
+class PendingRelationDefault:
+    """One asynchronous relation default shared by its still-unassigned key columns."""
+
+    relation_name: str
+    factory: Callable[[], Awaitable[Any]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,3 +69,8 @@ class WriteOutcome:
     operation: RowOperation
     row_count: int | None
     performed: bool = True
+
+    @property
+    def may_have_written(self) -> bool:
+        """Whether a statement affected rows or reported an unknown count."""
+        return self.performed and self.row_count != 0

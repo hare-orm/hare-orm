@@ -9,9 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import ConfigurationError, HareError, QueryError
 from hare.query.scopes.row_visibility import RowVisibility
-from hare.query.scopes.tenants.all_tenants import AllTenants
 from hare.query.scopes.tenants.model_tenants import ModelTenants
-from hare.query.scopes.tenants.tenant_values import TenantValues
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
@@ -83,12 +81,10 @@ class TenantRowLevelSecurity:
         Returns:
             The texts; None for every tenant.
         """
-        scope_class = type(scope)
-        if scope_class is AllTenants:
-            return None
-        if scope_class is TenantValues:
-            return [str(value) for value in scope.values]
-        return [str(scope)]
+        from hare.models.tenancy.tenancy import Tenancy
+
+        values = Tenancy.get_values(scope)
+        return None if values is None else [str(value) for value in values]
 
     @staticmethod
     def get_missing_tenants_error(model: type[Model], client: DatabaseClient) -> HareError:

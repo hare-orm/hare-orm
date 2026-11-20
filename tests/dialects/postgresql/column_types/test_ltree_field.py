@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.dialects.postgresql.fields.ltree_field import LtreeField
 from hare.dialects.postgresql.functions.ltree import Subpath
 from hare.dialects.postgresql.postgresql_introspector import PostgresqlIntrospector
@@ -171,8 +172,11 @@ async def test_an_empty_path_in_an_array_is_read_back(db_ltree):
     """asyncpg's text array parser crashed the process on an empty ltree in an array."""
     await TreeCategory.objects.create(id=30, path="")
     await TreeCategory.objects.create(id=31, path="Top")
-    rows = await TreeCategory._meta.connection.execute_dicts(
-        "SELECT array_agg(path ORDER BY id) AS paths FROM ltree_tree_category WHERE id IN (30, 31)"
+    rows = (
+        await HareContext.require_current()
+        .apps.get_queryset(TreeCategory)
+        .get_connection()
+        .execute_dicts("SELECT array_agg(path ORDER BY id) AS paths FROM ltree_tree_category WHERE id IN (30, 31)")
     )
     assert rows[0]["paths"] == ["", "Top"]
     assert await get_paths(path="") == [""]

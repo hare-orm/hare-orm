@@ -37,13 +37,18 @@ class CharEnumFieldInstance(CharField[str]):
     ) -> None:
         if not (isinstance(enum_type, type) and issubclass(enum_type, Enum)):
             raise ConfigurationError(f"CharEnumField takes an enum class, got {enum_type!r}")
+        stored_values = {str(member.value) for member in enum_type}
+        if len(stored_values) != len(enum_type):
+            raise ConfigurationError(
+                f"CharEnumField: {enum_type.__name__} has distinct members with the same stored text"
+            )
         # The column's description lists the members, unless one is given.
         if description is None:
             description = "\n".join([f"{member.name}: {str(member.value)}" for member in enum_type])[
                 :AUTO_DESCRIPTION_MAX_LENGTH
             ]
 
-        longest_value_length = max((len(str(item.value)) for item in enum_type), default=0)
+        longest_value_length = max(map(len, stored_values), default=0)
         if max_length == 0:
             max_length = longest_value_length
         elif isinstance(max_length, int) and max_length < longest_value_length:
@@ -96,7 +101,7 @@ class CharEnumFieldInstance(CharField[str]):
         return super().get_narrowing_limit(old_field)
 
     def get_assign_normalized_types(self) -> frozenset[type]:
-        return frozenset({self.enum_type})
+        return self._get_unchanged_assign_types(CharEnumFieldInstance.to_python, self.enum_type)
 
     def to_python(self, value: str | None) -> Enum | None:
         if value is None:

@@ -81,7 +81,7 @@ class ToManyFilters:
         relation_name, _, lookup = key.partition("__")
         if lookup not in {Lookup.ISNULL, Lookup.NOT_ISNULL}:
             return None
-        many_to_many_field = expression_context.model._meta.fields_map.get(relation_name)
+        many_to_many_field = expression_context.binding.fields_map.get(relation_name)
         if not isinstance(many_to_many_field, ManyToManyFieldInstance):
             return None
         if not isinstance(value, bool):
@@ -96,6 +96,7 @@ class ToManyFilters:
             dialect=expression_context.dialect,
             connection=expression_context.connection,
             through_only=through_only,
+            application_context=expression_context.application_context,
         )
         through_table, correlation = joins[0]
         inner_query = QueryBuilder().from_(through_table)
@@ -131,15 +132,16 @@ class ToManyFilters:
         """
         from hare.query.scopes.row_scopes import RowScopes
 
-        related_meta = many_to_many_field.related_model._meta
+        related_meta = many_to_many_field.get_related_binding()
         target_table = related_meta.basetable.as_(
             Identifiers.get_within_limit(f"{table.get_table_name()}__{relation_name}__visible")
         )
-        visible_target_criterion = RowScopes.of(many_to_many_field.related_model).get_criterion(
+        visible_target_criterion = RowScopes.of(related_meta).get_criterion(
             target_table,
             visibility=expression_context.visibility,
             dialect=expression_context.dialect,
             connection=expression_context.connection,
+            application_context=expression_context.application_context,
         )
         if visible_target_criterion is None:
             return None
@@ -191,7 +193,7 @@ class ToManyFilters:
         relation_name, _, lookup = key.partition("__")
         if lookup not in TO_MANY_RELATION_SHORTCUT_LOOKUPS:
             return None
-        relation_field = expression_context.model._meta.fields_map.get(relation_name)
+        relation_field = expression_context.binding.fields_map.get(relation_name)
         if not isinstance(relation_field, (BackwardForeignKeyRelation, ManyToManyFieldInstance)):
             return None
         if lookup in {Lookup.EXACT, Lookup.NOT} and value is None:
@@ -205,7 +207,8 @@ class ToManyFilters:
                 False,
             )
         is_many_to_many = isinstance(relation_field, ManyToManyFieldInstance)
-        target_primary_key_attribute_names = relation_field.related_model._meta.primary_key_attribute_names
+        target_meta = relation_field.get_related_binding()
+        target_primary_key_attribute_names = target_meta.primary_key_attribute_names
         if (
             not is_many_to_many
             and len(target_primary_key_attribute_names) > 1
@@ -257,7 +260,7 @@ class ToManyFilters:
         if not is_plain_value and LookupPaths.crosses_connections(relation_field):
             raise QueryError(
                 f"{expression_context.model.__name__}.{relation_name} points at "
-                f"{relation_field.related_model.__name__} on another connection - a query or an expression "
+                f"{related_model.__name__} on another connection - a query or an expression "
                 "of it can't run inside this one; filter by its keys "
                 f"({relation_name}__in=await ....values_list('pk', flat=True))."
             )
@@ -285,7 +288,6 @@ class ToManyFilters:
         # For IS [NOT] NULL: the LEFT JOIN found no row exactly when any one of its primary key
         # columns is NULL - or, for a related model without a primary key, its key column to
         # this row.
-        target_meta = relation_field.related_model._meta
         target_column_name = (
             target_primary_key_attribute_names[0]
             if target_meta.has_primary_key
@@ -304,9 +306,7 @@ class ToManyFilters:
         )
         nested_reference = None
         if nested_references is not None and len(nested_references) == 1 and nested_references[0][1] is not None:
-            nested_reference = RelatedKeyValueReference(
-                nested_references[0][1], relation_field.related_model, converts_lists, key
-            )
+            nested_reference = RelatedKeyValueReference(nested_references[0][1], related_model, converts_lists, key)
         return modifier, nested_reference, False
 
     @staticmethod
@@ -334,7 +334,6 @@ class ToManyFilters:
             target_key_names,
             lookup,
             value,
-            reads_outer_references=True,
         )
 
     @staticmethod
@@ -417,7 +416,7 @@ class ToManyFilters:
             Identifiers.get_within_limit(f"{outer_table.get_table_name()}__negated{depth_suffix}")
         )
         inner_where = modifier.where_criterion.replace_table(outer_table, inner_table)
-        correlation = KeyColumns.get_row_correlation(expression_context.model._meta, inner_table, outer_table)
+        correlation = KeyColumns.get_row_correlation(expression_context.binding, inner_table, outer_table)
         inner_query = QueryBuilder().from_(inner_table).select(Star())
         # Children crossing the same relation path each contribute the same join - it is joined
         # once, by join table.

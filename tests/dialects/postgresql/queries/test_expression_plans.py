@@ -56,7 +56,11 @@ async def test_a_geography_distance_and_radius_run_on_their_plans(db_postgis):
             .values_list("name", flat=True)
         )
 
-    await StatementPlanChecks.assert_a_later_query_runs_on_its_plan(near, (1_000, 2_000_000))
+    await StatementPlanChecks.assert_a_later_query_runs_on_its_plan(
+        near, (100_000, 2_000_000), expected_results=(["Moscow"], ["Kyiv", "Moscow"])
+    )
+    # A small integer takes the radius parameter without the explicit INTEGER cast.
+    assert await StatementPlanChecks.count_plan_hits(near(1_000)) == (["Moscow"], 0)
 
 
 @requires_features(dialect="postgresql")

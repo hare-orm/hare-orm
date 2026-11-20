@@ -38,13 +38,15 @@ class PrefetchRequest:
         prefetch_queries: dict[str, list[tuple[str | None, QuerySet[Any]]]],
         *,
         visibility: RowVisibility | None = None,
-    ) -> PrefetchRequest:
-        """Capture a query's visibility, row lock and connection choice for explicit prefetch maps.
+    ) -> PrefetchRequest | None:
+        """Capture the query's settings, or return None with no prefetch maps.
 
         The maps can describe the query's relations or dependencies of a custom ``to_attribute``;
         they are retained without mutation. An explicit ``visibility`` captures the current
         execution's tenant without changing a reusable queryset's declaration.
         """
+        if not (prefetch_map or prefetch_queries):
+            return None
         return cls(
             prefetch_map,
             prefetch_queries,

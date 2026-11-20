@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.exceptions import DatabaseError, HareError, ValidationError
 from hare.fields.data.json.json_codec import JsonCodec
 from hare.instrumentation.change_events import ChangeEvents
@@ -302,7 +303,7 @@ async def test_int_in_lookup_with_non_whole_number(db_write_paths, filler_count)
 async def test_defaults_are_normalized_like_assigned_values(db_write_paths):
     created = await WritePathDefaults.objects.create()
     fetched = await WritePathDefaults.objects.get(id=created.id)
-    for field_name in WritePathDefaults._meta.db_fields:
+    for field_name in HareContext.require_current().apps.get_binding(WritePathDefaults).db_fields:
         in_memory_value, read_value = getattr(created, field_name), getattr(fetched, field_name)
         assert type(in_memory_value) is type(read_value), field_name
         assert in_memory_value == read_value, field_name
@@ -403,10 +404,18 @@ async def test_a_rows_changed_event_hides_the_sensitive_part_of_a_key(db_write_p
     """The event's primary keys held a sensitive key part as it was - every observer, log and outbox
     reading the event got the secret, which repr(obj) and the errors hide."""
     client = WritePathSecretKey.get_connection()
-    event = ChangeEvents.build_event(client, WritePathSecretKey, RowOperation.INSERT, [("SECRET-4411", 7)], None)
+    event = ChangeEvents.build_event(
+        client,
+        HareContext.require_current().apps.get_binding(WritePathSecretKey),
+        RowOperation.INSERT,
+        [("SECRET-4411", 7)],
+        None,
+    )
     assert event.pks == (("<hidden>", 7),)
     assert "SECRET-4411" not in repr(event)
-    assert ChangeEvents.build_event(client, WritePathRecord, RowOperation.INSERT, [5], None).pks == (5,)
+    assert ChangeEvents.build_event(
+        client, HareContext.require_current().apps.get_binding(WritePathRecord), RowOperation.INSERT, [5], None
+    ).pks == (5,)
 
 
 @pytest.mark.asyncio
@@ -480,6 +489,9 @@ async def test_a_timedelta_is_no_time_of_day(db_write_paths):
     "filters",
     [
         {"number__lt": float("nan")},
+        {"number__lt": Decimal("sNaN")},
+        {"number__gte": Decimal("-sNaN42")},
+        {"number__range": [0, Decimal("sNaN")]},
         {"id__gt": float("nan")},
         pytest.param({"amount__lt": float("nan")}, marks=pytest.mark.decimal_fields),
         pytest.param({"amount__lt": Decimal("NaN")}, marks=pytest.mark.decimal_fields),
@@ -487,7 +499,18 @@ async def test_a_timedelta_is_no_time_of_day(db_write_paths):
         {"data__a": float("nan")},
         {"data__a__gt": float("inf")},
     ],
-    ids=["int_nan", "pk_nan", "decimal_float_nan", "decimal_nan", "decimal_inf_list", "json_nan", "json_inf"],
+    ids=[
+        "int_nan",
+        "int_signaling_nan",
+        "int_signed_signaling_nan",
+        "int_signaling_range",
+        "pk_nan",
+        "decimal_float_nan",
+        "decimal_nan",
+        "decimal_inf_list",
+        "json_nan",
+        "json_inf",
+    ],
 )
 async def test_a_number_no_write_stores_is_refused_in_a_filter(db_write_paths, filters):
     """NaN and the infinities - refused by every write - were compared each database its own way:
@@ -503,22 +526,6 @@ EXPRESSION_LITERAL_SHAPES: dict[str, Callable[[str, Any], Any]] = {
 }
 
 
-async def expression_update_with(field_name: str, value: Any) -> None:
-    record = await WritePathRecord.objects.create()
-    await WritePathRecord.objects.filter(id=record.id).update(**{field_name: value})
-
-
-async def expression_save_with(field_name: str, value: Any) -> None:
-    record = await WritePathRecord.objects.create()
-    setattr(record, field_name, value)
-    await record.save()
-
-
-async def expression_update_or_create_with(field_name: str, value: Any) -> None:
-    record = await WritePathRecord.objects.create()
-    await WritePathRecord.objects.update_or_create(id=record.id, defaults={field_name: value})
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("shape", list(EXPRESSION_LITERAL_SHAPES))
 @pytest.mark.parametrize(
@@ -528,7 +535,7 @@ async def expression_update_or_create_with(field_name: str, value: Any) -> None:
 )
 @pytest.mark.parametrize(
     "write_path",
-    [expression_update_with, expression_save_with, expression_update_or_create_with],
+    [update_with, save_with, update_or_create_with],
     ids=["update", "save", "update_or_create"],
 )
 async def test_a_literal_an_expression_writes_is_refused_as_the_plain_value_is(

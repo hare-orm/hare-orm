@@ -8,7 +8,6 @@ import pytest
 import pytest_asyncio
 
 from hare.contrib.test import RollbackIsolation
-from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.fields.encrypted.field_encryption import FieldEncryption
 from tests.utils.database_under_test import DatabaseUnderTest
 
@@ -25,9 +24,7 @@ def configured_keys() -> Generator[None]:
 
 @pytest_asyncio.fixture(scope="module")
 async def rules_context() -> AsyncGenerator[Any]:
-    async with hare_test_context(
-        ["tests.writes.rules.write_rules_models"], db_url=DatabaseUnderTest.get_url(), connection_label="models"
-    ) as context:
+    async with DatabaseUnderTest.open_model_context(["tests.writes.rules.write_rules_models"]) as context:
         yield context
 
 

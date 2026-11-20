@@ -20,6 +20,7 @@ class FieldLookup:
             convert it as the field converts its values.
         value_encoder_builder: Optional ``(field, dialect) -> encoder`` preparing fixed conversions
             while preserving the ordinary encoder's per-value checks and invocation arguments.
+        column_value_encoder: Optional encoder for a declared column with no value transforms.
         array_element_field: The field each item of a list value is bound as.
         array_element_fields: Per key column, the field each item of a list of key rows is
             bound as.
@@ -47,13 +48,18 @@ class FieldLookup:
     searched_field: Field[Any] | None = None
     required_feature: str | None = None
     value_encoder_builder: Callable[[Field[Any], Dialect], Callable[..., Any]] | None = None
+    column_value_encoder: Callable[..., Any] | None = None
 
-    def get_value_encoder(self, field: Field[Any], dialect: Dialect) -> Callable[..., Any] | None:
+    def get_value_encoder(
+        self, field: Field[Any], dialect: Dialect, *, is_column: bool = False
+    ) -> Callable[..., Any] | None:
         """Prepare an opted-in encoder once for a query's field and dialect.
 
         Plain extension callbacks are returned unchanged. The builder retains only conversion
         metadata; the model and each value continue to arrive at invocation time.
         """
+        if is_column and self.column_value_encoder is not None:
+            return self.column_value_encoder
         return self.value_encoder if self.value_encoder_builder is None else self.value_encoder_builder(field, dialect)
 
     def with_changes(self, **changes: Any) -> FieldLookup:

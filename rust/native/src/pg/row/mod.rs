@@ -24,11 +24,6 @@ impl PgRow {
         Ok(PgRow { names, values })
     }
 
-    /// The value at `index`, None past the last column.
-    pub fn get_value<'py>(&self, py: Python<'py>, index: usize) -> Option<Bound<'py, PyAny>> {
-        self.values.get(index).map(|value| value.bind(py).clone())
-    }
-
     fn index_of(&self, py: Python<'_>, key: &str) -> Option<usize> {
         self.names.index_of(py, key)
     }

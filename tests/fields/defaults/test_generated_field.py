@@ -31,6 +31,7 @@ from tests.fields.models_generated_field import (
     VersionedPricedItem,
 )
 from tests.utils.integer_statistic import IntegerStatistic
+from tests.utils.model_bindings import ModelBindings
 from tests.utils.timezone_context import override_timezone
 
 
@@ -44,7 +45,8 @@ def test_string_expression_used_verbatim_on_both_dialects():
 
 @pytest.mark.database_independent
 def test_an_expression_of_hare_is_written_in_each_databases_sql():
-    total = PackedItem._meta.fields_map["total"]
+    apps = ModelBindings.prepare(PackedItem)
+    total = apps.get_binding(PackedItem).fields_map["total"]
     expected = 'GENERATED ALWAYS AS ("quantity"*"pack") STORED'
     assert total.get_generated_sql(DialectRegistry.get_dialect("sqlite")) == expected
     assert total.get_generated_sql(DialectRegistry.get_dialect("postgresql")) == expected

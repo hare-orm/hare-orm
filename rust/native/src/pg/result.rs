@@ -1,5 +1,5 @@
-//! `PgResult` - the rows of one result as the driver read them. Nothing in it is a Python object
-//! until it is read as a sequence of `PgRow`s. Each row is built on first use from its decoded values.
+//! `PgResult` stores decoded database values. Positional reading builds Python tuples;
+//! named reading builds and retains each `PgRow` on first access.
 
 use std::sync::Arc;
 
@@ -30,10 +30,6 @@ impl PgResult {
         self.data.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
-    }
-
     /// The `PgRow` of row `index`.
     pub fn get_row<'py>(&self, py: Python<'py>, index: usize) -> PyResult<Bound<'py, PgRow>> {
         let row_objects = self.row_objects.get_or_init(py, || (0..self.len()).map(|_| PyOnceLock::new()).collect());
@@ -52,8 +48,8 @@ impl PgResult {
 
 #[pymethods]
 impl PgResult {
-    /// Positional rows use the same decoded values as named rows, without a `PgRow` wrapper.
-    /// Column names accompany the tuples so callers need not inspect a first row.
+    /// Build positional tuples from the decoded values and return their column names,
+    /// including when the result has no rows.
     fn positional<'py>(&self, py: Python<'py>) -> PyResult<(Bound<'py, PyList>, Bound<'py, PyTuple>)> {
         let rows = PyList::empty(py);
         for values in &self.data.rows {

@@ -2,7 +2,6 @@
 an index key's direction or a constraint was refused only when it ran, after the operations before it had
 changed the schema."""
 
-import os
 import textwrap
 
 import pytest
@@ -23,10 +22,7 @@ class Migration(migrations.Migration):
 """
 
 
-@pytest.fixture(autouse=True)
-def skip_without_clickhouse():
-    if not os.getenv("HARE_TEST_DB", "").startswith("clickhouse"):
-        pytest.skip("runs against the ClickHouse test server - make test_clickhouse")
+pytestmark = pytest.mark.usefixtures("skip_without_clickhouse")
 
 
 @pytest.mark.asyncio
@@ -197,39 +193,21 @@ async def test_a_migration_declaring_uniqueness_is_refused_before_it_changes_any
 
 
 @pytest.mark.asyncio
-async def test_a_migration_enabling_row_level_security_creates_no_table(project_factory):  # noqa: F811
-    """The row level security of a new model was refused when its own operation ran - after the model's
-    table was created, the migration left applied halfway."""
-    project = await project_factory()
-    project.write_models(
-        textwrap.dedent(
+@pytest.mark.parametrize(
+    ("model_source", "message"),
+    [
+        pytest.param(
             """
             class Board(Model):
                 id = fields.IntField(primary_key=True, generated=False)
 
                 class Meta:
                     row_level_security = "enabled"
-            """
-        )
-    )
-    await project.cli_ok("makemigrations")
-
-    result = await project.cli("migrate")
-
-    assert result.exit_code not in (0, None)
-    assert "Row level security policies are not supported on clickhouse" in result.output
-    assert "failed partway" not in result.output
-    tables = await project.query("SELECT name FROM system.tables WHERE database = currentDatabase()")
-    assert "board" not in {table["name"] for table in tables}
-
-
-@pytest.mark.asyncio
-async def test_a_migration_creating_a_model_with_a_trigger_creates_no_table(project_factory):  # noqa: F811
-    """A new model's trigger was refused once the model's table was created - the migration left applied
-    halfway."""
-    project = await project_factory()
-    project.write_models(
-        textwrap.dedent(
+            """,
+            "Row level security policies are not supported on clickhouse",
+            id="row_level_security",
+        ),
+        pytest.param(
             """
             from hare.ddl import RawSQLTerm
             from hare.ddl.schema_objects.trigger import Trigger
@@ -239,15 +217,21 @@ async def test_a_migration_creating_a_model_with_a_trigger_creates_no_table(proj
 
                 class Meta:
                     triggers = [Trigger(name="board_insert", on="INSERT", body=RawSQLTerm("RETURN NEW;"))]
-            """
-        )
-    )
+            """,
+            "Triggers are not supported on clickhouse",
+            id="trigger",
+        ),
+    ],
+)
+async def test_an_unsupported_new_model_feature_creates_no_table(project_factory, model_source, message):  # noqa: F811
+    project = await project_factory()
+    project.write_models(textwrap.dedent(model_source))
     await project.cli_ok("makemigrations")
 
     result = await project.cli("migrate")
 
     assert result.exit_code not in (0, None)
-    assert "Triggers are not supported on clickhouse" in result.output
+    assert message in result.output
     assert "failed partway" not in result.output
     tables = await project.query("SELECT name FROM system.tables WHERE database = currentDatabase()")
     assert "board" not in {table["name"] for table in tables}

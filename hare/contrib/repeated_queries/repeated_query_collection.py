@@ -26,13 +26,16 @@ class RepeatedQueryCollection:
         self.detector_class = detector_class
         self.entries_by_shape_key: dict[str, RepeatedQueryEntry] = {}
         self.total = 0
-        self.is_open = False
         self.observing: AbstractContextManager[None] | None = None
+
+    @property
+    def is_open(self) -> bool:
+        """Whether this collection is accepting query events."""
+        return self.observing is not None
 
     def __enter__(self) -> RepeatedQueryCollection:
         if self.is_open:
             raise QueryError("RepeatedQueryCollection is already active")
-        self.is_open = True
         self.observing = Observers.observing(QueryExecuted, self.on_query)
         self.observing.__enter__()
         return self
@@ -43,7 +46,6 @@ class RepeatedQueryCollection:
         exception: BaseException | None,
         exception_traceback: TracebackType | None,
     ) -> None:
-        self.is_open = False
         if self.observing is not None:
             observing, self.observing = self.observing, None
             observing.__exit__(None, None, None)

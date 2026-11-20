@@ -15,14 +15,18 @@ from hare.ddl.constraints import CheckConstraint, ExclusionConstraint
 from hare.ddl.enums import ExclusionConstraintUsing, TriggerEvent, TriggerTiming
 from hare.ddl.indexes import Index, PartialIndex
 from hare.ddl.raw_sql_term import RawSQLTerm
+from hare.ddl.schema_objects.database_sequence import DatabaseSequence
 from hare.ddl.schema_objects.trigger import Trigger
 from hare.ddl.schema_objects.view import View
 from hare.migrations.drift import detect_drift
 from hare.migrations.drift.shadow.schema_comparison import SchemaComparison
+from hare.migrations.operations import SeparateDatabaseAndState
 from hare.migrations.state.model_state import ModelState
+from hare.migrations.writer import MigrationWriter
 from hare.query.expressions import Q
 from hare.query.functions import Lower
 from tests.migrations.round_trips.test_round_trip_real_db import APP_LABEL, RoundTrip, build_live_state, build_model
+from tests.utils.migration_source import MigrationSource
 
 
 def skip_unless_dialect(round_trip: RoundTrip, *dialects: str) -> None:
@@ -31,8 +35,12 @@ def skip_unless_dialect(round_trip: RoundTrip, *dialects: str) -> None:
 
 
 async def get_operation_types(round_trip: RoundTrip, *models) -> list[str]:
-    result = await detect_drift(round_trip.connection, build_live_state(*models), [APP_LABEL])
-    return sorted(type(operation).__name__ for operation in result.operations)
+    result = await round_trip.get_drift(build_live_state(*models))
+    return sorted(
+        type(operation).__name__
+        for operation in result.operations
+        if not isinstance(operation, SeparateDatabaseAndState)
+    )
 
 
 @pytest.mark.asyncio
@@ -146,6 +154,65 @@ async def test_a_changed_date_default_of_a_column_is_its_alteration(db_isolated_
 
 
 @pytest.mark.asyncio
+async def test_repair_migration_starts_from_the_observed_table(db_isolated_no_schema):
+    round_trip = RoundTrip(db_isolated_no_schema.get_connection())
+    skip_unless_dialect(round_trip, "sqlite", "postgresql")
+    expected = build_model(
+        "Invoice", "invoice", {"amount": fields.IntField(db_default=17, db_index=True), "memo": fields.IntField()}
+    )
+    observed = build_model(
+        "Invoice",
+        "invoice",
+        {"amount": fields.IntField(db_default=19), "memo": fields.TextField()},
+        {
+            "indexes": [Index(fields=("memo",), name="extra_memo")],
+            "constraints": [CheckConstraint(Q(amount__gte=0), name="extra_amount")],
+        },
+    )
+    await round_trip.migrate_to(expected)
+    tracked_state = round_trip.tracked_state
+    await round_trip.migrate_to(observed)
+    await round_trip.connection.execute_script("INSERT INTO invoice (id, memo) VALUES (1, '42')")
+    drift = await round_trip.get_drift(tracked_state)
+    operations = drift.operations_by_app[APP_LABEL]
+    assert isinstance(operations[0], SeparateDatabaseAndState)
+    assert drift.mismatched_objects == []
+
+    source = MigrationWriter("repair", APP_LABEL, operations).as_string()
+    repair = MigrationSource.load(source, "repair", APP_LABEL, filename="<drift repair>")
+    await repair.apply(tracked_state, schema_editor=round_trip.editor)
+    assert not (await round_trip.get_drift(tracked_state)).has_drift
+    await round_trip.connection.execute_script("INSERT INTO invoice (id, memo) VALUES (2, 43)")
+    assert await round_trip.connection.execute_dicts("SELECT amount, memo FROM invoice ORDER BY id") == [
+        {"amount": 19, "memo": 42},
+        {"amount": 17, "memo": 43},
+    ]
+
+    await repair.unapply(tracked_state, schema_editor=round_trip.editor)
+    assert (await round_trip.get_drift(tracked_state)).has_drift
+
+
+@pytest.mark.asyncio
+async def test_drift_reports_a_repair_that_would_discard_an_untracked_column(db_isolated_no_schema):
+    round_trip = RoundTrip(db_isolated_no_schema.get_connection())
+    skip_unless_dialect(round_trip, "sqlite", "postgresql")
+    expected = build_model("Invoice", "invoice", {"amount": fields.IntField(db_default=17)})
+    observed = build_model(
+        "Invoice", "invoice", {"amount": fields.IntField(db_default=19), "memo": fields.TextField(null=True)}
+    )
+    await round_trip.migrate_to(observed)
+    await round_trip.connection.execute_script("INSERT INTO invoice (id, memo) VALUES (1, 'keep')")
+
+    result = await round_trip.get_drift(build_live_state(expected))
+    assert result.operations_by_app == {}
+    assert result.untracked_columns == [(APP_LABEL, "Invoice", "invoice", "memo")]
+    assert "rebuild" in result.mismatched_objects[0].detail
+    assert await round_trip.connection.execute_dicts("SELECT amount, memo FROM invoice") == [
+        {"amount": 19, "memo": "keep"}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_a_hash_exclusion_constraint_in_sync_is_no_drift(db_isolated_no_schema):
     round_trip = RoundTrip(db_isolated_no_schema.get_connection())
     skip_unless_dialect(round_trip, "postgresql")
@@ -174,20 +241,25 @@ class ShadowColor(enum.Enum):
 
 
 @pytest.mark.asyncio
-async def test_models_of_several_schemas_with_an_enum_type_in_sync_are_no_drift(db_isolated_no_schema):
+@pytest.mark.parametrize("explicit_default_schema", [False, True])
+async def test_models_of_several_schemas_with_an_enum_type_in_sync_are_no_drift(
+    db_isolated_no_schema, explicit_default_schema
+):
     from hare.dialects.postgresql.fields import NativeEnumField
+    from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
 
     round_trip = RoundTrip(db_isolated_no_schema.get_connection())
     skip_unless_dialect(round_trip, "postgresql")
+    type_schema = await DatabaseCatalog.get_default_schema(round_trip.connection) if explicit_default_schema else None
     painted = build_model(
         "ShadowPainted",
         "shadow_painted",
-        {"color": NativeEnumField(ShadowColor, type_name="shadow_color")},
+        {"color": NativeEnumField(ShadowColor, type_name="shadow_color", type_schema=type_schema)},
     )
     archived = build_model(
         "ShadowArchived",
         "shadow_archived",
-        {"color": NativeEnumField(ShadowColor, type_name="shadow_color")},
+        {"color": NativeEnumField(ShadowColor, type_name="shadow_color", type_schema=type_schema)},
         {"schema": "shadow_archive"},
     )
     await round_trip.migrate_to(painted, archived)
@@ -196,6 +268,28 @@ async def test_models_of_several_schemas_with_an_enum_type_in_sync_are_no_drift(
     await round_trip.connection.execute_script("ALTER TYPE \"shadow_color\" ADD VALUE 'blue'")
 
     assert await get_operation_types(round_trip, painted, archived) == ["AlterEnumType"]
+
+
+@pytest.mark.asyncio
+async def test_drift_finds_unattached_sequences_by_schema_and_name(db_isolated_no_schema):
+    round_trip = RoundTrip(db_isolated_no_schema.get_connection())
+    skip_unless_dialect(round_trip, "postgresql")
+    active = build_model("Active", "entry", {}, {"sequences": [DatabaseSequence("entry_numbers", increment=4)]})
+    archived = build_model(
+        "Archived", "entry", {}, {"schema": "archive", "sequences": [DatabaseSequence("entry_numbers", increment=4)]}
+    )
+    await round_trip.migrate_to(active, archived)
+    assert await get_operation_types(round_trip, active, archived) == []
+
+    await round_trip.connection.execute_script('ALTER SEQUENCE "entry_numbers" INCREMENT BY 8')
+    await round_trip.connection.execute_script('DROP SEQUENCE "archive"."entry_numbers"')
+    drift = await round_trip.get_drift(build_live_state(active, archived))
+    assert sorted(
+        (type(op).__name__, op.model_name) for op in drift.operations if not isinstance(op, SeparateDatabaseAndState)
+    ) == [
+        ("AddSequence", "Archived"),
+        ("AlterSequence", "Active"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -210,7 +304,7 @@ async def test_the_shadow_is_removed_when_the_comparison_fails(db_isolated_no_sc
 
     monkeypatch.setattr(SchemaComparison, "compare_model", fail)
     with pytest.raises(RuntimeError, match="the comparison failed"):
-        await detect_drift(round_trip.connection, build_live_state(widget), [APP_LABEL])
+        await round_trip.get_drift(build_live_state(widget))
 
     rows = await round_trip.connection.execute_dicts(
         "SELECT nspname FROM pg_namespace WHERE nspname LIKE 'hare\\_shadow\\_%'"
@@ -243,7 +337,7 @@ async def test_an_unmanaged_model_over_a_view_is_a_bare_table_in_the_shadow(db_i
         round_trip.connection,
         build_live_state(row),
         [APP_LABEL],
-        unmanaged_model_states=[ModelState.make_from_model(APP_LABEL, over_view)],
+        unmanaged_model_states=[ModelState.make_from_declaration(APP_LABEL, over_view)],
     )
 
     assert result.operations == []
@@ -274,7 +368,7 @@ async def test_an_unmanaged_models_generated_non_pk_column_is_not_created_in_the
         round_trip.connection,
         build_live_state(row),
         [APP_LABEL],
-        unmanaged_model_states=[ModelState.make_from_model(APP_LABEL, unmanaged)],
+        unmanaged_model_states=[ModelState.make_from_declaration(APP_LABEL, unmanaged)],
     )
 
     assert result.operations == []
@@ -306,7 +400,7 @@ async def test_a_relation_can_target_an_unmanaged_identity_column_in_the_shadow(
     Hare.register_live_models(
         [external, reference], app_label=APP_LABEL, connection_alias=round_trip.connection.connection_alias
     )
-    external_state = ModelState.make_from_model(APP_LABEL, external)
+    external_state = ModelState.make_from_declaration(APP_LABEL, external)
     result = await detect_drift(
         round_trip.connection,
         build_live_state(reference),

@@ -4,6 +4,11 @@ The integrations for [Litestar](litestar.md), [FastAPI](fastapi.md) and [Robyn](
 request runs in a transaction and the health routes they add; FastAPI and Robyn also the schemas of a
 response. This page describes what they share; each framework's page says how to plug hare into it.
 
+FastAPI and Litestar receive `CommaSeparated` and `KeyColumns` parameters as text. Constraints on
+their decoded values are applied by `RequestQuery` after parsing: `min_length=3` on a comma-separated
+list counts three items, and a key tuple's length counts its components. Ordinary parameter types
+retain their transport constraints.
+
 If application startup or lifespan work fails and closing its Hare context also fails, both errors are
 preserved in an exception group. A borrowed context remains under its caller's control and is not closed
 by the integration. Robyn applies the same error handling to its startup and shutdown callbacks.
@@ -34,7 +39,8 @@ Request shutdown waits for every transaction exit even if one fails or the reque
 repeatedly. Cancellation stops commits which have not started; an already submitted commit can still
 succeed. A cleanup error does not imply rollback, and independent connections are not one atomic
 transaction. If cleanup also fails while a request error is propagating, both errors are preserved in
-an exception group. Streaming and background work run after this transaction boundary.
+an exception group. An error while reading the response status also rolls back and releases the
+open transactions before propagating. Streaming and background work run after this transaction boundary.
 
 What runs without the transaction:
 

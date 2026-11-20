@@ -9,7 +9,7 @@ from hare.dialects.base.schema.plans.enums import SchemaEffect
 if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
     from hare.fields.field import Field
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,7 +21,7 @@ class ThroughTableCopy:
     columns: tuple[str, ...]
     values: tuple[str, ...]
     distinct: bool
-    through_model: type[Model] | None
+    through_binding: ModelBinding | None
     defaults: tuple[tuple[str, Field[Any]], ...] = ()
     generated_key_column: str | None = None
     effects: ClassVar[frozenset[SchemaEffect]] = frozenset({SchemaEffect.REWRITE_ROWS, SchemaEffect.BACKFILL_ROWS})
@@ -35,14 +35,14 @@ class ThroughTableCopy:
             return
         columns = list(self.columns)
         values = list(self.values)
-        if self.through_model is not None:
+        if self.through_binding is not None:
             for column, field in self.defaults:
                 columns.append(column)
                 values.append(
-                    await editor.column_backfill.added_column_backfill_sql_literal(field, self.through_model)
+                    await editor.column_backfill.added_column_backfill_sql_literal(field, self.through_binding)
                 )
             if self.generated_key_column is not None:
-                value = await editor.client.get_generated_key_sql(self.through_model)
+                value = await editor.client.get_generated_key_sql(self.through_binding)
                 if value is not None:
                     columns.append(self.generated_key_column)
                     values.append(value)

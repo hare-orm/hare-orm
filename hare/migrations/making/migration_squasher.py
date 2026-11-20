@@ -13,7 +13,6 @@ from hare.migrations.making.squashed_migration import SquashedMigration
 from hare.migrations.migration import Migration
 from hare.migrations.operations.operation import Operation
 from hare.migrations.state.migration_environment import MigrationEnvironment
-from hare.migrations.state.state import State
 from hare.migrations.writer.migration_writer import MigrationWriter
 
 
@@ -67,7 +66,8 @@ class MigrationSquasher:
         loader = MigrationLoader(self.apps_config, NoopRecorder(), definitions=self.definitions)
         await loader.build_graph()
         end_key = loader.graph.get_migration_key(app_label, end_name)
-        plan = [key for key in loader.graph.forwards_plan(end_key) if key.app_label == app_label]
+        full_plan = loader.graph.forwards_plan(end_key)
+        plan = [key for key in full_plan if key.app_label == app_label]
         if start_name is not None:
             start_key = loader.graph.get_migration_key(app_label, start_name)
             if start_key not in plan:
@@ -76,16 +76,22 @@ class MigrationSquasher:
         if len(plan) == 1:
             return SquashedMigration(writer=None, replaced_names=[plan[0].name])
 
-        migrations = [loader.graph.nodes[key] for key in plan]
+        migrations = [loader.graph.node_map[key].migration for key in plan]
         replaced: list[tuple[str, str]] = []
+        replacement_aliases: list[tuple[str, str]] = []
         for key, migration in zip(plan, migrations, strict=True):
             replaced.extend(migration.replaces or [(key.app_label, key.name)])  # type: ignore[union-attr]
-        replaced_keys = {MigrationKey(app_label=label, name=name) for label, name in replaced} | set(plan)
+            if migration is not None and migration.replaces:
+                replacement_aliases.extend([(key.app_label, key.name), *migration.replacement_aliases])
+        replacement_aliases = list(dict.fromkeys(replacement_aliases))
+        squashed_keys = set(plan)
+        replaced_keys = {
+            MigrationKey(app_label=label, name=name) for label, name in [*replaced, *replacement_aliases]
+        } | squashed_keys
         operations: list[Operation] = []
         elided_operation_count = 0
         dependencies: list[Any] = []
         run_before: list[tuple[str, str]] = []
-        squashed_keys = set(plan)
         for migration in migrations:
             for operation in migration.operations:  # type: ignore[union-attr]
                 if getattr(operation, "elidable", False):
@@ -106,16 +112,11 @@ class MigrationSquasher:
                 ):
                     run_before.append(successor)
 
-        state_before = State(
-            environment=self.environment,
-            default_connections={
-                label: config.get("default_connection", "default") for label, config in self.apps_config.items()
-            },
-        )
-        for key in loader.graph.forwards_plan(end_key):
+        state_before = loader.create_initial_state(self.environment)
+        for key in full_plan:
             if key not in squashed_keys:
                 self.raise_if_squash_makes_cycle(loader, migrations[-1], key, squashed_keys)
-                predecessor: Migration = loader.graph.nodes[key]  # type: ignore[assignment]
+                predecessor: Migration = loader.graph.node_map[key].migration  # type: ignore[assignment]
                 state_before = predecessor.prepare(state_before).after
 
         name = self.get_squashed_name(loader, plan, squashed_name)
@@ -126,6 +127,7 @@ class MigrationSquasher:
             dependencies=dependencies,
             run_before=run_before,
             replaces=replaced,
+            replacement_aliases=replacement_aliases,
             initial=not any(dependency[0] == app_label for dependency in dependencies),
             migrations_module=self.apps_config[app_label]["migrations"],
             atomic=all(migration.atomic for migration in migrations if isinstance(migration, Migration)),
@@ -154,7 +156,7 @@ class MigrationSquasher:
         Raises:
             ConfigurationError: The dependency depends on a migration of the range.
         """
-        if dependency_key not in loader.graph.nodes:
+        if dependency_key not in loader.graph.node_map:
             return
         needed_squashed_keys = [key for key in loader.graph.forwards_plan(dependency_key) if key in squashed_keys]
         if needed_squashed_keys:

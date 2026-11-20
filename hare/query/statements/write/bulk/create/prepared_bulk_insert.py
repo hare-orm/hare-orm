@@ -33,7 +33,7 @@ class PreparedBulkInsert:
         default_fields = tuple(
             name
             for name in bulk_create._writer.templates.explicit_key_fields
-            if bulk_create.model._meta.fields_map[name].has_db_default()
+            if bulk_create._binding.fields_map[name].has_db_default()  # type: ignore[union-attr]
         )
         multi_row = (
             bulk_create._returning
@@ -59,12 +59,13 @@ class PreparedBulkInsert:
             objects = [obj for obj, _shape in grouped_objects]
             omit_fields = set(omitted)
             self.omitted_fields.update(omit_fields)
-            fields = bulk_create._filtered_field_names(omit_fields, include_generated=custom_key)
-            columns = bulk_create._filter_columns(omit_fields, include_generated=custom_key)
+            insert_statement = bulk_create._get_insert_statement()
+            fields = insert_statement.get_field_names(with_primary_key=custom_key, omitted_field_names=omit_fields)
+            columns = insert_statement.get_columns(fields)
             if not columns:
-                templates = TemplateInsert.make_template_statements(bulk_create, omit_fields)
+                sql = TemplateInsert.get_default_values_sql(bulk_create, omit_fields, primary_key_given=custom_key)
                 batches = DefaultRowsInsert.bind_batches(
-                    bulk_create, templates[int(custom_key)][0], objects, omit_fields, bulk_create._returning
+                    bulk_create, sql, objects, omit_fields, bulk_create._returning
                 )
             elif bulk_create._use_copy:
                 batches = CopyInsert.bind_batches(bulk_create, columns, fields, objects)
@@ -88,18 +89,19 @@ class PreparedBulkInsert:
 
     async def execute(self, bulk_create: BulkCreateQuery[Any]) -> None:
         """Apply results as their commands finish; stop at the first execution failure."""
-        index = 0
-        async for result in self.bound.execute(bulk_create._connection):
-            batch = self.batches[index]
-            index += 1
+        connection = bulk_create._connection
+        for batch in self.batches:
+            result = await BoundWrite.execute_command(connection, batch.command)
             if batch.populate_returned_fields:
                 ReturnedRowsMatching.populate_returned_fields_from_returning_rows(
                     bulk_create,
-                    list(batch.objects),
+                    batch.objects,
                     result.rows,
                     batch.conflict_fields,
                     batch.written_fields,
                     batch.applied_columns,
+                    null_conflict_keys=batch.null_conflict_keys,
+                    bound_rows=batch.bound_rows,
                 )
             if bulk_create._reported_rows is not None:
                 bulk_create._reported_rows.extend(dict(row) for row in result.rows)

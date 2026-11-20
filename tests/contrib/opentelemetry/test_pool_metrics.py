@@ -5,6 +5,8 @@ another thread; nothing once uninstrumented."""
 
 import asyncio
 import os
+import subprocess  # nosec B404 - the test runs its own Python program.
+import sys
 import tempfile
 
 import pytest
@@ -14,7 +16,6 @@ from opentelemetry.sdk.metrics.view import DropAggregation, View
 
 from hare import Connections
 from hare.contrib.opentelemetry import OpenTelemetryInstrumentor
-from hare.contrib.opentelemetry.pool_metric_instruments import PoolMetricInstruments
 from hare.contrib.test import requires_features
 from hare.dialects.base.client.pool.pool_statistics import PoolStatistics
 from hare.instrumentation.pools.declarations import PoolMeasurement
@@ -22,6 +23,63 @@ from hare.instrumentation.pools.enums import PoolMetricEvent
 from hare.instrumentation.pools.pool_metrics import PoolMetrics
 from hare.instrumentation.pools.pool_metrics_recorder import PoolMetricsRecorder
 from tests.utils.database_under_test import DatabaseUnderTest
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("explicit_first", [False, True], ids=["global-first", "explicit-first"])
+def test_late_global_provider_shares_pool_metrics_with_its_explicit_user(explicit_first):
+    probe = """
+import asyncio
+import sys
+from opentelemetry import metrics
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from hare.contrib.opentelemetry import OpenTelemetryInstrumentor
+from hare.core.hare_context import HareContext
+
+def points(reader, name):
+    return [
+        point for resource in reader.get_metrics_data().resource_metrics
+        for scope in resource.scope_metrics for metric in scope.metrics
+        if metric.name == name for point in metric.data.data_points
+    ]
+
+async def run():
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+    explicit = OpenTelemetryInstrumentor(meter_provider=provider, query_spans=False)
+    implicit = OpenTelemetryInstrumentor(query_spans=False)
+    first, second = (explicit, implicit) if sys.argv[1] == "True" else (implicit, explicit)
+    first.instrument()
+    if first is explicit:
+        second.instrument()
+        metrics.set_meter_provider(provider)
+    else:
+        metrics.set_meter_provider(provider)
+        second.instrument()
+    try:
+        async with HareContext() as context:
+            await context.init(config={"connections": {"default": "sqlite+aiosqlite://:memory:"}, "apps": {}})
+            client = context.connections.get_main("default")
+            await client.execute_dicts("SELECT 1 AS one")
+            assert client.get_pool_status().connect_count == 1
+            assert sum(point.count for point in points(reader, "db.client.connection.create_time")) == 1
+            first.uninstrument()
+            assert sum(point.value for point in points(reader, "db.client.connection.count")) == 1
+            second.uninstrument()
+            assert not points(reader, "db.client.connection.count")
+            await context.close_connections()
+    finally:
+        first.uninstrument()
+        second.uninstrument()
+        provider.shutdown()
+
+asyncio.run(run())
+"""
+    result = subprocess.run(  # nosec B603 - the interpreter and the entire program come from this test.
+        [sys.executable, "-c", probe, str(explicit_first)], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.database_independent
@@ -37,7 +95,7 @@ def test_histogram_only_exports_keep_all_events_across_restart():
         )
         for reader in readers
     ]
-    instruments = [PoolMetricInstruments(provider) for provider in providers]
+    instruments = [OpenTelemetryInstrumentor(meter_provider=provider, query_spans=False) for provider in providers]
     statistics = PoolStatistics(capacity=2)
     statistics.set_recorder(
         lambda event, value: PoolMetricsRecorder.record(
@@ -46,8 +104,8 @@ def test_histogram_only_exports_keep_all_events_across_restart():
     )
     try:
         for instrument in instruments:
-            instrument.start()
-            instrument.start()
+            instrument.instrument()
+            instrument.instrument()
         for _ in range(100):
             statistics.add_wait(0.25)
         for reader in readers:
@@ -58,16 +116,16 @@ def test_histogram_only_exports_keep_all_events_across_restart():
             )
             assert (points[0].count, points[0].sum) == (100, 25)
         assert statistics.get_waits_since(0)[2] == 98
-        instruments[0].stop()
+        instruments[0].uninstrument()
         statistics.add_wait(0.25)
-        instruments[0].start()
+        instruments[0].instrument()
         statistics.add_wait(0.25)
         assert get_points(readers[0].get_metrics_data(), "db.client.connection.wait_time")[0].count == 101
         assert get_points(readers[1].get_metrics_data(), "db.client.connection.wait_time")[0].count == 102
     finally:
         statistics.set_recorder(None)
         for instrument in instruments:
-            instrument.stop()
+            instrument.uninstrument()
         for provider in providers:
             provider.shutdown()
 
@@ -161,6 +219,44 @@ async def test_pools_of_equal_attributes_are_summed_and_events_survive_closure(d
     data = metric_reader.get_metrics_data()
     assert get_points(data, "db.client.connection.max", **independent) == []
     assert get_points(data, "db.client.connection.wait_time", **independent)[0].count == wait_time.count + 1
+
+
+@pytest.mark.asyncio
+@requires_features(supports_pool_status=True)
+@pytest.mark.parametrize("first_state", ["inactive", "stopped", "active"])
+async def test_instrumentors_sharing_a_meter_provider_keep_one_set_of_pool_metrics(db_simple, first_state):
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+    first = OpenTelemetryInstrumentor(meter_provider=provider, query_spans=False)
+    second = OpenTelemetryInstrumentor(meter_provider=provider, query_spans=False)
+    client, directory = make_independent_client()
+    attributes = {"db.client.connection.pool.name": "models", "hare.pool.role": "independent"}
+    try:
+        if first_state != "inactive":
+            first.instrument()
+        if first_state == "stopped":
+            first.uninstrument()
+        second.instrument()
+        assert await client.execute_dicts("SELECT 1 AS one") == [{"one": 1}]
+        (created,) = get_points(reader.get_metrics_data(), "db.client.connection.create_time", **attributes)
+        assert created.count == client.get_pool_status().connect_count == 1
+
+        first.uninstrument()
+        report = reader.get_metrics_data()
+        assert get_points(report, "db.client.connection.count", **attributes)
+        assert get_points(report, "db.client.connection.max", **attributes)
+        assert get_points(report, "db.client.connection.idle.min", **attributes)
+        assert get_points(report, "db.client.connection.pending_requests", **attributes)
+
+        second.uninstrument()
+        assert get_points(reader.get_metrics_data(), "db.client.connection.max", **attributes) == []
+    finally:
+        first.uninstrument()
+        second.uninstrument()
+        await client.close()
+        if directory is not None:
+            directory.cleanup()
+        provider.shutdown()
 
 
 @pytest.mark.asyncio

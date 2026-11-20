@@ -49,7 +49,7 @@ async def init_and_raise(holder):
     ctx = HareContext.get_current()
     assert ctx is not None
     assert ctx.connections._get_storage() != {}
-    raise Exception("Some exception")
+    raise RuntimeError("Some exception")
 
 
 def test_run_async(holder, requires_no_context):
@@ -71,7 +71,7 @@ def test_run_async_raised(holder, requires_no_context):
     assert HareContext.get_current() is None
     assert holder["value"] == 1
 
-    with pytest.raises(Exception, match="Some exception"):
+    with pytest.raises(RuntimeError, match="Some exception"):
         Hare.run_async(init_and_raise(holder))
 
     # After run_async (even with exception), context should be cleaned up

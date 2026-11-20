@@ -53,40 +53,69 @@ async def test_write_contracts_share_input_conversions_and_keep_read_types_separ
     try:
         author = context.apps.get_model("types.TypeAuthor")
         book = context.apps.get_model("types.TypeBook")
-        edition = context.apps.get_model("types.TypeEdition")
-        writes = WriteValueTypes.get_all(book)
+        context.apps.get_model("types.TypeEdition")
+        writes = WriteValueTypes.get_all(context.apps.get_binding("types.TypeBook"))
         assert {"id", "pk", "author", "author_id", "amount", "published"} <= writes.keys()
         assert writes["author"].models == (author,) and writes["author"].nullable
-        assert WriteValueTypes.get(author, "books") is None
-        assert WriteValueTypes.get(book, "missing") is None
-        assert str in WriteValueTypes.get(author, "pk").accepted_classes
+        assert WriteValueTypes.get(context.apps.get_binding("types.TypeAuthor"), "books") is None
+        assert WriteValueTypes.get(context.apps.get_binding("types.TypeBook"), "missing") is None
+        assert str in WriteValueTypes.get(context.apps.get_binding("types.TypeAuthor"), "pk").accepted_classes
         assert str in writes["amount"].accepted_classes
         assert int in writes["amount"].accepted_classes
-        assert WriteValueTypes.get(book, "amount", accepts_expressions=True).accepts_expressions
-        lookup = book._meta.get_lookup_info("published")
+        assert WriteValueTypes.get(
+            context.apps.get_binding("types.TypeBook"), "amount", accepts_expressions=True
+        ).accepts_expressions
+        lookup = context.apps.get_binding(book).get_lookup_info("published")
         assert str in FilterValueTypes.get_filter_value_type(lookup).accepted_classes
         assert not FilterValueTypes.get_selected_value_type(lookup).accepted_classes
-        key = WriteValueTypes.get(edition, "pk").classes[0]
+        key = WriteValueTypes.get(context.apps.get_binding("types.TypeEdition"), "pk").classes[0]
         assert str in get_args(key[0]) and key[1] is int
         text = ValueTypeText(StubImports(__name__))
         assert "str" in text.get_text(writes["amount"])
-        assert "str" in text.get_text(WriteValueTypes.get(edition, "pk"))
+        assert "str" in text.get_text(WriteValueTypes.get(context.apps.get_binding("types.TypeEdition"), "pk"))
         expected_updates = {"author", "author_id", "amount", "published", "secret"}
-        updates = WriteValueTypes.get_all(book, accepts_expressions=True, write_type=WriteType.UPDATE)
+        updates = WriteValueTypes.get_all(
+            context.apps.get_binding("types.TypeBook"), accepts_expressions=True, write_type=WriteType.UPDATE
+        )
         assert updates.keys() == expected_updates
         assert all(description.accepts_expressions for description in updates.values())
-        stub = ModelStub(book, book.get_connection().dialect, StubImports(__name__), relation_depth=1)
+        stub = ModelStub(
+            context.apps.get_binding("types.TypeBook"),
+            book.get_connection().dialect,
+            StubImports(__name__),
+            relation_depth=1,
+        )
         assert stub.get_update_types() == updates
         assert {"id", "pk", "version", "deleted", "computed", "secret_blind_index"} <= writes.keys()
-        for name in WriteValueTypes.get_names(book):
+        for name in WriteValueTypes.get_names(context.apps.get_binding("types.TypeBook")):
             if name in expected_updates:
-                RowWriteRules.get(book, WriteType.UPDATE, [name], ".update()", finds_rows_by_key=False)
+                RowWriteRules.get(
+                    context.apps.get_binding("types.TypeBook"),
+                    WriteType.UPDATE,
+                    [name],
+                    ".update()",
+                    finds_rows_by_key=False,
+                )
             else:
                 with pytest.raises(QueryError):
-                    RowWriteRules.get(book, WriteType.UPDATE, [name], ".update()", finds_rows_by_key=False)
-        assert WriteValueTypes.get_all(edition, write_type=WriteType.UPDATE).keys() == {"code", "revision"}
+                    RowWriteRules.get(
+                        context.apps.get_binding("types.TypeBook"),
+                        WriteType.UPDATE,
+                        [name],
+                        ".update()",
+                        finds_rows_by_key=False,
+                    )
+        assert WriteValueTypes.get_all(
+            context.apps.get_binding("types.TypeEdition"), write_type=WriteType.UPDATE
+        ).keys() == {"code", "revision"}
         for name in ("code", "revision"):
-            RowWriteRules.get(edition, WriteType.UPDATE, [name], ".update()", finds_rows_by_key=False)
+            RowWriteRules.get(
+                context.apps.get_binding("types.TypeEdition"),
+                WriteType.UPDATE,
+                [name],
+                ".update()",
+                finds_rows_by_key=False,
+            )
     finally:
         await Hare.close_connections()
         context.__exit__(None, None, None)

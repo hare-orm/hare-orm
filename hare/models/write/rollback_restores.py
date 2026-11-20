@@ -68,7 +68,7 @@ class RollbackRestores:
             elif layer.field_names is None:
                 first_values = layer.snapshots[0].values
                 if not snapshot.values.keys() <= first_values.keys():
-                    layer.field_names = set(first_values) | snapshot.values.keys()
+                    layer.field_names = first_values.keys() | snapshot.values.keys()
                     layer.snapshots.append(snapshot)
             elif not snapshot.values.keys() <= layer.field_names:
                 layer.field_names.update(snapshot.values)
@@ -86,7 +86,7 @@ class RollbackRestores:
             for instance, layer in new_layers:
                 RollbackRestores.pop_pending_rollback_restore_layer(instance, layer)
 
-        TransactionCallbacks.add_on_rollback_callback(transaction, _on_rollback)
+        TransactionCallbacks.add_on_rollback_callback(transaction, _on_rollback, is_user_callback=False)
         TransactionCallbacks.add_on_commit_callback(transaction, _on_commit, is_user_callback=False)
 
     @staticmethod
@@ -148,9 +148,14 @@ class RollbackRestores:
         if index is None:
             # Restored already, by the rollback of the transaction its savepoint was released into.
             return []
-        rolled_back = [entry for entry in stack[index:] if entry.client is layer.client]
-        for entry in rolled_back:
-            RollbackRestores.pop_pending_rollback_restore_layer(obj, entry)
+        rolled_back = []
+        remaining = []
+        for entry in stack[index:]:
+            if entry.client is layer.client:
+                rolled_back.append(entry)
+            else:
+                remaining.append(entry)
+        stack[index:] = remaining
         snapshots = []
         for entry in rolled_back:
             values: dict[str, Any] = {}

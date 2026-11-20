@@ -1,15 +1,54 @@
 import importlib
+import os
+import py_compile
 import sys
 
 import pytest
 
 from hare.migrations.exceptions import MigrationLoadError
+from hare.migrations.loading.graph.migration_key import MigrationKey
 from hare.migrations.loading.migration_loader import MigrationLoader
 from hare.migrations.loading.recorder.migration_recorder import MigrationRecorder
 from tests.utils.project_imports import ProjectImports
 from tests.utils.project_sources import ProjectSources
 
 pytestmark = pytest.mark.database_independent
+
+
+def test_cold_load_uses_current_source_despite_valid_timestamp_bytecode(tmp_path):
+    sources = ProjectSources(tmp_path)
+    package = sources.write_package("library")
+    old = (
+        "from hare.migrations import Migration as Base\n"
+        "from hare.migrations.operations import AlterField\n"
+        "from hare import fields\n"
+        "class Migration(Base):\n"
+        "    operations = [AlterField('Book', 'title', fields.CharField(max_length=20))]\n"
+    )
+    path = sources.write_migration(package, "0001_initial", old)
+    timestamp = path.stat()
+    py_compile.compile(str(path), doraise=True, invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP)
+    current = old.replace("max_length=20", "max_length=30")
+    assert len(old) == len(current)
+    path.write_text(current, encoding="utf-8")
+    os.utime(path, ns=(timestamp.st_atime_ns, timestamp.st_mtime_ns))
+    with ProjectImports(tmp_path).activate():
+        loader = MigrationLoader({"library": {"migrations": "library.migrations"}}, MigrationRecorder(None))
+        for _attempt in range(2):
+            loader.load_disk()
+            assert loader.disk_migrations[MigrationKey("library", "0001_initial")].operations[0].field.max_length == 30
+
+
+def test_failed_cold_module_execution_leaves_no_partial_import(tmp_path):
+    sources = ProjectSources(tmp_path)
+    package = sources.write_package("library")
+    sources.write_migration(package, "0001_initial", "marker = 'partial'\nraise RuntimeError('broken')\n")
+    name = "library.migrations.0001_initial"
+    with ProjectImports(tmp_path).activate():
+        with pytest.raises(RuntimeError, match="broken"):
+            MigrationLoader._import_migration_module(name)
+        assert name not in sys.modules
+        assert not hasattr(sys.modules["library.migrations"], "0001_initial")
 
 
 @pytest.mark.parametrize(

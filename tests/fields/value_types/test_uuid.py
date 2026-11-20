@@ -4,11 +4,14 @@ import warnings
 import pytest
 
 from hare import fields
+from hare.core.hare_context import HareContext
 from hare.exceptions import ValidationError
 from hare.fields.database_default import DatabaseDefault
 from hare.fields.db_defaults import SqlDefault
 from hare.warnings import RedundantDbDefaultWarning
 from tests.shared_models import testmodels
+
+pytestmark = pytest.mark.usefixtures("model_conversion_context")
 
 
 @pytest.mark.database_independent
@@ -115,7 +118,7 @@ def test_to_db_value_rejects_empty_string_instead_of_silently_nulling():
     UUID error any other garbage string gets."""
     from hare.exceptions import ValidationError
 
-    field = testmodels.UUIDFields._meta.fields_map["data"]
+    field = HareContext.require_current().apps.get_binding(testmodels.UUIDFields).fields_map["data"]
     with pytest.raises(ValidationError, match="badly formed hexadecimal UUID string"):
         field.to_db_value("", testmodels.UUIDFields)
 
@@ -128,7 +131,7 @@ def test_to_python_value_wraps_malformed_string():
     validation failure raises."""
     from hare.exceptions import ValidationError
 
-    field = testmodels.UUIDFields._meta.fields_map["data"]
+    field = HareContext.require_current().apps.get_binding(testmodels.UUIDFields).fields_map["data"]
     with pytest.raises(ValidationError, match="badly formed hexadecimal UUID string"):
         field.from_db_value("not-a-uuid-at-all")
 
@@ -136,7 +139,7 @@ def test_to_python_value_wraps_malformed_string():
 @pytest.mark.database_independent
 @pytest.mark.parametrize("bad_value", [123, 1.5, [1], b"not-a-uuid"])
 def test_non_string_value_raises_validation_error(bad_value):
-    field = testmodels.UUIDFields._meta.fields_map["data"]
+    field = HareContext.require_current().apps.get_binding(testmodels.UUIDFields).fields_map["data"]
     with pytest.raises(ValidationError, match="expected a UUID or UUID string"):
         field.to_db_value(bad_value, testmodels.UUIDFields)
     with pytest.raises(ValidationError, match="expected a UUID or UUID string"):

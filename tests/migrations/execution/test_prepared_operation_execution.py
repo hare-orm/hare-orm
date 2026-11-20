@@ -147,7 +147,7 @@ async def test_sql_collection_keeps_sql_siblings_beside_python_in_nested_branch(
             )
         ],
     )
-    await PreparedOperationExecution.run(migration, migration.prepare(State()), editor, collect_sql=True)
+    await PreparedOperationExecution.run(migration, migration.prepare(State()), editor)
     assert calls == []
     assert "-- THIS OPERATION CANNOT BE REPRESENTED AS SQL" in editor.collected_sql
     assert editor.events == [("sql", set(), {"sql"})]

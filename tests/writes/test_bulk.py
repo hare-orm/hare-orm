@@ -16,6 +16,7 @@ from hare.exceptions import (
 from hare.fields.database_default import DatabaseDefault
 from hare.instrumentation.declarations import QueryExecuted, RowsChanged
 from hare.instrumentation.observers.observers import Observers
+from hare.models.write.bound_rows import BoundRows
 from hare.query.expressions import F, Value
 from hare.query.statements.write.bulk.bulk_update_checks import BulkUpdateChecks
 from hare.query.statements.write.bulk.bulk_write_batches import BulkWriteBatches
@@ -39,6 +40,7 @@ from tests.shared_models.testmodels import (
     WidgetTagMembership,
 )
 from tests.shared_models.testmodels_postgres import DefaultModel
+from tests.utils.model_bindings import ModelBindings
 
 
 def assert_list_sort_equal(actual, expected, sorted_key="id"):
@@ -96,30 +98,46 @@ async def test_upsert_preserves_order_between_generated_and_explicit_primary_key
 
 @pytest.mark.database_independent
 def test_bulk_update_rejects_primary_keys_equal_after_field_normalization():
+    apps = ModelBindings.prepare(ContactAccount)
+    binding = apps.get_binding(ContactAccount)
     objects = [
-        ContactAccount(email="ann@EXAMPLE.com", name="a", version=0),
-        ContactAccount(email="ann@example.COM", name="b", version=0),
+        apps.new(ContactAccount, email="ann@EXAMPLE.com", name="a", version=0),
+        apps.new(ContactAccount, email="ann@example.COM", name="b", version=0),
     ]
 
     with pytest.raises(QueryError, match="multiple objects"):
-        BulkUpdateChecks.raise_if_row_written_twice(ContactAccount, objects, SQLITE_DIALECT.types)
+        bound_rows = BoundRows(
+            ["email"],
+            BulkWriteBatches.serialize_instances(
+                binding,
+                SQLITE_DIALECT.types,
+                objects,
+                ["email"],
+            ),
+        )
+        BulkUpdateChecks.raise_if_row_written_twice(
+            binding,
+            objects,
+            bound_rows.get_keys(binding, SQLITE_DIALECT.types, ["email"]),
+        )
 
 
 @pytest.mark.database_independent
 def test_bulk_update_accepts_an_unhashable_json_primary_key():
     model = SimpleNamespace(
-        __name__="Document",
-        _meta=SimpleNamespace(
-            primary_key_attribute="data",
-            primary_key_attribute_names=["data"],
-            has_composite_primary_key=False,
-            fields_map={"data": fields.JSONField(primary_key=True)},
-            optimistic_lock_field=None,
-        ),
+        _model=SimpleNamespace(__name__="Document"),
+        primary_key_attribute="data",
+        primary_key_attribute_names=["data"],
+        has_composite_primary_key=False,
+        fields_map={"data": fields.JSONField(primary_key=True)},
+        optimistic_lock_field=None,
     )
 
+    obj = SimpleNamespace(data={"a": 1}, pk={"a": 1})
+    value = SQLITE_DIALECT.types.get_db_value(model.fields_map["data"], obj.data, obj)
+    bound_rows = BoundRows(["data"], [[value]])
     BulkUpdateChecks.raise_if_row_written_twice(
-        model, [SimpleNamespace(data={"a": 1}, pk={"a": 1})], SQLITE_DIALECT.types
+        model, [obj], bound_rows.get_keys(model, SQLITE_DIALECT.types, ["data"])
     )
 
 
@@ -1023,14 +1041,28 @@ async def test_bulk_create_returning_rollback_restores_pk(db_truncate):
         pass
 
     objects = [UniqueName(name=f"rb{i}") for i in range(3)]
+    names = ["rb0", "rb1", "rb2"]
+    callbacks = []
     with pytest.raises(UnrelatedFailure):
         async with Transactions.atomic():
-            await UniqueName.objects.bulk_create(objects, returning=True)
-            assert all(obj.id is not None for obj in objects)
+            async with Transactions.atomic() as transaction:
+                Transactions.on_commit(lambda: callbacks.append("commit"))
+                Transactions.on_rollback(lambda: callbacks.append("rollback"))
+                await UniqueName.objects.bulk_create(objects, returning=True)
+                ids = [obj.id for obj in objects]
+                assert None not in ids
+                assert len(set(ids)) == len(names)
+                assert all(obj._saved_in_db for obj in objects)
+                assert await transaction.execute_dicts("SELECT id, name FROM uniquename ORDER BY name") == [
+                    {"id": key, "name": name} for key, name in zip(ids, names, strict=True)
+                ]
+            assert callbacks == []
             raise UnrelatedFailure
 
     assert all(obj.id is None for obj in objects)
     assert all(obj._saved_in_db is False for obj in objects)
+    assert callbacks == ["rollback"]
+    assert await UniqueName.get_connection().execute_dicts("SELECT id, name FROM uniquename") == []
 
 
 @requires_features(supports_transactions=True)

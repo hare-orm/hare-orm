@@ -8,6 +8,7 @@ import re
 import pytest
 
 from hare import fields
+from hare.core.hare_context import HareContext
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.dialects.base.features import Features
 from hare.dialects.clickhouse.clickhouse_engine import ClickhouseEngine
@@ -19,6 +20,7 @@ from hare.migrations.operations import AlterModelOptions, CreateModel, DeleteMod
 from hare.migrations.state.state import State
 from hare.query.expressions import F
 from tests.dialects.clickhouse.models import Team
+from tests.utils.model_bindings import ModelBindings
 from tests.utils.operations import apply_operations
 
 TABLE = "clickhouse_visits"
@@ -62,7 +64,7 @@ async def alter(state, editor, options) -> State:
 
 @pytest.mark.asyncio
 async def test_options_are_created_and_changed_in_place(clickhouse_db):
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
     state = await apply_operations(
@@ -159,6 +161,8 @@ async def test_options_are_created_and_changed_in_place(clickhouse_db):
 
 @pytest.mark.database_independent
 def test_options_are_checked(monkeypatch):
+    apps = ModelBindings.prepare(Team)
+    binding = apps.get_binding(Team)
     for arguments in (
         {"column_codecs": (("page", "ZSTD(3)); DROP TABLE x"),)},
         {"column_codecs": {"page": "ZSTD"}},
@@ -181,7 +185,7 @@ def test_options_are_checked(monkeypatch):
         ClickhouseTableOptions(column_codecs=(("missing", "LZ4"),)),
     ):
         with pytest.raises(ConfigurationError):
-            options.raise_if_unsupported(Team, Team._meta.connection.features)
+            options.raise_if_unsupported(binding, Features())
     # A key or a time naming no field was a KeyError of the DDL.
     for option_name, arguments in (
         ("partition_by", {"partition_by": "missing"}),
@@ -189,27 +193,31 @@ def test_options_are_checked(monkeypatch):
         ("sharding_key", {"engine": "Distributed", "distributed_over": "team_local", "sharding_key": "missing"}),
     ):
         with pytest.raises(ConfigurationError, match=rf"{option_name} names no field \['missing'\]"):
-            ClickhouseTableOptions(**arguments).raise_if_unsupported(Team, Features())
+            ClickhouseTableOptions(**arguments).raise_if_unsupported(binding, Features())
     # Rows are sampled by an unsigned integer.
     with pytest.raises(ConfigurationError, match="sample_by 'name' is a column of String"):
-        ClickhouseTableOptions(order_by=("id", "name"), sample_by="name").raise_if_unsupported(Team, Features())
+        ClickhouseTableOptions(order_by=("id", "name"), sample_by="name").raise_if_unsupported(binding, Features())
     # A local table of the model's own name was the only table created - the rows weren't distributed.
     # The table is named when the app is set up, which a run on another database doesn't do.
-    monkeypatch.setattr(Team._meta, "db_table", Team._meta.db_table or "team")
+    monkeypatch.setattr(
+        binding,
+        "db_table",
+        binding.db_table or "team",
+    )
     with pytest.raises(ConfigurationError, match="distributed_over names the model's table"):
-        ClickhouseTableOptions(distributed_over=Team._meta.db_table).raise_if_unsupported(Team, Features())
+        ClickhouseTableOptions(distributed_over=binding.db_table).raise_if_unsupported(binding, Features())
     # A nullable key column met the server's refusal halfway through a migration.
     for arguments in ({"order_by": ("id", "description")}, {"partition_by": "description"}):
         with pytest.raises(ConfigurationError, match=r"read the nullable fields \['description'\]"):
-            ClickhouseTableOptions(**arguments).raise_if_unsupported(Team, Features())
+            ClickhouseTableOptions(**arguments).raise_if_unsupported(binding, Features())
         ClickhouseTableOptions(**arguments, settings=(("allow_nullable_key", 1),)).raise_if_unsupported(
-            Team, Features()
+            binding, Features()
         )
     # No setting lets a sharding key read one.
     with pytest.raises(ConfigurationError, match=r"sharding_key reads the nullable fields \['description'\]"):
         ClickhouseTableOptions(
             distributed_over="team_local", sharding_key="description", settings=(("allow_nullable_key", 1),)
-        ).raise_if_unsupported(Team, Features())
+        ).raise_if_unsupported(binding, Features())
 
 
 def test_a_renamed_field_is_renamed_in_every_key_naming_it():
@@ -237,15 +245,20 @@ async def test_rows_of_a_table_with_a_projection_are_deleted(clickhouse_db):
     )
     await Trade.objects.filter(symbol="a").delete()
     assert await Trade.objects.order_by("id").values_list("id", flat=True) == [1, 3, 5]
-    (table,) = await Trade._meta.connection.execute_dicts(
-        "SELECT create_table_query FROM system.tables WHERE database = currentDatabase() AND name = 'trade'"
+    (table,) = (
+        await HareContext.require_current()
+        .apps.get_queryset(Trade)
+        .get_connection()
+        .execute_dicts(
+            "SELECT create_table_query FROM system.tables WHERE database = currentDatabase() AND name = 'trade'"
+        )
     )
     assert re.findall(r"PROJECTION (\w+)", table["create_table_query"]) == ["by_symbol"]
 
 
 @pytest.mark.asyncio
 async def test_a_table_of_an_engine_outside_the_merge_tree_family(clickhouse_db):
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
     state = await apply_operations(
@@ -270,12 +283,12 @@ async def test_a_table_of_an_engine_outside_the_merge_tree_family(clickhouse_db)
         ClickhouseTableOptions(engine="Log", settings=(("index_granularity", 1),)),
     ):
         with pytest.raises(ConfigurationError, match="MergeTree family"):
-            options.raise_if_unsupported(Team, connection.features)
+            options.raise_if_unsupported(clickhouse_db.apps.get_binding(Team), connection.features)
 
 
 @pytest.mark.asyncio
 async def test_a_collapsing_table_takes_its_sign_column_of_int8(clickhouse_db):
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
     state = await apply_operations(
@@ -311,7 +324,7 @@ async def test_a_collapsing_table_takes_its_sign_column_of_int8(clickhouse_db):
 
 @pytest.mark.asyncio
 async def test_a_ttl_of_a_nullable_column_is_refused_with_its_remedy(clickhouse_db):
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     sql = "CREATE TABLE ttl_of_a_nullable (id UInt8, seen Nullable(DateTime)) ENGINE = MergeTree ORDER BY id TTL {}"
     try:
         with pytest.raises(UnSupportedError, match=r"never NULL - the column is nullable: assumeNotNull\(seen\)"):
@@ -323,7 +336,7 @@ async def test_a_ttl_of_a_nullable_column_is_refused_with_its_remedy(clickhouse_
 
 @pytest.mark.asyncio
 async def test_a_relation_named_in_the_sort_sorts_by_its_key_column(clickhouse_db):
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
     state = await apply_operations(

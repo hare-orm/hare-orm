@@ -3,8 +3,9 @@ from __future__ import annotations
 import dataclasses
 from typing import Any
 
+from hare.ddl.enums import SchemaPartType
 from hare.inspectdb.constants import CATALOG_DIAGNOSTIC_PART_TYPES
-from hare.inspectdb.enums import CatalogDiagnosticCode, SchemaPartType
+from hare.inspectdb.enums import CatalogDiagnosticCode
 from hare.inspectdb.introspection.schema_part import SchemaPart
 from hare.inspectdb.introspection.table_info import TableInfo
 

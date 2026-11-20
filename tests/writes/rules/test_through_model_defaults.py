@@ -1,3 +1,6 @@
+import sys
+from types import ModuleType
+
 import pytest
 
 from hare import Model, fields
@@ -50,3 +53,43 @@ async def test_through_model_defaults_write_blind_indexes_and_hide_parameters():
             "called label",
             "awaited label",
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ("add", "set"))
+@pytest.mark.parametrize("asynchronous", (False, True))
+async def test_given_through_values_do_not_evaluate_their_field_defaults(monkeypatch, operation, asynchronous):
+    calls = []
+
+    def rejected_default():
+        calls.append("sync")
+        raise RuntimeError("unused default")
+
+    async def rejected_async_default():
+        calls.append("async")
+        raise RuntimeError("unused default")
+
+    class Owner(Model):
+        peers = fields.ManyToManyField("models.Peer", through="models.Link")
+
+    class Peer(Model):
+        pass
+
+    class Link(Model):
+        owner = fields.ForeignKeyField("models.Owner")
+        peer = fields.ForeignKeyField("models.Peer")
+        stamp = fields.IntField(default=rejected_async_default if asynchronous else rejected_default)
+        note = fields.IntField(default=8)
+
+    module = ModuleType("tests._through_given_values")
+    module.__models__ = [Owner, Peer, Link]
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    async with hare_test_context([module.__name__], db_url="sqlite+aiosqlite://:memory:"):
+        owner = await Owner.objects.create()
+        peer = await Peer.objects.create()
+        if operation == "add":
+            await owner.peers.add(peer, through_defaults={"stamp": 55})
+        else:
+            await owner.peers.set([peer], through_defaults={"stamp": 55})
+        assert calls == []
+        assert await Link.objects.values_list("stamp", "note") == [(55, 8)]

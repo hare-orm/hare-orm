@@ -4,10 +4,15 @@ _NON_PRAGMA_KWARGS allowlist, not by having to
 remember every non-pragma kwarg at the .pop() call site."""
 
 import asyncio
+import gc
 import sqlite3
+import sys
 import threading
+import weakref
+from pathlib import Path
 from types import SimpleNamespace
 
+import aiosqlite
 import pytest
 
 from hare.contrib.test import requires_features
@@ -33,6 +38,210 @@ from hare.instrumentation.declarations import QueryExecuted
 from hare.instrumentation.observers.observers import Observers
 from hare.transactions.transactions import Transactions
 from tests.shared_models.testmodels import Tournament
+
+
+@pytest.mark.sqlite_only
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows filenames cannot contain a colon")
+@pytest.mark.asyncio
+async def test_memory_database_deletion_preserves_same_named_filesystem_entry(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    sentinel = tmp_path / ":memory:"
+    sentinel.write_bytes(b"unrelated filesystem entry")
+    client = AiosqliteClient(file_path=":memory:", connection_alias="storage-memory")
+    try:
+        assert await client.execute_dicts("SELECT 7 AS value") == [{"value": 7}]
+        await client.db_delete()
+        assert sentinel.read_bytes() == b"unrelated filesystem entry"
+    finally:
+        await client.close()
+
+
+@pytest.mark.sqlite_only
+@pytest.mark.asyncio
+async def test_deletion_after_close_uses_the_opened_database_path(tmp_path, monkeypatch):
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    monkeypatch.chdir(first)
+    client = AiosqliteClient(file_path="storage.sqlite3", connection_alias="storage-file")
+    try:
+        await client.db_create()
+        await client.execute_script("CREATE TABLE sample(value int); INSERT INTO sample VALUES(7)")
+        await client.close()
+        await client.close()
+        unrelated = second / "storage.sqlite3"
+        unrelated.write_bytes(b"another directory's file")
+        monkeypatch.chdir(second)
+        await client.db_delete()
+        assert not (first / "storage.sqlite3").exists()
+        assert unrelated.read_bytes() == b"another directory's file"
+    finally:
+        await client.close()
+
+
+@pytest.mark.sqlite_only
+@pytest.mark.asyncio
+async def test_unopened_create_check_does_not_claim_a_later_file(tmp_path, monkeypatch):
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    monkeypatch.chdir(first)
+    client = AiosqliteClient(file_path="checked.sqlite3", connection_alias="storage-check")
+    await client.db_create()
+    (first / "checked.sqlite3").write_bytes(b"external first")
+    (second / "checked.sqlite3").write_bytes(b"external second")
+    monkeypatch.chdir(second)
+    await client.db_delete()
+    assert (first / "checked.sqlite3").read_bytes() == b"external first"
+    assert (second / "checked.sqlite3").read_bytes() == b"external second"
+    explicit = AiosqliteClient(file_path=first / "checked.sqlite3", connection_alias="explicit-delete")
+    await explicit.db_delete()
+    assert not (first / "checked.sqlite3").exists()
+    assert (second / "checked.sqlite3").read_bytes() == b"external second"
+
+
+@pytest.mark.sqlite_only
+@pytest.mark.asyncio
+async def test_uri_create_refuses_the_native_existing_target(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    identifier = "file:existing.sqlite3?mode=rwc"
+    try:
+        oracle = sqlite3.connect(identifier)
+    except sqlite3.Error:
+        pytest.skip("This native SQLite build cannot open this file identifier")
+    try:
+        oracle.execute("CREATE TABLE sample(value int)")
+        oracle.execute("INSERT INTO sample VALUES(7)")
+        oracle.commit()
+        filename = next(row[2] for row in oracle.execute("PRAGMA database_list") if row[1] == "main")
+    finally:
+        oracle.close()
+    target = Path(filename)
+    before = target.read_bytes()
+    client = AiosqliteClient(file_path=identifier, connection_alias="storage-uri")
+    try:
+        with pytest.raises(OperationalError, match="already exists"):
+            await client.db_create()
+        assert target.read_bytes() == before
+    finally:
+        await client.close()
+
+
+@pytest.mark.sqlite_only
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["open", "probe", "create"])
+async def test_cancelled_connection_acquisition_closes_the_late_native_handle(tmp_path, monkeypatch, operation):
+    monkeypatch.chdir(tmp_path)
+    started, release = asyncio.Event(), threading.Event()
+    wrappers, references, closed = [], [], []
+    loop = asyncio.get_running_loop()
+    original_connect = aiosqlite.connect
+    client = AiosqliteClient(
+        file_path="file:cancelled?mode=memory&cache=private"
+        if operation == "create"
+        else tmp_path / "cancelled.sqlite3",
+        connection_alias="cancelled-open",
+    )
+
+    class TrackedConnection(sqlite3.Connection):
+        def close(self):
+            closed.append(True)
+            return super().close()
+
+    def connecting(*args, **kwargs):
+        connection = original_connect(*args, **kwargs, factory=TrackedConnection, check_same_thread=False)
+        wrappers.append(connection)
+        original_connector = connection._connector
+
+        def opening():
+            loop.call_soon_threadsafe(started.set)
+            if not release.wait(5):
+                raise RuntimeError("connection acquisition was not released")
+            raw_connection = original_connector()
+            references.append(weakref.ref(raw_connection))
+            return raw_connection
+
+        connection._connector = opening
+        return connection
+
+    async def opening():
+        if operation == "open":
+            await client.create_connection(with_db=True)
+        elif operation == "probe":
+            await client._probe_storage_filename(client.filename)
+        else:
+            await client.db_create()
+
+    monkeypatch.setattr(aiosqlite, "connect", connecting)
+    collecting = gc.isenabled()
+    gc.disable()
+    task = asyncio.create_task(opening())
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        await client.close()
+        await asyncio.to_thread(wrappers[0]._thread.join, 5)
+        assert not wrappers[0]._thread.is_alive()
+        assert len(references) == 1
+        assert closed == [True]
+        native = references[0]()
+        if native is not None:
+            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                native.execute("SELECT 41+1")
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await client.close()
+        for reference in references:
+            native = reference()
+            if native is not None:
+                sqlite3.Connection.close(native)
+        if collecting:
+            gc.enable()
+
+
+@pytest.mark.sqlite_only
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["cancel", "repeated-cancel", "close-error"])
+async def test_interrupted_close_releases_the_client_slot_and_can_reopen(tmp_path, monkeypatch, failure):
+    client = AiosqliteClient(file_path=tmp_path / "closing.sqlite3", connection_alias="interrupted-close")
+    await client.execute_script("CREATE TABLE sample(value int); INSERT INTO sample VALUES(19)")
+    connection = client._connection
+    started, release = asyncio.Event(), asyncio.Event()
+    original_close = aiosqlite.Connection.close
+    intercepted = False
+
+    async def closing(candidate):
+        nonlocal intercepted
+        await original_close(candidate)
+        if candidate is connection and not intercepted:
+            intercepted = True
+            started.set()
+            await release.wait()
+            if failure == "close-error":
+                raise RuntimeError("reported after physical close")
+
+    monkeypatch.setattr(aiosqlite.Connection, "close", closing)
+    task = asyncio.create_task(client.close())
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        if failure != "close-error":
+            task.cancel()
+            if failure == "repeated-cancel":
+                await asyncio.sleep(0)
+                task.cancel()
+        release.set()
+        with pytest.raises(RuntimeError if failure == "close-error" else asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        assert client._connection is None
+        assert await client.execute_dicts("SELECT value FROM sample") == [{"value": 19}]
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await client.close()
 
 
 @requires_features(dialect="sqlite")
@@ -711,7 +920,7 @@ async def test_close_after_timeout_fails_the_abandoned_transaction_with_hare_err
 @pytest.mark.asyncio
 async def test_a_null_byte_in_the_text_of_raw_sql_is_sqlites_to_refuse(db):
     """The text of raw SQL is sent as written - SQLite's driver refuses a null byte in it."""
-    connection = Tournament._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Tournament).get_connection()
     for run in (connection.execute, connection.execute_script):
         with pytest.raises(OperationalError, match="null character"):
             await run("SELECT 'a\x00b'")

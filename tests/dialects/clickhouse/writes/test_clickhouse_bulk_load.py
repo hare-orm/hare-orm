@@ -22,6 +22,7 @@ from hare.exceptions import (
     ValidationError,  # noqa: E402
 )
 from tests.dialects.clickhouse.models import Player, Team  # noqa: E402
+from tests.utils.model_bindings import ModelBindings
 
 PLAYER_FIELDS = ("name", "team_id", "score", "rating", "joined", "born", "active", "notes", "data")
 PLAYER_INSERT = (
@@ -133,7 +134,7 @@ def test_plain_columns_are_inserted_as_they_are():
 @pytest.mark.database_independent
 def test_a_uuid_is_written_as_the_uuid_itself():
     key = uuid.UUID("6f1e5a0e-0000-4000-8000-000000000001")
-    write = CLICKHOUSE_DIALECT.types.get_db_writer(Team._meta.fields_map["id"])
+    write = CLICKHOUSE_DIALECT.types.get_db_writer(ModelBindings.prepare(Team).get_binding(Team).fields_map["id"])
     assert write(key, Team) is key
     assert write(str(key), Team) == key
     assert type(write(str(key), Team)) is uuid.UUID

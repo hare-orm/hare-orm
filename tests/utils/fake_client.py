@@ -33,6 +33,14 @@ class FakeClient(DatabaseClient):
     async def close(self) -> None:
         raise NotImplementedError()
 
+    async def read_foreign_key_state(self) -> bool:
+        """Schema compilation tests execute no database constraints."""
+        return False
+
+    def enforces_foreign_keys(self) -> bool:
+        """No database backs the compiled statements."""
+        return False
+
     async def db_create(self) -> None:
         raise NotImplementedError()
 

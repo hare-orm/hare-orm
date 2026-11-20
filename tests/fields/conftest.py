@@ -5,8 +5,6 @@ These fixtures support tests that define hare_test_modules to use
 custom model definitions instead of the default tests.shared_models.testmodels.
 """
 
-import os
-
 import pytest
 import pytest_asyncio
 
@@ -18,50 +16,13 @@ from tests.utils.database_under_test import DatabaseUnderTest
 
 
 @pytest_asyncio.fixture(scope="module")
-async def db_array_fields_module():
-    """Module-scoped fixture for TestArrayFields - creates the database and schema ONCE per file
-    instead of once per test.
-
-    Uses models defined in tests.shared_models.testmodels_postgres module.
-    """
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    if DatabaseUnderTest.get_dialect().name != "postgresql":
-        pytest.skip("ArrayFields require PostgreSQL")
-    async with hare_test_context(
-        modules=["tests.shared_models.testmodels", "tests.shared_models.testmodels_postgres"],
-        db_url=db_url,
-        app_label="models",
-        connection_label="models",
-    ) as ctx:
-        yield ctx
-
-
-@pytest_asyncio.fixture(scope="function")
-async def db_array_fields(db_array_fields_module):
-    """
-    Fixture for TestArrayFields, with transaction rollback cleanup between tests.
-
-    Equivalent to: test.IsolatedTestCase with
-    hare_test_modules=["tests.shared_models.testmodels", "tests.shared_models.testmodels_postgres"]
-    """
-    async with RollbackIsolation(db_array_fields_module) as ctx:
-        yield ctx
-
-
-@pytest_asyncio.fixture(scope="module")
 async def db_generated_field_module():
     """Module-scoped fixture for GeneratedField tests (STORED, dialect-agnostic) - creates the
     database and schema ONCE per file instead of once per test.
 
     Uses models defined in tests.fields.models_generated_field module.
     """
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    async with hare_test_context(
-        modules=["tests.fields.models_generated_field"],
-        db_url=db_url,
-        app_label="models",
-        connection_label="models",
-    ) as ctx:
+    async with DatabaseUnderTest.open_model_context(["tests.fields.models_generated_field"]) as ctx:
         yield ctx
 
 
@@ -81,7 +42,7 @@ async def db_generated_field_virtual_module():
     Uses models defined in tests.fields.defaults.models_generated_field_virtual module. Skipped on a server
     without VIRTUAL generated columns (PostgreSQL before 18).
     """
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+    db_url = DatabaseUnderTest.get_url()
     async with hare_test_context(
         modules=["tests.fields.defaults.models_generated_field_virtual"],
         db_url=db_url,
@@ -113,13 +74,7 @@ async def db_subclass_fields_module():
 
     Uses models defined in tests.fields.field_declaration.subclass_models module.
     """
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    async with hare_test_context(
-        modules=["tests.fields.field_declaration.subclass_models"],
-        db_url=db_url,
-        app_label="models",
-        connection_label="models",
-    ) as ctx:
+    async with DatabaseUnderTest.open_model_context(["tests.fields.field_declaration.subclass_models"]) as ctx:
         yield ctx
 
 
@@ -139,7 +94,7 @@ async def db_subclass_fields(db_subclass_fields_module):
 async def db_encrypted_fields_module():
     """Module-scoped fixture for the encrypted-field tests (tests.fields.models_encrypted) - in an
     environment installing pydantic, the models whose fields declare a pydantic type too."""
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+    db_url = DatabaseUnderTest.get_url()
     modules = ["tests.fields.models_encrypted"]
     if SuiteEnvironments.installs(PYDANTIC_REQUIREMENT):
         modules.append("tests.fields.models_encrypted_pydantic")
@@ -155,13 +110,7 @@ async def db_encrypted_fields_module():
 @pytest_asyncio.fixture(scope="module")
 async def db_blind_index_module():
     """Module-scoped fixture for the blind index tests (tests.fields.encryption.models_blind_index)."""
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    async with hare_test_context(
-        modules=["tests.fields.encryption.models_blind_index"],
-        db_url=db_url,
-        app_label="models",
-        connection_label="models",
-    ) as ctx:
+    async with DatabaseUnderTest.open_model_context(["tests.fields.encryption.models_blind_index"]) as ctx:
         yield ctx
 
 
@@ -182,13 +131,7 @@ async def db_encrypted_fields(db_encrypted_fields_module):
 @pytest_asyncio.fixture(scope="module")
 async def db_write_paths_module():
     """Module-scoped fixture for the write-path parity tests (tests.fields.models_write_paths)."""
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    async with hare_test_context(
-        modules=["tests.fields.models_write_paths"],
-        db_url=db_url,
-        app_label="models",
-        connection_label="models",
-    ) as ctx:
+    async with DatabaseUnderTest.open_model_context(["tests.fields.models_write_paths"]) as ctx:
         yield ctx
 
 
@@ -203,7 +146,7 @@ async def db_write_paths(db_write_paths_module):
 async def db_text_formats_module():
     """Module-scoped fixture for the text format field tests (tests.fields.value_types.models_text_formats) -
     in an environment installing phonenumbers, the model of a PhoneField with region= too."""
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+    db_url = DatabaseUnderTest.get_url()
     modules = ["tests.fields.value_types.models_text_formats"]
     if SuiteEnvironments.installs(PHONE_REQUIREMENT):
         modules.append("tests.fields.value_types.models_text_formats_phone")
@@ -226,13 +169,7 @@ async def db_text_formats(db_text_formats_module):
 @pytest_asyncio.fixture(scope="module")
 async def db_generic_fk_module():
     """Module-scoped fixture for the generic foreign key tests (tests.fields.relations.models_generic_fk)."""
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    async with hare_test_context(
-        modules=["tests.fields.relations.models_generic_fk"],
-        db_url=db_url,
-        app_label="models",
-        connection_label="models",
-    ) as ctx:
+    async with DatabaseUnderTest.open_model_context(["tests.fields.relations.models_generic_fk"]) as ctx:
         yield ctx
 
 
@@ -246,13 +183,7 @@ async def db_generic_fk(db_generic_fk_module):
 @pytest_asyncio.fixture(scope="module")
 async def db_ordered_values_module():
     """Module-scoped fixture for the ordering of addresses and times (tests.fields.value_types.models_ip_address)."""
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    async with hare_test_context(
-        modules=["tests.fields.value_types.models_ip_address"],
-        db_url=db_url,
-        app_label="models",
-        connection_label="models",
-    ) as ctx:
+    async with DatabaseUnderTest.open_model_context(["tests.fields.value_types.models_ip_address"]) as ctx:
         yield ctx
 
 

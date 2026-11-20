@@ -8,6 +8,7 @@ import pytest
 
 from hare import fields
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.exceptions import FieldError, OperationalError, QueryError
 from hare.query.expressions import Case, F, Value, When
 from hare.query.functions import Cast, Coalesce, Collate, Concat, Greatest, Least, NullIf
@@ -72,7 +73,7 @@ async def test_json_becomes_the_text_its_database_writes_of_it(db):
         .values_list("text", "joined", "path_text", "scalar_text")
         .get(id=1)
     )
-    if JSONFields._meta.connection.dialect.name == "sqlite":
+    if HareContext.require_current().apps.get_queryset(JSONFields).get_connection().dialect.name == "sqlite":
         text = '{"bb":[1,2.5,null,true],"n":1e+20,"a":0}'
         assert texts == (text, f"{text}|", "[1,2.5,null,true]", "2.5|")
     else:

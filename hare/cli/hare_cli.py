@@ -10,9 +10,8 @@ from hare.cli.context.cli_context import CLIContext
 from hare.cli.context.command_context import CommandContext
 from hare.cli.exceptions import CLIError, CLIUsageError
 from hare.cli.messages import IPYTHON_REQUIRED, SHELL_REQUIRES_SYNC_DISPATCH
+from hare.cli.parsed_command import CommandHandler, ParsedCommand
 from hare.cli.plugins.cli_command_registry import CLICommandRegistry
-from hare.cli.shell_launcher import ShellLauncher
-from hare.cli.shell_session import ShellSession
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.exceptions import HareError
 
@@ -25,6 +24,9 @@ class HareCLI:
     @staticmethod
     def shell(cli_context: CLIContext) -> None:
         """Launch the interactive shell outside an active event loop."""
+        from hare.cli.shell_launcher import ShellLauncher
+        from hare.cli.shell_session import ShellSession
+
         if ShellLauncher.interactive_shell_class is None:
             raise CLIError(IPYTHON_REQUIRED)
         config = CommandContext.load_config(cli_context)
@@ -34,18 +36,23 @@ class HareCLI:
     @staticmethod
     async def run_shell(cli_context: CLIContext, _args: argparse.Namespace) -> None:
         """The parser's shell marker; asynchronous callers cannot nest an interactive loop."""
+        from hare.cli.shell_launcher import ShellLauncher
+
         if ShellLauncher.interactive_shell_class is None:
             raise CLIError(IPYTHON_REQUIRED)
         raise CLIError(SHELL_REQUIRES_SYNC_DISPATCH)
 
     @staticmethod
-    def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace | int:
+    def parse_arguments(argv: list[str] | None = None) -> ParsedCommand | int:
         """Select a command independently of how it is executed."""
-        global_options = ArgParserBuilder.parse_global_options(argv)
-        plugin_commands = CLICommandRegistry.discover(CLIContext(config=global_options.config))
-        parser = ArgParserBuilder.build_parser(plugin_commands)
         try:
-            return parser.parse_args(argv)
+            global_options = ArgParserBuilder.parse_global_options(argv)
+            context = CLIContext(config=global_options.config)
+            plugin_commands = CLICommandRegistry.discover(context)
+            handlers: dict[str, CommandHandler] = {}
+            parser = ArgParserBuilder.build_parser(plugin_commands, command_handlers=handlers)
+            arguments = parser.parse_args(argv)
+            return ParsedCommand(handlers[global_options.command_arguments[0]], context, arguments)
         except SystemExit as error:
             return error.code if isinstance(error.code, int) else 1
 
@@ -57,10 +64,10 @@ class HareCLI:
         return 2 if isinstance(error, CLIUsageError) else 1
 
     @staticmethod
-    async def run_command_async(args: argparse.Namespace) -> int:
+    async def run_command_async(command: ParsedCommand) -> int:
         """Run a parsed asynchronous command on the caller's loop."""
         try:
-            result = await args.func(CLIContext(config=args.config), args)
+            result = await command.handler(command.context, command.arguments)
         except (CLIError, HareError) as error:
             return HareCLI.report_error(error)
         return result if isinstance(result, int) else 0
@@ -77,10 +84,10 @@ class HareCLI:
         args = HareCLI.parse_arguments(argv)
         if isinstance(args, int):
             return args
-        if args.func is not HareCLI.run_shell:
+        if args.handler is not HareCLI.run_shell:
             return asyncio.run(HareCLI.run_command_async(args))
         try:
-            HareCLI.shell(CLIContext(config=args.config))
+            HareCLI.shell(args.context)
         except (CLIError, HareError) as error:
             return HareCLI.report_error(error)
         return 0

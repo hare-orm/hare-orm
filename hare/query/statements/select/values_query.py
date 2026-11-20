@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Callable, Collection, Coroutine, Iterable, Mapping, Sequence
 from copy import copy
+from functools import cached_property
 from typing import TYPE_CHECKING, Any, ClassVar, Self, TypeVar
 
 from hare.dialects.base.client.database_client import DatabaseClient
@@ -11,16 +12,18 @@ from hare.exceptions import (
 from hare.query.enums import RowShape
 from hare.query.execution.query_execution import QueryExecution
 from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import AggregatedMultiValuedPaths
+from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
 from hare.query.plans.description.plan_context import PlanContext
 from hare.query.plans.description.plan_description import PlanDescription
 from hare.query.plans.enums import PlanKeyForm
-from hare.query.plans.statement.declarations import ValuesReading
+from hare.query.plans.statement.declarations import ValuesPlanReading, ValuesReading
 from hare.query.plans.statement.declared_plan_slots import DeclaredPlanSlots
 from hare.query.plans.statement.statement_plan_descriptions import StatementPlanDescriptions
 from hare.query.queryset.extensions.query_set_extension_result import QuerySetExtensionResult
 from hare.query.queryset.extensions.query_set_extensions import QuerySetExtensions
 from hare.query.queryset.row_multiplication import RowMultiplication
 from hare.query.queryset.selection.values_selection import ValuesSelection
+from hare.query.queryset.single_rows.get_exceptions import GetExceptions
 from hare.query.queryset.specification_copying import SpecificationCopying
 from hare.query.rows.values_rows.dict_rows import DictRows
 from hare.query.rows.values_rows.flat_rows import FlatRows
@@ -31,6 +34,7 @@ from hare.query.statements.building.keyset_bounds import KeysetBounds
 from hare.query.statements.building.query_joins import QueryJoins
 from hare.query.statements.building.query_ordering import QueryOrdering
 from hare.query.statements.constants import (
+    DISTINCT_ORDERING_COLUMN_ALIAS_PREFIX,
     WINDOW_FILTER_COLUMN_ALIAS_PREFIX,
 )
 from hare.query.statements.projections.derived_projection import DerivedProjection
@@ -43,11 +47,12 @@ from hare.query.statements.summary.summary_source import SummarySource
 from hare.sql import Order
 
 if TYPE_CHECKING:
-    from hare.fields.field import Field as ModelField
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.plans.statement.declarations import CallPlanHit
     from hare.query.plans.statement.statement_plan import StatementPlan
     from hare.query.queryset.queryset import QuerySet
+    from hare.query.statements.projections.declarations import SelectedOutputColumn
     from hare.query.statements.write.update_query import UpdateQuery
 
 TModel = TypeVar("TModel", bound="Model")
@@ -117,10 +122,8 @@ class ValuesQuery(SelectQuery[Any]):
         self._init_build_state()
         self._annotations = annotations
         self._alias_keys = alias_keys
-        self._selection = None
         self._selecting_queryset: QuerySet[Any] = source_queryset
-        self._model_rows_queryset: QuerySet[Any] | None = None
-        self._selection = selection
+        self._selection: ValuesSelection = selection
         # The annotations added after .values()/.values_list() - an aggregate among them groups the
         # rows by the selected fields; one annotated before it, or passed to it as a keyword
         # argument, is computed per model row, like Django.
@@ -139,7 +142,7 @@ class ValuesQuery(SelectQuery[Any]):
         self._selected_fields_by_alias: dict[str, str] = {}
         output_column_aliases: list[tuple[str, ...]] = []
         for output_name, field_name in outputs:
-            components = ValuesOutput.get_composite_key_components(self.model, field_name, annotations) or (
+            components = ValuesOutput.get_composite_key_components(self._binding, field_name, annotations) or (  # type: ignore[arg-type]
                 field_name,
             )
             column_aliases = rows_class.get_column_aliases(
@@ -149,21 +152,13 @@ class ValuesQuery(SelectQuery[Any]):
             output_column_aliases.append(column_aliases)
         #: Prepared conversion shared by SQL-equivalent row shapes.
         self._column_converters: list[tuple[str, Callable[[Any], Any] | None]] | None = None
+        self._result_column_aliases: dict[str, str] | None = None
         #: How a row is read - by the shape the call asked for.
         self._rows: ValuesRows = rows_class(
             tuple(output_name for output_name, _field_name in outputs), output_column_aliases
         )
-        returns_dicts = rows_class.keyed_by_output_name
-        # What QueryConditions.get_filters() selects for a tuple row: the selected fields and every positional
-        # alias. An annotation's own name is left out - it would be selected twice.
-        self._fields_to_select_sql: set[str] | None = (
-            None
-            if returns_dicts
-            else {
-                *(field for field in self._selected_fields_by_alias.values() if field not in annotations),
-                *self._selected_fields_by_alias,
-            }
-        )
+        # Selection names refer to source expressions; output aliases never replace declarations.
+        self._fields_to_select_sql = set(self._selected_fields_by_alias.values())
 
     def _apply_values_to(self, queryset: QuerySet[Any]) -> QuerySet[Any, Any]:
         """``queryset`` - the source queryset changed - selecting this query's values.
@@ -176,14 +171,11 @@ class ValuesQuery(SelectQuery[Any]):
         """
         return queryset._with_selection(self._selection)
 
-    @property
+    @cached_property
     def _source_queryset(self) -> QuerySet[Any]:
         """The queryset whose rows this query selects values of, returning model instances - made
         the first time it is asked for."""
-        queryset = self._model_rows_queryset
-        if queryset is None:
-            queryset = self._model_rows_queryset = self._selecting_queryset._with_selection(None)
-        return queryset
+        return self._selecting_queryset._with_selection(None)
 
     def _get_first(self, *, reverse: bool) -> QuerySet[Any, Any]:
         """The first (or last) row - of the ordering, else of the group key for a grouped query,
@@ -246,9 +238,10 @@ class ValuesQuery(SelectQuery[Any]):
         Returns:
             The ordering to apply.
         """
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
         if (
             not orderings
-            and self.model._meta.ordering
+            and model_binding.ordering
             and (self._group_bys or (self._annotations and ValuesGrouping.is_grouped(self)))
         ):
             return orderings
@@ -342,7 +335,8 @@ class ValuesQuery(SelectQuery[Any]):
         """
         orderings = list(self._orderings)
         ordering_field_names = {field_name for field_name, _order in orderings}
-        primary_key_attribute_names = list(self.model._meta.primary_key_attribute_names)
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        primary_key_attribute_names = list(model_binding.primary_key_attribute_names)
         output_field_names = [
             ValuesOutput.get_concrete_field_path(self, name) for name in self._selected_fields_by_alias.values()
         ]
@@ -365,7 +359,7 @@ class ValuesQuery(SelectQuery[Any]):
                         )
                     if name in annotation_names:
                         multi_valued_names.append(name)
-                elif AggregatedMultiValuedPaths.get_multi_valued_paths(self.model, name):
+                elif AggregatedMultiValuedPaths.get_multi_valued_paths(model_binding, name):
                     multi_valued_names.append(name)
             ordering_is_unique = self._ordering_field_names_are_unique(ordering_field_names)
             tie_breaker_names = [*([] if ordering_is_unique else primary_key_attribute_names), *multi_valued_names]
@@ -385,7 +379,7 @@ class ValuesQuery(SelectQuery[Any]):
         if (
             self._distinct_on
             or RowMultiplication.reads_window_function(self)
-            or ValuesOutput.selects_composite_key(self)
+            or self._rows.has_composite_outputs
             or (self._extension_calls and QuerySetExtensions.changes_rows(self))
             or (not ValuesGrouping.is_grouped(self) and RowMultiplication.rows_repeat_per_primary_key(self))
             or self._can_tie_without_primary_key()
@@ -395,9 +389,9 @@ class ValuesQuery(SelectQuery[Any]):
             return None
         readers: list[Callable[[Any], Any]] = []
         for field_name, _order in self._orderings:
-            if field_name in self._annotations or field_name not in self.model._meta.direct_fields:
+            if field_name in self._annotations or field_name not in self._binding.direct_fields:  # type: ignore[union-attr]
                 return None
-            if not KeysetBounds.compares_by_order(self.model._meta.fields_map[field_name]):
+            if not KeysetBounds.compares_by_order(self._binding.fields_map[field_name]):  # type: ignore[union-attr]
                 return None
             reader = ValuesOutput.get_output_reader(self, field_name)
             if reader is None:
@@ -412,8 +406,9 @@ class ValuesQuery(SelectQuery[Any]):
         Returns:
             True when they can.
         """
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
         return (
-            not self.model._meta.has_primary_key
+            not model_binding.has_primary_key
             and not ValuesGrouping.is_grouped(self)
             and not self._distinct
             and not self._ordering_field_names_are_unique({field_name for field_name, _order in self._orderings})
@@ -423,9 +418,10 @@ class ValuesQuery(SelectQuery[Any]):
         """``Meta.ordering``, else the group key of a grouped query or the selected fields of a distinct
         one, else the primary key - like Django."""
         row_key_names = self._get_row_key_names()
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
         return list(self._apply_default_ordering(self._orderings)) or [
             (name, Order.ASC)
-            for name in (row_key_names if row_key_names is not None else self.model._meta.primary_key_attribute_names)
+            for name in (row_key_names if row_key_names is not None else model_binding.primary_key_attribute_names)
         ]
 
     def _get_row_key_names(self) -> list[str] | None:
@@ -455,9 +451,12 @@ class ValuesQuery(SelectQuery[Any]):
         Execution and cursor streaming select readers identically; this method retains no
         fallback result that could survive a later build with different output columns.
         """
-        column_converters = (
-            self._statement_plan.result_reading if self._statement_plan is not None else self._column_converters
-        )
+        column_converters: list[tuple[str, Callable[[Any], Any] | None]] | None
+        if self._statement_plan is not None:
+            reading: ValuesPlanReading = self._statement_plan.result_reading
+            column_converters = reading.converters
+        else:
+            column_converters = self._column_converters
         return ValuesOutput.get_column_converters(self) if column_converters is None else column_converters
 
     def _execute(self, statement: tuple[str, list[Any]]) -> Coroutine[Any, Any, Any]:
@@ -473,40 +472,39 @@ class ValuesQuery(SelectQuery[Any]):
         self, statement: tuple[str, list[Any]], column_converters: list[tuple[str, Any]]
     ) -> Any:
         """Reads the rows and keeps the driver's result for the dialect's result transform."""
-        statement_result = await self._rows.fetch_result(
+        statement_result = await QueryExecution.fetch_rows(
             self._connection,
             *statement,
             retry_read=self.is_read_only,
         )
-        rows = self._rows.convert_batch(self._connection, statement_result, column_converters)
-        result = self._get_single_or_list_result(rows)
-        reader = (
-            self._rows.get_result_reader(self._connection, statement_result, column_converters)
-            if statement_result.rows or statement_result.column_names
+        layout = (
+            self._rows.get_result_layout(self._connection, statement_result, column_converters)
+            if statement_result.rows
             else None
         )
+        rows = self._rows.convert_batch(self._connection, statement_result, column_converters, layout=layout)
+        result = GetExceptions.single_or_list_result(self, rows)
+        if layout is None and statement_result.column_names:
+            layout = self._rows.get_result_layout(self._connection, statement_result, column_converters)
+        reader = self._rows.get_result_reader(layout) if layout is not None else None
         self._extension_result = QuerySetExtensionResult(result, statement_result, reader)
         return result
 
-    def _get_call_signature_type_part(self) -> tuple[Any, Sequence[Any]]:
-        # SQL-equivalent row shapes share conversion metadata; the calls tell them apart.
-        return (self._rows.plan_shape,), ()
-
     @staticmethod
-    def get_queryset_type_part(queryset: QuerySet[Any, Any]) -> tuple[Any, Sequence[Any]]:
-        selection: ValuesSelection = queryset._selection  # type: ignore[assignment]
+    def get_selection_type_part(selection: ValuesSelection) -> tuple[Any, Sequence[Any]]:
         return (ValuesQuery.ROWS_CLASSES_BY_SHAPE[selection.shape].plan_shape,), ()
 
     def _get_call_plan_reading(self, plan: StatementPlan) -> Any:
         # The reader of the rows' shape - the calls select the fields and the shape - and the
         # converters of the columns, kept with the plan.
+        reading: ValuesPlanReading = plan.result_reading
         by_position = self._connection.features.supports_positional_rows
         layout = (
-            self._rows.get_layout(plan.result_reading, plan.result_column_names if by_position else None)
-            if plan.result_column_names or not by_position
+            self._rows.get_layout(reading.converters, reading.column_names if by_position else None)
+            if reading.column_names or not by_position
             else None
         )
-        return ValuesReading(self._rows, plan.result_reading, layout)
+        return ValuesReading(self._rows, reading.converters, layout)
 
     @staticmethod
     def read_call_plan(
@@ -528,12 +526,9 @@ class ValuesQuery(SelectQuery[Any]):
             queryset, connection, hit.sql, hit.parameters, reading.converters, retry_read=True, layout=reading.layout
         )
 
-    def _get_plan_record(self) -> dict[str, Any]:
+    def _prepare_plan_reading(self) -> ValuesPlanReading:
         self._column_converters = ValuesOutput.get_column_converters(self)
-        return {
-            "result_reading": self._column_converters,
-            "result_column_names": self._get_result_column_names(),
-        }
+        return ValuesPlanReading(self._column_converters, self._get_result_column_names())
 
     def _get_selected_field_names(self) -> Collection[str]:
         return self._selected_fields_by_alias.values()
@@ -577,24 +572,22 @@ class ValuesQuery(SelectQuery[Any]):
             # Its percent and seed are written into FROM, not bound.
             return None
         query = self._get_scoped_copy()
-        output_aliases = query._selected_fields_by_alias
-        ValuesOutput.register_selected_annotations(query, output_aliases)
         return query._describe_statement(True)
 
-    def _make_subquery(self, **kwargs: Any) -> None:
+    def _make_subquery(self, *, value_wrapper_references: RecordedValueReferences | None = None) -> None:
         """Builds ``self.query`` to be embedded in an enclosing query - selecting the requested columns
         alone, a plain ``.distinct()`` ordered by another one run over it in a derived table.
 
         Args:
-            kwargs: Passed on to ``_build_query()``.
+            value_wrapper_references: The enclosing statement's recorded value references, if supplied.
         """
-        self._make_query(**kwargs)
-        output_aliases = list(self._selected_fields_by_alias.keys())
+        self._make_query(value_wrapper_references=value_wrapper_references)
+        output_aliases = list(ValuesOutput.get_output_aliases(self))
+        self.query = DerivedProjection.get_selects_in_output_order(self.query, output_aliases)
         if len(self.query._selects) > len(output_aliases):
-            # A copy - selecting from it sets its alias, and it can be the query a plan keeps.
-            inner_query = copy(self.query)
-            self.query = self._connection.query_class.from_(inner_query).select(
-                *(inner_query[alias].as_(alias) for alias in output_aliases)
+            projection = DerivedProjection(self.query, column_prefix=DISTINCT_ORDERING_COLUMN_ALIAS_PREFIX)
+            self.query = self._connection.query_class.from_(projection.query).select(
+                *projection.get_output(output_aliases)
             )
         self._apply_none_as_subquery()
 
@@ -626,11 +619,7 @@ class ValuesQuery(SelectQuery[Any]):
                 "the filter applies to the query wrapped in a subquery, whose rows can't be locked."
             )
         output_aliases = list(self._selected_fields_by_alias.keys())
-        projection = DerivedProjection(
-            self.query,
-            column_prefix=WINDOW_FILTER_COLUMN_ALIAS_PREFIX,
-            output_fields=self._annotation_output_fields,
-        )
+        projection = DerivedProjection(self.query, column_prefix=WINDOW_FILTER_COLUMN_ALIAS_PREFIX)
         inner_query = projection.query
         outer_criterion = WindowFilterWrapping.get_derived_table_criterion(
             self._window_filter_criterion,  # type: ignore[arg-type]
@@ -668,18 +657,9 @@ class ValuesQuery(SelectQuery[Any]):
         return True
 
     def _prepare_build(self) -> None:
+        self._result_column_aliases = None
         output_aliases = self._selected_fields_by_alias
         ValuesDistinct.raise_if_over_encrypted_field(self, output_aliases.values())
-        # Kept as given: the registration below registers each selected annotation again under
-        # its alias - the build resolves the selected fields from the original ones.
-        self._given_annotations = self._annotations
-        # Before the query is described: the build records the values against the annotations
-        # after this registration, so the description lists them against the same ones. The
-        # registration is a pure function of the selected fields and the originating annotations.
-        ValuesOutput.register_selected_annotations(self, output_aliases)
-
-    def _get_build_plan_description(self) -> PlanDescription | None:
-        return self._describe_statement(False)
 
     def _get_selected_fields_plan_key(self) -> tuple[tuple[str, str], ...]:
         """The selected fields - each column's alias with the field or annotation it selects."""
@@ -690,78 +670,65 @@ class ValuesQuery(SelectQuery[Any]):
         return tuple(sorted(self._grouping_annotation_names.intersection(self._annotations)))
 
     def _select_columns(self) -> None:
-        # The selected fields are resolved from the annotations as given: the registration runs
-        # again, in order, alongside each field's own column.
-        self._annotations = dict(self._given_annotations)
         self.query = self._get_base_query()
         QueryJoins.apply_effective_basetable(self)
         for alias, field in self._selected_fields_by_alias.items():
             ValuesOutput.add_field_to_select_query(self, field, alias)
 
+    def _get_annotation_column_aliases(self, name: str) -> tuple[str, ...]:
+        """Publish a source annotation only under the aliases selecting that expression."""
+        return tuple(alias for alias, field in self._selected_fields_by_alias.items() if field == name)
+
     def _apply_ordering(self) -> None:
-        given_annotations = self._given_annotations
         # QueryOrdering.get_ordering() needs each selected annotation's alias, so an ORDER BY reference uses
         # the name that's actually in SELECT.
         annotation_output_aliases = {
-            field: alias for alias, field in self._selected_fields_by_alias.items() if field in given_annotations
+            field: alias for alias, field in self._selected_fields_by_alias.items() if field in self._annotations
         }
+        orderings = self._orderings
+        if self._rows.keyed_by_output_name:
+            orderings = [
+                (name if name in self._annotations else self._selected_fields_by_alias.get(name, name), direction)
+                for name, direction in orderings
+            ]
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
         QueryOrdering.get_ordering(
             self,
-            model=self.model,
+            binding=model_binding,
             table=self._effective_basetable(),
-            orderings=self._orderings,
+            orderings=orderings,
             annotations=self._annotations,
-            fields_for_select=ValuesOutput.get_ordering_field_names(self, annotation_output_aliases),
+            fields_for_select=self._selected_fields_by_alias.values(),
             annotation_output_aliases=annotation_output_aliases,
         )
 
     def _get_explicit_group_bys(self) -> tuple[str, ...]:
         return self._group_bys
 
-    def _get_selected_sql_fields(self) -> Collection[str] | None:
-        """The fields ``QueryConditions.get_filters()`` selects, None for its default."""
+    def _get_selected_sql_fields(self) -> Collection[str]:
+        """The source names selected by ``QueryConditions.get_filters()``."""
         return self._fields_to_select_sql
 
-    def _prune_unselected_annotations(self) -> None:
-        """Drops from the SELECT list the annotations a dict row doesn't return - one not named in
-        ``.values()`` is filtered or ordered by, never returned."""
-        if self._rows.keyed_by_output_name:
-            aliases = self._selected_fields_by_alias
-            self.query._selects = [select for select in self.query._selects if select.alias in aliases]
+    def _get_output_columns(self) -> list[SelectedOutputColumn]:
+        """Describe every actual SQL cell, retaining the decoder's first alias occurrence.
 
-    def _get_output_columns(self) -> list[tuple[str, str, str, ModelField[Any] | None]]:
-        """The selected columns of the built query, to read from it as a derived table.
-
-        Returns:
-            Per column: its output name, the field or annotation name it selects, its alias and
-            the field its value decodes through.
+        Public output order belongs to the values reader. This positional description also
+        includes repeated aliases and SQL-only ordering cells, which affect DISTINCT identity
+        but cannot become additional aggregate operands.
         """
-        return [
-            (
+        declared: dict[str | None, SelectedOutputColumn] = {
+            sql_alias: (
                 alias if self._rows.keyed_by_output_name else field_name,
                 field_name,
-                alias,
+                sql_alias,
                 ValuesOutput.get_output_value_field(self, field_name),
             )
-            for alias, field_name in self._selected_fields_by_alias.items()
-        ]
-
-    async def _fetch_rows(
-        self,
-        connection: DatabaseClient,
-        sql: str,
-        parameters: list[Any],
-        column_converters: Sequence[tuple[str, Callable[[Any], Any] | None]],
-    ) -> list[Any]:
-        """Runs a query selecting this query's columns and builds the output rows.
-
-        Args:
-            connection: The connection.
-            sql: The SQL.
-            parameters: Its parameters.
-            column_converters: Each column's alias and decoder.
-
-        Returns:
-            The output rows.
-        """
-        return await self._rows.fetch(connection, sql, parameters, column_converters, retry_read=self.is_read_only)
+            for sql_alias, (alias, field_name) in zip(
+                ValuesOutput.get_output_aliases(self), self._selected_fields_by_alias.items(), strict=True
+            )
+        }
+        columns: list[SelectedOutputColumn] = []
+        for term in self.query._selects:
+            alias = DerivedProjection.get_output_name(term)
+            columns.append(declared.pop(alias, (None, None, alias, None)))
+        return columns

@@ -77,7 +77,7 @@ class Lateral(NamedColumns):
         bound_subquery: Subquery = subquery.get_result(expression_context).term  # type: ignore[assignment]
         lateral_query = LateralQuery(self.name, bound_subquery)  # type: ignore[arg-type]
         return ExpressionResult(
-            term=lateral_query.field(path),
+            term=lateral_query.field(bound_subquery.get_selected_column_name(path)),
             joins=[(lateral_query, TrueCriterion())],  # type: ignore[list-item]
             output_field=bound_subquery.get_selected_field(path),
         )

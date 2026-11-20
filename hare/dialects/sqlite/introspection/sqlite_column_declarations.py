@@ -5,6 +5,7 @@ from collections.abc import Collection, Iterator
 from sqlparse import tokens
 from sqlparse.lexer import tokenize
 
+from hare.dialects.sqlite.constants import SQLITE_DEFAULT_COLLATION
 from hare.inspectdb.introspection.catalog_sql import CatalogSql
 
 
@@ -55,10 +56,17 @@ class SqliteColumnDeclarations:
         return value
 
     @staticmethod
+    def get_parenthesized_identifiers(sql: str) -> tuple[str, ...]:
+        """Decode the identifier list inside a constraint's parentheses."""
+        return tuple(
+            SqliteColumnDeclarations.get_identifier(term.strip()) for term in CatalogSql.get_parenthesized_terms(sql)
+        )
+
+    @staticmethod
     def get_collation(declaration: str) -> str:
         """Read the column COLLATE clause; expressions' collations belong to expressions."""
         lexemes = iter(SqliteColumnDeclarations.get_top_level_tokens(declaration))
-        collation = "binary"
+        collation = SQLITE_DEFAULT_COLLATION
         for _, value in lexemes:
             if value.upper() == "COLLATE":
                 following = next(lexemes, None)
@@ -73,14 +81,7 @@ class SqliteColumnDeclarations:
             if value.upper() != "AS":
                 continue
             tail = declaration[position + len(value) :]
-            opening = next(
-                (
-                    offset
-                    for offset, character, depth in CatalogSql.get_unquoted_characters(tail)
-                    if not character.isspace()
-                ),
-                None,
-            )
+            opening = CatalogSql.get_first_unquoted_nonspace_offset(tail)
             if opening is not None:
                 expression = CatalogSql.extract_parentheses(tail, opening)
                 return expression.strip() if expression is not None else None

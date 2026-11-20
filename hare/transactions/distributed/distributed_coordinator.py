@@ -351,7 +351,7 @@ class DistributedCoordinator:
     @asynccontextmanager
     async def run(coordinator: str, participants: Sequence[str]) -> AsyncGenerator[DistributedTransactions]:
         """Runs one distributed transaction - what ``Transactions.distributed()`` opens."""
-        coordinator_connection, participant_connections = DistributedCoordinator._get_connections(
+        coordinator_connection, participant_connections, default_alias = DistributedCoordinator._get_connections(
             coordinator, participants
         )
         # The aliases the connections have - an empty one given picks the default connection.
@@ -365,7 +365,9 @@ class DistributedCoordinator:
 
         xid = DistributedCoordinator._make_xid(coordinator)
         try:
-            yield DistributedTransactions(coordinator, coordinator_client, participant_clients)
+            yield DistributedTransactions(
+                coordinator, coordinator_client, participant_clients, default_alias=default_alias
+            )
         except BaseException as error:
             await DistributedCoordinator._roll_back_distributed_transaction(
                 participant_contexts, participant_clients, coordinator_context, coordinator_client, xid, cause=error
@@ -396,7 +398,7 @@ class DistributedCoordinator:
     @staticmethod
     def _get_connections(
         coordinator: str, participants: Sequence[str]
-    ) -> tuple[DatabaseClient, dict[str, DatabaseClient]]:
+    ) -> tuple[DatabaseClient, dict[str, DatabaseClient], str | None]:
         """The connections of a distributed transaction, each checked to take part in one.
 
         Args:
@@ -404,7 +406,7 @@ class DistributedCoordinator:
             participants: The participants' aliases.
 
         Returns:
-            The coordinator's connection, and each participant's by its connection's alias.
+            The coordinator, the participants by their resolved aliases, and the alias for an empty input.
 
         Raises:
             QueryError: No participant, an alias twice, or a connection already inside a transaction.
@@ -413,10 +415,13 @@ class DistributedCoordinator:
         if not participants:
             raise QueryError("Transactions.distributed() needs at least one participant")
         coordinator_connection = Atomic.get_connection(coordinator)
-        participant_connections = {
-            connection.connection_alias: connection
-            for connection in (Atomic.get_connection(connection_alias) for connection_alias in participants)
-        }
+        default_alias = None if coordinator else coordinator_connection.connection_alias
+        participant_connections = {}
+        for alias in participants:
+            connection = Atomic.get_connection(alias)
+            participant_connections[connection.connection_alias] = connection
+            if not alias:
+                default_alias = connection.connection_alias
         # Told apart by the aliases the connections have - an empty one given picks the default connection.
         if (
             len(participant_connections) != len(participants)
@@ -445,7 +450,7 @@ class DistributedCoordinator:
                     "distributed()). Nesting distributed() inside an ambient transaction on the "
                     "same alias isn't supported - run it outside any enclosing transaction."
                 )
-        return coordinator_connection, participant_connections
+        return coordinator_connection, participant_connections, default_alias
 
     @staticmethod
     async def _open_participants(

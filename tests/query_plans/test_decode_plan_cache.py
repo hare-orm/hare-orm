@@ -15,7 +15,6 @@ from unittest.mock import patch
 import pytest
 
 from hare import Hare, fields
-from hare.core.apps import Apps
 from hare.core.config import HareConfig
 from hare.dialects.base.results.statement_result import StatementResult
 from hare.dialects.sqlite.drivers.aiosqlite.client.aiosqlite_client import AiosqliteClient
@@ -74,9 +73,9 @@ def test_cached_readers_follow_native_result_types(cache_path, field_class, fiel
 
     module = ModuleType("native_reader_cache_models")
     module.Number = Number
-    Hare.bind_models(HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": [module]}))
+    apps = Hare.bind_models(HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": [module]}))
     source_client = AiosqliteClient(connection_alias="same", file_path=":memory:")
-    Apps.bind_model_base_queries(Number, source_client)
+    apps.bind_base_queries()
     plans = []
     decoded = []
     for native in (False, True, False):
@@ -88,7 +87,7 @@ def test_cached_readers_follow_native_result_types(cache_path, field_class, fiel
         )
         query = None
         if cache_path != "row_columns":
-            query = get_model_rows_query(Number.objects.all().using(client))
+            query = get_model_rows_query(apps.get_queryset(Number).using(client))
             if cache_path == "decode_plan":
                 query._make_query()
             else:
@@ -98,13 +97,17 @@ def test_cached_readers_follow_native_result_types(cache_path, field_class, fiel
         reader = (
             InstanceHydration.get_model_rows_reader(query)
             if cache_path == "prepared_columns"
-            else ModelRows(Number, client.dialect.types, decode_plan=query._decode_plan if query is not None else None)
+            else ModelRows(
+                apps.get_binding(Number),
+                client.dialect.types,
+                decode_plan=query._decode_plan if query is not None else None,
+            )
         )
         result = StatementResult(1, [(1, raw)])
         result.description = (("id",), ("number",))
         columns = reader.get_columns(client, result)
         layout = reader.prepared_result or reader.get_result_layout(columns, ())
-        decoded.append(reader.read_batch(client, result, layout)[0].number)
+        decoded.append(reader.read_batch(client, result.rows, layout)[0].number)
         if cache_path in ("row_columns", "prepared_columns"):
             plans.append(columns)
         elif cache_path == "decode_plan":
@@ -124,16 +127,16 @@ def column_binding_model():
 
     module = ModuleType("column_binding_models")
     module.Book = Book
-    Hare.bind_models(HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": [module]}))
+    apps = Hare.bind_models(HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": [module]}))
     client = AiosqliteClient(connection_alias="same", file_path=":memory:")
-    Apps.bind_model_base_queries(Book, client)
-    return Book, client
+    apps.bind_base_queries()
+    return apps.get_binding(Book), client
 
 
 @pytest.mark.database_independent
 @pytest.mark.parametrize("by_position", [False, True])
 def test_prepared_columns_allow_unhashable_readers_and_follow_invalidation(column_binding_model, by_position):
-    model, source = column_binding_model
+    binding, source = column_binding_model
 
     class Reader:
         __hash__ = None
@@ -150,11 +153,11 @@ def test_prepared_columns_allow_unhashable_readers_and_follow_invalidation(colum
         native_python_types=source.native_python_types,
         features=SimpleNamespace(supports_positional_rows=by_position),
     )
-    field = model._meta.fields_map["title"]
+    field = binding.fields_map["title"]
 
     def read(value, prefix):
         reader = ModelRows(
-            model,
+            binding,
             client.dialect.types,
             decode_plan=(("title", field, Reader(prefix)),),
             decode_plan_is_partial=True,
@@ -162,11 +165,13 @@ def test_prepared_columns_allow_unhashable_readers_and_follow_invalidation(colum
         )
         # Positional prepared results need no driver description or keys() method.
         result = StatementResult(1, [(value,)] if by_position else [{"title": value}])
-        return reader.read_batch(client, result, reader.get_result_layout(reader.get_columns(client, result), ()))[0]
+        return reader.read_batch(
+            client, result.rows, reader.get_result_layout(reader.get_columns(client, result), ())
+        )[0]
 
     assert read("first", "A:").title == "A:first"
     assert read("second", "A:").title == "A:second"
-    StatementPlans.row_columns.forget_holder(model)
+    StatementPlans.row_columns.forget_holder(binding)
     refreshed = read("third", "B:")
     assert refreshed.title == "B:third"
     assert refreshed._partial is True
@@ -174,16 +179,16 @@ def test_prepared_columns_allow_unhashable_readers_and_follow_invalidation(colum
 
 @pytest.mark.database_independent
 def test_explicit_decode_plans_without_a_compiler_key_keep_their_readers(column_binding_model):
-    model, client = column_binding_model
-    field = model._meta.fields_map["title"]
+    binding, client = column_binding_model
+    field = binding.fields_map["title"]
     result = StatementResult(1, [("mixed",)])
     actual = []
     for convert in (str.upper, str.lower):
         reader = ModelRows(
-            model, client.dialect.types, decode_plan=(("title", field, convert),), decode_plan_is_partial=True
+            binding, client.dialect.types, decode_plan=(("title", field, convert),), decode_plan_is_partial=True
         )
         layout = reader.get_result_layout(reader.get_columns(client, result), ())
-        actual.append(reader.read_batch(client, result, layout)[0].title)
+        actual.append(reader.read_batch(client, result.rows, layout)[0].title)
     assert actual == ["MIXED", "mixed"]
 
 
@@ -193,13 +198,13 @@ def test_explicit_decode_plans_without_a_compiler_key_keep_their_readers(column_
 @pytest.mark.parametrize("stop_early", [False, True])
 @pytest.mark.parametrize("combined", [False, True])
 async def test_model_stream_binds_nonempty_batches_and_closes(column_binding_model, by_position, stop_early, combined):
-    model, source = column_binding_model
+    binding, source = column_binding_model
     closed = []
     requests = []
 
     def make_row(title):
         if combined:
-            values = (model._meta.app, model.__name__, title)
+            values = (binding.app, binding._model.__name__, title)
             names = (reader.app_column, reader.model_column, "title")
 
             class DriverRow(tuple):
@@ -224,19 +229,19 @@ async def test_model_stream_binds_nonempty_batches_and_closes(column_binding_mod
         dialect=source.dialect,
         native_python_types=source.native_python_types,
         features=SimpleNamespace(supports_positional_rows=by_position),
-        stream_batches=stream_batches,
+        _stream_built_batches=stream_batches,
     )
     if combined:
-        reader = CombinedModelRows(model, {model}, ())
+        reader = CombinedModelRows(binding, {binding._model}, ())
         stream = reader.stream_batches(
             client, "SELECT title", [7], chunk_size=1, result_reading=reader.get_result_reading()
         )
         expected = [[], ["one"], [], ["two"]]
     else:
         reader = ModelRows(
-            model,
+            binding,
             client.dialect.types,
-            decode_plan=(("title", model._meta.fields_map["title"], str.upper),),
+            decode_plan=(("title", binding.fields_map["title"], str.upper),),
             decode_plan_is_partial=True,
             decode_plan_key=("title",),
         )

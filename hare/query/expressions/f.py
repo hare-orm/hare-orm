@@ -11,7 +11,7 @@ from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import
 from hare.query.expressions.arithmetic.combinable_expression import CombinableExpression
 from hare.query.expressions.expression import Expression
 from hare.query.expressions.expression_context import ExpressionContext
-from hare.query.expressions.expression_result import ExpressionResult, TableCriterionTuple
+from hare.query.expressions.expression_result import ExpressionResult
 from hare.query.expressions.joins.named_join import NamedJoin
 from hare.query.expressions.ordering import Ordering
 from hare.query.expressions.structure.enums import ArgumentRole
@@ -23,7 +23,6 @@ from hare.query.lookup_info.lookup_paths import LookupPaths
 from hare.query.lookup_info.value_paths import ValuePaths
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
-from hare.sql.terms.term import Term
 from hare.sql.terms.tuple import Tuple
 
 if TYPE_CHECKING:
@@ -72,7 +71,7 @@ class F(CombinableExpression):
         """
         output_field = result.output_field
         if isinstance(output_field, RelationalField):
-            return output_field.related_model._meta.pk
+            return output_field.get_related_binding().pk
         return output_field
 
     def is_json_path_of(self, annotation: Any) -> bool:
@@ -120,7 +119,7 @@ class F(CombinableExpression):
         # Local import: the generic foreign key types build Case/Q of this package.
         from hare.query.generic_foreign_keys.generic_foreign_key_types import GenericForeignKeyTypes
 
-        return GenericForeignKeyTypes.get_type_aliases(expression_context.model, (self.name,)).get(self.name)
+        return GenericForeignKeyTypes.get_type_aliases(expression_context.binding, (self.name,)).get(self.name)
 
     @staticmethod
     def get_date_part_expression(value_path: str, part: str) -> Expression:
@@ -158,37 +157,38 @@ class F(CombinableExpression):
         return annotation is not None and not (isinstance(annotation, F) and annotation.name == name)
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
-        term: Term
-        joins: list[TableCriterionTuple] = []
-        output_field = None
-
         main_name_part, __, rest_name_parts = self.name.partition("__")
         relation_alias = expression_context.annotations.get(main_name_part)
         if isinstance(relation_alias, NamedJoin):
             # A path through a named JOIN - a FilteredRelation's related field, a Lateral's column.
+            if (
+                relation_alias.repeats_rows
+                and (tracker := AggregatedMultiValuedPaths.get_from(expression_context)) is not None
+            ):
+                tracker.record_path(main_name_part)
             return relation_alias.get_path_result(rest_name_parts, expression_context)
         if (
             rest_name_parts
             and self.name not in expression_context.annotations
-            and (date_part_split := ValuePaths.get_date_part_split(expression_context.model, self.name)) is not None
+            and (date_part_split := ValuePaths.get_date_part_split(expression_context.binding, self.name)) is not None
         ):
             # A part of a date, time or datetime - F("created__year"), F("during__startswith__hour").
             return self.get_date_part_expression(*date_part_split).get_result(expression_context)
         names_annotation = F.names_given_annotation(expression_context.annotations, self.name)
-        if main_name_part in expression_context.model._meta.fetch_fields and not names_annotation:
+        if main_name_part in expression_context.binding.fetch_fields and not names_annotation:
             # field in the format of "related_field__field" or "related_field__another_rel_field__field"
             if (tracker := AggregatedMultiValuedPaths.get_from(expression_context)) is not None:
                 tracker.record_lookup(
-                    expression_context.model, self.name, expression_context.select_related_path_prefix
+                    expression_context.binding, self.name, expression_context.select_related_path_prefix
                 )
             bound_path = BoundLookupPath.bind(expression_context, self.name)
             term, joins, output_field = bound_path.term, list(bound_path.joins), bound_path.field
         elif (
             rest_name_parts
             and not names_annotation
-            and ValuePaths.get_value_path_split(expression_context.model, self.name) is not None
+            and (path_split := ValuePaths.get_value_path_split(expression_context.binding, self.name)) is not None
         ):
-            bound_path = BoundLookupPath.bind(expression_context, self.name)
+            bound_path = BoundLookupPath.bind_value_path(expression_context, self.name, path_split)
             term, joins, output_field = bound_path.term, list(bound_path.joins), bound_path.field
         elif (
             rest_name_parts
@@ -218,28 +218,22 @@ class F(CombinableExpression):
             expression_context.annotation_names_in_progress.add(self.name)
             try:
                 annotation = expression_context.annotations[self.name]
-                if isinstance(annotation, Term) and not isinstance(annotation, Expression):
-                    term = annotation
-                else:
-                    referenced_result = annotation.get_result(expression_context)
-                    term = referenced_result.term
-                    joins = referenced_result.joins
-                    # The referenced annotation's own value type - e.g. Length("name") is an
-                    # integer, not its argument's CharField.
-                    output_field = annotation.get_value_field(referenced_result)
+                result = Expression._get_referenced_annotation_value(annotation, expression_context)
             finally:
                 expression_context.annotation_names_in_progress.discard(self.name)
+            LookupPaths.mark_sensitive_column(result.term, result.output_field)
+            return result
         elif rest_name_parts and (type_expression := self.get_generic_type_expression(expression_context)):
             # The type of a generic foreign key, e.g. F("target__type") - the branch set, as a CASE.
             return type_expression.get_result(expression_context)
         else:
             # a regular model field, e.g. F("id")
-            meta = expression_context.model._meta
+            meta = expression_context.binding
             if self.name == PRIMARY_KEY_ALIAS and meta.has_composite_primary_key:
                 # A composite key is the row of its columns - a filter or an ordering reads its fields.
                 table = expression_context.table
                 term = Tuple(*(table[column] for column in KeyColumns.get_source_columns(meta)))
-                return ExpressionResult(term=term, output_field=None, joins=joins)
+                return ExpressionResult(term=term)
             bound_path = BoundLookupPath.bind(expression_context, self.name)
             term, joins, output_field = bound_path.term, list(bound_path.joins), bound_path.field
         LookupPaths.mark_sensitive_column(term, output_field)

@@ -15,9 +15,11 @@ import argparse
 import asyncio
 import importlib
 import os
+import sqlite3
 import subprocess  # nosec B404 - build checks invoke trusted tooling without a shell.
 import sys
 import tempfile
+from contextlib import closing
 from pathlib import Path
 
 from hare import Hare, HareConfig, fields
@@ -38,8 +40,6 @@ class WheelCheckNote(Model):
 class WheelCheck:
     """The checks of one installed wheel."""
 
-    #: The extension modules a wheel carries.
-    EXTENSION_MODULES = ("rust.native",)
     #: The submodules of rust.native that make up the PostgreSQL driver - built on Unix alone.
     DRIVER_SUBMODULES = ("pg", "pool")
 
@@ -61,19 +61,18 @@ class WheelCheck:
         import hare  # noqa: PLC0415 - the installed package, located at run time
 
         package_directory = Path(hare.__file__).resolve().parent.parent
-        for module_name in self.EXTENSION_MODULES:
-            try:
-                module = importlib.import_module(module_name)
-            except ImportError as error:
-                raise SystemExit(f"{module_name} doesn't import: {error}") from error
-            module_file = getattr(module, "__file__", None)
-            if module_file is None:
-                # The bare `rust` namespace directory, with no compiled module in it.
-                raise SystemExit(f"{module_name} is an empty namespace package")
-            if Path(module_file).resolve().parent.parent != package_directory:
-                raise SystemExit(f"{module_name} imports from {module_file}, not from the installed package")
-            print(f"{module_name}: {module_file}")
-        native = importlib.import_module("rust.native")
+        module_name = "rust.native"
+        try:
+            native = importlib.import_module(module_name)
+        except ImportError as error:
+            raise SystemExit(f"{module_name} doesn't import: {error}") from error
+        module_file = getattr(native, "__file__", None)
+        if module_file is None:
+            # The bare `rust` namespace directory, with no compiled module in it.
+            raise SystemExit(f"{module_name} is an empty namespace package")
+        if Path(module_file).resolve().parent.parent != package_directory:
+            raise SystemExit(f"{module_name} imports from {module_file}, not from the installed package")
+        print(f"{module_name}: {module_file}")
         driver_submodules = [name for name in self.DRIVER_SUBMODULES if hasattr(native, name)]
         expected_submodules = list(self.DRIVER_SUBMODULES) if os.name == "posix" else []
         if driver_submodules != expected_submodules:
@@ -99,9 +98,9 @@ class WheelCheck:
             await WheelCheckNote.objects.create(id=1, title="written by the wheel")
             titles = [row["title"] for row in await WheelCheckNote.objects.all().values("title")]
             scheme = db_url.split(":")[0]
-            if list(titles) != ["written by the wheel"]:
+            if titles != ["written by the wheel"]:
                 raise SystemExit(f"{scheme}: read back {titles!r}")
-            client_class_name = type(WheelCheckNote._meta.connection).__name__
+            client_class_name = type(WheelCheckNote.get_connection()).__name__
             if scheme == "postgresql" and not client_class_name.startswith("RustPg"):
                 raise SystemExit(f"postgresql:// ran on {client_class_name}, not the Rust driver")
             print(f"{scheme}: a row written and read back through {client_class_name}")
@@ -149,10 +148,26 @@ class WheelCheck:
                 if completed.returncode != 0:
                     raise SystemExit(f"hare {command} failed:\n{completed.stdout}{completed.stderr}")
                 outputs.append(completed.stdout)
-            if not list((project / "wheel_project" / "migrations").glob("0001_*.py")):
+            migrations = list((project / "wheel_project" / "migrations").glob("0001_*.py"))
+            if not migrations:
                 raise SystemExit(f"makemigrations wrote no migration:\n{outputs[0]}")
             if "No changes detected" not in outputs[2]:
                 raise SystemExit(f"makemigrations after migrate found changes:\n{outputs[2]}")
+            database = project / "project.sqlite3"
+            if not database.is_file():
+                raise SystemExit(f"migrate wrote no database:\n{outputs[1]}")
+            try:
+                with closing(sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)) as connection:
+                    columns = connection.execute("SELECT name FROM pragma_table_info('note') ORDER BY cid")
+                    if columns.fetchall() != [("id",), ("title",)]:
+                        raise SystemExit("migrate did not create the Note table with its declared columns")
+                    applied = connection.execute(
+                        "SELECT app, name FROM hare_migrations WHERE app = ?", ("wheel_project",)
+                    )
+                    if applied.fetchall() != [("wheel_project", migrations[0].stem)]:
+                        raise SystemExit("migrate did not record the first migration")
+            except sqlite3.Error as error:
+                raise SystemExit(f"migrate left an unreadable schema: {error}") from error
         print("makemigrations, migrate: a project's migration written, applied, no changes after it")
 
     def run(self) -> None:

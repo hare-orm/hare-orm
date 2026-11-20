@@ -42,28 +42,28 @@ pub(crate) fn is_text_format_array(value: &Value, postgres_type: &Type) -> bool 
 
 /// Writes Postgres's text array literal (`{"a",NULL,{"b"}}`) for a list checked by
 /// `is_text_format_array` - every string double-quoted, with `"` and `\` backslash-escaped.
-pub(crate) fn write_text_array_literal(items: &[Value], out: &mut String) {
-    out.push('{');
+pub(crate) fn write_text_array_literal(items: &[Value], out: &mut BytesMut, delimiter: u8) {
+    out.extend_from_slice(b"{");
     for (index, item) in items.iter().enumerate() {
         if index > 0 {
-            out.push(',');
+            out.extend_from_slice(&[delimiter]);
         }
         match item {
-            Value::Array(sub_items) => write_text_array_literal(sub_items, out),
+            Value::Array(sub_items) => write_text_array_literal(sub_items, out, delimiter),
             Value::Text(text) => {
-                out.push('"');
-                for character in text.chars() {
-                    if character == '"' || character == '\\' {
-                        out.push('\\');
+                out.extend_from_slice(b"\"");
+                for byte in text.bytes() {
+                    if byte == b'"' || byte == b'\\' {
+                        out.extend_from_slice(b"\\");
                     }
-                    out.push(character);
+                    out.extend_from_slice(&[byte]);
                 }
-                out.push('"');
+                out.extend_from_slice(b"\"");
             }
-            _ => out.push_str("NULL"),
+            _ => out.extend_from_slice(b"NULL"),
         }
     }
-    out.push('}');
+    out.extend_from_slice(b"}");
 }
 
 /// Encodes a list (nested lists for more dimensions, e.g. `[[1, 2], [3, 4]]`) as ONE Postgres
@@ -152,10 +152,7 @@ fn append_array_leaves<'a>(items: &'a [Value], leaves: &mut Vec<&'a Value>) -> R
 
 /// Rebuilds the nested `Value::Array` tree from wire-order dimension sizes and the flat,
 /// row-major leaves.
-pub(crate) fn nest_leaves(dims: &[usize], leaves: Vec<Value>) -> Value {
-    if dims.is_empty() {
-        return Value::Array(leaves);
-    }
+fn nest_leaves(dims: &[usize], leaves: Vec<Value>) -> Value {
     let mut level = leaves;
     for &width in dims.iter().skip(1).rev() {
         let mut items = level.into_iter();
@@ -228,6 +225,7 @@ mod tests {
 
     use tokio_postgres::types::{Format, Kind as TypeShape, ToSql, Type};
 
+    use crate::pg::parameter_encoding::{PgParameterEncoding, PgParameterMode};
     use crate::pg::value::test_support::*;
     use crate::pg::value::Value;
 
@@ -238,7 +236,10 @@ mod tests {
         let value = Value::Array(vec![Value::Text("abcdef".to_string()), Value::Null]);
         assert!(matches!(value.encode_format(&Type::MACADDR_ARRAY), Format::Text));
         let mut out = BytesMut::new();
-        value.to_sql(&Type::MACADDR_ARRAY, &mut out).expect("a text array literal must encode");
+        PgParameterEncoding::new(&value, &Type::MACADDR_ARRAY, PgParameterMode::Negotiated)
+            .with_text_array_delimiter(Some(b','))
+            .encode(&mut out)
+            .expect("a text array literal must encode");
         assert_eq!(&out[..], b"{\"abcdef\",NULL}");
     }
 
@@ -249,8 +250,27 @@ mod tests {
             Value::Array(vec![Value::Text("[1,2]".to_string()), Value::Null]),
         ]);
         let mut out = BytesMut::new();
-        value.to_sql(&vector_array_type(), &mut out).expect("a nested text array literal must encode");
+        PgParameterEncoding::new(&value, &vector_array_type(), PgParameterMode::Negotiated)
+            .with_text_array_delimiter(Some(b','))
+            .encode(&mut out)
+            .expect("a nested text array literal must encode");
         assert_eq!(&out[..], b"{{\"a\\\"b\",\"c\\\\d\"},{\"[1,2]\",NULL}}");
+    }
+
+    #[test]
+    fn every_array_dimension_uses_the_native_member_delimiter() {
+        let value = Value::Array(vec![
+            Value::Array(vec![Value::Text("(1,2),(3,4)".to_string()), Value::Null]),
+            Value::Array(vec![Value::Text("(5,6),(7,8)".to_string()), Value::Text("é\"\\".to_string())]),
+        ]);
+        let mut out = BytesMut::new();
+        assert!(value.to_sql(&Type::BOX_ARRAY, &mut out).is_err());
+        assert!(out.is_empty());
+        PgParameterEncoding::new(&value, &Type::BOX_ARRAY, PgParameterMode::Negotiated)
+            .with_text_array_delimiter(Some(b';'))
+            .encode(&mut out)
+            .unwrap();
+        assert_eq!(&out[..], "{{\"(1,2),(3,4)\";NULL};{\"(5,6),(7,8)\";\"é\\\"\\\\\"}}".as_bytes());
     }
 
     #[test]

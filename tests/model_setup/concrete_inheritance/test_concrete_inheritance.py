@@ -1,23 +1,18 @@
 """A concrete model subclassing a concrete model: a table of its own, without the relations to the other."""
 
-import os
-
 import pytest
 
-from hare.contrib.test import hare_test_context
 from hare.exceptions import QueryError
 from tests.model_setup.concrete_inheritance.concrete_inheritance_models import CornerShelf, Shelf, ShelfItem
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 @pytest.mark.asyncio
 async def test_a_subclass_has_no_relation_another_model_points_at_its_base_with():
     """CornerShelf(id=1).items read the ShelfItem rows of Shelf(id=1), a row of another table, and
     items.add() wrote a CornerShelf key into a relation to Shelf."""
-    async with hare_test_context(
-        modules=["tests.model_setup.concrete_inheritance.concrete_inheritance_models"],
-        db_url=os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:"),
-        app_label="models",
-        connection_label="models",
+    async with DatabaseUnderTest.open_model_context(
+        ["tests.model_setup.concrete_inheritance.concrete_inheritance_models"]
     ):
         shelf = await Shelf.objects.create(id=1)
         corner_shelf = await CornerShelf.objects.create(id=1)
@@ -33,11 +28,8 @@ async def test_a_subclass_has_no_relation_another_model_points_at_its_base_with(
 async def test_a_filter_of_the_relation_to_the_base_refuses_a_subclass_instance():
     """filter(shelf=corner_shelf) compared the CornerShelf key with the Shelf rows' - the Shelf row of that
     key matched - while create(shelf=corner_shelf) was refused."""
-    async with hare_test_context(
-        modules=["tests.model_setup.concrete_inheritance.concrete_inheritance_models"],
-        db_url=os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:"),
-        app_label="models",
-        connection_label="models",
+    async with DatabaseUnderTest.open_model_context(
+        ["tests.model_setup.concrete_inheritance.concrete_inheritance_models"]
     ):
         shelf = await Shelf.objects.create(id=1)
         corner_shelf = await CornerShelf.objects.create(id=1)

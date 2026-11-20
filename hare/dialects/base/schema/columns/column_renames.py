@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from hare.models.model_binding import ModelBinding
+
 from typing import Any
 
 from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
@@ -7,7 +12,6 @@ from hare.dialects.base.schema.plans.schema_statement import SchemaStatement
 from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
 from hare.fields.field import Field
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
-from hare.models import Model
 
 
 class ColumnRenames(SchemaEditorPart):
@@ -26,21 +30,21 @@ class ColumnRenames(SchemaEditorPart):
         Returns:
             The column names, one per key column of a relation.
         """
-        if isinstance(field, ForeignKeyFieldInstance) and field.db_column_names:
-            return field.db_column_names
+        if isinstance(field, ForeignKeyFieldInstance) and (column_names := field.db_column_names):
+            return column_names
         return (field.source_field or field.model_field_name,)
 
     def get_model_column_rename_plan(
         self,
-        old_model: type[Model],
-        new_model: type[Model],
+        old_binding: ModelBinding,
+        new_binding: ModelBinding,
         field_pairs: list[tuple[Field[Any], Field[Any]]],
     ) -> SchemaChangePlan:
         """Prepares the rename of every changed field column before executing any DDL.
 
         Args:
-            old_model: The model before the rename.
-            new_model: The model after it.
+            old_binding: The binding of the model before the rename.
+            new_binding: The binding of the model after it.
             field_pairs: The (old, new) fields whose columns change.
 
         Returns:
@@ -55,7 +59,7 @@ class ColumnRenames(SchemaEditorPart):
                     steps.append(
                         SchemaStatement(
                             self.editor.get_column_change_sql(
-                                new_model,
+                                new_binding,
                                 self.editor.RENAME_FIELD_TEMPLATE,
                                 old_column=self.editor.quote(old_column),
                                 new_column=self.editor.quote(new_column),

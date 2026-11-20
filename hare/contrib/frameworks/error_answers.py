@@ -5,7 +5,7 @@ from http import HTTPStatus
 from typing import Any
 
 from hare.contrib.frameworks.constants import PATH_PARAMETER_SOURCE, QUERY_PARAMETER_SOURCE, STATUS_BY_ERROR
-from hare.contrib.request_query.exceptions import RequestQueryForbidden
+from hare.contrib.request_query.exceptions import InvalidRequestQuery, RequestQueryForbidden
 from hare.exceptions import ValidationError
 
 
@@ -27,6 +27,13 @@ class ErrorAnswers:
       requires couldn't be loaded) - ``502 Bad Gateway``, without the error's message, which names the
       service and the values asked.
     """
+
+    @staticmethod
+    def get_handlers[TAnswer, TInvalid](
+        answer: TAnswer, invalid_request_query: TInvalid
+    ) -> dict[type[Exception], TAnswer | TInvalid]:
+        """Register the ORM errors and the framework's dedicated validation handler."""
+        return {**dict.fromkeys(STATUS_BY_ERROR, answer), InvalidRequestQuery: invalid_request_query}
 
     @staticmethod
     def get_status(error: Exception) -> HTTPStatus | None:

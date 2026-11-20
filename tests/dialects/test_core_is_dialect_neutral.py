@@ -97,6 +97,8 @@ DIALECT_NAME_MODULES = frozenset(
         "hare/dialects/base/dialect.py",
         "hare/dialects/dialect_registry.py",
         "hare/core/extensions/registry_builder.py",
+        # Pickle records registered dialect identities; this module has no SQL/name dispatch.
+        "hare/core/apps/model_binding_graph.py",
     }
 )
 #: The calls taking a key first.

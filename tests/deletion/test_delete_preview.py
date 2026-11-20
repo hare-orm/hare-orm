@@ -4,6 +4,7 @@ import pytest
 
 from hare.contrib.test import requires_features
 from hare.core.connections.connections import Connections
+from hare.core.hare_context import HareContext
 from hare.exceptions import (
     IntegrityError,
     ProtectedError,
@@ -94,8 +95,12 @@ async def test_root_override_is_unknown_without_running_application_code(db, mon
 
 async def select_all_rows(model: type[Model]) -> list[dict[str, Any]]:
     """Every row of ``model``, soft-deleted and other tenants' ones included, ordered by pk."""
-    query = model.objects.all_tenants() if model._meta.tenant_field else model.objects.all()
-    if model._meta.soft_delete_field:
+    query = (
+        model.objects.all_tenants()
+        if HareContext.require_current().apps.get_binding(model).tenant_field
+        else model.objects.all()
+    )
+    if HareContext.require_current().apps.get_binding(model).soft_delete_field:
         query = query.include_deleted()
     return await query.order_by("pk").values()
 
@@ -440,7 +445,7 @@ async def count_total_and_live_rows(models: tuple[type[Model], ...]) -> dict[typ
     row_counts = {}
     for model in models:
         rows = await select_all_rows(model)
-        soft_delete_field = model._meta.soft_delete_field
+        soft_delete_field = HareContext.require_current().apps.get_binding(model).soft_delete_field
         live_count = sum(1 for row in rows if not soft_delete_field or row[soft_delete_field] is None)
         row_counts[model] = (len(rows), live_count)
     return row_counts

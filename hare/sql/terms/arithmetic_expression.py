@@ -48,14 +48,7 @@ class ArithmeticExpression(Term):
             current_operator: The current operator.
             left_operator: The highest level operator of the left expression.
         """
-        if left_operator is None:
-            # If the left expression is a single item.
-            return False
-        if current_operator in self.add_order:
-            # If the current operator is '+' or '-'.
-            return False
-        # '*' or '/' after '+' or '-' needs parentheses: (A + B) / ...
-        return left_operator in self.add_order
+        return current_operator not in self.add_order and left_operator in self.add_order
 
     def right_needs_parens(self, current_operator: Arithmetic, right_operator: Arithmetic | None) -> bool:
         """Returns true if the expression on the right of the current operator needs to be enclosed in parentheses.
@@ -64,20 +57,11 @@ class ArithmeticExpression(Term):
             current_operator: The current operator.
             right_operator: The highest level operator of the right expression.
         """
-        if right_operator is None:
-            # If the right expression is a single item.
-            return False
-        if current_operator == Arithmetic.ADD:
-            return False
-        if current_operator == Arithmetic.DIV:
-            return True
-        if current_operator == Arithmetic.MUL and right_operator == Arithmetic.DIV:
-            # a * (b / c) must stay parenthesized - rendering it as "a*b/c" evaluates
-            # left-to-right as (a*b)/c, which diverges from the constructed a*(b/c) under
-            # integer division (e.g. a=3,b=2,c=4: a*(b/c)=3*0=0 but (a*b)/c=6/4=1).
-            return True
-        # A '+' or '-' on the right of '*', '/' or '-' needs parentheses: ... - (A + B)
-        return right_operator in self.add_order
+        # Equal-precedence right operands need grouping even for + and *: reassociation
+        # changes floating-point rounding and can overflow an otherwise valid integer tree.
+        return right_operator is not None and (
+            current_operator not in self.add_order or right_operator in self.add_order
+        )
 
     def get_sql(self, sql_context: SqlContext) -> str:
         left_operator, right_operator = [getattr(side, "operator", None) for side in [self.left, self.right]]

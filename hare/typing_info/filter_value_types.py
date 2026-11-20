@@ -61,7 +61,8 @@ class FilterValueTypes:
             # another type than its filters take (an address read as an ``ipaddress`` object). A JSON
             # document is any value.
             selected_type = ValueType(
-                classes=(field.get_python_type(),), declared_in=(field.model, field.model_field_name)
+                classes=(field.get_python_type(),),
+                declared_in=(field.get_binding().model_binding, field.model_field_name),  # type: ignore[arg-type]
             )
         else:
             selected_type = FilterValueTypes.get_compared_type(lookup_info, accepts_instances=False)
@@ -86,7 +87,7 @@ class FilterValueTypes:
                 # ``__isnull`` on the field or on its ``__type``.
                 return ValueType(classes=(bool,))
             if lookup_info.compares_generic_type:
-                return ValueType(literals=tuple(generic_field.branch_names))
+                return ValueType(literals=generic_field.branch_names)
             # A filter takes a branch's row as a dict too - {"type": <branch>, <key fields>}.
             return ValueType(classes=(dict,) if accepts_instances else (), models=tuple(generic_field.branch_by_model))
         if target in {LookupTarget.JSON_PATH, LookupTarget.ANNOTATION}:
@@ -116,21 +117,20 @@ class FilterValueTypes:
             The type, without None.
         """
         field = lookup_info.field
-        compares_field_value = (
+        if (
             not lookup_info.transforms
-            and lookup_info.target is not LookupTarget.RELATION
+            and lookup_info.lookup is not Lookup.ISNULL
             and field is not None
             and not isinstance(field, tuple)
             and (
                 lookup_info.value_type is field.field_type
                 or (lookup_info.value_type is object and lookup_info.lookup is Lookup.EXACT)
             )
-        )
-        if compares_field_value and field is not None and not isinstance(field, tuple):
+        ):
             return ValueType(
                 classes=(lookup_info.value_type,),
                 accepted_classes=field.get_accepted_value_types() if accepts_raw_values else (),
-                declared_in=(field.model, field.model_field_name),
+                declared_in=(field.get_binding().model_binding, field.model_field_name),  # type: ignore[arg-type]
                 accepts_enum_values=accepts_raw_values,
             )
         return ValueType(classes=(lookup_info.value_type,))

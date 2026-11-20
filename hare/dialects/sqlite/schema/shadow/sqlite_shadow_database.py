@@ -32,9 +32,5 @@ class SqliteShadowDatabase(ShadowDatabase):
         traceback: TracebackType | None,
     ) -> None:
         if self.client is not None:
-            try:
+            with ResourceCompletion.preserve_error(exception, SCHEMA_CLEANUP_FAILED):
                 await ResourceCompletion.wait(self.client.close())
-            except BaseException as cleanup_error:
-                if exception is not None:
-                    raise BaseExceptionGroup(SCHEMA_CLEANUP_FAILED, [exception, cleanup_error]) from None
-                raise

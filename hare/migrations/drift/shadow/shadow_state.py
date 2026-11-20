@@ -32,11 +32,14 @@ class ShadowState:
         Returns:
             The state.
         """
+        selected = dict(model_states)
         shadow_state = State(
-            default_connections=dict(source_state.default_connections), environment=source_state.environment
+            models={key: model.clone() for key, model in {**source_state.models, **selected}.items()},
+            default_connections=dict(source_state.default_connections),
+            environment=source_state.environment,
         )
-        for key, model_state in model_states:
-            shadow_model_state = model_state.clone()
+        for key in selected:
+            shadow_model_state = shadow_state.models[key]
             options = shadow_model_state.options
             if schema := options.get(ModelOption.SCHEMA):
                 options[ModelOption.SCHEMA] = ShadowState.get_schema(schema, shadow)
@@ -52,7 +55,6 @@ class ShadowState:
                 enum_type = field.requires_enum_type
                 if enum_type is not None and enum_type.schema:
                     ShadowState.place_enum_types(field, shadow)
-            shadow_state.models[key] = shadow_model_state
         return shadow_state
 
     @staticmethod

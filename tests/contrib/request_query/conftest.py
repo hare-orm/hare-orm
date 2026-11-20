@@ -1,6 +1,5 @@
 import datetime
 import gc
-import os
 from dataclasses import dataclass
 from weakref import WeakSet
 
@@ -9,7 +8,6 @@ import pytest_asyncio
 
 from hare.contrib.request_query import RequestQuery
 from hare.contrib.test import RollbackIsolation
-from hare.contrib.test.isolated_contexts import hare_test_context
 from tests.contrib.request_query.models import (
     Author,
     Book,
@@ -21,6 +19,7 @@ from tests.contrib.request_query.models import (
     Tag,
     Visit,
 )
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 def _get_request_query_classes() -> list[type]:
@@ -57,12 +56,7 @@ class Library:
 
 @pytest_asyncio.fixture(scope="module")
 async def db_request_query_module():
-    async with hare_test_context(
-        modules=["tests.contrib.request_query.models"],
-        db_url=os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:"),
-        app_label="models",
-        connection_label="models",
-    ) as context:
+    async with DatabaseUnderTest.open_model_context(["tests.contrib.request_query.models"]) as context:
         yield context
 
 

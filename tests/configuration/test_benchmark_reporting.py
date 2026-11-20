@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -72,9 +74,8 @@ async def test_load_measures_each_operation_and_drains_workers_on_failure(monkey
 
 
 @pytest.fixture
-def benchmark_report():
+def benchmark_target_run():
     from orm_benchmark.declarations.targets import TARGETS
-    from orm_benchmark.definitions.benchmark_report import BenchmarkReport
 
     target = next(target for target in TARGETS if target.database == "sqlite" and target.distribution != "hare-orm")
     run = {
@@ -98,7 +99,34 @@ def benchmark_report():
             "get_by_pk": {"status": "failed"},
         },
     }
+    return target, run
+
+
+@pytest.fixture
+def benchmark_report(benchmark_target_run):
+    from orm_benchmark.definitions.benchmark_report import BenchmarkReport
+
+    target, run = benchmark_target_run
     return BenchmarkReport.collect([target], {target.key: [run]}, "small", 42, "test")
+
+
+def test_repeated_benchmark_target_runs_once_per_round(benchmark_target_run, monkeypatch):
+    from orm_benchmark.running import runner
+
+    target, result = benchmark_target_run
+    commands = []
+
+    def run(command, *, check):
+        commands.append(command)
+        Path(command[-1]).write_text(json.dumps(result), encoding="utf-8")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(runner.Runner, "get_interpreter", lambda target: "python")
+    monkeypatch.setattr(runner.Runner, "get_version", lambda distribution: "test")
+    monkeypatch.setattr(runner.subprocess, "run", run)
+    data = runner.Runner.run_all([target, target], runs=1, size="small", seed=42).data
+    assert len(commands) == 1
+    assert len(data["databases"][target.database]["targets"][target.key]["processes"]) == 1
 
 
 def test_report_is_a_snapshot_and_missing_baseline_has_no_ratio(benchmark_report, monkeypatch):
@@ -106,7 +134,7 @@ def test_report_is_a_snapshot_and_missing_baseline_has_no_ratio(benchmark_report
     from orm_benchmark.output.chart_writer import ChartWriter
 
     data = json.loads(json.dumps(benchmark_report.data))
-    before = ChartWriter.render_all(data)
+    before = ChartWriter.render_all(module.BenchmarkReport(data))
     monkeypatch.setattr(module, "DATABASES", ())
     monkeypatch.setattr(module, "SIZES", {"small": 99999})
     restored = module.BenchmarkReport(data)
@@ -119,7 +147,7 @@ def test_report_is_a_snapshot_and_missing_baseline_has_no_ratio(benchmark_report
     assert restored.get_result(target, "first_row")["status"] == "not-run"
     assert restored.get_baseline(database) is None
     assert restored.get_ratio(target, None) is None
-    assert ChartWriter.render_all(data) == before
+    assert ChartWriter.render_all(restored) == before
 
 
 def test_staging_failure_preserves_all_published_artifacts(tmp_path, monkeypatch):
@@ -128,15 +156,22 @@ def test_staging_failure_preserves_all_published_artifacts(tmp_path, monkeypatch
     first, second = tmp_path / "first.svg", tmp_path / "second.md"
     first.write_text("previous chart")
     second.write_text("previous page")
-    write_text = Path.write_text
+    open_staged_file = tempfile.NamedTemporaryFile
 
-    def fail_second(path, content, **options):
-        if content == "new page":
-            raise OSError("staging failed")
-        return write_text(path, content, **options)
+    @contextmanager
+    def fail_second(**options):
+        with open_staged_file(**options) as output:
 
-    monkeypatch.setattr(Path, "write_text", fail_second)
+            def write(content):
+                if content == "new page":
+                    raise OSError("staging failed")
+                return output.write(content)
+
+            yield SimpleNamespace(name=output.name, write=write)
+
+    monkeypatch.setattr(tempfile, "NamedTemporaryFile", fail_second)
     with pytest.raises(OSError, match="staging failed"):
         BenchmarkArtifacts.publish({first: "new chart", second: "new page"})
     assert first.read_text() == "previous chart"
     assert second.read_text() == "previous page"
+    assert set(tmp_path.iterdir()) == {first, second}

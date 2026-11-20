@@ -19,7 +19,7 @@ class StatementOptions:
     Timeout and password renewal keep their existing implementations and nesting order.
     """
 
-    operations: ClassVar[Cache[Callable[..., Any]]] = Cache(holds_sql=False)
+    operations: ClassVar[Cache[Callable[..., Any]]] = Cache()
 
     @staticmethod
     def get_operation(client: DatabaseClient, function: Callable[..., Any], observed: bool) -> Callable[..., Any]:

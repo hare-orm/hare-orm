@@ -64,6 +64,9 @@ class QuerySpans(QueryWrapper):
                         break
                 yield batch
         finally:
-            span.end()
-            if (close_batches := getattr(batches, "aclose", None)) is not None:
-                await close_batches()
+            try:
+                if (close_batches := getattr(batches, "aclose", None)) is not None:
+                    with trace.use_span(span, end_on_exit=False):
+                        await close_batches()
+            finally:
+                span.end()

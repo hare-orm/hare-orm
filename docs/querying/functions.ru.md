@@ -162,7 +162,7 @@ await Branch.objects.annotate(distance=Sqrt(Power("x", 2) + Power("y", 2))).filt
 | `Chr(code)`, `Ord(text)` | символ по коду; код первого символа — собственные `chr`/`ascii` базы (`Ord("")` в SQLite — `NULL`; `Chr` в ClickHouse отвергает только код, которому не соответствует ни один символ, `Chr(0)` — `\x00`) |
 | `MD5`, `SHA1`, `SHA224`, `SHA256`, `SHA384`, `SHA512(text)` | хэш текста в UTF-8 шестнадцатеричными цифрами в нижнем регистре |
 | `Trim(text)`, `Lower(text)`, `Upper(text)` | текст без пробелов по краям, в нижнем регистре, в верхнем регистре — собственные `UPPER()`/`LOWER()` SQLite меняют регистр только у букв ASCII (`Upper("café")` → `CAFé`), ClickHouse — через `upperUTF8()`/`lowerUTF8()`, PostgreSQL — по своим правилам |
-| `Length(text)` | число символов — `int` |
+| `Length(value)` | число символов в тексте или байтов в двоичном поле — `int` |
 | `Concat(field, *args)` | аргументы, соединённые в один текст, — `CONCAT` — см. [`Concat()`](#concat) |
 
 ### <a id="concat"></a>`Concat()`

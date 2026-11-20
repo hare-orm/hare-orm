@@ -83,6 +83,7 @@ class HarePlugin(InitPluginProtocol, RequestQueryDIPlugin, SerializationPlugin):
     ) -> None:
         self.lifecycle = HareLifecycle(config, atomic_requests=atomic_requests, context=hare_context)
         self.health_routes = health_routes
+        self.apps = self.lifecycle.bind_models()
 
     def supports_type(self, field_definition: FieldDefinition) -> bool:
         return field_definition.is_subclass_of(Model)
@@ -91,10 +92,15 @@ class HarePlugin(InitPluginProtocol, RequestQueryDIPlugin, SerializationPlugin):
         model_type = self.get_model_type(field_definition)
         if model_type is None:
             raise ConfigurationError(f"{field_definition.annotation!r} holds no hare model")
-        dto = HarePlugin.model_dtos.get(model_type)
+        binding = self.lifecycle.get_model_apps().get_binding(model_type)
+        dto = HarePlugin.model_dtos.get(binding)
         if dto is None:
-            dto = HareDTO[model_type]  # type: ignore[valid-type]
-            HarePlugin.model_dtos[model_type] = dto
+            dto = type(
+                f"{model_type.__name__}DTO",
+                (HareDTO[model_type],),  # type: ignore[valid-type]
+                {"__module__": model_type.__module__, "binding": binding},
+            )
+            HarePlugin.model_dtos[binding] = dto
         return dto
 
     @classmethod
@@ -119,7 +125,6 @@ class HarePlugin(InitPluginProtocol, RequestQueryDIPlugin, SerializationPlugin):
     def on_app_init(self, app_config: AppConfig) -> AppConfig:
         # Litestar builds the handlers' signatures - the parameters of each request query - right
         # after the plugins, long before the lifespan opens the connections.
-        self.lifecycle.bind_models()
         app_config.lifespan.insert(0, self.lifespan)
         for exception_type, handler in HareExceptionHandlers.get_handlers().items():
             app_config.exception_handlers.setdefault(exception_type, handler)

@@ -8,14 +8,16 @@ import socket
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import timedelta
+from functools import partial
 from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar
 
-from hare.contrib.outbox.constants import OUTBOX_KEY_MAX_LENGTH, OUTBOX_RELEASE_FAILED
+from hare.contrib.outbox.constants import OUTBOX_KEY_MAX_LENGTH
 from hare.contrib.outbox.deliveries.callable_delivery import CallableDelivery
 from hare.contrib.outbox.deliveries.delivery_batch import DeliveryBatch
 from hare.contrib.outbox.deliveries.delivery_result import DeliveryResult
 from hare.contrib.outbox.exceptions import DeliveryError
 from hare.contrib.outbox.outbox_event import OutboxEvent
+from hare.contrib.outbox.outbox_release import OutboxRelease
 from hare.contrib.outbox.relay.claimed_batch import ClaimedBatch
 from hare.contrib.outbox.relay.constants import (
     DEFAULT_BATCH_SIZE,
@@ -127,7 +129,7 @@ class OutboxRelay(Generic[TOutboxEvent]):
         name: str | None = None,
         using: str | DatabaseClient | None = None,
     ) -> None:
-        OutboxStore.check_count("batch_size", batch_size)
+        OutboxStore.check_batch_size(batch_size)
         #: The model as it was given - a label is looked up on first use.
         self.model_reference = model
         self._model: type[TOutboxEvent] | None = model if isinstance(model, type) else None
@@ -170,9 +172,13 @@ class OutboxRelay(Generic[TOutboxEvent]):
             client = Connections.get_client(self.using)
             if client is None:
                 client = self.model.get_connection(for_write=True)
-            if client.is_transaction_client:
-                client = client.get_non_transactional_client()  # type: ignore[attr-defined]
-            self._store = OutboxStore(self.model, client, topics=self.topic_selection)
+            client = client.get_non_transactional_client()
+            self._store = OutboxStore(
+                HareContext.require_current().get_model_binding(self.model),
+                client,
+                context=HareContext.require_current(),
+                topics=self.topic_selection,
+            )
         return self._store
 
     @property
@@ -214,12 +220,7 @@ class OutboxRelay(Generic[TOutboxEvent]):
             try:
                 await wakeup.subscribe(self.on_wakeup, connection)
             except BaseException as error:
-                try:
-                    await ResourceCompletion.wait(wakeup.unsubscribe(self.on_wakeup))
-                except BaseException as release_error:
-                    if release_error is error:
-                        raise
-                    raise BaseExceptionGroup(OUTBOX_RELEASE_FAILED, [error, release_error]) from None
+                await OutboxRelease.finish(partial(wakeup.unsubscribe, self.on_wakeup), after_error=error)
                 raise
         # Never through a transaction start() may be called in - it ends long before the relay.
         handler = connection.connection_handler or Connections.current()
@@ -233,11 +234,12 @@ class OutboxRelay(Generic[TOutboxEvent]):
         """
         async with self._lifecycle_lock:
             if self._stop_task is None:
-                if self.task is None:
+                poll_task = self.task
+                if poll_task is None:
                     return
                 self.stopping = True
                 self.woken.set()
-                self._stop_task = asyncio.create_task(self._stop())
+                self._stop_task = asyncio.create_task(self._stop(poll_task))
             task = self._stop_task
         try:
             await ResourceCompletion.wait(task)
@@ -245,7 +247,7 @@ class OutboxRelay(Generic[TOutboxEvent]):
             if task.done() and self._stop_task is task:
                 self._stop_task = None
 
-    async def _stop(self) -> None:
+    async def _stop(self, poll_task: asyncio.Task[None]) -> None:
         """Drain the poll and release wakeup and transport even when one release raises."""
         try:
             async with contextlib.AsyncExitStack() as releases:
@@ -253,11 +255,9 @@ class OutboxRelay(Generic[TOutboxEvent]):
                 wakeup = self.wakeup
                 if wakeup is not None:
                     releases.push_async_callback(wakeup.unsubscribe, self.on_wakeup)
-                # stop() publishes one cleanup task only for a live poll, under the lifecycle lock.
-                assert self.task is not None  # nosec B101
-                self.task.cancel()
+                poll_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
-                    await self.task
+                    await poll_task
         finally:
             self.task = None
 
@@ -274,9 +274,8 @@ class OutboxRelay(Generic[TOutboxEvent]):
         try:
             await self.stop()
         except BaseException as release_error:
-            if exception is None or release_error is exception:
-                raise
-            raise BaseExceptionGroup(OUTBOX_RELEASE_FAILED, [exception, release_error]) from None
+            OutboxRelease.raise_if_both_failed(exception, release_error)
+            raise
 
     def on_wakeup(self, topics: frozenset[str]) -> None:
         """The wakeup's callback: polls at once when the signal names a topic of this relay's, or
@@ -306,8 +305,6 @@ class OutboxRelay(Generic[TOutboxEvent]):
         """
         try:
             return await self.poll_once()
-        except asyncio.CancelledError:
-            raise
         except Exception:
             logger.exception("OutboxRelay: a poll of %s failed", self.model.__name__)
             return 0

@@ -3,7 +3,7 @@ from __future__ import annotations
 from hare.ddl.enums import GrantTarget
 from hare.ddl.security.grant import Grant
 from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
-from hare.models import Model
+from hare.models.model_binding import ModelBinding
 
 
 class Grants(SchemaEditorPart):
@@ -12,7 +12,7 @@ class Grants(SchemaEditorPart):
 
     __slots__ = ()
 
-    def get_grant_sqls(self, model: type[Model], grant: Grant) -> list[str]:
+    def get_grant_sqls(self, binding: ModelBinding, grant: Grant) -> list[str]:
         """The statements granting privileges on a model's table or on an object it declares.
 
         Raises:
@@ -20,7 +20,7 @@ class Grants(SchemaEditorPart):
         """
         raise self.get_unsupported_error("Grants")
 
-    def get_revoke_sqls(self, model: type[Model], grant: Grant) -> list[str]:
+    def get_revoke_sqls(self, binding: ModelBinding, grant: Grant) -> list[str]:
         """The statements revoking the privileges of a grant.
 
         Raises:
@@ -28,19 +28,19 @@ class Grants(SchemaEditorPart):
         """
         raise self.get_unsupported_error("Grants")
 
-    async def add_grant(self, model: type[Model], grant: Grant) -> None:
+    async def add_grant(self, binding: ModelBinding, grant: Grant) -> None:
         """Grants privileges on a model's table or on an object it declares."""
-        await self.editor.run_sqls(self.get_grant_sqls(model, grant))
+        await self.editor.run_sqls(self.get_grant_sqls(binding, grant))
 
-    async def remove_grant(self, model: type[Model], grant: Grant) -> None:
+    async def remove_grant(self, binding: ModelBinding, grant: Grant) -> None:
         """Revokes the privileges of a grant."""
-        await self.editor.run_sqls(self.get_revoke_sqls(model, grant))
+        await self.editor.run_sqls(self.get_revoke_sqls(binding, grant))
 
-    def get_grant_again_sqls(self, model: type[Model], target: GrantTarget, object_name: str) -> list[str]:
+    def get_grant_again_sqls(self, binding: ModelBinding, target: GrantTarget, object_name: str) -> list[str]:
         """Compile retained privileges before replacing an object, so invalid grants cannot follow a DROP."""
         return [
             sql
-            for grant in model._meta.grants
+            for grant in binding.grants
             if grant.on == target and grant.object_name == object_name
-            for sql in self.get_grant_sqls(model, grant)
+            for sql in self.get_grant_sqls(binding, grant)
         ]

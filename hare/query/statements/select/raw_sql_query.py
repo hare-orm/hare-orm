@@ -14,7 +14,9 @@ from hare.query.statements.awaitable_query import AwaitableQuery
 from hare.sql.terms.parameters.recording_parameterizer import RecordingParameterizer
 
 if TYPE_CHECKING:
+    from hare.core.hare_context import HareContext
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 TModel = TypeVar("TModel", bound="Model")
 
@@ -28,9 +30,16 @@ class RawSQLQuery(AwaitableQuery[TModel], Generic[TModel]):
     __slots__ = ("_sql", "_parameters", "_raw_sql", "_raw_sql_plan")
 
     def __init__(
-        self, model: type[TModel], connection: DatabaseClient, sql: str, parameters: Sequence[Any] = ()
+        self,
+        model: type[TModel],
+        connection: DatabaseClient,
+        sql: str,
+        parameters: Sequence[Any] = (),
+        *,
+        binding: ModelBinding,
+        context: HareContext | None,
     ) -> None:
-        super().__init__(model)
+        super().__init__(model, binding=binding, context=context)
         # Checked before the plan key reads the parameters' types: a string's characters would
         # read as parameters of a plan kept for as many str parameters.
         if not isinstance(parameters, (list, tuple)):
@@ -38,7 +47,7 @@ class RawSQLQuery(AwaitableQuery[TModel], Generic[TModel]):
         self._sql = sql
         self._parameters = parameters
         self._apply_connection(connection)
-        self._raw_sql_plan: RawSQLPlan | None = StatementPlans.raw_sql_plans.get_bucket(self.model).get(
+        self._raw_sql_plan: RawSQLPlan | None = StatementPlans.raw_sql_plans.get_bucket(self._binding).get(
             self._get_raw_sql_plan_key()
         )
         # A text and parameter types a plan was kept for were checked when it was made. Any other
@@ -88,7 +97,7 @@ class RawSQLQuery(AwaitableQuery[TModel], Generic[TModel]):
             indexes_by_parameter_id = {id(parameter): index for index, parameter in enumerate(raw_sql.parameters)}
             parameter_indexes = [indexes_by_parameter_id.get(id(source)) for source in parameterizer.sources]
             if None not in parameter_indexes:
-                StatementPlans.raw_sql_plans.get_bucket(self.model)[self._get_raw_sql_plan_key()] = RawSQLPlan(
+                StatementPlans.raw_sql_plans.get_bucket(self._binding)[self._get_raw_sql_plan_key()] = RawSQLPlan(
                     sql,
                     tuple(parameter_indexes),  # type: ignore[arg-type]
                 )
@@ -104,12 +113,16 @@ class RawSQLQuery(AwaitableQuery[TModel], Generic[TModel]):
             return []
         column_names = result.column_names
         annotation_names_key = (self.model, connection.connection_alias, connection.dialect, column_names)
-        annotation_names = StatementPlans.raw_sql_annotation_names.get_bucket(self.model).get(annotation_names_key)
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        bucket = StatementPlans.raw_sql_annotation_names.get_bucket(model_binding)
+        annotation_names = bucket.get(annotation_names_key)
         if annotation_names is None:
             annotation_names = self._get_annotation_names(column_names)
-            StatementPlans.raw_sql_annotation_names.get_bucket(self.model)[annotation_names_key] = annotation_names
-        instances = ModelRows(self.model, connection.dialect.types, annotations=annotation_names).read_all(
-            connection, result
+            bucket[annotation_names_key] = annotation_names
+        instances = ModelRows(model_binding, connection.dialect.types, annotations=annotation_names).read_all(
+            connection,
+            result,
+            context=self._context,
         )
         return instances if isinstance(instances, list) else await instances
 
@@ -125,15 +138,18 @@ class RawSQLQuery(AwaitableQuery[TModel], Generic[TModel]):
 
         Raises:
             QueryError: A column name appears more than once.
-            FieldError: The primary key column isn't selected.
+            FieldError: The primary key column isn't selected, or an extra column would overwrite
+                a protected model attribute.
         """
+        from hare.query.statements.select.model_rows.instance_hydration import InstanceHydration
+
         duplicate_names = sorted(name for name, count in Counter(column_names).items() if count > 1)
         if duplicate_names:
             raise QueryError(
                 f"raw() query returns the column(s) {duplicate_names} more than once - alias the "
                 "extra ones (a.id AS author_pk), each column name must be unique."
             )
-        meta = self.model._meta
+        meta: ModelBinding = self._binding  # type: ignore[assignment]
         layout = meta.get_hydration_layout(self._connection)
         missing_pk_columns = [
             meta.fields_db_projection[pk_name]
@@ -145,13 +161,22 @@ class RawSQLQuery(AwaitableQuery[TModel], Generic[TModel]):
                 f"raw() query for {self.model.__name__} must select the primary key column(s) "
                 f"{missing_pk_columns} - instances can't be built without it."
             )
-        return [
+        annotation_names = [
             column_name
             for column_name in column_names
             if column_name not in layout.entry_by_column
             and column_name not in layout.entry_by_field_name
             and column_name not in meta.fields_map
         ]
+        colliding_names = InstanceHydration.get_colliding_attribute_names(
+            meta, annotation_names, class_attributes=False
+        )
+        if colliding_names:
+            raise FieldError(
+                f"raw() column(s) {colliding_names} conflict with reserved attribute(s) of "
+                f"{self.model.__name__} - use different aliases for extra columns."
+            )
+        return annotation_names
 
     async def _execute_bound(self) -> list[TModel]:
         return await self._get_execution_query()._execute()

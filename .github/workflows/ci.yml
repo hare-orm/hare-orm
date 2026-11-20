@@ -47,8 +47,9 @@ jobs:
           import json
           from tests.matrix.matrix_catalog import MatrixCatalog
           print("matrix=" + json.dumps(MatrixCatalog.get_ci_matrices()))
-          print("python-versions=" + json.dumps(MatrixCatalog.get("versions.python")))
-          print("linux-interpreters=" + " ".join("python" + version for version in MatrixCatalog.get("versions.python")))
+          versions = MatrixCatalog.get("versions.python")
+          print("python-versions=" + json.dumps(versions))
+          print("linux-interpreters=" + " ".join("python" + version for version in versions))
           PY
 
   # ruff format, ruff, mypy, bandit (on Python 3.12, the oldest supported), cargo fmt, clippy and
@@ -56,7 +57,6 @@ jobs:
   # `make check`.
   check:
     needs: [build-native-linux]
-    if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'dev' && github.base_ref == 'main') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -124,6 +124,9 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.catalog.outputs.matrix)['test-sqlite'] }}
     runs-on: ubuntu-24.04
+    env:
+      MATRIX_OPTIONS: >-
+        --python ${{ matrix.python }} --suite 'sqlite-*'
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
@@ -138,7 +141,7 @@ jobs:
       # The virtualenv of each environment and database driver of the runs below - tests/matrix.
       - name: Create the virtualenvs
         run: |
-          make matrix_venvs MATRIX_OPTIONS="--python ${{ matrix.python }} --suite 'sqlite-*'" \
+          make matrix_venvs \
             matrix_interpreter="${{ steps.python.outputs.python-path }}"
       - name: Prepare the SQLite versions
         run: make sqlite_versions matrix_python_versions=${{ matrix.python }}
@@ -150,8 +153,7 @@ jobs:
           echo "HARE_TEST_SPATIALITE_PATH=mod_spatialite" >> "$GITHUB_ENV"
       - name: Test every SQLite version
         run: |
-          make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} --suite 'sqlite-*' \
-            --workers auto --print-failed-logs"
+          make test_matrix MATRIX_OPTIONS="$MATRIX_OPTIONS --workers auto --print-failed-logs"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -168,6 +170,9 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.catalog.outputs.matrix)['test-database-independent'] }}
     runs-on: ubuntu-24.04
+    env:
+      MATRIX_OPTIONS: >-
+        --python ${{ matrix.python }} --suite database-independent
     timeout-minutes: 120
     defaults:
       run:
@@ -185,12 +190,11 @@ jobs:
       # The virtualenv of each environment and database driver of the runs below - tests/matrix.
       - name: Create the virtualenvs
         run: |
-          make matrix_venvs MATRIX_OPTIONS="--python ${{ matrix.python }} --suite database-independent" \
+          make matrix_venvs \
             matrix_interpreter="${{ steps.python.outputs.python-path }}"
       - name: Test what reads no database
         run: |
-          make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} --suite database-independent --workers auto \
-            --print-failed-logs"
+          make test_matrix MATRIX_OPTIONS="$MATRIX_OPTIONS --workers auto --print-failed-logs"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -209,6 +213,9 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.catalog.outputs.matrix)['test-postgres'] }}
     runs-on: ubuntu-24.04
+    env:
+      MATRIX_OPTIONS: >-
+        --python ${{ matrix.python }} --suite asyncpg-${{ matrix.postgres }} --suite rust_pg-${{ matrix.postgres }}
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v7
@@ -225,12 +232,11 @@ jobs:
       # The virtualenv of each environment and database driver of the runs below - tests/matrix.
       - name: Create the virtualenvs
         run: |
-          make matrix_venvs MATRIX_OPTIONS="--python ${{ matrix.python }} --suite asyncpg-${{ matrix.postgres }} --suite rust_pg-${{ matrix.postgres }}" \
+          make matrix_venvs \
             matrix_interpreter="${{ steps.python.outputs.python-path }}"
       - name: Test PostgreSQL ${{ matrix.postgres }} through asyncpg and rust_pg
         run: |
-          make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} --suite asyncpg-${{ matrix.postgres }} \
-            --suite rust_pg-${{ matrix.postgres }} --print-failed-logs"
+          make test_matrix MATRIX_OPTIONS="$MATRIX_OPTIONS --print-failed-logs"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -276,6 +282,9 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.catalog.outputs.matrix)['test-brokers'] }}
     runs-on: ubuntu-24.04
+    env:
+      MATRIX_OPTIONS: >-
+        --python ${{ matrix.python }} --suite 'redis-*' --suite 'rabbitmq-*' --suite 'kafka-*'
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
@@ -292,12 +301,11 @@ jobs:
       # The virtualenv of each environment and database driver of the runs below - tests/matrix.
       - name: Create the virtualenvs
         run: |
-          make matrix_venvs MATRIX_OPTIONS="--python ${{ matrix.python }} --suite 'redis-*' --suite 'rabbitmq-*' --suite 'kafka-*'" \
+          make matrix_venvs \
             matrix_interpreter="${{ steps.python.outputs.python-path }}"
       - name: Test the wakeups and deliveries
         run: |
-          make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} --suite 'redis-*' --suite 'rabbitmq-*' \
-            --suite 'kafka-*' --print-failed-logs"
+          make test_matrix MATRIX_OPTIONS="$MATRIX_OPTIONS --print-failed-logs"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -316,6 +324,9 @@ jobs:
       # Each ClickHouse on its driver's newest compatible Python; the oldest server also on older Pythons.
       matrix: ${{ fromJSON(needs.catalog.outputs.matrix)['test-clickhouse'] }}
     runs-on: ubuntu-24.04
+    env:
+      MATRIX_OPTIONS: >-
+        --python ${{ matrix.python }} --suite '${{ matrix.driver }}-${{ matrix.clickhouse }}' --suite '${{ matrix.driver }}-cluster-${{ matrix.clickhouse }}'
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
@@ -323,9 +334,8 @@ jobs:
       # runner could hold one as the server starts - reserved, none takes them, nor the other three.
       - name: Reserve the ClickHouse ${{ matrix.clickhouse }} ports
         run: |
-          version="${{ matrix.clickhouse }}"
-          digits="$(printf %02d%02d "${version%%.*}" "${version#*.}")"
-          sudo sysctl -w "net.ipv4.ip_local_reserved_ports=2${digits},3${digits},4${digits},5${digits},6${digits}"
+          ports=$(python3 -m tests.matrix.matrix_ports --csv clickhouse "${{ matrix.clickhouse }}")
+          sudo sysctl -w "net.ipv4.ip_local_reserved_ports=$ports"
       - uses: ./.github/actions/setup-poetry
         id: python
         with:
@@ -339,12 +349,11 @@ jobs:
       # The virtualenv of each environment and database driver of the runs below - tests/matrix.
       - name: Create the virtualenvs
         run: |
-          make matrix_venvs MATRIX_OPTIONS="--python ${{ matrix.python }} --suite '${{ matrix.driver }}-${{ matrix.clickhouse }}' --suite '${{ matrix.driver }}-cluster-${{ matrix.clickhouse }}'" \
+          make matrix_venvs \
             matrix_interpreter="${{ steps.python.outputs.python-path }}"
       - name: Test ClickHouse ${{ matrix.clickhouse }} through ${{ matrix.driver }}
         run: |
-          make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} --suite '${{ matrix.driver }}-${{ matrix.clickhouse }}' --suite '${{ matrix.driver }}-cluster-${{ matrix.clickhouse }}' \
-            --print-failed-logs"
+          make test_matrix MATRIX_OPTIONS="$MATRIX_OPTIONS --print-failed-logs"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -363,6 +372,9 @@ jobs:
       # Each PgBouncer in front of the newest PostgreSQL, the newest one in front of the oldest too.
       matrix: ${{ fromJSON(needs.catalog.outputs.matrix)['test-pgbouncer'] }}
     runs-on: ubuntu-24.04
+    env:
+      MATRIX_OPTIONS: >-
+        --python ${{ matrix.python }} --suite 'pgbouncer-*-${{ matrix.pgbouncer }}-${{ matrix.postgres }}'
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v7
@@ -381,12 +393,11 @@ jobs:
       # The virtualenv of each environment and database driver of the runs below - tests/matrix.
       - name: Create the virtualenvs
         run: |
-          make matrix_venvs MATRIX_OPTIONS="--python ${{ matrix.python }} --suite 'pgbouncer-*-${{ matrix.pgbouncer }}-${{ matrix.postgres }}'" \
+          make matrix_venvs \
             matrix_interpreter="${{ steps.python.outputs.python-path }}"
       - name: Test through PgBouncer ${{ matrix.pgbouncer }} with asyncpg and rust_pg
         run: |
-          make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} \
-            --suite 'pgbouncer-*-${{ matrix.pgbouncer }}-${{ matrix.postgres }}' --print-failed-logs"
+          make test_matrix MATRIX_OPTIONS="$MATRIX_OPTIONS --print-failed-logs"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -399,7 +410,6 @@ jobs:
   test-poetry-add:
     needs: [catalog, build-native-linux]
     name: test-poetry-add (${{ matrix.python }})
-    if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'dev' && github.base_ref == 'main') }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.catalog.outputs.matrix)['test-poetry-add'] }}

@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from hare.contrib.outbox.constants import OUTBOX_RELEASE_FAILED
+from hare.contrib.outbox.outbox_release import OutboxRelease
 from hare.core.resource_completion import ResourceCompletion
 
 try:
@@ -45,12 +45,7 @@ class RabbitMQConnection:
                     exchange = await self.open_exchange(connection)
                 except BaseException as error:
                     # A robust connection reconnects for ever - one whose exchange wasn't opened is closed.
-                    try:
-                        await ResourceCompletion.wait(connection.close())
-                    except BaseException as release_error:
-                        if release_error is error:
-                            raise
-                        raise BaseExceptionGroup(OUTBOX_RELEASE_FAILED, [error, release_error]) from None
+                    await OutboxRelease.finish(connection.close, after_error=error)
                     raise
                 self.connection, self.exchange = connection, exchange
             return self.exchange

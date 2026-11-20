@@ -16,6 +16,18 @@ class DriverClasses:
     environment of its driver."""
 
     @staticmethod
+    def make_postgresql_client(client_class: Any, **credentials: Any) -> Any:
+        """Construct a PostgreSQL client for tests that supply settings without opening it."""
+        return client_class(
+            user="postgres",
+            password="postgres",
+            database="test",
+            host="127.0.0.1",
+            connection_alias="models",
+            **credentials,
+        )
+
+    @staticmethod
     def get_parameters(*paths: str) -> list[ParameterSet]:
         """The parameters of the classes.
 

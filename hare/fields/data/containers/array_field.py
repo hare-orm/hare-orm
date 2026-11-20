@@ -19,8 +19,7 @@ from hare.fields.field import Field
 from hare.query.enums import Lookup, LookupValueShape
 
 if TYPE_CHECKING:
-    from hare.dialects.base.types.type_registry import TypeRegistry
-    from hare.models import Model
+    from hare.fields.data.containers.container_value_converters import ContainerValueConverters
     from hare.query.filters.lookups.field_lookup import FieldLookup
     from hare.sql.terms.term import Term
 
@@ -33,7 +32,8 @@ class ArrayField(ContainerField):
 
     ``tags__0`` reads an element (0-indexed, negative from the end), ``tags__0_2`` a slice,
     ``tags__len`` the length; ``__contains``, ``__contained_by``, ``__overlap``, ``__len`` and
-    ``__item=(index, value)`` compare it. A set is written sorted.
+    ``__item=(index, value)`` compare it. A set is sorted before element conversion, including
+    when a constructor or default supplies it; lists and tuples keep their order.
 
     Args:
         base_field: The field of the elements.
@@ -74,22 +74,16 @@ class ArrayField(ContainerField):
     def get_child_fields(self) -> tuple[Field[Any], ...]:
         return (self.base_field,)
 
+    def get_snapshot_comparison_value(self, value: Any) -> Any:
+        """Expose held document representations without encoding ordinary scalar values."""
+        if value is None:
+            return None
+        return [self.base_field.get_snapshot_comparison_value(element) for element in value]
+
     def get_held_steps(self) -> tuple[tuple[tuple[HeldValueStep, int | None], Field[Any]], ...]:
         return (((HeldValueStep.ELEMENT, None), self.base_field),)
 
-    def encode_value(
-        self, value: Any, instance: type[Model] | Model | None, types: TypeRegistry | None, path: str
-    ) -> Any:
-        """Write one value through the same traversal a prepared column uses."""
-        return self._prepare_encoder(types)(value, instance, path)
-
-    def get_value_encoder(self, types: TypeRegistry | None) -> Callable[..., Any]:
-        """Prepare this shape while preserving an overridden encode_value hook."""
-        if getattr(self.encode_value, "__func__", None) is not ArrayField.encode_value:
-            return super().get_value_encoder(types)
-        return self._prepare_encoder(types)
-
-    def _prepare_encoder(self, types: TypeRegistry | None) -> Callable[..., Any]:
+    def _prepare_encoder(self, types: ContainerValueConverters | None) -> Callable[..., Any]:
         encode = self.get_child_encoder(self.base_field, types)
 
         def encode_value(value: Any, instance: Any, path: str) -> Any:
@@ -101,17 +95,7 @@ class ArrayField(ContainerField):
 
         return encode_value
 
-    def decode_value(self, value: Any, types: TypeRegistry | None) -> Any:
-        """Read one value through the same traversal a prepared column uses."""
-        return self._prepare_decoder(types)(value)
-
-    def get_value_decoder(self, types: TypeRegistry | None) -> Callable[[Any], Any]:
-        """Prepare this shape while preserving an overridden decode_value hook."""
-        if getattr(self.decode_value, "__func__", None) is not ArrayField.decode_value:
-            return super().get_value_decoder(types)
-        return self._prepare_decoder(types)
-
-    def _prepare_decoder(self, types: TypeRegistry | None) -> Callable[[Any], Any]:
+    def _prepare_decoder(self, types: ContainerValueConverters | None) -> Callable[[Any], Any]:
         decode = self.get_child_decoder(self.base_field, types)
 
         def decode_value(value: Any) -> Any:
@@ -125,8 +109,10 @@ class ArrayField(ContainerField):
         return decode_value
 
     def normalize_value(self, value: Any, path: str) -> Any:
-        if not isinstance(value, (list, tuple, set)):
-            return value
+        if not isinstance(value, (list, tuple)):
+            if not isinstance(value, set):
+                return value
+            value = sorted(value)
         return [
             self.normalize_child(self.base_field, element, f"{path}[{index}]") for index, element in enumerate(value)
         ]

@@ -5,7 +5,6 @@ from typing import Any
 from hare.dialects.base.schema.columns.column_conversion_check import ColumnConversionCheck
 from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.clickhouse.schema.constants import (
-    CLICKHOUSE_APPLY_DELETED_MASK_TEMPLATE,
     CLICKHOUSE_COLUMN_TYPES_QUERY,
     CLICKHOUSE_CONVERTED_VALUE_TEMPLATE,
     CLICKHOUSE_DECIMAL_TEXT_TEMPLATE,
@@ -39,8 +38,6 @@ class ClickhouseColumnConversionCheck(ColumnConversionCheck):
         self, qualified_table: str, old_field: Field[Any], new_field: Field[Any], quoted_column: str
     ) -> None:
         client = self.editor.client
-        # The checks below read no deleted row, which the MODIFY COLUMN would still convert.
-        await self.editor.run_sql(CLICKHOUSE_APPLY_DELETED_MASK_TEMPLATE.format(table=qualified_table))
         types = await client.execute_dicts(
             CLICKHOUSE_COLUMN_TYPES_QUERY.format(
                 column=quoted_column,
@@ -67,7 +64,7 @@ class ClickhouseColumnConversionCheck(ColumnConversionCheck):
                     CLICKHOUSE_VALUE_NOT_CONVERTED_MESSAGE.format(
                         column=quoted_column,
                         table=qualified_table,
-                        value=unread_value,
+                        value=self.get_shown_conversion_value(old_field, new_field, unread_value),
                         new_type=type(new_field).__name__,
                     )
                 )
@@ -80,6 +77,8 @@ class ClickhouseColumnConversionCheck(ColumnConversionCheck):
             )
         if predicate_sql is None:
             return
+        conversion_error = None
+        cause = None
         try:
             rows = await client.execute_dicts(
                 CLICKHOUSE_UNCONVERTED_VALUE_QUERY.format(
@@ -88,15 +87,30 @@ class ClickhouseColumnConversionCheck(ColumnConversionCheck):
             )
         except (OperationalError, UnSupportedError) as error:
             # The server converts the column's type to no value of the new one.
-            raise OperationalError(
+            sensitive = old_field.sensitive or new_field.sensitive
+            shown_error = (
+                self.get_shown_conversion_value(old_field, new_field, str(error)) if sensitive else str(error)
+            )
+            conversion_error = OperationalError(
                 CLICKHOUSE_TYPE_NOT_CONVERTED_MESSAGE.format(
-                    column=quoted_column, table=qualified_table, old_type=old_type, new_type=new_type, error=error
+                    column=quoted_column,
+                    table=qualified_table,
+                    old_type=old_type,
+                    new_type=new_type,
+                    error=shown_error,
                 )
-            ) from error
+            )
+            if not sensitive:
+                cause = error
+        if conversion_error is not None:
+            raise conversion_error from cause
         if rows:
             raise OperationalError(
                 CLICKHOUSE_VALUE_NOT_CONVERTED_MESSAGE.format(
-                    column=quoted_column, table=qualified_table, value=rows[0]["value"], new_type=new_type
+                    column=quoted_column,
+                    table=qualified_table,
+                    value=self.get_shown_conversion_value(old_field, new_field, rows[0]["value"]),
+                    new_type=new_type,
                 )
             )
 

@@ -4,6 +4,8 @@ import re
 
 from hare.search.enums import SearchOperator, SearchType
 
+POSTGRESQL_SEARCH_CONFIG_SQL_TYPE = "regconfig"
+
 #: The tsquery function per search type, keyed by ``SearchType`` values.
 SEARCH_TYPE_FUNCTIONS: dict[str, str] = {
     SearchType.PLAIN: "PLAINTO_TSQUERY",

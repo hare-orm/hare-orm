@@ -15,8 +15,7 @@ from hare.fields.field import Field
 from hare.query.enums import Lookup, LookupValueShape
 
 if TYPE_CHECKING:
-    from hare.dialects.base.types.type_registry import TypeRegistry
-    from hare.models import Model
+    from hare.fields.data.containers.container_value_converters import ContainerValueConverters
     from hare.query.filters.lookups.field_lookup import FieldLookup
     from hare.sql.terms.term import Term
 
@@ -94,6 +93,17 @@ class TupleField(ContainerField):
     def get_child_fields(self) -> tuple[Field[Any], ...]:
         return self.fields_in_order
 
+    def get_snapshot_comparison_value(self, value: Any) -> Any:
+        """Compare each element through its declared field, including named tuples."""
+        if value is None:
+            return None
+        return tuple(
+            field.get_snapshot_comparison_value(element)
+            for field, element in zip(
+                self.fields_in_order, self.get_ordered_values(value, self.get_path()), strict=True
+            )
+        )
+
     def get_held_steps(self) -> tuple[tuple[tuple[HeldValueStep, int | None], Field[Any]], ...]:
         return tuple(
             ((HeldValueStep.TUPLE_ELEMENT, position), field) for position, field in enumerate(self.fields_in_order)
@@ -116,7 +126,9 @@ class TupleField(ContainerField):
         names = self.element_names
         if isinstance(value, Mapping) and names is not None:
             if set(value) != set(names):
-                raise ValidationError(f"{path}: expected the elements {list(names)}, got {sorted(value)!r}")
+                raise ValidationError(
+                    f"{path}: expected the elements {list(names)}, got {self.get_value_for_message(list(value))}"
+                )
             return [value[name] for name in names]
         if not isinstance(value, (tuple, list)):
             raise ValidationError(f"{path}: expected a tuple, got {self.get_value_for_message(value)}")
@@ -136,19 +148,7 @@ class TupleField(ContainerField):
         """
         return f"{path}.{self.element_names[position] if self.element_names is not None else position}"
 
-    def encode_value(
-        self, value: Any, instance: type[Model] | Model | None, types: TypeRegistry | None, path: str
-    ) -> Any:
-        """Write one value through the same traversal a prepared column uses."""
-        return self._prepare_encoder(types)(value, instance, path)
-
-    def get_value_encoder(self, types: TypeRegistry | None) -> Callable[..., Any]:
-        """Prepare this shape while preserving an overridden encode_value hook."""
-        if getattr(self.encode_value, "__func__", None) is not TupleField.encode_value:
-            return super().get_value_encoder(types)
-        return self._prepare_encoder(types)
-
-    def _prepare_encoder(self, types: TypeRegistry | None) -> Callable[..., Any]:
+    def _prepare_encoder(self, types: ContainerValueConverters | None) -> Callable[..., Any]:
         encoders = tuple(self.get_child_encoder(field, types) for field in self.fields_in_order)
 
         def encode_value(value: Any, instance: Any, path: str) -> Any:
@@ -160,17 +160,7 @@ class TupleField(ContainerField):
 
         return encode_value
 
-    def decode_value(self, value: Any, types: TypeRegistry | None) -> Any:
-        """Read one value through the same traversal a prepared column uses."""
-        return self._prepare_decoder(types)(value)
-
-    def get_value_decoder(self, types: TypeRegistry | None) -> Callable[[Any], Any]:
-        """Prepare this shape while preserving an overridden decode_value hook."""
-        if getattr(self.decode_value, "__func__", None) is not TupleField.decode_value:
-            return super().get_value_decoder(types)
-        return self._prepare_decoder(types)
-
-    def _prepare_decoder(self, types: TypeRegistry | None) -> Callable[[Any], Any]:
+    def _prepare_decoder(self, types: ContainerValueConverters | None) -> Callable[[Any], Any]:
         decoders = tuple(self.get_child_decoder(field, types) for field in self.fields_in_order)
         names = self.element_names
 

@@ -40,6 +40,9 @@ The counters belong to the client, not to its pool: they survive `Connections.re
 replaces the pools. On SQLite the "pool" is the client's one connection — `size` is 1 and `waiting`
 counts the tasks and transactions waiting for it.
 
+Completed measurements update their counters before notifying instrumentation. Recorder callbacks
+run outside internal statistics and pool locks, so they can read the pool's current occupancy.
+
 A connection may have several pools, each with its `PoolRole` (`hare.instrumentation.enums`):
 
 | Role | The pool of |

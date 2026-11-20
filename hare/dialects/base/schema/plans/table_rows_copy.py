@@ -9,7 +9,7 @@ from hare.dialects.base.schema.plans.enums import SchemaEffect
 
 if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,7 +21,7 @@ class TableRowsCopy:
     sampling a clock or emitting misleading executable SQL with placeholder values.
     """
 
-    model: type[Model]
+    binding: ModelBinding
     target_sql: str
     source_sql: str
     columns: tuple[ColumnCopy, ...]
@@ -42,5 +42,5 @@ class TableRowsCopy:
             target=self.target_sql,
             source=self.source_sql,
             columns=", ".join(column.column_sql for column in self.columns),
-            values=", ".join(column.get_value_sql(editor, self.model) for column in self.columns),
+            values=", ".join(column.get_value_sql(editor, self.binding) for column in self.columns),
         )

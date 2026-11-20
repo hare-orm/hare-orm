@@ -76,8 +76,13 @@ class ZoneNames:
             # dependency. Its zone data is read on first use: loading it through tzdata
             # costs a few milliseconds of every Hare.init().
             return
+        ZoneNames._parse_configured_zone(zone)
+
+    @staticmethod
+    def _parse_configured_zone(zone: str) -> ZoneInfo:
+        """Parse a configured name and translate an unknown IANA zone into a configuration error."""
         try:
-            ZoneNames.parse(zone)
+            return ZoneNames.parse(zone)
         except (ZoneInfoNotFoundError, ValueError):
             raise ConfigurationError(f"Unknown timezone {zone!r}: expected an IANA zone name like 'UTC'") from None
 
@@ -96,8 +101,7 @@ class ZoneNames:
                 offset) - the database converts by name.
         """
         if isinstance(zone, str):
-            ZoneNames.validate(zone)
-            return ZoneNames.parse(zone).key
+            return ZoneNames._parse_configured_zone(zone).key
         zone_key = getattr(zone, "key", None)
         if isinstance(zone_key, str):
             return zone_key

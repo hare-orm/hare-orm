@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Iterable
+from itertools import chain
 from typing import TYPE_CHECKING, Any
 
 from hare.query.enums import Connector
 from hare.query.expressions import Q
+from hare.query.key_comparison import KeyComparison
 from hare.query.relation_loading.prefetching.prefetch_checks import PrefetchChecks
 from hare.query.relation_loading.prefetching.prefetch_keys import PrefetchKeys
 from hare.query.relation_loading.prefetching.related_rows_fetch import RelatedRowsFetch
@@ -31,13 +34,13 @@ class DirectRelationPrefetch:
         The plan has already applied required projection, connection and per-parent slice.
         """
         bindings = {binding.model: binding for binding in node.key_bindings}
-        keys_by_shape: dict[tuple[str, ...], dict[tuple[Any, ...], None]] = {}
+        keys_by_shape: defaultdict[tuple[str, ...], dict[tuple[Any, ...], None]] = defaultdict(dict)
         for obj in objs:
             binding = bindings[type(obj)]
             PrefetchChecks.reject_unloaded_relation_keys((obj,), binding.source_names, node.field)
             key = PrefetchKeys.get_value(obj, binding.source_names)
             if None not in key:
-                keys_by_shape.setdefault(binding.target_names, {})[key] = None
+                keys_by_shape[binding.target_names][key] = None
         queryset = node.queryset
         # A prepared direct fetch always owns a queryset; only loaded nodes omit it.
         assert queryset is not None  # nosec B101
@@ -57,11 +60,22 @@ class DirectRelationPrefetch:
                     groups,
                     key_width=max(map(len, keys_by_shape)),
                 )
-        targets = {
-            (names, PrefetchKeys.get_value(obj, names)): obj for obj in related_objects for names in keys_by_shape
-        }
+        readers = {}
+        targets: dict[tuple[tuple[str, ...], tuple[Any, ...]], Model] = {}
+        if related_objects:
+            connection = queryset.get_connection()
+            target_binding = queryset._binding
+            for names, requested in keys_by_shape.items():
+                stored = [(PrefetchKeys.get_value(obj, names), obj) for obj in related_objects]
+                fields = [target_binding.fields_map[name] for name in names]  # type: ignore[union-attr]
+                reader = await KeyComparison.get_key_reader(
+                    connection, fields, chain(requested, (key for key, _ in stored))
+                )
+                readers[names] = reader
+                targets.update(((names, reader(key)), obj) for key, obj in stored)
         for obj in objs:
             binding = bindings[type(obj)]
             key = PrefetchKeys.get_value(obj, binding.source_names)
-            related = None if None in key else targets.get((binding.target_names, key))
+            read = readers.get(binding.target_names)
+            related = None if read is None or None in key else targets.get((binding.target_names, read(key)))
             result.add_forward(obj, node.field, node.to_attribute, related)

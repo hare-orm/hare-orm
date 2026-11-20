@@ -14,8 +14,8 @@ from hare.contrib.frameworks.request_transaction import RequestTransaction
 from hare.contrib.frameworks.robyn.hare_exception_handlers import HareExceptionHandlers
 from hare.contrib.frameworks.robyn.hare_open_api import HareOpenAPI
 from hare.contrib.frameworks.robyn.route_handler import RouteHandler
-from hare.core.connections.messages import CONNECTION_RELEASE_FAILED
 from hare.core.constants import INITIALIZATION_RELEASE_FAILED
+from hare.core.resource_completion import ResourceCompletion
 from hare.instrumentation.queries.query_tags import QueryTags
 from hare.models.tenancy.tenancy import Tenancy
 
@@ -88,7 +88,10 @@ class HareRobyn(Robyn):
         self.hare.bind_models()
         self.application_startup_handler: Callable[[], Any] | None = None
         self.application_shutdown_handler: Callable[[], Any] | None = None
-        super().__init__(file_object, openapi=openapi or HareOpenAPI(), **kwargs)
+        schema = openapi or HareOpenAPI()
+        if isinstance(schema, HareOpenAPI):
+            schema.apps = self.hare.model_apps
+        super().__init__(file_object, openapi=schema, **kwargs)
         self.exception(HareExceptionHandlers.handle)
         super().startup_handler(self.start_hare)
         super().shutdown_handler(self.stop_hare)
@@ -227,27 +230,16 @@ class HareRobyn(Robyn):
             with self.hare.scope():
                 await self.run_application_handler(self.application_startup_handler)
         except BaseException as error:
-            try:
+            with ResourceCompletion.preserve_error(error, INITIALIZATION_RELEASE_FAILED):
                 await self.hare.stop()
-            except BaseException as release_error:
-                raise BaseExceptionGroup(INITIALIZATION_RELEASE_FAILED, [error, release_error]) from None
             raise
 
     async def stop_hare(self) -> None:
         """Runs the application's shutdown handler and closes its context, preserving both failures."""
         if self.hare.context is None:
             return
-        try:
-            with self.hare.scope():
-                await self.run_application_handler(self.application_shutdown_handler)
-        except BaseException as error:
-            try:
-                await self.hare.stop()
-            except BaseException as release_error:
-                raise BaseExceptionGroup(CONNECTION_RELEASE_FAILED, [error, release_error]) from None
-            raise
-        else:
-            await self.hare.stop()
+        async with self.hare.scope_until_stop():
+            await self.run_application_handler(self.application_shutdown_handler)
 
     @staticmethod
     async def run_application_handler(handler: Callable[[], Any] | None) -> None:

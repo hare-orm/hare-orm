@@ -7,7 +7,9 @@ from hare.exceptions import UnSupportedError
 from hare.fields.data.json.json_field import JSONField
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
 from hare.fields.generated_field import GeneratedField
+from hare.sql.functions.cast import Cast
 from hare.sql.functions.json.json_sort_key import JsonSortKey
+from hare.sql.terms.values.literal_value import LiteralValue
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
@@ -27,10 +29,8 @@ class BoundOrdering:
     to recover parameters by inspecting the generated comparison tree.
     """
 
-    source_term: Term
     term: Term
     field: Field[Any] | None
-    direction: Order
     nulls_first: bool
     context: ExpressionContext
 
@@ -47,10 +47,8 @@ class BoundOrdering:
                 )
         features = context.connection.features if context.connection is not None else context.dialect.features
         return cls(
-            term,
             cls.get_comparison_key(context, field, term),
             field,
-            direction,
             direction.puts_nulls_first(features.sorts_nulls_first),
             context,
         )
@@ -71,8 +69,14 @@ class BoundOrdering:
         return self.context.dialect.types.get_read_column_value(self.field, value, self.context.model)
 
     def get_boundary_term(self, encoded_value: Any) -> tuple[Term, ValueWrapper]:
-        """Return the comparison key and its explicit source for parameter recording."""
+        """Type the storage literal before applying the column's comparison transformation.
+
+        Container enum codecs need the physical SQL type to read codes as members. The
+        original wrapper remains the parameter source, independent of the comparison tree.
+        """
         wrapper = ValueWrapper(encoded_value)
         if self.field is not None and self.field.sensitive:
             wrapper.sensitive = True
-        return self.get_comparison_key(self.context, self.field, wrapper), wrapper
+        cast_type = self.context.dialect.parameters.get_result_literal_cast_type(self.field)
+        term = Cast(wrapper, LiteralValue(cast_type)) if cast_type is not None else wrapper
+        return self.get_comparison_key(self.context, self.field, term), wrapper

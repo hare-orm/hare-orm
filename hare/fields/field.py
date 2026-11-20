@@ -5,9 +5,10 @@ import contextvars
 import functools
 import inspect
 import warnings
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Sequence
 from copy import deepcopy
 from enum import Enum
+from types import MethodType
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, overload
 
 from hare.classes.class_path import ClassPath
@@ -45,6 +46,7 @@ if TYPE_CHECKING:
     from hare.ddl.schema_objects.enum_type import EnumType
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.dialect import Dialect
+    from hare.fields.data.containers.container_field import HeldValuePath
     from hare.fields.narrowing.narrowing_limit import NarrowingLimit
     from hare.models import Model
     from hare.query.filters.lookups.field_lookup import FieldLookup
@@ -74,7 +76,7 @@ class Field(Generic[TValue], metaclass=FieldMeta):
         description: The column's comment in the generated DDL.
         validators: The validators of the field's values.
         sensitive: Whether the field holds secret data (credentials, tokens, personal data): listed
-            in ``Model._meta.sensitive_fields``, hidden in error messages and dropped by
+            in the model binding's ``sensitive_fields``, hidden in error messages and dropped by
             ``pydantic_model_creator(..., exclude_sensitive=True)``. The schema doesn't change.
 
     **Class attributes** a field class declares:
@@ -400,11 +402,6 @@ class Field(Generic[TValue], metaclass=FieldMeta):
         self.default = default
         # Cached: the check is slow, and Model.__init__ would run it per instance.
         self._default_is_coroutine = self._is_async_default(default)
-        #: Whether the static ``default`` already has the form ``to_python`` gives
-        #: it - None until the first instance construction checks it.
-        self.static_default_is_normalized = None
-        #: ``get_assign_normalized_types()``, cached by the first callable default normalized.
-        self.assign_normalized_types = None
         self.db_default = db_default
         if self.has_db_default() and callable(self.db_default):
             raise ConfigurationError(
@@ -525,22 +522,6 @@ class Field(Generic[TValue], metaclass=FieldMeta):
     def cache_buckets(self, value: dict[int, CacheBucket[Any]]) -> None:
         self.get_binding().cache_buckets = value
 
-    @property
-    def static_default_is_normalized(self) -> bool | None:
-        return self.get_binding().static_default_is_normalized
-
-    @static_default_is_normalized.setter
-    def static_default_is_normalized(self, value: bool | None) -> None:
-        self.get_binding().static_default_is_normalized = value
-
-    @property
-    def assign_normalized_types(self) -> frozenset[type] | None:
-        return self.get_binding().assign_normalized_types
-
-    @assign_normalized_types.setter
-    def assign_normalized_types(self, value: frozenset[type] | None) -> None:
-        self.get_binding().assign_normalized_types = value
-
     def snapshot(self, *, memo: dict[int, Any] | None = None) -> Self:
         """Return an independent declaration without invoking constructors or defaults.
 
@@ -585,6 +566,14 @@ class Field(Generic[TValue], metaclass=FieldMeta):
             TypeError: The value has no JSON form.
         """
         return JsonValues.get_json_value(value)
+
+    def get_snapshot_comparison_value(self, value: Any) -> Any:
+        """The value compared by dirty tracking and snapshots, without write conversion.
+
+        Ordinary fields retain Python equality. Document fields and containers
+        override this to expose nested storage distinctions to the same comparison.
+        """
+        return value
 
     def get_written_value_of_another_type(self, value: Any) -> Any:
         """The value a write takes of a value of another type than ``field_type`` - converted as
@@ -739,8 +728,10 @@ class Field(Generic[TValue], metaclass=FieldMeta):
         """Bind the field's one column writer, preserving custom conversion and validation.
 
         A value whose exact type needs no conversion may stay in the native serializer.
-        It still runs this field's validation once. Every value needing conversion goes
-        through the same field or dialect method used by a direct call.
+        Its non-null values still run field validation once. Default validation calls the
+        same native routine as Field.validate, without its Python wrapper; a captured
+        custom callback keeps its normal call. Every value needing conversion goes through
+        the same field or dialect method used by a direct call.
 
         Args:
             converter: The dialect's column conversion, None for ``to_db_value()``.
@@ -748,19 +739,22 @@ class Field(Generic[TValue], metaclass=FieldMeta):
         Returns:
             The writer, called with the value and the model or instance written for.
         """
-        field_writer = (
-            self.to_db_value
-            if converter is None
-            else converter.prepare(self)
-            if isinstance(converter, PreparedConverter)
-            else functools.partial(converter, self)
-        )
+        field_writer = self.to_db_value if converter is None else PreparedConverter.bind(converter, self)
         if self.sensitive or type(self).validate is not Field.validate:
             return field_writer
         exact_types = self.get_unchanged_write_types(converter)
         if exact_types is None:
             return field_writer
-        return NativeModules.rows.TypedColumnWriter(exact_types, self.null, self.validate, field_writer)
+        null = self.null
+        validate = self.validate
+        validation = (
+            (self, Enum)
+            if isinstance(validate, MethodType)
+            and validate.__func__ is Field.native_validation_method
+            and validate.__self__ is self
+            else (validate, None)
+        )
+        return NativeModules.rows.TypedColumnWriter(exact_types, null, validation, field_writer)
 
     def get_unchanged_write_types(self, converter: Callable[..., Any] | None) -> tuple[type, ...] | None:
         """Exact types whose values the declared writer leaves unchanged before validation.
@@ -785,13 +779,29 @@ class Field(Generic[TValue], metaclass=FieldMeta):
         return self.to_lookup_value
 
     def get_assign_normalized_types(self) -> frozenset[type]:
-        """Returns the exact types whose values ``to_python`` always returns
-        unchanged - a default value of one of them skips that call on instance construction.
+        """Exact types whose values this converter always returns unchanged.
+
+        The base converter can skip its declared type. An overriding converter must explicitly
+        declare that guarantee; a storage type alone says nothing about Python normalization.
 
         Returns:
-            ``{field_type}``, or nothing when ``field_type`` isn't a single class.
+            The unchanged types, empty for an undeclared or overridden normalization contract.
         """
-        return frozenset({self.field_type}) if isinstance(self.field_type, type) else frozenset()
+        return (
+            self._get_unchanged_assign_types(Field.to_python, self.field_type)
+            if isinstance(self.field_type, type)
+            else frozenset()
+        )
+
+    def _get_unchanged_assign_types(self, converter: Callable[..., Any], *value_types: type) -> frozenset[type]:
+        """Retain a converter's declared shortcut only while that converter remains unchanged.
+
+        Built-in fields use this in their normalization declaration. A subclass overriding
+        ``to_python`` cannot silently inherit its parent's shortcut; an explicit override of
+        ``get_assign_normalized_types`` may declare a new guarantee.
+        """
+        to_python = self.to_python
+        return frozenset(value_types) if getattr(to_python, "__func__", to_python) is converter else frozenset()
 
     def get_default_value_on_assign(self, value: Any) -> Any:
         """Normalizes a callable default's result the way an assigned value is, so memory holds
@@ -838,6 +848,9 @@ class Field(Generic[TValue], metaclass=FieldMeta):
             ValidationError: A validator refuses the value.
         """
         NativeModules.rows.validate_field(self, value, Enum)
+
+    #: Original wrapper identity, so replaced validation stays on its captured callback.
+    native_validation_method: ClassVar[Callable[..., None]] = validate
 
     def get_validated_values(self, values: list[Any]) -> list[Any] | None:
         """``values`` as ``Field.to_db_value()`` of each gives them, checked in one pass - when every
@@ -899,6 +912,10 @@ class Field(Generic[TValue], metaclass=FieldMeta):
         """Whether the field declares a ``db_default``."""
         return not isinstance(self.db_default, DbDefaultNotSet)
 
+    def has_insert_default(self) -> bool:
+        """Whether Hare or the database supplies the field's insert value when omitted."""
+        return self.generated or self.default is not None or self.has_db_default()
+
     def is_db_default_redundant_with_default(self) -> bool:
         """Whether a ``db_default`` set alongside ``default`` can never take effect.
 
@@ -915,6 +932,8 @@ class Field(Generic[TValue], metaclass=FieldMeta):
         ``functools.partial``, or an object whose ``__call__`` is one.
         """
         # Most fields have no default.
+        while isinstance(default, functools.partial):
+            default = default.func
         return default is not None and (
             inspect.iscoroutinefunction(default)
             or (callable(default) and inspect.iscoroutinefunction(type(default).__call__))
@@ -961,6 +980,15 @@ class Field(Generic[TValue], metaclass=FieldMeta):
 
         return FieldLookups.get_generic(self)
 
+    def get_path_key_value(self, segment: str) -> Any:
+        """The logical Python key named by a map path's text, without a database read codec.
+
+        The assignment converter handles textual keys by default. A field accepting only
+        non-text inputs supplies its lexical conversion here, before normal assignment.
+        The dialect still encodes the resulting key for the actual comparison.
+        """
+        return self.to_python(segment)
+
     def get_path_transform(self, segment: str) -> tuple[Callable[[Term], Term], Field[Any]] | None:
         """How one path segment after the field's name reads inside its value - an array's item
         (``tags__0``) or length (``tags__len``), a range's bound (``during__startswith``) - so a
@@ -973,10 +1001,20 @@ class Field(Generic[TValue], metaclass=FieldMeta):
             The function building the term the segment reads from the field's own term, and the
             field of the value it reads; None when the segment reads nothing inside the value.
         """
+        registered_transform = self.get_registered_transform(segment)
+        return None if registered_transform is None else registered_transform.get_transform(self)
+
+    def get_registered_transform(self, segment: str) -> RegisteredTransform | None:
+        """The nearest declaration of a path segment in the current registry generation.
+
+        Query paths inspect declarations before the field's built-in path hook, so an
+        explicit registration also applies to fields overriding that hook. The same
+        declaration supplies its required extension; subclasses precede their bases.
+        """
         for klass in type(self).__mro__:
             registered_transform = Field.get_class_transforms(klass).get(segment)
             if registered_transform is not None:
-                return registered_transform.get_transform(self)
+                return registered_transform
         return None
 
     @classmethod
@@ -1300,6 +1338,15 @@ class Field(Generic[TValue], metaclass=FieldMeta):
             The limit, None if the change never narrows.
         """
         return None
+
+    def get_held_narrowing_limits(self, old_field: Field[Any]) -> Sequence[tuple[HeldValuePath, NarrowingLimit]]:
+        """Limits for values held inside a column, empty for a scalar field.
+
+        Containers expose paths to narrowed elements. Wrappers delegate this hook
+        together with the scalar limit, so schema checks do not classify field types
+        or bypass custom implementations.
+        """
+        return ()
 
     @classmethod
     def _get_constructor_parameters(cls) -> tuple[tuple[str, Any], ...]:

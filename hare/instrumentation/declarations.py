@@ -11,6 +11,7 @@ from hare.transactions.enums import TransactionEventType
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -82,6 +83,8 @@ class RowsChanged:
     pks: tuple[Any, ...] | None
     fields: tuple[str, ...] | None
     connection_alias: str
+
+    binding: ModelBinding | None = dataclasses.field(default=None, kw_only=True, compare=False, repr=False)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

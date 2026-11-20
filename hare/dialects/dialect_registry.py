@@ -12,6 +12,8 @@ from hare.dialects.constants import BUILTIN_DIALECTS_BY_NAME, BUILTIN_DRIVER_MOD
 from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from hare.dialects.base.connection.driver import Driver
     from hare.dialects.base.dialect import Dialect
 
@@ -156,16 +158,7 @@ class DialectRegistry:
         Raises:
             ConfigurationError: If no driver has the name.
         """
-        driver = Registries.snapshot.drivers.get(name) or Registries.snapshot.schemes.get(name)
-        if driver is None:
-            cls.load_builtin_driver(name)
-            driver = Registries.snapshot.drivers.get(name) or Registries.snapshot.schemes.get(name)
-        if driver is None:
-            cls.load_installed_drivers()
-            driver = Registries.snapshot.drivers.get(name) or Registries.snapshot.schemes.get(name)
-        if driver is None:
-            cls.load()
-            driver = Registries.snapshot.drivers.get(name) or Registries.snapshot.schemes.get(name)
+        driver = cls._find_driver(name, by_name=True)
         if driver is None:
             engines = sorted({*Registries.snapshot.drivers, *Registries.snapshot.schemes})
             raise ConfigurationError(
@@ -184,18 +177,30 @@ class DialectRegistry:
         Returns:
             The driver, or None.
         """
-        scheme = scheme.lower()
-        driver = Registries.snapshot.schemes.get(scheme)
-        if driver is None:
-            cls.load_builtin_driver(scheme)
-            driver = Registries.snapshot.schemes.get(scheme)
-        if driver is None:
-            cls.load_installed_drivers()
-            driver = Registries.snapshot.schemes.get(scheme)
-        if driver is None:
-            cls.load()
-            driver = Registries.snapshot.schemes.get(scheme)
-        return driver
+        return cls._find_driver(scheme.lower(), by_name=False)
+
+    @staticmethod
+    def _get_registered_driver(name: str, by_name: bool) -> Driver | None:
+        snapshot = Registries.snapshot
+        driver = snapshot.drivers.get(name) if by_name else None
+        return driver if driver is not None else snapshot.schemes.get(name)
+
+    @classmethod
+    def _find_driver(cls, name: str, *, by_name: bool) -> Driver | None:
+        driver = cls._get_registered_driver(name, by_name)
+        if driver is not None:
+            return driver
+        loaders: tuple[Callable[[], None], ...] = (
+            lambda: cls.load_builtin_driver(name),
+            cls.load_installed_drivers,
+            cls.load,
+        )
+        for load in loaders:
+            load()
+            driver = cls._get_registered_driver(name, by_name)
+            if driver is not None:
+                return driver
+        return None
 
     @classmethod
     def get_url_schemes(cls) -> list[str]:
@@ -236,15 +241,7 @@ class DialectRegistry:
             The dialects.
         """
         cls.load()
-        builtin_dialects = [Registries.snapshot.dialects[name] for name in BUILTIN_DIALECTS_BY_NAME]
-        return (
-            *builtin_dialects,
-            *(
-                dialect
-                for name, dialect in Registries.snapshot.dialects.items()
-                if name not in BUILTIN_DIALECTS_BY_NAME
-            ),
-        )
+        return cls._get_registered_dialects()
 
     @classmethod
     def get_connected_dialects(cls) -> tuple[Dialect, ...]:
@@ -266,14 +263,16 @@ class DialectRegistry:
         """
         cls.load_builtin_dialects()
         cls.load_installed_drivers()
-        builtin_dialects = [Registries.snapshot.dialects[name] for name in BUILTIN_DIALECTS_BY_NAME]
+        return cls._get_registered_dialects()
+
+    @staticmethod
+    def _get_registered_dialects() -> tuple[Dialect, ...]:
+        """Return the registered dialects with the built-ins in declaration order."""
+        dialects = Registries.snapshot.dialects
+        builtin_dialects = [dialects[name] for name in BUILTIN_DIALECTS_BY_NAME]
         return (
             *builtin_dialects,
-            *(
-                dialect
-                for name, dialect in Registries.snapshot.dialects.items()
-                if name not in BUILTIN_DIALECTS_BY_NAME
-            ),
+            *(dialect for name, dialect in dialects.items() if name not in BUILTIN_DIALECTS_BY_NAME),
         )
 
     @classmethod

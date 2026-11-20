@@ -1,13 +1,17 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Mapping
+from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from hare.core.apps.declarations import ModelReference
+    from hare.dialects.base.literals.sql_literals import SqlLiterals
     from hare.migrations.state.model_state import ModelState
+    from hare.models.model_binding import ModelBinding
 
 from hare.core.apps import Apps
-from hare.core.apps.model_binding_graph import ModelBindingGraph
+from hare.core.apps.model_binding_preparation import ModelBindingPreparation
 from hare.core.apps.relation_linking import RelationLinking
 from hare.core.connections.connection_handler import ConnectionHandler
 from hare.exceptions import ConfigurationError
@@ -29,7 +33,12 @@ class StateApps(Apps):
         environment: MigrationEnvironment | None = None,
     ) -> None:
         self.environment = environment if environment is not None else MigrationEnvironment.capture(connections)
-        super().__init__({}, self.environment.connections, swappable=self.environment.swappable_settings)
+        super().__init__(
+            {},
+            self.environment.connections,
+            swappable=self.environment.swappable_settings,
+            context=self.environment.context,
+        )
         self._default_connections = default_connections or {}
 
     def register_model(self, app_label: str, model: type[Model]) -> None:
@@ -42,29 +51,54 @@ class StateApps(Apps):
         Raises:
             ConfigurationError: The model is registered under another app.
         """
-        if model._meta.app and model._meta.app != app_label:
-            raise ConfigurationError(f"Given model is already registered with label {model._meta.app}")
+        if self._preparation is None:
+            with ModelBindingPreparation(self, (model,)):
+                self.register_model(app_label, model)
+                self.init_relations()
+                self.build_initial_querysets()
+            return
+        if model._declaration.app and model._declaration.app != app_label:
+            raise ConfigurationError(f"Given model is already registered with label {model._declaration.app}")
 
-        graph = ModelBindingGraph.current.get()
-        if graph is not None and graph.apps is self:
-            graph.include((model,))
+        self._preparation.include((model,))
         self.apps.setdefault(app_label, {})[model.__name__] = model
-        model._meta.app = app_label
+        binding = self.get_binding(model)
+        binding.app = app_label
         if app_label in self._default_connections:
-            model._meta.default_connection = self._default_connections[app_label]
+            binding.default_connection = self._default_connections[app_label]
 
-    def get_identifier_key(self, model: type[Model], name: str) -> str:
-        if self._connections._db_config is None or model._meta.default_connection is None:
-            # A state rendered without connections - its models were checked as they were declared.
-            return name
-        return super().get_identifier_key(model, name)
+    @cached_property
+    def unbound_identifier_rules(self) -> SqlLiterals:
+        """Generic, case-sensitive declaration rules for a state without connections."""
+        from hare.dialects.base.dialect import Dialect
+
+        return Dialect().literals
+
+    def get_identifier_rules(self, model: type[Model]) -> SqlLiterals:
+        if self._connections._db_config is None or self.get_binding(model).default_connection is None:
+            return self.unbound_identifier_rules
+        return super().get_identifier_rules(model)
 
     def get_swappable_label(self, setting: str) -> str:
         """Read captured application settings, falling back to historical declarations."""
         return self.environment.get_swappable_label(setting) or super().get_swappable_label(setting)
 
-    def get_model_reference(self, reference: Any) -> Any:
+    def get_model(self, reference: Any) -> type[Model]:
+        """Read historical identity before falling back to the common registry lookup."""
+        return super().get_model(self.get_model_reference(reference))
+
+    def get_binding(self, reference: Any) -> ModelBinding:
+        """Map captured live references to this historical graph before reading metadata."""
+        return super().get_binding(self.get_model_reference(reference))
+
+    def get_model_reference(self, reference: ModelReference) -> ModelReference:
         """Bind a reference against this registry, independent of the current context."""
+        if isinstance(reference, type) and reference in self.environment.source_bindings:
+            binding = self.environment.source_bindings[reference]
+            return f"{binding.app}.{reference.__name__}"
+        if isinstance(reference, type) and reference._declaration.app is not None:
+            # A migration's Python class names historical identity, never a live graph.
+            return f"{reference._declaration.app}.{reference.__name__}"
         return (
             self.get_swappable_label(reference.setting)
             if isinstance(reference, SwappableModelReference)
@@ -72,8 +106,10 @@ class StateApps(Apps):
         )
 
     def _reference_is_missing(self, reference: Any) -> bool:
-        """Whether a relation's ``"app.Model"`` reference names a model this state can't load
-        yet - a model class, or a reference of another form, never is.
+        """Whether a relation target is absent from this version of the historical registry.
+
+        Labels can load a captured unmanaged declaration. Class references are first translated
+        through captured placement or an explicit declaration app; another graph supplies no metadata.
 
         Args:
             reference: The reference.
@@ -81,6 +117,8 @@ class StateApps(Apps):
         Returns:
             True for an unloadable ``"app.Model"`` string.
         """
+        if isinstance(reference, type):
+            return all(reference is not model for model in self.get_models_iterable())
         if not isinstance(reference, str):
             return False
         parts = reference.split(".")
@@ -107,23 +145,34 @@ class StateApps(Apps):
         """Sets up relations, skipping those whose target isn't registered yet (``CreateModel``
         operations come in any order) - such a model stays not inited until the target exists.
         """
-        if all(model._meta._inited for app in self.apps.values() for model in app.values()):
+        if all(self.get_binding(model)._inited for app in self.apps.values() for model in app.values()):
+            return
+        if self._preparation is None:
+            with ModelBindingPreparation(self):
+                self.init_relations()
+                self.build_initial_querysets()
             return
         super().init_relations()
 
-    def link_relations(self) -> None:
-        uninited_models = [model for app in self.apps.values() for model in app.values() if not model._meta._inited]
+    def link_relations(self, *, deferred_models: frozenset[type[Model]] = frozenset()) -> None:
+        uninited_models = [
+            model for app in self.apps.values() for model in app.values() if not self.get_binding(model)._inited
+        ]
         if not uninited_models:
             return
 
-        models_with_missing_references: set[type[Model]] = set()
+        models_with_missing_references: set[type[Model]] = set(deferred_models)
         # The models only a many-to-many field's target or through model of is missing - their
         # foreign keys are linked now, as their table is created with those columns.
         models_missing_only_many_to_many: set[type[Model]] = set()
 
         for model in uninited_models:
-            for field_name in (*model._meta.foreign_key_fields, *model._meta.one_to_one_fields):
-                foreign_key_object = model._meta.fields_map[field_name]
+            binding = self.get_binding(model)
+            for field_name in (
+                *binding.foreign_key_fields,
+                *binding.one_to_one_fields,
+            ):
+                foreign_key_object = binding.fields_map[field_name]
                 reference = self.get_model_reference(foreign_key_object.model_name)  # type: ignore[attr-defined]
                 if self._reference_is_missing(reference):
                     models_with_missing_references.add(model)
@@ -132,8 +181,8 @@ class StateApps(Apps):
             if model in models_with_missing_references:
                 continue
 
-            for field_name in model._meta.many_to_many_fields:
-                many_to_many_object = model._meta.fields_map[field_name]
+            for field_name in binding.many_to_many_fields:
+                many_to_many_object = binding.fields_map[field_name]
                 references = [self.get_model_reference(many_to_many_object.model_name)]  # type: ignore[attr-defined]
                 through_reference = self.get_model_reference(many_to_many_object.through_model)  # type: ignore[attr-defined]
                 if through_reference is not None:
@@ -144,47 +193,29 @@ class StateApps(Apps):
                     models_missing_only_many_to_many.add(model)
                     break
 
-        for model in models_with_missing_references:
-            model._meta._inited = True
+        super().link_relations(deferred_models=frozenset(models_with_missing_references))
 
-        super().link_relations()
-
-        for model in models_with_missing_references:
-            model._meta._inited = False
         for model in models_missing_only_many_to_many:
             RelationLinking.ensure_foreign_key_or_one_to_one_inited(self, model)
 
     def build_initial_querysets(self) -> None:
-        self.build_querysets(model for app in self.apps.values() for model in app.values())
+        """Prepare complete historical nodes with the captured base clients, without tenant routing.
 
-    def build_querysets(self, models: Iterable[type[Model]]) -> None:
-        """Finalises the inited models of ``models`` and builds their base queries.
-
-        Args:
-            models: The models.
+        A standalone call builds another graph; nested state rendering shares its draft.
+        State-only registries without connection configuration retain their structural SQL.
         """
-        # Skip building querysets when no DB config is available (state-only mode)
-        # This allows pure state operations to work without database connections
         if self._connections._db_config is None:
             return
-
-        models = tuple(models)
-        with ModelBindingGraph(self, models):
-            for model in models:
-                if model._meta.default_connection is None:
-                    continue
-                if not model._meta._inited:
-                    continue
-                model._meta.finalise_model()
-                connection = self._connections.get(model._meta.default_connection)
-                self.bind_model_base_queries(model, connection)
-
-    def unregister_model(self, app_label: str, model_name: str) -> None:
-        try:
-            model = self.apps[app_label].pop(model_name)
-            model._meta.app = None
-        except KeyError:
+        if self._preparation is None:
+            with ModelBindingPreparation(self):
+                self.init_relations()
+                self.build_initial_querysets()
             return
+        for model in self.get_models_iterable():
+            binding = self.get_binding(model)
+            if binding.default_connection is None or not binding._inited:
+                continue
+            self.bind_model_base_queries(binding, self._connections.get_main(binding.default_connection))
 
     @staticmethod
     def split_reference(reference: str | type[Model]) -> tuple[str, str]:
@@ -201,44 +232,39 @@ class StateApps(Apps):
         """
         if not isinstance(reference, str):
             model_class = reference
-            app_label = model_class._meta.app
+            app_label = model_class._declaration.app
             if app_label is None:
                 raise ConfigurationError(f"Model {model_class} is not registered in any app")
             return app_label, model_class.__name__
         return Apps.split_validated_reference(reference)
 
-    def clone(
-        self,
-        model_states: dict[tuple[str, str], ModelState] | None = None,
+    @classmethod
+    def from_model_states(
+        cls,
+        model_states: Mapping[tuple[str, str], ModelState],
+        *,
+        default_connections: Mapping[str, str],
+        environment: MigrationEnvironment,
+        reusable_models: Mapping[tuple[str, str], type[Model]],
     ) -> StateApps:
-        """A copy of the registry - its models rendered again from their states.
+        """Prepare a historical registry from one version of the model declarations.
 
         Args:
-            model_states: The states of the models, by app label and model name.
+            model_states: The states to register, in their declaration order.
+            default_connections: The state's connection aliases, copied for this registry.
+            environment: The captured application settings and connection owner.
+            reusable_models: Unchanged class declarations. Their bindings are still rebuilt.
 
         Returns:
-            The copy.
+            The registry with linked relations and prepared base queries.
         """
-        # Imported here: the model state module imports this one.
-        from hare.migrations.state.model_state import ModelState
-
-        state_apps = self.__class__(
-            default_connections=dict(self._default_connections),
-            environment=self.environment,
-        )
-        with ModelBindingGraph(state_apps):
-            if model_states is not None:
-                for (app_label, _model_name), model_state in model_states.items():
-                    # Rendered from copies: relation setup fills derived attributes into the fields,
-                    # which must not leak into the state.
-                    model = model_state.render()
-                    state_apps.register_model(app_label, model)
-            else:
-                for app_label, app in self.apps.items():
-                    for model in app.values():
-                        model_clone = ModelState.make_from_model(app_label, model).render()
-                        state_apps.register_model(app_label, model_clone)
-
+        state_apps = cls(default_connections=dict(default_connections), environment=environment)
+        with ModelBindingPreparation(state_apps):
+            for model_key in model_states:
+                model = reusable_models.get(model_key)
+                if model is None:
+                    model = model_states[model_key].render()
+                state_apps.register_model(model_key[0], model)
             state_apps.init_relations()
             state_apps.build_initial_querysets()
         return state_apps

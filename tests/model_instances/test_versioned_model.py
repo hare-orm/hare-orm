@@ -17,6 +17,7 @@ from tests.shared_models.testmodels import (
     VersionedDocumentWithReviewer,
     VersionedDocumentWithSoftDelete,
 )
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 @pytest.mark.asyncio
@@ -261,15 +262,10 @@ async def test_track_dirty_fields(db):
 async def test_autonomous_transaction(db, tmp_path):
     """A real file-backed SQLite DB, not the shared in-memory `db` fixture connection -
     Transactions.autonomous() opens a genuinely separate connection."""
-    from hare.contrib.test.isolated_contexts import hare_test_context
     from hare.transactions.transactions import Transactions
 
     db_path = tmp_path / "versioned_autonomous_test.sqlite"
-    async with hare_test_context(
-        ["tests.shared_models.testmodels"],
-        db_url=f"sqlite+aiosqlite:///{db_path}?synchronous=OFF",
-        connection_label="models",
-    ):
+    async with DatabaseUnderTest.open_file_model_context(db_path):
         async with Transactions.autonomous() as conn:
             await VersionedDocument.objects.using(conn).create(title="Draft")
 
@@ -414,3 +410,20 @@ async def test_a_new_record_gets_a_version_7_id(db):
     second = await VersionedDocumentWithSoftDelete.objects.create(title="b")
     assert first.id.version == second.id.version == 7
     assert first.id < second.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("truth_method", ("__bool__", "__len__"))
+@pytest.mark.parametrize("method_name", ("get_last_version_or_exception", "get_last_visible_version_or_exception"))
+async def test_latest_version_accepts_an_existing_falsy_model(db, monkeypatch, truth_method, method_name):
+    monkeypatch.setattr(VersionedDocument, truth_method, lambda self: False, raising=False)
+    first = await VersionedDocument.objects.create(title="Draft")
+    second = await first.create_new_version(title="Revised")
+    latest = await getattr(VersionedDocument, method_name)(id=first.id)
+    assert not latest
+    assert latest.pk == second.pk
+    assert latest.title == "Revised"
+    with pytest.raises(DoesNotExist):
+        await getattr(VersionedDocument, method_name)(id=Uuid7.new())
+    with pytest.raises(LookupError):
+        await getattr(VersionedDocument, method_name)(id=Uuid7.new(), exception=LookupError)

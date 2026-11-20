@@ -1,15 +1,9 @@
 //! Wire bytes of a result column -> `Value`.
 
-use std::fmt::Write as _;
-
-use tokio_postgres::types::{FromSql, Kind as TypeShape, Type};
+use tokio_postgres::types::{FromSql, Type};
 
 use crate::pg::decode_context::PgDecodeContext;
 use crate::pg::error::DriverError;
-use crate::pg::types::array::decode_array;
-use crate::pg::types::composite::decode_composite;
-use crate::pg::types::range::{decode_multirange, decode_range};
-use crate::pg::types::vector::PgVectorCell;
 use crate::pg::value::column_decoder::PgColumnDecoder;
 pub(crate) use crate::pg::value::server_text_forms::ServerTextForms;
 use crate::pg::value::{BoxError, Value};
@@ -34,16 +28,16 @@ impl<'a> FromSql<'a> for RawColumnBytes<'a> {
 }
 
 /// The error of a value of column `index`, of type `ty`, that doesn't decode.
-pub(crate) fn get_decode_error(index: usize, postgres_type: &Type, error: &BoxError) -> DriverError {
+fn get_decode_error(row: &tokio_postgres::Row, index: usize, error: &BoxError) -> DriverError {
+    let postgres_type = row.columns()[index].type_();
     DriverError::Conversion(format!("failed to decode column {} ({}): {}", index, postgres_type.name(), error))
 }
 
 /// The wire bytes of column `index` of `row` - None for NULL.
-pub(crate) fn get_raw_column(row: &tokio_postgres::Row, index: usize) -> Result<Option<&[u8]>, DriverError> {
-    let postgres_type = row.columns()[index].type_();
+fn get_raw_column(row: &tokio_postgres::Row, index: usize) -> Result<Option<&[u8]>, DriverError> {
     row.try_get::<_, RawColumnBytes<'_>>(index)
         .map(|raw| raw.0)
-        .map_err(|error| get_decode_error(index, postgres_type, &error.into()))
+        .map_err(|error| get_decode_error(row, index, &error.into()))
 }
 
 pub fn decode_pg_row_values<'a>(
@@ -55,9 +49,7 @@ pub fn decode_pg_row_values<'a>(
         .iter()
         .enumerate()
         .map(|(index, decoder)| {
-            decoder
-                .decode(get_raw_column(row, index)?, forms)
-                .map_err(|error| get_decode_error(index, row.columns()[index].type_(), &error))
+            decoder.decode(get_raw_column(row, index)?, forms).map_err(|error| get_decode_error(row, index, &error))
         })
         .collect()
 }
@@ -79,43 +71,6 @@ pub(crate) fn decode_value_with_context<'a>(
     context: &mut PgDecodeContext,
 ) -> Result<Value, BoxError> {
     PgColumnDecoder::new(postgres_type).decode_with_context(raw, forms, context)
-}
-
-pub(super) fn decode_structured_value<'a>(
-    postgres_type: &Type,
-    raw: &'a [u8],
-    forms: &mut ServerTextForms<'a>,
-    context: &mut PgDecodeContext,
-) -> Result<Value, BoxError> {
-    if postgres_type.oid() == RECORD_OID {
-        return decode_composite(raw, None, forms, context);
-    }
-    match postgres_type.kind() {
-        TypeShape::Array(member_type) => decode_array(member_type, raw, forms, context),
-        TypeShape::Enum(_) => Ok(Value::Text(std::str::from_utf8(raw)?.to_string())),
-        TypeShape::Range(_) => Ok(Value::Range(decode_range(postgres_type, raw, forms, context)?)),
-        TypeShape::Multirange(subtype) => decode_multirange(subtype, raw, forms, context),
-        TypeShape::Composite(fields) => decode_composite(raw, Some(fields), forms, context),
-        _ => match postgres_type.name() {
-            "vector" => {
-                let value = PgVectorCell::from_sql(postgres_type, raw)?.into_value();
-                if let Value::Array(items) = &value {
-                    context.reserve_values(items.len())?;
-                }
-                Ok(value)
-            }
-            "citext" => Ok(Value::Text(std::str::from_utf8(raw)?.to_string())),
-            // PostGIS's binary form is EWKB; its text form is the same bytes in uppercase hex.
-            "geometry" | "geography" => {
-                let mut hex = String::with_capacity(raw.len() * 2);
-                for byte in raw {
-                    write!(hex, "{byte:02X}").expect("writing hex digits into a String never fails");
-                }
-                Ok(Value::Text(hex))
-            }
-            _ => Ok(forms.text_form(postgres_type, raw)),
-        },
-    }
 }
 
 #[cfg(test)]

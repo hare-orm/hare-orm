@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from hare.ddl.security.grant import Grant
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
     from hare.migrations.state.model_state import ModelState
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class GrantObjectType(SchemaObjectType):
@@ -51,7 +51,7 @@ class GrantObjectType(SchemaObjectType):
     def find(
         cls,
         model_state: ModelState,
-        get_model: Callable[[], type[Model]],
+        get_model: Callable[[], ModelBinding],
         *,
         name: str | None = None,
         fields: list[str] | None = None,
@@ -59,7 +59,7 @@ class GrantObjectType(SchemaObjectType):
         raise IncompatibleStateError(f"A grant has no name - it is found by what it grants on {model_state.name}")
 
     @classmethod
-    async def add(cls, editor: BaseSchemaEditor, model: type[Model], schema_object: Any, **options: Any) -> None:
+    async def add(cls, editor: BaseSchemaEditor, model: ModelBinding, schema_object: Any, **options: Any) -> None:
         cls.raise_if_unsupported(editor)
         await editor.grants.add_grant(model, schema_object)
 
@@ -67,8 +67,8 @@ class GrantObjectType(SchemaObjectType):
     async def remove(
         cls,
         editor: BaseSchemaEditor,
-        model: type[Model],
-        remaining_model: type[Model],
+        model: ModelBinding,
+        remaining_model: ModelBinding,
         schema_object: Any,
         **options: Any,
     ) -> None:

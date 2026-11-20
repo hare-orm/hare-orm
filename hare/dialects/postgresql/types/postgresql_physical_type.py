@@ -31,7 +31,7 @@ class PostgresqlPhysicalType:
     array_dimensions: int = 0
     element: PostgresqlPhysicalType | None = None
 
-    parsed: ClassVar[Cache[PostgresqlPhysicalType]] = Cache(POSTGRESQL_PHYSICAL_TYPE_CACHE_SIZE, holds_sql=False)
+    parsed: ClassVar[Cache[PostgresqlPhysicalType]] = Cache(POSTGRESQL_PHYSICAL_TYPE_CACHE_SIZE)
 
     @classmethod
     def from_sql(cls, sql: str) -> PostgresqlPhysicalType:

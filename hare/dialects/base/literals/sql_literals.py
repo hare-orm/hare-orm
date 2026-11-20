@@ -7,11 +7,13 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.caching.cache import Cache
 from hare.core.caching.cache_bucket import CacheBucket
+from hare.ddl.enums import SchemaNamespace, SchemaPartType
 from hare.dialects.base.literals.constants import SQL_NULL_BYTE, SQL_NULL_BYTE_VALUE_MESSAGE
 from hare.exceptions import ValidationError
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
+    from hare.fields.field import Field
 
 
 class SqlLiterals:
@@ -32,7 +34,7 @@ class SqlLiterals:
 
     #: The writer each set of literals found for a value's class through the class's bases, kept
     #: in a bucket of the set.
-    found_literal_writers: ClassVar[Cache[Any]] = Cache(holds_sql=False)
+    found_literal_writers: ClassVar[Cache[Any]] = Cache()
 
     def __init__(self, dialect: Dialect) -> None:
         """
@@ -59,6 +61,50 @@ class SqlLiterals:
         """
         escaped = name.replace(self.identifier_quote_char, self.identifier_quote_char * 2)
         return f"{self.identifier_quote_char}{escaped}{self.identifier_quote_char}"
+
+    def get_field_literal_sql(self, field: Field[Any], value: Any) -> str:
+        """Render an already converted value with its column's type information.
+
+        Dialects may need the declared type to disambiguate a stored literal. The
+        caller performs field conversion once before invoking this renderer.
+        """
+        return self.get_literal_sql(value)
+
+    def get_schema_key(self, schema: str | None) -> str | None:
+        """Compare a declared schema without assuming the connection's search path."""
+        return None if schema is None else self.get_identifier_key(schema)
+
+    def get_schema_object_key(
+        self, object_type: SchemaPartType, schema: str | None, table: str, name: str
+    ) -> tuple[SchemaNamespace, str | None, str | None, str] | None:
+        """A physical name key, or None when its server-owned identity is not modeled.
+
+        Dialects define shared namespaces and table-local objects. Opaque function
+        signatures are not parsed or refused by their bare name.
+        """
+        if object_type is SchemaPartType.TRIGGER:
+            return self._get_schema_object_key(SchemaNamespace.TRIGGER, schema, None, name)
+        if object_type in (
+            SchemaPartType.TABLE,
+            SchemaPartType.INDEX,
+            SchemaPartType.VIEW,
+            SchemaPartType.MATERIALIZED_VIEW,
+            SchemaPartType.SEQUENCE,
+            SchemaPartType.DICTIONARY,
+        ):
+            return self._get_schema_object_key(SchemaNamespace.RELATION, schema, None, name)
+        return None
+
+    def _get_schema_object_key(
+        self, namespace: SchemaNamespace, schema: str | None, table: str | None, name: str
+    ) -> tuple[SchemaNamespace, str | None, str | None, str]:
+        """Apply identifier comparison after the dialect has selected the object's scope."""
+        return (
+            namespace,
+            self.get_schema_key(schema),
+            None if table is None else self.get_identifier_key(table),
+            self.get_identifier_key(name),
+        )
 
     def get_identifier_key(self, name: str) -> str:
         """What a name is told apart by - two names of one key name one column or table. A quoted name is

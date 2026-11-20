@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
     from hare.fields.field import Field
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,11 +24,11 @@ class ColumnCopy:
     default_sql: str | None = None
     clock_field: Field[Any] | None = None
 
-    def get_value_sql(self, editor: BaseSchemaEditor, model: type[Model]) -> str:
+    def get_value_sql(self, editor: BaseSchemaEditor, binding: ModelBinding) -> str:
         """Render a value, evaluating the clock only during row-copy execution."""
         default_sql = self.default_sql
         if self.clock_field is not None:
-            default_sql = editor.column_backfill.auto_now_backfill_sql_literal(self.clock_field, model)
+            default_sql = editor.column_backfill.auto_now_backfill_sql_literal(self.clock_field, binding)
         if self.source_sql is None:
             return default_sql if default_sql is not None else "NULL"
         if default_sql is None:

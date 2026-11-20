@@ -301,7 +301,7 @@ async def test_distinct_on_annotate_by_model(db):
     await Tournament.objects.create(name="1", desc="b")
     await Tournament.objects.create(name="2", desc="c")
     tournaments = await Tournament.objects.annotate(count_name=Count("name")).distinct("name").order_by("name")
-    assert [1, 1] == [tournaments[0].count_name, tournaments[0].count_name]
+    assert [(row.name, row.count_name) for row in tournaments] == [("1", 1), ("2", 1)]
 
 
 @test.requires_features(supports_distinct_on=True)

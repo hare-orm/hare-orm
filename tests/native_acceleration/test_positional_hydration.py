@@ -2,6 +2,7 @@ from datetime import UTC
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from tests.shared_models.testmodels import (
     BooleanFields,
     DatetimeFields,
@@ -114,11 +115,13 @@ async def test_layout_readers_preserve_native_values_and_convert_other_columns(d
     """Column and field lookup share one reader; non-native booleans retain NULL handling."""
     from hare import Connections
 
-    layout = Tournament._meta.get_hydration_layout(Connections.get("models"))
+    layout = HareContext.require_current().apps.get_binding(Tournament).get_hydration_layout(Connections.get("models"))
     for field_name, (column, field, reader) in layout.entry_by_field_name.items():
         assert layout.entry_by_column[column] == (field_name, field, reader)
 
-    boolean_layout = BooleanFields._meta.get_hydration_layout(Connections.get("models"))
+    boolean_layout = (
+        HareContext.require_current().apps.get_binding(BooleanFields).get_hydration_layout(Connections.get("models"))
+    )
     for _column, field, reader in boolean_layout.entry_by_field_name.values():
         if field.field_type is bool and reader is not None:
             assert reader(None) is None

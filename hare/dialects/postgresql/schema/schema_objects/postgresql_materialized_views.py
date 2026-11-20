@@ -16,11 +16,11 @@ from hare.dialects.postgresql.schema.constants import (
     POSTGRESQL_MATERIALIZED_VIEW_UNIQUE_INDEX_TEMPLATE,
 )
 from hare.exceptions import ConfigurationError
-from hare.models import Model
 from hare.sql.identifiers import Identifiers
 
 if TYPE_CHECKING:
     from hare.dialects.postgresql.schema.postgresql_schema_editor import PostgresqlSchemaEditor
+    from hare.models.model_binding import ModelBinding
 
 
 class PostgresqlMaterializedViews(MaterializedViews):
@@ -31,9 +31,9 @@ class PostgresqlMaterializedViews(MaterializedViews):
     editor: PostgresqlSchemaEditor
 
     def get_materialized_view_create_sqls(
-        self, model: type[Model], view: MaterializedView, safe: bool = False
+        self, binding: ModelBinding, view: MaterializedView, safe: bool = False
     ) -> list[str]:
-        qualified_view = self.editor.qualify_object_name(model, view.name)
+        qualified_view = self.editor.qualify_object_name(binding, view.name)
         if_not_exists = "IF NOT EXISTS " if safe else ""
         statements = [
             POSTGRESQL_MATERIALIZED_VIEW_CREATE_TEMPLATE.format(
@@ -54,11 +54,8 @@ class PostgresqlMaterializedViews(MaterializedViews):
             )
         return statements
 
-    async def drop_materialized_view(self, model: type[Model], view: MaterializedView) -> None:
-        await self.editor.run_sql(self.get_materialized_view_drop_sql(model, view))
-
     def get_materialized_view_drop_sql(
-        self, model: type[Model], view: MaterializedView, *, if_exists: bool = False
+        self, binding: ModelBinding, view: MaterializedView, *, if_exists: bool = False
     ) -> str:
         """Compile removal without changing the catalog."""
         template = (
@@ -66,42 +63,50 @@ class PostgresqlMaterializedViews(MaterializedViews):
             if if_exists
             else POSTGRESQL_MATERIALIZED_VIEW_DROP_TEMPLATE
         )
-        return template.format(view=self.editor.qualify_object_name(model, view.name))
+        return template.format(view=self.editor.qualify_object_name(binding, view.name))
 
     async def rename_materialized_view(
-        self, model: type[Model], old_view: MaterializedView, new_view: MaterializedView
+        self, binding: ModelBinding, old_view: MaterializedView, new_view: MaterializedView
     ) -> None:
         if old_view.name == new_view.name:
             return
         await self.editor.run_sql(
             POSTGRESQL_MATERIALIZED_VIEW_RENAME_TEMPLATE.format(
-                view=self.editor.qualify_object_name(model, old_view.name), new_name=self.editor.quote(new_view.name)
+                view=self.editor.qualify_object_name(binding, old_view.name), new_name=self.editor.quote(new_view.name)
             )
         )
         if old_view.unique_columns:
             await self.editor.run_sql(
                 POSTGRESQL_INDEX_RENAME_TEMPLATE.format(
-                    index_name=self.editor.qualify_object_name(model, self.get_materialized_view_index_name(old_view)),
+                    index_name=self.editor.qualify_object_name(
+                        binding, self.get_materialized_view_index_name(old_view)
+                    ),
                     new_name=self.editor.quote(self.get_materialized_view_index_name(new_view)),
                 )
             )
 
-    async def refresh_materialized_view(self, model: type[Model], view: MaterializedView, concurrently: bool) -> None:
+    def check_refresh(self, binding: ModelBinding, view: MaterializedView, concurrently: bool) -> None:
+        """A concurrent refresh requires the declared unique index."""
+        if concurrently and not view.unique_columns:
+            raise ConfigurationError(
+                f"Materialized view {view.name!r} can't be refreshed concurrently without unique_columns - "
+                "a concurrent refresh needs a unique index on it"
+            )
+
+    async def refresh_materialized_view(
+        self, binding: ModelBinding, view: MaterializedView, concurrently: bool
+    ) -> None:
         """Refreshes the view; concurrently it stays readable, which needs the unique index of its
         ``unique_columns`` and a view filled before.
 
         Raises:
             ConfigurationError: ``concurrently`` for a view without ``unique_columns``.
         """
-        if concurrently and not view.unique_columns:
-            raise ConfigurationError(
-                f"Materialized view {view.name!r} can't be refreshed concurrently without unique_columns - "
-                "a concurrent refresh needs a unique index on it"
-            )
+        self.check_refresh(binding, view, concurrently)
         await self.editor.run_sql(
             POSTGRESQL_MATERIALIZED_VIEW_REFRESH_TEMPLATE.format(
                 concurrently="CONCURRENTLY " if concurrently else "",
-                view=self.editor.qualify_object_name(model, view.name),
+                view=self.editor.qualify_object_name(binding, view.name),
             )
         )
 
@@ -111,7 +116,11 @@ class PostgresqlMaterializedViews(MaterializedViews):
         return Identifiers.get_within_limit(f"{view.name}{POSTGRESQL_MATERIALIZED_VIEW_UNIQUE_INDEX_SUFFIX}")
 
     def get_schema_move_plan(
-        self, model: type[Model], materialized_view: MaterializedView, old_schema: str | None, new_schema: str | None
+        self,
+        binding: ModelBinding,
+        materialized_view: MaterializedView,
+        old_schema: str | None,
+        new_schema: str | None,
     ) -> SchemaChangePlan:
         return self.editor.schemas.get_object_schema_move_plan(
             "MATERIALIZED VIEW", self.editor.qualify_table_name(materialized_view.name, old_schema), new_schema

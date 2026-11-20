@@ -95,7 +95,9 @@ class TopicRouter(OutboxDelivery):
 
     async def close(self) -> None:
         """Close every distinct transport, retaining failures without skipping later releases."""
-        deliveries = {id(delivery): delivery for delivery in (*self.routes.values(), self.default) if delivery}
+        deliveries = {
+            id(delivery): delivery for delivery in (*self.routes.values(), self.default) if delivery is not None
+        }
         releases = AsyncExitStack()
         for delivery in reversed(tuple(deliveries.values())):
             releases.push_async_callback(delivery.close)

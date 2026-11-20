@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 from hare.exceptions import QueryError
 
 if TYPE_CHECKING:
+    from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.dialect import Dialect
     from hare.query.queryset.query_specification import QuerySpecification
     from hare.query.queryset.queryset import QuerySet
@@ -63,3 +64,16 @@ class WrittenTargetChecks:
 
         if query._extension_calls:
             QuerySetExtensions.raise_if_refused_in_write(query, dialect)
+
+    @staticmethod
+    def raise_if_rows_unwritable(query: QuerySpecification[Any], connection: DatabaseClient, method_name: str) -> None:
+        """Apply dialect-dependent row admission before either selecting or writing matching rows.
+
+        Cascades, instance overrides and direct statements share the same restrictions on
+        slicing, extension calls and distinct field selections.
+        """
+        WrittenTargetChecks.raise_if_refused_calls(query, connection.dialect)
+        if query._offset or (query._limit is not None and not connection.features.supports_update_limit_order_by):
+            raise QueryError(f"Cannot {method_name}() a query once a slice has been taken.")
+        if query._distinct_on:
+            raise QueryError(f"Cannot call {method_name}() after .distinct(*fields).")

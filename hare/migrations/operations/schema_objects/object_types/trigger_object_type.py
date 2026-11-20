@@ -7,7 +7,7 @@ from hare.models.enums import ModelOption
 
 if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class TriggerObjectType(SchemaObjectType):
@@ -18,29 +18,29 @@ class TriggerObjectType(SchemaObjectType):
     reaches_other_tables: ClassVar[bool] = True
 
     @classmethod
-    def raise_if_object_unsupported(cls, editor: BaseSchemaEditor, model: type[Model], schema_object: Any) -> None:
+    def raise_if_object_unsupported(cls, editor: BaseSchemaEditor, model: ModelBinding, schema_object: Any) -> None:
         # A database without triggers refuses their statements, which no feature names - built, none sent.
         editor.trigger_statements.get_trigger_create_sqls(model, schema_object)
 
     @classmethod
-    async def add(cls, editor: BaseSchemaEditor, model: type[Model], schema_object: Any, **options: Any) -> None:
+    async def add(cls, editor: BaseSchemaEditor, model: ModelBinding, schema_object: Any, **options: Any) -> None:
         await editor.trigger_statements.add_trigger(model, schema_object)
 
     @classmethod
     async def remove(
         cls,
         editor: BaseSchemaEditor,
-        model: type[Model],
-        remaining_model: type[Model],
+        model: ModelBinding,
+        remaining_model: ModelBinding,
         schema_object: Any,
         **options: Any,
     ) -> None:
         await editor.trigger_statements.remove_trigger(model, schema_object)
 
     @classmethod
-    async def rename(cls, editor: BaseSchemaEditor, model: type[Model], old_object: Any, new_object: Any) -> None:
+    async def rename(cls, editor: BaseSchemaEditor, model: ModelBinding, old_object: Any, new_object: Any) -> None:
         await editor.trigger_statements.rename_trigger(model, old_object, new_object)
 
     @classmethod
-    async def alter(cls, editor: BaseSchemaEditor, model: type[Model], old_object: Any, new_object: Any) -> None:
+    async def alter(cls, editor: BaseSchemaEditor, model: ModelBinding, old_object: Any, new_object: Any) -> None:
         await editor.trigger_statements.alter_trigger(model, old_object, new_object)

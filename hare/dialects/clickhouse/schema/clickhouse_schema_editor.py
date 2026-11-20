@@ -15,6 +15,7 @@ from hare.dialects.base.schema.indexes.index_statements import IndexStatements
 from hare.dialects.base.schema.plans.enums import SchemaEffect
 from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.dialects.base.schema.plans.schema_statement import SchemaStatement
+from hare.dialects.base.schema.plans.schema_step import SchemaStep
 from hare.dialects.base.schema.runtime_statements.table_clearing import TableClearing
 from hare.dialects.base.schema.schema_objects.dictionaries import Dictionaries
 from hare.dialects.base.schema.schema_objects.materialized_views import MaterializedViews
@@ -26,7 +27,6 @@ from hare.dialects.base.schema.tables.table_partitions import TablePartitions
 from hare.dialects.base.schema.tables.table_rebuild import TableRebuild
 from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
 from hare.dialects.clickhouse.client.clickhouse_mutation_recovery import ClickhouseMutationRecovery
-from hare.dialects.clickhouse.client.constants import CLICKHOUSE_DEFAULT_DATABASE
 from hare.dialects.clickhouse.cluster.clickhouse_placement_plan import ClickhousePlacementPlan
 from hare.dialects.clickhouse.cluster.constants import CLICKHOUSE_SCHEMA_REPLICATING_DATABASE_ENGINES
 from hare.dialects.clickhouse.cluster.messages import SCHEMA_DATABASE_ENGINE_REQUIRED
@@ -39,6 +39,7 @@ from hare.dialects.clickhouse.schema.columns.clickhouse_column_definitions impor
 from hare.dialects.clickhouse.schema.columns.clickhouse_column_narrowing_check import ClickhouseColumnNarrowingCheck
 from hare.dialects.clickhouse.schema.columns.clickhouse_column_renames import ClickhouseColumnRenames
 from hare.dialects.clickhouse.schema.constants import (
+    CLICKHOUSE_APPLY_DELETED_MASK_TEMPLATE,
     CLICKHOUSE_FIXED_STRING_TEXT_TEMPLATE,
     CLICKHOUSE_FIXED_STRING_TO_TEXT_TEMPLATE,
     CLICKHOUSE_TEXT_TYPE_NAME,
@@ -60,7 +61,7 @@ if TYPE_CHECKING:
 
     from hare.dialects.clickhouse.client.clickhouse_client import ClickhouseClient
     from hare.fields.field import Field
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class ClickhouseSchemaEditor(BaseSchemaEditor):
@@ -134,25 +135,25 @@ class ClickhouseSchemaEditor(BaseSchemaEditor):
         engines = self.database_engines
         if engines is None and self.client.cluster is not None:
             engines = self.client.cluster.database_engines
-        database = schema or self.client.database or CLICKHOUSE_DEFAULT_DATABASE
+        database = ClickhousePlacementPlan.get_effective_database(self.client.database, schema)
         return engines.get(database) if engines is not None else None
 
     def get_schema_cluster_sql(self, schema: str | None = None) -> str:
         return ClickhousePlacementPlan.get_cluster_sql(self.get_schema_cluster(schema), self.client.sql_context)
 
-    def get_schema_recovery(self, model: type[Model]) -> ClickhouseMutationRecovery | None:
+    def get_schema_recovery(self, binding: ModelBinding) -> ClickhouseMutationRecovery | None:
         """Recover local ALTER mutations; distributed DDL has no globally unique mutation IDs."""
-        placement = self.get_schema_placement(model)
+        placement = self.get_schema_placement(binding)
         if placement.cluster is not None:
             return None
         return ClickhouseMutationRecovery(
-            placement.database or self.client.database or CLICKHOUSE_DEFAULT_DATABASE,
+            ClickhousePlacementPlan.get_effective_database(self.client.database, placement.database),
             placement.storage_table,
         )
 
-    def get_schema_placement(self, model: type[Model]) -> ClickhousePlacementPlan:
+    def get_schema_placement(self, binding: ModelBinding) -> ClickhousePlacementPlan:
         """Combine declared table identities with the target database's replication mode."""
-        placement = self.get_row_placement(model)
+        placement = self.get_row_placement(binding)
         return replace(
             placement,
             replicates_schema=placement.cluster is not None and self.get_schema_cluster(placement.database) is None,
@@ -167,28 +168,42 @@ class ClickhouseSchemaEditor(BaseSchemaEditor):
             new_table=self.qualify_table_name(new_name, schema),
         ) + self.get_schema_cluster_sql(schema)
 
-    def get_row_change_table_sql(self, model: type[Model]) -> str:
+    def get_row_change_table_sql(self, binding: ModelBinding) -> str:
         """Render declared storage; mutations reach shards even when the database replicates DDL."""
-        return self.get_row_placement(model).get_mutation_target_sql(self.client.sql_context)
+        return self.get_row_placement(binding).get_mutation_target_sql(self.client.sql_context)
 
-    def get_row_recovery(self, model: type[Model]) -> ClickhouseMutationRecovery | None:
+    def get_row_recovery(self, binding: ModelBinding) -> ClickhouseMutationRecovery | None:
         return ClickhouseMutationRecovery.for_mutation(
-            self.get_row_placement(model), self.client.database or CLICKHOUSE_DEFAULT_DATABASE
+            self.get_row_placement(binding), ClickhousePlacementPlan.get_effective_database(self.client.database)
         )
 
-    def get_row_placement(self, model: type[Model]) -> ClickhousePlacementPlan:
-        """Use the current schema declaration for both rendering and failure metadata."""
-        options = ClickhouseTableOptions.get_for_model(model, self.client.dialect)
-        table = options.get_storage_table_name(model._meta.db_table)
-        return ClickhousePlacementPlan(
-            model._meta.db_table, table, model._meta.schema, self.client.sql_context.cluster_name
+    def get_apply_deleted_mask_statement(self, binding: ModelBinding) -> SchemaStatement:
+        """Remove masked rows from the physical tables before rewriting their columns."""
+        return SchemaStatement(
+            CLICKHOUSE_APPLY_DELETED_MASK_TEMPLATE.format(table=self.get_row_change_table_sql(binding)),
+            frozenset({SchemaEffect.REWRITE_ROWS}),
+            recovery=self.get_row_recovery(binding),
         )
+
+    def get_column_conversion_steps(
+        self, binding: ModelBinding, old_field: Field[Any], new_field: Field[Any], column_sql: str
+    ) -> tuple[SchemaStep, ...]:
+        return (
+            self.get_apply_deleted_mask_statement(binding),
+            *super().get_column_conversion_steps(binding, old_field, new_field, column_sql),
+        )
+
+    def get_row_placement(self, binding: ModelBinding) -> ClickhousePlacementPlan:
+        """Use the current schema declaration for both rendering and failure metadata."""
+        options = ClickhouseTableOptions.get_for_model(binding, self.client.dialect)
+        table = options.get_storage_table_name(binding.db_table)
+        return ClickhousePlacementPlan(binding.db_table, table, binding.schema, self.client.sql_context.cluster_name)
 
     def get_column_change_sql(
-        self, model: type[Model], template: str, *, storage_changes: str | None = None, **values: str
+        self, binding: ModelBinding, template: str, *, storage_changes: str | None = None, **values: str
     ) -> str:
         """Change storage first and the logical companion second, without inspecting SQL."""
-        placement = self.get_schema_placement(model)
+        placement = self.get_schema_placement(binding)
         storage = placement.storage_table
         tables = dict.fromkeys((storage, placement.logical_table))
         cluster_sql = ClickhousePlacementPlan.get_cluster_sql(placement.schema_cluster, self.client.sql_context)
@@ -206,31 +221,31 @@ class ClickhouseSchemaEditor(BaseSchemaEditor):
 
     def get_alter_field_plan(
         self,
-        old_model: type[Model],
-        new_model: type[Model],
+        old_binding: ModelBinding,
+        new_binding: ModelBinding,
         field_name: str,
-        candidate_referencing_models: Sequence[type[Model]] = (),
+        candidate_referencing_models: Sequence[ModelBinding] = (),
     ) -> SchemaChangePlan:
         """Compile dependent projections and dictionaries around the shared field plan."""
-        names = self.table_partitions.get_projection_names_reading_retyped_column(old_model, new_model, field_name)
-        plan = super().get_alter_field_plan(old_model, new_model, field_name, candidate_referencing_models)
+        names = self.table_partitions.get_projection_names_reading_retyped_column(old_binding, new_binding, field_name)
+        plan = super().get_alter_field_plan(old_binding, new_binding, field_name, candidate_referencing_models)
         steps = [
-            *(SchemaStatement(sql) for sql in self.table_partitions.get_projection_drop_sqls(old_model, names)),
+            *(SchemaStatement(sql) for sql in self.table_partitions.get_projection_drop_sqls(old_binding, names)),
             *plan.steps,
         ]
-        projection_sqls = self.table_partitions.get_projection_add_sqls(new_model, names)
+        projection_sqls = self.table_partitions.get_projection_add_sqls(new_binding, names)
         if projection_sqls:
-            recovery = self.get_schema_recovery(new_model)
+            recovery = self.get_schema_recovery(new_binding)
             steps.extend(SchemaStatement(sql, recovery=recovery) for sql in projection_sqls)
         steps.extend(
             SchemaStatement(sql)
-            for sql in self.dictionaries.get_retyped_field_dictionary_sqls(old_model, new_model, field_name)
+            for sql in self.dictionaries.get_retyped_field_dictionary_sqls(old_binding, new_binding, field_name)
         )
         return SchemaChangePlan(tuple(steps), before=plan.before, after=plan.after)
 
     def get_column_type_change_plan(
         self,
-        model: type[Model],
+        binding: ModelBinding,
         old_field: Field[Any],
         new_field: Field[Any],
         new_sql_type: str,
@@ -247,7 +262,7 @@ class ClickhouseSchemaEditor(BaseSchemaEditor):
             steps.append(
                 SchemaStatement(
                     self.get_column_change_sql(
-                        model,
+                        binding,
                         self.ALTER_FIELD_TEMPLATE,
                         changes=self.ALTER_FIELD_TYPE_TEMPLATE.format(
                             column=column,
@@ -264,13 +279,13 @@ class ClickhouseSchemaEditor(BaseSchemaEditor):
                         ),
                     ),
                     frozenset({SchemaEffect.REWRITE_ROWS}),
-                    recovery=self.get_schema_recovery(model),
+                    recovery=self.get_schema_recovery(binding),
                 )
             )
         return SchemaChangePlan(
             (
                 *steps,
-                *super().get_column_type_change_plan(model, old_field, new_field, new_sql_type).steps,
+                *super().get_column_type_change_plan(binding, old_field, new_field, new_sql_type).steps,
             )
         )
 
@@ -286,6 +301,7 @@ class ClickhouseSchemaEditor(BaseSchemaEditor):
     ALTER_FIELD_NULL_TEMPLATE = "MODIFY COLUMN {column} {sql_type}"
     ALTER_FIELD_NOT_NULL_TEMPLATE = "MODIFY COLUMN {column} {sql_type}"
     UPDATE_ROWS_TEMPLATE = "ALTER TABLE {table} UPDATE {assignments} WHERE {condition}"
+    CREATE_STORED_SNAPSHOT_TEMPLATE = "CREATE TABLE {table} ENGINE=Memory AS {select}"
     ALTER_FIELD_SET_DEFAULT_TEMPLATE = "MODIFY COLUMN {column} DEFAULT {default}"
     ALTER_FIELD_DROP_DEFAULT_TEMPLATE = "MODIFY COLUMN {column} REMOVE DEFAULT"
     # A column computed on write is stored with the row, one computed on read is an alias of its

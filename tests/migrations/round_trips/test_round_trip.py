@@ -4,14 +4,8 @@ by default; set HARE_TEST_DB to a postgres URL to run the same scenarios on that
 
 from __future__ import annotations
 
-import contextlib
 import datetime
-import importlib
-import importlib.util
-import io
 import math
-import os
-import sys
 import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -20,9 +14,12 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 
-from hare.cli import hare_cli as cli_module
 from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
+from tests.utils.cli_commands import CliCommands
 from tests.utils.database_under_test import DatabaseUnderTest
+from tests.utils.module_loader import ModuleLoader
+from tests.utils.project_imports import ProjectImports
+from tests.utils.project_sources import ProjectSources
 from tests.utils.server_session import ServerSession
 
 APP_LABEL = "rtapp"
@@ -34,59 +31,37 @@ class RoundTripProject:
     """A throwaway project (models package + migrations package + settings) on one database."""
 
     def __init__(self, project_directory: Path, monkeypatch: pytest.MonkeyPatch, database_url: str) -> None:
-        self.project_directory = project_directory
-        self.package_directory = project_directory / MODELS_PACKAGE
-        self.package_directory.mkdir()
-        (self.package_directory / "__init__.py").write_text("", encoding="utf-8")
-        (self.package_directory / "models.py").write_text("", encoding="utf-8")
-        self.migrations_directory = self.package_directory / "migrations"
-        self.migrations_directory.mkdir()
-        (self.migrations_directory / "__init__.py").write_text("", encoding="utf-8")
-        (project_directory / f"{SETTINGS_MODULE}.py").write_text(
-            "HARE_ORM = {\n"
-            f'    "connections": {{"default": {database_url!r}}},\n'
-            '    "apps": {\n'
-            f'        "{APP_LABEL}": {{\n'
-            f'            "models": ["{MODELS_PACKAGE}.models"],\n'
-            '            "default_connection": "default",\n'
-            f'            "migrations": "{MODELS_PACKAGE}.migrations",\n'
-            "        },\n"
-            "    },\n"
-            "}\n",
-            encoding="utf-8",
-        )
+        self.sources = ProjectSources(project_directory)
+        self.imports = ProjectImports(project_directory)
+        package = self.sources.write_package(MODELS_PACKAGE)
+        self.migrations_directory = self.sources.prepare_migrations(package)
+        config = {
+            "connections": {"default": database_url},
+            "apps": {
+                APP_LABEL: {
+                    "models": [f"{MODELS_PACKAGE}.models"],
+                    "default_connection": "default",
+                    "migrations": f"{MODELS_PACKAGE}.migrations",
+                },
+            },
+        }
+        self.sources.write_module(SETTINGS_MODULE, f"HARE_ORM = {config!r}\n")
         monkeypatch.syspath_prepend(str(project_directory))
-        importlib.invalidate_caches()
-        self.purge_project_modules()
-
-    @staticmethod
-    def purge_project_modules() -> None:
-        for module_name in list(sys.modules):
-            if module_name.startswith((MODELS_PACKAGE, SETTINGS_MODULE)):
-                del sys.modules[module_name]
 
     def write_models(self, source: str) -> None:
-        (self.package_directory / "models.py").write_text(source, encoding="utf-8")
-        self.purge_project_modules()
-        importlib.invalidate_caches()
+        self.sources.write_module(f"{MODELS_PACKAGE}/models", source)
 
     async def run_cli(self, *arguments: str) -> SimpleNamespace:
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-                exit_code = await cli_module.HareCLI.run_cli_async(["-c", f"{SETTINGS_MODULE}.HARE_ORM", *arguments])
-        finally:
-            self.purge_project_modules()
-            importlib.invalidate_caches()
-        return SimpleNamespace(exit_code=exit_code, output=stdout.getvalue() + stderr.getvalue())
+        return await CliCommands.run(
+            ["-c", f"{SETTINGS_MODULE}.HARE_ORM", *arguments],
+            project=self.imports.root,
+        )
 
-    async def make_and_migrate(self, *makemigrations_arguments: str) -> SimpleNamespace:
+    async def make_and_migrate(self, *makemigrations_arguments: str) -> None:
         make_result = await self.run_cli("makemigrations", APP_LABEL, *makemigrations_arguments)
         assert make_result.exit_code == 0, make_result.output
         migrate_result = await self.run_cli("migrate")
         assert migrate_result.exit_code == 0, migrate_result.output
-        return make_result
 
     async def assert_nothing_left_to_do(self) -> None:
         check_result = await self.run_cli("makemigrations", "--check", "--dry-run")
@@ -103,26 +78,19 @@ class RoundTripProject:
     def load_migration_operations(self, migration_file_name: str) -> list:
         """Executes the written migration file and returns its ``operations`` list."""
         module_name = f"{MODELS_PACKAGE}.migrations.{migration_file_name.removesuffix('.py')}"
-        specification = importlib.util.spec_from_file_location(
-            module_name, self.migrations_directory / migration_file_name
-        )
-        assert specification is not None and specification.loader is not None
-        migration_module = importlib.util.module_from_spec(specification)
-        try:
-            specification.loader.exec_module(migration_module)
-        finally:
-            self.purge_project_modules()
-        return migration_module.Migration.operations
+        with self.imports.isolate_modules():
+            migration_module = ModuleLoader.load(module_name, self.migrations_directory / migration_file_name)
+            return migration_module.Migration.operations
 
 
 @pytest_asyncio.fixture
 async def database_url(tmp_path: Path) -> AsyncGenerator[str]:
-    raw_database_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+    raw_database_url = DatabaseUnderTest.get_url()
     if DatabaseUnderTest.is_file_database(raw_database_url):
         scheme = raw_database_url.split("://", 1)[0]
         yield f"{scheme}:///{(tmp_path / 'round_trip.sqlite3').as_posix()}"
         return
-    raw_database_url = raw_database_url.replace("\\{", "{").replace("\\}", "}")
+    raw_database_url = DatabaseUnderTest.normalize_url_template(raw_database_url)
     resolved_database_url = raw_database_url.format(f"rt_{uuid.uuid4().hex}")
     credentials = DbUrlConfigGenerator.expand(resolved_database_url)["credentials"]
     # The template may carry a per-run prefix (test_<run tag>_{}) - create exactly the database the URL names.

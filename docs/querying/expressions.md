@@ -364,6 +364,10 @@ class Exists(Expression):
     def __init__(self, queryset: QuerySet[Any, Any], *, negated: bool = False) -> None: ...
 ```
 
+`Subquery(queryset.count())` selects one scalar count of the queryset's rows, including its
+`limit()`/`offset()` slice. An empty source or an empty slice produces zero, including when no
+group survives. This applies to model rows, selected values and set operations.
+
 ```python
 await Author.objects.annotate(
     has_book_in_print=Exists(Book.objects.filter(author_id=OuterReference("id"), in_print=True)),

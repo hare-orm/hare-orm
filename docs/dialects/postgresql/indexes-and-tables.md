@@ -114,6 +114,13 @@ class LoanRecord(Model):
 partition holds is refused by the database (`IntegrityError`). The order the partitions are listed in
 doesn't matter.
 
+An explicit partition can set `table` and `schema` to address an existing child. For example,
+`ListPartition("archived", (7,), table="legacy_archive", schema="archive")` keeps the logical partition
+name and uses `archive.legacy_archive` in PostgreSQL. A default partition with a custom address takes
+`DefaultPartition("other", table="legacy_other", schema="archive")`. `HashPartitioning.locations` records
+the address of selected remainders as `(remainder, schema, table)` tuples. Changes to the address of a
+partition with the same bounds use `RenamePartition`, which preserves its rows.
+
 What PostgreSQL requires is checked before any DDL is written — when the table is created, and when a
 later migration adds a constraint, an index or a field or changes a field (`AddConstraint`, `AddIndex`,
 `AddField`, `AlterField`) — `ConfigurationError` names the problem:

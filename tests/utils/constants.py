@@ -19,6 +19,8 @@ PYDANTIC_REQUIREMENT = "pydantic"
 #: The requirement of the tests needing phonenumbers - its environment registers the model of a PhoneField
 #: with region=.
 PHONE_REQUIREMENT = "phone"
+#: The diagnostic for tests requiring the ClickHouse server profile.
+CLICKHOUSE_PROFILE_SKIP_REASON = "runs against the ClickHouse test server - make test_clickhouse"
 #: The client classes of hare's PostgreSQL drivers, by dotted path - a test parametrized with
 #: DriverClasses imports asyncpg's only in the environment installing the package.
 RUST_PG_CLIENT_PATH = "hare.dialects.postgresql.drivers.rust_pg.client.RustPgClient"

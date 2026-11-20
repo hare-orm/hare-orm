@@ -47,6 +47,10 @@ class OffsetWindowFunction(WindowFunction):
         # A default is a plaintext value the column's decoder would try to decrypt.
         self.accepts_encrypted_field = default is None
 
+    def get_plan_options(self) -> tuple[Any, ...]:
+        """Separate the zero-offset SQL of types which cannot hold NULL."""
+        return (*super().get_plan_options(), type(self.offset) is int and self.offset == 0)
+
     def build(
         self, expression_context: ExpressionContext
     ) -> tuple[AnalyticFunction, list[TableCriterionTuple], Field[Any] | None]:

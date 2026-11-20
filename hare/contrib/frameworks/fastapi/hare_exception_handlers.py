@@ -9,7 +9,6 @@ from fastapi import HTTPException
 from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 
-from hare.contrib.frameworks.constants import STATUS_BY_ERROR
 from hare.contrib.frameworks.error_answers import ErrorAnswers
 from hare.contrib.request_query.exceptions import InvalidRequestQuery
 
@@ -100,4 +99,4 @@ class HareExceptionHandlers:
         Returns:
             The map for ``FastAPI(exception_handlers=...)``.
         """
-        return {**dict.fromkeys(STATUS_BY_ERROR, cls.answer), InvalidRequestQuery: cls.invalid_request_query}
+        return ErrorAnswers.get_handlers(cls.answer, cls.invalid_request_query)

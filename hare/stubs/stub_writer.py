@@ -7,7 +7,7 @@ from hare.stubs.module_stub import ModuleStub
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.typing_info.bound_models import BoundModels
 
 
@@ -28,11 +28,12 @@ class StubWriter:
 
     def get_stub_texts(self) -> dict[Path, str]:
         """The text of each stub, by its path."""
-        models_by_module: dict[str, list[tuple[type[Model], Dialect]]] = {}
-        for model in self.bound_models.models:
-            dialect = self.bound_models.get_dialect(model)
+        models_by_module: dict[str, list[tuple[ModelBinding, Dialect]]] = {}
+        for binding in self.bound_models.bindings:
+            model = binding._model
+            dialect = self.bound_models.get_dialect(binding)
             if dialect is not None:
-                models_by_module.setdefault(model.__module__, []).append((model, dialect))
+                models_by_module.setdefault(model.__module__, []).append((binding, dialect))
         texts: dict[Path, str] = {}
         for module_name, models in sorted(models_by_module.items()):
             relative_path, text = ModuleStub(module_name, models, self.relation_depth).get_stub()

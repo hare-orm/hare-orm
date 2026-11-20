@@ -9,6 +9,7 @@ import os
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.exceptions import UnSupportedError, ValidationError
 from hare.transactions.transactions import Transactions
 from tests.dialects.postgresql.column_types.models_citext import CitextContact, CitextTagged
@@ -251,5 +252,10 @@ async def test_an_empty_value_in_an_array_is_read_back(db_citext):
     await CitextTagged.objects.create(id=1, tags=["", "Ab"])
     assert (await CitextTagged.objects.get(id=1)).tags == ["", "Ab"]
     assert await CitextTagged.objects.filter(tags=["", "AB"]).count() == 1
-    rows = await CitextTagged._meta.connection.execute_dicts("SELECT ARRAY['', 'x']::citext[] AS tags")
+    rows = (
+        await HareContext.require_current()
+        .apps.get_queryset(CitextTagged)
+        .get_connection()
+        .execute_dicts("SELECT ARRAY['', 'x']::citext[] AS tags")
+    )
     assert rows[0]["tags"] == ["", "x"]

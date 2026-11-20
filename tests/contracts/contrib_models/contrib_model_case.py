@@ -4,9 +4,8 @@ import dataclasses
 from collections.abc import Callable
 from typing import Any
 
-import pytest
-
 from hare.models import Model
+from tests.contracts.contract_parameters import ContractParameters
 
 
 @dataclasses.dataclass(frozen=True)
@@ -32,5 +31,4 @@ class ContribModelCase:
         Returns:
             The parameter, named after the case.
         """
-        marks = [pytest.mark.requires(*self.requires)] if self.requires else []
-        return pytest.param(self, id=self.name, marks=marks)
+        return ContractParameters.make(self, self.name, self.requires)

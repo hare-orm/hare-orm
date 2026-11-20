@@ -43,18 +43,23 @@ class OpenTelemetryInstrumentor:
         self.query_spans = (
             QuerySpans(tracer_provider, record_sql_statement=record_sql_statement) if query_spans else None
         )
-        self.pool_metric_instruments = PoolMetricInstruments(meter_provider) if pool_metrics else None
+        self.meter_provider = meter_provider
+        self.pool_metrics_token = object() if pool_metrics else None
+        self.pool_metric_instruments: PoolMetricInstruments | None = None
 
     def instrument(self) -> None:
         """Starts the spans and the metrics - nothing when already started."""
         if self.query_spans is not None:
             Observers.wrap_queries(self.query_spans)
-        if self.pool_metric_instruments is not None:
-            self.pool_metric_instruments.start()
+        if self.pool_metrics_token is not None:
+            instruments = self.pool_metric_instruments
+            if instruments is None:
+                instruments = self.pool_metric_instruments = PoolMetricInstruments.for_provider(self.meter_provider)
+            instruments.start(self.pool_metrics_token)
 
     def uninstrument(self) -> None:
         """Stops the spans and the metrics - nothing when not started."""
         if self.query_spans is not None:
             Observers.unwrap_queries(self.query_spans)
         if self.pool_metric_instruments is not None:
-            self.pool_metric_instruments.stop()
+            self.pool_metric_instruments.stop(self.pool_metrics_token)

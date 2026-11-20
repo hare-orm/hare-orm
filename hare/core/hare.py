@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 from hare.classes.class_property import classproperty
 from hare.core.config import HareConfig
-from hare.core.constants import DEFAULT_CONNECTION_NAME
+from hare.core.constants import DEFAULT_CONNECTION_NAME, SWAPPABLE_SETTING_NOT_INITIALIZED_MESSAGE
 from hare.core.hare_context import HareContext
 from hare.core.hare_meta import HareMeta
 from hare.dialects.base.constants import SLOW_QUERY_THRESHOLD_MS
@@ -111,10 +111,7 @@ class Hare(metaclass=HareMeta):
         """
         context = HareContext.get_current()
         if context is None:
-            raise ConfigurationError(
-                f"Swappable setting {setting!r} is only known after Hare.init() - initialize Hare "
-                "before importing migration files that use swappable_dependency()"
-            )
+            raise ConfigurationError(SWAPPABLE_SETTING_NOT_INITIALIZED_MESSAGE.format(setting=setting))
         return context.swappable_label(setting)
 
     @classmethod

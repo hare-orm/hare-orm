@@ -11,7 +11,7 @@ from hare.dialects.clickhouse.schema.tables.clickhouse_replica_check import Clic
 
 if TYPE_CHECKING:
     from hare.dialects.clickhouse.schema.clickhouse_schema_editor import ClickhouseSchemaEditor
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class ClickhouseTableCreation(TableCreation):
@@ -23,31 +23,32 @@ class ClickhouseTableCreation(TableCreation):
 
     def get_definition(
         self,
-        model: type[Model],
+        binding: ModelBinding,
         safe: bool = False,
         deferred_table_keys: frozenset[tuple[str | None, str]] = frozenset(),
         *,
         storage_table_name: str | None = None,
     ) -> TableDefinition:
         """Attach schema placement while keeping the physical identity usable by row copies."""
-        definition = super().get_definition(model, safe, deferred_table_keys, storage_table_name=storage_table_name)
-        return replace(definition, placement_sql=self.editor.get_schema_cluster_sql(model._meta.schema))
+        definition = super().get_definition(binding, safe, deferred_table_keys, storage_table_name=storage_table_name)
+        return replace(definition, placement_sql=self.editor.get_schema_cluster_sql(binding.schema))
 
-    def get_replica_check_plan(self, model: type[Model]) -> SchemaChangePlan:
+    def get_replica_check_plan(self, binding: ModelBinding) -> SchemaChangePlan:
         """Prepare the topology check only for an unreplicated distributed storage declaration."""
+        model = binding._model
         client = self.editor.client
         cluster = getattr(client, "cluster", None)
         if cluster is None:
             return SchemaChangePlan(())
-        options = ClickhouseTableOptions.get_for_model(model, client.dialect)
+        options = ClickhouseTableOptions.get_for_model(binding, client.dialect)
         if options.distributed_over is None or options.get_engine().is_replicated():
             return SchemaChangePlan(())
         return SchemaChangePlan((ClickhouseReplicaCheck(model.__name__, options.get_engine_name(), cluster.name),))
 
-    def get_create_plan(self, model: type[Model]) -> SchemaChangePlan:
+    def get_create_plan(self, binding: ModelBinding) -> SchemaChangePlan:
         """Compile all declarations before checking topology and creating the table."""
-        plan = super().get_create_plan(model)
-        return SchemaChangePlan((*self.get_replica_check_plan(model).steps, *plan.steps), after=plan.after)
+        plan = super().get_create_plan(binding)
+        return SchemaChangePlan((*self.get_replica_check_plan(binding).steps, *plan.steps), after=plan.after)
 
-    def get_composite_pk_constraint_sql(self, model: type[Model], field_names: list[str]) -> str:
+    def get_composite_pk_constraint_sql(self, binding: ModelBinding, field_names: list[str]) -> str:
         return ""

@@ -1,20 +1,8 @@
 import pytest
-import pytest_asyncio
 
 from hare.query.expressions import Case, Exists, OuterReference, Q, Value, When
 from hare.query.functions import Sum
 from tests.shared_models.testmodels import Author, Book, Event, Tournament
-
-
-@pytest_asyncio.fixture
-async def library(db):
-    first_author = await Author.objects.create(name="First")
-    second_author = await Author.objects.create(name="Second")
-    third_author = await Author.objects.create(name="Third")
-    await Book.objects.create(name="A", author=first_author, rating=1.0)
-    await Book.objects.create(name="B", author=first_author, rating=2.0)
-    await Book.objects.create(name="C", author=second_author, rating=5.0)
-    return first_author, second_author, third_author
 
 
 def has_book_rated_at_least(rating: float) -> Exists:

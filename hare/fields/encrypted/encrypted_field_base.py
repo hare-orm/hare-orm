@@ -11,6 +11,7 @@ from hare.fields.generated_field import GeneratedField
 
 if TYPE_CHECKING:
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.expressions import Expression
 
 
@@ -69,14 +70,13 @@ class EncryptedFieldBase(Field[Any]):
         Raises:
             FieldError: ``field_object`` is an encrypted field.
         """
-        if isinstance(field_object, GeneratedField):
-            field_object = field_object.output_field
+        field_object = GeneratedField.get_effective_field(field_object)
         if isinstance(field_object, EncryptedFieldBase):
             raise FieldError(field_object.get_unsupported_usage_message(usage))
 
     @staticmethod
     def raise_if_compared_to_expression(
-        model: type[Model], filter_key: str, expression_field: Field[Any] | None
+        model: ModelBinding, filter_key: str, expression_field: Field[Any] | None
     ) -> None:
         """Rejects a filter comparing an encrypted field with an expression (``F()``,
         ``Subquery``, ...), on either side - the database would compare ciphertext.
@@ -93,9 +93,8 @@ class EncryptedFieldBase(Field[Any]):
         from hare.query.lookup_info.lookup_path import LookupPath
 
         lookup_path = LookupPath.parse(model, filter_key, crosses_last=True)
-        field_object = lookup_path.model._meta.fields_map.get(lookup_path.field_name or "")
-        if isinstance(field_object, GeneratedField):
-            field_object = field_object.output_field
+        field_object = lookup_path.binding.fields_map.get(lookup_path.field_name or "")
+        field_object = GeneratedField.get_effective_field(field_object)
         if isinstance(field_object, EncryptedFieldBase):
             raise FieldError(field_object.get_unsupported_lookup_message())
         EncryptedFieldBase.raise_if_encrypted(expression_field, "a filter comparison")
@@ -118,8 +117,7 @@ class EncryptedFieldBase(Field[Any]):
         from hare.query.expressions import F
 
         target_field = GeneratedField.get_effective_field(target_field)
-        if isinstance(source_field, GeneratedField):
-            source_field = source_field.output_field
+        source_field = GeneratedField.get_effective_field(source_field)
         if isinstance(target_field, EncryptedFieldBase):
             if (
                 type(expression) is F

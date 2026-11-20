@@ -29,11 +29,14 @@ class AlterModelOptions:
     def __init__(self, name: str, options: dict[str, Any]) -> None: ...
 
 class AlterModelTable:
-    def __init__(self, name: str, table: str) -> None: ...
+    def __init__(self, name: str, table: str | None) -> None: ...
 
 class AlterModelSchema:
     def __init__(self, name: str, schema: str | None) -> None: ...
 ```
+
+Pass `table=None` to derive the table name from the model again. An explicit string remains the table's
+name on a later model rename, including when it matches the model's lowercase name.
 
 `RenameModel` and `AlterModelTable` leave the raw SQL of the model's views and materialized views as it
 is written: raw SQL is yours, hare never rewrites it. A view whose query you rewrote for the new table name
@@ -95,6 +98,10 @@ got in between. A model that was never managed by the migrations (unmanaged from
 the migration state at all — making it managed generates a `CreateModel`; if its table already exists,
 apply that migration with `migrate --fake`.
 
+Relations added to a managed model can refer to an unmanaged target by label, class or `swappable()`.
+Dependency planning uses the target captured in the migration environment, including its composite
+primary key when `to_field` is omitted; it does not add that external table to the managed state.
+
 `AlterModelSchema(name: str, schema: str | None)` moves the model's table (`ALTER TABLE ... SET SCHEMA` on
 PostgreSQL, `RENAME TABLE` into another database of the server on ClickHouse — refused for a model whose
 views, materialized views, dictionaries or `Distributed` table name the table by its database; SQLite
@@ -116,6 +123,9 @@ class AddPartition:
 
 class RemovePartition:
     def __init__(self, model_name: str, partition: Any) -> None: ...
+
+class RenamePartition:
+    def __init__(self, model_name: str, partition: Any, replacement: Any) -> None: ...
 ```
 
 `AddPartition`/`RemovePartition` add and remove one partition of a [partitioned
@@ -131,6 +141,10 @@ another strategy, key or count of hash partitions — PostgreSQL can't change in
 `AlterModelOptions` creates the table anew and copies its rows (its indexes, constraints, comments,
 triggers and the foreign keys of other tables referencing it are set again), rewriting the whole table
 under an exclusive lock.
+
+`RenamePartition` changes the name or schema of an attached partition with the same bounds.
+`makemigrations` and `hare drift` use it for address changes. Applying or reversing it preserves
+the partition's rows and its attachment to the parent table.
 
 ## <a id="field-operations"></a>Fields
 
@@ -230,6 +244,9 @@ PostgreSQL their foreign key constraints are dropped first and re-created once e
 type; on SQLite the referencing tables are rebuilt. The values are converted with a plain cast, so on
 PostgreSQL a type pair it can't cast (`integer` to `uuid`) fails.
 
+Narrowing checks follow the field declaration even when the SQL type stays unchanged, including
+enum membership inside nested containers.
+
 `AlterField` to a column type that can't hold a value the table already stores raises
 `FieldNarrowingDataLossError` before anything changes, on every dialect: a shorter `max_length` (or a text,
 number or boolean turned into a `CharField` too short for its text), a `DecimalField` with fewer decimal
@@ -295,6 +312,12 @@ renamed model gives it. It renames the columns other tables name after a compone
 a relation's `<relation>_<component>` column, an automatic through table's — however many relations deep:
 a relation whose `to_field` names such a key field, or the key fields of a renamed relation itself,
 follows the new names.
+
+Primary-key declarations follow field renames too, including explicitly named relation columns.
+The component order stays the same. Autodetection can rename several otherwise unchanged key
+fields in one migration; changing the key's membership or order still requires a hand-written
+migration. A complete ordered group of relation columns and its logical relation name describe
+the same key when states are compared.
 
 Raw SQL (`RawSQLTerm` — a raw condition, check or key, a trigger's body, a view's query, a generated
 column's expression, a raw table option, a projection's query) is yours: the rename leaves it as it is
@@ -508,12 +531,21 @@ which creates no schema by DDL (an attached database stands for one), both are s
 `RemoveCollation` takes the same arguments, to create it again going back. SQLite and ClickHouse have no
 collation DDL (`Features.supports_collations`) — both are skipped there with a warning.
 
-The `apps` given to `code` and `reverse_code` hold the historical models at that operation boundary,
-including changes made by preceding operations in the same migration. On a rollback they hold only
-migrations still applied: models introduced by migrations already unapplied in this run are absent,
-so deleting rows through `apps.get_model()` does not cascade into their dropped tables.
-`apps.get_model("app.Model")` takes the model's label, as `HareContext.get_model()`
-does.
+The `apps` passed to `code` and `reverse_code` holds the historical graph at that operation
+boundary, including preceding changes in the same migration. Query data through its factory and
+the executor's client:
+
+```python
+async def fill_titles(apps, schema_editor):
+    books = apps.get_queryset("library.Book", using=schema_editor.client)
+    await books.filter(title__isnull=True).update(title="Untitled")
+```
+
+`apps.get_model("library.Book")` returns the historical Python class. Its manager selects the current
+application registry, so historical data queries must start from `apps.get_queryset()`. This preserves
+the intended graph and the exact client, including its transaction and tenant schema. Models absent
+from the rollback state do not participate in its cascades.
+
 
 `RunPython.noop` is a ready-made no-op you can use as `reverse_code` for a one-way data migration.
 `elidable=True` leaves the operation out when its migration is
@@ -624,6 +656,25 @@ method inputs as read-only. Changing a nested field declaration in `state_forwar
 an earlier snapshot or the caller's input. `Migration.apply()` returns a new state;
 `Migration.unapply(state_before=...)` explicitly takes the state before application and preserves it.
 
+`Migration.prepare(state)` also preserves its input. Safety inspection uses the prepared snapshots
+without another initial state copy, retaining an independent final state for subsequent migrations.
+
+Prepared boundaries store private declarations. Reading `before`, `after`, or `get(position)`
+produces an independent working `State`, with its rendered models created only when needed.
+Its `models` supports the `MutableMapping` interface: key access, iteration, `get()`, `update()`,
+`pop()`, and `copy()`. Use these operations rather than requiring an exact `dict` type.
+The first access detaches the model and its fields, so existing nested mutations in
+`state_forward()` remain isolated. Publication also protects against references the operation
+keeps and changes later. Preparing a boundary does not replay `state_forward()` on later reads.
+`State.clone()` makes a deep copy when a separate complete working state is needed.
+
+Dependency providers and requirements both receive captured state:
+`get_provided_dependencies(app_label, state)` and `get_required_dependencies(app_label, state)`.
+Use that state for relation targets and composite key attributes; the current application's models
+are not the migration's historical declarations. Preparation exposes target declarations before
+ordering mutually dependent creations. Database operations, defaults and value conversion run under
+the state's captured application settings, including nested operations and SQL collection.
+
 `Operation.snapshot()` creates the operation used for preparation and execution. Its default copies
 mutable declaration values from instance attributes and inherited slots without calling defaults or
 migration callbacks. Nested fields use their snapshot protocol, and callbacks retain their identity.
@@ -631,8 +682,13 @@ An operation holding external resources can override it to copy only declaration
 its resource handles.
 Do not keep execution results on the migration file's shared operation objects.
 
-`SeparateDatabaseAndState` retains separate prepared state and database branches. Nested database
+`SeparateDatabaseAndState` prepares its state and database branches separately, retaining the
+resulting state boundary and the executable database tree. Nested database
 operations use the same tenant routing, atomicity and constraint policy as top-level operations.
+Safety inspection aggregates physical effects from the prepared database branch, including nested
+containers; state-only changes do not claim a data loss or table rewrite. Swappable relation checks
+also inspect nested declarations in both branches without running state operations. Declaration
+snapshots are taken once; before/after state snapshots remain independent.
 SQL collection includes renderable siblings of a Python-only operation and marks the Python step
 with a comment; it never runs that callback.
 

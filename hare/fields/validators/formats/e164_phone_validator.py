@@ -20,8 +20,7 @@ class E164PhoneValidator(Validator):
         InvalidPhoneNumber: The value isn't an E.164 number.
     """
 
-    regex = re.compile(E164_PHONE_PATTERN)
-    check = NativeModules.rows.ValueCheck.pattern(regex, "fullmatch", True)
+    check = NativeModules.rows.ValueCheck.pattern(re.compile(E164_PHONE_PATTERN), "fullmatch", True)
 
     def __call__(self, value: Any) -> None:
         if self.check.failure(value) is not None:

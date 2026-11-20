@@ -17,6 +17,7 @@ from hare.migrations.autodetection.rename_questions import RenameQuestions
 from hare.migrations.operations import AddField, AlterField, CreateModel, RenameModel
 from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
+from tests.utils.project_sources import ProjectSources
 
 pytestmark = pytest.mark.sqlite_only
 
@@ -28,12 +29,8 @@ def write_app_package(tmp_path: Path, app_label: str) -> str:
     for module_name in [name for name in sys.modules if name == app_label or name.startswith(f"{app_label}.")]:
         del sys.modules[module_name]
     importlib.invalidate_caches()
-    package_dir = tmp_path / app_label
-    migrations_dir = package_dir / "migrations"
-    migrations_dir.mkdir(parents=True, exist_ok=True)
-    (package_dir / "__init__.py").write_text("", encoding="ascii")
-    (package_dir / "models.py").write_text("", encoding="ascii")
-    (migrations_dir / "__init__.py").write_text("", encoding="ascii")
+    sources = ProjectSources(tmp_path)
+    sources.prepare_migrations(sources.write_package(app_label))
     return f"{app_label}.migrations"
 
 

@@ -10,6 +10,7 @@ from hare.dialects.sqlite.functions.datetime.date_truncation import DateTruncati
 from hare.dialects.sqlite.functions.datetime.sqlite_date_part_extraction import SqliteDatePartExtraction
 from hare.dialects.sqlite.functions.sqlite_native_functions import SqliteNativeFunctions
 from hare.sql.enums import TruncType
+from tests.dialects.sqlite.native_functions.function_comparison import FunctionComparison
 
 pytestmark = [
     pytest.mark.database_independent,
@@ -33,25 +34,29 @@ def native():
     )
 
 
-def call_both(native_call, python_call, *arguments):
-    try:
-        expected = python_call(*arguments)
-    except Exception as error:  # noqa: BLE001 - the error is what is compared.
-        with pytest.raises(type(error)):
-            native_call(*arguments)
-        return
-    assert native_call(*arguments) == expected, arguments
-
-
 def test_extract(native) -> None:
     for part in [*DATE_PART_EXTRACTORS, "DATE", "TIME", "CENTURY"]:
         for value in VALUES:
             for zone_name in ZONES:
-                call_both(native.extract, SqliteDatePartExtraction.extract, part, value, zone_name)
+                FunctionComparison.assert_equal(
+                    native.extract, SqliteDatePartExtraction.extract, part, value, zone_name
+                )
 
 
 def test_truncate(native) -> None:
     for unit in [*TruncType, "decade"]:
         for value in VALUES:
             for zone_name in ZONES:
-                call_both(native.truncate, DateTruncation.truncate, str(unit), value, zone_name)
+                FunctionComparison.assert_equal(native.truncate, DateTruncation.truncate, str(unit), value, zone_name)
+
+
+@pytest.mark.parametrize("native_code", [False, True], ids=["python", "rust"])
+def test_calendar_date_changes_at_local_midnight_without_losing_precision(native, native_code):
+    extract = native.extract if native_code else SqliteDatePartExtraction.extract
+    truncate = native.truncate if native_code else DateTruncation.truncate
+    instant = "2024-01-01 00:12:34.567890+00:00"
+    assert extract("YEAR", instant, "America/New_York") == 2023
+    assert extract("MICROSECOND", instant, "America/New_York") == 567890
+    assert truncate("day", instant, "America/New_York") == "2023-12-31 05:00:00+00:00"
+    assert truncate("second", "12:34:56.123456", None) == "12:34:56"
+    assert truncate("month", "2024-02-29", None) == "2024-02-01"

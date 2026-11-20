@@ -59,7 +59,7 @@ class OptimisticLockObserver(WriteObserver):
         Args:
             row: The row a path has just read.
         """
-        if row._meta.optimistic_lock_field:
+        if row._binding.optimistic_lock_field:
             await type(row).objects.include_deleted().filter(pk=row.pk).update(name=row.name)
 
     async def check(self, scenario: WriteScenario, path: WritePath, outcome: WriteOutcome) -> None:

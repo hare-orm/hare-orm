@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
     from hare.fields.relations.fields.relational_field import RelationalField
     from hare.models import Model
-    from hare.query.queryset.queryset import QuerySet
+    from hare.models.model_binding import ModelBinding
     from hare.query.relation_loading.prefetching.prefetcher import Prefetcher
 
 
@@ -50,10 +50,10 @@ class PrefetchPlan:
             prefetch_map={
                 key: value
                 for key, value in request.prefetch_map.items()
-                if key not in loaded and key in prefetcher.model._meta.fetch_fields
+                if key not in loaded and key in prefetcher._binding.fetch_fields
             },
         )
-        meta = prefetcher.model._meta
+        meta: ModelBinding = prefetcher._binding
         nodes = []
         for field, entries in prefetcher._make_prefetch_queries(fetched).items():
             relation: RelationalField[Any] = meta.fields_map[field]  # type: ignore[assignment]
@@ -74,7 +74,7 @@ class PrefetchPlan:
                     )
             for to_attribute, queryset in entries:
                 # A prefetch loads one level; lazy SELECT defaults must not traverse a self-relation chain.
-                _, lazy_select_fields = LazyRelationNames.get(queryset.model)
+                _, lazy_select_fields = LazyRelationNames.get(queryset._binding)  # type: ignore[arg-type]
                 queryset._deferred_related_fields = queryset._deferred_related_fields | lazy_select_fields
                 required_projection = tuple(
                     dict.fromkeys(name for binding in key_bindings for name in binding.target_names)
@@ -84,14 +84,20 @@ class PrefetchPlan:
                 if to_attribute and (dependencies := request.prefetch_map.get(to_attribute)):
                     from hare.query.statements.select.model_rows.only_defer_fields import OnlyDeferFields
 
-                    dependent_map: dict[str, set[str | Prefetch]] = {}
-                    dependent_queries: dict[str, list[tuple[str | None, QuerySet[Any]]]] = {}
-                    Prefetch.add_lookups(queryset.model, dependent_map, dependent_queries, dependencies)
+                    dependent_map = dict(queryset._prefetch_map)
+                    dependent_queries = dict(queryset._prefetch_queries)
+                    Prefetch.add_lookups(queryset._binding, dependent_map, dependent_queries, dependencies)  # type: ignore[arg-type]
                     required_fields = OnlyDeferFields.get_prefetch_required_fields(
-                        queryset.model, queryset._fields_for_select, dependent_map, dependent_queries
+                        queryset._binding,  # type: ignore[arg-type]
+                        queryset._fields_for_select,
+                        dependent_map,
+                        dependent_queries,
                     )
                     queryset = PrefetchChecks.ensure_only_includes_fields(queryset, *required_fields)
                     dependent_request = PrefetchRequest.from_query(queryset, dependent_map, dependent_queries)
+                    # Load the combined subtree once, after the parent's slice and before publication.
+                    queryset._prefetch_map = {}
+                    queryset._prefetch_queries = {}
                 target_connection = queryset.get_connection()
                 queryset._apply_connection(target_connection)
                 row_slice = None
@@ -106,8 +112,8 @@ class PrefetchPlan:
                 elif strategy is PrefetchStrategy.REVERSE:
                     if sliced:
                         if (
-                            SlicedPrefetch.reads_window(queryset)
-                            or not queryset.model._meta.has_primary_key
+                            SlicedPrefetch.needs_python_slice(queryset)
+                            or not queryset._binding.has_primary_key  # type: ignore[union-attr]
                             or SlicedPrefetch.repeats_rows_of_a_key(queryset)
                         ):
                             row_slice = SlicedPrefetch.get_row_slice(queryset)
@@ -120,7 +126,7 @@ class PrefetchPlan:
                     rows_strategy = PrefetchRowsStrategy.LINKS
                     if sliced:
                         if (
-                            SlicedPrefetch.reads_window(queryset)
+                            SlicedPrefetch.needs_python_slice(queryset)
                             or target_connection is not through_connection
                             or prefetcher.connection is not through_connection
                             or RowMultiplication.filters_join_multi_valued_relation(queryset)
@@ -132,7 +138,7 @@ class PrefetchPlan:
                     elif (
                         through_connection is prefetcher.connection
                         and not meta.has_composite_primary_key
-                        and not queryset.model._meta.has_composite_primary_key
+                        and not queryset._binding.has_composite_primary_key  # type: ignore[union-attr]
                         and ManyToManyPrefetch.can_join_through_table(queryset, many_relation, prefetcher.connection)
                         and len({obj.pk for obj in objs})
                         <= through_connection.features.max_bind_parameters - PREFETCH_BIND_PARAMETERS_HEADROOM
@@ -170,18 +176,19 @@ class PrefetchPlan:
     def bind_keys(objs: tuple[Model, ...], field: str, strategy: PrefetchStrategy) -> tuple[PrefetchKeyBinding, ...]:
         """Bind key names before fetching, retaining distinct direct-relation source shapes."""
         bindings = []
-        for model in dict.fromkeys(type(obj) for obj in objs):
-            relation: RelationalField[Any] = model._meta.fields_map[field]  # type: ignore[assignment]
+        for source_binding in dict.fromkeys(obj._binding for obj in objs):
+            model = source_binding._model
+            relation: RelationalField[Any] = source_binding.fields_map[field]  # type: ignore[assignment]
             if strategy is PrefetchStrategy.DIRECT:
                 source_names = relation.source_fields
                 target_names = relation.to_field_names
             elif strategy is PrefetchStrategy.MANY_TO_MANY:
-                source_names = model._meta.primary_key_attribute_names
-                target_names = relation.related_model._meta.primary_key_attribute_names
+                source_names = source_binding.primary_key_attribute_names
+                target_names = relation.get_related_binding().primary_key_attribute_names
             else:
                 source_names = tuple(target.model_field_name for target in relation.to_field_instances)
                 target_names = relation.relation_fields  # type: ignore[attr-defined]
-            bindings.append(PrefetchKeyBinding(model, tuple(source_names), tuple(target_names)))
+            bindings.append(PrefetchKeyBinding(model, source_names, tuple(target_names)))
         return tuple(bindings)
 
     async def fetch(self) -> PrefetchResult:

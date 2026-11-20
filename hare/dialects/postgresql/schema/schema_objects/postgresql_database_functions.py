@@ -14,10 +14,10 @@ from hare.dialects.postgresql.schema.constants import (
     POSTGRESQL_FUNCTION_VOLATILITY_KEYWORDS,
 )
 from hare.dialects.postgresql.schema.schema_objects.postgresql_function_arguments import PostgresqlFunctionArguments
-from hare.models import Model
 
 if TYPE_CHECKING:
     from hare.dialects.postgresql.schema.postgresql_schema_editor import PostgresqlSchemaEditor
+    from hare.models.model_binding import ModelBinding
 
 
 class PostgresqlDatabaseFunctions(DatabaseFunctions):
@@ -28,13 +28,13 @@ class PostgresqlDatabaseFunctions(DatabaseFunctions):
     editor: PostgresqlSchemaEditor
 
     def get_function_create_sqls(
-        self, model: type[Model], function: DatabaseFunction, safe: bool = False
+        self, binding: ModelBinding, function: DatabaseFunction, safe: bool = False
     ) -> list[str]:
         """The ``CREATE FUNCTION``, quoting its body with the dialect's string literal renderer."""
         return [
             POSTGRESQL_FUNCTION_CREATE_TEMPLATE.format(
                 or_replace="OR REPLACE " if safe else "",
-                function=self.editor.qualify_object_name(model, function.name),
+                function=self.editor.qualify_object_name(binding, function.name),
                 arguments=", ".join(function.arguments),
                 returns=function.returns,
                 language=function.language or POSTGRESQL_DEFAULT_FUNCTION_LANGUAGE,
@@ -44,42 +44,42 @@ class PostgresqlDatabaseFunctions(DatabaseFunctions):
             )
         ]
 
-    async def drop_database_function(self, model: type[Model], function: DatabaseFunction) -> None:
+    async def drop_database_function(self, binding: ModelBinding, function: DatabaseFunction) -> None:
         await self.editor.run_sql(
             POSTGRESQL_FUNCTION_DROP_TEMPLATE.format(
-                function=self.editor.qualify_object_name(model, function.name),
+                function=self.editor.qualify_object_name(binding, function.name),
                 arguments=PostgresqlFunctionArguments.get_identity_sql(function.arguments),
             )
         )
 
     async def alter_database_function(
-        self, model: type[Model], old_function: DatabaseFunction, new_function: DatabaseFunction
+        self, binding: ModelBinding, old_function: DatabaseFunction, new_function: DatabaseFunction
     ) -> None:
         """Replaces the function in place (``CREATE OR REPLACE``, its grants kept) when its arguments
         and result type stay; otherwise drops it, creates the new one and grants on it again."""
-        if old_function.arguments == new_function.arguments and old_function.returns == new_function.returns:
-            await self.editor.run_sqls(self.get_function_create_sqls(model, new_function, safe=True))
+        if old_function.can_replace_in_place(new_function):
+            await self.editor.run_sqls(self.get_function_create_sqls(binding, new_function, safe=True))
             return
-        statements = self.get_function_create_sqls(model, new_function)
-        statements += self.editor.grants.get_grant_again_sqls(model, GrantTarget.FUNCTION, new_function.name)
-        await self.drop_database_function(model, old_function)
+        statements = self.get_function_create_sqls(binding, new_function)
+        statements += self.editor.grants.get_grant_again_sqls(binding, GrantTarget.FUNCTION, new_function.name)
+        await self.drop_database_function(binding, old_function)
         await self.editor.run_sqls(statements)
 
     async def rename_database_function(
-        self, model: type[Model], old_function: DatabaseFunction, new_function: DatabaseFunction
+        self, binding: ModelBinding, old_function: DatabaseFunction, new_function: DatabaseFunction
     ) -> None:
         if old_function.name == new_function.name:
             return
         await self.editor.run_sql(
             POSTGRESQL_FUNCTION_RENAME_TEMPLATE.format(
-                function=self.editor.qualify_object_name(model, old_function.name),
+                function=self.editor.qualify_object_name(binding, old_function.name),
                 arguments=PostgresqlFunctionArguments.get_identity_sql(old_function.arguments),
                 new_name=self.editor.quote(new_function.name),
             )
         )
 
     def get_schema_move_plan(
-        self, model: type[Model], function: DatabaseFunction, old_schema: str | None, new_schema: str | None
+        self, binding: ModelBinding, function: DatabaseFunction, old_schema: str | None, new_schema: str | None
     ) -> SchemaChangePlan:
         qualified_function = self.editor.qualify_table_name(function.name, old_schema)
         return self.editor.schemas.get_object_schema_move_plan(

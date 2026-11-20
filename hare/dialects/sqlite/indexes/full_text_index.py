@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.dialects.base.features import Features
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class FullTextIndex(SeparateTableIndex):
@@ -67,18 +67,18 @@ class FullTextIndex(SeparateTableIndex):
         self.extra = SQLITE_FULL_TEXT_TOKENIZER_DESCRIPTION.format(tokenizer=tokenizer) if tokenizer else ""
 
     @classmethod
-    def get_covering(cls, model: type[Model], field_names: Iterable[str]) -> FullTextIndex | None:
+    def get_covering(cls, binding: ModelBinding, field_names: Iterable[str]) -> FullTextIndex | None:
         """The model's first full-text index over every one of the fields.
 
         Args:
-            model: The model.
+            binding: The model.
             field_names: The fields.
 
         Returns:
             The index, None when no full-text index covers them.
         """
         wanted_field_names = set(field_names)
-        for index in model._meta.indexes:
+        for index in binding.indexes:
             if isinstance(index, cls) and wanted_field_names <= set(index.fields):
                 return index
         return None
@@ -123,7 +123,7 @@ class FullTextIndex(SeparateTableIndex):
             GeneratedNamePrefix.INDEX, table_name, column_names, self.get_name_parts()
         )
 
-    def get_extra(self, model: type[Model], client: DatabaseClient) -> str:
+    def get_extra(self, binding: ModelBinding, client: DatabaseClient) -> str:
         """Rejects the index where it can't be created - a plain ``CREATE INDEX`` is never written
         for it.
 
@@ -133,7 +133,7 @@ class FullTextIndex(SeparateTableIndex):
         self.raise_if_missing_feature(client.features, repr(client.connection_alias))
         return ""
 
-    def get_create_sqls(self, schema_editor: BaseSchemaEditor, model: type[Model], safe: bool) -> list[str]:
+    def get_create_sqls(self, schema_editor: BaseSchemaEditor, binding: ModelBinding, safe: bool) -> list[str]:
         """Returns the statements creating the FTS5 table, its triggers, and filling it.
 
         Raises:
@@ -145,17 +145,17 @@ class FullTextIndex(SeparateTableIndex):
         quote = schema_editor.quote
         literals = client.dialect.literals
         exists = "IF NOT EXISTS " if safe else ""
-        table_name = self.get_table_name(model)
-        schema = model._meta.schema
+        table_name = self.get_table_name(binding)
+        schema = binding.schema
         # The index's table and triggers are in the indexed table's attached database; a name in a
         # trigger's body or the content option is one of that database.
-        indexed_table = quote(model._meta.db_table)
+        indexed_table = quote(binding.db_table)
         index_table = quote(table_name)
         qualified_index_table = schema_editor.qualify_table_name(table_name, schema)
-        row_key_column = self.get_row_key_column(model)
-        columns = [quote(column) for column in model._meta.get_column_names(self.fields)]
+        row_key_column = self.get_row_key_column(binding)
+        columns = [quote(column) for column in binding.get_column_names(self.fields)]
         options = [
-            f"{SQLITE_FULL_TEXT_CONTENT_OPTION}={literals.get_string_literal_sql(model._meta.db_table)}",
+            f"{SQLITE_FULL_TEXT_CONTENT_OPTION}={literals.get_string_literal_sql(binding.db_table)}",
             f"{SQLITE_FULL_TEXT_CONTENT_ROWID_OPTION}={literals.get_string_literal_sql(row_key_column)}",
         ]
         if self.tokenizer:

@@ -45,6 +45,30 @@ class Lookups:
         return [value if isinstance(value, Term) else ParameterizedValueWrapper(value) for value in values]
 
     @staticmethod
+    def get_list_membership(
+        term: Term,
+        values: list[Any] | tuple[Any, ...] | set[Any],
+        *,
+        negated: bool,
+        known_nonempty: bool = False,
+        criterion_builder: Callable[[Term, list[Term], bool], Criterion] | None = None,
+    ) -> Criterion:
+        """Build literal membership with the same empty-list and NULL rules for each SQL operator."""
+        non_null_values = [value for value in values if value is not None]
+        has_none = len(non_null_values) != len(values) if known_nonempty or non_null_values else False
+        if not non_null_values:
+            if not known_nonempty and not values:
+                return BasicCriterion.always_true() if negated else BasicCriterion.always_false()
+            return term.notnull() if negated else term.isnull()
+
+        terms = Lookups.get_in_list_terms(non_null_values)
+        if criterion_builder is not None:
+            criterion = criterion_builder(term, terms, negated)
+        else:
+            criterion = term.notin(terms) if negated else term.isin(terms)
+        return criterion | term.isnull() if has_none != negated else criterion
+
+    @staticmethod
     def is_in(term: Term, value: Any) -> Criterion:
         """``field__in=value`` - a None among the values matches the NULL rows; an empty list matches
         none.
@@ -67,14 +91,7 @@ class Lookups:
             # all, so there's no embedded None to strip; mirrors Term.isin()'s own dispatch (which
             # this eventually calls into) between a real value collection and a bare Term.
             return term.isin(value)
-        # `x IN (1, NULL)` never matches a NULL column - a None in the list becomes an explicit IS
-        # NULL check.
-        non_null_values = [item for item in value if item is not None]
-        has_none = len(non_null_values) != len(value)
-        if not non_null_values:
-            return term.isnull()
-        criterion = term.isin(Lookups.get_in_list_terms(non_null_values))
-        return criterion | term.isnull() if has_none else criterion
+        return Lookups.get_list_membership(term, value, negated=False, known_nonempty=True)
 
     @staticmethod
     def not_in(term: Term, value: Any) -> Criterion:
@@ -94,15 +111,7 @@ class Lookups:
             # A subquery or term, not a list. `x NOT IN (...)` is UNKNOWN when the subquery yields a
             # NULL, so the positive IN is wrapped in IS NOT TRUE - true for both FALSE and UNKNOWN.
             return Lookups.is_in(term, value).is_not_true()
-        # A None in the list means NULL rows are excluded (`None not in [1, None]` is False) - no IS
-        # NULL check is added then.
-        non_null_values = [item for item in value if item is not None]
-        has_none = len(non_null_values) != len(value)
-        if not non_null_values:
-            # every element was None - "not in [None, ...]" means "is not null"
-            return term.notnull()
-        criterion = term.notin(Lookups.get_in_list_terms(non_null_values))
-        return criterion if has_none else criterion | term.isnull()
+        return Lookups.get_list_membership(term, value, negated=True, known_nonempty=True)
 
     @staticmethod
     def between(term: Term, value: tuple[Any, Any]) -> Criterion:

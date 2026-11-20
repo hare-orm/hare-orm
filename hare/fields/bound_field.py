@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from hare.fields.field import Field
     from hare.fields.relations.bound_relation import BoundRelation
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclass(slots=True)
@@ -29,7 +30,15 @@ class BoundField:
     static_default_is_normalized: bool | None = None
     assign_normalized_types: frozenset[type] | None = None
     cache_buckets: dict[int, CacheBucket[Any]] = field(default_factory=dict)
+    model_binding: ModelBinding | None = None
 
     def copy_runtime(self) -> BoundField:
         """Keep identity for a field copy that will receive a new declaration on publication."""
-        return BoundField(self.model, self.name, self.column, self.reference, relation=copy(self.relation))
+        return BoundField(
+            model=self.model,
+            model_binding=self.model_binding,
+            name=self.name,
+            column=self.column,
+            reference=self.reference,
+            relation=copy(self.relation),
+        )

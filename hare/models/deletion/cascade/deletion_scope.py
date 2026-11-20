@@ -4,9 +4,13 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.core.connections.model_connection_choice import ModelConnectionChoice
+from hare.core.hare_context import HareContext
+
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,25 +34,30 @@ class DeletionScope:
     @staticmethod
     def get_database(client: DatabaseClient) -> DatabaseClient:
         """Returns the physical client's identity independently of transaction nesting."""
-        return client.get_non_transactional_client() if client.is_transaction_client else client  # type: ignore[attr-defined]
+        return client.get_non_transactional_client()
 
     @staticmethod
     def get_row_identity(
-        model: type[Model],
+        binding: ModelBinding,
         pk: Any,
         connection: DatabaseClient | None,
+        *,
+        source_model: type[Model],
     ) -> tuple[DatabaseClient, str | None, type[Model], Any, Any]:
         """Separates equal keys in different clients, tenant schemas and non-unique tenant scopes."""
+        model = binding._model
         from hare.models.deletion.cascade.related_rows import RelatedRows
         from hare.models.tenancy.tenancy import Tenancy
         from hare.query.scopes.tenants.tenant_values import TenantValues
 
-        client = RelatedRows.get_connection_for(model, connection) or model.get_connection(for_write=True)
+        client = RelatedRows.get_connection_for(
+            binding, connection, source_model=source_model
+        ) or ModelConnectionChoice.get(HareContext.require_current(), binding, True)
         root = DeletionScope.get_database(client)
-        schema = client.tenant_schema if model._meta.tenant_schema else None
+        schema = client.tenant_schema if binding.tenant_schema else None
         tenant = (
-            TenantValues.get_single_value_or_scope(Tenancy.get_scope(model))
-            if model._meta.tenant_field and not client.features.supports_unique_constraints
+            TenantValues.get_single_value_or_scope(Tenancy.get_scope(binding))
+            if binding.tenant_field and not client.features.supports_unique_constraints
             else None
         )
         return root, schema, model, pk, tenant

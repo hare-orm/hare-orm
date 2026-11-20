@@ -13,6 +13,8 @@ import pytest_asyncio
 from hare.contrib.test import RollbackIsolation
 from hare.contrib.test.databases.postgresql.reusable_test_schemas import ReusableTestSchemas
 from hare.contrib.test.isolated_contexts import hare_test_context
+from tests.utils.database_under_test import DatabaseUnderTest
+from tests.utils.kept_shared_test_database import KeptSharedTestDatabase
 from tests.utils.postgresql_extensions import PostgresqlExtensions
 
 
@@ -37,15 +39,7 @@ async def db_module_postgres(_shared_test_db_url: str):
     - see db_module's own docstring in the root conftest.py for the full rationale.
     """
     skip_if_not_postgres()
-    async with hare_test_context(
-        modules=["tests.shared_models.testmodels"],
-        db_url=_shared_test_db_url,
-        app_label="models",
-        connection_label="models",
-        _create_db=False,
-        _generate_schemas=False,
-        _drop_db_on_exit=False,
-    ) as ctx:
+    async with KeptSharedTestDatabase.open_context(_shared_test_db_url, ["tests.shared_models.testmodels"]) as ctx:
         await ReusableTestSchemas.reset_rows(ctx.get_connection())
         yield ctx
 
@@ -63,39 +57,19 @@ async def db_postgres(db_module_postgres):
 
 @pytest_asyncio.fixture(scope="module")
 async def db_tsvector_module():
-    """Module-scoped fixture for TestTSVectorField/TestPostgresSearchLookupTSVector - both share
-    the same tests.dialects.postgresql.models_tsvector module, so both db_tsvector and db_search
-    build on this one create-once-per-file database instead of each recreating it per test."""
+    """The TSVector field and search tests share a create-once-per-file database of
+    tests.dialects.postgresql.models_tsvector, isolated by db_tsvector for each test."""
     skip_if_not_postgres()
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    async with hare_test_context(
-        modules=["tests.dialects.postgresql.models_tsvector"],
-        db_url=db_url,
-        app_label="models",
-        connection_label="models",
-    ) as ctx:
+    async with DatabaseUnderTest.open_model_context(["tests.dialects.postgresql.models_tsvector"]) as ctx:
         yield ctx
 
 
 @pytest_asyncio.fixture(scope="function")
 async def db_tsvector(db_tsvector_module):
     """
-    Fixture for TestTSVectorField, with transaction rollback cleanup between tests.
+    Fixture for TSVector field and search tests, with transaction rollback cleanup between tests.
 
     Uses models defined in tests.dialects.postgresql.models_tsvector module.
-    Equivalent to: test.IsolatedTestCase with hare_test_modules
-    """
-    async with RollbackIsolation(db_tsvector_module) as ctx:
-        yield ctx
-
-
-@pytest_asyncio.fixture(scope="function")
-async def db_search(db_tsvector_module):
-    """
-    Fixture for TestPostgresSearchLookupTSVector, with transaction rollback cleanup between
-    tests - shares db_tsvector_module's already-created database/schema (same underlying
-    tests.dialects.postgresql.models_tsvector module as db_tsvector).
-
     Equivalent to: test.IsolatedTestCase with hare_test_modules
     """
     async with RollbackIsolation(db_tsvector_module) as ctx:
@@ -200,13 +174,7 @@ async def db_citext(db_citext_module):
 async def db_network_module():
     """Module-scoped database of the inet/cidr/macaddr field models."""
     skip_if_not_postgres()
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    async with hare_test_context(
-        modules=["tests.dialects.postgresql.column_types.models_network"],
-        db_url=db_url,
-        app_label="models",
-        connection_label="models",
-    ) as ctx:
+    async with DatabaseUnderTest.open_model_context(["tests.dialects.postgresql.column_types.models_network"]) as ctx:
         yield ctx
 
 
@@ -221,12 +189,8 @@ async def db_network(db_network_module):
 async def db_multi_range_module():
     """Module-scoped database of the multirange field models."""
     skip_if_not_postgres()
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    async with hare_test_context(
-        modules=["tests.dialects.postgresql.column_types.models_multi_range"],
-        db_url=db_url,
-        app_label="models",
-        connection_label="models",
+    async with DatabaseUnderTest.open_model_context(
+        ["tests.dialects.postgresql.column_types.models_multi_range"]
     ) as ctx:
         yield ctx
 
@@ -242,13 +206,7 @@ async def db_multi_range(db_multi_range_module):
 async def db_ltree_module():
     """Module-scoped database of the ltree field models - generate_schemas() creates the extension."""
     skip_if_not_postgres()
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    async with hare_test_context(
-        modules=["tests.dialects.postgresql.column_types.models_ltree"],
-        db_url=db_url,
-        app_label="models",
-        connection_label="models",
-    ) as ctx:
+    async with DatabaseUnderTest.open_model_context(["tests.dialects.postgresql.column_types.models_ltree"]) as ctx:
         yield ctx
 
 
@@ -264,12 +222,8 @@ async def db_native_enum_module():
     """Module-scoped database of the NativeEnumField models - generate_schemas() creates their ENUM
     types before the tables."""
     skip_if_not_postgres()
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    async with hare_test_context(
-        modules=["tests.dialects.postgresql.column_types.models_native_enum"],
-        db_url=db_url,
-        app_label="models",
-        connection_label="models",
+    async with DatabaseUnderTest.open_model_context(
+        ["tests.dialects.postgresql.column_types.models_native_enum"]
     ) as ctx:
         yield ctx
 
@@ -319,13 +273,7 @@ async def db_agg_module():
     Uses models defined in tests.dialects.postgresql.models_agg module.
     """
     skip_if_not_postgres()
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    async with hare_test_context(
-        modules=["tests.dialects.postgresql.models_agg"],
-        db_url=db_url,
-        app_label="models",
-        connection_label="models",
-    ) as ctx:
+    async with DatabaseUnderTest.open_model_context(["tests.dialects.postgresql.models_agg"]) as ctx:
         yield ctx
 
 
@@ -341,13 +289,7 @@ async def db_ranges_module():
     """Module-scoped fixture for RangeField tests. Uses models defined in
     tests.dialects.postgresql.column_types.models_ranges module."""
     skip_if_not_postgres()
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    async with hare_test_context(
-        modules=["tests.dialects.postgresql.column_types.models_ranges"],
-        db_url=db_url,
-        app_label="models",
-        connection_label="models",
-    ) as ctx:
+    async with DatabaseUnderTest.open_model_context(["tests.dialects.postgresql.column_types.models_ranges"]) as ctx:
         yield ctx
 
 
@@ -362,12 +304,7 @@ async def db_ranges(db_ranges_module):
 async def db_container_paths_module():
     """Module-scoped fixture for array/range path tests, on tests.dialects.postgresql.models_container_paths."""
     skip_if_not_postgres()
-    async with hare_test_context(
-        modules=["tests.dialects.postgresql.models_container_paths"],
-        db_url=os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:"),
-        app_label="models",
-        connection_label="models",
-    ) as ctx:
+    async with DatabaseUnderTest.open_model_context(["tests.dialects.postgresql.models_container_paths"]) as ctx:
         yield ctx
 
 

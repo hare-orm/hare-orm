@@ -223,7 +223,7 @@ DESCRIBE_WITHOUT_CONNECTIONS_SCRIPT = textwrap.dedent(
     from hare.core.hare_context import HareContext
     from hare.dialects.postgresql.request_query import PostgresqlRequestQuery
 
-    Hare.bind_models(
+    apps = Hare.bind_models(
         HareConfig.from_db_url(
             "postgresql://user:password@127.0.0.1:1/unused", {"models": ["tests.contrib.request_query.models"]}
         )
@@ -232,10 +232,10 @@ DESCRIBE_WITHOUT_CONNECTIONS_SCRIPT = textwrap.dedent(
 
     result = {"context": HareContext.get_current() is not None}
     for base in (RequestQuery, PostgresqlRequestQuery):
-        query_class = base.for_model(Book, filters=(FilterField("status"), FilterField("author__name")))
+        query_class = base.for_model(Book, apps=apps, filters=(FilterField("status"), FilterField("author__name")))
         result[base.__name__] = [
             [description.name, str(description.parameter_type), description.filter_key]
-            for description in query_class.describe_parameters()
+            for description in query_class.describe_parameters(apps=apps)
         ]
     print(json.dumps(result))
     """

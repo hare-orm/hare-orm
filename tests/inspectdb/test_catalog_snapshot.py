@@ -1,11 +1,12 @@
 import json
 import sqlite3
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
-from hare.ddl.enums import GrantTarget
+from hare.ddl.enums import GrantTarget, SchemaPartType
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.ddl.schema_objects.database_function import DatabaseFunction
 from hare.dialects.dialect_registry import DialectRegistry
@@ -18,12 +19,14 @@ from hare.dialects.postgresql.introspection.postgresql_catalog_reader import Pos
 from hare.dialects.postgresql.introspection.postgresql_declaration_mapper import PostgresqlDeclarationMapper
 from hare.dialects.postgresql.introspection.postgresql_definitions import PostgresqlDefinitions
 from hare.dialects.postgresql.introspection.postgresql_object_grants import PostgresqlObjectGrants
+from hare.dialects.postgresql.postgresql_introspector import PostgresqlIntrospector
 from hare.dialects.sqlite.introspection.sqlite_column_declarations import SqliteColumnDeclarations
 from hare.dialects.sqlite.introspection.sqlite_declaration_mapper import SqliteDeclarationMapper
+from hare.dialects.sqlite.introspection.sqlite_foreign_key_clauses import SqliteForeignKeyClauses
 from hare.dialects.sqlite.sqlite_introspector import SqliteIntrospector
 from hare.fields import IntField
 from hare.fields.db_defaults.sql_default import SqlDefault
-from hare.inspectdb.enums import CatalogDiagnosticCode, SchemaPartType
+from hare.inspectdb.enums import CatalogDiagnosticCode
 from hare.inspectdb.introspection.catalog_identities import CatalogIdentities
 from hare.inspectdb.introspection.catalog_snapshot import CatalogSnapshot
 from hare.inspectdb.introspection.catalog_sql import CatalogSql
@@ -38,6 +41,58 @@ from hare.migrations.operations import CreateModel
 from hare.migrations.state.state import State
 
 pytestmark = pytest.mark.database_independent
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("sql", ["0.123456789012345678", "'0.123456789012345678'::numeric", "1"])
+def test_numeric_column_default_literals_do_not_pass_through_float(sql):
+    mapper = PostgresqlDeclarationMapper(PostgresqlIntrospector)
+    result = mapper.get_column_db_default(sql, False, "numeric")
+    assert type(result) is Decimal
+    assert result == Decimal("1" if sql == "1" else "0.123456789012345678")
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "'0.123456789012345678'::double precision",
+        "123.456::numeric(8,2)",
+        "round(1.234, 2)",
+    ],
+)
+def test_numeric_column_defaults_preserve_value_changing_sql(sql):
+    default = PostgresqlDeclarationMapper(PostgresqlIntrospector).get_column_db_default(sql, False, "numeric")
+    assert isinstance(default, SqlDefault)
+    assert default.sql == sql
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("result", [object(), SqlDefault("1::numeric"), 0.123], ids=["sentinel", "sql", "float"])
+@pytest.mark.parametrize("falsey", [False, True], ids=["classmethod", "falsey-callable"])
+def test_numeric_column_default_mapping_preserves_custom_parser_authority(result, falsey):
+    calls = []
+
+    class Parser(PostgresqlIntrospector):
+        @classmethod
+        def parse_db_default(cls, sql):
+            calls.append(sql)
+            return result
+
+    if falsey:
+
+        class FalseyParser:
+            def __call__(self, sql):
+                calls.append(sql)
+                return result
+
+            def __bool__(self):
+                raise AssertionError("parser truthiness was inspected")
+
+        Parser.parse_db_default = FalseyParser()
+    sql = " 0.123456789012345678::numeric "
+    assert PostgresqlDeclarationMapper(Parser).get_column_db_default(sql, False, "numeric") is result
+    assert calls == [sql]
 
 
 @pytest.mark.asyncio
@@ -176,7 +231,10 @@ def test_identity_sequence_drift_does_not_fabricate_a_field_repair(property_name
     )
     state = State()
     CreateModel("Book", [("number", IntField(description=shadow_column.description))]).state_forward("models", state)
-    comparison = SchemaComparison(state, None, real, shadow)
+    from tests.utils.fake_client import FakeClient
+
+    client = FakeClient("postgresql")
+    comparison = SchemaComparison(state, client.dialect.schema_editor_class(client), real, shadow)
     comparison.compare_columns(("models", "Book"), state.models["models", "Book"], "book", {"number": "number"})
     assert len(comparison.mismatched_objects) == 1
     assert len(comparison.operations) == int(change_comment)
@@ -262,7 +320,7 @@ class SqliteCatalogConnection:
     async def execute_dicts(self, sql, parameters=None):
         self.query_count += 1
         cursor = self.database.execute(sql, parameters or [])
-        names = [column[0] for column in cursor.description]
+        names = [column[0] for column in cursor.description or ()]
         return [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
 
     async def execute(self, sql, parameters=None):
@@ -437,7 +495,7 @@ def test_declaration_mappers_preserve_overlapping_foreign_keys_as_diagnostics(ov
             }
         )
     sqlite_result = SqliteDeclarationMapper.get_foreign_keys(
-        sqlite_rows,
+        SqliteForeignKeyClauses.get_ordered_groups(sqlite_rows),
         {"parent": [{"name": "a", "pk": 1}, {"name": "b", "pk": 2}], "author": [{"name": "id", "pk": 1}]},
         "item",
         {0: None, 1: None, 2: None},
@@ -488,6 +546,24 @@ def test_column_clauses_ignore_literals_comments_and_nested_collations():
             SqliteColumnDeclarations.get_generated_expression(columns["derived"])
             == "substr(\"odd,name\" COLLATE RTRIM, 1, 2) || '), AS ('"
         )
+    finally:
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_referenced_column_spelling_preserves_composite_foreign_key_and_timing():
+    database = sqlite3.connect(":memory:")
+    try:
+        database.executescript("""CREATE TABLE Parent (region INT NOT NULL, id INT NOT NULL, PRIMARY KEY (region, id));
+        CREATE TABLE child (id INTEGER PRIMARY KEY, owner_region INT, owner_id INT,
+            FOREIGN KEY(OWNER_REGION, OWNER_ID) REFERENCES PARENT(REGION, ID) DEFERRABLE INITIALLY DEFERRED);""")
+        connection = SqliteCatalogConnection(database)
+        snapshot = await DatabaseCatalog.read_tables(connection, ["child"], "main")
+        tables = SqliteIntrospector.get_table_infos(snapshot, connection.dialect)
+        (relation,) = tables[0].composite_foreign_keys
+        assert relation.target_table == "Parent"
+        assert relation.columns == ("owner_region", "owner_id")
+        assert relation.deferral == "DEFERRABLE INITIALLY DEFERRED"
     finally:
         database.close()
 
@@ -550,7 +626,7 @@ def test_unrepresentable_privileges_remain_drift_without_a_fabricated_operation(
     comparison.compare_grants("Item", "item")
     assert comparison.operations == []
     assert len(comparison.mismatched_objects) == 1
-    result = DriftResult([], [], [], mismatched_objects=comparison.mismatched_objects)
+    result = DriftResult({}, [], [], mismatched_objects=comparison.mismatched_objects)
     assert result.has_drift
 
 
@@ -569,7 +645,7 @@ def test_grants_to_separate_function_overloads_are_not_merged_by_name():
     assert len(parts) == 2
     assert {part.definition["arguments"] for part in parts} == {"value integer", "value text"}
     comparison = SchemaComparison(None, None, parts, [])
-    model = SimpleNamespace(_meta=SimpleNamespace(sequences=(), functions=(SimpleNamespace(name="read_value"),)))
+    model = SimpleNamespace(sequences=(), functions=(SimpleNamespace(name="read_value"),))
     comparison.compare_object_grants(model, "Item")
     assert comparison.operations == []
     assert len(comparison.mismatched_objects) == 2
@@ -613,9 +689,14 @@ def test_grant_identity_remapping_preserves_its_logical_namespace():
 @pytest.mark.parametrize("actual_signatures", [("value integer",), ("value text",), ("value integer", "value text")])
 def test_function_drift_only_suggests_replacing_an_unambiguous_matching_signature(actual_signatures):
     declaration = DatabaseFunction("read_value", "integer", RawSQLTerm("SELECT value"), arguments=("value integer",))
-    model = SimpleNamespace(_meta=SimpleNamespace(functions=(declaration,)))
+    model = SimpleNamespace(functions=(declaration,))
     actual = SchemaPart(
-        SchemaPartType.FUNCTION, "", "read_value", {"body": "SELECT 0"}, operation_signatures=actual_signatures
+        SchemaPartType.FUNCTION,
+        "",
+        "read_value",
+        {"body": "SELECT 0"},
+        DatabaseFunction("read_value", "integer", RawSQLTerm("SELECT 0"), arguments=("value integer",)),
+        operation_signatures=actual_signatures,
     )
     expected = SchemaPart(
         SchemaPartType.FUNCTION, "", "read_value", {"body": "SELECT value"}, operation_signatures=("value integer",)

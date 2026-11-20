@@ -4,10 +4,8 @@ it the same way."""
 
 import pytest
 
-from hare.fields.encrypted.field_encryption import FieldEncryption
 from hare.query.expressions import F
 from tests.fields.encryption.test_encrypted_json_documents import (
-    SECRET_KEY,
     decrypt_stored_document,
     fetch_raw_document,
 )
@@ -17,11 +15,7 @@ from tests.fields.models_encrypted_pydantic import EncryptedTypedDocumentRecord,
 TYPED_DOCUMENT_TABLE = "encrypted_typed_document_record"
 
 
-@pytest.fixture(autouse=True)
-def field_encryption_key():
-    FieldEncryption.configure(SECRET_KEY)
-    yield
-    FieldEncryption.reset()
+pytestmark = pytest.mark.usefixtures("field_encryption_key")
 
 
 @pytest.mark.asyncio

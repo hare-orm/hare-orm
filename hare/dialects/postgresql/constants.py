@@ -295,7 +295,8 @@ SELECT tc.relname AS table_name, ic.relname AS index_name, array_agg(a.attname O
        array_agg((ord.key_option & 2) = 2 ORDER BY ord.n) AS nulls_first_keys,
        array_agg(
            CASE WHEN a.attnum IS NOT NULL AND ord.collation_oid <> 0 AND ord.collation_oid <> a.attcollation
-               THEN coll.collname END
+               THEN CASE WHEN coll_ns.nspname = 'pg_catalog' THEN quote_ident(coll.collname)
+                         ELSE format('%I.%I', coll_ns.nspname, coll.collname) END END
            ORDER BY ord.n
        ) AS key_collations,
        (
@@ -326,6 +327,7 @@ CROSS JOIN LATERAL unnest(idx.indkey::int2[], idx.indclass::oid[], idx.indoption
 LEFT JOIN pg_attribute a ON a.attrelid = tc.oid AND a.attnum = ord.attnum
 LEFT JOIN pg_opclass oc ON oc.oid = ord.opclassoid
 LEFT JOIN pg_collation coll ON coll.oid = ord.collation_oid
+LEFT JOIN pg_namespace coll_ns ON coll_ns.oid = coll.collnamespace
 -- The UNIQUE or PRIMARY KEY constraint the index backs, for its DEFERRABLE/INITIALLY DEFERRED
 -- flags and WITHOUT OVERLAPS - conrelid keeps out another table's FK constraint whose conindid is
 -- this same index.
@@ -361,8 +363,7 @@ POSTGRESQL_DOMAIN_COLUMN_TODO = (
 #: Columns in their declared order - information_schema's own type reporting, plus format_type()'s
 #: full type text (vector dimensions, array element sizes), an array's declared dimensions
 #: (``attndims``), whether a generated column is stored (``attgenerated``), the domain of a column of
-#: one, column comments and the labels of an ENUM type, an array's element type's too, with its schema
-#: when it isn't the default one.
+#: one, column comments and the labels and physical identity of an ENUM type or array element.
 POSTGRESQL_COLUMNS_SQL = """
 SELECT c.table_name, c.column_name, c.data_type, c.udt_name, c.is_nullable, c.character_maximum_length,
        c.numeric_precision, c.numeric_scale, c.column_default,
@@ -390,25 +391,26 @@ SELECT c.table_name, c.column_name, c.data_type, c.udt_name, c.is_nullable, c.ch
                AND dependency.deptype IN ('a', 'i')
        ), '[]'::jsonb) AS column_sequences,
        col_description(tc.oid, c.ordinal_position) AS description,
-       format_type(a.atttypid, a.atttypmod) AS full_type, a.attgenerated::text AS attgenerated, a.attndims,
+       CASE WHEN element_type.typtype = 'e' THEN format(
+           '%I.%I%s', type_namespace.nspname, element_type.typname,
+           CASE WHEN attribute_type.oid = element_type.oid THEN '' ELSE '[]' END
+       ) ELSE format_type(a.atttypid, a.atttypmod) END AS full_type,
+       a.attgenerated::text AS attgenerated, a.attndims,
        (
            SELECT array_agg(e.enumlabel ORDER BY e.enumsortorder)
-           FROM pg_type t
-           JOIN pg_enum e ON e.enumtypid = CASE WHEN t.typcategory = 'A' THEN t.typelem ELSE t.oid END
-           WHERE t.oid = a.atttypid
+           FROM pg_enum e WHERE e.enumtypid = element_type.oid
        ) AS enum_labels,
-       (
-           SELECT nullif(type_namespace.nspname, current_schema())
-           FROM pg_type t
-           JOIN pg_type element_type ON element_type.oid = CASE WHEN t.typcategory = 'A' THEN t.typelem ELSE t.oid END
-           JOIN pg_namespace type_namespace ON type_namespace.oid = element_type.typnamespace
-           WHERE t.oid = a.atttypid AND element_type.typtype = 'e'
-       ) AS enum_type_schema
+       CASE WHEN element_type.typtype = 'e' THEN type_namespace.nspname END AS enum_type_schema,
+       current_schema() AS default_schema
 FROM information_schema.columns c
 JOIN pg_namespace ns ON ns.nspname = c.table_schema
 JOIN pg_class tc ON tc.relnamespace = ns.oid AND tc.relname = c.table_name
 JOIN pg_attribute a
     ON a.attrelid = tc.oid AND a.attname = c.column_name AND a.attnum > 0 AND NOT a.attisdropped
+JOIN pg_type attribute_type ON attribute_type.oid = a.atttypid
+LEFT JOIN pg_type element_type ON element_type.oid = CASE
+    WHEN attribute_type.typcategory = 'A' THEN attribute_type.typelem ELSE attribute_type.oid END
+LEFT JOIN pg_namespace type_namespace ON type_namespace.oid = element_type.typnamespace
 WHERE c.table_schema = $1 AND c.table_name = ANY($2::text[])
 ORDER BY c.table_name, c.ordinal_position
 """
@@ -522,6 +524,7 @@ SELECT tc.relname AS table_name, pt.partstrat::text AS strategy, pt.partnatts::i
              FROM unnest(pt.partattrs::int2[]) WITH ORDINALITY AS key_column(attnum, position)
              JOIN pg_attribute att ON att.attrelid = tc.oid AND att.attnum = key_column.attnum
              ORDER BY key_column.position) AS key_types,
+       ns.nspname AS parent_schema, child_ns.nspname AS partition_schema,
        child.relname AS partition_table, pg_get_expr(child.relpartbound, child.oid) AS bound,
        child.reloptions AS storage_parameters, cts.spcname AS tablespace,
        pg_get_partkeydef(tc.oid) AS key_definition, child.relkind = 'p' AS partition_partitioned
@@ -530,6 +533,7 @@ JOIN pg_class tc ON tc.oid = pt.partrelid
 JOIN pg_namespace ns ON ns.oid = tc.relnamespace
 LEFT JOIN pg_inherits inh ON inh.inhparent = tc.oid
 LEFT JOIN pg_class child ON child.oid = inh.inhrelid
+LEFT JOIN pg_namespace child_ns ON child_ns.oid = child.relnamespace
 LEFT JOIN pg_tablespace cts ON cts.oid = child.reltablespace
 WHERE ns.nspname = $1 AND tc.relname = ANY($2::text[])
 ORDER BY tc.relname, child.relname
@@ -618,7 +622,7 @@ SELECT n.nspname AS schema_name, t.typname AS name, array_agg(e.enumlabel ORDER 
 FROM pg_type t
 JOIN pg_enum e ON e.enumtypid = t.oid
 JOIN pg_namespace n ON n.oid = t.typnamespace
-WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+WHERE n.nspname = $1
 GROUP BY n.nspname, t.typname
 """
 
@@ -634,7 +638,7 @@ SELECT matviewname AS name, definition, true AS is_materialized
 FROM pg_matviews WHERE schemaname = $1 AND matviewname = ANY($2::text[])
 """
 
-#: The columns of each unique index of a relation, in their order.
+#: The keys of each index eligible for a concurrent refresh of a materialized view.
 POSTGRESQL_UNIQUE_INDEX_COLUMNS_SQL = """
 SELECT array_agg(a.attname ORDER BY k.ordinality) AS columns
 FROM pg_index i
@@ -642,7 +646,9 @@ JOIN pg_class c ON c.oid = i.indrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
 CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ordinality)
 JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
-WHERE n.nspname = $1 AND c.relname = $2 AND i.indisunique
+WHERE n.nspname = $1 AND c.relname = $2 AND i.indisunique AND i.indimmediate
+  AND i.indisvalid AND i.indpred IS NULL AND i.indexprs IS NULL
+  AND k.ordinality <= i.indnkeyatts
 GROUP BY i.indexrelid
 """
 
@@ -776,22 +782,27 @@ WHERE s.schemaname = $1 AND default_table.relname = ANY($2::text[])
 ORDER BY name
 """
 
-#: The sequences of a schema no column owns nor takes its default from - inspectdb names them in a note.
-POSTGRESQL_UNATTACHED_SEQUENCES_SQL = """
-SELECT s.sequencename AS name, s.start_value, s.increment_by, s.min_value, s.max_value, s.cycle, s.cache_size
+#: Declared sequences by name, or the unattached sequences if names are not supplied.
+POSTGRESQL_SCHEMA_SEQUENCES_SQL = """
+SELECT s.sequencename AS name, s.start_value, s.increment_by, s.min_value, s.max_value, s.cycle, s.cache_size,
+       owner_table.relname AS owner_table, owner_column.attname AS owner_column
 FROM pg_sequences s
 JOIN pg_namespace n ON n.nspname = s.schemaname
 JOIN pg_class sequence_class ON sequence_class.relname = s.sequencename AND sequence_class.relnamespace = n.oid
+LEFT JOIN pg_depend ownership ON ownership.objid = sequence_class.oid
+    AND ownership.classid = 'pg_class'::regclass AND ownership.refclassid = 'pg_class'::regclass
+    AND ownership.deptype IN ('a', 'i') AND ownership.refobjsubid > 0
+LEFT JOIN pg_class owner_table ON owner_table.oid = ownership.refobjid
+LEFT JOIN pg_attribute owner_column
+    ON owner_column.attrelid = owner_table.oid AND owner_column.attnum = ownership.refobjsubid
 WHERE s.schemaname = $1
-    AND NOT EXISTS (
-        SELECT 1 FROM pg_depend d
-        WHERE d.objid = sequence_class.oid AND d.classid = 'pg_class'::regclass AND d.deptype IN ('a', 'i')
-    )
-    AND NOT EXISTS (
-        SELECT 1 FROM pg_depend default_dependency
-        WHERE default_dependency.refobjid = sequence_class.oid
-            AND default_dependency.classid = 'pg_attrdef'::regclass
-    )
+    AND (s.sequencename = ANY($2::text[]) OR (
+        $2::text[] IS NULL AND ownership.objid IS NULL AND NOT EXISTS (
+            SELECT 1 FROM pg_depend default_dependency
+            WHERE default_dependency.refobjid = sequence_class.oid
+                AND default_dependency.classid = 'pg_attrdef'::regclass
+        )
+    ))
 ORDER BY s.sequencename
 """
 

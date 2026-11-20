@@ -4,23 +4,28 @@ from copy import copy
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.exceptions import QueryError
-from hare.query.execution.query_execution import QueryExecution
 from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
-from hare.query.plans.constants import NO_CALL_PLAN
 from hare.query.plans.enums import PlanKeyForm
-from hare.query.plans.statement.declarations import CallPlanHit
 from hare.query.plans.statement.declared_plan_slots import DeclaredPlanSlots
 from hare.query.plans.statement.statement_plan_descriptions import StatementPlanDescriptions
 from hare.query.statements.awaitable_query import AwaitableQuery
 from hare.query.statements.building.query_ctes import QueryCtes
+from hare.query.statements.constants import COUNT_SUBQUERY_VALUE_ALIAS
 from hare.query.statements.summary.rows_summary_query import RowsSummaryQuery
 from hare.sql.analytics.count import Count
+from hare.sql.enums import AnalyticFunctionName
+from hare.sql.functions.coalesce import Coalesce
 from hare.sql.functions.count import Count as DistinctCount
+from hare.sql.terms.case.case import Case
+from hare.sql.terms.functions.aggregate_function import AggregateFunction
 from hare.sql.terms.star import Star
+from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.models.model_binding import ModelBinding
     from hare.sql.builder.queries.query_builder import QueryBuilder
+    from hare.sql.terms.term import Term
 
 
 class CountQuery(RowsSummaryQuery):
@@ -68,51 +73,46 @@ class CountQuery(RowsSummaryQuery):
     ) -> QueryBuilder:
         return self._connection.query_class.from_(copy(built_rows_query.query)).select(Count(Star()))
 
-    def _group_by_primary_key(self) -> None:
-        """Groups by the base table's primary key - one group per row, so the rows an aggregate's JOIN
-        multiplies are counted once.
+    def _make_subquery(self, *, value_wrapper_references: RecordedValueReferences | None = None) -> None:
+        """Build one scalar count, applying the slice in SQL instead of the terminal reader.
+
+        Grouped counts repeat their total on every surviving group; MAX reads it once and
+        COALESCE supplies zero when no group survives. The outer selection always returns one
+        row, including for an empty source. Standalone count execution keeps its ordinary reader.
         """
-        effective_table = self._effective_basetable()
-        self.query = self.query.groupby(
-            *(
-                effective_table[self.model._meta.fields_db_projection[attribute_name]]
-                for attribute_name in self.model._meta.primary_key_attribute_names
-            )
+        super()._make_subquery(value_wrapper_references=value_wrapper_references)
+        rows = self.query
+        rows._selects = [rows._selects[0].as_(COUNT_SUBQUERY_VALUE_ALIAS)]
+        count: Term = Coalesce(
+            AggregateFunction(AnalyticFunctionName.MAX, rows[COUNT_SUBQUERY_VALUE_ALIAS]),
+            ValueWrapper(0, allow_parametrize=False),
         )
+        if self._offset:
+            offset = ValueWrapper(self._offset)
+            count = Case().when(count < offset, 0).else_(count - offset)
+        if self._limit is not None:
+            limit = ValueWrapper(self._limit)
+            count = Case().when(count > limit, limit).else_(count)
+        self.query = self._connection.query_class.from_(rows).select(count)
 
     def _get_distinct_count_term(self) -> Any:
         """``COUNT(DISTINCT <pk>)`` for a ``.distinct()`` queryset - the rows a JOIN multiplies are
         counted once. Only where a row's identity is its primary key; anything else raises.
         """
-        meta = self.model._meta
+        meta: ModelBinding = self._binding  # type: ignore[assignment]
         if self._distinct_on or meta.has_composite_primary_key or not meta.has_primary_key:
             raise QueryError(
                 "count() on a .distinct() queryset is only supported for a single-column primary key "
                 "with no .distinct(<fields>) - its result would be silently wrong."
             )
-        return DistinctCount(self._effective_basetable()[self.model._meta.db_pk_column]).distinct()
+        return DistinctCount(self._effective_basetable()[meta.db_pk_column]).distinct()
 
     async def _execute_bound(self) -> int:
         if self._is_none:
-            return await self._execute_none()
-        lookup = NO_CALL_PLAN
-        connection: DatabaseClient | None = None
-        if self._call_signature is not None:
-            connection = self.get_connection()
-            call_plan = self._find_call_plan(connection)
-            if isinstance(call_plan, CallPlanHit):
-                return await QueryExecution.read(
-                    self, connection, self._count(connection, call_plan.sql, call_plan.parameters)
-                )
-            lookup = call_plan
-        query = self._get_execution_query_to_build(lookup, connection)
-        statement = query._make_query_to_run()
-        return await QueryExecution.read(query, query._connection, query._count(query._connection, *statement))
+            return 0
+        return await self._execute_scalar_summary()
 
-    async def _execute_none(self) -> int:
-        return 0
-
-    async def _count(self, connection: DatabaseClient, sql: str, parameters: list[Any]) -> int:
+    async def _read_scalar_summary(self, connection: DatabaseClient, sql: str, parameters: list[Any]) -> int:
         """Runs the ``COUNT`` and applies the slice to it.
 
         Args:
@@ -124,7 +124,7 @@ class CountQuery(RowsSummaryQuery):
             The number of rows.
         """
         by_position = connection.features.supports_positional_rows
-        _, result = await connection.execute(
+        _, result = await connection._execute_built(
             sql, parameters, returns_rows=True, rows_by_position=by_position, retry_read=True
         )
         if not result:

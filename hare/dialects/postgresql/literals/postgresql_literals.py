@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import datetime
 from collections.abc import Callable, Collection, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from hare.ddl.enums import SchemaNamespace, SchemaPartType
 from hare.dialects.base.literals.sql_literals import SqlLiterals
+from hare.fields.data.containers.array_field import ArrayField
 from hare.time.system_zone import SystemZone
+
+if TYPE_CHECKING:
+    from hare.fields.field import Field
 
 
 class PostgresqlLiterals(SqlLiterals):
@@ -13,6 +18,40 @@ class PostgresqlLiterals(SqlLiterals):
     literals."""
 
     alias_quote_char = '"'
+
+    def get_schema_object_key(
+        self, object_type: SchemaPartType, schema: str | None, table: str, name: str
+    ) -> tuple[SchemaNamespace, str | None, str | None, str] | None:
+        """Compare only objects sharing a physical name scope on this database."""
+        if object_type is SchemaPartType.TRIGGER:
+            return self._get_schema_object_key(SchemaNamespace.TRIGGER, schema, table, name)
+        if object_type in (
+            SchemaPartType.TABLE,
+            SchemaPartType.INDEX,
+            SchemaPartType.VIEW,
+            SchemaPartType.MATERIALIZED_VIEW,
+            SchemaPartType.SEQUENCE,
+        ):
+            return self._get_schema_object_key(SchemaNamespace.RELATION, schema, None, name)
+        return None
+
+    def get_field_literal_sql(self, field: Field[Any], value: Any) -> str:
+        """Use a typed ARRAY constructor without assuming the element type's text delimiter."""
+        value_field = self.dialect.types.get_value_field(field)
+        if isinstance(value_field, ArrayField) and value is not None:
+            return f"({self.get_array_constructor_sql(value)})::{value_field.get_column_type(self.dialect)}"
+        return super().get_field_literal_sql(field, value)
+
+    def get_array_constructor_sql(self, value: Collection[Any]) -> str:
+        """Render converted array elements recursively using their ordinary scalar literals."""
+        return self.get_array_literal_sql(
+            [
+                self.get_array_constructor_sql(element)
+                if isinstance(element, (list, tuple, set, frozenset))
+                else self.get_literal_sql(element)
+                for element in value
+            ]
+        )
 
     def get_string_literal_sql(self, text: str) -> str:
         """A string literal PostgreSQL reads the same whatever ``standard_conforming_strings`` is

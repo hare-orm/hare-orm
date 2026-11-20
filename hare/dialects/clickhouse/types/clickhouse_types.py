@@ -159,15 +159,22 @@ class ClickhouseTypes:
                 TypeMapping(
                     column_type=ClickhouseJsonValues.get_column_type,
                     to_db=ClickhouseJsonValues.to_db_escaping_key_dots,
+                    to_lookup=ClickhouseJsonValues.to_lookup,
                 ),
             )
             # Its JSON text in a String column - compared as that text, beside JSON columns.
             types.register(
                 JSONTextField,
-                TypeMapping(column_type=CLICKHOUSE_JSON_TEXT_COLUMN_TYPE, to_lookup=ClickhouseJsonValues.to_lookup),
+                TypeMapping(column_type=CLICKHOUSE_JSON_TEXT_COLUMN_TYPE),
             )
             # The value at a path - any JSON value, as a literal beside it (Coalesce(F("data__n"), Value(0))).
-            types.register(JSONPathField, TypeMapping(to_db=ClickhouseJsonValues.to_db_path_value))
+            types.register(
+                JSONPathField,
+                TypeMapping(
+                    to_db=ClickhouseJsonValues.to_db_path_value,
+                    to_lookup=PreparedConverter(lambda field: field.get_lookup_value_writer()),
+                ),
+            )
         else:
             # JSON text - on a server without the JSON type.
             types.register(JSONField, TypeMapping(column_type=CLICKHOUSE_JSON_TEXT_COLUMN_TYPE))
@@ -209,6 +216,7 @@ class ClickhouseTypes:
                 column_type=ClickhouseEnumTypes.get_char_enum_column_type,
                 function_cast=ClickhouseEnumTypes.get_char_enum_text,
                 to_db=ClickhouseEnumTypes.get_char_enum_db_value,
+                to_lookup=ClickhouseEnumTypes.get_char_enum_lookup_value,
                 to_python=ClickhouseEnumTypes.get_char_enum_python_value,
             ),
         )

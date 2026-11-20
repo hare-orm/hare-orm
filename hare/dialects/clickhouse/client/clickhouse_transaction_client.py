@@ -73,13 +73,13 @@ class ClickhouseTransactionClient(TransactionClient, ClickhouseClient):
             The driver's connection.
         """
 
-    @abc.abstractmethod
     async def close_transaction_connection(self, connection: Any) -> None:
         """Closes the connection the transaction ran on.
 
         Args:
             connection: The driver's connection.
         """
+        await connection.close()
 
     @abc.abstractmethod
     async def send_transaction_statement(self, sql: str) -> None:

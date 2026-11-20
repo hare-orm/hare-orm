@@ -32,7 +32,7 @@ class CountingRouter:
 @pytest.mark.asyncio
 async def test_each_execution_asks_the_router_once(db, summary):
     await Tournament.objects.create(name="routed")
-    Caches.forget_model_caches([Tournament])
+    Caches.forget_model_caches([HareContext.require_current().apps.get_binding(Tournament)])
     router = HareContext.require_current().router
     router.init_routers([CountingRouter])
     try:

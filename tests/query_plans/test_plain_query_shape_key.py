@@ -3,6 +3,7 @@
 import pytest
 
 from hare.core.caching.caches import Caches
+from hare.core.hare_context import HareContext
 from hare.query.plans.statement.statement_plans import StatementPlans
 from hare.query.statements.select.model_rows.instance_hydration import InstanceHydration
 from tests.shared_models import testmodels
@@ -18,7 +19,7 @@ async def test_plain_query_reuses_its_plan_with_new_values(db):
     StatementPlans.call_signature_plans.clear()
     rows = await testmodels.Tournament.objects.filter(name="first").order_by("id")
     assert [row.name for row in rows] == ["first"]
-    bucket = StatementPlans.plans.get_bucket(testmodels.Tournament)
+    bucket = StatementPlans.plans.get_bucket(HareContext.require_current().apps.get_binding(testmodels.Tournament))
     (plan,) = bucket.values()
     hits = StatementPlans.hits
     rows = await testmodels.Tournament.objects.filter(name="second").order_by("id")
@@ -73,14 +74,22 @@ async def test_ordering_and_filter_values_change_between_hits(db):
 
 @pytest.mark.asyncio
 async def test_forgetting_model_caches_drops_the_plain_shape_caches(db):
-    Caches.forget_model_caches([testmodels.Tournament])
+    Caches.forget_model_caches([HareContext.require_current().apps.get_binding(testmodels.Tournament)])
     await testmodels.Tournament.objects.filter(name="x")
-    bucket = StatementPlans.plans.get_bucket(testmodels.Tournament)
+    bucket = StatementPlans.plans.get_bucket(HareContext.require_current().apps.get_binding(testmodels.Tournament))
     (plan,) = bucket.values()
-    assert testmodels.Tournament in InstanceHydration.ALL_FIELDS_SELECTS_KEY_CACHE
-    Caches.forget_model_caches([testmodels.Tournament])
+    assert (
+        HareContext.require_current().apps.get_binding(testmodels.Tournament)
+        in InstanceHydration.ALL_FIELDS_SELECTS_KEY_CACHE
+    )
+    Caches.forget_model_caches([HareContext.require_current().apps.get_binding(testmodels.Tournament)])
     assert not bucket
-    assert testmodels.Tournament not in InstanceHydration.ALL_FIELDS_SELECTS_KEY_CACHE
+    assert (
+        HareContext.require_current().apps.get_binding(testmodels.Tournament)
+        not in InstanceHydration.ALL_FIELDS_SELECTS_KEY_CACHE
+    )
     assert await testmodels.Tournament.objects.filter(name="x") == []
-    (replacement,) = StatementPlans.plans.get_bucket(testmodels.Tournament).values()
+    (replacement,) = StatementPlans.plans.get_bucket(
+        HareContext.require_current().apps.get_binding(testmodels.Tournament)
+    ).values()
     assert replacement is not plan

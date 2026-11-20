@@ -143,9 +143,8 @@ async def test_a_geometry_in_an_expression_is_written_as_a_geometry(db_gis):
     driver binds - though update(location=Value(...)) wrote one."""
     await create_places()
     branch = Case(When(id=1, then=Point(7, 8)), default=F("location"))
-    assert await GisPlace.objects.filter(id=1).annotate(x=Value(Point(3, 4))).values_list("x", flat=True) == [
-        Point(3, 4, srid=4326)
-    ]
+    for point in (Point(3, 4), Point(3, 4, srid=4326)):
+        assert await GisPlace.objects.filter(id=1).annotate(x=Value(point)).values_list("x", flat=True) == [point]
     assert await GisPlace.objects.filter(id=1).annotate(x=branch).values_list("x", flat=True) == [
         Point(7, 8, srid=4326)
     ]

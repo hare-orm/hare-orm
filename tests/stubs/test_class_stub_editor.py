@@ -1,5 +1,6 @@
 import ast
 
+import libcst as cst
 import pytest
 
 from hare.stubs.class_stub_editor import ClassStubEditor
@@ -14,7 +15,9 @@ from hare.stubs.class_stub_editor import ClassStubEditor
     ],
 )
 def test_class_members_are_replaced_structurally(source):
-    text = ClassStubEditor.update(source, {"Book": {"objects": "objects: ClassVar[BookQuerySet]"}})
+    text = (
+        cst.parse_module(source).visit(ClassStubEditor({"Book": {"objects": "objects: ClassVar[BookQuerySet]"}})).code
+    )
     tree = ast.parse(text)
     model = tree.body[0]
     assert isinstance(model, ast.ClassDef)
@@ -39,10 +42,8 @@ class Book:
 
 class Other: ...
 '''
-    text = ClassStubEditor.update(
-        source,
-        {"Book": {"objects": "objects: BookQuerySet", "pk": "@property\ndef pk(self) -> int: ..."}},
-    )
+    declarations = {"Book": {"objects": "objects: BookQuerySet", "pk": "@property\ndef pk(self) -> int: ..."}}
+    text = cst.parse_module(source).visit(ClassStubEditor(declarations)).code
     ast.parse(text)
     assert text.startswith("# module comment\n")
     assert '"""A book."""' in text
@@ -55,5 +56,5 @@ class Other: ...
 
 def test_class_edit_is_deterministic():
     declarations = {"Book": {"objects": "objects: BookQuerySet"}}
-    text = ClassStubEditor.update("class Book: ...\n", declarations)
-    assert ClassStubEditor.update(text, declarations) == text
+    text = cst.parse_module("class Book: ...\n").visit(ClassStubEditor(declarations)).code
+    assert cst.parse_module(text).visit(ClassStubEditor(declarations)).code == text

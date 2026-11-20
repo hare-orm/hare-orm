@@ -52,7 +52,12 @@ async def test_a_write_cancelled_before_its_report_still_reports_it(clickhouse_d
         with pytest.raises(asyncio.CancelledError):
             await task
     monkeypatch.undo()
-    assert await Skill.objects.filter(name="z").count() == 2
+    connection = clickhouse_db.get_connection()
+    assert await connection.execute_dicts("SELECT id, name FROM skill ORDER BY id") == (
+        [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}, {"id": 3, "name": "z"}, {"id": 4, "name": "z"}]
+        if write is bulk_create_skills
+        else [{"id": 1, "name": "z"}, {"id": 2, "name": "z"}]
+    )
     assert len(observed) == 1
 
 

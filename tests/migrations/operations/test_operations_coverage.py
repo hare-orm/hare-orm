@@ -7,8 +7,6 @@ from hare.ddl import RawSQLTerm
 from hare.ddl.constraints import UniqueConstraint
 from hare.ddl.indexes import Index
 from hare.ddl.schema_objects.trigger import Trigger
-from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-from hare.dialects.base.schema.tables.table_comments import TableComments
 from hare.exceptions import ConfigurationError
 from hare.migrations.exceptions import IncompatibleStateError
 from hare.migrations.operations import (
@@ -34,22 +32,9 @@ from hare.migrations.operations import (
 from hare.migrations.state.state import State
 from tests.utils.fake_client import FakeClient
 from tests.utils.operations import apply_operations
+from tests.utils.schema_editor import TestSchemaEditor
 
 pytestmark = pytest.mark.database_independent
-
-
-class TestSchemaEditorTableComments(TableComments):
-    __test__ = False
-
-    def get_table_comment_sql(self, table: str, comment: str) -> str:
-        return ""
-
-    def get_column_comment_sql(self, table: str, column: str, comment: str) -> str:
-        return ""
-
-
-class _TestSchemaEditor(BaseSchemaEditor):
-    table_comments_class = TestSchemaEditorTableComments
 
 
 # --- IncompatibleStateError guards, one per operation type ---
@@ -319,7 +304,7 @@ def test_rename_constraint_success(state_with_model: State):
 @pytest.mark.asyncio
 async def test_run_sql_list_of_plain_strings():
     client = FakeClient("sql")
-    editor = _TestSchemaEditor(client)
+    editor = TestSchemaEditor(client)
     state = State()
 
     op = RunSQL(["CREATE INDEX a ON t (x)", "CREATE INDEX b ON t (y)"])
@@ -331,19 +316,19 @@ async def test_run_sql_list_of_plain_strings():
 @pytest.mark.asyncio
 async def test_run_sql_parameterized_tuples_collect_sql():
     client = FakeClient("sql")
-    editor = _TestSchemaEditor(client, collect_sql=True)
+    editor = TestSchemaEditor(client, collect_sql=True)
     state = State()
 
     op = RunSQL([("INSERT INTO t (x) VALUES (%s)", [1])])
     await apply_operations("models", state, op, schema_editor=editor)
 
-    assert editor.collected_sql == ["INSERT INTO t (x) VALUES (1)"]
+    assert editor.collected_sql == ["--", "-- Run SQL", "--", "INSERT INTO t (x) VALUES (1)"]
 
 
 @pytest.mark.asyncio
 async def test_run_sql_bad_tuple_shape_raises_value_error():
     client = FakeClient("sql")
-    editor = _TestSchemaEditor(client, collect_sql=True)
+    editor = TestSchemaEditor(client, collect_sql=True)
     state = State()
 
     op = RunSQL([("sql", "params", "extra")])
@@ -354,7 +339,7 @@ async def test_run_sql_bad_tuple_shape_raises_value_error():
 @pytest.mark.asyncio
 async def test_run_sql_noop_sentinel_executes_nothing():
     client = FakeClient("sql")
-    editor = _TestSchemaEditor(client)
+    editor = TestSchemaEditor(client)
     state = State()
 
     op = RunSQL(RunSQL.noop)
@@ -366,7 +351,7 @@ async def test_run_sql_noop_sentinel_executes_nothing():
 @pytest.mark.asyncio
 async def test_run_sql_backward_without_reverse_sql_raises():
     client = FakeClient("sql")
-    editor = _TestSchemaEditor(client)
+    editor = TestSchemaEditor(client)
     state = State()
 
     op = RunSQL("CREATE INDEX a ON t (x)")
@@ -388,7 +373,7 @@ async def test_run_python_backward_executes_reverse_code():
         calls.append("backward")
 
     client = FakeClient("sql")
-    editor = _TestSchemaEditor(client)
+    editor = TestSchemaEditor(client)
     state = State()
 
     op = RunPython(forward, backward)
@@ -400,7 +385,7 @@ async def test_run_python_backward_executes_reverse_code():
 @pytest.mark.asyncio
 async def test_run_python_backward_without_reverse_code_raises():
     client = FakeClient("sql")
-    editor = _TestSchemaEditor(client)
+    editor = TestSchemaEditor(client)
     state = State()
 
     op = RunPython(RunPython.noop)

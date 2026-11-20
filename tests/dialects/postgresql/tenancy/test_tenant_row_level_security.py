@@ -12,6 +12,7 @@ import pytest
 
 from hare.contrib.test import capture_queries, hare_test_context
 from hare.core.connections.connections import Connections
+from hare.core.hare_context import HareContext
 from hare.ddl import TenantCondition
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.dialects.dialect_registry import DialectRegistry
@@ -71,8 +72,8 @@ async def test_scopes_recheck_policy_tenants_after_live_models_change():
     skip_if_not_postgres()
     async with tenant_context() as (context, _):
         scopes = [ModelTenants({RlsNote: 1, RlsLabel: "acme"}) for _ in range(2)]
-        note_key = TenantCondition.get_table_key(RlsNote)
-        label_key = TenantCondition.get_table_key(RlsLabel)
+        note_key = TenantCondition.get_table_key(HareContext.require_current().apps.get_binding(RlsNote))
+        label_key = TenantCondition.get_table_key(HareContext.require_current().apps.get_binding(RlsLabel))
         for scope in scopes:
             assert scope.get_policy_tenants("models") == {note_key: 1, label_key: "acme"}
         context.unregister_live_models([RlsLabel])

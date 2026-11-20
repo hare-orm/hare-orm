@@ -1,18 +1,17 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.caching.model_cache import ModelCache
 from hare.exceptions import FieldError
-from hare.query.relation_loading.prefetching.prefetch_request import PrefetchRequest
 from hare.query.rows.model_rows.model_rows import ModelRows
 from hare.query.statements.building.query_annotations import QueryAnnotations
 from hare.sql.terms.field import Field
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.models import Model
-    from hare.query.plans.statement.statement_plan import StatementPlan
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset.query_specification import QuerySpecification
     from hare.query.rows.native.hydration_layout import HydrationEntry
     from hare.query.statements.select.model_rows_query import ModelRowsQuery
@@ -44,7 +43,8 @@ class InstanceHydration:
             return
         # An annotation named like a field, or like a property of the model (`pk`), would overwrite
         # it on the hydrated instance. An .alias() is never selected and can't collide.
-        reserved_names = InstanceHydration.get_reserved_attribute_names(query.model)
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
+        reserved_names = InstanceHydration.get_reserved_attribute_names(model_binding)
         alias_keys = query._alias_keys
         colliding_keys = [key for key in query._annotations if key in reserved_names and key not in alias_keys]
         if colliding_keys:
@@ -56,48 +56,88 @@ class InstanceHydration:
             )
 
     @staticmethod
-    @ModelCache.fact()
-    def get_reserved_attribute_names(model: type[Model]) -> frozenset[str]:
-        """The names an instance's attributes take - its fields and the properties defined on the
-        model class and its bases (``pk``) - a fact of the model.
+    def get_colliding_attribute_names(
+        binding: ModelBinding, names: Iterable[str], *, class_attributes: bool = True
+    ) -> list[str]:
+        """The requested attributes that would replace fields, model state, methods or relation caches.
+
+        Type-only persistence state and dynamic relation caches come from the model's reserved
+        names. Class attributes are checked directly, preserving declarations on custom subclasses.
+        Unrelated user attributes starting with an underscore remain available. Raw extra
+        columns may replace user-declared class defaults, but not callable methods or properties.
 
         Args:
-            model: The model class.
+            binding: The binding of the class whose instances receive the values.
+            names: The proposed attribute names.
+            class_attributes: Protect every existing class attribute; False permits ordinary
+                user class defaults while retaining model state, methods and property checks.
+
+        Returns:
+            The conflicting names in sorted order.
+        """
+        model = binding._model
+        reserved_names = InstanceHydration.get_reserved_attribute_names(binding)
+        return sorted(
+            name
+            for name in names
+            if name in reserved_names
+            or (hasattr(model, name) if class_attributes else callable(getattr(model, name, None)))
+        )
+
+    @staticmethod
+    @ModelCache.fact()
+    def get_reserved_attribute_names(binding: ModelBinding) -> frozenset[str]:
+        """The model's fields, persistence state, relation caches, properties and base model API.
+
+        Args:
+            binding: The binding supplying the model's fields and relation names.
 
         Returns:
             The names.
         """
+        model = binding._model
+        from hare.models.constants import INSTANCE_STATE_ATTRIBUTE_NAMES
+        from hare.models.model import Model
+
         property_names = (
             name
             for klass in model.__mro__
             for name, attribute in vars(klass).items()
             if isinstance(attribute, property)
         )
-        return frozenset([*model._meta.fields_map, *property_names])
+        return frozenset(
+            [
+                *binding.fields_map,
+                *INSTANCE_STATE_ATTRIBUTE_NAMES,
+                *vars(Model),
+                *(f"_{name}" for name in binding.fetch_fields),
+                *property_names,
+            ]
+        )
 
     @staticmethod
     def get_model_rows_reader(
         query: QuerySpecification[Any],
         connection: DatabaseClient | None = None,
-        plan: StatementPlan | None = None,
         *,
         reader_class: type[ModelRows] = ModelRows,
     ) -> ModelRows:
         """One reader factory for compiled plans, uncacheable statements and streaming.
 
-        A plan contains layout metadata only; the reader holds no connection - ``connection`` only
-        selects the plan's prepared columns and the dialect decoding the annotations. Without a plan,
-        the caller supplies a built model query with the same layout attributes.
+        With no explicit connection, reuse the statement plan's reader when one is available.
+        Otherwise build the reader from the query's layout and the selected connection's dialect.
+        The reader holds no connection.
         """
         if connection is None:
             connection = query._connection
             plan = query._statement_plan  # type: ignore[attr-defined]
-        if plan is not None:
-            reader: ModelRows = plan.result_reading
-            return reader
+            if plan is not None:
+                reader: ModelRows = plan.result_reading
+                return reader
         built_query: ModelRowsQuery[Any] = query  # type: ignore[assignment]
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
         return reader_class(
-            query.model,
+            model_binding,
             connection.dialect.types,  # type: ignore[union-attr]
             select_related_buckets=built_query._select_related_positions,
             decode_plan=built_query._decode_plan,
@@ -110,22 +150,9 @@ class InstanceHydration:
                 else ()
             ),
             annotation_fields=QueryAnnotations.get_annotation_fields(built_query),
+            annotation_columns=built_query._result_column_aliases,
+            source_column_names=built_query._source_column_names,
         )
-
-    @staticmethod
-    def get_prefetch_request(query: ModelRowsQuery[Any]) -> PrefetchRequest | None:
-        """What the instances this queryset loads get prefetched, with the settings of this
-        queryset the prefetch queries take over - None when nothing is prefetched.
-
-        Args:
-            query: The model rows query.
-
-        Returns:
-            The request, or None.
-        """
-        if not (query._prefetch_map or query._prefetch_queries):
-            return None
-        return PrefetchRequest.from_query(query, query._prefetch_map, query._prefetch_queries)
 
     @staticmethod
     def build_decode_plan(
@@ -140,7 +167,8 @@ class InstanceHydration:
         """
         if len(query._select_related_positions) != 1 or not query.features.supports_positional_rows:
             return None
-        entry_by_column = query.model._meta.get_hydration_layout(query._connection).entry_by_column
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
+        entry_by_column = model_binding.get_hydration_layout(query._connection).entry_by_column
         plan: list[HydrationEntry] = []
         for term in base_selects:
             if not isinstance(term, Field):
@@ -152,20 +180,25 @@ class InstanceHydration:
         return tuple(plan)
 
     @staticmethod
-    def get_all_fields_selects_key(model: type[Model]) -> tuple[str | None, ...]:
-        """The column names of ``model``'s every-column SELECT list - part of the decode plans' key and
+    def get_selects_key(terms: Iterable[Term]) -> tuple[str | None, ...]:
+        """Use physical column names and retain the positions of other terms."""
+        return tuple(term.name if isinstance(term, Field) else None for term in terms)
+
+    @staticmethod
+    def get_all_fields_selects_key(binding: ModelBinding) -> tuple[str | None, ...]:
+        """The column names of this binding's every-column SELECT list - part of the decode plans' key and
         of the plan key. Kept per model beside the query it was read from.
 
         Args:
-            model: The model.
+            binding: The structural source of the SELECT columns.
 
         Returns:
             One name per selected term, None for a term that isn't a plain column.
         """
-        basequery_all_fields = model._meta.basequery_all_fields
-        cached = InstanceHydration.ALL_FIELDS_SELECTS_KEY_CACHE.get(model)
+        basequery_all_fields = binding.basequery_all_fields
+        cached = InstanceHydration.ALL_FIELDS_SELECTS_KEY_CACHE.get(binding)
         if cached is not None and cached[0] is basequery_all_fields:
             return cached[1]
-        selects_key = tuple(term.name if isinstance(term, Field) else None for term in basequery_all_fields._selects)
-        InstanceHydration.ALL_FIELDS_SELECTS_KEY_CACHE[model] = (basequery_all_fields, selects_key)
+        selects_key = InstanceHydration.get_selects_key(basequery_all_fields._selects)
+        InstanceHydration.ALL_FIELDS_SELECTS_KEY_CACHE[binding] = (basequery_all_fields, selects_key)
         return selects_key

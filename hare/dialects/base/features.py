@@ -61,6 +61,9 @@ class Features:
             computed in an unfiltered derived SELECT before applying the outer conditions.
         supports_ordered_correlated_subqueries: A correlated subquery orders and limits its own rows
             (``Subquery(... .order_by(...)[:1])``).
+        keeps_exists_limit: An EXISTS subquery respects its explicit LIMIT.
+        rounds_integer_lookup_bounds: Fractional decimal bounds must be rounded before binding
+            comparisons with an integer column.
         supports_correlated_aggregates: A correlated subquery selecting a ``COUNT``, ``SUM`` or another
             aggregate of every row counts each row once - without, one correlated by a column rows of
             the query around it share raises ``UnSupportedError``; correlated by its primary key or a
@@ -247,6 +250,8 @@ class Features:
     supports_correlated_subqueries: bool = True
     rewrites_correlated_exists: bool = False
     supports_ordered_correlated_subqueries: bool = True
+    keeps_exists_limit: bool = True
+    rounds_integer_lookup_bounds: bool = False
     supports_correlated_select: bool = True
     supports_correlated_order_by: bool = True
     supports_correlated_group_by: bool = True
@@ -352,7 +357,7 @@ class Features:
     plan_keys: ClassVar[Iterator[int]] = itertools.count(1)
     #: The features ``replace()`` made, each set of features once - one plan key for the connections
     #: of the same features.
-    replaced_features: ClassVar[Cache[Features]] = Cache(REPLACED_FEATURES_CACHE_SIZE, holds_sql=False)
+    replaced_features: ClassVar[Cache[Features]] = Cache(REPLACED_FEATURES_CACHE_SIZE)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "plan_key", next(Features.plan_keys))

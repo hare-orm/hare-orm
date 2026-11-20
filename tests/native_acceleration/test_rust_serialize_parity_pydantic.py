@@ -2,6 +2,7 @@
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.dialects.base.constants import SQL_DIALECT
 from hare.exceptions import ValidationError
 from hare.query.statements.write.bulk.bulk_write_batches import BulkWriteBatches
@@ -9,11 +10,18 @@ from tests.shared_models.testmodels_pydantic import PydanticJSONFields
 
 
 @pytest.mark.database_independent
+@pytest.mark.usefixtures("model_conversion_context")
+@pytest.mark.parametrize("model_conversion_context", [["tests.shared_models.testmodels_pydantic"]], indirect=True)
 def test_batch_serializer_checks_typed_json_shape():
     obj = PydanticJSONFields(data={"a": 1}, data_pydantic={"foo": 1, "bar": "valid"})
     obj.data_pydantic = {"totally": "wrong shape"}
     with pytest.raises(ValidationError):
-        BulkWriteBatches.serialize_instances(PydanticJSONFields, SQL_DIALECT.types, [obj], ["data_pydantic"])
+        BulkWriteBatches.serialize_instances(
+            HareContext.require_current().apps.get_binding(PydanticJSONFields),
+            SQL_DIALECT.types,
+            [obj],
+            ["data_pydantic"],
+        )
 
 
 @pytest.mark.asyncio

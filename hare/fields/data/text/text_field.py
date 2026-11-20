@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from hare.fields.data.text.text_values import TextValues
-from hare.fields.field import Field
+from hare.fields.data.text.string_field import StringField
 
 
-class TextField(Field[str]):
+class TextField(StringField[str]):
     """A text of any length - a ``TEXT`` column. It can be unique, indexed and named by a
     ``UniqueConstraint`` or ``Meta.indexes``."""
 
@@ -20,14 +19,5 @@ class TextField(Field[str]):
     # A text column reads as a str - to_python() checks only a value assigned of another type.
     keeps_native_db_values = True
 
-    def get_written_value_of_another_type(self, value: Any) -> Any:
-        TextValues.raise_if_not_text(self, value)
-        return super().get_written_value_of_another_type(value)
-
-    def to_python(self, value: Any) -> Any:
-        if value is not None and not isinstance(value, str):
-            TextValues.raise_if_not_text(self, value)
-        return super().to_python(value)
-
-    def from_db_value(self, value: Any) -> Any:
-        return self.to_python(TextValues.get_read_text(value))
+    def get_assign_normalized_types(self) -> frozenset[type]:
+        return self._get_unchanged_assign_types(TextField.to_python, self.field_type)

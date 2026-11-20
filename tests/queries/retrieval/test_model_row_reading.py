@@ -1,11 +1,10 @@
 """Model row decoding preserves value errors, exact JSON and joined relation state."""
 
-from dataclasses import replace
-
 import pytest
 
 from hare.contrib.test import capture_queries
-from hare.query.rows.model_rows.model_rows import ModelRows
+from hare.core.hare_context import HareContext
+from hare.query.rows.model_rows.model_columns import ModelColumns
 from hare.query.statements.write.bulk.bulk_write_batches import BulkWriteBatches
 from tests.shared_models.testmodels import DoubleFK, IntFields, JSONFields
 
@@ -19,21 +18,16 @@ async def test_row_reader_error_propagates_without_retry(db, monkeypatch):
         calls.append(value)
         raise TypeError("row cannot be read")
 
-    get_columns = ModelRows.get_columns
+    from_entries = ModelColumns.from_entries
 
-    def failing_columns(self, connection, result):
-        columns = get_columns(self, connection, result)
-        return [
-            replace(
-                columns[0], entries=tuple((name, field, fail_read) for name, field, _reader in columns[0].entries)
-            ),
-            *columns[1:],
-        ]
+    def failing_columns(binding, entries, keys, is_partial):
+        entries = tuple((name, field, fail_read if name == "intnum" else reader) for name, field, reader in entries)
+        return from_entries(binding, entries, keys, is_partial)
 
-    monkeypatch.setattr(ModelRows, "get_columns", failing_columns)
+    monkeypatch.setattr(ModelColumns, "from_entries", staticmethod(failing_columns))
     with pytest.raises(TypeError, match="row cannot be read"):
         await IntFields.objects.all()
-    assert len(calls) == 1
+    assert calls == [1]
 
 
 @pytest.mark.asyncio
@@ -42,7 +36,9 @@ async def test_bulk_writer_does_not_replace_a_missing_value(db):
     object.__delattr__(obj, "intnum")
     types = IntFields.get_connection().dialect.types
     with pytest.raises(AttributeError):
-        BulkWriteBatches.serialize_instances(IntFields, types, [obj], ["intnum"])
+        BulkWriteBatches.serialize_instances(
+            HareContext.require_current().apps.get_binding(IntFields), types, [obj], ["intnum"]
+        )
 
 
 @pytest.mark.asyncio

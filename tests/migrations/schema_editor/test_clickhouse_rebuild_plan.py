@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from hare import Model, fields
+from hare.core.apps.model_binding_graph import ModelBindingGraph
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.ddl.schema_objects.view import View
 from hare.dialects.clickhouse.clickhouse_engine import ClickhouseEngine
@@ -35,7 +36,7 @@ def rebuild_model():
     apps = StateApps()
     apps.register_model("schema_plan", Book)
     apps.init_relations()
-    return Book
+    return apps.get_binding(Book)
 
 
 @pytest.mark.parametrize("engine", ["Atomic", "Replicated", "Shared"])
@@ -50,7 +51,10 @@ async def test_rebuild_preserves_original_until_exchange_and_releases_it_after_f
     client.cluster = None
     client.database = "default"
     editor = ClickhouseSchemaEditor(client, database_engines={"default": engine})
-    plan = editor.table_rebuild.get_rebuild_plan(rebuild_model, rebuild_model)
+    plan = editor.table_rebuild.get_rebuild_plan(
+        rebuild_model,
+        rebuild_model,
+    )
     preview = ClickhouseSchemaEditor(client, collect_sql=True, database_engines={"default": engine})
     await plan.execute(preview)
     statements = preview.collected_sql
@@ -97,7 +101,10 @@ async def test_unsupported_exchange_database_fails_before_ddl(rebuild_model, sna
     execute = AsyncMock()
     monkeypatch.setattr(editor, "run_sql", execute)
     with pytest.raises(UnSupportedError, match="EXCHANGE TABLES"):
-        await editor.table_rebuild.get_rebuild_plan(rebuild_model, rebuild_model).execute(editor)
+        await editor.table_rebuild.get_rebuild_plan(
+            rebuild_model,
+            rebuild_model,
+        ).execute(editor)
     execute.assert_not_called()
     assert catalog.await_count == (1 if snapshot is None else 0)
 
@@ -126,8 +133,8 @@ async def test_storage_transition_copies_the_previous_logical_table_and_preserve
         "Book",
         {"table_options": [ClickhouseTableOptions(engine="MergeTree", distributed_over=current)]},
     ).state_forward("schema_plan", target)
-    old_model = state.apps.get_model("schema_plan.Book")
-    new_model = target.apps.get_model("schema_plan.Book")
+    state.apps.get_model("schema_plan.Book")
+    target.apps.get_model("schema_plan.Book")
     client = FakeClient("clickhouse")
     client.database = "default"
     client.cluster = ClickhouseCluster(client, "alpha")
@@ -145,7 +152,9 @@ async def test_storage_transition_copies_the_previous_logical_table_and_preserve
 
     monkeypatch.setattr(client, "execute_dicts", catalog)
     monkeypatch.setattr(editor, "run_sql", execute)
-    plan = editor.table_partitions.get_alter_table_options_plan(old_model, new_model)
+    plan = editor.table_partitions.get_alter_table_options_plan(
+        state.apps.get_binding("schema_plan.Book"), target.apps.get_binding("schema_plan.Book")
+    )
     assert plan.before.qualified_name == f'"{previous or "book"}"'
     assert plan.after.qualified_name == f'"{current or "book"}"'
     await plan.execute(editor)
@@ -172,7 +181,9 @@ async def test_storage_transition_copies_the_previous_logical_table_and_preserve
 
         monkeypatch.setattr(client, "execute_dicts", occupied)
         with pytest.raises(ConfigurationError, match="already exists"):
-            await editor.table_partitions.get_alter_table_options_plan(old_model, new_model).execute(editor)
+            await editor.table_partitions.get_alter_table_options_plan(
+                state.apps.get_binding("schema_plan.Book"), target.apps.get_binding("schema_plan.Book")
+            ).execute(editor)
         assert trace == []
 
 
@@ -193,7 +204,7 @@ async def test_router_rebuild_drains_all_queues_without_copying_remote_rows(
             ],
         },
     ).state_forward("schema_plan", state)
-    model = state.apps.get_model("schema_plan.Book")
+    state.apps.get_model("schema_plan.Book")
     client = FakeClient("clickhouse")
     client.database = "default"
     client.cluster = None if cluster_name is None else ClickhouseCluster(client, cluster_name)
@@ -208,7 +219,9 @@ async def test_router_rebuild_drains_all_queues_without_copying_remote_rows(
     catalog = AsyncMock(side_effect=AssertionError("unexpected catalog read"))
     monkeypatch.setattr(client, "execute_dicts", catalog)
     monkeypatch.setattr(editor, "run_sql", execute)
-    plan = editor.table_rebuild.get_rebuild_plan(model, model)
+    plan = editor.table_rebuild.get_rebuild_plan(
+        state.apps.get_binding("schema_plan.Book"), state.apps.get_binding("schema_plan.Book")
+    )
     flush = 'SYSTEM FLUSH DISTRIBUTED "default"."book"' + (' ON CLUSTER "alpha"' if cluster_name else "")
     if failure is not None:
         with pytest.raises(ValueError, match=failure):
@@ -223,6 +236,8 @@ async def test_router_rebuild_drains_all_queues_without_copying_remote_rows(
 
 
 async def test_storage_cannot_be_implicitly_replaced_by_a_standalone_router(rebuild_model):
+    declaration_graph = ModelBindingGraph()
+
     class Router(Model):
         id = fields.IntField(primary_key=True, generated=False)
 
@@ -237,4 +252,4 @@ async def test_storage_cannot_be_implicitly_replaced_by_a_standalone_router(rebu
     client.cluster = None
     editor = ClickhouseSchemaEditor(client)
     with pytest.raises(UnSupportedError, match="explicit data migration"):
-        editor.table_rebuild.get_rebuild_plan(rebuild_model, Router)
+        editor.table_rebuild.get_rebuild_plan(rebuild_model, declaration_graph.include(Router))

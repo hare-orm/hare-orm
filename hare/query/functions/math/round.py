@@ -63,6 +63,7 @@ class Round(Function):
 
         Args:
             field_object: The rounded value's field.
+            expression_context: SQL context for the expression, including its query, binding and connection.
 
         Returns:
             The field the rounded result is decoded through.

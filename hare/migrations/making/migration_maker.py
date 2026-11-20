@@ -112,20 +112,20 @@ class MigrationMaker:
         Returns:
             The risks.
         """
-        state = project_state.clone()
+        # Preparation isolates its input; safety inspection reads the prepared snapshots.
+        state = project_state
         risks: list[MigrationRisk] = []
         for writer in MigrationMaker.get_writers_in_dependency_order(writers):
             migration = Migration(writer.name, writer.app_label, operations=writer.operations)
             migration.atomic = writer.atomic
             prepared = migration.prepare(state)
-            next_state = prepared.after.clone()
             connection_alias = self.apps_config[writer.app_label].get("default_connection") or DEFAULT_CONNECTION_NAME
             risks.extend(
                 await self.safety_checker.check(
                     migration, prepared, client=state.environment.connections.get(connection_alias), read_catalog=False
                 )
             )
-            state = next_state
+            state = prepared.after
         return risks
 
     @staticmethod
@@ -228,13 +228,7 @@ class MigrationMaker:
                 await MigrationMaker.apply_branches_together(
                     graph,
                     leaf_keys,
-                    State(
-                        environment=autodetector.environment,
-                        default_connections={
-                            label: config.get("default_connection", DEFAULT_CONNECTION_NAME)
-                            for label, config in self.apps_config.items()
-                        },
-                    ),
+                    autodetector.loader.create_initial_state(autodetector.environment),
                 )
             except Exception as error:
                 raise ConfigurationError(
@@ -269,10 +263,8 @@ class MigrationMaker:
             leaf_keys: The heads of the branches.
             state: The initial state and application environment; left unchanged.
         """
-        for key in graph.forwards_plan_for_all(leaf_keys):
-            migration = graph.nodes[key]
-            if isinstance(migration, Migration):
-                state = await migration.apply(state, dry_run=True, schema_editor=None)
+        keys = (key for key in graph.forwards_plan_for_all(leaf_keys) if graph.node_map[key].migration is not None)
+        await graph.replay_state(keys, state)
 
     @staticmethod
     def rename_writers(writers: list[MigrationWriter], name: str) -> None:

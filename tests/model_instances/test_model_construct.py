@@ -7,6 +7,8 @@ All tests use the ``db`` fixture to ensure Hare is initialized and _meta is full
 
 import pytest
 
+from hare import Model, fields
+from hare.core.hare_context import HareContext
 from hare.query.queryset.relations.many_to_many_relation import ManyToManyRelation
 from hare.query.queryset.relations.reverse_relation import ReverseRelation
 from tests.shared_models.testmodels import (
@@ -21,6 +23,9 @@ from tests.shared_models.testmodels import (
     Team,
     Tournament,
 )
+from tests.utils.model_bindings import ModelBindings
+
+pytestmark = pytest.mark.usefixtures("model_conversion_context")
 
 # ---------------------------------------------------------------------------
 # Basic data field construction
@@ -68,8 +73,9 @@ async def test_construct_gives_each_instance_its_own_copy_of_a_mutable_default(d
 
 
 @pytest.mark.asyncio
-async def test_construct_with_generated_pk_is_saved_with_that_pk(db):
-    instance = Tournament.construct(id=4300, name="constructed")
+@pytest.mark.parametrize("key_name", ("id", "pk"))
+async def test_construct_with_generated_pk_is_saved_with_that_pk(db, key_name):
+    instance = Tournament.construct(**{key_name: 4300}, name="constructed")
     assert instance._custom_generated_pk is True
 
     await instance.save()
@@ -410,10 +416,31 @@ async def test_constructor_values_go_through_an_overridden_setattr(db, monkeypat
 
     monkeypatch.setattr(Tournament, "__setattr__", recording_setattr)
     Tournament(name="spring", desc="d")
-    assert set(Tournament._meta.fields_db_projection) <= set(assignments)
+    assert set(HareContext.require_current().apps.get_binding(Tournament).fields_db_projection) <= set(assignments)
     monkeypatch.undo()
 
     given_key = Tournament(id=42, name="keyed")
     assert given_key.id == 42
     assert given_key._custom_generated_pk is True
     assert Tournament(name="unkeyed")._custom_generated_pk is False
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("key_type", ("automatic", "named", "composite"))
+@pytest.mark.parametrize("saved", (False, True))
+def test_construct_keeps_explicit_primary_key_alias_components(key_type, saved):
+    class Entry(Model):
+        if key_type == "named":
+            number = fields.IntField(primary_key=True, generated=False, default=7)
+        elif key_type == "composite":
+            region = fields.TextField(default="default")
+            number = fields.IntField(default=7)
+            pk = fields.CompositePrimaryKey("region", "number")
+
+    prepared_models = ModelBindings.prepare(Entry)
+
+    value = ("west", 5) if key_type == "composite" else 100
+    obj = prepared_models.construct(Entry, pk=value, _saved_in_db=saved)
+    assert obj.pk == value
+    assert obj._saved_in_db is saved
+    assert obj._custom_generated_pk is (key_type == "automatic" and not saved)

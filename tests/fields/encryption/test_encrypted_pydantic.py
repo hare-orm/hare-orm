@@ -7,17 +7,9 @@ import pytest
 
 from hare.core.connections.connections import Connections
 from hare.exceptions import ValidationError
-from hare.fields.encrypted.field_encryption import FieldEncryption
 from tests.fields.models_encrypted_pydantic import EncryptedSettingsRecord, EncryptedWebhookSettings
 
-SECRET_KEY = "test-field-encryption-secret"
-
-
-@pytest.fixture(autouse=True)
-def field_encryption_key():
-    FieldEncryption.configure(SECRET_KEY)
-    yield
-    FieldEncryption.reset()
+pytestmark = pytest.mark.usefixtures("field_encryption_key")
 
 
 @pytest.mark.asyncio

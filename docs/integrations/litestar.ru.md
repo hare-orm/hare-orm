@@ -101,9 +101,9 @@ async def get_chapter(chapter: NamedDependency[ChapterQuery]) -> ChapterSchema: 
 Litestar строит сигнатуры обработчиков при создании приложения, до того как при запуске откроются
 подключения. `HarePlugin` в этот момент привязывает модели своей конфигурации (`Hare.bind_models()`),
 поэтому параметры [`Meta.filters`](request-queries.ru.md#meta-filters) попадают в сигнатуры и в схему;
-если используется только `RequestQueryDIPlugin`, вызовите `Hare.bind_models()` до создания приложения.
-
-Без `HarePlugin` добавьте `RequestQueryDIPlugin()` в `plugins`.
+если используется только `RequestQueryDIPlugin`, передайте офлайн-реестр явно:
+`RequestQueryDIPlugin(apps=Hare.bind_models(HARE_CONFIG))` в `plugins`.
+Вызов `bind_models()` без использования возвращённого реестра не привязывает схемы обработчиков.
 
 ## <a id="haredto"></a>Ответы: `HareDTO`
 
@@ -139,16 +139,31 @@ async def list_books(books: NamedDependency[BookQuery]) -> Page[Book]:
 ```python
 from litestar.dto import DTOConfig
 
+from hare import Hare
 from hare.contrib.frameworks.litestar import HareDTO
+
+apps = Hare.bind_models(HARE_CONFIG)
 
 
 class BookDTO(HareDTO[Book]):
+    binding = apps.get_binding(Book)
     config = DTOConfig(exclude={"tags"}, rename_strategy="camel")
 
 
 @get("/books", return_dto=BookDTO, dependencies={"books": RequestQueryDIPlugin.provide(BookQuery)})
 async def list_books(books: NamedDependency[BookQuery]) -> Page[Book]:
     return await books.page()
+```
+
+Плагин выбирает независимую структурную привязку для каждого автоматически созданного DTO.
+Пользовательский DTO, подготавливаемый вне активного приложения, задаёт её явно; подключение
+к базе не открывается:
+
+```python
+apps = Hare.bind_models(HARE_CONFIG)
+
+class BookDTO(HareDTO[Book]):
+    binding = apps.get_binding(Book)
 ```
 
 ### <a id="related-rows"></a>Связанные строки
@@ -170,6 +185,7 @@ async def get_book(book_id: FromPath[int]) -> Book:
 
 ```python
 class BookDetailDTO(HareDTO[Book]):
+    binding = apps.get_binding(Book)
     config = DTOConfig(max_nested_depth=2)
 
 
@@ -186,6 +202,7 @@ async def get_book_detail(book_id: FromPath[int]) -> Book:
 
 ```python
 class BookDTO(HareDTO[Book]):
+    binding = apps.get_binding(Book)
     config = DTOConfig(
         max_nested_depth=2,
         exclude={"author.books", "tags.id"},
@@ -208,6 +225,7 @@ class BookDTO(HareDTO[Book]):
 
 ```python
 class PartialBookDTO(HareDTO[Book]):
+    binding = apps.get_binding(Book)
     config = DTOConfig(partial=True)
 
 @patch("/books/{book_id:int}", dto=PartialBookDTO)
@@ -225,6 +243,7 @@ async def change_book(book_id: int, data: DTOData[Book]) -> Book:
 
 ```python
 class BookDTO(HareDTO[Book]):
+    binding = apps.get_binding(Book)
     config = DTOConfig(exclude={"author.books"})
     extra_fields = {"reviews_count": int, "is_new": bool}  # читаются со строки по имени, с типом
     computed = ("title_length", "author.initials")          # синхронные свойства и методы

@@ -78,21 +78,31 @@ their consumers. Unparseable numeric text raises `ConfigurationError` when confi
 | `pool_acquire_timeout` | none (wait indefinitely) | Seconds to wait for a free connection before `PoolTimeoutError`, a `DBConnectionError`. The pool implementation controls timeout scheduling and accepted values. |
 | `command_timeout` | none (off) | Seconds allowed for one command round trip, enforced through `asyncio.timeout()` — see [`command_timeout`](#command-timeout). |
 
+A connection-opening timeout is distinct from an expired pool-acquisition deadline. The asyncpg driver
+reports it as a connection failure, without counting it as a pool timeout.
+
 ### <a id="statement-cache-size"></a>`statement_cache_size`
 
 A driver statement-cache capacity; hare does not impose its own upper limit. URL text is converted to
 an integer, and the driver interprets the setting. `0` turns the cache off: each statement is prepared
 for its own run
-— on `rust_pg` a statement whose values all carry a type of their own (a UUID, a date, a time, an aware
+— on `rust_pg` an ORM statement whose values all carry a type of their own (a UUID, a date, a time, an aware
 `datetime`, a `timedelta`, a `Decimal`, a `float`, `bytes`, a `bool`, `None`) goes out with them in one
 round trip instead.
 
 The native driver invalidates a stale cached plan when PostgreSQL reports a changed result type,
 then raises the error. It does not silently replay that statement: the same server error can originate
 in a nested query after other effects have occurred. A later explicit call prepares a fresh plan.
+Text-array delimiter metadata uses a bounded native LRU per physical connection. An explicit positive
+`statement_cache_size` also limits the retained member-type OIDs; `0` disables retention. With the
+driver default, delimiter retention is limited to 256 entries. A single bind may use more types than
+this limit: its complete descriptor is independent of subsequent cache eviction.
+
 Schema-editor operations explicitly invalidate driver statement and type metadata after DDL, including
 partially executed migration scripts. Native connections refresh their caches before their next use;
-asyncpg uses its public schema reload. Application-managed raw DDL can request this boundary with
+asyncpg uses its public schema reload and prepares accessible domain-array types through its public
+statement API, so domain values nested in anonymous records have the same codecs as direct columns.
+Application-managed raw DDL can request this boundary with
 `await connection.invalidate_schema_cache()`.
 
 For raw `execute()` and `execute_described()`, column names and affected-row counts come from
@@ -193,6 +203,9 @@ connection refused on another. Inside a transaction its connection is already op
 repeated. A dialect without password rotation (SQLite, ClickHouse) refuses `password_provider` as an
 unknown setting.
 
+Connections waiting for the same password refresh share its result, including when the provider
+returns the same password text. A later expiration or refused login can request another refresh.
+
 ## <a id="url-parameters-and-tls"></a>URL query parameters and TLS
 
 TLS is selected with `?sslmode=` (libpq values `disable`/`allow`/`prefer`/`require`/`verify-ca`/
@@ -289,11 +302,12 @@ on both drivers. A parameter of the wrong type for its column raises `Operationa
 converted, and a database error keeps the server's `DETAIL`/`HINT` in its message and its `sqlstate`,
 `constraint_name`, `table_name`, ... on the driver exception it was raised from.
 
-A raw statement's values pass to the driver as they are, so what asyncpg and rust_pg do with them shows
-through. hare makes them agree where it can:
+For raw SQL, PostgreSQL determines the parameter types from the statement on both drivers. A column
+comparison such as `WHERE id = $1` supplies the type. Where the SQL leaves it ambiguous, cast the
+placeholder explicitly, for example `SELECT pg_typeof($1::uuid)`. With rust_pg and its statement cache
+disabled, raw statements are prepared before binding, which can add a round trip.
 
-- **A wrong number of parameters** raises `OperationalError` on both — asyncpg refuses it before sending,
-  the server refuses it for rust_pg; the connection stays usable.
+- **A wrong number of parameters** raises `OperationalError` on both; the connection stays usable.
 - **A value Python's type holds none of** — `interval 'infinity'` or one of millions of years,
   `'24:00:00'::time`, a date before year 1 or after 9999 — raises `OperationalError` from a query of
   hare. An `interval` is read the way asyncpg reads it on both: a year of 365 days, a month of 30.
@@ -304,6 +318,14 @@ through. hare makes them agree where it can:
   column's range, so it never reaches the driver.
 - A login with no password raises `ConfigurationError`, like a wrong one, on both — rust_pg refuses it
   before the server asks.
+
+Native list parameters whose array elements require server text input use that element type's
+catalogued delimiter at every dimension. This includes `box[]`, arrays of domains and domains over
+arrays. Metadata is keyed by the actual member OID on the executing physical connection; identical
+type names in different schemas do not share it. The first use of an uncached member type loads its
+delimiter, and later bindings reuse it until schema metadata is invalidated. Ordinary binary text,
+integer and UUID arrays do not require that lookup. Batch binding also inspects rows after initial
+NULL or empty arrays, and transaction streaming uses the same metadata contract.
 
 The native driver selects decoders from physical column types and decodes each binary value once
 before publishing the result. An unsupported non-NULL value requests the server's text representation;

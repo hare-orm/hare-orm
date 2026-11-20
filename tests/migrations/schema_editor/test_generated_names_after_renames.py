@@ -31,13 +31,17 @@ def create_item() -> CreateModel:
 
 
 def get_expected_index_names(state: State, editor) -> set[str]:
-    model = state.apps.get_model(f"{APP_LABEL}.Item")
+    state.apps.get_model(f"{APP_LABEL}.Item")
     return {
-        index.name for index, _is_constraint in editor.generated_index_names.get_generated_index_names(model).values()
+        index.name
+        for index, _is_constraint in editor.generated_index_names.get_generated_index_names(
+            state.apps.get_binding(f"{APP_LABEL}.Item")
+        ).values()
     }
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("migration_context")
 async def test_indexes_take_the_names_of_the_renamed_columns_and_table_on_sqlite() -> None:
     client = AiosqliteClient(file_path=":memory:", connection_alias="generated_names")
     await client.create_connection(with_db=True)

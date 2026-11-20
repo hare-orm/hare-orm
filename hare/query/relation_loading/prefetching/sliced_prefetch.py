@@ -12,6 +12,7 @@ from hare.sql.order import Order
 from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset import QuerySet
 
 
@@ -47,9 +48,15 @@ class SlicedPrefetch:
         return unsliced
 
     @staticmethod
-    def reads_window(related_queryset: QuerySet[Any]) -> bool:
-        """Whether an annotation of a ``Prefetch`` queryset reads a window - computed over other rows
-        than its own, the rows of every parent, which a slice of each parent's rows would narrow."""
+    def needs_python_slice(related_queryset: QuerySet[Any]) -> bool:
+        """Whether per-parent numbering would change the queryset's row selection.
+
+        User windows must read all matching rows. Cursor bounds must select rows before
+        the per-parent slice, whereas filtering the added numbering window would put
+        those bounds after the slice. Both use the existing materialized-row strategy.
+        """
+        if related_queryset._cursor_values or related_queryset._before_cursor_values:
+            return True
         annotations = related_queryset._annotations
         seen_ids: set[int] = set()
         return any(
@@ -91,6 +98,11 @@ class SlicedPrefetch:
         """The slice of a ``Prefetch`` queryset, taken of each parent's rows."""
         offset = related_queryset._offset or 0
         limit = related_queryset._limit
+        if related_queryset._reverse_result_order:
+            # The reader restores the original order; backwards pagination slices its end.
+            if limit == 0:
+                return slice(0, 0)
+            return slice(None if limit is None else -offset - limit, -offset or None)
         return slice(offset, None if limit is None else offset + limit)
 
     @staticmethod
@@ -100,7 +112,8 @@ class SlicedPrefetch:
         unsliced = SlicedPrefetch.get_unsliced(related_queryset)
         if list(unsliced._apply_default_ordering(unsliced._orderings)):
             return unsliced
-        return unsliced.order_by(*unsliced.model._meta.primary_key_attribute_names)
+        model_binding: ModelBinding = unsliced._binding  # type: ignore[assignment]
+        return unsliced.order_by(*model_binding.primary_key_attribute_names)
 
     @staticmethod
     def repeats_rows_of_a_key(related_queryset: QuerySet[Any]) -> bool:
@@ -135,12 +148,13 @@ class SlicedPrefetch:
         limit = related_queryset._limit
         unsliced = SlicedPrefetch.get_unsliced(related_queryset)
         orderings = list(unsliced._apply_default_ordering(unsliced._orderings))
+        model_binding: ModelBinding = unsliced._binding  # type: ignore[assignment]
         if not orderings:
             # Without an ordering the rows of a parent come in the order of their keys.
-            orderings = [(name, Order.ASC) for name in unsliced.model._meta.primary_key_attribute_names]
+            orderings = [(name, Order.ASC) for name in model_binding.primary_key_attribute_names]
         window_orderings = [
             # An expression of Meta.ordering is ordered by itself - the window reads no alias of it.
-            Ordering(unsliced.model._meta.ordering_expressions.get(name, name), order)
+            Ordering(model_binding.ordering_expressions.get(name, name), order)
             for name, order in orderings
         ]
         number_function: Any = RowNumber()
@@ -150,7 +164,7 @@ class SlicedPrefetch:
             ordering_names = {name for name, _order in orderings}
             window_orderings += [
                 Ordering(name, Order.ASC)
-                for name in unsliced.model._meta.primary_key_attribute_names
+                for name in model_binding.primary_key_attribute_names
                 if name not in ordering_names
             ]
             number_function = DenseRank()

@@ -66,6 +66,42 @@ async def read_texts():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["queryset", "cached_queryset", "instance", "bulk"])
+async def test_retained_queries_pin_only_the_source_applications_reads(operation):
+    async with primary_and_replica() as first:
+        source = first.connections.get("primary")
+        replica = first.connections.get("replica")
+        await Note.objects.using(source).create(id=1, text="first primary")
+        await Note.objects.using(replica).create(id=1, text="first replica")
+        source_query = Note.objects.using(source)
+        query = source_query.filter(id=1)
+        if operation == "cached_queryset":
+            await query.update(text="first primary")
+        Routing.forget_writes()
+        assert await read_texts() == ["first replica"]
+        async with primary_and_replica() as second:
+            other_source = second.connections.get("primary")
+            other_replica = second.connections.get("replica")
+            await Note.objects.using(other_source).create(id=1, text="second primary")
+            await Note.objects.using(other_replica).create(id=1, text="second replica")
+            Routing.forget_writes()
+            assert await read_texts() == ["second replica"]
+            if operation in {"queryset", "cached_queryset"}:
+                await query.update(text="first changed")
+            elif operation == "instance":
+                obj = await source_query.get(id=1)
+                obj.text = "first changed"
+                await obj.save(using=source)
+            else:
+                await source_query.bulk_update([first.apps.new(Note, id=1, text="first changed")], ["text"])
+            assert await source_query.values_list("text", flat=True) == ["first changed"]
+            assert await Note.objects.using(other_source).values_list("text", flat=True) == ["second primary"]
+            assert await Note.objects.using(other_replica).values_list("text", flat=True) == ["second replica"]
+            assert await read_texts() == ["second replica"]
+        assert await read_texts() == ["first changed"]
+
+
+@pytest.mark.asyncio
 async def test_a_read_after_a_write_goes_to_the_written_connection():
     async with primary_and_replica():
 

@@ -65,7 +65,7 @@ class RemoveSchemaObject(ModelBoundOperation):
         """
         model_state = self.get_model_state(state, app_label, self.model_name)
         return self.object_type.find(
-            model_state, lambda: self._model(state, app_label), name=self.name, fields=self.fields
+            model_state, lambda: self.get_model_binding(state, app_label), name=self.name, fields=self.fields
         )
 
     def state_forward(self, app_label: str, state: State) -> None:
@@ -90,8 +90,8 @@ class RemoveSchemaObject(ModelBoundOperation):
         self.check_can_run(state_editor)
         await self.object_type.remove(
             state_editor,
-            self._model(old_state, app_label),
-            self._model(new_state, app_label),
+            self.get_model_binding(old_state, app_label),
+            self.get_model_binding(new_state, app_label),
             self.find(old_state, app_label),
             **self.get_type_options(),
         )
@@ -106,5 +106,5 @@ class RemoveSchemaObject(ModelBoundOperation):
         if not state_editor:
             return
         self.check_can_run(state_editor)
-        model = self._model(new_state, app_label)
+        model = self.get_model_binding(new_state, app_label)
         await self.object_type.add(state_editor, model, self.find(new_state, app_label), **self.get_type_options())

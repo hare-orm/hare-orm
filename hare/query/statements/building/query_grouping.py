@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from copy import copy
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import FieldError, UnSupportedError
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
 from hare.query.expressions.expression_context import ExpressionContext
-from hare.query.lookup_info.bound_lookup_path import BoundLookupPath
-from hare.query.queryset.concrete_field_paths import ConcreteFieldPaths
+from hare.query.grouping.grouping_expressions import GroupingExpressions
 from hare.query.queryset.constants import AGGREGATE_GROUP_NAME_MESSAGE
 from hare.query.statements.building.query_annotations import QueryAnnotations
 from hare.query.statements.building.query_joins import QueryJoins
@@ -18,6 +17,7 @@ from hare.sql.terms.select_reference import SelectReference
 from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
+    from hare.models.model_binding import ModelBinding
     from hare.query.statements.awaitable_query import AwaitableQuery
     from hare.sql.builder.tables.declarations import SourceBinding
 
@@ -40,6 +40,7 @@ class QueryGrouping:
         Args:
             query: The query.
         """
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
         if query._has_aggregate:
             source_bindings = NodeStructure.get_source_bindings(query.query)
             grouped_keys: set[tuple[Any, ...]] = set()
@@ -62,7 +63,7 @@ class QueryGrouping:
                 if not query.query._havings:
                     return
                 effective_table = query._effective_basetable()
-                group_by_terms = [effective_table[field] for field in query.model._meta.db_fields]
+                group_by_terms = [effective_table[field] for field in model_binding.db_fields]
             elif query.group_by_must_include_primary_key or aggregates_per_model_row:
                 # One group per row: the selected columns alone needn't be unique, so the primary
                 # key is grouped by too - it needn't be selected.
@@ -71,8 +72,8 @@ class QueryGrouping:
                     group_by_terms,
                     grouped_keys,
                     [
-                        effective_table[query.model._meta.fields_db_projection[attribute_name]]
-                        for attribute_name in query.model._meta.primary_key_attribute_names
+                        effective_table[model_binding.fields_db_projection[attribute_name]]
+                        for attribute_name in model_binding.primary_key_attribute_names
                     ],
                     source_bindings,
                 )
@@ -86,15 +87,7 @@ class QueryGrouping:
                 )
             # Grouped by without their SELECT alias: a bare alias like "id" would be ambiguous next
             # to a joined table's column of that name.
-            aliasless_terms = []
-            for term in group_by_terms:
-                # An alias-free term stays the same object, so an ORDER BY of it renders with the
-                # same bind parameters as its GROUP BY.
-                aliasless_term = term
-                if term.alias is not None:
-                    aliasless_term = copy(term)
-                    aliasless_term.alias = None
-                aliasless_terms.append(aliasless_term)
+            aliasless_terms = [term.without_alias() for term in group_by_terms]
             query.query = query.query.groupby(*aliasless_terms)
 
     @staticmethod
@@ -173,7 +166,7 @@ class QueryGrouping:
         source_bindings = NodeStructure.get_source_bindings(query.query)
         grouped_keys = QueryGrouping.get_grouped_keys(query, source_bindings)
         effective_table = query._effective_basetable()
-        meta = query.model._meta
+        meta: ModelBinding = query._binding  # type: ignore[assignment]
         primary_key_keys = {
             QueryGrouping.get_group_by_key(effective_table[meta.fields_db_projection[attribute_name]], source_bindings)
             for attribute_name in meta.primary_key_attribute_names
@@ -303,9 +296,10 @@ class QueryGrouping:
             raise UnSupportedError(
                 f"{grouping_set!r} needs GROUP BY grouping sets, which {query._connection.dialect} doesn't have"
             )
-        set_names = set(grouping_set.field_names)
+        grouping_field_names = grouping_set.field_names
+        set_names = set(grouping_field_names)
         plain_names = [name for name in field_names if name not in set_names]
-        terms_by_name = {name: QueryGrouping.get_group_bys(query, name) for name in grouping_set.field_names}
+        terms_by_name = {name: QueryGrouping.get_group_bys(query, name) for name in grouping_field_names}
         return [*QueryGrouping.get_group_bys(query, *plain_names), grouping_set.get_element(terms_by_name)]
 
     @staticmethod
@@ -324,23 +318,31 @@ class QueryGrouping:
         """
         group_bys: list[Term] = []
         effective_table = query._effective_basetable()
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
         context = ExpressionContext(
-            model=query.model,
+            binding=model_binding,
             table=effective_table,
             annotations=query._annotations,
             dialect=query.dialect,
             connection=query._connection,
             visibility=query._visibility,
             select_related_extra_conditions=query._select_related_extra_conditions,
+            grouping_annotation_result=partial(
+                QueryAnnotations.get_grouping_annotation_result,
+                query,
+            ),
+            application_context=query._context,
         )
         for field_name in field_names:
             EncryptedFieldBase.raise_if_encrypted(
                 QueryAnnotations.get_field_object_by_path(query, field_name), "GROUP BY"
             )
-            if field_name in query._annotations:
-                annotation_term = QueryAnnotations.get_annotation_expression_term(
-                    query, field_name, query._annotations, effective_table
-                )
+            results = GroupingExpressions.get_results(context, field_name)
+            if field_name in query._annotations and len(results) == 1:
+                annotation_result = results[0]
+                annotation_term = annotation_result.term
+                for join in annotation_result.joins:
+                    QueryJoins.join_table(query, join)
                 if annotation_term.contains_aggregate:
                     raise FieldError(AGGREGATE_GROUP_NAME_MESSAGE.format(name=field_name))
                 # A bare Field renders as the quoted SELECT alias. An annotation that is not
@@ -353,10 +355,8 @@ class QueryGrouping:
                     group_bys.append(annotation_term)
                 continue
             # A composite key (pk, or a relation to one) groups by every one of its columns.
-            for concrete_field_name in ConcreteFieldPaths.get_paths(query.model, field_name):
-                bound_path = BoundLookupPath.bind(context, concrete_field_name)
-                for join in bound_path.joins:
+            for result in results:
+                for join in result.joins:
                     QueryJoins.join_table(query, join)
-                column = bound_path.columns[0]
-                group_bys.append(column.as_(f"{column.table.get_table_name()}__{concrete_field_name}"))  # type: ignore[union-attr]
+                group_bys.append(result.term)
         return group_bys

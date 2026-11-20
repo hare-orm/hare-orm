@@ -5,7 +5,7 @@ without building a query is ``LookupInfoBuilder``'s.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection
 from typing import TYPE_CHECKING, Any
 
 from hare.core.connections.model_connection_choice import ModelConnectionChoice
@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.dialect import Dialect
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.expressions import Q
     from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
 
@@ -44,12 +45,27 @@ class LookupPaths:
     MAX_SELECT_LABEL_PREFIX_BYTES = 20
 
     @staticmethod
-    def safe_select_label(prefix: str, field_name: str) -> str:
+    def safe_select_label(prefix: str, field_name: str, reserved_labels: Collection[str] = ()) -> str:
         """Builds the ``"{prefix}.{field_name}"`` label of a ``select_related()`` column, shortened so
-        the whole label fits the identifier length limit.
+        the whole label fits the identifier length limit and avoids public annotation labels.
+
+        Keep the logical field suffix: named-row readers use it within each hydration bucket.
+        Only the internal prefix changes when an annotation has reserved the same label.
         """
         prefix = Identifiers.shorten(prefix, LookupPaths.MAX_SELECT_LABEL_PREFIX_BYTES)
-        return f"{prefix}.{field_name}"
+        label = f"{prefix}.{field_name}"
+        if not reserved_labels:
+            return label
+        labels = Identifiers(reserved_labels)
+        if label not in labels:
+            return label
+        prefixes = Identifiers(tuple(name.rpartition(".")[0] for name in reserved_labels))
+        candidate = prefix
+        while label in labels:
+            prefixes.add(candidate)
+            candidate = prefixes.get_free_name(prefix)
+            label = f"{Identifiers.shorten(candidate, LookupPaths.MAX_SELECT_LABEL_PREFIX_BYTES)}.{field_name}"
+        return label
 
     @staticmethod
     def crosses_connections(related_field: RelationalField[Any]) -> bool:
@@ -68,8 +84,13 @@ class LookupPaths:
         if HareContext.get_current() is None:
             return False
         try:
-            connection = ModelConnectionChoice.get_metadata_connection(related_field.model)
-            related_connection = ModelConnectionChoice.get_metadata_connection(related_field.related_model)
+            connection = ModelConnectionChoice.get_metadata_connection(
+                HareContext.require_current(),
+                related_field.get_binding().model_binding,  # type: ignore[arg-type]
+            )
+            related_connection = ModelConnectionChoice.get_metadata_connection(
+                HareContext.require_current(), related_field.get_related_binding()
+            )
         except ConfigurationError:
             # A model of no connection - one of a migration's state, its DDL written - crosses none; a query of
             # it fails asking for its connection.
@@ -90,9 +111,17 @@ class LookupPaths:
         """
         if not isinstance(related_field, ManyToManyFieldInstance):
             return False
-        declaring_model = related_field.related_model if related_field._generated else related_field.model
-        declaring_connection = ModelConnectionChoice.get_metadata_connection(declaring_model)
-        return declaring_connection is ModelConnectionChoice.get_metadata_connection(related_field.model)
+        owner_binding = related_field.get_binding().model_binding
+        declaring_connection = ModelConnectionChoice.get_metadata_connection(
+            HareContext.require_current(),
+            related_field.get_related_binding()  # type: ignore[arg-type]
+            if related_field._generated
+            else owner_binding,
+        )
+        return declaring_connection is ModelConnectionChoice.get_metadata_connection(
+            HareContext.require_current(),
+            owner_binding,  # type: ignore[arg-type]
+        )
 
     @staticmethod
     def get_joins_for_related_field(
@@ -141,7 +170,8 @@ class LookupPaths:
             f"__gen{filter_call_generation}" if filter_call_generation and related_field.is_multi_valued else ""
         )
 
-        related_table: Table = related_field.related_model._meta.basetable
+        related_binding = related_field.get_related_binding()
+        related_table: Table = related_binding.basetable
         if isinstance(related_field, ManyToManyFieldInstance):
             # Always aliased: a second many-to-many hop over the same through table would otherwise
             # count as already joined.
@@ -153,8 +183,8 @@ class LookupPaths:
             related_table = related_table.as_(
                 Identifiers.get_within_limit(f"{table.get_table_name()}__{related_field_name}{generation_suffix}")
             )
-            owner_pk_columns = KeyColumns.get_source_columns(related_field.model._meta)
-            target_pk_columns = KeyColumns.get_source_columns(related_field.related_model._meta)
+            owner_pk_columns = KeyColumns.get_source_columns(related_field.get_binding().model_binding)  # type: ignore[arg-type]
+            target_pk_columns = KeyColumns.get_source_columns(related_binding)
             required_joins.append(
                 (
                     through_table,
@@ -176,9 +206,7 @@ class LookupPaths:
                 )
             )
         elif isinstance(related_field, BackwardForeignKeyRelation):
-            to_field_source_fields = [
-                to_field.source_field or to_field.model_field_name for to_field in related_field.to_field_instances
-            ]
+            to_field_source_fields = related_field.to_column_names
 
             # Always aliased: a self-referential relation walked several hops deep can collide with
             # any earlier hop or with the FROM table.
@@ -195,12 +223,7 @@ class LookupPaths:
                 )
             )
         else:
-            to_field_source_fields = [
-                to_field.source_field or to_field.model_field_name for to_field in related_field.to_field_instances
-            ]
-
-            from_fields = [related_field.model._meta.fields_map[sf] for sf in related_field.source_fields]
-            from_field_source_fields = [to_field.source_field or to_field.model_field_name for to_field in from_fields]
+            to_field_source_fields = related_field.to_column_names
 
             related_table = related_table.as_(
                 Identifiers.get_within_limit(f"{table.get_table_name()}__{related_field_name}")
@@ -210,37 +233,39 @@ class LookupPaths:
                     related_table,
                     KeyColumns.row_equality(
                         [related_table[column] for column in to_field_source_fields],
-                        [table[column] for column in from_field_source_fields],
+                        [table[column] for column in related_field.db_column_names],
                     ),
                 )
             )
         return required_joins
 
     @staticmethod
-    def expand_expression(root_model: type[Model], lookup_expression: str) -> Sequence[Field[Any]]:
-        """The fields a lookup path crosses, from the model to the field it ends at.
+    def get_expression_path(root_binding: ModelBinding, lookup_expression: str) -> tuple[LookupPath, Field[Any]]:
+        """The parsed path of an expression and the field it ends at.
 
         Args:
-            root_model: The model the path starts at.
+            root_binding: The model the path starts at.
             lookup_expression: The path - ``author__name``.
 
         Returns:
-            The fields.
+            The path and the terminal field, with a scalar primary-key alias expanded.
 
         Raises:
             FieldError: The path names no field.
         """
-        lookup_path = LookupPath.parse(root_model, lookup_expression)
+        lookup_path = LookupPath.parse(root_binding, lookup_expression)
         if len(lookup_path.rest) != 1:
             raise FieldError(f"{lookup_expression} not resolvable")
+        model_binding = lookup_path.binding
         model = lookup_path.model
         last_field_name = lookup_path.rest[0]
-        if last_field_name == PRIMARY_KEY_ALIAS and isinstance(model._meta.primary_key_attribute, str):
-            last_field_name = model._meta.primary_key_attribute
-        last_field = model._meta.fields_map.get(last_field_name)
+        primary_key_attribute = model_binding.primary_key_attribute
+        if last_field_name == PRIMARY_KEY_ALIAS and isinstance(primary_key_attribute, str):
+            last_field_name = primary_key_attribute
+        last_field = model_binding.fields_map.get(last_field_name)
         if last_field is None:
             raise FieldError(f"Unknown field {lookup_expression!r}: {model.__name__} has no field {last_field_name!r}")
-        return [*lookup_path.relations, last_field]
+        return lookup_path, last_field
 
     @staticmethod
     def get_scoped_joins(
@@ -255,6 +280,7 @@ class LookupPaths:
         connection: DatabaseClient | None,
         through_only: bool = False,
         value_wrapper_references: RecordedValueReferences | None = None,
+        application_context: HareContext | None = None,
     ) -> list[TableCriterionTuple]:
         """The JOINs of one relation hop scoped like the related model's own queryset: a through
         model's default scope and the visibility of the rows it points at, the related model's
@@ -275,6 +301,7 @@ class LookupPaths:
                 table.
             value_wrapper_references: An existing recorder for the extra condition; otherwise
                 the active statement recorder receives its references.
+            application_context: The application context used to bind values and check model routing.
 
         Returns:
             The joins, the related table last.
@@ -288,7 +315,12 @@ class LookupPaths:
         )
         if through_only:
             ScopeJoinConditions.fold_through_model_ambient_scope_into_join(
-                joins, related_field, visibility=visibility, dialect=dialect, connection=connection
+                joins,
+                related_field,
+                visibility=visibility,
+                dialect=dialect,
+                connection=connection,
+                application_context=application_context,
             )
             return joins
         ScopeJoinConditions.fold_through_join_scopes(
@@ -297,21 +329,25 @@ class LookupPaths:
             visibility=visibility,
             dialect=dialect,
             connection=connection,
+            application_context=application_context,
         )
+        related_binding = related_field.get_related_binding()
         ScopeJoinConditions.fold_ambient_scope_into_join(
             joins,
-            related_field.related_model,
+            related_binding,
             visibility=visibility,
             dialect=dialect,
             connection=connection,
+            application_context=application_context,
         )
         ScopeJoinConditions.fold_extra_condition_into_join(
             joins,
-            related_field.related_model,
+            related_binding,
             extra_condition,
             dialect=dialect,
             connection=connection,
             value_wrapper_references=value_wrapper_references,
+            application_context=application_context,
         )
         ScopeJoinConditions.fold_extra_condition_into_through_join(
             joins,
@@ -319,6 +355,7 @@ class LookupPaths:
             extra_condition,
             dialect=dialect,
             connection=connection,
+            application_context=application_context,
         )
         return joins
 

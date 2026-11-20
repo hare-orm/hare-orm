@@ -1,8 +1,11 @@
 import pytest
 
 from hare import fields
+from hare.core.hare_context import HareContext
 from hare.exceptions import ValidationError
 from tests.shared_models import testmodels
+
+pytestmark = pytest.mark.usefixtures("model_conversion_context")
 
 # ============================================================================
 # TestIntFields
@@ -76,7 +79,7 @@ def test_a_text_read_from_the_database_that_is_no_int_raises_a_validation_error(
 def test_a_bool_given_for_an_int_is_refused():
     """bool is a subclass of int - a flag given for a number reached rust_pg as a boolean
     parameter of an integer column."""
-    field = testmodels.IntFields._meta.fields_map["intnum"]
+    field = HareContext.require_current().apps.get_binding(testmodels.IntFields).fields_map["intnum"]
     inst = testmodels.IntFields(intnum=1, intnum_null=None)
     with pytest.raises(ValidationError, match="expected an int, got bool"):
         field.to_db_value(True, inst)
@@ -99,7 +102,10 @@ async def test_an_integer_expression_reads_the_databases_own_result(db):
     for value in (2, 3):
         await testmodels.BigIntFields.objects.create(intnum=value)
     result = await testmodels.BigIntFields.objects.aggregate(half=Sum("intnum") / 2)
-    if testmodels.BigIntFields._meta.connection.dialect.name == "postgresql":
+    if (
+        HareContext.require_current().apps.get_queryset(testmodels.BigIntFields).get_connection().dialect.name
+        == "postgresql"
+    ):
         assert result["half"] == Decimal("2.5")
     else:
         assert result["half"] == 2

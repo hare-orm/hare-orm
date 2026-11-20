@@ -81,8 +81,6 @@ def init_memory_database(
         models = default_models
     elif isinstance(models, str):
         models = [models]
-    else:
-        models = models
     return partial(wrapper, model_modules=models)  # type: ignore[arg-type]
 
 

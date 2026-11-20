@@ -9,14 +9,16 @@ from hare.exceptions import ConfigurationError, QueryError
 from hare.query.expressions import ExpressionContext
 from hare.search import SearchQuery, SearchVector
 from tests.dialects.postgresql.models_tsvector import TSVectorEntry
+from tests.utils.model_bindings import ModelBindings
 
 pytestmark = pytest.mark.database_independent
 
 
 def bind_field(expression, config=None):
     field = TSVectorField(expression=expression, config=config)
-    field.model = TSVectorEntry
-    field.model_field_name = "search_vector"
+    binding = ModelBindings.prepare(TSVectorEntry).get_binding(TSVectorEntry)
+    field.bind_to_model(TSVectorEntry, "search_vector")
+    field.get_binding().model_binding = binding
     return field
 
 
@@ -24,8 +26,8 @@ def test_defaults_apply_to_each_vector_without_overwriting_explicit_configuratio
     expression = SearchVector("title", weight="A") + SearchVector("body", config="english", weight="B")
     field = bind_field(expression, "russian")
     sql = field.get_generated_sql(DialectRegistry.get_dialect("postgresql"))
-    assert "TO_TSVECTOR('russian',COALESCE(\"title\",''))" in sql
-    assert "TO_TSVECTOR('english',COALESCE(\"body\",''))" in sql
+    assert "TO_TSVECTOR(CAST('russian' AS regconfig),COALESCE(\"title\",''))" in sql
+    assert "TO_TSVECTOR(CAST('english' AS regconfig),COALESCE(\"body\",''))" in sql
     assert expression.left.config is None
     assert expression.right.config == "english"
 
@@ -54,8 +56,13 @@ def test_each_generated_vector_requires_a_configuration():
 
 def test_search_without_common_configuration_requires_explicit_query_languages():
     dialect = DialectRegistry.get_dialect("postgresql")
+    binding = ModelBindings.prepare(TSVectorEntry).get_binding(TSVectorEntry)
     context = ExpressionContext(
-        model=TSVectorEntry, table=TSVectorEntry.get_table(), annotations={}, dialect=dialect, connection=None
+        binding=binding,
+        table=binding.basetable,
+        annotations={},
+        dialect=dialect,
+        connection=None,
     )
     term = context.table.search_vector
     with pytest.raises(QueryError, match="SearchQuery"):

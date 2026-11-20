@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.exceptions import FieldError, QueryError, ValidationError
 from hare.query.expressions import F
 from tests.shared_models import testmodels, testmodels_postgres
@@ -104,13 +105,19 @@ async def test_constructor_assigns_relations_and_checks_their_keys(db):
 @pytest.mark.asyncio
 async def test_a_patched_to_python_is_used(db, monkeypatch):
     calls = []
-    original_to_python = testmodels.CharFields._meta.fields_map["char"].__class__.to_python
+    original_to_python = (
+        HareContext.require_current().apps.get_binding(testmodels.CharFields).fields_map["char"].__class__.to_python
+    )
 
     def counting_to_python(self, value):
         calls.append(value)
         return original_to_python(self, value)
 
-    monkeypatch.setattr(type(testmodels.CharFields._meta.fields_map["char"]), "to_python", counting_to_python)
+    monkeypatch.setattr(
+        type(HareContext.require_current().apps.get_binding(testmodels.CharFields).fields_map["char"]),
+        "to_python",
+        counting_to_python,
+    )
     with pytest.raises(ValidationError, match="expected a str"):
         testmodels.CharFields(char=123)
     assert calls == [123]

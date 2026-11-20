@@ -7,13 +7,13 @@ import pytest
 
 from hare.contrib.test import hare_test_context
 from hare.exceptions import ConfigurationError
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 @pytest.mark.asyncio
 async def test_the_outbox_is_refused_when_bound():
     db_url = os.getenv("HARE_TEST_DB", "")
-    if not db_url.startswith("clickhouse"):
-        pytest.skip("runs against the ClickHouse test server - make test_clickhouse")
+    DatabaseUnderTest.skip_unless_clickhouse(db_url)
     with pytest.raises(ConfigurationError, match="keeps nothing unique"):
         async with hare_test_context(
             modules=["tests.dialects.clickhouse.change_capture.models"],

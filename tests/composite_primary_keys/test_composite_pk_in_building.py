@@ -7,13 +7,12 @@ objects at once, each object still restored."""
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import pytest
 import pytest_asyncio
 
-from hare.contrib.test import RollbackIsolation, hare_test_context, requires_features
+from hare.contrib.test import RollbackIsolation, requires_features
 from hare.core.connections.connections import Connections
 from hare.exceptions import QueryError, UnSupportedError, ValidationError
 from hare.query.expressions import F
@@ -22,18 +21,14 @@ from hare.sql.terms.term import Term
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 from hare.transactions import Transactions
 from tests.composite_primary_keys.composite_key_list_models import CompositeIntKeyEntry, CompositeTextKeyEntry
+from tests.utils.database_under_test import DatabaseUnderTest
 
 MODULES = ["tests.composite_primary_keys.composite_key_list_models"]
 
 
 @pytest_asyncio.fixture(scope="module")
 async def composite_db_module():
-    async with hare_test_context(
-        MODULES,
-        db_url=os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:"),
-        app_label="models",
-        connection_label="models",
-    ) as context:
+    async with DatabaseUnderTest.open_model_context(MODULES) as context:
         yield context
 
 

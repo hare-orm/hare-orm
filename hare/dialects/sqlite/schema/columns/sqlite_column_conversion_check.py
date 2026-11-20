@@ -62,41 +62,46 @@ class SqliteColumnConversionCheck(ColumnConversionCheck):
             OperationalError: A stored value is no value of the new type.
         """
         if isinstance(new_field, (GeometryField, VectorField)):
-            await self.check_kept_values(qualified_table, new_field, quoted_column)
+            await self.check_kept_values(qualified_table, new_field, quoted_column, old_field=old_field)
             return
         old_type = self.get_value_type(old_field)
         new_type = self.get_value_type(new_field)
-        if new_type is None and type(old_field) is not type(new_field):
-            # A field of another type (a UUID, a JSON document, a duration) - each value read as it reads.
-            unread_value = await self.get_unread_value(qualified_table, quoted_column, new_field)
-            if unread_value is not None:
+        if new_type is None:
+            if type(old_field) is type(new_field):
+                return
+        else:
+            if old_type == new_type or new_type == SqliteConvertedValueType.TEXT:
+                return
+            if old_type in self.NUMBER_TYPES and new_type in self.NUMBER_TYPES:
+                return
+            integer_range = new_field.COLUMN_TYPE_RANGE if isinstance(new_field, IntField) else None
+            # A value of a type no conversion reads is stored as text.
+            unreadable_value = await self.get_unreadable_text(qualified_table, quoted_column, new_type, integer_range)
+            if unreadable_value is not None:
                 raise OperationalError(
-                    SQLITE_INVALID_INPUT_MESSAGE.format(new_type=type(new_field).__name__, value=unread_value)
+                    SQLITE_INVALID_INPUT_MESSAGE.format(
+                        new_type=new_type,
+                        value=self.get_shown_conversion_value(old_field, new_field, unreadable_value),
+                    )
                 )
-            return
-        if new_type is None or old_type == new_type or new_type == SqliteConvertedValueType.TEXT:
-            return
-        if old_type in self.NUMBER_TYPES and new_type in self.NUMBER_TYPES:
-            # A number or a boolean converts into each of them.
-            return
-        integer_range = new_field.COLUMN_TYPE_RANGE if isinstance(new_field, IntField) else None
-        # A value of a type no conversion reads (a UUID, a JSON document) is its text - as a text's.
-        unreadable_value = await self.get_unreadable_text(qualified_table, quoted_column, new_type, integer_range)
-        if unreadable_value is not None:
-            raise OperationalError(SQLITE_INVALID_INPUT_MESSAGE.format(new_type=new_type, value=unreadable_value))
-        if new_type not in self.NUMBER_TYPES and (
-            self.editor.table_rebuild.get_remake_value_conversion_sql(old_field, new_field, quoted_column)
-            == quoted_column
-        ):
-            # Copied into the rebuilt table as it is stored - a date of a boolean, a time of a moment's text: each
-            # value read as the new field reads it.
-            unread_value = await self.get_unread_value(qualified_table, quoted_column, new_field)
-            if unread_value is not None:
-                raise OperationalError(
-                    SQLITE_INVALID_INPUT_MESSAGE.format(new_type=type(new_field).__name__, value=unread_value)
+            if new_type in self.NUMBER_TYPES or (
+                self.editor.table_rebuild.get_remake_value_conversion_sql(old_field, new_field, quoted_column)
+                != quoted_column
+            ):
+                return
+        # The rebuilt column keeps the stored values, so check that the new field can read them.
+        unread_value = await self.get_unread_value(qualified_table, quoted_column, new_field)
+        if unread_value is not None:
+            raise OperationalError(
+                SQLITE_INVALID_INPUT_MESSAGE.format(
+                    new_type=type(new_field).__name__,
+                    value=self.get_shown_conversion_value(old_field, new_field, unread_value),
                 )
+            )
 
-    async def check_kept_values(self, qualified_table: str, new_field: Field[Any], quoted_column: str) -> None:
+    async def check_kept_values(
+        self, qualified_table: str, new_field: Field[Any], quoted_column: str, *, old_field: Field[Any] | None = None
+    ) -> None:
         """Refuses a change of a geometry or a vector field whose column holds a value the new field refuses -
         the column holds any geometry or vector, and one of another type, SRID, dimensions or length would
         stay there, which the field reads no more.
@@ -105,18 +110,19 @@ class SqliteColumnConversionCheck(ColumnConversionCheck):
             qualified_table: The already schema-qualified, quoted table name.
             new_field: The field's new definition.
             quoted_column: The already-quoted column.
+            old_field: The field as it was defined before the change.
 
         Raises:
             OperationalError: The new field refuses a stored value.
         """
         if not isinstance(new_field, (GeometryField, VectorField)):
             return
-        refusal = await self.get_unfit_value_refusal(qualified_table, quoted_column, new_field)
+        refusal = await self.get_unfit_value_refusal(qualified_table, quoted_column, new_field, old_field=old_field)
         if refusal is not None:
             raise OperationalError(SQLITE_UNFIT_VALUE_MESSAGE.format(refusal=refusal))
 
     async def get_unfit_value_refusal(
-        self, qualified_table: str, quoted_column: str, new_field: Field[Any]
+        self, qualified_table: str, quoted_column: str, new_field: Field[Any], *, old_field: Field[Any] | None = None
     ) -> str | None:
         """Why the new field refuses a stored value it reads - a geometry of another type or SRID, a vector of
         another length.
@@ -125,21 +131,19 @@ class SqliteColumnConversionCheck(ColumnConversionCheck):
             qualified_table: The already schema-qualified, quoted table name.
             quoted_column: The already-quoted column.
             new_field: The field's new definition.
+            old_field: The field as it was defined before the change.
 
         Returns:
             The field's refusal of one such value, None when every one fits.
         """
         read_value = self.editor.client.dialect.types.get_python_reader(new_field)
         write_value = self.editor.client.dialect.types.get_db_writer(new_field)
-        _, rows = await self.editor.client.execute(
-            f"SELECT DISTINCT {quoted_column} AS value FROM {qualified_table} "  # nosec B608
-            f"WHERE {quoted_column} IS NOT NULL"
-        )
-        for row in rows:
-            stored_value = dict(row)["value"]
+        for stored_value in await self.iter_distinct_stored_values(qualified_table, quoted_column):
             try:
                 write_value(read_value(stored_value), None)
             except (ValidationError, ValueError, TypeError) as error:
+                if new_field.sensitive or (old_field is not None and old_field.sensitive):
+                    return self.get_shown_conversion_value(old_field or new_field, new_field, stored_value)
                 return str(error)
         return None
 
@@ -200,12 +204,8 @@ class SqliteColumnConversionCheck(ColumnConversionCheck):
                 f"WHERE {quoted_column} IS NOT NULL AND {reader_function}({quoted_column}) IS NULL LIMIT 1"
             )
             return str(dict(rows[0])["value"]) if rows else None
-        _, rows = await client.execute(
-            f"SELECT DISTINCT {quoted_column} AS value FROM {qualified_table} "  # nosec B608
-            f"WHERE {quoted_column} IS NOT NULL"
-        )
-        for row in rows:
-            value = str(dict(row)["value"])
+        for stored_value in await self.iter_distinct_stored_values(qualified_table, quoted_column):
+            value = str(stored_value)
             if not self.reads_text(value, new_type):
                 return value
             if integer_range is not None and not integer_range[0] <= int(value) <= integer_range[1]:

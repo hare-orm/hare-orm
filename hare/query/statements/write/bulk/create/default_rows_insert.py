@@ -12,6 +12,7 @@ TModel = TypeVar("TModel", bound="Model")
 
 if TYPE_CHECKING:
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.statements.write.bulk.create.bulk_create_query import BulkCreateQuery
 
 
@@ -82,8 +83,9 @@ class DefaultRowsInsert:
         returning_columns = (
             ReturnedRowsMatching.get_returning_columns(bulk_create, omit_fields) if with_returning else []
         )
+        model_binding: ModelBinding = bulk_create._binding  # type: ignore[assignment]
         return bulk_create._connection.dialect.clauses.get_insert_rows_source_sql(
-            bulk_create.model._meta.basetable.get_sql(sql_context),
+            model_binding.basetable.get_sql(sql_context),
             rows_source_sql,
             [ReturnedValue(sql=sql_context.quote(column), column_name=column) for column in returning_columns],
         )

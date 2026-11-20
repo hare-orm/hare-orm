@@ -5,6 +5,7 @@ import uuid
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.fields.data.numeric import IntField
 from hare.migrations.migration import Migration
 from hare.migrations.operations import AlterField
@@ -15,7 +16,7 @@ from tests.dialects.clickhouse.models import Team
 
 @pytest.mark.asyncio
 async def test_a_tables_rows_are_counted(clickhouse_db):
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     rules = connection.dialect.migration_safety_rules
     assert await rules.count_table_rows(connection, "team", None, 10) == 0
     await Team.objects.bulk_create([Team(name=f"team{number}") for number in range(3)])
@@ -26,7 +27,7 @@ async def test_a_tables_rows_are_counted(clickhouse_db):
 
 @pytest.mark.asyncio
 async def test_the_rows_of_a_table_in_another_database_are_counted_there(clickhouse_db):
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     database = f"safety_other_{uuid.uuid4().hex[:8]}"
     await connection.execute_script(f"CREATE DATABASE {database}")
     try:
@@ -41,7 +42,7 @@ async def test_the_rows_of_a_table_in_another_database_are_counted_there(clickho
 
 @pytest.mark.asyncio
 async def test_a_table_whose_engine_keeps_no_count_is_large(clickhouse_db):
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     await connection.execute_script("CREATE VIEW safety_view AS SELECT 1 AS id")
     try:
         rules = connection.dialect.migration_safety_rules
@@ -52,7 +53,7 @@ async def test_a_table_whose_engine_keeps_no_count_is_large(clickhouse_db):
 
 @pytest.mark.asyncio
 async def test_the_checker_tells_a_small_table_from_a_large_one(clickhouse_db):
-    connection = Team._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Team).get_connection()
     await Team.objects.bulk_create([Team(name=f"team{number}") for number in range(3)])
     state = State.from_models([Team], app_label="models")
     migration = Migration("0002_change", "models", operations=[AlterField("Team", "name", IntField())])

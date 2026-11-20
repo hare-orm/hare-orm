@@ -19,6 +19,7 @@ from hare.dialects.clickhouse.renderers.constants import (
 from hare.sql import functions
 from hare.sql.enums import CastType
 from hare.sql.functions.address_text import AddressText
+from hare.sql.functions.length import Length
 from hare.sql.sql_context import SqlContext
 
 if TYPE_CHECKING:
@@ -48,7 +49,10 @@ class ClickhouseTextRenderers:
     def render_generic_function(function: Function, sql_context: SqlContext) -> str:
         """A plain SQL function under ClickHouse's own name."""
         args_sql = ",".join(function.get_arg_sql(argument, sql_context) for argument in function.args)
-        function_sql = f"{CLICKHOUSE_GENERIC_FUNCTION_NAMES[function.name]}({args_sql})"
+        if isinstance(function, Length) and function.counts_bytes:
+            function_sql = f"length(unhex({args_sql}))"
+        else:
+            function_sql = f"{CLICKHOUSE_GENERIC_FUNCTION_NAMES[function.name]}({args_sql})"
         if function.name in CLICKHOUSE_UNSIGNED_RESULT_FUNCTION_NAMES:
             return CLICKHOUSE_SIGNED_RESULT_TEMPLATE.format(function_sql)
         return function_sql
@@ -103,7 +107,7 @@ class ClickhouseTextRenderers:
                 # An expression of no known field - a text function, a literal - read as a text.
                 term_sql = CLICKHOUSE_TIME_OF_TEXT_TEMPLATE.format(f"toString({term_sql})")
             time_zone_sql = zone_sql if function.source == CastType.DATETIME else CLICKHOUSE_UTC_ZONE_SQL
-            return ClickhouseTemporalRenderers.get_time_text_sql(term_sql, time_zone_sql)
+            return ClickhouseTemporalRenderers.get_time_text_sql(term_sql, time_zone_sql, sql_context)
         # A moment too - a ClickhouseDatetimeField's own precision and zone.
         return ClickhouseValueCasts.get_cast_sql(
             term_sql, function, function.target_field.get_column_type(sql_context.dialect), zone_sql

@@ -10,6 +10,7 @@ from hare.query.key_columns import KeyColumns
 from hare.query.lookup_info.lookup_paths import LookupPaths
 
 if TYPE_CHECKING:
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset.query_specification import QuerySpecification
 
 
@@ -100,7 +101,8 @@ class PendingFilterCalls:
         Returns:
             The ``Q``.
         """
-        primary_key_q = KeyColumns.get_primary_key_q(specification.model, key, value)
+        model_binding: ModelBinding = specification._binding  # type: ignore[assignment]
+        primary_key_q = KeyColumns.get_primary_key_q(model_binding, key, value)
         if primary_key_q is not None:
             return primary_key_q
         for suffix, lookup, negated in (
@@ -112,9 +114,10 @@ class PendingFilterCalls:
             if not key.endswith(suffix):
                 continue
             relation_key = key[: -len(suffix)]
-            related_model = getattr(specification.model._meta.fields_map.get(relation_key), "related_model", None)
+            related_model = getattr(model_binding.fields_map.get(relation_key), "related_model", None)
             if related_model is None or not isinstance(
-                target_primary_key_attribute := related_model._meta.primary_key_attribute, tuple
+                target_primary_key_attribute := model_binding.graph.get_binding(related_model).primary_key_attribute,
+                tuple,
             ):
                 break
             field_names = tuple(f"{relation_key}__{name}" for name in target_primary_key_attribute)
@@ -125,20 +128,17 @@ class PendingFilterCalls:
                 lookup,
                 value,
                 accepts_instances=False,
-                reads_outer_references=True,
             )
             return ~comparison_q if negated else comparison_q
-        field_object = specification.model._meta.fields_map.get(key)
+        field_object = model_binding.fields_map.get(key)
         if (
             isinstance(field_object, ManyToManyFieldInstance)
             and value is not None
             # A relation to a model on another connection is compared by its links, key and all.
             and not LookupPaths.crosses_connections(field_object)
         ):
-            target_primary_key_attribute = field_object.related_model._meta.primary_key_attribute
+            target_primary_key_attribute = field_object.get_related_binding().primary_key_attribute
             if isinstance(target_primary_key_attribute, tuple):
                 field_names = tuple(f"{key}__{pk_name}" for pk_name in target_primary_key_attribute)
-                return KeyColumns.get_comparison_q(
-                    key, field_names, target_primary_key_attribute, Lookup.EXACT, value, reads_outer_references=True
-                )
+                return KeyColumns.get_comparison_q(key, field_names, target_primary_key_attribute, Lookup.EXACT, value)
         return Q(**{key: value})

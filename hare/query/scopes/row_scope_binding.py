@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextvars import Context, ContextVar, copy_context
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from hare.core.caching.cache import Cache
 from hare.query.expressions import Q
@@ -22,12 +22,7 @@ class RowScopeBinding:
     """
 
     current: ClassVar[ContextVar[RowScopeBinding | None]] = ContextVar("hare_row_scope_binding", default=None)
-    conditions: ClassVar[Cache[tuple[RowScopeProvider, RowVisibility, Q | None]]] = Cache(holds_sql=False)
-
-    @cached_property
-    def cache_buckets(self) -> dict[int, Any]:
-        """Allocate storage only when a provider participates in this execution."""
-        return {}
+    conditions: ClassVar[Cache[tuple[RowScopeProvider, RowVisibility, Q | None]]] = Cache()
 
     @cached_property
     def context(self) -> Context:

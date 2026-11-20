@@ -9,20 +9,7 @@ from hare.transactions.enums import TransactionEventType
 from hare.transactions.transactions import Transactions
 from tests.shared_models.testmodels import IntFields
 
-pytestmark = pytest.mark.sqlite_only
-
-
-@pytest.fixture(autouse=True)
-def _clear_observers():
-    """The process observers are process-wide state - a test that leaves an observer behind would
-    leak it into later tests."""
-    Observers.process_observers.clear()
-    for dispatcher in Observers.process_observers.dispatchers.values():
-        dispatcher.pending_errors.clear()
-    yield
-    Observers.process_observers.clear()
-    for dispatcher in Observers.process_observers.dispatchers.values():
-        dispatcher.pending_errors.clear()
+pytestmark = [pytest.mark.sqlite_only, pytest.mark.usefixtures("cleared_process_observers")]
 
 
 @pytest.mark.database_independent

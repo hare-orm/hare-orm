@@ -10,9 +10,6 @@ outputs:
   python-path:
     description: The path of the Python's executable.
     value: ${{ steps.python.outputs.python-path }}
-  python-version:
-    description: The exact version set up.
-    value: ${{ steps.python.outputs.python-version }}
 runs:
   using: composite
   steps:

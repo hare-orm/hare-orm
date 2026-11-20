@@ -26,11 +26,11 @@ class RenameModelRule(MigrationSafetyRule):
             old_name = new_name = operation.name
         else:
             return None
-        old_model = context.get_model_before(old_name)
-        new_model = context.get_model_after(new_name)
+        old_model = context.get_binding_before(old_name)
+        new_model = context.get_binding_after(new_name)
         if old_model is None or new_model is None:
             return None
-        old_table, new_table = old_model._meta.db_table, new_model._meta.db_table
+        old_table, new_table = old_model.db_table, new_model.db_table
         if old_table == new_table:
             return None
         return context.get_risk(

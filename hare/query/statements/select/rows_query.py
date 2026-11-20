@@ -9,6 +9,7 @@ from hare.exceptions import QueryError
 from hare.fields.data.constants import INT32_MAX
 from hare.query.execution.query_execution import QueryExecution
 from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import AggregatedMultiValuedPaths
+from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
 from hare.query.queryset.extensions.query_set_extensions import QuerySetExtensions
 from hare.query.queryset.single_rows.get_exceptions import GetExceptions
 from hare.query.statements.awaitable_query import AwaitableQuery
@@ -17,8 +18,14 @@ from hare.sql import Order
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
+    from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
+    from hare.query.plans.description.plan_description import PlanDescription
     from hare.query.plans.statement.declarations import CallPlanHit
+    from hare.query.queryset.query_specification import QuerySpecification
     from hare.query.queryset.queryset import QuerySet
+    from hare.sql.builder.queries.query_builder import QueryBuilder
+    from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 TModel = TypeVar("TModel", bound="Model")
 
@@ -32,9 +39,35 @@ class RowsQuery(AwaitableQuery[TModel], abstract=True):
     #: A plain SELECT - see AwaitableQuery.is_read_only.
     is_read_only: ClassVar[bool] = True
 
+    def _prepare_slice_terms(
+        self, query: QueryBuilder, offset: int | None
+    ) -> tuple[ValueWrapper | None, ValueWrapper | None]:
+        """Build the same slice terms used by SQL and recorded value references."""
+        wrapper = query._wrapper_class
+        terms = (
+            wrapper(self._limit) if self._limit is not None else None,
+            wrapper(offset) if offset is not None else None,
+        )
+        self._slice_boundary_terms = terms
+        return terms
+
+    def _record_slice_values(
+        self, references: RecordedValueReferences, terms: tuple[ValueWrapper | None, ValueWrapper | None]
+    ) -> None:
+        for name, term in zip(("_limit", "_offset"), terms, strict=True):
+            if term is not None:
+                ExpressionArguments.record_literal(references, self, name, term)
+
+    def _get_build_plan_description(self) -> PlanDescription | None:
+        return self._describe_statement(False)
+
+    def _needs_dependency_values(self) -> bool:
+        # Extensions may change the slice; ordinary zero-limit reads consume no inputs.
+        return super()._needs_dependency_values() and (self._limit != 0 or bool(self._extension_calls))
+
     async def _execute_bound(self) -> Any:
         if self._is_none:
-            return await self._execute_none()
+            return GetExceptions.empty_single_or_list_result(self)
         query = self._get_execution_query(self._select_for_update)
         statement = query._make_query_to_run()
         result = await query._execute(statement)
@@ -43,9 +76,6 @@ class RowsQuery(AwaitableQuery[TModel], abstract=True):
             if query._extension_calls and query._applies_result_transform
             else result
         )
-
-    async def _execute_none(self) -> Any:
-        return GetExceptions.empty_single_or_list_result(self)
 
     def _execute(self, statement: tuple[str, list[Any]]) -> Coroutine[Any, Any, Any]:
         """The read of the built statement - the one road a plan found by the calls takes too
@@ -74,12 +104,14 @@ class RowsQuery(AwaitableQuery[TModel], abstract=True):
         Returns:
             The rows.
         """
-        return RowsQuery.iterate_query(lambda: self, chunk_size)
+        return RowsQuery.iterate_query(self, chunk_size)
 
     @staticmethod
-    async def iterate_query(get_query: Callable[[], RowsQuery[Any]], chunk_size: int) -> AsyncGenerator[Any]:
+    async def iterate_query(specification: QuerySpecification[Any], chunk_size: int) -> AsyncGenerator[Any]:
         """Read with one set of dependency inputs throughout the iterator's lifetime."""
-        query = get_query()
+        source = QueryExecution.get_bound(specification)
+        with QueryExecution(source._context):
+            query = source._get_compiler()
         query._check_chunk_size(chunk_size)
         iterator = QueryExecution.iterate(query, RowsQuery._iterate_rows(query, chunk_size))
         async with contextlib.aclosing(iterator):
@@ -107,7 +139,16 @@ class RowsQuery(AwaitableQuery[TModel], abstract=True):
             raise QueryError("iterator() does not support .before_cursor() - await the page instead")
         if rows_query._is_none:
             return
-        query = rows_query._get_iterated_query()
+        query: RowsQuery[Any]
+        bound_source = (
+            rows_query._get_execution_query(rows_query._select_for_update) if rows_query._extension_calls else None
+        )
+        if bound_source is not None and QuerySetExtensions.changes_rows(bound_source):
+            from hare.query.statements.select.iterator_page_query import IteratorPageQuery
+
+            query = IteratorPageQuery(bound_source)
+        else:
+            query = rows_query._get_iterated_query()
         page_template = query._get_execution_query(query._select_for_update)
         page_template._applies_result_transform = False
         page_template._single = False
@@ -186,7 +227,8 @@ class RowsQuery(AwaitableQuery[TModel], abstract=True):
         """Whether no two rows can share the values of the ordering fields - they include the
         primary key, a non-nullable unique field, or every field of a non-nullable unconditional
         ``UniqueConstraint``."""
-        return AggregatedMultiValuedPaths.field_names_identify_row(self.model, ordering_field_names)
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        return AggregatedMultiValuedPaths.field_names_identify_row(model_binding, ordering_field_names)
 
     def stream(self, chunk_size: int = 1000) -> AsyncGenerator[Any]:
         """Streams the rows off a cursor, inside a transaction - see
@@ -198,12 +240,14 @@ class RowsQuery(AwaitableQuery[TModel], abstract=True):
         Returns:
             The rows.
         """
-        return RowsQuery.stream_query(lambda: self, chunk_size)
+        return RowsQuery.stream_query(self, chunk_size)
 
     @staticmethod
-    async def stream_query(get_query: Callable[[], RowsQuery[Any]], chunk_size: int) -> AsyncGenerator[Any]:
+    async def stream_query(specification: QuerySpecification[Any], chunk_size: int) -> AsyncGenerator[Any]:
         """Read with one set of dependency inputs throughout the iterator's lifetime."""
-        query = get_query()
+        source = QueryExecution.get_bound(specification)
+        with QueryExecution(source._context):
+            query = source._get_compiler()
         query._check_chunk_size(chunk_size, INT32_MAX)
         iterator = QueryExecution.iterate(query, RowsQuery._stream_rows(query, chunk_size))
         async with contextlib.aclosing(iterator):

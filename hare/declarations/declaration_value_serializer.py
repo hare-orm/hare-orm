@@ -7,6 +7,7 @@ import functools
 import importlib
 import inspect
 import ipaddress
+import keyword
 import math
 import sys
 import textwrap
@@ -60,14 +61,14 @@ class DeclarationValueSerializer:
         for name, obj in module.__dict__.items():
             if obj is value and name.isidentifier():
                 return module_name, name, False
+        name = getattr(value, "__name__", None)
+        if name and name.isidentifier() and getattr(module, name, None) is value:
+            return module_name, name, False
         qualname = getattr(value, "__qualname__", None)
         if qualname and "." in qualname:
             if "<locals>" in qualname:
                 raise ConfigurationError(f"Cannot resolve import for {value!r}")
             return module_name, f"{module_name}.{qualname}", True
-        name = getattr(value, "__name__", None)
-        if name and name.isidentifier() and getattr(module, name, None) is value:
-            return module_name, name, False
         raise ConfigurationError(f"Cannot resolve import for {value!r}")
 
     @staticmethod
@@ -205,7 +206,9 @@ class DeclarationValueSerializer:
         if isinstance(value, Flag) and value.name not in enum_class.__members__:
             # A combination of flags (or an empty one) has no member of its own to name.
             return f"{name}({value.value!r})"
-        return f"{name}.{value.name}"
+        if value.name.isidentifier() and not keyword.iskeyword(value.name):
+            return f"{name}.{value.name}"
+        return f"{name}[{value.name!r}]"
 
     @staticmethod
     def render_literal(value: Any, imports: ImportManager) -> str | None:
@@ -238,15 +241,11 @@ class DeclarationValueSerializer:
         if not isinstance(value, SqlDefault):
             return None
         for default_class in (Now, RandomHex, UuidV7):
-            if isinstance(value, default_class):
+            if type(value) is default_class:
                 return f"{imports.add_from('hare.fields.db_defaults', default_class.__name__)}()"
         path, args, kwargs = value.deconstruct()
         module_name, _, class_name = path.rpartition(".")
-        if (
-            type(value) is not SqlDefault
-            and DeclarationValueSerializer.is_importable_module_name(module_name)
-            and class_name.isidentifier()
-        ):
+        if type(value) is not SqlDefault and ClassPath.is_importable_name(module_name) and class_name.isidentifier():
             # A subclass keeps its class - a dialect's renderer of it, its own SQL.
             return DeclarationValueSerializer.render_call(path, args, kwargs, imports)
         return f"{imports.add_from('hare.fields.db_defaults', 'SqlDefault')}({value.sql!r})"
@@ -273,7 +272,10 @@ class DeclarationValueSerializer:
                 return f"{imports.add_from('hare.query.expressions', 'F')}({value.target!r}).{direction}({nulls})"
             return f"{DeclarationValueSerializer.render_query_expression(value.target, imports)}.{direction}({nulls})"
         if isinstance(value, OrderedIndexKey):
-            key_name = imports.add_from("hare.ddl.indexes", "OrderedIndexKey")
+            key_class = type(value)
+            key_name = imports.add_from(
+                "hare.ddl.indexes" if key_class is OrderedIndexKey else key_class.__module__, key_class.__name__
+            )
             term_name = imports.add_from("hare.ddl", "RawSQLTerm")
             order_name = imports.add_from("hare.sql", "Order")
             return (
@@ -526,7 +528,7 @@ class DeclarationValueSerializer:
         Raises:
             ConfigurationError: The value is a lambda or a local function.
         """
-        if inspect.isfunction(value) and not DeclarationValueSerializer.is_importable_module_name(value.__module__):
+        if inspect.isfunction(value) and not ClassPath.is_importable_name(value.__module__):
             return DeclarationValueSerializer.declare_function(value, imports)
         if not callable(value):
             return None
@@ -607,19 +609,6 @@ class DeclarationValueSerializer:
             f"{name} = {base_source}({enum_type.__name__!r}, {{{members_source}}}{type_source})"
         )
         return name
-
-    @staticmethod
-    def is_importable_module_name(module_name: str) -> bool:
-        """Whether a module can be imported by its name in Python code - a migration's module,
-        named after its number (``0002_add_title``), can't.
-
-        Args:
-            module_name: The dotted module name.
-
-        Returns:
-            Whether every part of it is an identifier.
-        """
-        return all(part.isidentifier() for part in module_name.split("."))
 
     @staticmethod
     def declare_function(function: Any, imports: ImportManager) -> str:

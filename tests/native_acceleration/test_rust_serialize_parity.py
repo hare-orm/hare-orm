@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from hare.core.caching.caches import Caches
+from hare.core.hare_context import HareContext
 from hare.dialects.base.constants import SQL_DIALECT
 from hare.dialects.sqlite.constants import SQLITE_DIALECT
 from hare.exceptions import ValidationError
@@ -40,15 +41,22 @@ from tests.shared_models.testmodels import (
 )
 from tests.shared_models.testmodels_postgres import DecimalFields
 
+pytestmark = pytest.mark.usefixtures("model_conversion_context")
+
 
 def _serialize_both(model, columns: tuple[str, ...], instances: list) -> tuple[list, list]:
     reference_instances = [copy(instance) for instance in instances]
-    fields_map = model._meta.fields_map
+    fields_map = HareContext.require_current().apps.get_binding(model).fields_map
     python_rows = [
         [fields_map[name].to_db_value(getattr(inst, name), inst) for name in columns] for inst in reference_instances
     ]
 
-    writer = partial(BulkWriteBatches.serialize_instances, model, SQL_DIALECT.types, columns=columns)
+    writer = partial(
+        BulkWriteBatches.serialize_instances,
+        HareContext.require_current().apps.get_binding(model),
+        SQL_DIALECT.types,
+        columns=columns,
+    )
     batch_rows = writer(instances)
     return python_rows, batch_rows
 
@@ -87,8 +95,13 @@ def test_int_field_success_value_and_type_parity():
 def test_char_field_max_length_violation_error_parity():
     columns = ("char",)
     inst = CharFields(char="x" * 300, char_null=None)
-    writer = partial(BulkWriteBatches.serialize_instances, CharFields, SQL_DIALECT.types, columns=columns)
-    fields_map = CharFields._meta.fields_map
+    writer = partial(
+        BulkWriteBatches.serialize_instances,
+        HareContext.require_current().apps.get_binding(CharFields),
+        SQL_DIALECT.types,
+        columns=columns,
+    )
+    fields_map = HareContext.require_current().apps.get_binding(CharFields).fields_map
 
     with pytest.raises(ValidationError) as python_exc:
         fields_map["char"].to_db_value(getattr(inst, "char"), inst)
@@ -102,8 +115,13 @@ def test_char_field_max_length_violation_error_parity():
 def test_int_field_out_of_range_error_parity():
     columns = ("intnum", "intnum_null")
     inst = IntFields(intnum=99999999999999, intnum_null=None)
-    fields_map = IntFields._meta.fields_map
-    writer = partial(BulkWriteBatches.serialize_instances, IntFields, SQL_DIALECT.types, columns=columns)
+    fields_map = HareContext.require_current().apps.get_binding(IntFields).fields_map
+    writer = partial(
+        BulkWriteBatches.serialize_instances,
+        HareContext.require_current().apps.get_binding(IntFields),
+        SQL_DIALECT.types,
+        columns=columns,
+    )
 
     with pytest.raises(ValidationError) as python_exc:
         fields_map["intnum"].to_db_value(getattr(inst, "intnum"), inst)
@@ -120,8 +138,13 @@ def test_int_field_type_conversion_failure_error_parity():
     try:
         inst = IntFields(intnum=1, intnum_null=None)
         object.__setattr__(inst, "intnum", "not-an-int")
-        fields_map = IntFields._meta.fields_map
-        writer = partial(BulkWriteBatches.serialize_instances, IntFields, SQL_DIALECT.types, columns=columns)
+        fields_map = HareContext.require_current().apps.get_binding(IntFields).fields_map
+        writer = partial(
+            BulkWriteBatches.serialize_instances,
+            HareContext.require_current().apps.get_binding(IntFields),
+            SQL_DIALECT.types,
+            columns=columns,
+        )
 
         with pytest.raises(ValidationError) as python_exc:
             fields_map["intnum"].to_db_value(getattr(inst, "intnum"), inst)
@@ -139,8 +162,13 @@ def test_decimal_field_type_conversion_failure_error_parity():
     columns = ("decimal", "decimal_null")
     inst = DecimalFields(decimal=Decimal("1.0000"), decimal_null=None)
     object.__setattr__(inst, "decimal", "not-a-decimal")
-    fields_map = DecimalFields._meta.fields_map
-    writer = partial(BulkWriteBatches.serialize_instances, DecimalFields, SQL_DIALECT.types, columns=columns)
+    fields_map = HareContext.require_current().apps.get_binding(DecimalFields).fields_map
+    writer = partial(
+        BulkWriteBatches.serialize_instances,
+        HareContext.require_current().apps.get_binding(DecimalFields),
+        SQL_DIALECT.types,
+        columns=columns,
+    )
 
     with pytest.raises(ValidationError) as python_exc:
         fields_map["decimal"].to_db_value(getattr(inst, "decimal"), inst)
@@ -155,8 +183,13 @@ def test_none_on_non_nullable_field_error_parity():
     columns = ("intnum", "intnum_null")
     inst = IntFields(intnum=1, intnum_null=None)
     inst.intnum = None  # bypass constructor-time validation, matches a direct attribute assignment
-    fields_map = IntFields._meta.fields_map
-    writer = partial(BulkWriteBatches.serialize_instances, IntFields, SQL_DIALECT.types, columns=columns)
+    fields_map = HareContext.require_current().apps.get_binding(IntFields).fields_map
+    writer = partial(
+        BulkWriteBatches.serialize_instances,
+        HareContext.require_current().apps.get_binding(IntFields),
+        SQL_DIALECT.types,
+        columns=columns,
+    )
 
     with pytest.raises(ValidationError) as python_exc:
         fields_map["intnum"].to_db_value(getattr(inst, "intnum"), inst)
@@ -184,8 +217,13 @@ def test_decimal_max_digits_validation_matches():
     _assert_rows_match(DecimalFields, columns, python_rows, batch_rows)
 
     over_limit = DecimalFields(decimal=Decimal("123456789012345.6789"), decimal_null=None)
-    fields_map = DecimalFields._meta.fields_map
-    writer = partial(BulkWriteBatches.serialize_instances, DecimalFields, SQL_DIALECT.types, columns=columns)
+    fields_map = HareContext.require_current().apps.get_binding(DecimalFields).fields_map
+    writer = partial(
+        BulkWriteBatches.serialize_instances,
+        HareContext.require_current().apps.get_binding(DecimalFields),
+        SQL_DIALECT.types,
+        columns=columns,
+    )
     with pytest.raises(ValidationError) as python_exc:
         fields_map["decimal"].to_db_value(over_limit.decimal, over_limit)
     with pytest.raises(ValidationError) as batch_exc:
@@ -196,7 +234,7 @@ def test_decimal_max_digits_validation_matches():
 @pytest.mark.postgresql_models
 @pytest.mark.database_independent
 def test_decimal_bound_validator_preserves_precision():
-    field = DecimalFields._meta.fields_map["decimal"]
+    field = HareContext.require_current().apps.get_binding(DecimalFields).fields_map["decimal"]
     original_validators = list(field.validators)
     BulkWriteBatches.SERIALIZE_INSTANCES_CACHE.clear()
     field.validators.append(MinValueValidator(Decimal("0.0000")))
@@ -218,7 +256,7 @@ class _MultipleOfThreeValidator(Validator):
 @pytest.mark.database_independent
 def test_base_field_custom_validator_is_called():
     original_field = _swap_field_and_clear_cache(IntFields, "intnum", _BareIntField())
-    tag_field = IntFields._meta.fields_map["intnum"]
+    tag_field = HareContext.require_current().apps.get_binding(IntFields).fields_map["intnum"]
     tag_field.validators.append(_MultipleOfThreeValidator())
     BulkWriteBatches.SERIALIZE_INSTANCES_CACHE.clear()
     try:
@@ -227,8 +265,13 @@ def test_base_field_custom_validator_is_called():
         _assert_rows_match(IntFields, ("intnum",), python_rows, batch_rows)
 
         bad_inst = IntFields(intnum=10, intnum_null=None)  # violates the multiple-of-three rule
-        fields_map = IntFields._meta.fields_map
-        writer = partial(BulkWriteBatches.serialize_instances, IntFields, SQL_DIALECT.types, columns=("intnum",))
+        fields_map = HareContext.require_current().apps.get_binding(IntFields).fields_map
+        writer = partial(
+            BulkWriteBatches.serialize_instances,
+            HareContext.require_current().apps.get_binding(IntFields),
+            SQL_DIALECT.types,
+            columns=("intnum",),
+        )
         with pytest.raises(ValidationError) as python_exc:
             fields_map["intnum"].to_db_value(getattr(bad_inst, "intnum"), bad_inst)
         with pytest.raises(ValidationError) as batch_exc:
@@ -269,8 +312,13 @@ def test_date_field_malformed_string_error_parity():
     columns = ("date",)
     inst = DateFields(date=datetime.date(2024, 1, 1), date_null=None)
     inst.date = "not-a-date-string-longer-than-4-chars"
-    fields_map = DateFields._meta.fields_map
-    writer = partial(BulkWriteBatches.serialize_instances, DateFields, SQL_DIALECT.types, columns=columns)
+    fields_map = HareContext.require_current().apps.get_binding(DateFields).fields_map
+    writer = partial(
+        BulkWriteBatches.serialize_instances,
+        HareContext.require_current().apps.get_binding(DateFields),
+        SQL_DIALECT.types,
+        columns=columns,
+    )
 
     with pytest.raises(ValidationError) as python_exc:
         fields_map["date"].to_db_value(getattr(inst, "date"), inst)
@@ -309,8 +357,13 @@ def test_uuid_field_invalid_string_error_parity():
     columns = ("data",)
     inst = UUIDFields(data=uuid.uuid4())
     inst.data = "not-a-valid-uuid"
-    fields_map = UUIDFields._meta.fields_map
-    writer = partial(BulkWriteBatches.serialize_instances, UUIDFields, SQL_DIALECT.types, columns=columns)
+    fields_map = HareContext.require_current().apps.get_binding(UUIDFields).fields_map
+    writer = partial(
+        BulkWriteBatches.serialize_instances,
+        HareContext.require_current().apps.get_binding(UUIDFields),
+        SQL_DIALECT.types,
+        columns=columns,
+    )
 
     with pytest.raises(ValidationError) as python_exc:
         fields_map["data"].to_db_value(getattr(inst, "data"), inst)
@@ -355,8 +408,13 @@ def test_float_field_nan_error_parity():
     columns = ("floatnum", "floatnum_null")
     inst = FloatFields(floatnum=1.0, floatnum_null=None)
     object.__setattr__(inst, "floatnum", math.nan)
-    fields_map = FloatFields._meta.fields_map
-    writer = partial(BulkWriteBatches.serialize_instances, FloatFields, SQLITE_DIALECT.types, columns=columns)
+    fields_map = HareContext.require_current().apps.get_binding(FloatFields).fields_map
+    writer = partial(
+        BulkWriteBatches.serialize_instances,
+        HareContext.require_current().apps.get_binding(FloatFields),
+        SQLITE_DIALECT.types,
+        columns=columns,
+    )
 
     # SQLite stores a NaN as NULL - its own writer refuses it.
     with pytest.raises(ValidationError) as python_exc:
@@ -392,8 +450,13 @@ def test_json_field_encoder_failure_error_parity():
 
     inst = JSONFields(data={"a": 1})
     inst.data = {"a": Unserializable()}
-    fields_map = JSONFields._meta.fields_map
-    writer = partial(BulkWriteBatches.serialize_instances, JSONFields, SQL_DIALECT.types, columns=columns)
+    fields_map = HareContext.require_current().apps.get_binding(JSONFields).fields_map
+    writer = partial(
+        BulkWriteBatches.serialize_instances,
+        HareContext.require_current().apps.get_binding(JSONFields),
+        SQL_DIALECT.types,
+        columns=columns,
+    )
 
     with pytest.raises(ValidationError) as python_exc:
         fields_map["data"].to_db_value(getattr(inst, "data"), inst)
@@ -408,15 +471,20 @@ def test_json_field_encoder_failure_error_parity():
     [{"a": float("nan")}, [float("-inf")]],
     ids=repr,
 )
-def test_json_field_unstorable_value_error_parity(value):
+def test_json_field_unstorable_value_error_parity(db, value):
     """Bucket 6 runs the same NaN checks JSONField.to_db_value does."""
     columns = ("data",)
     inst = JSONFields(data={"a": 1})
     inst.data = value
-    writer = partial(BulkWriteBatches.serialize_instances, JSONFields, SQL_DIALECT.types, columns=columns)
+    writer = partial(
+        BulkWriteBatches.serialize_instances,
+        HareContext.require_current().apps.get_binding(JSONFields),
+        SQL_DIALECT.types,
+        columns=columns,
+    )
 
     with pytest.raises(ValidationError) as python_exc:
-        JSONFields._meta.fields_map["data"].to_db_value(value, inst)
+        HareContext.require_current().apps.get_binding(JSONFields).fields_map["data"].to_db_value(value, inst)
     with pytest.raises(ValidationError) as batch_exc:
         writer([inst])
 
@@ -439,9 +507,14 @@ def test_sensitive_inlined_validator_error_parity():
     try:
         inst = CharFields(char="ab", char_null=None)
         inst.char = "SECRET-PIN"
-        writer = partial(BulkWriteBatches.serialize_instances, CharFields, SQL_DIALECT.types, columns=columns)
+        writer = partial(
+            BulkWriteBatches.serialize_instances,
+            HareContext.require_current().apps.get_binding(CharFields),
+            SQL_DIALECT.types,
+            columns=columns,
+        )
         with pytest.raises(ValidationError) as python_exc:
-            CharFields._meta.fields_map["char"].to_db_value(inst.char, inst)
+            HareContext.require_current().apps.get_binding(CharFields).fields_map["char"].to_db_value(inst.char, inst)
         with pytest.raises(ValidationError) as batch_exc:
             writer([inst])
     finally:
@@ -468,8 +541,13 @@ def test_json_field_invalid_non_dict_list_value_raises_same_error():
     inst = JSONFields(data_validate={"a": 1})
     inst.data_validate = 12345  # bypass constructor-time validation - raise_if_not_dict_or_list
     # (data_validate's own validator) should reject a non-dict/list value at to_db_value() time.
-    fields_map = JSONFields._meta.fields_map
-    writer = partial(BulkWriteBatches.serialize_instances, JSONFields, SQL_DIALECT.types, columns=columns)
+    fields_map = HareContext.require_current().apps.get_binding(JSONFields).fields_map
+    writer = partial(
+        BulkWriteBatches.serialize_instances,
+        HareContext.require_current().apps.get_binding(JSONFields),
+        SQL_DIALECT.types,
+        columns=columns,
+    )
 
     with pytest.raises(Exception) as python_exc:
         fields_map["data_validate"].to_db_value(getattr(inst, "data_validate"), inst)
@@ -510,8 +588,13 @@ def test_int_enum_invalid_value_raises_same_error_type_and_message():
     columns = ("service",)
     inst = EnumFields(service=Service.python_programming)
     inst.service = 999999  # not a valid Service member
-    fields_map = EnumFields._meta.fields_map
-    writer = partial(BulkWriteBatches.serialize_instances, EnumFields, SQL_DIALECT.types, columns=columns)
+    fields_map = HareContext.require_current().apps.get_binding(EnumFields).fields_map
+    writer = partial(
+        BulkWriteBatches.serialize_instances,
+        HareContext.require_current().apps.get_binding(EnumFields),
+        SQL_DIALECT.types,
+        columns=columns,
+    )
 
     with pytest.raises(Exception) as python_exc:
         fields_map["service"].to_db_value(getattr(inst, "service"), inst)
@@ -543,8 +626,13 @@ def test_char_enum_invalid_value_raises_validation_error_not_value_error():
     columns = ("currency",)
     inst = EnumFields(currency=Currency.USD)
     inst.currency = "not-a-real-currency-code-thats-way-too-long"
-    fields_map = EnumFields._meta.fields_map
-    writer = partial(BulkWriteBatches.serialize_instances, EnumFields, SQL_DIALECT.types, columns=columns)
+    fields_map = HareContext.require_current().apps.get_binding(EnumFields).fields_map
+    writer = partial(
+        BulkWriteBatches.serialize_instances,
+        HareContext.require_current().apps.get_binding(EnumFields),
+        SQL_DIALECT.types,
+        columns=columns,
+    )
 
     with pytest.raises(ValidationError) as python_exc:
         fields_map["currency"].to_db_value(getattr(inst, "currency"), inst)
@@ -599,10 +687,15 @@ def test_datetime_field_auto_now_values_are_written_as_they_are_on_both_paths():
     )
     columns = ("datetime_auto", "datetime_add")
     held_values = [(inst.datetime_auto, inst.datetime_add) for inst in (python_inst, batch_inst)]
-    fields_map = DF._meta.fields_map
+    fields_map = HareContext.require_current().apps.get_binding(DF).fields_map
     python_row = [fields_map[name].to_db_value(getattr(python_inst, name), python_inst) for name in columns]
 
-    writer = partial(BulkWriteBatches.serialize_instances, DF, SQL_DIALECT.types, columns=columns)
+    writer = partial(
+        BulkWriteBatches.serialize_instances,
+        HareContext.require_current().apps.get_binding(DF),
+        SQL_DIALECT.types,
+        columns=columns,
+    )
     batch_row = writer([batch_inst])[0]
 
     assert [(inst.datetime_auto, inst.datetime_add) for inst in (python_inst, batch_inst)] == held_values
@@ -610,17 +703,17 @@ def test_datetime_field_auto_now_values_are_written_as_they_are_on_both_paths():
 
 
 def _swap_field_and_clear_cache(model, field_name: str, new_field):
-    original_field = model._meta.fields_map[field_name]
+    original_field = HareContext.require_current().apps.get_binding(model).fields_map[field_name]
     new_field.model_field_name = original_field.model_field_name
     new_field.source_field = original_field.source_field
-    model._meta.fields_map[field_name] = new_field
-    Caches.forget_model_caches([model])
+    HareContext.require_current().apps.get_binding(model).fields_map[field_name] = new_field
+    Caches.forget_model_caches([HareContext.require_current().apps.get_binding(model)])
     return original_field
 
 
 def _restore_field(model, field_name: str, original_field):
-    model._meta.fields_map[field_name] = original_field
-    Caches.forget_model_caches([model])
+    HareContext.require_current().apps.get_binding(model).fields_map[field_name] = original_field
+    Caches.forget_model_caches([HareContext.require_current().apps.get_binding(model)])
 
 
 @pytest.mark.database_independent
@@ -645,7 +738,9 @@ def test_batch_writer_calls_subclass_with_each_instance(model, name, field_class
     original = _swap_field_and_clear_cache(model, name, CustomField(*args))
     try:
         instances = [_instance_with_raw(model, **{name: value}) for value in ("first", "second")]
-        rows = BulkWriteBatches.serialize_instances(model, SQL_DIALECT.types, instances, [name])
+        rows = BulkWriteBatches.serialize_instances(
+            HareContext.require_current().apps.get_binding(model), SQL_DIALECT.types, instances, [name]
+        )
         assert rows == [["converted:first"], ["converted:second"]]
         assert calls == [("first", instances[0]), ("second", instances[1])]
     finally:
@@ -702,7 +797,7 @@ def _instance_with_raw(model, **raw_values):
         (FloatFields, "floatnum", math.inf),
     ],
 )
-def test_scalar_value_and_type_parity(model, column, raw):
+def test_scalar_value_and_type_parity(db, model, column, raw):
     instance = _instance_with_raw(model, **{column: raw})
     python_rows, batch_rows = _serialize_both(model, (column,), [instance])
     _assert_rows_match(model, (column,), python_rows, batch_rows)
@@ -724,8 +819,13 @@ def test_scalar_value_and_type_parity(model, column, raw):
 )
 def test_scalar_error_parity(model, column, raw):
     instance = _instance_with_raw(model, **{column: raw})
-    field = model._meta.fields_map[column]
-    writer = partial(BulkWriteBatches.serialize_instances, model, SQLITE_DIALECT.types, columns=(column,))
+    field = HareContext.require_current().apps.get_binding(model).fields_map[column]
+    writer = partial(
+        BulkWriteBatches.serialize_instances,
+        HareContext.require_current().apps.get_binding(model),
+        SQLITE_DIALECT.types,
+        columns=(column,),
+    )
     with pytest.raises(ValidationError) as python_exc:
         SQLITE_DIALECT.types.get_db_writer(field)(raw, instance)
     with pytest.raises(ValidationError) as batch_exc:
@@ -735,17 +835,28 @@ def test_scalar_error_parity(model, column, raw):
 
 @pytest.mark.database_independent
 def test_scalar_custom_validator_is_called():
-    original_field = _swap_field_and_clear_cache(IntFields, "intnum", IntFields._meta.fields_map["intnum"].__copy__())
-    IntFields._meta.fields_map["intnum"].validators.append(_MultipleOfThreeValidator())
+    original_field = _swap_field_and_clear_cache(
+        IntFields, "intnum", HareContext.require_current().apps.get_binding(IntFields).fields_map["intnum"].__copy__()
+    )
+    HareContext.require_current().apps.get_binding(IntFields).fields_map["intnum"].validators.append(
+        _MultipleOfThreeValidator()
+    )
     BulkWriteBatches.SERIALIZE_INSTANCES_CACHE.clear()
     try:
         python_rows, batch_rows = _serialize_both(IntFields, ("intnum",), [_instance_with_raw(IntFields, intnum=9)])
         _assert_rows_match(IntFields, ("intnum",), python_rows, batch_rows)
 
         bad_instance = _instance_with_raw(IntFields, intnum=10)
-        writer = partial(BulkWriteBatches.serialize_instances, IntFields, SQL_DIALECT.types, columns=("intnum",))
+        writer = partial(
+            BulkWriteBatches.serialize_instances,
+            HareContext.require_current().apps.get_binding(IntFields),
+            SQL_DIALECT.types,
+            columns=("intnum",),
+        )
         with pytest.raises(ValidationError) as python_exc:
-            IntFields._meta.fields_map["intnum"].to_db_value(10, bad_instance)
+            HareContext.require_current().apps.get_binding(IntFields).fields_map["intnum"].to_db_value(
+                10, bad_instance
+            )
         with pytest.raises(ValidationError) as batch_exc:
             writer([bad_instance])
         assert str(batch_exc.value) == str(python_exc.value)

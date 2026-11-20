@@ -28,11 +28,9 @@ class NativeExtensionExtractor:
         self.wheel_directory = wheel_directory
         self.extension_directory = extension_directory
 
-    def run(self) -> list[Path]:
+    def run(self) -> None:
         """Extracts the extension of every wheel.
 
-        Returns:
-            The extracted files.
 
         Raises:
             SystemExit: The directory holds no wheel, or a wheel carries no single extension file.
@@ -40,22 +38,26 @@ class NativeExtensionExtractor:
         wheels = sorted(self.wheel_directory.glob("*.whl"))
         if not wheels:
             raise SystemExit(f"no wheels in {self.wheel_directory}")
-        extracted_paths = []
         for wheel in wheels:
             with zipfile.ZipFile(wheel) as archive:
-                members = [
-                    name
-                    for name in archive.namelist()
-                    if name.startswith("rust/native.") and name.endswith(self.EXTENSION_SUFFIXES)
-                ]
-                if len(members) != 1:
-                    raise SystemExit(f"{wheel.name} carries {len(members)} rust.native extension files, expected one")
-                target_path = self.extension_directory / Path(members[0]).name
-                with archive.open(members[0]) as source, target_path.open("wb") as destination:
-                    shutil.copyfileobj(source, destination)
+                _, target_path = self.extract(wheel, archive, self.extension_directory)
             print(f"{wheel.name}: {target_path}")
-            extracted_paths.append(target_path)
-        return extracted_paths
+
+    @classmethod
+    def extract(cls, wheel: Path, archive: zipfile.ZipFile, directory: Path) -> tuple[str, Path]:
+        """Read the wheel's single native module into the given directory."""
+        members = [
+            name
+            for name in archive.namelist()
+            if name.startswith("rust/native.") and name.endswith(cls.EXTENSION_SUFFIXES)
+        ]
+        if len(members) != 1:
+            raise SystemExit(f"{wheel.name} carries {len(members)} rust.native extension files, expected one")
+        [member] = members
+        target = directory / Path(member).name
+        with archive.open(member) as source, target.open("wb") as destination:
+            shutil.copyfileobj(source, destination)
+        return member, target
 
 
 if __name__ == "__main__":

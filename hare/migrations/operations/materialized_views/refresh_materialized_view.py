@@ -8,8 +8,10 @@ from hare.migrations.operations.schema_objects.object_types.materialized_view_ob
 )
 
 if TYPE_CHECKING:
+    from hare.ddl.schema_objects.materialized_view import MaterializedView
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
     from hare.migrations.state.state import State
+    from hare.models.model_binding import ModelBinding
 
 
 class RefreshMaterializedView(ModelBoundOperation):
@@ -36,10 +38,19 @@ class RefreshMaterializedView(ModelBoundOperation):
         """The view's query may read any table."""
         return True
 
+    def _get_refresh_target(self, state: State, app_label: str) -> tuple[ModelBinding, MaterializedView]:
+        """The bound model and named view to check or refresh."""
+        model_state = self.get_model_state(state, app_label, self.model_name)
+        binding = self.get_model_binding(state, app_label)
+        view = MaterializedViewObjectType.find(model_state, lambda: binding, name=self.name)
+        return binding, view
+
     def raise_if_unsupported(
         self, app_label: str, old_state: State, new_state: State, schema_editor: BaseSchemaEditor
     ) -> None:
         MaterializedViewObjectType.raise_if_unsupported(schema_editor)
+        binding, view = self._get_refresh_target(new_state, app_label)
+        schema_editor.materialized_views.check_refresh(binding, view, self.concurrently)
 
     async def database_forward(
         self,
@@ -51,8 +62,5 @@ class RefreshMaterializedView(ModelBoundOperation):
         if not state_editor:
             return
         MaterializedViewObjectType.raise_if_unsupported(state_editor)
-        model_state = self.get_model_state(new_state, app_label, self.model_name)
-        view = MaterializedViewObjectType.find(model_state, lambda: self._model(new_state, app_label), name=self.name)
-        await state_editor.materialized_views.refresh_materialized_view(
-            self._model(new_state, app_label), view, self.concurrently
-        )
+        binding, view = self._get_refresh_target(new_state, app_label)
+        await state_editor.materialized_views.refresh_materialized_view(binding, view, self.concurrently)

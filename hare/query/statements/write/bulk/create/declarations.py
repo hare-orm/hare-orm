@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from hare.models.model import Model
+    from hare.models.write.bound_rows import BoundRows
     from hare.query.execution.write_statements import WriteCommand
 
 
@@ -24,3 +25,6 @@ class BoundInsertBatch:
     written_fields: tuple[str, ...] = ()
     applied_columns: tuple[str, ...] | None = None
     inline_statements: tuple[str, ...] = ()
+    # Actual bound conflict-target NULLs, only where NULL cannot conflict.
+    null_conflict_keys: tuple[bool, ...] = ()
+    bound_rows: BoundRows | None = None

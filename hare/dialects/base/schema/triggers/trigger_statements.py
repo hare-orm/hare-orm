@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from hare.models.model_binding import ModelBinding
+
 from hare.ddl.conditions.trigger_condition import TriggerCondition
 from hare.ddl.schema_objects.trigger import Trigger
 from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
-from hare.models import Model
 
 
 class TriggerStatements(SchemaEditorPart):
@@ -12,11 +16,11 @@ class TriggerStatements(SchemaEditorPart):
 
     __slots__ = ()
 
-    def get_trigger_create_sqls(self, model: type[Model], trigger: Trigger, safe: bool = False) -> list[str]:
+    def get_trigger_create_sqls(self, binding: ModelBinding, trigger: Trigger, safe: bool = False) -> list[str]:
         """The statements creating a trigger - shared by add_trigger() and generate_schemas().
 
         Args:
-            model: The model the trigger is declared on.
+            binding: The model the trigger is declared on.
             trigger: The trigger.
             safe: Replace an existing trigger of the same name instead of failing.
 
@@ -28,11 +32,11 @@ class TriggerStatements(SchemaEditorPart):
         """
         raise self.get_unsupported_error("Triggers")
 
-    def get_when_sql(self, model: type[Model], trigger: Trigger) -> str | None:
+    def get_when_sql(self, binding: ModelBinding, trigger: Trigger) -> str | None:
         """The SQL of a trigger's ``WHEN`` condition.
 
         Args:
-            model: The model the trigger is declared on.
+            binding: The model the trigger is declared on.
             trigger: The trigger.
 
         Returns:
@@ -40,13 +44,12 @@ class TriggerStatements(SchemaEditorPart):
         """
         if trigger.when is None:
             return None
-        return TriggerCondition.get_sql(trigger.when, trigger.get_condition_row(), model, self.editor.client)
+        return TriggerCondition.get_sql(trigger.when, trigger.get_condition_row(), binding, self.editor.client)
 
-    async def add_trigger(self, model: type[Model], trigger: Trigger) -> None:
-        for statement in self.get_trigger_create_sqls(model, trigger):
-            await self.editor.run_sql(statement)
+    async def add_trigger(self, binding: ModelBinding, trigger: Trigger) -> None:
+        await self.editor.run_sqls(self.get_trigger_create_sqls(binding, trigger))
 
-    async def remove_trigger(self, model: type[Model], trigger: Trigger) -> None:
+    async def remove_trigger(self, binding: ModelBinding, trigger: Trigger) -> None:
         """Drops a trigger.
 
         Raises:
@@ -54,32 +57,32 @@ class TriggerStatements(SchemaEditorPart):
         """
         raise self.get_unsupported_error("Triggers")
 
-    async def alter_trigger(self, model: type[Model], old_trigger: Trigger, new_trigger: Trigger) -> None:
-        statements = self.get_trigger_create_sqls(model, new_trigger)
-        await self.remove_trigger(model, old_trigger)
+    async def alter_trigger(self, binding: ModelBinding, old_trigger: Trigger, new_trigger: Trigger) -> None:
+        statements = self.get_trigger_create_sqls(binding, new_trigger)
+        await self.remove_trigger(binding, old_trigger)
         await self.editor.run_sqls(statements)
 
-    async def rename_trigger(self, model: type[Model], old_trigger: Trigger, new_trigger: Trigger) -> None:
+    async def rename_trigger(self, binding: ModelBinding, old_trigger: Trigger, new_trigger: Trigger) -> None:
         """Renames a trigger of a model's table - by dropping and creating it where the database renames no
         trigger.
 
         Args:
-            model: The model.
+            binding: The model.
             old_trigger: The trigger as declared before.
             new_trigger: The trigger as declared now.
         """
         if old_trigger.name == new_trigger.name:
             return
-        await self.alter_trigger(model, old_trigger, new_trigger)
+        await self.alter_trigger(binding, old_trigger, new_trigger)
 
     def get_trigger_schema_move_plan(
-        self, model: type[Model], trigger: Trigger, old_schema: str | None, new_schema: str | None
+        self, binding: ModelBinding, trigger: Trigger, old_schema: str | None, new_schema: str | None
     ) -> SchemaChangePlan:
         """Prepares moving what a trigger keeps apart from its table to the table's new schema - nothing
         by default: the trigger goes with the table.
 
         Args:
-            model: The model, rendered in its old schema.
+            binding: The model, rendered in its old schema.
             trigger: The trigger.
             old_schema: The schema the table was in; None for the connection's current schema.
             new_schema: The schema it moved to; None for the connection's current schema.

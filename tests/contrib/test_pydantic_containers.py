@@ -14,12 +14,16 @@ from pydantic import ValidationError
 from hare.contrib.pydantic import pydantic_model_creator
 from tests.dialects.clickhouse.dynamic_types.models import Sample
 from tests.dialects.clickhouse.models import Shipment
+from tests.utils.model_bindings import ModelBindings
 
 pytestmark = pytest.mark.database_independent
 
 
 def test_containers_are_annotated_to_any_depth():
-    annotations = {name: field.annotation for name, field in pydantic_model_creator(Shipment).model_fields.items()}
+    annotations = {
+        name: field.annotation
+        for name, field in pydantic_model_creator(Shipment, apps=ModelBindings.prepare(Shipment)).model_fields.items()
+    }
     assert annotations["tags"] == list[str]
     assert annotations["scores"] == list[int | None]
     assert annotations["grid"] == list[list[int]]
@@ -33,7 +37,7 @@ def test_containers_are_annotated_to_any_depth():
 
 
 def test_a_document_is_validated_through_the_containers():
-    schema = pydantic_model_creator(Shipment)
+    schema = pydantic_model_creator(Shipment, apps=ModelBindings.prepare(Shipment))
     key = uuid.uuid4()
     document = {
         "id": 1,
@@ -57,7 +61,10 @@ def test_a_document_is_validated_through_the_containers():
 
 
 def test_values_of_several_types():
-    annotations = {name: field.annotation for name, field in pydantic_model_creator(Sample).model_fields.items()}
+    annotations = {
+        name: field.annotation
+        for name, field in pydantic_model_creator(Sample, apps=ModelBindings.prepare(Sample)).model_fields.items()
+    }
     assert annotations["anything"] == typing.Any | None
     assert annotations["reading"] == int | str | list[float] | None
     assert annotations["bag"] == list[typing.Any | None]
@@ -76,7 +83,7 @@ def test_a_float_json_has_no_number_for_reads_back_from_the_schemas_json():
         class Meta:
             app = "contract_nan"
 
-    schema = pydantic_model_creator(Measurement, name="MeasurementNaN")
+    schema = pydantic_model_creator(Measurement, apps=ModelBindings.prepare(Measurement), name="MeasurementNaN")
     dumped = schema(id=1, readings=[1.5, float("nan"), float("inf")]).model_dump_json()
     assert '"NaN"' in dumped
     assert '"Infinity"' in dumped

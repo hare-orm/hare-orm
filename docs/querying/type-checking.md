@@ -6,7 +6,7 @@ misspelled name in `order_by()` or `only()`, a field the constructor doesn't kno
 otherwise be found only when the query runs. The plugin also gives `values()` and `values_list()` rows
 real types instead of `dict[str, Any]` and `tuple[Any, ...]`.
 
-The plugin reads lookup descriptions through `Model._meta.get_lookup_info()`
+The plugin reads lookup descriptions through `apps.get_binding(Model).get_lookup_info()`
 ([Describing filters and orderings](describing-filters.md)) and shares field input and read types with
 the stub generator. Registered lookups, transforms and fields participate in those descriptions too.
 Static checks use these contracts without executing queries or validating actual field values;
@@ -34,6 +34,25 @@ At the start of every mypy run the plugin imports the configuration and binds it
 database (`Hare.bind_models()`): their relations, swappable models and lookups. The directory of mypy's
 configuration file is put on the Python path for the import. Each model's lookups are checked against the
 dialect of its `default_connection`.
+
+### <a id="prepared-models"></a>Prepared model metadata: `BoundModels`
+
+Custom typing tools can read a prepared registry through `BoundModels(apps)`. Its `apps` argument is
+the `Apps` returned by `Hare.bind_models()`; the bindings and connection dialects come from that same
+graph. The reader does not bind models or parse connection settings.
+
+```python
+from hare import Hare
+from hare.core.config import HareConfig
+from hare.typing_info.bound_models import BoundModels
+
+config = HareConfig.load("library.settings.HARE_CONFIG")
+bound_models = BoundModels(Hare.bind_models(config))
+```
+
+`bound_models.bindings` lists the prepared bindings in full model-name order, and
+`bound_models.get_dialect(binding)` returns a binding's configured dialect or `None` when it has no
+configured connection. Preparing and reading this metadata opens no database connections.
 
 ### <a id="mypy-imports"></a>Lookups registered outside the models
 
@@ -316,8 +335,15 @@ hare stubs --output stubs         # another directory than typings/
 A stub starts with the whole module produced by mypy's stubgen. LibCST updates class declarations
 structurally, preserving other scopes and comments. Both tools are installed by the `pyright` extra.
 Pyright reads the stub instead of the module, so its other names stay.
+Model declarations are matched by their complete class path: a registered `Scope.Entry`
+is typed inside `Scope`, while unrelated top-level or nested classes named `Entry` remain
+unchanged. Classes local to a function are not module-level attribute paths.
+The command keeps its temporary model bindings active for the whole generation and restores
+the caller's active application bindings on exit. It does not open database connections.
 Package modules keep their layout: models in `library/__init__.py` produce
 `typings/library/__init__.pyi`, alongside stubs for child modules.
+Abstract bases nested inside module-level classes are included too: their inherited fields
+are typed both on the abstract base and on its concrete subclasses.
 Each model's fields are typed (`name: Field[str]`, a relation
 `author: Field[Author]`) and its queryset typed for its own keys and values:
 

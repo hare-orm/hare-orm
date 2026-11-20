@@ -15,6 +15,7 @@ from hare.contrib.request_query.declaration.request_query_registry import Reques
 
 if TYPE_CHECKING:
     from hare.contrib.request_query.request_query import RequestQuery
+    from hare.core.apps import Apps
 
 
 class RequestQueryGenerationBuilder:
@@ -26,10 +27,17 @@ class RequestQueryGenerationBuilder:
     """
 
     @staticmethod
-    def build(query_class: type[RequestQuery[Any]]) -> RequestQueryGeneration:
+    def build(query_class: type[RequestQuery[Any]], *, apps: Apps | None = None) -> RequestQueryGeneration:
         queryset = query_class.get_meta_option("queryset")
-        if queryset is not None:
-            RequestQueryRegistry.check_model_registered(query_class, queryset.model)
+        if queryset is not None and queryset._binding is None:
+            from hare.core.hare_context import HareContext
+            from hare.query.queryset.pending_calls.calls_before_setup import CallsBeforeSetup
+
+            queryset = (
+                CallsBeforeSetup.bind(queryset, HareContext.require_current())
+                if apps is None
+                else CallsBeforeSetup.bind(queryset, apps.context, apps.binding_graph)
+            )
         schema = create_model(
             query_class.__name__,
             __base__=query_class,
@@ -50,7 +58,7 @@ class RequestQueryGenerationBuilder:
             parameter_builder = FilterParameterBuilder(query_class)
             parameter_fields.update(parameter_builder.build_fields(queryset))
             RequestQueryParameters.add_parameter_fields(schema, parameter_fields)
-            builder = DeclarationBuilder(schema)
+            builder = DeclarationBuilder(schema, queryset)
             declaration = replace(
                 builder.build(),
                 on_describe=partial(RequestQueryRegistry.track_described_models, ref(query_class)),
@@ -59,8 +67,7 @@ class RequestQueryGenerationBuilder:
                 query_class,
                 {queryset.model, *parameter_builder.described_models, *builder.described_models},
             )
-            RequestQueryRegistry.bound_models.add(queryset.model)
         schema.model_rebuild()
-        generation = RequestQueryGeneration(schema, declaration, options)
+        generation = RequestQueryGeneration(RequestQueryRegistry.revision, schema, declaration, options)
         schema.parameter_generation = generation
         return generation

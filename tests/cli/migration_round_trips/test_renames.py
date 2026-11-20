@@ -15,6 +15,29 @@ from tests.utils.database_under_test import DatabaseUnderTest
 
 
 @pytest.mark.asyncio
+async def test_recording_an_explicit_default_table_name_keeps_it_when_the_model_is_renamed(project_factory):
+    project = await project_factory()
+    model = "class {name}(Model):\n    id = fields.IntField(primary_key=True)\n{meta}"
+    explicit = '    class Meta:\n        table = "book"\n'
+    project.write_models(model.format(name="Book", meta=""))
+    await project.cli_ok("makemigrations")
+    await project.cli_ok("migrate")
+    await project.query("INSERT INTO book (id) VALUES (11)")
+    project.write_models(model.format(name="Book", meta=explicit))
+    await project.cli_ok("makemigrations")
+    [change] = project.get_latest_migration("app").operations
+    assert isinstance(change, ops.AlterModelTable)
+    assert change.table == "book"
+    await project.cli_ok("migrate")
+
+    project.write_models(model.format(name="BookRecord", meta=explicit))
+    await project.cli_ok("makemigrations", "--rename", "app.Book=BookRecord")
+    await project.cli_ok("migrate")
+    await project.cli_ok("makemigrations", "--check")
+    assert await project.query("SELECT id FROM book") == [{"id": 11}]
+
+
+@pytest.mark.asyncio
 async def test_a_confirmed_rename_recreates_the_generated_field_rewritten_for_the_new_name(project_factory) -> None:
     """The generated field's raw SQL is the user's: rewritten in the model, it's removed before the
     rename and added after it - unapplying adds the old one back once the column has its old name."""

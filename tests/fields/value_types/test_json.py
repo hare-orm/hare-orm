@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from hare.contrib.test import assert_query_count, requires_features
+from hare.core.hare_context import HareContext
 from hare.ddl.indexes import Index
 from hare.exceptions import (
     ConfigurationError,
@@ -19,6 +20,8 @@ from hare.fields.data.json.json_codec import JsonCodec
 from hare.query.functions import Max, Min
 from hare.transactions.transactions import Transactions
 from tests.shared_models import testmodels
+
+pytestmark = pytest.mark.usefixtures("model_conversion_context")
 
 
 @pytest.mark.database_independent
@@ -111,7 +114,7 @@ async def test_create(db):
 async def test_a_null_byte_in_a_value_is_the_databases_to_store(db):
     """SQLite stores a null byte in JSON as it is; PostgreSQL refuses it itself - a ValidationError, as
     for a refused value, not an OperationalError."""
-    dialect_name = testmodels.JSONFields._meta.connection.dialect.name
+    dialect_name = HareContext.require_current().apps.get_queryset(testmodels.JSONFields).get_connection().dialect.name
     for data in ({"null_byte": "a\x00b"}, {"a\x00b": "value"}, ["a\x00b"]):
         if dialect_name == "postgresql":
             with pytest.raises(ValidationError, match="null byte"):
@@ -493,7 +496,7 @@ def test_to_db_value_wraps_encoder_failure():
     class Unserializable:
         pass
 
-    field = testmodels.JSONFields._meta.fields_map["data"]
+    field = HareContext.require_current().apps.get_binding(testmodels.JSONFields).fields_map["data"]
     with pytest.raises(ValidationError):
         field.to_db_value({"a": Unserializable()}, testmodels.JSONFields)
 
@@ -557,7 +560,7 @@ def test_json_field_error_matches_other_fields_validation_error_convention():
     failure (write) and a genuine decode failure of real, stored DB text (read) must both raise
     ValidationError like every other field - a plain str written via to_db_value is no longer
     one of those failure cases (see test_string_value_round_trips_as_a_plain_string)."""
-    field = testmodels.JSONFields._meta.fields_map["data"]
+    field = HareContext.require_current().apps.get_binding(testmodels.JSONFields).fields_map["data"]
 
     class Unserializable:
         pass
@@ -583,7 +586,10 @@ async def test_exact_and_not_compare_json_values(db):
     not_matching_ids = {row.id for row in await testmodels.JSONFields.objects.filter(data__not={"a": 1, "b": 2})}
     assert not_matching_ids == {second.id, third.id}
     reordered = [row.id for row in await testmodels.JSONFields.objects.filter(data={"b": 2, "a": 1})]
-    is_sqlite = testmodels.JSONFields._meta.connection.dialect.name == "sqlite"
+    is_sqlite = (
+        HareContext.require_current().apps.get_queryset(testmodels.JSONFields).get_connection().dialect.name
+        == "sqlite"
+    )
     assert reordered == ([] if is_sqlite else [first.id])
 
 
@@ -635,7 +641,7 @@ async def test_top_level_numbers_round_trip_exactly(db):
 @pytest.mark.asyncio
 async def test_sqlite_json_column_has_text_affinity(db):
     await testmodels.JSONFields.objects.create(data=1.0)
-    connection = testmodels.JSONFields._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(testmodels.JSONFields).get_connection()
     rows = await connection.execute_dicts('SELECT typeof("data") AS storage_class FROM "jsonfields"')
     assert {row["storage_class"] for row in rows} == {"text"}
 
@@ -698,7 +704,10 @@ async def test_min_and_max_of_json_are_the_databases(db):
     before any SQL."""
     await testmodels.JSONFields.objects.create(data={"a": 1})
     await testmodels.JSONFields.objects.create(data={"b": 2})
-    if testmodels.JSONFields._meta.connection.dialect.name == "sqlite":
+    if (
+        HareContext.require_current().apps.get_queryset(testmodels.JSONFields).get_connection().dialect.name
+        == "sqlite"
+    ):
         assert await testmodels.JSONFields.objects.aggregate(value=Max("data")) == {"value": {"b": 2}}
         assert await testmodels.JSONFields.objects.aggregate(value=Min("data")) == {"value": {"a": 1}}
         return

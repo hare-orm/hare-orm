@@ -27,7 +27,7 @@ pub fn read_fields(value: &Bound<'_, PyDateTime>) -> Option<NaiveDateTime> {
 pub struct ZoneConversions {
     /// `(zone_name) -> tzinfo`.
     zone_parser: Py<PyAny>,
-    /// Zone name -> its zone: an owner bucket of `Timezone.ZONES`, which empties it whenever the
+    /// Zone name -> its zone: an owner bucket of `ZoneNames.ZONES`, which empties it whenever the
     /// zones are dropped. Reads and writes go through the bucket to enforce its bound.
     zones_by_name: Py<PyAny>,
 }

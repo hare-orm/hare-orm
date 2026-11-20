@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from hare.contrib.test import capture_queries, requires_features
+from hare.core.hare_context import HareContext
 from hare.exceptions import (
     FieldError,
     OperationalError,
@@ -596,7 +597,7 @@ async def test_get_update_sql_materializes_update_fields_once(db):
     for the cache key and the SET-clause loop would silently produce a SET
     clause with 0 fields the moment caching is involved."""
     await Tournament.objects.create(name="1")
-    executor = InstanceWriter(Tournament, Tournament.get_connection())
+    executor = InstanceWriter(HareContext.require_current().apps.get_binding(Tournament), Tournament.get_connection())
 
     sql, _parameter_layout = executor.get_update_sql(iter(["name"]), None)
     assert "SET" in sql

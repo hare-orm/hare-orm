@@ -9,6 +9,58 @@
 "tests/writes/rules" = ["encryption"]
 
 [modules]
+"tests/contracts/test_binding_lifecycle_contracts.py" = { requires = [], cells = [] }
+"tests/contracts/test_write_target_admission.py" = { requires = [], cells = [] }
+"tests/contracts/test_json_path_labels.py" = { requires = [], cells = [] }
+"tests/contracts/test_encryption_rotation_scopes.py" = { requires = ["encryption"], cells = ["encryption"] }
+"tests/contracts/test_iterator_scope_lifetime.py" = { requires = [], cells = [] }
+"tests/model_setup/binding/test_binding_origins.py" = { requires = [], cells = ["request-query"] }
+"tests/contracts/test_execution_contract_boundaries.py" = { requires = [], cells = [] }
+"tests/contracts/test_naive_datetime_encoding.py" = { requires = [], cells = [] }
+"tests/contracts/test_integer_enum_input_forms.py" = { requires = [], cells = [] }
+"tests/contracts/test_temporal_container_paths.py" = { requires = [], cells = [] }
+"tests/cli/test_init_package_locations.py" = { requires = [], cells = [] }
+"tests/contracts/test_time_of_day_inputs.py" = { requires = [], cells = [] }
+"tests/contracts/test_registered_field_paths.py" = { requires = [], cells = [] }
+"tests/contracts/test_result_column_aliases.py" = { requires = [], cells = [] }
+"tests/native_acceleration/test_assignment_normalization.py" = { requires = [], cells = [] }
+"tests/contracts/test_assigned_field_normalization.py" = { requires = [], cells = [] }
+"tests/contracts/test_container_lookup_conversion.py" = { requires = [], cells = [] }
+"tests/contracts/test_registered_model_identity.py" = { requires = [], cells = [] }
+"tests/contracts/test_implicit_relation_target.py" = { requires = [], cells = [] }
+"tests/contracts/test_secondary_table_drift.py" = { requires = [], cells = [] }
+"tests/contracts/test_renamed_annotation_projection.py" = { requires = [], cells = [] }
+"tests/contracts/test_ip_address_scope.py" = { requires = [], cells = [] }
+"tests/contracts/test_named_join_identity.py" = { requires = [], cells = [] }
+"tests/contracts/test_keyless_summaries.py" = { requires = [], cells = [] }
+"tests/contracts/test_distinct_membership.py" = { requires = [], cells = [] }
+"tests/contracts/test_historical_relation_references.py" = { requires = [], cells = [] }
+"tests/contracts/test_async_partial_defaults.py" = { requires = [], cells = [] }
+"tests/contracts/test_container_dirty_fields.py" = { requires = [], cells = ["pydantic"] }
+"tests/contracts/test_reverse_write_preparation.py" = { requires = [], cells = [] }
+"tests/contracts/test_bulk_conflict_bound_values.py" = { requires = [], cells = [] }
+"tests/contracts/test_native_prerequisite_execution.py" = { requires = [], cells = [] }
+"tests/contracts/test_native_prerequisite_owners.py" = { requires = [], cells = [] }
+"tests/contracts/test_through_value_preparation.py" = { requires = [], cells = [] }
+"tests/contracts/test_nullable_conflict_returning.py" = { requires = [], cells = [] }
+"tests/contracts/test_returning_keys.py" = { requires = [], cells = [] }
+"tests/contracts/test_json_enum_inputs.py" = { requires = ["pydantic"], cells = ["encryption"] }
+"tests/contracts/test_related_cache_declarations.py" = { requires = [], cells = [] }
+"tests/contracts/test_selected_row_identity.py" = { requires = [], cells = [] }
+"tests/contracts/test_expression_structure.py" = { requires = [], cells = [] }
+"tests/contracts/test_generated_enum_constraints.py" = { requires = [], cells = [] }
+"tests/contracts/test_sqlite_migration_transactions.py" = { requires = [], cells = [] }
+"tests/native_acceleration/test_native_exports.py" = { requires = [], cells = [] }
+"tests/contracts/test_versioned_relation_values.py" = { requires = [], cells = [] }
+"tests/contracts/test_related_write_scopes.py" = { requires = [], cells = [] }
+"tests/contrib/outbox/test_outbox_model_scopes.py" = { requires = [], cells = [] }
+"tests/relations/test_relation_instance_presence.py" = { requires = [], cells = [] }
+"tests/contracts/test_background_connection_frames.py" = { requires = [], cells = [] }
+"tests/contracts/test_spatial_result_metadata.py" = { requires = [], cells = [] }
+"tests/contracts/test_search_config_expressions.py" = { requires = [], cells = [] }
+"tests/contracts/test_result_branch_codecs.py" = { requires = [], cells = [] }
+"tests/contracts/test_callable_defaults.py" = { requires = [], cells = [] }
+"tests/contracts/test_swappable_relation_binding.py" = { requires = [], cells = [] }
 "tests/contracts/test_tenant_connection_paths.py" = { requires = [], cells = [] }
 "tests/contracts/test_transaction_scope_paths.py" = { requires = [], cells = [] }
 "tests/contracts/test_filter_value_snapshots.py" = { requires = [], cells = [] }
@@ -541,6 +593,7 @@
 "tests/migrations/autodetection/test_migration_checks.py" = { requires = [], cells = [] }
 "tests/migrations/autodetection/test_migration_splitter.py" = { requires = [], cells = [] }
 "tests/migrations/autodetection/test_operation_sorter.py" = { requires = [], cells = [] }
+"tests/migrations/autodetection/test_unmanaged_relation_dependencies.py" = { requires = [], cells = [] }
 "tests/migrations/autodetection/test_rename_questions.py" = { requires = [], cells = [] }
 "tests/migrations/autodetection/test_required_extensions.py" = { requires = [], cells = [] }
 "tests/migrations/autodetection/test_state_diff_operations.py" = { requires = [], cells = [] }
@@ -692,7 +745,7 @@
 "tests/multiple_connections/test_relations_on_second_connection.py" = { requires = [], cells = [] }
 "tests/multiple_connections/test_router.py" = { requires = [], cells = [] }
 "tests/multiple_connections/test_subquery_exists_cross_db_guard.py" = { requires = [], cells = [] }
-"tests/multiple_connections/test_transactions_distributed.py" = { requires = [], cells = [] }
+"tests/multiple_connections/test_transactions_distributed.py" = { requires = [], cells = ["asyncpg"] }
 "tests/multiple_connections/test_two_databases.py" = { requires = [], cells = [] }
 "tests/contracts/test_relation_connection_paths.py" = { requires = [], cells = [] }
 "tests/native_acceleration/test_field_codecs.py" = { requires = [], cells = ["asyncpg"] }
@@ -888,6 +941,7 @@
 "tests/schema/test_postgres_comment_escaping.py" = { requires = [], cells = [] }
 "tests/schema/test_schema_qualified_bulk_loads.py" = { requires = [], cells = [] }
 "tests/sql_builder/test_hashing.py" = { requires = [], cells = [] }
+"tests/sql_builder/test_negative.py" = { requires = [], cells = [] }
 "tests/sql_builder/test_querybuilder_copy_isolation.py" = { requires = [], cells = [] }
 "tests/sql_builder/test_replace_table.py" = { requires = [], cells = [] }
 "tests/stubs/test_pyright_reads_stubs.py" = { requires = ["pyright", "pyright-cli"], cells = ["mypy", "pyright", "pyright-cli"] }

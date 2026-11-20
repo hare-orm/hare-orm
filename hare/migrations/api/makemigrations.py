@@ -50,21 +50,22 @@ async def makemigrations(
     if (empty or merge) and not app_labels:
         raise ConfigurationError("empty and merge need the apps to make migrations for")
     typed_config = HareConfig.load(config)
-    # An app named twice is one app - one migration of it.
-    target_app_labels = list(dict.fromkeys(app_labels)) if app_labels else list(typed_config.apps)
-    for label in target_app_labels:
+    requested_labels = tuple(app_labels or ())
+    for label in requested_labels:
         if label not in typed_config.apps:
             raise ConfigurationError(f"Unknown app label {label}")
     safety_config = typed_config.migrations.safety if typed_config.migrations is not None else None
-    async with MigrationSession(typed_config, target_app_labels, create_packages=True) as session:
+    async with MigrationSession(typed_config, requested_labels, create_packages=True) as session:
         apps: Apps = session.context.apps  # type: ignore[assignment]
         # A view declared as a queryset is written as that queryset's SQL.
         apps.bind_base_queries()
         # A constraint no migrate could apply isn't written into a migration.
         for app_models in apps.apps.values():
             for model in app_models.values():
-                if model._meta.connection.features.supports_unique_constraints:
-                    ModelConnectionChecks.raise_if_unique_constraint_options_unsupported(model)
+                binding = apps.get_binding(model)
+                connection = apps._connections.get(binding.default_connection)  # type: ignore[arg-type]
+                if connection.features.supports_unique_constraints:
+                    ModelConnectionChecks.raise_if_unique_constraint_options_unsupported(binding, connection)
         maker = MigrationMaker(
             apps,
             session.configured_apps,
@@ -72,4 +73,4 @@ async def makemigrations(
             rename_questions=rename_questions,
             definitions=session.get_definitions(),
         )
-        return await maker.make(target_app_labels, empty=empty, merge=merge, name=name)
+        return await maker.make(session.selected_apps, empty=empty, merge=merge, name=name)

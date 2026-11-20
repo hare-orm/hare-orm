@@ -4,12 +4,14 @@ from collections.abc import Callable
 from types import MemberDescriptorType
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.classes.deferred_import import DeferredImport
 from hare.core.caching.cache import Cache
 from hare.native.native_modules import NativeModules
 from hare.query.queryset.constants import UNCOPIED_QUERY_SLOTS
 
 if TYPE_CHECKING:
     from hare.query.queryset.query_specification import QuerySpecification
+    from hare.query.queryset.queryset import QuerySet
 
 
 class SpecificationCopying:
@@ -20,11 +22,13 @@ class SpecificationCopying:
     """
 
     #: The declared slots of each class (``get_slot_names()``).
-    slot_names: ClassVar[Cache[Any]] = Cache(holds_sql=False)
+    slot_names: ClassVar[Cache[Any]] = Cache()
     #: How each class's slots are copied (``get_slot_copy_plan()``).
-    slot_copy_plans: ClassVar[Cache[Any]] = Cache(holds_sql=False)
+    slot_copy_plans: ClassVar[Cache[Any]] = Cache()
     #: ``QuerySet`` - imported at the first copy, as its module imports this one.
-    query_set_class: ClassVar[type[Any] | None] = None
+    query_set_class: ClassVar[DeferredImport[type[QuerySet[Any, Any]]]] = DeferredImport(
+        "hare.query.queryset.queryset", "QuerySet"
+    )
     #: rust.native.rows.copy_slot_values() - copies a query's slots to its clone.
     slot_copier: ClassVar[Any] = NativeModules.rows.copy_slot_values
 
@@ -95,12 +99,6 @@ class SpecificationCopying:
             target: The independent destination.
             specification_class: Which declared slots to copy, defaulting to the source's class.
         """
-        query_set_class = SpecificationCopying.query_set_class
-        if query_set_class is None:
-            # Deferred import: the queryset module imports this one.
-            from hare.query.queryset.queryset import QuerySet
-
-            SpecificationCopying.query_set_class = query_set_class = QuerySet
         plain_names, container_slots, has_prefetch_map, has_prefetch_queries = SpecificationCopying.get_slot_copy_plan(
             type(source) if specification_class is None else specification_class
         )
@@ -114,7 +112,7 @@ class SpecificationCopying:
             prefetch_queries = getattr(source, "_prefetch_queries", None)
             if prefetch_queries is not None:
                 target._prefetch_queries = {key: list(queries) for key, queries in prefetch_queries.items()}
-        if isinstance(target, query_set_class):
+        if isinstance(target, SpecificationCopying.query_set_class):
             target._unchanged_base_manager = None
         source.copy_extension_state(target)
 

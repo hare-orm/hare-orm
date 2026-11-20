@@ -8,7 +8,9 @@ from threading import RLock
 from typing import TYPE_CHECKING
 from weakref import WeakKeyDictionary
 
-from hare.contrib.outbox.constants import OUTBOX_RELEASE_FAILED
+import orjson
+
+from hare.contrib.outbox.outbox_release import OutboxRelease
 from hare.contrib.outbox.wakeups.constants import (
     WAKEUP_HEALTHY_SECONDS,
     WAKEUP_MAX_RECONNECT_ATTEMPTS,
@@ -45,10 +47,18 @@ class OutboxWakeup:
     row, given up with an ERROR - the relays keep polling.
     """
 
+    def __deepcopy__(self, memo: dict[int, object]) -> OutboxWakeup:
+        """Keep the shared signal service when copying a model's declarative options.
+
+        Models and relays must refer to the same subscriptions, tasks and transaction
+        signals. These runtime resources are not declarations to duplicate.
+        """
+        memo[id(self)] = self
+        return self
+
     def __init__(self) -> None:
-        #: The topics of the events each open transaction wrote, by the savepoint they were written
-        #: in (None at the transaction's own level) - signalled once it commits, those of a savepoint
-        #: rolled back dropped.
+        #: The topics of each open transaction by savepoint, used to join or deduplicate signals.
+        #: Topics of a savepoint that rolls back are dropped.
         self.pending_topics: WeakKeyDictionary[TransactionClient, SavepointTopics] = WeakKeyDictionary()
         #: The relays' callbacks, each with the event loop it is called on.
         self.subscriptions: list[tuple[WakeupCallback, asyncio.AbstractEventLoop]] = []
@@ -74,22 +84,42 @@ class OutboxWakeup:
         if not ChangeCapturing.is_in_transaction(connection):
             await self.signal_safely(frozenset(topics))
             return
-        connection_transaction: TransactionClient = connection  # type: ignore[assignment]
-        transaction = connection_transaction._get_top_level_transaction()
-        savepoint_span = TransactionCallbacks.get_registration_span(connection_transaction)
-        pending_by_savepoint = self.pending_topics.setdefault(transaction, {})
-        pending = pending_by_savepoint.get(savepoint_span)
-        if pending is None:
-            # Registered at the savepoint the events were written in: a rollback of it drops them
-            # with their own callbacks, the topics written around it still signalled.
-            pending = pending_by_savepoint[savepoint_span] = set()
-            TransactionCallbacks.add_on_commit_callback(
-                connection_transaction, partial(self.signal_pending, transaction), is_user_callback=False
-            )
-            TransactionCallbacks.add_on_rollback_callback(
-                connection_transaction, partial(self.drop_pending, transaction, savepoint_span)
-            )
+        transaction, savepoint_span, topics_by_savepoint = self._get_topic_scope(connection)
+        pending = self._register_topic_bucket(
+            connection, transaction, savepoint_span, topics_by_savepoint, signal_on_commit=True
+        )
         pending.update(topics)
+
+    def _get_topic_scope(
+        self, connection: TransactionClient
+    ) -> tuple[TransactionClient, SavepointSpan | None, SavepointTopics]:
+        """The top-level transaction, active savepoint and their topic storage."""
+        transaction = connection._get_top_level_transaction()
+        savepoint_span = TransactionCallbacks.get_registration_span(connection)
+        return transaction, savepoint_span, self.pending_topics.setdefault(transaction, {})
+
+    def _register_topic_bucket(
+        self,
+        connection: TransactionClient,
+        transaction: TransactionClient,
+        savepoint_span: SavepointSpan | None,
+        topics_by_savepoint: SavepointTopics,
+        *,
+        signal_on_commit: bool,
+    ) -> set[str]:
+        """Register cleanup for the topics first written in this transaction or savepoint."""
+        pending = topics_by_savepoint.get(savepoint_span)
+        if pending is not None:
+            return pending
+        pending = topics_by_savepoint[savepoint_span] = set()
+        if signal_on_commit:
+            TransactionCallbacks.add_on_commit_callback(
+                connection, partial(self.signal_pending, transaction), is_user_callback=False
+            )
+        TransactionCallbacks.add_on_rollback_callback(
+            connection, partial(self.drop_pending, transaction, savepoint_span), is_user_callback=False
+        )
+        return pending
 
     async def signal_pending(self, transaction: TransactionClient) -> None:
         """Signals the topics a committed transaction wrote - once, joined, whichever of its
@@ -132,6 +162,27 @@ class OutboxWakeup:
             topics: The topics of the events written.
         """
         raise NotImplementedError
+
+    @staticmethod
+    def encode_topics(topics: frozenset[str]) -> bytes:
+        """Encodes broker signals as a JSON array, preserving delimiters and Unicode in topic names.
+
+        Args:
+            topics: The topics carried by one signal; empty means the topics aren't known.
+
+        Returns:
+            UTF-8 JSON bytes shared by Redis, Kafka and RabbitMQ wakeups.
+        """
+        return orjson.dumps(sorted(topics))
+
+    def dispatch_payload(self, payload: str | bytes) -> None:
+        """Decodes a broker signal and gives its exact topic names to subscribed relays.
+
+        Args:
+            payload: The JSON array written by ``encode_topics()``. Invalid JSON raises, so the
+                listener follows its normal failure and reconnect handling.
+        """
+        self.dispatch(frozenset(orjson.loads(payload)))
 
     async def subscribe(self, callback: WakeupCallback, connection: str | DatabaseClient) -> None:
         """Calls ``callback`` on every signal from now on - a relay's subscription.
@@ -185,19 +236,9 @@ class OutboxWakeup:
     async def _stop_listening(self, listen_task: asyncio.Task[None]) -> None:
         """Stops the listener and closes its transport on the listener's event loop."""
         listen_task.cancel()
-        try:
+        async with OutboxRelease(lambda: self.close):
             with contextlib.suppress(asyncio.CancelledError):
                 await listen_task
-        except BaseException as error:
-            try:
-                await ResourceCompletion.wait(self.close())
-            except BaseException as release_error:
-                if release_error is error:
-                    raise
-                raise BaseExceptionGroup(OUTBOX_RELEASE_FAILED, [error, release_error]) from None
-            raise
-        else:
-            await ResourceCompletion.wait(self.close())
 
     def dispatch(self, topics: frozenset[str]) -> None:
         """Gives a received signal to every subscribed relay - on the event loop of its subscription, also
@@ -261,8 +302,6 @@ class OutboxWakeup:
                 await listen()
                 # Given up on its own - the relays keep polling.
                 return
-            except asyncio.CancelledError:
-                raise
             except Exception:
                 # A subscription that ran a while before failing starts the count again.
                 failures = 1 if loop.time() - started_at >= WAKEUP_HEALTHY_SECONDS else failures + 1

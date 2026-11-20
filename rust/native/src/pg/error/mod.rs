@@ -20,6 +20,8 @@ create_exception!(rust.native.pg, QueryError, pyo3::exceptions::PyException);
 
 create_exception!(rust.native.pg, IntegrityViolationError, QueryError);
 
+create_exception!(rust.native.pg, TooManyParametersError, QueryError);
+
 create_exception!(rust.native.pg, ConversionError, pyo3::exceptions::PyException);
 
 // SQLSTATE class 3D ("database does not exist"). Not a QueryError: dropping a missing database
@@ -115,10 +117,12 @@ pub fn to_pyerr(error: impl Into<DriverError>) -> PyErr {
 }
 
 #[cfg(unix)]
-pub fn register(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
+pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    let py = module.py();
     module.add("ConnectionError", py.get_type::<ConnectionError>())?;
     module.add("QueryError", py.get_type::<QueryError>())?;
     module.add("IntegrityViolationError", py.get_type::<IntegrityViolationError>())?;
+    module.add("TooManyParametersError", py.get_type::<TooManyParametersError>())?;
     module.add("ConversionError", py.get_type::<ConversionError>())?;
     module.add("InvalidCatalogError", py.get_type::<InvalidCatalogError>())?;
     module.add("InvalidTransactionStateError", py.get_type::<InvalidTransactionStateError>())?;

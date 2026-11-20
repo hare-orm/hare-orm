@@ -116,9 +116,7 @@ class AsyncpgTransactionClient(PostgresqlTransactionClient, AsyncpgClient):
         async with self.acquire_connection() as connection:
             if self.log.isEnabledFor(logging.DEBUG):
                 self.log.debug("%s: %s", query, values)
-            await AsyncpgClient.run_ending_connection_on_cancel(
-                connection, connection.executemany(query, [AsyncpgParameters.get_bound_values(row) for row in values])
-            )
+            await self._execute_many_on_connection(connection, query, values)
 
     async def _driver_stream_batches(
         self, query: str, values: list[Any] | None = None, chunk_size: int = 0
@@ -159,8 +157,6 @@ class AsyncpgTransactionClient(PostgresqlTransactionClient, AsyncpgClient):
             await self.transaction.rollback()  # type: ignore[union-attr]
 
     async def _driver_savepoint(self, name: str) -> None:
-        # Sent ahead of a statement (PendingStatements.send_pending_savepoints()), the connection lock already held.
-        await PendingStatements.send_pending_begin(self)
         await self._connection.execute(POSTGRES_SAVEPOINT_SQL.format(name=name))
 
     async def _driver_release_savepoint(self, name: str) -> None:

@@ -62,6 +62,9 @@ await Book.objects.filter(keywords__item=(0, "sea"))  # keywords[1] = 'sea'
 (`[[1, 2], None]`) дают `ValidationError` до отправки. Массив пустых подмассивов (`[[]]`, `[[], []]`)
 PostgreSQL сохраняет как пустой массив, и он читается как `[]`; ClickHouse сохраняет его как есть.
 
+Та же проверка вложенной формы действует для подклассов `ArrayField`, в том числе разных подклассов
+на соседних уровнях, после преобразования элементов их writers.
+
 Чтобы получить элемент как вычисляемое значение, а не фильтровать по нему, используйте
 [`ArrayItem`](functions.ru.md) — позиция тоже отсчитывается с 0:
 
@@ -87,6 +90,11 @@ await Book.objects.filter(keywords__len__gte=2)
 await Book.objects.filter(keywords__0_2__contains=["whaling"])
 await Book.objects.all().order_by("keywords__0").values_list("keywords__0", "keywords__len")
 ```
+
+Элементы с датой или временем и границы диапазонов сохраняют обычные составные операторы:
+`moments__0__year__gte=2024`, `moments__0__date__in=[date(2024, 1, 1)]` или
+`during__startswith__year__range=(2023, 2024)`. Описание сортировки принимает те же пути
+к значениям, например `moments__0__year`.
 
 ## <a id="wall-clock-fields"></a>`NaiveDatetimeField`, `NaiveTimeField`, `IntervalField`, `FixedCharField`
 
@@ -208,6 +216,9 @@ await Loan.objects.filter(status__in=[LoanStatus.LENT, "overdue"]).order_by("sta
   `type_schema`, создаётся так же, как `Meta.schema` модели (`CreateSchema`). Замена `CharEnumField` на
   `NativeEnumField` или перенос колонки на другой тип (другие `type_name` или `type_schema`) преобразует её
   на месте через текст (`ALTER COLUMN ... TYPE ... USING`).
+  Поля с неявной и явной схемой используют один тип, если текущая схема PostgreSQL совпадает с явной.
+  В этом случае у полей должны совпадать метки, а тип сохраняется до удаления последнего использования.
+  Если текущая схема PostgreSQL другая, поля используют два отдельных типа.
 - **Изменение членов.** Новые члены, добавленные так, что старые сохраняют порядок, становятся новыми
   метками на месте (`ALTER TYPE ... ADD VALUE`) — добавленное так значение нельзя использовать в той же
   транзакции, поэтому записывайте такие строки в следующей миграции. Удалённый или переставленный член

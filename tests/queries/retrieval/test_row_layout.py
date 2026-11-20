@@ -5,10 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.dialects.base.results.statement_result import StatementResult
 from hare.native.native_modules import NativeModules
 from hare.query.rows.model_rows.model_columns import ModelColumns
-from hare.query.rows.row_column import RowColumn
 from hare.query.rows.row_layout import RowLayout
 from hare.query.rows.values_rows.dict_rows import DictRows
 from hare.query.rows.values_rows.flat_rows import FlatRows
@@ -75,18 +75,26 @@ def test_attribute_assignment_preserves_column_selection_and_custom_readers(by_p
 
     names = ("ignored", "second", "first")
     row = raw if by_position else dict(zip(names, raw, strict=True))
-    layout = RowLayout(tuple(RowColumn(key, decode) for key in ((2, 1) if by_position else ("first", "second"))))
+    layout = RowLayout(tuple((key, decode) for key in ((2, 1) if by_position else ("first", "second"))))
 
     class Loaded:
-        _meta = SimpleNamespace(default_custom_generated_pk=False, track_dirty_fields=False)
+        binding = SimpleNamespace(default_custom_generated_pk=False, track_dirty_fields=False)
 
-    columns = ModelColumns(
-        Loaded,
+    bindings = {Loaded: Loaded.binding}
+    graph = SimpleNamespace(get_binding=bindings.__getitem__)
+    for model, binding in bindings.items():
+        binding._model = model
+        binding.graph = graph
+        binding.cache_buckets = {}
+    context = HareContext()
+
+    columns = ModelColumns.from_entries(
+        Loaded.binding,
         (("first", None, decode), ("second", None, decode)),
-        tuple(column.key for column in layout.columns),
+        tuple(key for key, _reader in layout.columns),
         False,
     )
-    instance = NativeModules.rows.ModelResultLayout((columns,), ()).read_row(row, None, lambda obj: None)
+    instance = NativeModules.rows.ModelResultLayout((columns,), ()).read_row(row, None, context, lambda obj: None)
     assert (instance.first, instance.second) == expected
     assert calls == [raw[2], raw[1]]
     assert row == (raw if by_position else dict(zip(names, raw, strict=True)))
@@ -142,7 +150,9 @@ async def test_streamed_result_shapes_close_the_cursor_and_preserve_empty_batche
         finally:
             closed.append(True)
 
-    connection = SimpleNamespace(features=SimpleNamespace(supports_positional_rows=by_position), stream_batches=stream)
+    connection = SimpleNamespace(
+        features=SimpleNamespace(supports_positional_rows=by_position), _stream_built_batches=stream
+    )
     reader = row_type(("value",), (("value",),))
     batches = []
     async with aclosing(reader.stream_batches(connection, "SELECT value", [7], [("value", decode)], 2)) as source:
@@ -182,7 +192,9 @@ async def test_a_streamed_conversion_error_closes_the_cursor(by_position):
         finally:
             closed.append(True)
 
-    connection = SimpleNamespace(features=SimpleNamespace(supports_positional_rows=by_position), stream_batches=stream)
+    connection = SimpleNamespace(
+        features=SimpleNamespace(supports_positional_rows=by_position), _stream_built_batches=stream
+    )
     reader = TupleRows(("value",), (("value",),))
     received = []
     with pytest.raises(ValueError, match="invalid literal"):

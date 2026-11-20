@@ -5,6 +5,8 @@ import datetime
 
 import pytest
 
+from hare.core.hare_context import HareContext
+from hare.exceptions import IntegrityError
 from hare.models.write.instance_values import InstanceValues
 from hare.models.write.rules.enums import WriteType
 from hare.models.write.rules.row_write_rules import RowWriteRules
@@ -82,7 +84,7 @@ async def test_an_insert_keeps_an_auto_now_add_value_given(rules_db):
 async def test_a_failed_insert_puts_the_stamps_back(rules_db):
     await RuleDocument.objects.create(id=1)
     duplicate = RuleDocument(id=1)
-    with pytest.raises(Exception):
+    with pytest.raises(IntegrityError):
         await duplicate.save(force_create=True)
     assert duplicate.created_at is None
     assert duplicate.updated_at is None
@@ -95,7 +97,9 @@ async def test_a_stamp_sets_each_field_as_its_rule_says_and_a_failed_write_puts_
 ):
     if not native:
         monkeypatch.setattr(RowWriteRules, "native_rows", None)
-    rules = RowWriteRules.get(RuleDocument, WriteType.INSERT, None, "test")
+    rules = RowWriteRules.get(
+        HareContext.require_current().apps.get_binding(RuleDocument), WriteType.INSERT, None, "test"
+    )
     created_at = datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC)
     given, unset = RuleDocument(id=1, created_at=created_at), RuleDocument(id=2)
     changed_values = InstanceValues()

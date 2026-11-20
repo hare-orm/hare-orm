@@ -8,6 +8,7 @@ import pytest
 import pytest_asyncio
 
 from hare import fields
+from hare.core.hare_context import HareContext
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
 from hare.dialects.clickhouse.constants import CLICKHOUSE_DIALECT
@@ -17,6 +18,7 @@ from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
 from hare.migrations.autodetection.state_signatures import StateSignatures
 from hare.models import Model
 from tests.dialects.clickhouse.models import Invoice
+from tests.utils.model_bindings import ModelBindings
 
 
 @pytest_asyncio.fixture
@@ -32,7 +34,12 @@ async def invoices(clickhouse_db):
 
 @pytest.mark.asyncio
 async def test_columns_are_declared_as_computed(clickhouse_db):
-    rows = await Invoice._meta.connection.execute_dicts("DESCRIBE TABLE invoice")
+    rows = (
+        await HareContext.require_current()
+        .apps.get_queryset(Invoice)
+        .get_connection()
+        .execute_dicts("DESCRIBE TABLE invoice")
+    )
     computed_rows = sorted((row for row in rows if row["default_type"]), key=lambda row: row["name"])
     assert [(row["name"], row["type"], row["default_type"]) for row in computed_rows] == [
         ("label", "String", "ALIAS"),
@@ -86,7 +93,9 @@ async def test_a_schema_refuses_a_written_row_whose_computed_values_are_unloaded
 
 @pytest.mark.asyncio
 async def test_the_introspector_reads_computed_columns(clickhouse_db):
-    table = await DatabaseCatalog.inspect_table(Invoice._meta.connection, "invoice")
+    table = await DatabaseCatalog.inspect_table(
+        HareContext.require_current().apps.get_queryset(Invoice).get_connection(), "invoice"
+    )
     computed = {
         column.name: (column.generated_expression, column.generated_stored)
         for column in table.columns
@@ -109,7 +118,9 @@ def test_a_column_computed_on_read_is_no_key_of_the_sort():
             app = "sorted_by_alias"
 
     with pytest.raises(ConfigurationError, match="computed on"):
-        ClickhouseTableOptions(order_by=("id", "label")).raise_if_unsupported(Sorted, CLICKHOUSE_DIALECT.features)
+        ClickhouseTableOptions(order_by=("id", "label")).raise_if_unsupported(
+            ModelBindings.prepare(Sorted).get_binding(Sorted), CLICKHOUSE_DIALECT.features
+        )
 
 
 @pytest.mark.database_independent

@@ -11,7 +11,7 @@ from hare.core.hare_context import HareContext
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.dialects.base.dialect import Dialect
 from hare.dialects.base.features import Features
-from hare.exceptions import FieldError, QueryError, UnSupportedError
+from hare.exceptions import ConfigurationError, FieldError, QueryError, UnSupportedError
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
 from hare.models.tenancy.tenancy import Tenancy
 from hare.query.constants import AMBIENT_TENANT_NOT_OVERRIDDEN, PRIMARY_KEY_ALIAS
@@ -49,11 +49,13 @@ from hare.sql.terms.term import Term
 if TYPE_CHECKING:
     from hare.core.caching.cache_bucket import CacheBucket
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.execution.query_dependency import QueryDependency
     from hare.query.queryset.combination.combination import Combination
     from hare.query.queryset.queryset import QuerySet
     from hare.query.queryset.selection.values_selection import ValuesSelection
     from hare.query.scopes.row_scope_provider import RowScopeProvider
+    from hare.query.statements.awaitable_query import AwaitableQuery
     from hare.query.statements.query_sql import QuerySql
 
 
@@ -66,12 +68,19 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
     """What a query asks for - the model, the connection choice, the filters, annotations, ordering,
     slice and the other settings the chained methods declare. ``QuerySet`` adds the methods changing
     it; an ``AwaitableQuery`` takes one over, builds and runs its SQL.
+
+    ``_binding`` stays optional because a reusable template has no registry. Execution
+    binds a local copy before interpreting fields; metadata helpers consume that bound
+    phase. Local annotations and targeted type comments describe this phase where
+    decorators or replay make it invisible to static type narrowing.
     """
 
     query_sql: ClassVar[DeferredImport[type[QuerySql]]] = DeferredImport("hare.query.statements.query_sql", "QuerySql")
 
     __slots__ = (
         "model",
+        "_binding",
+        "_context",
         "_execution_dependencies",
         "_connection",
         # Whether .using() pinned the connection - _connection is also set once the router or the default
@@ -203,6 +212,8 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
     #: holding SQL that no plan key reads would let two queries of different SQL share a plan.
     SLOT_PLAN_ROLES: ClassVar[dict[str, SpecificationSlotPlanRole]] = {
         "model": SpecificationSlotPlanRole.KEYED,
+        "_binding": SpecificationSlotPlanRole.KEYED,
+        "_context": SpecificationSlotPlanRole.CONNECTION,
         "_execution_dependencies": SpecificationSlotPlanRole.BOOKKEEPING,
         "_connection": SpecificationSlotPlanRole.CONNECTION,
         "_connection_explicitly_chosen": SpecificationSlotPlanRole.CONNECTION,
@@ -254,8 +265,13 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
         super().__init_subclass__(**kwargs)
         cls.copy_plan_bucket = SpecificationCopying.slot_copy_plans.get_bucket(cls)
 
-    def __init__(self, model: type[TModel]) -> None:
+    def __init__(
+        self, model: type[TModel], *, binding: ModelBinding | None = None, context: HareContext | None = None
+    ) -> None:
         self.model: type[TModel] = model
+        # Field-dependent methods are replayed only after a template has a binding.
+        self._binding: ModelBinding | None = binding
+        self._context: HareContext | None = context if binding is not None else None
         self._execution_dependencies: tuple[QueryDependency, ...] = ()
         self._options: QueryOptions = QueryOptions.DEFAULT
         self._connection: DatabaseClient | None = None
@@ -284,6 +300,12 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
         self._selection: ValuesSelection | None = None
         self._combination: Combination | None = None
 
+    @classmethod
+    def from_binding(cls, binding: ModelBinding, *, context: HareContext | None = None) -> Self:
+        """Construct through the usual query initializer with an explicit structural source."""
+        model: type[TModel] = binding._model  # type: ignore[assignment]
+        return cls(model, binding=binding, context=context)
+
     @property
     def _q_objects(self) -> list[Q]:
         """The conditions the query filters by - the filter calls a queryset made by simple calls
@@ -309,23 +331,37 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
         """Adds the relations the model loads by default (``lazy=``) and ``.defer_related()``
         didn't switch off to the ones this query joins or prefetches - on the copy a build makes,
         before it reads them."""
-        self._select_related.update(LazyRelationNames.get(self.model)[0] - self._deferred_related_fields)
-        for field_name in self._get_default_prefetched_relations():
-            self._prefetch_map.setdefault(field_name, set())
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        self._select_related.update(LazyRelationNames.get(model_binding)[0] - self._deferred_related_fields)
+        self._prefetch_map = self._get_effective_prefetch_map()
+
+    def _get_effective_prefetch_map(self) -> dict[str, set[str | Prefetch]]:
+        """Merge default prefetches without changing the query or replacing explicit options."""
+        missing = self._get_default_prefetched_relations() - self._prefetch_map.keys()
+        if not missing:
+            return self._prefetch_map
+        return {**self._prefetch_map, **{name: set() for name in missing}}
 
     def _get_default_prefetched_relations(self) -> frozenset[str]:
         """The relations the model prefetches by default (``lazy="select"``) that ``.defer_related()``
         didn't switch off."""
-        relations = LazyRelationNames.get(self.model)[1]
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        relations = LazyRelationNames.get(model_binding)[1]
         if not relations or not self._deferred_related_fields:
             return relations
         return relations - self._deferred_related_fields
 
+    def _needs_dependency_values(self) -> bool:
+        """Whether this operation needs external inputs rather than an empty-query marker."""
+        return not self._is_none
+
     def _model_is_set_up(self) -> bool:
-        """Whether ``Hare.init()`` has set the model up - its relations resolved. A query built
-        before that checks its field names, relations and lookups when it is compiled instead of
-        when each method is called."""
-        return self.model._meta._inited
+        """Whether this query has a complete structural binding.
+
+        Templates record field-dependent calls until a caller selects a graph; replay validates
+        names against that graph without changing the original declaration.
+        """
+        return self._binding is not None and self._binding._inited
 
     def _loads_relations(self) -> bool:
         """Whether reading this query's rows loads relations - asked for, or by default when the
@@ -334,52 +370,10 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
             return True
         if self._selection is not None:
             return False
-        joined, prefetched = LazyRelationNames.get(self.model)
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        joined, prefetched = LazyRelationNames.get(model_binding)
         deferred = self._deferred_related_fields
         return not joined.issubset(deferred) or not prefetched.issubset(deferred)
-
-    def _take_rows_of(
-        self, source: QuerySpecification[Any], *, keeps_ordering: bool = False, keeps_grouping: bool = False
-    ) -> None:
-        """Takes over which rows ``source`` matches - its model, connection choice, default scope,
-        filters, annotations, ``.distinct()``, slice, keyset boundaries, CTEs and dialect method
-        calls - and nothing of how it returns them.
-
-        Args:
-            source: The queryset, or a query made from one.
-            keeps_ordering: Keep the ordering - a slice is taken in it. Without it the ordering is
-                kept only for the keyset boundaries.
-            keeps_grouping: Keep the ``.group_by()`` fields.
-        """
-        SpecificationCopying.copy_specification(source, self)
-        self._configure_rows_source(source, keeps_ordering=keeps_ordering, keeps_grouping=keeps_grouping)
-
-    def _configure_rows_source(
-        self, source: QuerySpecification[Any], *, keeps_ordering: bool, keeps_grouping: bool
-    ) -> None:
-        """Keep only settings selecting source rows, after copying or sharing its declaration.
-
-        Group names are checked before being removed. Cursor boundaries still need the
-        source ordering even when the caller does not otherwise retain it. Containers
-        describing returned relations are replaced, never cleared on the source.
-        """
-        self._single = False
-        self._raise_does_not_exist = False
-        self._prefetch_map = {}
-        self._prefetch_queries = {}
-        self._select_related = set()
-        self._selection = None
-        self._combination = None
-        options = source._options
-        if options is not QueryOptions.DEFAULT:
-            if not keeps_grouping and options.group_bys:
-                source._raise_if_group_names_invalid()
-            removed_options = QueryOptions.ROW_RETURN_SETTINGS
-            if not keeps_grouping:
-                removed_options += ("group_bys",)
-            self._options = options.without(*removed_options)
-        if not keeps_ordering and not (options.cursor_values or options.before_cursor_values):
-            self._orderings = []
 
     def _raise_if_group_names_invalid(self) -> None:
         """Refuses a ``group_by()`` name that is neither an annotation nor a field, and one of an
@@ -389,6 +383,7 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
         Raises:
             FieldError: A name reads no field, or is an aggregate annotation's.
         """
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
         for name in self._group_bys:
             if (annotation := self._annotations.get(name)) is not None:
                 term = (
@@ -401,7 +396,7 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
                 continue
             if name == PRIMARY_KEY_ALIAS:
                 continue
-            lookup_path = LookupPath.parse(self.model, name)
+            lookup_path = LookupPath.parse(model_binding, name)
             # Refused on model rows too, which group by the primary key and would leave it unread.
             target_field = lookup_path.get_target_field()
             EncryptedFieldBase.raise_if_encrypted(target_field, "GROUP BY")
@@ -488,10 +483,12 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
         Returns:
             A fresh context with the scope the real query resolves in.
         """
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
         return ExpressionContext(
-            model=self.model,
+            binding=model_binding,
             dialect=QueryConnection.get_analysis_dialect(self),
             connection=self._connection,
+            checks_dialect_admission=self._connection is not None,
             table=self._effective_basetable(),
             annotations=annotations,
             aggregated_multi_valued_paths=aggregated_multi_valued_paths,
@@ -500,6 +497,7 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
             visibility=self._visibility,
             # Building the real query rejects a filter on a window function where SQL can't apply it.
             window_function_filter_allowed=True,
+            application_context=self._context,
         )
 
     @staticmethod
@@ -534,8 +532,9 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
         Returns:
             The ordering to apply.
         """
-        if not orderings and not self._default_ordering_disabled and self.model._meta.ordering:
-            return self.model._meta.ordering
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        if not orderings and not self._default_ordering_disabled and (default_ordering := model_binding.ordering):
+            return default_ordering
         return orderings
 
     @staticmethod
@@ -637,20 +636,37 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
             stop = base_offset + base_limit if base_limit is not None else None
         return offset, (max(stop - offset, 0) if stop is not None else None)
 
-    def _share_default_scope(self, query: TDerivedAwaitableQuery) -> TDerivedAwaitableQuery:
-        """Hands this query's default scope to a query built from its filters.
+    def _share_connection(self, query: TDerivedAwaitableQuery) -> TDerivedAwaitableQuery:
+        """Hand connection choices to a derived query without consulting the router.
+
+        The same-model recipient takes this graph and application identity along with
+        its connection choices. It keeps its filters, scope and other settings. Its
+        connection hook runs before routing hints are copied; routing happens at execution.
 
         Args:
-            query: The derived query.
+            query: The derived query of the same model.
 
         Returns:
             ``query`` itself.
         """
+        query._binding = self._binding
+        query._context = self._context
+        query._apply_connection(self._connection)
+        query._connection_explicitly_chosen = self._connection_explicitly_chosen
+        query._router_fallback_connection = self._router_fallback_connection
+        query._instance_connection_alias = self._instance_connection_alias
+        query._instance_connection_model = self._instance_connection_model
+        return query
+
+    def _share_default_scope(self, query: QuerySpecification[Any]) -> None:
+        """Hands this query's default scope to a query built from its filters.
+
+        Args:
+            query: The derived query.
+        """
         query._uses_default_scope = self._uses_default_scope
         query._row_scope_provider = self._row_scope_provider
         query._visibility = self._visibility
-        query._options = query._options.updated(extension_calls=self._extension_calls)
-        return query
 
     def _effective_basetable(self) -> Table:
         """The table this query's own fields and filters are read from: the model's table, aliased when
@@ -658,7 +674,8 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
         ``OuterReference`` would otherwise bind to this query's own row.
         """
 
-        table = self.model._meta.basetable
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        table = model_binding.basetable
         outer_context = OuterScope.current_expression_context.get()
         if outer_context is not None and table.get_table_name() == outer_context.table.get_table_name():
             return table.as_(Identifiers.get_within_limit(f"{table.get_table_name()}__exists_inner"))
@@ -706,13 +723,14 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
         """
         if not self._alias_keys:
             return set()
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
         directly_used_names = {
             *(fields_for_select or ()),
             *self._get_selected_field_names(),
             *self._group_bys,
             *self._distinct_on,
             # Meta.ordering's too - an expression of it is ordered by an alias.
-            *(field_name for field_name, _order in self._orderings or self.model._meta.ordering),
+            *(field_name for field_name, _order in self._orderings or model_binding.ordering),
         }
         tracker = AnnotationAccessTracker(self._annotations)
         for annotation_name, annotation in self._annotations.items():
@@ -808,14 +826,25 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
 
         Raises:
             ConfigurationError: No connection is pinned and no Hare context is active; the model has
-                no default connection, or its tenancy needs a setting of the connection it lacks
-                (``MetaInfo.check_tenant_client()``).
+                no default connection, the client belongs to another HareContext, or the model's
+                tenancy needs a setting of the connection it lacks
+                (``ModelBinding.check_tenant_client()``).
             QueryError: The model's tenancy needs a single active tenant, or a transaction that set
-                its tenants (``MetaInfo.check_tenant_client()``).
+                its tenants (``ModelBinding.check_tenant_client()``).
         """
+        context = self._context
+        if context is not None:
+            context.check_open()
+            if HareContext.get_current() is not context:
+                from hare.query.execution.query_execution import QueryExecution
+
+                with QueryExecution(context):
+                    return self.get_connection(for_write=for_write)
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
         if self._connection:
-            return ModelConnectionChoice.get_checked(self.model, self._connection)
-        context = HareContext.require_current()
+            return ModelConnectionChoice.get_checked(model_binding, self._connection, context=context)
+        if context is None:
+            raise ConfigurationError("A bound query needs an application context before database access")
         # The connection is chosen under the tenant this query's WHERE was built for, not the one
         # active when the query is awaited - a router routing by tenant, or a connection with a schema
         # per tenant, would otherwise pick another tenant's database or schema.
@@ -828,21 +857,23 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
             else Tenancy.current.set(tenant_snapshot)
         )
         try:
-            connection = ModelConnectionChoice.get_routed(context, self.model, for_write)
+            connection = ModelConnectionChoice.get_routed(context, model_binding, for_write)
             if connection is None:
                 if self._instance_connection_alias is not None:
                     connection = ModelConnectionChoice.get_instance_fallback(
                         context,
-                        self.model,
-                        self._instance_connection_model,
+                        model_binding,
+                        None
+                        if self._instance_connection_model is None
+                        else model_binding.graph.get_binding(self._instance_connection_model),
                         self._instance_connection_alias,
                         for_write,
                     )
                 if connection is None and self._router_fallback_connection is not None:
                     connection = self._router_fallback_connection
                 if connection is None:
-                    connection = ModelConnectionChoice.get_default(context, self.model)
-            return ModelConnectionChoice.get_checked(self.model, connection)
+                    connection = ModelConnectionChoice.get_default(context, model_binding)
+            return ModelConnectionChoice.get_checked(model_binding, connection, context=context)
         finally:
             if tenant_token is not None:
                 Tenancy.current.reset(tenant_token)
@@ -854,6 +885,8 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
             connection: The database connection to use for this query.
         """
         # None leaves the connection to be chosen when the query runs.
+        if connection is not None:
+            ModelConnectionChoice.check_context(self._context, connection)
         self._connection = connection
 
     def _get_base_query(self) -> QueryBuilder:
@@ -870,7 +903,7 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
         Returns:
             The query builder.
         """
-        return self.query_sql._get_base_query_all_fields(self)
+        return self.query_sql._get_base_query(self, all_fields=True)
 
     def _get_execution_query(self, for_write: bool = False, connection: DatabaseClient | None = None) -> Self:
         """Return a separate query for this execution, preserving an explicitly pinned connection.
@@ -885,25 +918,39 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
         Returns:
             The query bound to a connection.
         """
-        execution_query = copy(self)
-        bound_connection = execution_query._connection
-        if bound_connection is None:
-            bound_connection = (
-                execution_query.get_connection(for_write=for_write) if connection is None else connection
+        if self._binding is None:
+            from hare.query.queryset.pending_calls.calls_before_setup import (
+                CallsBeforeSetup,
             )
-            execution_query._apply_connection(bound_connection)
-        if execution_query.model._meta.checks_tenant_client or bound_connection.sets_tenants:
-            ModelConnectionChoice.get_checked(execution_query.model, bound_connection)
+
+            return CallsBeforeSetup.bind(self, HareContext.require_current())._get_execution_query(
+                for_write, connection
+            )
+        if self._context is not None:
+            self._context.check_open()
+        execution_query = copy(self)
+        execution_query._bind_execution_connection(for_write, connection)
         return execution_query
 
-    def _get_compiler(self) -> QuerySpecification[Any]:
+    def _bind_execution_connection(self, for_write: bool, connection: DatabaseClient | None) -> DatabaseClient:
+        """Attach and check the selected client on an execution copy."""
+        bound_connection = self._connection
+        if bound_connection is None:
+            bound_connection = self.get_connection(for_write=for_write) if connection is None else connection
+            self._apply_connection(bound_connection)
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        if model_binding.checks_tenant_client or bound_connection.sets_tenants:
+            ModelConnectionChoice.get_checked(model_binding, bound_connection, context=self._context)
+        return bound_connection
+
+    def _get_compiler(self) -> AwaitableQuery[Any]:
         """The query building this query's SQL - the query itself, unless it only describes the
         rows another query builds.
 
         Returns:
             The query.
         """
-        return self
+        return self  # type: ignore[return-value]
 
     def _make_query(self) -> Any:
         """Builds the query for the connection it runs on."""

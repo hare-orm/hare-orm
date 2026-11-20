@@ -62,8 +62,11 @@ class Function(Criterion):
         Returns:
             The SQL.
         """
-        arg_context = sql_context.copy(with_alias=False)
-        return arg.get_sql(arg_context) if hasattr(arg, "get_sql") else str(arg)
+        try:
+            get_sql = arg.get_sql
+        except AttributeError:
+            return str(arg)
+        return get_sql(sql_context.copy(with_alias=False))
 
     def get_dialect_special_name(self, sql_context: SqlContext) -> str:
         name_renderer = sql_context.dialect.renderers.get_name_renderer(type(self))

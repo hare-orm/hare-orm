@@ -6,7 +6,7 @@ use pyo3::prelude::*;
 use pyo3::Borrowed;
 use tokio_postgres::types::{Kind as TypeShape, Type};
 
-use crate::pg::error::DriverError;
+use crate::pg::error::{DriverError, TooManyParametersError};
 use crate::pg::value::Value;
 
 pub struct ParameterValues(pub Vec<Value>);
@@ -15,11 +15,23 @@ impl<'a, 'py> FromPyObject<'a, 'py> for ParameterValues {
     type Error = PyErr;
 
     fn extract(parameters: Borrowed<'a, 'py, PyAny>) -> Result<Self, PyErr> {
-        Ok(ParameterValues(parameters.extract::<Vec<Value>>()?))
+        let values = parameters.extract::<Vec<Value>>()?;
+        Self::check_count(values.len())?;
+        Ok(ParameterValues(values))
     }
 }
 
 impl ParameterValues {
+    pub(crate) fn check_count(count: usize) -> PyResult<()> {
+        if count > usize::from(u16::MAX) {
+            return Err(TooManyParametersError::new_err(format!(
+                "PostgreSQL supports at most {} bind parameters, got {count}",
+                u16::MAX,
+            )));
+        }
+        Ok(())
+    }
+
     /// The unspecified parameter type (OID 0) - the server infers the parameter's type from context.
     /// Built once: `Type::new()` allocates, and most bind parameters need this type.
     pub(crate) fn unspecified_type() -> Type {
@@ -31,11 +43,24 @@ impl ParameterValues {
         params.iter().map(|value| value.pg_type().unwrap_or_else(Self::unspecified_type)).collect()
     }
 
+    /// Only SQL built by Hare gets type hints. For raw SQL the server determines
+    /// the parameters and their types before binding any values.
+    pub(crate) fn type_hints(params: &[Value], built_sql: bool) -> Vec<Type> {
+        if built_sql {
+            Self::types(params)
+        } else {
+            Vec::new()
+        }
+    }
+
     /// The parameter types of an `execute_many` batch, one per column for all rows: that of the first
     /// value with a declared type (`Value::pg_type()`), widened when rows disagree (`widen_pg_type()`); a
     /// batch mixing types that can't widen to one is refused. Adapted from yara-orm's
     /// `unified_param_types` (MIT License).
-    pub(crate) fn batch_types(rows: &[Vec<Value>]) -> Result<Vec<Type>, DriverError> {
+    pub(crate) fn batch_types(rows: &[Vec<Value>], built_sql: bool) -> Result<Vec<Type>, DriverError> {
+        if !built_sql {
+            return Ok(Vec::new());
+        }
         let Some(first) = rows.first() else {
             return Ok(Vec::new());
         };

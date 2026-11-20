@@ -131,7 +131,7 @@ async def test_dates_and_datetimes_of_generated_date_columns(db):
         ),
     ],
 )
-def test_dates_refuse_a_wrong_field_type_or_order(call, message):
+def test_dates_refuse_a_wrong_field_type_or_order(call, message, db):
     with pytest.raises(FieldError, match=message):
         call()
 

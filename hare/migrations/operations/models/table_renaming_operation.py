@@ -39,22 +39,25 @@ class TableRenamingOperation(HareOperation):
         """
         if not state_editor:
             return
-        old_model = old_state.apps.get_model(f"{app_label}.{name_in_old_state}")
-        new_model = new_state.apps.get_model(f"{app_label}.{name_in_new_state}")
-        old_table = old_model._meta.db_table
-        new_table = new_model._meta.db_table
+        old_binding = old_state.apps.get_binding(f"{app_label}.{name_in_old_state}")
+        old_table = old_binding.db_table
+        new_binding = new_state.apps.get_binding(f"{app_label}.{name_in_new_state}")
+        new_table = new_binding.db_table
         steps: list[SchemaStep] = []
         if old_table != new_table:
             # A dictionary reads the table by its name, and the server renames no table one reads.
-            steps.extend(SchemaStatement(sql) for sql in state_editor.dictionaries.get_model_drop_sqls(old_model))
-            steps.extend(state_editor.get_table_rename_plan(new_model, old_table, new_table).steps)
-            for dictionary in new_model._meta.dictionaries:
+            steps.extend(SchemaStatement(sql) for sql in state_editor.dictionaries.get_model_drop_sqls(old_binding))
+            steps.extend(state_editor.get_table_rename_plan(new_binding, old_table, new_table).steps)
+            for dictionary in new_binding.dictionaries:
                 steps.extend(
                     SchemaStatement(sql)
-                    for sql in state_editor.dictionaries.get_dictionary_create_sqls(new_model, dictionary)
+                    for sql in state_editor.dictionaries.get_dictionary_create_sqls(new_binding, dictionary)
                 )
             steps.extend(
-                state_editor.generated_index_names.get_generated_index_names_change_plan(old_model, new_model).steps
+                state_editor.generated_index_names.get_generated_index_names_change_plan(
+                    old_binding,
+                    new_binding,
+                ).steps
             )
         steps.extend(
             self.get_auto_many_to_many_rename_plan(
@@ -85,18 +88,19 @@ class TableRenamingOperation(HareOperation):
         """
         steps: list[SchemaStep] = []
         renamed_model = new_state.apps.get_model(f"{app_label}.{name_in_new_state}")
-        for (model_app_label, model_name), model_state in new_state.models.items():
+        for model_app_label, model_name in new_state.models:
             is_renamed_model = model_app_label == app_label and model_name == name_in_new_state
             old_model_name = name_in_old_state if is_renamed_model else model_name
             if (model_app_label, old_model_name) not in old_state.models:
                 continue
-            old_owner_model = old_state.apps.get_model(f"{model_app_label}.{old_model_name}")
-            new_owner_model = new_state.apps.get_model(f"{model_app_label}.{model_name}")
-            for field_name, declared_field in model_state.fields.items():
+            for field_name, declared_field in new_state.models[(model_app_label, model_name)].fields.items():
                 if not isinstance(declared_field, ManyToManyFieldInstance):
                     continue
-                old_field = old_owner_model._meta.fields_map.get(field_name)
-                new_field = new_owner_model._meta.fields_map.get(field_name)
+                old_field = old_state.apps.get_binding(f"{model_app_label}.{old_model_name}").fields_map.get(
+                    field_name
+                )
+                new_binding = new_state.apps.get_binding(f"{model_app_label}.{model_name}")
+                new_field = new_binding.fields_map.get(field_name)
                 if not isinstance(old_field, ManyToManyFieldInstance) or not isinstance(
                     new_field, ManyToManyFieldInstance
                 ):
@@ -111,7 +115,7 @@ class TableRenamingOperation(HareOperation):
                     continue
                 steps.extend(
                     state_editor.many_to_many_through_tables.get_many_to_many_change_plan(
-                        new_owner_model, old_field, new_field
+                        new_binding, old_field, new_field
                     ).steps
                 )
         return SchemaChangePlan(tuple(steps))

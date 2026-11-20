@@ -17,9 +17,11 @@ from hare.query.scopes.soft_delete_scope import SoftDeleteScope
 from hare.query.scopes.tenants.tenant_scope import TenantScope
 
 if TYPE_CHECKING:
+    from hare.core.hare_context import HareContext
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.dialect import Dialect
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
     from hare.query.queryset import QuerySet
     from hare.sql import Table
@@ -37,52 +39,52 @@ class RowScopes:
     #: The description of the filters the scopes last described - ``(visibility, uses_default_scope,
     #: description)``, kept on the scopes in a lifetime bucket: the queries of a model are
     #: described with one visibility over and over.
-    described_filters: ClassVar[Cache[tuple[RowVisibility, bool, Any]]] = Cache(holds_sql=False)
+    described_filters: ClassVar[Cache[tuple[RowVisibility, bool, Any]]] = Cache()
 
-    __slots__ = ("model", "field_scopes", "cache_buckets", "__weakref__")
+    __slots__ = ("_binding", "field_scopes", "cache_buckets", "__weakref__")
 
-    def __init__(self, model: type[Model]) -> None:
-        meta = model._meta
-        self.model = model
+    def __init__(self, binding: ModelBinding) -> None:
+        self._binding = binding
         #: The scopes filtering by one field of the model, soft-delete first.
         self.field_scopes: tuple[RowScope, ...] = (
-            *((SoftDeleteScope(model),) if meta.soft_delete_field else ()),
-            *((TenantScope(model),) if meta.tenant_field else ()),
+            *((SoftDeleteScope(binding),) if binding.soft_delete_field else ()),
+            *((TenantScope(binding),) if binding.tenant_field else ()),
         )
         self.cache_buckets: dict[int, Any] = {}
 
     def __bool__(self) -> bool:
-        return bool(self.field_scopes) or self.model._meta.manager.scope is not None
+        return bool(self.field_scopes) or self._binding.manager.scope is not None
 
     @staticmethod
     @ModelCache.fact()
-    def of(model: type[Model]) -> RowScopes:
+    def of(binding: ModelBinding) -> RowScopes:
         """The scopes of ``model``.
 
         Args:
-            model: The model.
+            binding: The model.
 
         Returns:
             The scopes - falsy when the model has none.
         """
-        return RowScopes(model)
+        return RowScopes(binding)
 
     @staticmethod
-    def get_base_queryset(model: type[Model], visibility: RowVisibility = RowVisibility.DEFAULT) -> QuerySet[Model]:
+    def get_base_queryset(binding: ModelBinding, visibility: RowVisibility = RowVisibility.DEFAULT) -> QuerySet[Model]:
         """A queryset of ``model`` scoped only by ``Meta.soft_delete_field``/``Meta.tenant_field``,
         without the filters a custom ``Meta.manager`` adds.
 
         Args:
-            model: The model.
+            binding: The model.
             visibility: Which rows the queryset asks to see.
 
         Returns:
             The queryset, bound to no connection.
         """
         # Deferred import: the queryset package imports this module.
+        from hare.core.hare_context import HareContext
         from hare.query.queryset import QuerySet
 
-        queryset = QuerySet(model)
+        queryset: QuerySet[Any] = QuerySet.from_binding(binding, context=HareContext.require_current())
         queryset._uses_default_scope = True
         queryset._visibility = visibility
         # Its queries run by the calls made on it - the key of the calls holds the visibility.
@@ -90,18 +92,20 @@ class RowScopes:
         return queryset
 
     @staticmethod
-    def get_queryset(model: type[Model], visibility: RowVisibility = RowVisibility.DEFAULT) -> QuerySet[Model]:
+    def get_queryset(binding: ModelBinding, visibility: RowVisibility = RowVisibility.DEFAULT) -> QuerySet[Model]:
         """The queryset ``model``'s manager returns, seeing what a query with ``visibility``
         sees.
 
         Args:
-            model: The model.
+            binding: The model.
             visibility: The visibility of the query it is made for.
 
         Returns:
             The queryset.
         """
-        queryset = model._meta.manager.create_queryset()
+        from hare.core.hare_context import HareContext
+
+        queryset = binding.manager.create_queryset(binding=binding, context=HareContext.require_current())
         queryset._visibility = visibility.get_for_related_query()
         return queryset
 
@@ -128,7 +132,7 @@ class RowScopes:
                 if scope_filter is not None:
                     filters.append(scope_filter)
         if visibility.only_deleted:
-            filters.append((f"{self.model._meta.soft_delete_field}__isnull", False))
+            filters.append((f"{self._binding.soft_delete_field}__isnull", False))
         return filters
 
     def get_filters_plan_description(
@@ -197,10 +201,14 @@ class RowScopes:
         visibility = visibility.get_for_active_tenant()
         condition: Q | None = None
         for scope in self.field_scopes:
-            scope_condition = scope.get_condition(visibility)
-            if scope_condition is not None:
+            scope_filter = scope.get_filter(visibility)
+            if scope_filter is not None:
+                key, value = scope_filter
+                scope_condition = Q(**{key: value})
                 condition = scope_condition if condition is None else condition & scope_condition
-        provider_condition = RowScopeBinding.get_condition(self.model._meta.manager.scope, self.model, visibility)
+        provider_condition = RowScopeBinding.get_condition(
+            self._binding.manager.scope, self._binding._model, visibility
+        )
         if provider_condition is not None:
             condition = provider_condition if condition is None else condition & provider_condition
         return condition
@@ -212,6 +220,7 @@ class RowScopes:
         visibility: RowVisibility = RowVisibility.DEFAULT,
         dialect: Dialect,
         connection: DatabaseClient | None,
+        application_context: HareContext | None = None,
     ) -> Criterion | None:
         """``get_condition()`` as a ``hare.sql`` criterion against ``table`` - for a JOIN or a WHERE
         built by hand.
@@ -221,6 +230,7 @@ class RowScopes:
             visibility: The visibility of the query it is built for.
             dialect: The dialect the criterion compiles for.
             connection: The connection the query runs on, None for no particular database.
+            application_context: The application context used to bind values and check model routing.
 
         Returns:
             The criterion, None if the model has no default scope.
@@ -232,26 +242,29 @@ class RowScopes:
         if not self:
             return None
         condition = self.get_condition(visibility)
-        model = self.model
+        model = self._binding._model
         if condition is None:
             # A plan of the query has to tell a scope that has a condition now.
-            PlanRecording.record_scope(model, visibility, None, [])
+            PlanRecording.record_scope(self._binding, visibility, None, [], application_context=application_context)
             return None
         # A query recording its plan records the scope's values apart from its own - a later
         # query of the plan binds the scope of its own context (PlanRecording).
         value_wrapper_references: RecordedValueReferences | None = [] if PlanRecording.is_recording() else None
         modifier = condition.get_result(
             ExpressionContext(
-                model=model,
+                binding=self._binding,
                 table=table,
                 annotations={},
                 dialect=dialect,
                 connection=connection,
                 value_wrapper_references=value_wrapper_references,
+                application_context=application_context,
             )
         )
         if value_wrapper_references is not None:
-            PlanRecording.record_scope(model, visibility, condition, value_wrapper_references)
+            PlanRecording.record_scope(
+                self._binding, visibility, condition, value_wrapper_references, application_context=application_context
+            )
         if modifier.joins:
             raise ConfigurationError(
                 f"{model.__name__}'s row scope filters across a relation, which a "

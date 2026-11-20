@@ -257,6 +257,7 @@ class CorrelatedSubqueries:
 
         Args:
             query: The query.
+            sql_context: The SQL rendering context for the query.
 
         Returns:
             Whether it does.
@@ -540,7 +541,7 @@ class CorrelatedSubqueries:
         inner_columns = [inner for inner, _outer in pairs]
         outer_columns = [outer for _inner, outer in pairs]
         membership_query = copy(inner_query)
-        membership_query._selects = list(inner_columns)
+        membership_query._selects = inner_columns
         membership_query._limit = None
         where: Term | None = None
         for condition in [*kept_conditions, *(column.notnull() for column in inner_columns)]:

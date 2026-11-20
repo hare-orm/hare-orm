@@ -29,13 +29,17 @@ async def scoped_rows():
 @pytest.mark.parametrize("model", (ScopedItem, CompositeScopedItem))
 @pytest.mark.parametrize("path", ScopedWritePath)
 async def test_nested_outcomes_keep_scoped_writes_and_callbacks_together(scoped_rows, model, path):
+    unchanged = [(2, 7, 3, 30, False)]
+    if model is CompositeScopedItem:
+        # Same tenant and same id as the first target. The full key must address the write.
+        unchanged.insert(0, (1, 8, 1, 40, False))
     for inner_rollback in (False, True):
         for outer_rollback in (False, True):
             await model.objects.all_tenants().include_deleted().hard_delete()
-            for tenant_id, number, amount in ((1, 1, 10), (1, 2, 20), (2, 3, 30)):
+            for tenant_id, region, number, amount, _ in [(1, 7, 1, 10, False), (1, 7, 2, 20, False), *unchanged]:
                 with Tenancy.scope(tenant_id):
-                    await model.objects.create(id=number, tenant_id=tenant_id, amount=amount)
-            keys = [(1, number) if model is CompositeScopedItem else number for number in (1, 2)]
+                    await model.objects.create(id=number, region=region, tenant_id=tenant_id, amount=amount)
+            keys = [(7, number) if model is CompositeScopedItem else number for number in (1, 2)]
             events = []
             with Tenancy.scope(1):
                 try:
@@ -56,18 +60,19 @@ async def test_nested_outcomes_keep_scoped_writes_and_callbacks_together(scoped_
                             raise RollbackRequested
                 except RollbackRequested:
                     pass
-            rows = await model.objects.all_tenants().include_deleted().order_by("tenant_id", "id")
-            actual = [(obj.tenant_id, obj.id, obj.amount, obj.deleted_at is not None) for obj in rows]
+            rows = await model.objects.all_tenants().include_deleted().order_by("tenant_id", "region", "id")
+            actual = [(obj.tenant_id, obj.region, obj.id, obj.amount, obj.deleted_at is not None) for obj in rows]
             committed = [not outer_rollback, not outer_rollback and not inner_rollback]
             expected = [
                 (
                     1,
+                    7,
                     number,
                     base + (increment if committed[number - 1] and path is not ScopedWritePath.DELETE else 0),
                     committed[number - 1] and path is ScopedWritePath.DELETE,
                 )
                 for number, base, increment in ((1, 10, 3), (2, 20, 5))
-            ] + [(2, 3, 30, False)]
+            ] + unchanged
             label = (path, inner_rollback, outer_rollback)
             assert actual == expected, label
             expected_events = ["inner_rollback"] if inner_rollback else []

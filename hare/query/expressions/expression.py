@@ -10,7 +10,7 @@ from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
-    from hare.query.statements.awaitable_query import AwaitableQuery
+    from hare.query.queryset.query_specification import QuerySpecification
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
 from hare.query.expressions.ordering import Ordering
@@ -79,6 +79,16 @@ class Expression(ExpressionDeclaration, Plannable, abstract=True):
             return self.value_field
         return result.output_field
 
+    @staticmethod
+    def _get_referenced_annotation_value(
+        annotation: Expression | Term, expression_context: ExpressionContext
+    ) -> ExpressionResult:
+        """Bind the SQL value and its reader for a reference to an admitted annotation."""
+        if isinstance(annotation, Term) and not isinstance(annotation, Expression):
+            return ExpressionResult(term=annotation)
+        result = annotation.get_result(expression_context)
+        return ExpressionResult(term=result.term, joins=result.joins, output_field=annotation.get_value_field(result))
+
     def get_result_literals(self) -> list[Any]:
         """The literals the expression's value may be - none by default: the database computes it.
 
@@ -104,7 +114,7 @@ class Expression(ExpressionDeclaration, Plannable, abstract=True):
         return [] if isinstance(value, Term) else [value]
 
     @staticmethod
-    def _get_wrapped_query(wrapped_query: AwaitableQuery[Any], expression_context: ExpressionContext) -> Any:
+    def _get_wrapped_query(wrapped_query: QuerySpecification[Any], expression_context: ExpressionContext) -> Any:
         """Returns the query a ``Subquery(...)``/``Exists(...)`` wraps, bound to the connection the
         outer query runs on.
 
@@ -118,6 +128,11 @@ class Expression(ExpressionDeclaration, Plannable, abstract=True):
         Raises:
             QueryError: The wrapped query is pinned to another connection than the outer query's.
         """
+
         return QueryConnection.get_bound_to(
-            wrapped_query, expression_context.connection, expression_context.model, "Subquery(...)/Exists(...)"
+            wrapped_query,
+            expression_context.connection,
+            expression_context.binding,
+            "Subquery(...)/Exists(...)",
+            context=expression_context.application_context,
         )

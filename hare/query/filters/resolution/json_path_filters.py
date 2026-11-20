@@ -27,6 +27,7 @@ from hare.time.zone_settings import ZoneSettings
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
+    from hare.models.model_binding import ModelBinding
 
 
 class JsonPathFilters:
@@ -75,19 +76,16 @@ class JsonPathFilters:
             return JsonPathFilters.get_outer_json_path_mirrored_kwarg(expression_context, key, value)
         if not isinstance(value, F):
             return key, value, expression_context
-        meta = expression_context.model._meta
+        meta = expression_context.binding
         field_name, __, lookup = key.partition("__")
         field = meta.fields_map.get(field_name)
+        mirrored_lookup = JsonPathFilters._get_mirrored_lookup(meta, field_name, field, lookup)
         if (
-            field is None
-            or field_name in meta.fetch_fields
-            or isinstance(GeneratedField.get_effective_field(field), JSONField)
-            or lookup not in MIRRORED_COMPARISON_LOOKUPS
+            mirrored_lookup is None
             or value.name.partition("__")[0] in meta.fetch_fields
             or not isinstance(value.get_result(expression_context).output_field, JSONPathField)
         ):
             return key, value, expression_context
-        mirrored_lookup = MIRRORED_COMPARISON_LOOKUPS[lookup]
         return (
             (f"{value.name}__{mirrored_lookup}" if mirrored_lookup else value.name),
             F(field_name),
@@ -110,22 +108,19 @@ class JsonPathFilters:
             The key and value to resolve, and the context they resolve in.
         """
         outer_context = OuterScope.current_expression_context.get()
-        meta = expression_context.model._meta
+        meta = expression_context.binding
         field_name, __, lookup = key.partition("__")
         field = meta.fields_map.get(field_name)
         path_split = (
-            None if outer_context is None else ValuePaths.get_value_path_split(outer_context.model, value.field)
+            None if outer_context is None else ValuePaths.get_value_path_split(outer_context.binding, value.field)
         )
+        mirrored_lookup = JsonPathFilters._get_mirrored_lookup(meta, field_name, field, lookup)
         if (
-            field is None
-            or field_name in meta.fetch_fields
-            or isinstance(GeneratedField.get_effective_field(field), JSONField)
-            or lookup not in MIRRORED_COMPARISON_LOOKUPS
+            mirrored_lookup is None
             or path_split is None
             or not isinstance(GeneratedField.get_effective_field(path_split[1]), JSONField)
         ):
             return key, value, expression_context
-        mirrored_lookup = MIRRORED_COMPARISON_LOOKUPS[lookup]
         mirrored_key = (
             f"{OUTER_JSON_PATH_ANNOTATION_NAME}__{mirrored_lookup}"
             if mirrored_lookup
@@ -139,6 +134,19 @@ class JsonPathFilters:
                 annotations={**expression_context.annotations, OUTER_JSON_PATH_ANNOTATION_NAME: value},
             ),
         )
+
+    @staticmethod
+    def _get_mirrored_lookup(
+        binding: ModelBinding, field_name: str, field: Field[Any] | None, lookup: str
+    ) -> str | None:
+        """Decide whether a comparison against this local field can be mirrored."""
+        if (
+            field is None
+            or field_name in binding.fetch_fields
+            or isinstance(GeneratedField.get_effective_field(field), JSONField)
+        ):
+            return None
+        return MIRRORED_COMPARISON_LOOKUPS.get(lookup)
 
     @staticmethod
     def get_json_base_field(expression_context: ExpressionContext, name: str) -> JSONField[Any] | None:
@@ -165,7 +173,7 @@ class JsonPathFilters:
                 dataclasses.replace(expression_context, value_wrapper_references=None), name, annotation
             ).output_field
         else:
-            field = expression_context.model._meta.fields_map.get(name)
+            field = expression_context.binding.fields_map.get(name)
         effective_field = GeneratedField.get_effective_field(field) if field is not None else None
         return effective_field if isinstance(effective_field, JSONField) else None
 
@@ -209,13 +217,11 @@ class JsonPathFilters:
         if path in FieldLookups.get(json_field):
             # A lookup of the whole value.
             return expression_context, annotation_name
-        path_lookup_names = JsonPathLookups.get_lookup_names()
-        if len(path_segments) == 1 and path_segments[0] in path_lookup_names:
+        suffix = JsonPathLookups.get_lookup_suffix(path_segments)
+        if suffix is not None and len(path_segments) == 1:
             # A lookup name right after the field is that lookup of the whole value, never a key.
             return expression_context, annotation_name
-        path_name = key
-        if len(path_segments) > 1 and path_segments[-1] in path_lookup_names:
-            path_name = key.rpartition("__")[0]
+        path_name = key if suffix is None else key.rpartition("__")[0]
         return (
             dataclasses.replace(
                 expression_context, annotations={**expression_context.annotations, path_name: F(path_name)}

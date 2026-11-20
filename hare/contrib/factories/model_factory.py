@@ -15,6 +15,7 @@ from hare.contrib.factories.field_declarations.lazy_attribute import LazyAttribu
 from hare.contrib.factories.field_declarations.post_declaration import PostDeclaration
 from hare.contrib.factories.field_declarations.sub_factory import SubFactory
 from hare.contrib.factories.trait import Trait
+from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError
 from hare.models.write.rules.tenant_write_rules import TenantWriteRules
 
@@ -215,8 +216,9 @@ class ModelFactory(Generic[TModel]):
         the active scope."""
         model = cls.get_model()
         model_values = {name: value for name, value in values.items() if name not in parameter_names}
-        if model._meta.tenant_field:
-            TenantWriteRules.fill_new_values(model, model_values, "create")
+        binding = HareContext.require_current().get_model_binding(model)
+        if binding.tenant_field:
+            TenantWriteRules.fill_new_values(binding, model_values, "create")
         return model(**model_values)
 
     @classmethod
@@ -276,8 +278,8 @@ class ModelFactory(Generic[TModel]):
         if any(isinstance(declaration, (SubFactory, PostDeclaration)) for declaration in declarations.values()):
             return [await cls.create(**given) for _ in range(size)]
         model = cls.get_model()
-        reads_back_keys = model._meta.generated_pk_field_name is not None
-        queryset = model.objects
+        queryset = HareContext.require_current().apps.get_queryset(model)  # type: ignore[union-attr]
+        reads_back_keys = queryset._binding.generated_pk_field_name is not None
         connection = queryset.get_connection(for_write=True)
         features = connection.features
         if reads_back_keys and not (features.supports_returning and features.guarantees_returning_order):

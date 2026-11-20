@@ -4,7 +4,6 @@ from collections.abc import Iterable
 from types import ModuleType
 from typing import TYPE_CHECKING
 
-from hare.core.caching.caches import Caches
 from hare.core.constants import DEFAULT_CONNECTION_NAME
 from hare.exceptions import ConfigurationError
 
@@ -33,10 +32,11 @@ class LiveModelRegistration:
         no model keeps a backward relation added by them.
 
         Args:
+            context: The application context whose graph and live model registrations change.
             models: The model classes.
             app_label: The app label to register them under.
             connection_alias: The connection their queries use.
-            managed: Written to each model's ``_meta.managed`` before its relations are set up -
+            managed: Applied to each prepared binding before its relations are set up -
                 False keeps migrations and drift checks away from its table; None keeps what its
                 ``Meta.managed`` declares.
 
@@ -51,59 +51,54 @@ class LiveModelRegistration:
             raise ConfigurationError(f"register_live_models() needs an app label without a dot, got {app_label!r}")
         # Local import: the registry imports the models, which import the transactions and this module.
         from hare.core.apps import Apps
-        from hare.core.apps.cross_connection_checks import CrossConnectionChecks
-        from hare.core.apps.enum_member_checks import EnumMemberChecks
-        from hare.core.apps.model_binding_graph import ModelBindingGraph
-        from hare.core.apps.relation_linking import RelationLinking
+        from hare.core.apps.model_binding_preparation import ModelBindingPreparation
 
         if connection_alias not in context.connections.db_config:
             raise ConfigurationError(f"Unknown connection {connection_alias!r}")
         if context._apps is None:
-            context._apps = Apps({}, context.connections, context._table_name_generator)
-        context._models_bound = True
+            context._apps = Apps({}, context.connections, context._table_name_generator, context=context)
         apps = context._apps
-        models = list(dict.fromkeys(models))
         registered_models = apps.apps.get(app_label, {})
+        new_models = []
         seen_model_names: set[str] = set()
-        for model in models:
+        for model in dict.fromkeys(models):
             if model.__name__ in seen_model_names:
                 raise ConfigurationError(f"Two models named {model.__name__!r} were passed for app {app_label!r}.")
             seen_model_names.add(model.__name__)
             registered_model = registered_models.get(model.__name__)
-            if registered_model is not None and registered_model is not model:
+            if registered_model is model:
+                continue
+            if registered_model is not None:
                 raise ConfigurationError(
                     f'A different model named "{app_label}.{model.__name__}" is already registered - '
                     "call unregister_live_models() on it first."
                 )
-            if model._meta.app and model._meta.app != app_label:
+            declared_app = model._declaration.app
+            registered_binding = apps.binding_graph.bindings.get(model)
+            bound_app = registered_binding.app if registered_binding is not None else declared_app
+            if bound_app and bound_app != app_label:
                 raise ConfigurationError(
-                    f"Model {model.__name__!r} belongs to app {model._meta.app!r} - it can't be "
+                    f"Model {model.__name__!r} belongs to app {bound_app!r} - it can't be "
                     f"registered under {app_label!r}."
                 )
-        new_models = [model for model in models if registered_models.get(model.__name__) is not model]
+            new_models.append(model)
+        if not new_models:
+            return
         module = ModuleType(f"hare.register_live_models.{app_label}")
-        module.__models__ = models  # type: ignore[attr-defined]
+        module.__models__ = new_models  # type: ignore[attr-defined]
         # Like loading the configured apps: the models are registered first (their relations
         # set up later), then bound to the connection, then the relations are set up - so the
         # table-name collision check sees the models' real connection.
-        with ModelBindingGraph(apps, models):
+        with ModelBindingPreparation(apps, new_models):
             if managed is not None:
-                for model in models:
-                    model._meta.managed = managed
+                for model in new_models:
+                    apps.get_binding(model).managed = managed
             apps.init_app(app_label, [module], init_relations=False)
-            for model in models:
-                model._meta.default_connection = connection_alias
-                model._meta.registered_live = True
-            CrossConnectionChecks.check_cross_connection_constraints(apps)
-            apps.init_relations()
-            EnumMemberChecks.add_to_models(models, context.connections)
-            CrossConnectionChecks.check_change_capture_connections(apps)
-            apps.build_initial_querysets()
-        # The targets gained backward relations; caches of the registered model set are stale too,
-        # including when a newly registered model has no relations.
-        Caches.forget_model_caches(
-            set(new_models) | {target for model in models for target in RelationLinking.get_relation_targets(model)}
-        )
+            for model in new_models:
+                binding = apps.get_binding(model)
+                binding.default_connection = connection_alias
+                binding.registered_live = True
+            apps.finish_model_binding()
 
     @staticmethod
     def unregister_live_models(context: HareContext, models: Iterable[ModelReference]) -> None:
@@ -113,6 +108,7 @@ class LiveModelRegistration:
         registered again afterwards; an unregistered class runs no queries until then.
 
         Args:
+            context: The application context whose graph and live model registrations change.
             models: Models registered in this context - classes, ``"app.Model"`` labels or
                 ``swappable()`` settings.
 
@@ -124,4 +120,9 @@ class LiveModelRegistration:
         if context._apps is None:
             names = ", ".join(getattr(reference, "__name__", str(reference)) for reference in references)
             raise ConfigurationError(f"Model(s) {names!r} not registered.")
-        context._apps.remove_models([context._apps.get_model(reference) for reference in references])
+        context._apps.remove_models(
+            [
+                reference if isinstance(reference, type) else context._apps.get_model(reference)
+                for reference in references
+            ]
+        )

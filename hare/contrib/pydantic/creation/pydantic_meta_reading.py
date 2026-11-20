@@ -10,7 +10,7 @@ from hare.contrib.pydantic.models.pydantic_model import PydanticModel
 
 if TYPE_CHECKING:
     from hare.contrib.pydantic.creation.pydantic_model_creator import PydanticModelCreator
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class PydanticMetaReading:
@@ -18,16 +18,17 @@ class PydanticMetaReading:
     creator's arguments - that decide which fields the pydantic model gets and how."""
 
     @staticmethod
-    def collect_pydantic_meta(model: type[Model]) -> PydanticMetaData:
+    def collect_pydantic_meta(binding: ModelBinding) -> PydanticMetaData:
         """Merges the ``Meta.pydantic`` of every class in ``model``'s MRO declaring its own - with several
         abstract bases, none may silently win by base order. List settings
         (include/exclude/computed) accumulate; scalar settings and ``model_config`` take the most
         derived class's value.
         """
+        model = binding._model
         accumulated: PydanticMetaData | None = None
         for klass in reversed(model.__mro__):
-            model_meta = klass.__dict__.get("Meta")
-            meta = getattr(model_meta, "pydantic", None)
+            declaration = klass.__dict__.get("_declaration")
+            meta = declaration.declared_options.get("pydantic") if declaration is not None else None
             if meta is None:
                 continue
             klass_meta = PydanticMetaData.from_options(meta)
@@ -46,7 +47,7 @@ class PydanticMetaReading:
 
     @staticmethod
     def get_meta(
-        model: type[Model],
+        binding: ModelBinding,
         meta_override: object | None,
         exclude: tuple[str, ...],
         include: tuple[str, ...],
@@ -61,7 +62,7 @@ class PydanticMetaReading:
         """The options of a model's schema: its ``Meta.pydantic``, an override's, then the call's arguments.
 
         Args:
-            model: The model.
+            binding: The model.
             meta_override: An object or mapping whose settings replace the model's ``Meta.pydantic`` ones.
             exclude: The fields left out.
             include: The fields kept - every field when empty.
@@ -76,7 +77,7 @@ class PydanticMetaReading:
         Returns:
             The options.
         """
-        meta_from_class = PydanticMetaReading.collect_pydantic_meta(model)
+        meta_from_class = PydanticMetaReading.collect_pydantic_meta(binding)
         if meta_override:
             meta_from_class = meta_from_class.with_overrides(meta_override)
         meta = meta_from_class.finalize_meta(
@@ -92,29 +93,28 @@ class PydanticMetaReading:
         )
         return dataclasses.replace(
             meta,
-            include=PydanticMetaReading.with_generic_branches(model, meta.include),
-            exclude=PydanticMetaReading.with_generic_branches(model, meta.exclude),
+            include=PydanticMetaReading.with_generic_branches(binding, meta.include),
+            exclude=PydanticMetaReading.with_generic_branches(binding, meta.exclude),
         )
 
     @staticmethod
-    def with_generic_branches(model: type[Model], names: tuple[str, ...]) -> tuple[str, ...]:
+    def with_generic_branches(binding: ModelBinding, names: tuple[str, ...]) -> tuple[str, ...]:
         """Adds the branches of each generic foreign key named - and their key fields - to names a
         schema includes or leaves out: the field stands for them.
 
         Args:
-            model: The model.
+            binding: The model.
             names: Field names, possibly naming generic foreign keys.
 
         Returns:
             ``names`` followed by the branch names and key fields of the generic foreign keys it names.
         """
-        meta = model._meta
         branch_names = [
             name
             for generic_name in names
-            if generic_name in meta.generic_foreign_key_fields
-            for branch_name in meta.generic_foreign_key_fields[generic_name].branch_names
-            for name in (branch_name, *meta.fields_map[branch_name].source_fields)  # type: ignore[attr-defined]
+            if generic_name in binding.generic_foreign_key_fields
+            for branch_name in binding.generic_foreign_key_fields[generic_name].branch_names
+            for name in (branch_name, *binding.fields_map[branch_name].source_fields)  # type: ignore[attr-defined]
         ]
         return names + tuple(branch_names)
 

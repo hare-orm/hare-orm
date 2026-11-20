@@ -75,6 +75,10 @@ class Book(Model):
 
 ## <a id="searchquery"></a>`SearchQuery`
 
+В PostgreSQL `config` у `SearchVector`, `SearchQuery` и `SearchHeadline` принимает имя конфигурации
+или текстовое выражение, например `F("configuration")` или `Coalesce(...)`. Диалект приводит
+текстовый результат к `regconfig`, поэтому выражение колонки может выбирать конфигурацию для каждой строки.
+
 ```python
 SearchQuery(value, config=None, search_type=SearchType.PLAIN, invert=False)
 ```

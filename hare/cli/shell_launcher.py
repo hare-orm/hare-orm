@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from typing import Any, ClassVar
 
@@ -28,32 +29,50 @@ class ShellLauncher:
             hare_context: The initialized context.
 
         Returns:
-            The namespace.
+            The namespace. Service names and unambiguous qualified names are reserved
+            before plain names are added. Ambiguous qualified aliases are omitted with
+            a warning; ``apps[app_label][model_name]`` always retains every model.
         """
         namespace: dict[str, Any] = {
             "Hare": Hare,
             "hare": hare_context,
             "apps": hare_context.apps,
         }
-        # Every model goes into the namespace. Two apps' models of one name: the plain name is the
-        # last one's, each is also reachable app-qualified, and a warning is printed.
         if hare_context.apps:
-            seen_model_names: set[str] = set()
+            models = [
+                (app_label, model_name, model_class)
+                for app_label, models_dict in hare_context.apps.items()
+                for model_name, model_class in models_dict.items()
+            ]
+            qualified_counts = Counter(f"{app_label}_{model_name}" for app_label, model_name, _ in models)
+            reserved_names = namespace.keys() | qualified_counts.keys()
+            for app_label, model_name, model_class in models:
+                qualified_name = f"{app_label}_{model_name}"
+                if qualified_counts[qualified_name] == 1 and qualified_name not in namespace:
+                    namespace[qualified_name] = model_class
+            for qualified_name, count in qualified_counts.items():
+                if count > 1:
+                    print(
+                        f"Warning: multiple models have the qualified shell alias {qualified_name!r}; "
+                        "that alias is omitted. Use apps[app_label][model_name]."
+                    )
             colliding_model_names: set[str] = set()
-            for app_label, models_dict in hare_context.apps.items():
-                for model_name, model_class in models_dict.items():
-                    if model_name in seen_model_names:
-                        colliding_model_names.add(model_name)
-                    else:
-                        seen_model_names.add(model_name)
-                    namespace[model_name] = model_class
-                    namespace[f"{app_label}_{model_name}"] = model_class
+            for app_label, model_name, model_class in models:
+                if model_name in reserved_names:
+                    print(
+                        f"Warning: model {app_label}.{model_name} cannot use reserved shell name {model_name!r}; "
+                        "use its qualified alias or apps[app_label][model_name]."
+                    )
+                    continue
+                if model_name in namespace:
+                    colliding_model_names.add(model_name)
+                namespace[model_name] = model_class
             if colliding_model_names:
                 for model_name in sorted(colliding_model_names):
                     print(  # interactive shell banner, matches this file's own launch_*() prints
                         f"Warning: multiple apps register a model named {model_name!r} - "
-                        f"{model_name!r} refers to whichever app loaded last; every one is also "
-                        f"reachable as <app_label>_{model_name}."
+                        f"{model_name!r} refers to whichever app loaded last; use qualified aliases "
+                        "or apps[app_label][model_name] for the exact model."
                     )
         return namespace
 

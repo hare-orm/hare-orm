@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from hare.core.constants import DEFAULT_LARGE_TABLE_ROWS
+from hare.migrations.operations.special.app_operation import AppOperation
 from hare.migrations.safety.migration_safety_context import MigrationSafetyContext
 from hare.migrations.safety.migration_table_rows import MigrationTableRows
 from hare.migrations.state.prepared_operation_states import PreparedOperationStates
@@ -35,6 +37,7 @@ class MigrationSafetyChecker:
         *,
         client: DatabaseClient,
         read_catalog: bool = True,
+        respect_schema_scope: bool = False,
     ) -> list[MigrationRisk]:
         """Checks one migration against its already prepared operation states.
 
@@ -48,6 +51,7 @@ class MigrationSafetyChecker:
             client: The configured client used to prepare the same schema plans as execution.
             read_catalog: Count table rows using the client. When False, preparation makes
                 no database calls and every existing table may be large.
+            respect_schema_scope: Check only operations applied by this shared or tenant client.
 
         Returns:
             Its risks, in the order of its operations - exempted ones included, marked.
@@ -64,18 +68,27 @@ class MigrationSafetyChecker:
             "schema_editor": dialect.schema_editor_class(client, collect_sql=True),
             "large_table_rows": self.large_table_rows,
         }
-        contexts = await self.get_contexts(operation_states, common_context_values, table_rows)
+        contexts = await self.get_contexts(
+            operation_states,
+            common_context_values,
+            table_rows,
+            respect_schema_scope=respect_schema_scope and client.tenant_schema_template is not None,
+        )
         risks = [risk for context in contexts for risk in self.check_operation(rules, context)]
         for rule in rules:
-            risks.extend(
-                rule.check_migration(
-                    [
-                        context
-                        for context in contexts
-                        if not context.in_separate_database_and_state or rule.checks_separated_database_operations
-                    ]
+            try:
+                risks.extend(
+                    rule.check_migration(
+                        [
+                            context
+                            for context in contexts
+                            if not context.in_separate_database_and_state or rule.checks_separated_database_operations
+                        ]
+                    )
                 )
-            )
+            finally:
+                for context in contexts:
+                    context.discard_schema_plan()
         return risks
 
     @classmethod
@@ -86,6 +99,7 @@ class MigrationSafetyChecker:
         table_rows: MigrationTableRows,
         *,
         in_separate_database_and_state: bool = False,
+        respect_schema_scope: bool = False,
     ) -> list[MigrationSafetyContext]:
         """Flatten executed leaves, retaining each boundary's independent row estimates.
 
@@ -101,19 +115,28 @@ class MigrationSafetyChecker:
                         common_context_values,
                         table_rows,
                         in_separate_database_and_state=True,
+                        respect_schema_scope=respect_schema_scope,
                     )
                 )
                 continue
+            if respect_schema_scope and prepared.operation.runs_in_tenant_schema(
+                states.app_label, prepared.before, prepared.after
+            ) != (table_rows.client.tenant_schema is not None):
+                continue
+            app_label, operation = AppOperation.unwrap(states.app_label, prepared.operation)
+            if operation is not prepared.operation:
+                prepared = replace(prepared, operation=operation)
             context = MigrationSafetyContext(
                 operation=prepared.operation,
+                operation_app_label=app_label,
                 operation_states=states,
                 position=position,
                 in_separate_database_and_state=in_separate_database_and_state,
-                table_row_counts=await table_rows.get_counts(prepared, states.app_label),
+                table_row_counts=await table_rows.get_counts(prepared, app_label),
                 **common_context_values,
             )
             contexts.append(context)
-            table_rows.advance(prepared, states.app_label)
+            table_rows.advance(prepared, app_label)
         return contexts
 
     @staticmethod
@@ -130,10 +153,13 @@ class MigrationSafetyChecker:
             Its risks.
         """
         risks = []
-        for rule in rules:
-            if context.in_separate_database_and_state and not rule.checks_separated_database_operations:
-                continue
-            risk = rule.check_operation(context)
-            if risk is not None:
-                risks.append(risk)
-        return risks
+        try:
+            for rule in rules:
+                if context.in_separate_database_and_state and not rule.checks_separated_database_operations:
+                    continue
+                risk = rule.check_operation(context)
+                if risk is not None:
+                    risks.append(risk)
+            return risks
+        finally:
+            context.discard_schema_plan()

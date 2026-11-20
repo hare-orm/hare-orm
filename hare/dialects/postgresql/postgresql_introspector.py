@@ -5,7 +5,7 @@ from collections.abc import Collection, Mapping, Sequence
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from hare.ddl.enums import GrantTarget
+from hare.ddl.enums import GrantTarget, SchemaPartType
 from hare.ddl.schema_objects.enum_type import EnumType
 from hare.dialects.postgresql.constants import (
     NATIVE_ENUM_FIELD_PATH,
@@ -18,13 +18,12 @@ from hare.dialects.postgresql.constants import (
     POSTGRESQL_EXTENSION_TYPE_FIELD_PATHS,
     POSTGRESQL_EXTENSIONS_SQL,
     POSTGRESQL_FIXED_CHAR_FIELD_PATH,
-    POSTGRESQL_INSPECTED_FUNCTION_PRIVILEGES_SQL,
     POSTGRESQL_INSPECTED_FUNCTIONS_SQL,
-    POSTGRESQL_INSPECTED_SEQUENCE_PRIVILEGES_SQL,
     POSTGRESQL_NAIVE_TYPE_FIELD_PATHS,
     POSTGRESQL_NUMERIC_CAST_TYPES,
     POSTGRESQL_SCHEMA_EXISTS_SQL,
     POSTGRESQL_SCHEMA_NAMES_SQL,
+    POSTGRESQL_SCHEMA_SEQUENCES_SQL,
     POSTGRESQL_TABLE_EXISTS_SQL,
     POSTGRESQL_TABLE_NAMES_SQL,
     POSTGRESQL_TRAILING_TYPE_CAST_RE,
@@ -32,7 +31,6 @@ from hare.dialects.postgresql.constants import (
     POSTGRESQL_TS_VECTOR_TYPE_NAME,
     POSTGRESQL_TUNED_INDEX_TYPES,
     POSTGRESQL_TYPE_MAP,
-    POSTGRESQL_UNATTACHED_SEQUENCES_SQL,
     POSTGRESQL_VIEWS_SQL,
 )
 from hare.dialects.postgresql.fields.constants import NATIVE_ENUM_TYPE_NAME_PATTERN
@@ -67,7 +65,6 @@ from hare.inspectdb.constants import (
     BASE_FIELD_SENTINEL_KWARG,
     INSPECTED_ENUM_MODULE_NAME,
 )
-from hare.inspectdb.enums import SchemaPartType
 from hare.inspectdb.exceptions import SchemaNotFoundError
 from hare.inspectdb.generation.model_naming import ModelNaming
 from hare.inspectdb.introspection.catalog_snapshot import CatalogSnapshot
@@ -158,19 +155,16 @@ class PostgresqlIntrospector(SchemaIntrospector):
     async def fetch_unattached_schema_objects(
         cls, connection: DatabaseClient, schema: str
     ) -> tuple[list[DatabaseSequence], list[DatabaseFunction], list[SchemaPart]]:
-        sequence_rows = await connection.execute_dicts(POSTGRESQL_UNATTACHED_SEQUENCES_SQL, [schema])
+        sequence_rows = await connection.execute_dicts(POSTGRESQL_SCHEMA_SEQUENCES_SQL, [schema, None])
         function_rows = await connection.execute_dicts(POSTGRESQL_INSPECTED_FUNCTIONS_SQL, [schema])
-        sequence_privilege_rows = await connection.execute_dicts(
-            POSTGRESQL_INSPECTED_SEQUENCE_PRIVILEGES_SQL, [schema]
-        )
-        function_privilege_rows = await connection.execute_dicts(
-            POSTGRESQL_INSPECTED_FUNCTION_PRIVILEGES_SQL, [schema]
+        sequence_privilege_rows, function_privilege_rows = await PostgresqlCatalogReader.read_object_privileges(
+            connection, schema
         )
         function_signatures: dict[str, list[str]] = defaultdict(list)
         for row in function_rows:
             function_signatures[row["name"]].append(row["identity_arguments"])
         return (
-            [PostgresqlInspectedSchemaObjects.get_sequence(row, None) for row in sequence_rows],
+            [PostgresqlInspectedSchemaObjects.get_sequence(row) for row in sequence_rows],
             [PostgresqlInspectedSchemaObjects.get_function(row) for row in function_rows],
             [
                 *PostgresqlObjectGrants.get_parts(sequence_privilege_rows, GrantTarget.SEQUENCE),
@@ -187,18 +181,9 @@ class PostgresqlIntrospector(SchemaIntrospector):
         return {row["name"] for row in await connection.execute_dicts(POSTGRESQL_EXTENSIONS_SQL)}
 
     @classmethod
-    async def fetch_enum_types(
-        cls, connection: DatabaseClient, default_schema: str
-    ) -> dict[tuple[str | None, str], EnumType]:
-        enum_types: dict[tuple[str | None, str], EnumType] = {}
-        for row in await connection.execute_dicts(POSTGRESQL_ENUM_TYPES_SQL):
-            labels = tuple(row["labels"])
-            schema = row["schema_name"]
-            enum_types[schema, row["name"]] = EnumType(name=row["name"], labels=labels, schema=schema)
-            if schema == default_schema:
-                # A model without Meta.schema names it without one.
-                enum_types[None, row["name"]] = EnumType(name=row["name"], labels=labels)
-        return enum_types
+    async def fetch_enum_types(cls, connection: DatabaseClient, schema: str) -> list[EnumType]:
+        rows = await connection.execute_dicts(POSTGRESQL_ENUM_TYPES_SQL, [schema])
+        return [EnumType(name=row["name"], labels=tuple(row["labels"]), schema=schema) for row in rows]
 
     @classmethod
     async def fetch_views(cls, connection: DatabaseClient, schema: str) -> list[tuple[str, bool, tuple[str, ...]]]:

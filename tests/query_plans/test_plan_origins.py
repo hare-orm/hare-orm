@@ -8,6 +8,7 @@ from typing import Any, ClassVar
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.query.expressions import Exists, F, Q, Value
 from hare.query.plans.constants import OPTIONAL_VALUE_ORIGIN
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
@@ -20,6 +21,8 @@ from hare.query.plans.statement.query_key_compiler import QueryKeyCompiler
 from hare.query.plans.statement.statement_plan_runs import StatementPlanRuns
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 from tests.shared_models.testmodels import IntFields
+
+pytestmark = pytest.mark.usefixtures("model_conversion_context")
 
 
 @pytest.mark.database_independent
@@ -60,7 +63,11 @@ def test_a_description_made_while_another_is_made_lists_its_origins_too():
 @pytest.mark.database_independent
 def test_values_of_one_origin_bind_from_the_first_and_only_when_they_are_one_object():
     shared = Q(intnum=1)
-    description = PlanOrigins.describe(lambda: Q(shared, shared).get_plan_description(PlanContext(model=IntFields)))
+    description = PlanOrigins.describe(
+        lambda: Q(shared, shared).get_plan_description(
+            PlanContext(binding=HareContext.require_current().apps.get_binding(IntFields))
+        )
+    )
     assert len(description.values) == 2
     assert description.origins[0] == description.origins[1]
     # No reference of the second value is needed - it is the first one's.
@@ -72,7 +79,11 @@ def test_values_of_one_origin_bind_from_the_first_and_only_when_they_are_one_obj
 
 @pytest.mark.database_independent
 def test_a_reference_of_no_described_value_keeps_no_plan():
-    description = PlanOrigins.describe(lambda: Q(intnum=1).get_plan_description(PlanContext(model=IntFields)))
+    description = PlanOrigins.describe(
+        lambda: Q(intnum=1).get_plan_description(
+            PlanContext(binding=HareContext.require_current().apps.get_binding(IntFields))
+        )
+    )
     assert StatementPlanRuns.get_value_sources(description, [(("elsewhere", "intnum"), object())]) is None
     assert StatementPlanRuns.get_value_sources(description, []) is None
 
@@ -157,7 +168,11 @@ class Point(Plannable):
 @pytest.mark.database_independent
 def test_part_types_describe_their_values():
     point = Point((1.5, 2.5))
-    description = PlanOrigins.describe(lambda: point.get_plan_description(PlanContext(model=IntFields)))
+    description = PlanOrigins.describe(
+        lambda: point.get_plan_description(
+            PlanContext(binding=HareContext.require_current().apps.get_binding(IntFields))
+        )
+    )
     # The pair is bound whole, the text a method gives, each parameter, then the condition's value.
     assert description.values == [(1.5, 2.5), "POINT(1.5, 2.5)", 1, 2, 3]
     assert description.origins[:4] == [
@@ -174,7 +189,11 @@ def test_part_types_describe_their_values():
 @pytest.mark.database_independent
 def test_a_value_of_a_condition_folded_into_no_join_binds_nothing():
     point = Point((1.5, 2.5))
-    description = PlanOrigins.describe(lambda: point.get_plan_description(PlanContext(model=IntFields)))
+    description = PlanOrigins.describe(
+        lambda: point.get_plan_description(
+            PlanContext(binding=HareContext.require_current().apps.get_binding(IntFields))
+        )
+    )
     references = [(origin, object()) for origin in description.origins[:4]]
     sources = StatementPlanRuns.get_value_sources(description, references)
     assert sources is not None

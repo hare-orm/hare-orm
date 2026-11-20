@@ -7,6 +7,7 @@ import pytest
 
 from hare.contrib.test import requires_features
 from hare.core.caching.caches import Caches
+from hare.core.hare_context import HareContext
 from hare.dialects.base.client import TransactionClient
 from hare.exceptions import (
     DoesNotExist,
@@ -72,7 +73,7 @@ async def test_get_by_pk_allocates_no_statement_on_a_cache_hit(db):
 @pytest.mark.asyncio
 async def test_first_query_of_a_shape_runs_its_queryset_and_keeps_the_plan(db):
     obj = await testmodels.IntFields.objects.create(intnum=31)
-    Caches.forget_model_caches([testmodels.IntFields])
+    Caches.forget_model_caches([HareContext.require_current().apps.get_binding(testmodels.IntFields)])
     first = testmodels.IntFields.objects.get(intnum=31)
     assert has_call_signature(first)
     assert get_kept_plan(first) is None
@@ -151,7 +152,7 @@ async def test_get_or_none(db):
 @pytest.mark.asyncio
 async def test_get_and_get_or_none_share_a_plan(db):
     other = await testmodels.Author.objects.create(name="other")
-    Caches.forget_model_caches([testmodels.Author])
+    Caches.forget_model_caches([HareContext.require_current().apps.get_binding(testmodels.Author)])
     assert await testmodels.Author.objects.get(name="other") == other
     query = testmodels.Author.objects.get(does_not_exist_exception=None, name="other")
     assert has_call_signature(query)
@@ -288,7 +289,7 @@ async def test_composite_primary_key(db):
 async def test_relations_loaded_by_default_run_on_the_call_plan(db, model):
     """A model's relations loaded by default (``lazy=``) are part of the plan of its calls - a repeated
     ``get()`` builds no statement."""
-    Caches.forget_model_caches([model])
+    Caches.forget_model_caches([HareContext.require_current().apps.get_binding(model)])
     for index in range(2):
         with spy_on_queryset_init() as queryset_init:
             assert await model.objects.get(pk=10**9, does_not_exist_exception=None) is None
@@ -329,7 +330,7 @@ async def test_forgetting_model_caches_drops_the_plan(db):
     obj = await testmodels.IntFields.objects.create(intnum=6)
     await testmodels.IntFields.objects.get(pk=obj.id)
     assert get_kept_plan(testmodels.IntFields.objects.get(pk=obj.id)) is not None
-    Caches.forget_model_caches([testmodels.IntFields])
+    Caches.forget_model_caches([HareContext.require_current().apps.get_binding(testmodels.IntFields)])
     assert get_kept_plan(testmodels.IntFields.objects.get(pk=obj.id)) is None
     assert (await testmodels.IntFields.objects.get(pk=obj.id)).id == obj.id
 

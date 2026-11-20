@@ -118,15 +118,12 @@ class OutputFormatter:
         if event == "apply_start":
             print(f"  Applying {TerminalColors.CYAN}{label}{TerminalColors.RESET}...", end="", flush=True)
             OutputFormatter.progress_line_open = True
-        elif event == "apply_done":
+        elif event in ("apply_done", "rollback_done"):
             print(f" {TerminalColors.GREEN}OK{TerminalColors.RESET}")
             OutputFormatter.progress_line_open = False
         elif event == "rollback_start":
             print(f"  Rolling back {TerminalColors.YELLOW}{label}{TerminalColors.RESET}...", end="", flush=True)
             OutputFormatter.progress_line_open = True
-        elif event == "rollback_done":
-            print(f" {TerminalColors.GREEN}OK{TerminalColors.RESET}")
-            OutputFormatter.progress_line_open = False
 
     @staticmethod
     def dry_run_progress_reporter(event: str, app_label: str, name: str) -> None:

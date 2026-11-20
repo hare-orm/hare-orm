@@ -193,6 +193,7 @@ where its database or driver does something of its own.
 | `get_pool_bounds() -> (least, most)` | The connections the pool keeps, as configured — for `get_pool_status()` of a pool failing to open. | Must be implemented with `Features.supports_pool_status`. |
 | `ping(timeout=5.0)` | `SELECT 1`, bounded by `timeout`; `False` for a connection error, an operational error or a timeout. | The same for every driver. |
 | `create_independent_client(settings=None)` | A new connection to the same database, apart from this one and in the same tenant schema; the caller closes it. | Built from the connection's settings. |
+| `get_non_transactional_client()` | The same database client outside transaction wrappers, without reselecting a tenant or connection. | Returns `self`; `TransactionClient` follows its parents to the non-transactional client. |
 | `get_server_client()` | The client of the server itself, past the pooler the connection goes through (`direct_host`). | This client. |
 | `lock_timeout_session(seconds)` | A client on one connection whose every statement waits at most `seconds` for a lock — for a migration running outside a transaction. | Raises `UnSupportedError`. |
 | `get_tenant_client()` | The client the active tenant scope works through — of the tenant's schema with a schema per tenant. | This client, or the schema's client. |

@@ -4,7 +4,6 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from hare.ddl.declared_names import DeclaredNames
-from hare.ddl.schema_objects.enum_type import EnumType
 from hare.migrations.operations.dependencies.operation_dependency import OperationDependency
 from hare.migrations.operations.enum_types.enum_type_operation import EnumTypeOperation
 from hare.migrations.operations.enums import DependencyType
@@ -31,24 +30,29 @@ class DropEnumType(EnumTypeOperation):
         self.schema = schema
         self.labels = self.get_checked_labels(labels, "DropEnumType.labels")
 
-    def get_provided_dependencies(self, app_label: str) -> list[OperationDependency]:
+    def get_provided_dependencies(self, app_label: str, state: State) -> list[OperationDependency]:
         return [OperationDependency.of_enum_type(self.schema, self.name, DependencyType.REMOVED)]
 
     def get_required_dependencies(self, app_label: str, state: State) -> list[OperationDependency]:
         """Every field of the type - removed or changed first."""
         return [
-            OperationDependency.of_field(*model_key, field_name, DependencyType.CHANGED)
-            for model_key, model_state in state.models.items()
-            for field_name, field in model_state.fields.items()
-            if (enum_type := getattr(field, "requires_enum_type", None)) is not None
-            and enum_type.key == (self.schema, self.name)
+            *super().get_required_dependencies(app_label, state),
+            OperationDependency.of_enum_type(self.schema, self.name, DependencyType.CREATED),
+            *[
+                OperationDependency.of_field(*model_key, field_name, DependencyType.CHANGED)
+                for model_key in state.models
+                if state.default_connections.get(model_key[0]) == state.default_connections.get(app_label)
+                for field_name, field in state.models[model_key].fields.items()
+                if (enum_type := getattr(field, "requires_enum_type", None)) is not None
+                and enum_type.key == (self.schema, self.name)
+            ],
         ]
 
     def describe(self) -> str:
         return f"Drop ENUM type {self.get_type_label()}"
 
     def state_forward(self, app_label: str, state: State) -> None:
-        state.enum_types.pop(EnumType(self.name, self.labels, self.schema).key, None)
+        self._record_type(app_label, state, None)
 
     def get_referenced_model_labels(self, app_label: str) -> frozenset[str] | None:
         return frozenset()
@@ -56,11 +60,9 @@ class DropEnumType(EnumTypeOperation):
     async def database_forward(
         self, app_label: str, old_state: State, new_state: State, state_editor: BaseSchemaEditor | None = None
     ) -> None:
-        if self._runs_enum_types(state_editor, f"dropping the ENUM type {self.name}"):
-            await state_editor.enum_types.drop_enum_type(EnumType(self.name, self.labels, self.schema))
+        await self._drop_type(app_label, new_state, state_editor, self.labels)
 
     async def database_backward(
         self, app_label: str, old_state: State, new_state: State, state_editor: BaseSchemaEditor | None = None
     ) -> None:
-        if self._runs_enum_types(state_editor, f"creating the ENUM type {self.name}"):
-            await state_editor.enum_types.create_enum_type(EnumType(self.name, self.labels, self.schema))
+        await self._create_type(app_label, old_state, state_editor, self.labels)

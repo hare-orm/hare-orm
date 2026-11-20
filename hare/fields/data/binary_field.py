@@ -45,6 +45,9 @@ class BinaryField(Field[TBinary]):
         self.raise_if_not_bytes_like(value)
         return super().to_db_value(value, instance)
 
+    def get_assign_normalized_types(self) -> frozenset[type]:
+        return self._get_unchanged_assign_types(BinaryField.to_python, self.field_type)
+
     def to_python(self, value: Any) -> Any:
         # The same on construction.
         self.raise_if_not_bytes_like(value)

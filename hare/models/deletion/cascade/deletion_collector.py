@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Collection
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.core.connections.model_connection_choice import ModelConnectionChoice
+from hare.core.connections.relation_constraints import RelationConstraints
+from hare.core.hare_context import HareContext
 from hare.exceptions import ProtectedError
 from hare.fields.enums import OnDelete
 from hare.fields.relations.fields.backward_foreign_key_relation import BackwardForeignKeyRelation
@@ -20,6 +23,7 @@ from hare.models.enums import DeletionAction
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class DeletionCollector:
@@ -70,20 +74,21 @@ class DeletionCollector:
             only_unconstrained, hands_over_rows, only_toward_protect, defers_querysets=defers_querysets
         )
 
-    async def collect(self, model: type[Model], pks: list[Any]) -> DeletionPlan:
+    async def collect(self, binding: ModelBinding, pks: list[Any]) -> DeletionPlan:
         """Walks the rows deleting the ``model`` rows ``pks`` reaches.
 
         Args:
-            model: The model of the root rows.
+            binding: The model of the root rows.
             pks: Primary keys of the root rows, each listed once.
 
         Returns:
             The plan.
         """
-        plan = DeletionPlan(model, list(pks))
+        model = binding._model
+        plan = DeletionPlan(binding, list(pks))
         plan.waves.append({model: dict.fromkeys(pks, self.root_action)})
         if self.locks_rows:
-            await self._lock_root_rows(model, pks)
+            await self._lock_root_rows(binding, pks)
         elif await self._collect_tree_through_self(plan):
             # One recursive query - it can't lock the rows it reads.
             return plan
@@ -98,26 +103,28 @@ class DeletionCollector:
                         continue
                     pks_by_action.setdefault(action, []).append(pk)
                 for action, action_pks in pks_by_action.items():
-                    await self._collect_children(plan, current_model, action, action_pks, queued, next_wave)
+                    await self._collect_children(
+                        plan, binding.graph.get_binding(current_model), action, action_pks, queued, next_wave
+                    )
             if next_wave:
                 plan.waves.append(next_wave)
             frontier = next_wave
         return plan
 
-    async def _lock_root_rows(self, model: type[Model], pks: list[Any]) -> None:
+    async def _lock_root_rows(self, binding: ModelBinding, pks: list[Any]) -> None:
         """Locks the root rows until the transaction ends - a row pointing at one can't be inserted
         meanwhile.
 
         Args:
-            model: The model of the root rows.
+            binding: The model of the root rows.
             pks: Their primary keys.
         """
         # A walk locks rows on a transaction alone (RelatedRows.locks_rows_of()).
         connection: DatabaseClient = self.connection  # type: ignore[assignment]
-        primary_key_attribute_names = model._meta.primary_key_attribute_names
+        primary_key_attribute_names = binding.primary_key_attribute_names
         for batch in RelatedRows.split_into_batches(pks, connection, len(primary_key_attribute_names)):
             queryset = RelatedRows.include_soft_deleted(
-                RelatedRows.get_base_queryset(model).filter(pk__in=batch).using(connection)
+                RelatedRows.get_base_queryset(binding).filter(pk__in=batch).using(connection)
             )
             await queryset.select_for_update().values_list(*primary_key_attribute_names)
 
@@ -133,10 +140,10 @@ class DeletionCollector:
             Whether the waves were filled - otherwise the plan is walked wave by wave.
         """
         model = plan.root_model
-        meta = model._meta
+        meta = plan.root_binding
         cascading_relations = [
             relation
-            for relation in DeletionGraph.get_backward_relations(model)
+            for relation in DeletionGraph.get_backward_relations(plan.root_binding)
             if relation[1].on_delete == OnDelete.CASCADE
         ]
         if (
@@ -149,8 +156,10 @@ class DeletionCollector:
         to_field_names = tuple(to_field.model_field_name for to_field in foreign_key_field.to_field_instances)
         if backward_field.related_model is not model or to_field_names != meta.primary_key_attribute_names:
             return False
-        is_walkable, child_action = self._get_self_tree_child_action(model, foreign_key_field, self.root_action)
-        if not is_walkable or self._get_self_tree_child_action(model, foreign_key_field, child_action) != (
+        is_walkable, child_action = self._get_self_tree_child_action(
+            plan.root_binding, foreign_key_field, self.root_action
+        )
+        if not is_walkable or self._get_self_tree_child_action(plan.root_binding, foreign_key_field, child_action) != (
             True,
             child_action,
         ):
@@ -162,15 +171,17 @@ class DeletionCollector:
             value_names.append(meta.soft_delete_field)  # type: ignore[arg-type]
         if reads_version:
             value_names.append(meta.optimistic_lock_field)  # type: ignore[arg-type]
-        rows = await RelatedRows.get_tree_rows(backward_field, plan.root_pks, self.connection, value_names)
+        rows = await RelatedRows.get_tree_rows(
+            backward_field, plan.root_pks, self.connection, value_names, source_model=plan.root_model
+        )
         if rows is None:
             return False
         rows_by_parent: dict[Any, list[tuple[Any, ...]]] = {}
         for row in rows:
             rows_by_parent.setdefault(row[1], []).append(row)
         root_pks = set(plan.root_pks)
-        queued = set(plan.root_pks)
-        frontier = list(plan.root_pks)
+        queued = root_pks.copy()
+        frontier: Collection[Any] = plan.root_pks
         while frontier:
             wave: dict[Any, DeletionAction | None] = {}
             for parent_pk in frontier:
@@ -186,11 +197,14 @@ class DeletionCollector:
                     wave[pk] = DeletionAction.UNCHANGED if reads_state and row[2] is not None else child_action
             if wave:
                 plan.waves.append({model: wave})
-            frontier = list(wave)
+            frontier = wave
         return True
 
     def _get_self_tree_child_action(
-        self, model: type[Model], foreign_key_field: ForeignKeyFieldInstance[Any], parent_action: DeletionAction | None
+        self,
+        binding: ModelBinding,
+        foreign_key_field: ForeignKeyFieldInstance[Any],
+        parent_action: DeletionAction | None,
     ) -> tuple[bool, DeletionAction | None]:
         """What the delete does to the rows ``foreign_key_field``, a relation of ``model`` onto itself, leads
         to from rows it does ``parent_action`` to - as ``_collect_children()`` decides it.
@@ -199,7 +213,10 @@ class DeletionCollector:
             Whether the rows are walked through as rows of the same type, and their action.
         """
 
-        transition = self.policy.get_transition(model, model, foreign_key_field, parent_action, self.connection)
+        model = binding._model
+        transition = self.policy.get_transition(
+            binding, model, foreign_key_field, parent_action, self.connection, source_model=model
+        )
         if transition is None or transition.by_database or transition.action in HANDED_OVER_ACTIONS:
             return False, None
         return True, transition.action
@@ -207,7 +224,7 @@ class DeletionCollector:
     async def _collect_children(
         self,
         plan: DeletionPlan,
-        model: type[Model],
+        binding: ModelBinding,
         parent_action: DeletionAction | None,
         pks: list[Any],
         queued: set[RowKey],
@@ -218,33 +235,36 @@ class DeletionCollector:
 
         Args:
             plan: The plan being built.
-            model: The model of the rows.
+            binding: The model of the rows.
             parent_action: What the delete does to them.
             pks: Their primary keys.
             queued: ``(type, pk)`` of every row reached so far.
             next_wave: The next wave being built.
         """
         parent_soft = parent_action in {DeletionAction.SOFT_DELETE, DeletionAction.UNCHANGED}
-        for backward_field, foreign_key_field in DeletionGraph.get_backward_relations(model):
+        for backward_field, foreign_key_field in DeletionGraph.get_backward_relations(binding):
             related_model = backward_field.related_model
             transition = self.policy.get_transition(
-                model,
+                binding,
                 related_model,
                 foreign_key_field,
                 parent_action,
                 self.connection,
+                source_model=plan.root_model,
             )
             if transition is None:
                 continue
             by_database = transition.by_database
-            target_values = await RelatedRows.get_target_values(model, foreign_key_field, pks, self.connection)
+            target_values = await RelatedRows.get_target_values(
+                binding, foreign_key_field, pks, self.connection, source_model=plan.root_model
+            )
             if not target_values:
                 continue
             if (
                 parent_action is not None
                 and not by_database
                 and self.policy.hands_over_rows
-                and not related_model._meta.has_primary_key
+                and not backward_field.get_related_binding().has_primary_key
             ):
                 # No key to list its rows by - they're deleted by the relation's condition, as
                 # the database's own ON DELETE CASCADE would.
@@ -322,10 +342,15 @@ class DeletionCollector:
             return [
                 (related_pk, False)
                 for related_pk in await RelatedRows.get_rows_pointing_at(
-                    backward_field, target_values, self.connection, primary_keys_only=True, lock=self.locks_rows
+                    backward_field,
+                    target_values,
+                    self.connection,
+                    primary_keys_only=True,
+                    lock=self.locks_rows,
+                    source_model=plan.root_model,
                 )
             ]
-        meta = related_model._meta
+        meta = backward_field.get_related_binding()
         primary_key_attribute_names = meta.primary_key_attribute_names
         pk_column_count = len(primary_key_attribute_names)
         reads_version = self.reads_versions and bool(meta.optimistic_lock_field)
@@ -334,9 +359,9 @@ class DeletionCollector:
             value_names.append(meta.optimistic_lock_field)
         rows: list[tuple[Any, bool]] = []
         for queryset in RelatedRows.get_pointing_querysets(
-            backward_field, target_values, self.connection, lock=self.locks_rows
+            backward_field, target_values, self.connection, lock=self.locks_rows, source_model=plan.root_model
         ):
-            for values in await queryset.values_list(*value_names):
+            for values in await queryset.values_list(*value_names):  # type: ignore[arg-type]
                 related_pk = values[0] if pk_column_count == 1 else tuple(values[:pk_column_count])
                 if reads_version:
                     plan.row_versions[(related_model, related_pk)] = values[pk_column_count + 1]
@@ -345,29 +370,29 @@ class DeletionCollector:
 
     @staticmethod
     async def get_reachable_keys(
-        model: type[Model], pks: list[Any], connection: DatabaseClient | None
+        binding: ModelBinding, pks: list[Any], connection: DatabaseClient | None
     ) -> frozenset[RowKey]:
         """Every row deleting the ``model`` rows ``pks`` reaches through ``on_delete=CASCADE``, the
         roots included - a guarding row among them goes with the rows it guards.
 
         Args:
-            model: The model of the root rows.
+            binding: The model of the root rows.
             pks: Their primary keys.
             connection: The connection the delete runs on.
 
         Returns:
             ``(type, pk)`` of each row.
         """
-        return (await DeletionCollector(connection, root_action=None).collect(model, pks)).get_keys()
+        return (await DeletionCollector(connection, root_action=None).collect(binding, pks)).get_keys()
 
     @staticmethod
-    async def check_protected(model: type[Model], pks: list[Any], connection: DatabaseClient | None = None) -> None:
+    async def check_protected(binding: ModelBinding, pks: list[Any], connection: DatabaseClient) -> None:
         """Raises if a ``PROTECT`` relation has rows pointing at any of the ``model`` rows ``pks``
         - one query per ``PROTECT``-guarded relation, not one query per row. A protecting row the same
         delete removes as well doesn't count.
 
         Args:
-            model: The model of the rows about to be deleted.
+            binding: The model of the rows about to be deleted.
             pks: Primary keys of the ``model`` rows.
             connection: Specific DB connection to check against, matching whatever connection the
                 delete itself is scoped to - a stale/wrong connection could miss a row created
@@ -377,41 +402,53 @@ class DeletionCollector:
         Raises:
             ProtectedError: If a PROTECT-guarded relation has matching rows.
         """
-        blocking = await DeletionCollector.find_protecting_rows(model, pks, connection)
+        model = binding._model
+        blocking = await DeletionCollector.find_protecting_rows(binding, pks, connection, source_model=model)
         if blocking is not None:
             # A protecting row the same delete removes through another branch of its cascade goes
             # with the rows it protects.
             blocking = await DeletionCollector.find_protecting_rows(
-                model, pks, connection, exclude=await DeletionCollector.get_reachable_keys(model, pks, connection)
+                binding,
+                pks,
+                connection,
+                exclude=await DeletionCollector.get_reachable_keys(binding, pks, connection),
+                source_model=model,
             )
         if blocking is not None:
             raise ProtectedError(*blocking)
 
     @staticmethod
     async def find_protecting_rows(
-        model: type[Model],
+        binding: ModelBinding,
         pks: list[Any],
         connection: DatabaseClient | None,
         *,
         exclude: frozenset[tuple[type[Model], Any]] | None = None,
+        source_model: type[Model],
     ) -> tuple[str, list[Model]] | None:
         """Looks for rows a PROTECT-guarded relation keeps pointing at any of ``pks`` - the shared
         lookup behind ``check_protected`` and ``check_protected_transitively``.
 
         Args:
-            model: The model of the rows about to be deleted.
+            binding: The model of the rows about to be deleted.
             pks: Primary keys of the ``model`` rows.
             connection: The connection the delete runs on - every lookup against a model on that
                 connection runs on it, inside its transaction; a model on another connection,
                 or every model when None, uses its own.
             exclude: ``(type, pk)`` pairs to ignore as protectors, because the same operation
                 removes them too.
+            source_model: The root model, used to choose whether this operation shares the cascade's connection.
 
         Returns:
             ``(message, protecting rows)`` for the first relation that has any, ``None`` if none.
         """
         first_group = await DeletionCollector.find_first_guarding_rows(
-            model, pks, connection, guarding_actions=PROTECTING_ON_DELETE_ACTIONS, exclude=exclude
+            binding,
+            pks,
+            connection,
+            guarding_actions=PROTECTING_ON_DELETE_ACTIONS,
+            exclude=exclude,
+            source_model=source_model,
         )
         if first_group is None:
             return None
@@ -420,18 +457,19 @@ class DeletionCollector:
 
     @staticmethod
     async def find_first_guarding_rows(
-        model: type[Model],
+        binding: ModelBinding,
         pks: list[Any],
         connection: DatabaseClient | None,
         *,
         guarding_actions: frozenset[OnDelete],
         exclude: frozenset[tuple[type[Model], Any]] | None = None,
         only_unconstrained: bool = False,
+        source_model: type[Model],
     ) -> tuple[str, list[Model], ForeignKeyFieldInstance[Any] | ManyToManyFieldInstance[Any]] | None:
         """The first group ``iterate_guarding_rows()`` yields, if any.
 
         Args:
-            model: The model of the rows about to be deleted.
+            binding: The model of the rows about to be deleted.
             pks: Primary keys of the ``model`` rows.
             connection: The connection the delete runs on - every lookup against a model on that
                 connection runs on it, inside its transaction; a model on another connection,
@@ -439,17 +477,19 @@ class DeletionCollector:
             guarding_actions: ``on_delete`` actions to look at.
             exclude: ``(type, pk)`` pairs to ignore, because the same operation removes them too.
             only_unconstrained: Look only at ``db_constraint=False`` relations.
+            source_model: The root model, used to choose whether this operation shares the cascade's connection.
 
         Returns:
             ``(message, guarding rows, guarding field)``, or ``None`` if no relation has any.
         """
         guarding_row_groups = DeletionCollector.iterate_guarding_rows(
-            model,
+            binding,
             pks,
             connection,
             guarding_actions=guarding_actions,
             exclude=exclude,
             only_unconstrained=only_unconstrained,
+            source_model=source_model,
         )
         try:
             return await anext(guarding_row_groups, None)
@@ -458,20 +498,21 @@ class DeletionCollector:
 
     @staticmethod
     async def iterate_guarding_rows(
-        model: type[Model],
+        binding: ModelBinding,
         pks: list[Any],
         connection: DatabaseClient | None,
         *,
         guarding_actions: frozenset[OnDelete],
         exclude: frozenset[tuple[type[Model], Any]] | None = None,
         only_unconstrained: bool = False,
+        source_model: type[Model],
     ) -> AsyncGenerator[tuple[str, list[Model], ForeignKeyFieldInstance[Any] | ManyToManyFieldInstance[Any]]]:
         """Yields, relation by relation, the rows that keep pointing at any of ``pks`` through a
         backward FK/O2O or auto-through M2M relation whose ``on_delete`` is in
         ``guarding_actions``.
 
         Args:
-            model: The model of the rows about to be deleted.
+            binding: The model of the rows about to be deleted.
             pks: Primary keys of the ``model`` rows.
             connection: The connection the delete runs on - every lookup against a model on that
                 connection runs on it, inside its transaction; a model on another connection,
@@ -479,24 +520,40 @@ class DeletionCollector:
             guarding_actions: ``on_delete`` actions to look at.
             exclude: ``(type, pk)`` pairs to ignore, because the same operation removes them too.
             only_unconstrained: Look only at ``db_constraint=False`` relations.
+            source_model: The root model, used to choose whether this operation shares the cascade's connection.
 
         Yields:
             ``(message, guarding rows, guarding field)`` for every relation that has any.
         """
+        model = binding._model
         if not pks:
             return
-        for backward_field, foreign_key_field in DeletionGraph.get_backward_relations(model):
+        for backward_field, foreign_key_field in DeletionGraph.get_backward_relations(binding):
             related_model = backward_field.related_model
             if (
                 foreign_key_field.on_delete not in guarding_actions
-                or (only_unconstrained and foreign_key_field.has_database_constraint)
-                or not DeletionGraph.reaches_table(related_model, connection)
+                or (
+                    only_unconstrained
+                    and RelationConstraints.is_enforced(
+                        foreign_key_field,
+                        HareContext.require_current(),
+                        connection=connection,
+                        source_binding=binding.graph.get_binding(source_model),
+                    )
+                )
+                or not DeletionGraph.reaches_table(
+                    backward_field.get_related_binding(), connection, source_model=source_model
+                )
             ):
                 continue
-            target_values = await RelatedRows.get_target_values(model, foreign_key_field, pks, connection)
+            target_values = await RelatedRows.get_target_values(
+                binding, foreign_key_field, pks, connection, source_model=source_model
+            )
             if not target_values:
                 continue
-            matches = await RelatedRows.get_rows_pointing_at(backward_field, target_values, connection)
+            matches = await RelatedRows.get_rows_pointing_at(
+                backward_field, target_values, connection, source_model=source_model
+            )
             if exclude:
                 matches = [match for match in matches if (type(match), match.pk) not in exclude]
             if matches:
@@ -507,26 +564,37 @@ class DeletionCollector:
                     matches,
                     foreign_key_field,
                 )
-        for many_to_many_field in DeletionGraph.get_many_to_many_fields(model):
+        for many_to_many_field in DeletionGraph.get_many_to_many_fields(binding):
             # A through=Model relation's PROTECT is the through model's own FK field - checked
             # above.
             if (
                 many_to_many_field.through_model is not None
                 or many_to_many_field.on_delete not in guarding_actions
-                or (only_unconstrained and many_to_many_field.has_database_constraint)
-                or not DeletionGraph.reaches_relation_table(many_to_many_field, connection)
+                or (
+                    only_unconstrained
+                    and RelationConstraints.is_enforced(
+                        many_to_many_field,
+                        HareContext.require_current(),
+                        connection=connection,
+                        source_binding=binding.graph.get_binding(source_model),
+                    )
+                )
+                or not DeletionGraph.reaches_relation_table(many_to_many_field, connection, source_model=source_model)
             ):
                 continue
             related_model = many_to_many_field.related_model
-            base_query = RelatedRows.get_base_queryset(related_model)
-            related_connection = RelatedRows.get_connection_for(related_model, connection)
+            related_binding = many_to_many_field.get_related_binding()
+            base_query = RelatedRows.get_base_queryset(related_binding)
+            related_connection = RelatedRows.get_connection_for(related_binding, connection, source_model=source_model)
             # `<related_name>__in=` takes plain pks and composite pk tuples alike, binding a long
             # list as few parameters as the backend allows - batched anyway, for a list whose
             # values have no compact form.
-            lookup_connection = related_connection or related_model.get_connection(for_write=False)
+            lookup_connection = related_connection or ModelConnectionChoice.get(
+                HareContext.require_current(), related_binding, False
+            )
             matches_by_pk: dict[Any, Any] = {}
             for batch in RelatedRows.split_into_batches(
-                pks, lookup_connection, len(model._meta.primary_key_attribute_names)
+                pks, lookup_connection, len(binding.primary_key_attribute_names)
             ):
                 query = base_query.filter(**{f"{many_to_many_field.related_name}__in": batch}).using(
                     related_connection
@@ -554,30 +622,40 @@ class DeletionCollector:
 
     @staticmethod
     async def check_protected_transitively(
-        model: type[Model], pks: list[Any], connection: DatabaseClient | None = None
+        binding: ModelBinding, pks: list[Any], connection: DatabaseClient | None = None
     ) -> None:
         """Raises when hard-deleting the rows would, through ``CASCADE`` alone, remove a row a PROTECT
         relation still guards. A protecting row the same delete removes never blocks.
 
         Args:
-            model: The model of the rows about to be deleted.
+            binding: The model of the rows about to be deleted.
             pks: Their primary keys.
             connection: The connection to check on.
 
         Raises:
             ProtectedError: A cascade-reachable row is protected by a row outside the cascade.
         """
-        if not pks or not DeletionGraph.has_transitive_protect(model):
+        model = binding._model
+        if not pks or not DeletionGraph.has_transitive_protect(binding):
             return
-        plan = await DeletionCollector(connection, root_action=None, only_toward_protect=True).collect(model, pks)
+        plan = await DeletionCollector(connection, root_action=None, only_toward_protect=True).collect(binding, pks)
         tree_keys: frozenset[RowKey] | None = None
-        for reachable_model, descendant_pks in plan.get_descendant_pks_by_model().items():
-            if await DeletionCollector.find_protecting_rows(reachable_model, descendant_pks, connection) is None:
+        for reachable_model, descendant_pks in plan.get_pks_by_model(include_roots=False).items():
+            if (
+                await DeletionCollector.find_protecting_rows(
+                    binding.graph.get_binding(reachable_model), descendant_pks, connection, source_model=model
+                )
+                is None
+            ):
                 continue
             if tree_keys is None:
-                tree_keys = await DeletionCollector.get_reachable_keys(model, pks, connection)
+                tree_keys = await DeletionCollector.get_reachable_keys(binding, pks, connection)
             blocking = await DeletionCollector.find_protecting_rows(
-                reachable_model, descendant_pks, connection, exclude=tree_keys
+                binding.graph.get_binding(reachable_model),
+                descendant_pks,
+                connection,
+                exclude=tree_keys,
+                source_model=model,
             )
             if blocking is not None:
                 raise ProtectedError(*blocking)

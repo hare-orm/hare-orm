@@ -3,6 +3,7 @@ handing the special cases to the Python functions of ``InstanceInitialization``.
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.exceptions import FieldError, QueryError, ValidationError
 from hare.models.instances.instance_initialization import InstanceInitialization
 from hare.native.native_modules import NativeModules
@@ -11,9 +12,12 @@ from tests.shared_models.testmodels import Event, IntFields, Team, Tournament
 
 
 def test_the_constructor_is_native_and_kept_per_model(db):
-    constructor = InstanceInitialization.get_constructor(IntFields)
+    constructor = InstanceInitialization.get_constructor(HareContext.require_current().apps.get_binding(IntFields))
     assert isinstance(constructor, NativeModules.rows.InstanceConstructor)
-    assert InstanceInitialization.get_constructor(IntFields) is constructor
+    assert (
+        InstanceInitialization.get_constructor(HareContext.require_current().apps.get_binding(IntFields))
+        is constructor
+    )
 
 
 def test_keywords_are_assigned_and_left_out_fields_get_their_defaults(db):
@@ -35,7 +39,7 @@ def test_none_for_a_field_that_doesnt_take_it_is_refused_before_any_assignment(d
         IntFields(intnum=None)
 
 
-def test_an_expression_is_kept_for_the_write():
+def test_an_expression_is_kept_for_the_write(db):
     expression = F("intnum") + 1
     assert IntFields(intnum=expression).intnum is expression
 
@@ -90,3 +94,38 @@ def test_an_automatic_primary_key_left_out_is_set_past_setattr_and_counts_as_gen
     assert not obj._custom_generated_pk
     obj.id = 9
     assert obj._custom_generated_pk
+
+
+@pytest.mark.asyncio
+async def test_rejected_partial_relation_leaves_existing_fields_and_cached_relation_unchanged(db):
+    tournament = await Tournament.objects.create(name="complete")
+    event = await Event.objects.create(name="original", tournament=tournament)
+    partial = await Tournament.objects.get(pk=tournament.pk).only("name")
+    with pytest.raises(QueryError, match="didn't load"):
+        event.update_from_dict({"name": "unwanted", "tournament": partial})
+    assert event.name == "original"
+    assert event.tournament_id == tournament.pk
+    assert event.tournament is tournament
+    await event.save()
+    assert (await Event.objects.get(pk=event.pk)).name == "original"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_pending", (False, True))
+async def test_rejected_update_does_not_publish_or_replace_pending_defaults(db, already_pending):
+    async def original_default():
+        return 22
+
+    async def replacement_default():
+        return 99
+
+    obj = await IntFields.objects.create(intnum=1)
+    if already_pending:
+        obj.update_from_dict({"intnum_null": original_default})
+    pending = dict(obj._await_when_save)
+    with pytest.raises(QueryError, match="doesn't take None"):
+        obj.update_from_dict({"intnum_null": replacement_default, "intnum": None})
+    assert dict(obj._await_when_save) == pending
+    assert obj.intnum == 1
+    await obj.save()
+    assert (await IntFields.objects.get(pk=obj.pk)).intnum_null == (22 if already_pending else None)

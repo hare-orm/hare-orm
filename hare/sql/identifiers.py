@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Collection
 from hashlib import sha256
 from typing import ClassVar
+from uuid import uuid4
 
 from hare.core.caching.cache import Cache
 from hare.sql.constants import IDENTIFIER_DIGEST_LENGTH, IDENTIFIER_LENGTH_LIMIT, SHORTENED_IDENTIFIER_CACHE_SIZE
@@ -43,6 +44,17 @@ class Identifiers:
     SHORTENED_NAMES: ClassVar[Cache[str]] = Cache(SHORTENED_IDENTIFIER_CACHE_SIZE)
 
     @staticmethod
+    def get_schema_and_name(name: str, schema: str | None) -> tuple[str | None, str]:
+        """Read a qualified object name or interpret a short name in the supplied schema."""
+        qualifier, separator, object_name = name.rpartition(".")
+        return (qualifier if separator else schema), object_name
+
+    @staticmethod
+    def get_qualified_name(schema: str | None, name: str) -> str:
+        """Join an object's schema and name for use in dependency declarations."""
+        return f"{schema}.{name}" if schema is not None else name
+
+    @staticmethod
     def get_within_limit(name: str) -> str:
         """Returns ``name``, or its shortened form when it is longer than
         ``IDENTIFIER_LENGTH_LIMIT`` bytes.
@@ -54,6 +66,11 @@ class Identifiers:
             The name within the limit.
         """
         return Identifiers.shorten(name, IDENTIFIER_LENGTH_LIMIT)
+
+    @staticmethod
+    def get_temporary_name(name: str) -> str:
+        """Generate a name for one temporary schema object."""
+        return Identifiers.get_within_limit(f"{name} {uuid4().hex}")
 
     @staticmethod
     def shorten(name: str, limit: int | None) -> str:

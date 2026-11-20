@@ -51,6 +51,9 @@ class DateField(Field[TDate]):
             return DayLimit(None, None, checks_time_of_day=True)
         return None
 
+    def get_assign_normalized_types(self) -> frozenset[type]:
+        return self._get_unchanged_assign_types(DateField.to_python, self.field_type)
+
     def to_python(self, value: Any) -> datetime.date | None:
         if value is not None:
             value = self.get_date_value(value)

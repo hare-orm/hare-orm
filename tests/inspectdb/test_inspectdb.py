@@ -1,7 +1,8 @@
 import pytest
 
 from hare.contrib.test import requires_features
-from hare.core.connections.connections import Connections
+from hare.core.apps.model_binding_graph import ModelBindingGraph
+from hare.core.hare_context import HareContext
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.dialects.sqlite.introspection.sqlite_column_declarations import SqliteColumnDeclarations
@@ -14,6 +15,7 @@ from hare.inspectdb import (
     DuplicateModelClassNameError,
     SchemaInspector,
     SchemaIntrospector,
+    SchemaNotFoundError,
     TableNotFoundError,
 )
 from hare.inspectdb.enums import CatalogDiagnosticCode
@@ -21,15 +23,10 @@ from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
 from hare.instrumentation.declarations import QueryExecuted
 from hare.instrumentation.observers.observers import Observers
 from hare.models.class_building.model_field_collection import ModelFieldCollection
+from tests.utils.database_under_test import DatabaseUnderTest
 from tests.utils.model_source_generator import ModelSourceGenerator
 from tests.utils.operations import apply_operations
 from tests.utils.postgresql_extensions import PostgresqlExtensions
-
-
-@pytest.fixture
-def connection(db):
-    alias = next(iter(Connections.current().db_config))
-    return Connections.get(alias)
 
 
 @pytest.mark.parametrize(
@@ -180,6 +177,7 @@ async def test_generate_model_source_renders_primary_key_that_is_also_a_foreign_
     """A OneToOneField(primary_key=True)-shaped column is both the table's PK and an FK - the FK
     branch used to never check is_pk at all, silently dropping primary_key=True entirely and
     leaving the round-tripped model with a phantom, DB-nonexistent "id" PK instead."""
+    declaration_graph = ModelBindingGraph()
     table = await DatabaseCatalog.inspect_table(connection, "address")
     source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name)
 
@@ -191,14 +189,15 @@ async def test_generate_model_source_renders_primary_key_that_is_also_a_foreign_
     namespace: dict = {"Model": Model, "__name__": "tests.generated_inspectdb_module"}
     exec(compile(source, "<generated>", "exec"), namespace)  # noqa: S102 - test-only, own generated code
     generated_cls = namespace["Address"]
-    assert "id" not in generated_cls._meta.fields_map
-    assert generated_cls._meta.primary_key_attribute == "event"
+    assert "id" not in declaration_graph.include(generated_cls).fields_map
+    assert declaration_graph.include(generated_cls).primary_key_attribute == "event"
 
 
 @pytest.mark.asyncio
 async def test_round_trip_generated_model_is_loadable(connection):
     """The real test: generated source isn't just syntactically valid, it actually defines a
     working hare-orm model when executed, with the fields inspectdb claimed it would have."""
+    declaration_graph = ModelBindingGraph()
     table = await DatabaseCatalog.inspect_table(connection, "tournament")
     source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name)
 
@@ -208,9 +207,9 @@ async def test_round_trip_generated_model_is_loadable(connection):
     exec(compile(source, "<generated>", "exec"), namespace)  # noqa: S102 - test-only, own generated code
 
     generated_cls = namespace["Tournament"]
-    field_names = set(generated_cls._meta.fields_map.keys())
+    field_names = set(declaration_graph.include(generated_cls).fields_map.keys())
     assert field_names == {"id", "name", "desc", "created"}
-    assert generated_cls._meta.primary_key_attribute == "id"
+    assert declaration_graph.include(generated_cls).primary_key_attribute == "id"
 
 
 @pytest.mark.asyncio
@@ -475,6 +474,7 @@ async def test_generate_model_source_reconstructs_composite_pk(connection):
 
 @pytest.mark.asyncio
 async def test_round_trip_composite_pk_model_is_loadable(connection):
+    declaration_graph = ModelBindingGraph()
     table = await DatabaseCatalog.inspect_table(connection, "compositepkthing")
     source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name)
 
@@ -484,7 +484,7 @@ async def test_round_trip_composite_pk_model_is_loadable(connection):
     exec(compile(source, "<generated>", "exec"), namespace)  # noqa: S102 - test-only, own generated code
 
     generated_cls = namespace["Compositepkthing"]
-    assert generated_cls._meta.primary_key_attribute == ("thing_id", "revision")
+    assert declaration_graph.include(generated_cls).primary_key_attribute == ("thing_id", "revision")
 
 
 @pytest.mark.asyncio
@@ -506,14 +506,10 @@ async def test_generate_model_source_reconstructs_composite_pk_declared_out_of_p
 
 @pytest.mark.asyncio
 async def test_generate_model_source_composite_pk_fk_member_drops_the_relation_not_the_column(connection):
-    """A single-column FK that's ALSO a composite PK member can't be rendered as a
-    ForeignKeyField at all - ModelMeta._parse_composite_pk() unconditionally rejects any relation
-    field as a composite PK component ("it has no single DB column of its own"), so a generated
-    `pk = CompositePrimaryKey('warehouse', ...)` referencing a ForeignKeyField's own name used to
-    raise ConfigurationError the moment the model was imported - code that compiled fine but was
-    guaranteed to crash on the very next step. Confirmed live against a real Postgres table
-    shaped exactly like this before this fix. The FK relation is now dropped (with a TODO
-    comment) and the column rendered as a plain field instead, which is importable."""
+    """Keep the physical column and its primary-key position when a foreign key cannot be declared as a relation in
+    that key.
+    """
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script("CREATE TABLE scratch_composite_pk_warehouse (id INTEGER PRIMARY KEY)")
     await connection.execute_script(
         "CREATE TABLE scratch_composite_pk_stock ("
@@ -537,7 +533,7 @@ async def test_generate_model_source_composite_pk_fk_member_drops_the_relation_n
     exec(compile(source, "<generated>", "exec"), namespace)  # noqa: S102 - test-only, own generated code
 
     generated_cls = namespace["ScratchCompositePkStock"]
-    assert generated_cls._meta.primary_key_attribute == ("warehouse_id", "sku")
+    assert declaration_graph.include(generated_cls).primary_key_attribute == ("warehouse_id", "sku")
 
 
 @requires_features(supports_unique_constraints=True)
@@ -561,6 +557,7 @@ async def test_generate_model_source_reconstructs_multi_column_index_and_unique_
 @requires_features(supports_unique_constraints=True)
 @pytest.mark.asyncio
 async def test_round_trip_indexed_model_is_loadable(connection):
+    declaration_graph = ModelBindingGraph()
     table = await DatabaseCatalog.inspect_table(connection, "modelwithindexes")
     source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name)
 
@@ -570,13 +567,15 @@ async def test_round_trip_indexed_model_is_loadable(connection):
     exec(compile(source, "<generated>", "exec"), namespace)  # noqa: S102 - test-only, own generated code
 
     generated_cls = namespace["Modelwithindexes"]
-    assert [tuple(constraint.fields) for constraint in generated_cls._meta.constraints] == [("u1", "u2")]
-    assert [(index.fields, index.name) for index in generated_cls._meta.indexes] == [
+    assert [tuple(constraint.fields) for constraint in declaration_graph.include(generated_cls).constraints] == [
+        ("u1", "u2")
+    ]
+    assert [(index.fields, index.name) for index in declaration_graph.include(generated_cls).indexes] == [
         (["f1", "f2"], None),
         (["f3"], "model_with_indexes__f3"),
     ]
-    assert generated_cls._meta.fields_map["indexed"].index is True
-    assert generated_cls._meta.fields_map["u1"].unique is False
+    assert declaration_graph.include(generated_cls).fields_map["indexed"].index is True
+    assert declaration_graph.include(generated_cls).fields_map["u1"].unique is False
 
 
 @requires_features(dialect="postgresql")
@@ -590,6 +589,7 @@ async def test_generate_model_source_deduplicates_two_physical_unique_indexes_on
     an unnamed UniqueConstraint duplicating a unique_together entry does (9569954e) - confirmed
     live that CreateModel against a fresh table raised a raw, uncaught DB error instead of a
     clean ConfigurationError."""
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script(
         "CREATE TABLE scratch_dup_unique (id serial primary key, a integer NOT NULL, b integer NOT NULL)"
     )
@@ -610,7 +610,7 @@ async def test_generate_model_source_deduplicates_two_physical_unique_indexes_on
     ) in source
 
     generated_cls = await _load_generated_model(source, "ScratchDupUnique")
-    assert [constraint.name for constraint in generated_cls._meta.constraints] == [
+    assert [constraint.name for constraint in declaration_graph.include(generated_cls).constraints] == [
         "scratch_dup_unique_ct2",
         "scratch_dup_unique_idx1",
     ]
@@ -627,6 +627,7 @@ async def test_generate_model_source_deduplicates_two_physical_unique_indexes_on
 async def test_generate_model_source_reconstructs_fk_on_delete(connection):
     """The generic FK reconstruction always used to hardcode the default (CASCADE) - never read
     the real ON DELETE action off the DB, silently dropping it for a non-default FK."""
+    declaration_graph = ModelBindingGraph()
     table = await DatabaseCatalog.inspect_table(connection, "employee")
     source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name)
 
@@ -638,7 +639,7 @@ async def test_generate_model_source_reconstructs_fk_on_delete(connection):
 
     namespace: dict = {"Model": Model, "__name__": "tests.generated_inspectdb_module"}
     exec(compile(source, "<generated>", "exec"), namespace)  # noqa: S102 - test-only, own generated code
-    assert namespace["Employee"]._meta.fields_map["manager"].on_delete == OnDelete.NO_ACTION
+    assert declaration_graph.include(namespace["Employee"]).fields_map["manager"].on_delete == OnDelete.NO_ACTION
 
 
 @requires_features(supports_foreign_keys=True)
@@ -647,6 +648,7 @@ async def test_generate_model_source_reconstructs_set_default_fk_with_its_column
     """A real ON DELETE SET DEFAULT foreign key always comes with a DDL column DEFAULT here (that's
     what the database resets to), so the generated field carries it as db_default - the shape
     ForeignKeyField now requires for on_delete=SET_DEFAULT on a real constraint."""
+    declaration_graph = ModelBindingGraph()
     table = await DatabaseCatalog.inspect_table(connection, "setdefaultdbdefaultchildnullable")
     source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name)
 
@@ -658,7 +660,7 @@ async def test_generate_model_source_reconstructs_set_default_fk_with_its_column
 
     namespace: dict = {"Model": Model, "__name__": "tests.generated_inspectdb_module"}
     exec(compile(source, "<generated>", "exec"), namespace)  # noqa: S102 - test-only, own generated code
-    parent_field = namespace["Setdefaultdbdefaultchildnullable"]._meta.fields_map["parent"]
+    parent_field = declaration_graph.include(namespace["Setdefaultdbdefaultchildnullable"]).fields_map["parent"]
     assert parent_field.on_delete == OnDelete.SET_DEFAULT
     assert parent_field.db_default == 999
 
@@ -675,6 +677,7 @@ async def test_generate_model_source_downgrades_set_default_fk_without_a_column_
     ForeignKeyField(on_delete=SET_DEFAULT) can't express that without a db_default and would
     refuse to import, so the generator renders the action the database really performs, with a
     TODO explaining why."""
+    declaration_graph = ModelBindingGraph()
     suffix = "nullable" if nullable else "required"
     await connection.execute_script(f"CREATE TABLE scratch_set_default_parent_{suffix} (id INTEGER PRIMARY KEY)")
     await connection.execute_script(
@@ -696,7 +699,9 @@ async def test_generate_model_source_downgrades_set_default_fk_without_a_column_
     namespace: dict = {"Model": Model, "__name__": "tests.generated_inspectdb_module"}
     exec(compile(source, "<generated>", "exec"), namespace)  # noqa: S102 - test-only, own generated code
     generated_cls = namespace[f"ScratchSetDefaultChild{suffix.capitalize()}"]
-    assert generated_cls._meta.fields_map["parent"].on_delete == OnDelete(expected_on_delete.replace("_", " "))
+    assert declaration_graph.include(generated_cls).fields_map["parent"].on_delete == OnDelete(
+        expected_on_delete.replace("_", " ")
+    )
 
 
 @pytest.mark.parametrize(
@@ -773,10 +778,11 @@ async def test_generate_model_source_reconstructs_db_default_on_primary_key(conn
 async def test_a_generated_array_column_keeps_its_element_field(connection):
     """The output field of a generated array column was built without its element field - inspectdb
     failed on ArrayField() missing base_field."""
+    declaration_graph = ModelBindingGraph()
     source = await SchemaInspector.inspect(connection, tables=["generatedarraything"])
     namespace: dict[str, object] = {}
     exec(source, namespace)  # noqa: S102 - the generated module imports
-    tags = namespace["Generatedarraything"]._meta.fields_map["tags"]
+    tags = declaration_graph.include(namespace["Generatedarraything"]).fields_map["tags"]
     assert type(tags.output_field.base_field) is IntField
 
 
@@ -825,9 +831,9 @@ async def test_generate_model_source_keeps_the_start_of_the_transaction_a_sql_de
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_generate_model_source_reconstructs_decimal_precision(connection):
-    """Postgres has a real NUMERIC type preserving precision/scale - SQLite stores DecimalField
-    as VARCHAR(40) instead (see DecimalField._db_sqlite), indistinguishable from a genuine
-    CharField on introspection, so this is Postgres-only."""
+    """Recover precision and scale from PostgreSQL NUMERIC. SQLite's textual decimal storage does not carry those
+    limits in the column type.
+    """
     table = await DatabaseCatalog.inspect_table(connection, "decimalfields")
     source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name)
 
@@ -839,6 +845,7 @@ async def test_generate_model_source_reconstructs_decimal_precision(connection):
 @pytest.mark.asyncio
 async def test_generate_model_source_reconstructs_column_description(connection):
     """SQLite keeps a column's comment inside CREATE TABLE - read back from there too."""
+    declaration_graph = ModelBindingGraph()
     table = await DatabaseCatalog.inspect_table(connection, "comments")
     source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name)
 
@@ -852,7 +859,10 @@ async def test_generate_model_source_reconstructs_column_description(connection)
 
     namespace: dict = {"Model": Model, "__name__": "tests.generated_inspectdb_module"}
     exec(compile(source, "<generated>", "exec"), namespace)  # noqa: S102 - test-only, own generated code
-    assert namespace["Comments"]._meta.fields_map["message"].description == "Comment messages entered in the blog post"
+    assert (
+        declaration_graph.include(namespace["Comments"]).fields_map["message"].description
+        == "Comment messages entered in the blog post"
+    )
 
 
 # ============================================================================
@@ -947,6 +957,7 @@ async def test_generate_model_source_keeps_partial_index_condition_on_the_real_c
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_generate_model_source_reconstructs_partial_index_condition(connection):
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script("CREATE TABLE scratch_partial (id serial primary key, status text, category text)")
     await connection.execute_script(
         "CREATE INDEX idx_scratch_partial_1 ON scratch_partial (id) WHERE status = 'active'"
@@ -968,7 +979,7 @@ async def test_generate_model_source_reconstructs_partial_index_condition(connec
 
     namespace: dict = {"Model": Model, "__name__": "tests.generated_inspectdb_module"}
     exec(compile(source, "<generated>", "exec"), namespace)  # noqa: S102 - test-only, own generated code
-    conditions = {index.condition for index in namespace["ScratchPartial"]._meta.indexes}
+    conditions = {index.condition for index in declaration_graph.include(namespace["ScratchPartial"]).indexes}
     assert conditions == {
         RawSQLTerm("status = 'active'::text"),
         RawSQLTerm("(status = 'active'::text) AND (category = 'x'::text)"),
@@ -981,6 +992,7 @@ async def test_generate_model_source_reconstructs_unique_partial_index(connectio
     """A UNIQUE partial index (btree + condition, the NULL-safe/conditional-uniqueness use case)
     used to lose its uniqueness entirely on reconstruction - under a name of its own it is a named
     UniqueConstraint(condition=...), the predicate kept as the database has it."""
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script("CREATE TABLE scratch_unique_partial (id serial primary key, email text)")
     await connection.execute_script(
         "CREATE UNIQUE INDEX idx_scratch_unique_partial ON scratch_unique_partial (email) WHERE email IS NOT NULL"
@@ -996,7 +1008,7 @@ async def test_generate_model_source_reconstructs_unique_partial_index(connectio
 
     namespace: dict = {"Model": Model, "__name__": "tests.generated_inspectdb_module"}
     exec(compile(source, "<generated>", "exec"), namespace)  # noqa: S102 - test-only, own generated code
-    (constraint,) = namespace["ScratchUniquePartial"]._meta.constraints
+    (constraint,) = declaration_graph.include(namespace["ScratchUniquePartial"]).constraints
     assert (tuple(constraint.fields), constraint.name, constraint.condition) == (
         ("email",),
         "idx_scratch_unique_partial",
@@ -1062,6 +1074,7 @@ async def test_generate_model_source_plain_index_has_no_special_kwargs(connectio
 @pytest.mark.asyncio
 async def test_generate_model_source_reconstructs_table_description(connection):
     """SQLite keeps the table's comment inside CREATE TABLE - read back from there too."""
+    declaration_graph = ModelBindingGraph()
     table = await DatabaseCatalog.inspect_table(connection, "comments")
     source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name)
 
@@ -1072,13 +1085,14 @@ async def test_generate_model_source_reconstructs_table_description(connection):
 
     namespace: dict = {"Model": Model, "__name__": "tests.generated_inspectdb_module"}
     exec(compile(source, "<generated>", "exec"), namespace)  # noqa: S102 - test-only, own generated code
-    assert namespace["Comments"]._meta.table_description == "Test Table comment"
+    assert declaration_graph.include(namespace["Comments"]).table_description == "Test Table comment"
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_generate_model_source_reconstructs_postgres_trigger(connection):
     """Postgres: the trigger AND its backing function are both read back into one Trigger(...)."""
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script("CREATE TABLE scratch_trig (id serial primary key, hits int NOT NULL DEFAULT 0)")
     await connection.execute_script(
         "CREATE FUNCTION scratch_trig_bump_fn() RETURNS TRIGGER AS $body$\n"
@@ -1112,7 +1126,7 @@ async def test_generate_model_source_reconstructs_postgres_trigger(connection):
 
     namespace: dict = {"Model": Model, "__name__": "tests.generated_inspectdb_module"}
     exec(compile(source, "<generated>", "exec"), namespace)  # noqa: S102 - test-only, own generated code
-    assert namespace["ScratchTrig"]._meta.triggers[0].name == "scratch_trig_bump"
+    assert declaration_graph.include(namespace["ScratchTrig"]).triggers[0].name == "scratch_trig_bump"
 
 
 @requires_features(dialect="postgresql")
@@ -1121,6 +1135,7 @@ async def test_generate_model_source_reconstructs_postgres_constraint_trigger(co
     """A real CONSTRAINT TRIGGER ... DEFERRABLE INITIALLY DEFERRED round-trips through
     inspectdb with its deferral semantics intact, not silently dropped or misparsed as a plain
     (non-deferrable) trigger."""
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script(
         "CREATE TABLE scratch_trig_constraint (id serial primary key, hits int NOT NULL DEFAULT 0)"
     )
@@ -1154,7 +1169,7 @@ async def test_generate_model_source_reconstructs_postgres_constraint_trigger(co
 
     namespace: dict = {"Model": Model, "__name__": "tests.generated_inspectdb_module"}
     exec(compile(source, "<generated>", "exec"), namespace)  # noqa: S102 - test-only, own generated code
-    reconstructed = namespace["ScratchTrigConstraint"]._meta.triggers[0]
+    reconstructed = declaration_graph.include(namespace["ScratchTrigConstraint"]).triggers[0]
     assert reconstructed.deferrable is True
     assert reconstructed.initially_deferred is True
 
@@ -1343,6 +1358,7 @@ async def test_generate_model_source_reconstructs_exclusion_constraint(connectio
     engineered as a separate (meaningless - it captures none of the WITH operators) GistIndex in
     Meta.indexes, duplicating it. Also regression for a greedy operator regex that captured a
     trailing comma ("=," instead of "=") for every expression but the last."""
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script("CREATE EXTENSION IF NOT EXISTS btree_gist")
     await connection.execute_script(
         "CREATE TABLE scratch_booking (id serial primary key, resource int not null, during tstzrange not null)"
@@ -1364,9 +1380,9 @@ async def test_generate_model_source_reconstructs_exclusion_constraint(connectio
     namespace: dict = {"Model": Model, "__name__": "tests.generated_inspectdb_module"}
     exec(compile(source, "<generated>", "exec"), namespace)  # noqa: S102 - test-only, own generated code
     generated_cls = namespace["ScratchBooking"]
-    assert len(generated_cls._meta.constraints) == 1
-    assert generated_cls._meta.constraints[0].name == "no_overlap"
-    assert generated_cls._meta.constraints[0].expressions == (("resource", "="), ("during", "&&"))
+    assert len(declaration_graph.include(generated_cls).constraints) == 1
+    assert declaration_graph.include(generated_cls).constraints[0].name == "no_overlap"
+    assert declaration_graph.include(generated_cls).constraints[0].expressions == (("resource", "="), ("during", "&&"))
 
 
 @requires_features(dialect="postgresql")
@@ -1438,6 +1454,7 @@ async def test_generate_model_source_reconstructs_array_field(connection):
     """A Postgres ARRAY column (data_type == "ARRAY") used to fall into the ambiguous TextField
     fallback - udt_name carries the real element type ("_int4" for integer[]), which lets this
     reconstruct as a proper ArrayField(base_field=...)."""
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script("CREATE TABLE scratch_array (id serial primary key, tags integer[])")
 
     table = await DatabaseCatalog.inspect_table(connection, "scratch_array")
@@ -1452,7 +1469,7 @@ async def test_generate_model_source_reconstructs_array_field(connection):
 
     namespace: dict = {"Model": Model, "ArrayField": ArrayField, "__name__": "tests.generated_inspectdb_module"}
     exec(compile(source, "<generated>", "exec"), namespace)  # noqa: S102 - test-only, own generated code
-    assert isinstance(namespace["ScratchArray"]._meta.fields_map["tags"], ArrayField)
+    assert isinstance(declaration_graph.include(namespace["ScratchArray"]).fields_map["tags"], ArrayField)
 
 
 @requires_features(dialect="postgresql")
@@ -1463,6 +1480,7 @@ async def test_generate_model_source_reconstructs_array_of_range_field(connectio
     multi-dimensional array, which reports the identical udt_name regardless of dimensionality
     and stays a genuinely unfixable case), so it used to fall into the same ambiguous/TextField
     fallback as any other unmapped element type, losing the array structure entirely."""
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script("CREATE TABLE scratch_range_array (id serial primary key, spans int4range[])")
 
     table = await DatabaseCatalog.inspect_table(connection, "scratch_range_array")
@@ -1476,7 +1494,7 @@ async def test_generate_model_source_reconstructs_array_of_range_field(connectio
     from hare.dialects.postgresql.fields.ranges import IntRangeField
     from hare.fields import ArrayField
 
-    field = generated_cls._meta.fields_map["spans"]
+    field = declaration_graph.include(generated_cls).fields_map["spans"]
     assert isinstance(field, ArrayField)
     assert isinstance(field.base_field, IntRangeField)
 
@@ -1490,6 +1508,7 @@ async def test_generate_model_source_reconstructs_array_of_numeric_precision(con
     the array element's real precision/scale (NUMERIC(10,2)[] round-tripping into
     NUMERIC(20,6)[]) with no TODO. The real size is now recovered from format_type()'s own
     "numeric(p,s)[]" rendering instead, the same way vector_dimensions already is for pgvector."""
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script(
         "CREATE TABLE scratch_array_numeric (id serial primary key, amounts numeric(10,2)[])"
     )
@@ -1508,7 +1527,7 @@ async def test_generate_model_source_reconstructs_array_of_numeric_precision(con
     from hare.fields import ArrayField
     from hare.fields.data.numeric import DecimalField
 
-    field = generated_cls._meta.fields_map["amounts"]
+    field = declaration_graph.include(generated_cls).fields_map["amounts"]
     assert isinstance(field, ArrayField)
     assert isinstance(field.base_field, DecimalField)
     assert field.base_field.max_digits == 10
@@ -1523,6 +1542,7 @@ async def test_generate_model_source_reconstructs_array_of_varchar_length(connec
     - not just a different DDL, but one that ACCEPTS longer strings than the original schema
     ever allowed, with no TODO. The real element length is now recovered from format_type()'s
     own "character varying(N)[]" rendering."""
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script("CREATE TABLE scratch_array_varchar (id serial primary key, codes varchar(12)[])")
 
     table = await DatabaseCatalog.inspect_table(connection, "scratch_array_varchar")
@@ -1536,7 +1556,7 @@ async def test_generate_model_source_reconstructs_array_of_varchar_length(connec
     from hare.fields import ArrayField
     from hare.fields.data.text import CharField
 
-    field = generated_cls._meta.fields_map["codes"]
+    field = declaration_graph.include(generated_cls).fields_map["codes"]
     assert isinstance(field, ArrayField)
     assert isinstance(field.base_field, CharField)
     assert field.base_field.max_length == 12
@@ -1547,6 +1567,7 @@ async def test_generate_model_source_reconstructs_array_of_varchar_length(connec
 async def test_generate_model_source_reconstructs_array_dimensions(connection):
     """format_type() writes integer[][] as integer[] - a two-dimensional column was inspected as an
     array of integers, whose rows then failed to read. Its declared dimensions are attndims."""
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script(
         "CREATE TABLE scratch_array_dimensions (id serial primary key, grid integer[][] NOT NULL, "
         "cube varchar(5)[][][], line integer[])"
@@ -1567,7 +1588,7 @@ async def test_generate_model_source_reconstructs_array_dimensions(connection):
     from hare.fields import ArrayField
     from hare.fields.data.numeric import IntField
 
-    field = generated_cls._meta.fields_map["grid"]
+    field = declaration_graph.include(generated_cls).fields_map["grid"]
     assert isinstance(field.base_field, ArrayField)
     assert isinstance(field.base_field.base_field, IntField)
 
@@ -1728,6 +1749,7 @@ async def test_generate_model_source_reconstructs_citext_field(connection):
     any other unrecognized user-defined type, losing case-insensitivity and the citext extension
     link entirely. It's a real, unambiguous hare-orm field (CitextField) and must be reconstructed
     as one, not left as a TODO."""
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script("CREATE EXTENSION IF NOT EXISTS citext")
     await connection.execute_script("CREATE TABLE scratch_citext (id serial primary key, email citext)")
 
@@ -1742,7 +1764,7 @@ async def test_generate_model_source_reconstructs_citext_field(connection):
     generated_cls = await _load_generated_model(source, "ScratchCitext")
     from hare.dialects.postgresql.fields.citext_field import CitextField
 
-    assert isinstance(generated_cls._meta.fields_map["email"], CitextField)
+    assert isinstance(declaration_graph.include(generated_cls).fields_map["email"], CitextField)
 
 
 @requires_features(dialect="postgresql")
@@ -1753,6 +1775,7 @@ async def test_generate_model_source_reconstructs_tsvector_field(connection):
     (no "tsvector" entry there) and land in the generic ambiguous/TextField fallback, losing full-
     text search semantics entirely. It's a real, unambiguous hare-orm field (TSVectorField) and
     must be reconstructed as one, not left as a TODO."""
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script("CREATE TABLE scratch_tsvector (id serial primary key, body tsvector)")
 
     table = await DatabaseCatalog.inspect_table(connection, "scratch_tsvector")
@@ -1766,7 +1789,7 @@ async def test_generate_model_source_reconstructs_tsvector_field(connection):
     generated_cls = await _load_generated_model(source, "ScratchTsvector")
     from hare.dialects.postgresql.fields.ts_vector_field import TSVectorField
 
-    assert isinstance(generated_cls._meta.fields_map["body"], TSVectorField)
+    assert isinstance(declaration_graph.include(generated_cls).fields_map["body"], TSVectorField)
 
 
 @requires_features(dialect="postgresql")
@@ -1774,6 +1797,7 @@ async def test_generate_model_source_reconstructs_tsvector_field(connection):
 async def test_generate_model_source_reads_a_stored_tsvector_back_as_its_field(connection):
     # The generation expression TSVectorField writes, as PostgreSQL echoes it back: its sources,
     # configuration and weights - a chain of three, a number source and a quoted column too.
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script(
         "CREATE TABLE scratch_stored_tsvector (id serial primary key, title varchar(50), body text, "
         '"Label Text" varchar(20), rank integer, '
@@ -1792,7 +1816,7 @@ async def test_generate_model_source_reads_a_stored_tsvector_back_as_its_field(c
     from hare.dialects.postgresql.fields.ts_vector_field import TSVectorField
     from hare.fields import GeneratedField
 
-    fields_map = generated_cls._meta.fields_map
+    fields_map = declaration_graph.include(generated_cls).fields_map
     weighted, mixed = fields_map["weighted"], fields_map["mixed"]
     assert isinstance(weighted, TSVectorField) and isinstance(mixed, TSVectorField)
     assert (weighted.source_fields, weighted.config, weighted.weights) == (("title", "body"), "english", ("A", "B"))
@@ -1809,6 +1833,7 @@ async def test_generate_model_source_reconstructs_postgis_geography_field(connec
     TextField fallback as any other unrecognized user-defined type, losing geospatial semantics
     entirely. It's a real, unambiguous hare-orm field (a geography point with SRID 4326) and
     must be reconstructed as one, not left as a TODO."""
+    declaration_graph = ModelBindingGraph()
     await PostgresqlExtensions.require(connection, "postgis")
     await connection.execute_script("CREATE EXTENSION IF NOT EXISTS postgis")
     await connection.execute_script(
@@ -1827,7 +1852,7 @@ async def test_generate_model_source_reconstructs_postgis_geography_field(connec
     generated_cls = await _load_generated_model(source, "ScratchGeography")
     from hare.gis import PointField
 
-    field = generated_cls._meta.fields_map["location"]
+    field = declaration_graph.include(generated_cls).fields_map["location"]
     assert isinstance(field, PointField)
     assert field.geography and field.srid == 4326 and field.null
 
@@ -1840,6 +1865,7 @@ async def test_generate_model_source_reconstructs_vector_field(connection):
     any other unrecognized user-defined type, losing both the real field type AND the dimension
     count (VectorField's dimensions= is a required constructor argument). Must be reconstructed
     as VectorField(dimensions=768), not left as a TODO."""
+    declaration_graph = ModelBindingGraph()
     await PostgresqlExtensions.require(connection, "vector")
     await connection.execute_script("CREATE EXTENSION IF NOT EXISTS vector")
     await connection.execute_script("CREATE TABLE scratch_vector (id serial primary key, embedding vector(768))")
@@ -1855,7 +1881,7 @@ async def test_generate_model_source_reconstructs_vector_field(connection):
     generated_cls = await _load_generated_model(source, "ScratchVector")
     from hare.vectors import VectorField
 
-    generated_field = generated_cls._meta.fields_map["embedding"]
+    generated_field = declaration_graph.include(generated_cls).fields_map["embedding"]
     assert isinstance(generated_field, VectorField)
     assert generated_field.dimensions == 768
 
@@ -1877,6 +1903,7 @@ async def test_generate_model_source_reconstructs_pure_expression_index(connecti
     silently vanish entirely from the introspected schema - the inner join against pg_attribute
     drops the whole row when NO term resolves to a real attnum. Now reconstructed as
     Index(RawSQLTerm('lower(name)'))."""
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script("CREATE TABLE scratch_expr_index (id serial primary key, name text)")
     await connection.execute_script("CREATE INDEX idx_scratch_expr_lower ON scratch_expr_index (lower(name))")
 
@@ -1892,8 +1919,10 @@ async def test_generate_model_source_reconstructs_pure_expression_index(connecti
     assert "indexes = [Index(RawSQLTerm('lower(name)'), name='idx_scratch_expr_lower')]" in source
 
     generated_cls = await _load_generated_model(source, "ScratchExprIndex")
-    assert len(generated_cls._meta.indexes) == 1
-    assert generated_cls._meta.indexes[0].get_key_names(generated_cls) == ["(lower(name))"]
+    assert len(declaration_graph.include(generated_cls).indexes) == 1
+    assert declaration_graph.include(generated_cls).indexes[0].get_key_names(
+        declaration_graph.include(generated_cls)
+    ) == ["(lower(name))"]
 
 
 @requires_features(dialect="postgresql")
@@ -1905,6 +1934,7 @@ async def test_generate_model_source_reconstructs_mixed_expression_index(connect
     Index(RawSQLTerm('category'), RawSQLTerm('lower(name)')) - Index.__init__ makes fields= and
     expressions mutually exclusive, so once ANY term needs RawSQLTerm, every term (the real
     column included) is rendered that way."""
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script(
         "CREATE TABLE scratch_expr_mixed (id serial primary key, category text, name text)"
     )
@@ -1927,7 +1957,9 @@ async def test_generate_model_source_reconstructs_mixed_expression_index(connect
     ) in source
 
     generated_cls = await _load_generated_model(source, "ScratchExprMixed")
-    assert generated_cls._meta.indexes[0].get_key_names(generated_cls) == ["(category)", "(lower(name))"]
+    assert declaration_graph.include(generated_cls).indexes[0].get_key_names(
+        declaration_graph.include(generated_cls)
+    ) == ["(category)", "(lower(name))"]
 
 
 @requires_features(dialect="postgresql")
@@ -1960,6 +1992,7 @@ async def test_generate_model_source_falls_back_on_expression_index_with_opclass
 async def test_generate_model_source_reconstructed_expression_index_is_reappliable(connection):
     """The reconstructed Index(RawSQLTerm(...), ...) must produce valid, re-appliable CREATE
     INDEX SQL against Postgres - not just compile as Python."""
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script(
         "CREATE TABLE scratch_expr_reapply (id serial primary key, category text, name text)"
     )
@@ -1970,7 +2003,7 @@ async def test_generate_model_source_reconstructed_expression_index_is_reappliab
     table = await DatabaseCatalog.inspect_table(connection, "scratch_expr_reapply")
     source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name)
     generated_cls = await _load_generated_model(source, "ScratchExprReapply")
-    index = generated_cls._meta.indexes[0]
+    index = declaration_graph.include(generated_cls).indexes[0]
     # The reconstructed index keeps its database name - the original gives it up for the copy.
     await connection.execute_script("DROP INDEX idx_scratch_expr_reapply")
 
@@ -1992,8 +2025,8 @@ async def test_generate_model_source_reconstructed_expression_index_is_reappliab
     )
     state = State()
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
-        await editor.add_index(create_op.model, index)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
+        await editor.add_index(state.apps.get_binding("models.ScratchExprReapplyCopy"), index)
 
         rows = await connection.execute_dicts(
             "SELECT indexdef FROM pg_indexes WHERE tablename = 'scratch_expr_reapply_copy'"
@@ -2067,6 +2100,7 @@ async def test_generate_model_source_reconstructs_non_public_schema(connection):
     """A table living in a non-public Postgres schema used to generate a model with no
     Meta.schema at all - re-applying the generated model would then silently target "public"
     instead, physically relocating the table rather than just losing metadata."""
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script("CREATE SCHEMA IF NOT EXISTS scratch_other_schema")
     await connection.execute_script("CREATE TABLE scratch_other_schema.scratch_widget (id serial primary key)")
     try:
@@ -2078,7 +2112,7 @@ async def test_generate_model_source_reconstructs_non_public_schema(connection):
         assert "schema = 'scratch_other_schema'" in source
 
         generated_cls = await _load_generated_model(source, "ScratchWidget")
-        assert generated_cls._meta.schema == "scratch_other_schema"
+        assert declaration_graph.include(generated_cls).schema == "scratch_other_schema"
     finally:
         await connection.execute_script("DROP SCHEMA scratch_other_schema CASCADE")
 
@@ -2124,6 +2158,7 @@ async def test_generate_model_source_sanitizes_digit_leading_table_name(connecti
 async def test_generate_model_source_sanitizes_keyword_column_name(connection):
     """A column literally named "class" (a valid SQL identifier, quoted) can't be used as-is as
     a Python attribute name - it's a reserved keyword."""
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script('CREATE TABLE scratch_keyword_column (id INTEGER PRIMARY KEY, "class" TEXT)')
 
     table = await DatabaseCatalog.inspect_table(connection, "scratch_keyword_column")
@@ -2133,7 +2168,7 @@ async def test_generate_model_source_sanitizes_keyword_column_name(connection):
     assert "source_field='class'" in source
 
     generated_cls = await _load_generated_model(source, "ScratchKeywordColumn")
-    field = generated_cls._meta.fields_map["class_field"]
+    field = declaration_graph.include(generated_cls).fields_map["class_field"]
     assert field.source_field == "class"
 
 
@@ -2240,6 +2275,7 @@ async def test_generate_model_source_reconstructs_composite_foreign_key(connecti
     """A composite FK whose real column names DO follow the "<field>_<pk_component>" convention
     (parent_a/parent_b, referencing parent's own (a, b) primary key) is reconstructed as a single
     ForeignKeyField - not the previous unconditional unparsed-comment fallback."""
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script(
         "CREATE TABLE scratch_composite_fk_parent2 (a INT NOT NULL, b INT NOT NULL, PRIMARY KEY (a, b))"
     )
@@ -2275,7 +2311,7 @@ async def test_generate_model_source_reconstructs_composite_foreign_key(connecti
     # test_round_trip_composite_foreign_key_model_is_queryable below for that part, through a
     # real HareContext against the real DB instead.
     generated_cls = await _load_generated_model(source, "ScratchCompositeFkChild2")
-    field = generated_cls._meta.fields_map["parent"]
+    field = declaration_graph.include(generated_cls).fields_map["parent"]
     from hare.fields.relations.fields import ForeignKeyFieldInstance
 
     assert isinstance(field, ForeignKeyFieldInstance)
@@ -2288,6 +2324,7 @@ async def test_generate_model_source_reconstructs_composite_set_default_foreign_
     """A composite FK's ON DELETE SET DEFAULT is only importable as on_delete=SET_DEFAULT with the
     members' shared DEFAULT carried as db_default; without one the action the database really
     performs (NULL / failure) is rendered instead, with a TODO."""
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script(
         "CREATE TABLE scratch_composite_set_default_parent (a INT NOT NULL, b INT NOT NULL, PRIMARY KEY (a, b))"
     )
@@ -2310,7 +2347,7 @@ async def test_generate_model_source_reconstructs_composite_set_default_foreign_
     assert "db_default=0" in with_default_source
     assert "TODO" not in with_default_source
     generated_cls = await _load_generated_model(with_default_source, "ScratchCompositeSetDefaultWith")
-    assert generated_cls._meta.fields_map["parent"].on_delete == OnDelete.SET_DEFAULT
+    assert declaration_graph.include(generated_cls).fields_map["parent"].on_delete == OnDelete.SET_DEFAULT
 
     without_default_table = await DatabaseCatalog.inspect_table(connection, "scratch_composite_set_default_without")
     without_default_source = ModelSourceGenerator.generate_model_source(without_default_table, connection.dialect.name)
@@ -2319,7 +2356,7 @@ async def test_generate_model_source_reconstructs_composite_set_default_foreign_
         without_default_source
     )
     generated_cls = await _load_generated_model(without_default_source, "ScratchCompositeSetDefaultWithout")
-    assert generated_cls._meta.fields_map["parent"].on_delete == OnDelete.SET_NULL
+    assert declaration_graph.include(generated_cls).fields_map["parent"].on_delete == OnDelete.SET_NULL
 
 
 @pytest.mark.asyncio
@@ -2339,14 +2376,12 @@ async def test_round_trip_composite_foreign_key_model_is_queryable(tmp_path, mon
     earlier test in the same module when the whole file/suite ran together; running this test in
     true isolation raised "No HareContext is currently active" instead of skipping cleanly)."""
     import importlib
-    import os
     import uuid
 
     from hare.contrib.test.isolated_contexts import hare_test_context
     from hare.core.connections.connections import Connections
 
-    raw_db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:").replace("\\{", "{").replace("\\}", "}")
-    db_url = raw_db_url.format(uuid.uuid4().hex) if "{}" in raw_db_url else raw_db_url
+    db_url = DatabaseUnderTest.get_fresh_url()
 
     async with hare_test_context(modules=["tests.shared_models.testmodels"], db_url=db_url, _create_db=True):
         connection = Connections.get(next(iter(Connections.current().db_config)))
@@ -2423,7 +2458,8 @@ async def test_generate_model_source_reconstructs_single_column_fk_to_non_pk_uni
     assert fk.target_column == "code"
     assert fk.to_field == "code"
 
-    source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name)
+    target = await DatabaseCatalog.inspect_table(connection, "scratch_fk_unique_target5")
+    source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name, target_tables=(target,))
     compile(source, "<generated>", "exec")
     assert "to_field='code'" in source
 
@@ -2433,14 +2469,12 @@ async def test_round_trip_single_column_fk_to_non_pk_unique_target_is_queryable(
     """Mirrors test_round_trip_composite_foreign_key_model_is_queryable's own reasoning and
     Postgres-only skip (apps.py's to_field resolution only runs during real Apps registration)."""
     import importlib
-    import os
     import uuid
 
     from hare.contrib.test.isolated_contexts import hare_test_context
     from hare.core.connections.connections import Connections
 
-    raw_db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:").replace("\\{", "{").replace("\\}", "}")
-    db_url = raw_db_url.format(uuid.uuid4().hex) if "{}" in raw_db_url else raw_db_url
+    db_url = DatabaseUnderTest.get_fresh_url()
 
     async with hare_test_context(modules=["tests.shared_models.testmodels"], db_url=db_url, _create_db=True):
         connection = Connections.get(next(iter(Connections.current().db_config)))
@@ -2466,7 +2500,9 @@ async def test_round_trip_single_column_fk_to_non_pk_unique_target_is_queryable(
         source = "\n\n\n".join(
             [
                 ModelSourceGenerator.generate_model_source(target_table, connection.dialect.name),
-                ModelSourceGenerator.generate_model_source(source_table, connection.dialect.name),
+                ModelSourceGenerator.generate_model_source(
+                    source_table, connection.dialect.name, target_tables=(target_table,)
+                ),
             ]
         )
         assert "to_field='code'" in source
@@ -2481,7 +2517,7 @@ async def test_round_trip_single_column_fk_to_non_pk_unique_target_is_queryable(
         ):
             module = importlib.import_module(module_name)
             source_cls = module.ScratchFkUniqueSource4
-            fk_field = source_cls._meta.fields_map["target"]
+            fk_field = HareContext.require_current().apps.get_binding(source_cls).fields_map["target"]
             assert fk_field.to_field_names == ("code",)
 
             row = await source_cls.objects.all().first()
@@ -2584,6 +2620,21 @@ async def test_inspect_raises_on_case_differing_duplicate_table_names(connection
         await connection.execute_script('DROP TABLE IF EXISTS "scratch_case_FOO_BAR"')
 
 
+@requires_features(supports_transactions=True)
+@pytest.mark.asyncio
+async def test_inspect_reports_a_missing_catalog_object_before_comparing_class_names(connection):
+    await connection.execute_script("CREATE TABLE scratch_catalog_name (id INT PRIMARY KEY)")
+    names = ["scratch_catalog_name", "scratch__catalog_name"]
+    try:
+        for requested in (names, list(reversed(names))):
+            with pytest.raises(TableNotFoundError, match=names[1]):
+                await SchemaInspector.inspect(connection, tables=requested)
+        with pytest.raises(SchemaNotFoundError, match="scratch_absent_schema"):
+            await SchemaInspector.inspect(connection, tables=names, schema="scratch_absent_schema")
+    finally:
+        await connection.execute_script("DROP TABLE scratch_catalog_name")
+
+
 @pytest.mark.asyncio
 async def test_inspect_builds_a_model_without_primary_key_for_a_table_with_none(connection):
     """A table with no primary key becomes a model with
@@ -2667,6 +2718,7 @@ async def test_generate_model_source_skip_m2m_through_tables_false_builds_a_real
     skip_many_to_many_through_tables=False (for a caller like a runtime table browser that must be able to
     open ANY discovered table), the table - no PRIMARY KEY - becomes a usable model without one, its keys
     relations and its unique index kept."""
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script("CREATE TABLE scratch_employee (id INTEGER PRIMARY KEY, name TEXT)")
     await connection.execute_script(
         "CREATE TABLE scratch_employee_employee ("
@@ -2695,7 +2747,7 @@ async def test_generate_model_source_skip_m2m_through_tables_false_builds_a_real
         namespace: dict = {"Model": Model, "__name__": "tests.generated_inspectdb_module"}
         exec(compile(source_full, "<generated>", "exec"), namespace)  # noqa: S102 - test-only, own generated code
         generated_cls = namespace["ScratchEmployeeEmployee"]
-        assert generated_cls._meta.primary_key_attribute == ()
+        assert declaration_graph.include(generated_cls).primary_key_attribute == ()
     finally:
         await connection.execute_script("DROP TABLE IF EXISTS scratch_employee_employee")
         await connection.execute_script("DROP TABLE IF EXISTS scratch_employee")
@@ -2725,6 +2777,7 @@ async def test_generate_model_source_fk_field_avoids_plain_column_name_collision
     overwrote the plain column's own line in the generated class body - one field vanished on load
     with no warning. The FK must now fall back to its raw, unstripped column name plus an explicit
     source_field= (the same convention already used for a keyword/digit-prefixed column name)."""
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script("CREATE TABLE scratch_fk_name_collision_parent (id INTEGER PRIMARY KEY)")
     await connection.execute_script(
         "CREATE TABLE scratch_fk_name_collision_child (id INTEGER PRIMARY KEY, widget TEXT NOT NULL, "
@@ -2743,10 +2796,10 @@ async def test_generate_model_source_fk_field_avoids_plain_column_name_collision
         assert "source_field='widget_id'" in source
 
         generated_cls = await _load_generated_model(source, "ScratchFkNameCollisionChild")
-        field_names = set(generated_cls._meta.fields_map.keys())
+        field_names = set(declaration_graph.include(generated_cls).fields_map.keys())
         assert "widget" in field_names
         assert "widget_id" in field_names
-        assert generated_cls._meta.fields_map["widget_id"].source_field == "widget_id"
+        assert declaration_graph.include(generated_cls).fields_map["widget_id"].source_field == "widget_id"
     finally:
         await connection.execute_script("DROP TABLE IF EXISTS scratch_fk_name_collision_child")
         await connection.execute_script("DROP TABLE IF EXISTS scratch_fk_name_collision_parent")
@@ -2757,6 +2810,7 @@ async def test_generate_model_source_fk_field_collision_reversed_column_order(co
     """Same collision as above, but with the FK column declared BEFORE the plain column
     physically in the table - the fix's collision detection is computed up front over every
     column, so it must not depend on which of the two columns comes first."""
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script("CREATE TABLE scratch_fk_name_collision2_parent (id INTEGER PRIMARY KEY)")
     await connection.execute_script(
         "CREATE TABLE scratch_fk_name_collision2_child (id INTEGER PRIMARY KEY, "
@@ -2771,7 +2825,7 @@ async def test_generate_model_source_fk_field_collision_reversed_column_order(co
         assert "source_field='widget_id'" in source
 
         generated_cls = await _load_generated_model(source, "ScratchFkNameCollision2Child")
-        field_names = set(generated_cls._meta.fields_map.keys())
+        field_names = set(declaration_graph.include(generated_cls).fields_map.keys())
         assert "widget" in field_names
         assert "widget_id" in field_names
     finally:
@@ -2789,6 +2843,7 @@ async def test_generate_model_source_fk_field_collision_reversed_column_order(co
 @requires_features(dialect="sqlite")
 @pytest.mark.asyncio
 async def test_inspect_table_reconstructs_sqlite_stored_generated_column(connection):
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script(
         "CREATE TABLE scratch_rect (id INTEGER PRIMARY KEY, width INTEGER NOT NULL, "
         "height INTEGER NOT NULL, area INTEGER GENERATED ALWAYS AS (width * height) STORED)"
@@ -2810,8 +2865,8 @@ async def test_inspect_table_reconstructs_sqlite_stored_generated_column(connect
     generated_cls = await _load_generated_model(source, "ScratchRect")
     from hare.fields.generated_field import GeneratedField
 
-    assert "area" in generated_cls._meta.fields_map
-    area_field = generated_cls._meta.fields_map["area"]
+    assert "area" in declaration_graph.include(generated_cls).fields_map
+    area_field = declaration_graph.include(generated_cls).fields_map["area"]
     assert isinstance(area_field, GeneratedField)
     assert area_field.generated is True
     assert area_field.expression == RawSQLTerm("width * height")
@@ -2821,6 +2876,7 @@ async def test_inspect_table_reconstructs_sqlite_stored_generated_column(connect
 @requires_features(dialect="sqlite")
 @pytest.mark.asyncio
 async def test_inspect_table_reconstructs_sqlite_virtual_generated_column(connection):
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script(
         "CREATE TABLE scratch_rect_virtual (id INTEGER PRIMARY KEY, width INTEGER NOT NULL, "
         "height INTEGER NOT NULL, area INTEGER GENERATED ALWAYS AS (width * height) VIRTUAL)"
@@ -2837,7 +2893,7 @@ async def test_inspect_table_reconstructs_sqlite_virtual_generated_column(connec
     assert "stored=False" in source
 
     generated_cls = await _load_generated_model(source, "ScratchRectVirtual")
-    area_field = generated_cls._meta.fields_map["area"]
+    area_field = declaration_graph.include(generated_cls).fields_map["area"]
     assert area_field.stored is False
 
 
@@ -2858,6 +2914,7 @@ async def test_inspect_table_reconstructs_postgres_stored_generated_column(conne
     information_schema.columns reports a GENERATED ALWAYS AS (...) column's expression text
     directly - inspectdb used to never read it at all, silently reconstructing the column as an
     ordinary writable field the DB would reject the moment an INSERT actually named it."""
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script(
         "CREATE TABLE scratch_pg_rect (id serial PRIMARY KEY, width integer NOT NULL, "
         "height integer NOT NULL, area integer GENERATED ALWAYS AS (width * height) STORED)"
@@ -2876,7 +2933,7 @@ async def test_inspect_table_reconstructs_postgres_stored_generated_column(conne
     generated_cls = await _load_generated_model(source, "ScratchPgRect")
     from hare.fields.generated_field import GeneratedField
 
-    area_field = generated_cls._meta.fields_map["area"]
+    area_field = declaration_graph.include(generated_cls).fields_map["area"]
     assert isinstance(area_field, GeneratedField)
     assert area_field.generated is True
     assert area_field.stored is True
@@ -2885,6 +2942,7 @@ async def test_inspect_table_reconstructs_postgres_stored_generated_column(conne
 @requires_features(dialect="postgresql", supports_virtual_generated_columns=True)
 @pytest.mark.asyncio
 async def test_inspect_table_reconstructs_postgres_virtual_generated_column(connection):
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script(
         "CREATE TABLE scratch_pg_virtual_rect (id serial PRIMARY KEY, width integer NOT NULL, "
         "height integer NOT NULL, area integer GENERATED ALWAYS AS (width * height) VIRTUAL)"
@@ -2898,7 +2956,7 @@ async def test_inspect_table_reconstructs_postgres_virtual_generated_column(conn
     source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name)
     assert "stored=False" in source
     generated_cls = await _load_generated_model(source, "ScratchPgVirtualRect")
-    assert generated_cls._meta.fields_map["area"].stored is False
+    assert declaration_graph.include(generated_cls).fields_map["area"].stored is False
 
 
 # ============================================================================
@@ -2911,6 +2969,7 @@ async def test_inspect_table_reconstructs_postgres_virtual_generated_column(conn
 @requires_features(dialect="sqlite")
 @pytest.mark.asyncio
 async def test_inspect_table_reconstructs_sqlite_named_check_constraint(connection):
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script(
         "CREATE TABLE scratch_product (id INTEGER PRIMARY KEY, name VARCHAR(50) NOT NULL, "
         "price DECIMAL(10,2) NOT NULL, CONSTRAINT price_positive CHECK (price > 0))"
@@ -2928,9 +2987,9 @@ async def test_inspect_table_reconstructs_sqlite_named_check_constraint(connecti
     assert "CheckConstraint(check=RawSQLTerm('price > 0'), name='price_positive')" in source
 
     generated_cls = await _load_generated_model(source, "ScratchProduct")
-    assert len(generated_cls._meta.constraints) == 1
-    assert generated_cls._meta.constraints[0].name == "price_positive"
-    assert generated_cls._meta.constraints[0].check == RawSQLTerm("price > 0")
+    assert len(declaration_graph.include(generated_cls).constraints) == 1
+    assert declaration_graph.include(generated_cls).constraints[0].name == "price_positive"
+    assert declaration_graph.include(generated_cls).constraints[0].check == RawSQLTerm("price > 0")
 
 
 @requires_features(dialect="sqlite")
@@ -2939,6 +2998,7 @@ async def test_inspect_table_reconstructs_sqlite_unnamed_check_constraint_synthe
     """An inline column-level CHECK (no CONSTRAINT name of its own) has no name for SQLite to
     report at all - CheckConstraint.name is required, so one is synthesized the same way this
     file already synthesizes a name for a SQLite composite FK's own missing constraint name."""
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script(
         "CREATE TABLE scratch_product_unnamed (id INTEGER PRIMARY KEY, price DECIMAL(10,2) CHECK (price > 0))"
     )
@@ -2952,12 +3012,13 @@ async def test_inspect_table_reconstructs_sqlite_unnamed_check_constraint_synthe
     source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name)
     compile(source, "<generated>", "exec")
     generated_cls = await _load_generated_model(source, "ScratchProductUnnamed")
-    assert len(generated_cls._meta.constraints) == 1
+    assert len(declaration_graph.include(generated_cls).constraints) == 1
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_inspect_table_reconstructs_postgres_check_constraint(connection):
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script(
         "CREATE TABLE scratch_product_pg (id serial primary key, name varchar(50) not null, "
         "price numeric(10,2) not null, CONSTRAINT price_positive CHECK (price > 0))"
@@ -2978,8 +3039,8 @@ async def test_inspect_table_reconstructs_postgres_check_constraint(connection):
     assert "CheckConstraint(check=RawSQLTerm('price > (0)::numeric'), name='price_positive')" in source
 
     generated_cls = await _load_generated_model(source, "ScratchProductPg")
-    assert len(generated_cls._meta.constraints) == 1
-    assert generated_cls._meta.constraints[0].check == RawSQLTerm("price > (0)::numeric")
+    assert len(declaration_graph.include(generated_cls).constraints) == 1
+    assert declaration_graph.include(generated_cls).constraints[0].check == RawSQLTerm("price > (0)::numeric")
 
 
 @requires_features(dialect="postgresql")
@@ -2989,6 +3050,7 @@ async def test_inspect_table_reconstructs_postgres_check_and_exclusion_constrain
     EXCLUDE and a CHECK constraint used to risk two separate "constraints = [...]" assignment
     lines - valid Python, but the second would silently shadow (drop) the first in the class
     body."""
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script("CREATE EXTENSION IF NOT EXISTS btree_gist")
     await connection.execute_script(
         "CREATE TABLE scratch_booking_check (id serial primary key, resource int not null, "
@@ -3008,7 +3070,7 @@ async def test_inspect_table_reconstructs_postgres_check_and_exclusion_constrain
     assert "CheckConstraint(" in source
 
     generated_cls = await _load_generated_model(source, "ScratchBookingCheck")
-    assert len(generated_cls._meta.constraints) == 2
+    assert len(declaration_graph.include(generated_cls).constraints) == 2
 
 
 async def generate_model_class(connection, table_name: str, class_name: str):
@@ -3024,6 +3086,7 @@ async def generate_model_class(connection, table_name: str, class_name: str):
 @pytest.mark.asyncio
 async def test_generate_model_source_keeps_columns_whose_python_names_collide(connection):
     """Columns "a-b", "a b" and "a_b" all mangle to a_b - every column must still be represented."""
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script(
         'CREATE TABLE "inspect_coll" (id INTEGER PRIMARY KEY, "a-b" TEXT, "a b" TEXT, "a_b" TEXT)'
     )
@@ -3032,14 +3095,15 @@ async def test_generate_model_source_keeps_columns_whose_python_names_collide(co
     finally:
         await connection.execute_script('DROP TABLE "inspect_coll"')
 
-    assert set(generated_cls._meta.fields_db_projection.values()) == {"id", "a-b", "a b", "a_b"}
-    assert len(generated_cls._meta.fields_map) == 4
+    assert set(declaration_graph.include(generated_cls).fields_db_projection.values()) == {"id", "a-b", "a b", "a_b"}
+    assert len(declaration_graph.include(generated_cls).fields_map) == 4
     assert "source_field='a-b'" in source
     assert "source_field='a b'" in source
 
 
 @pytest.mark.asyncio
 async def test_generate_model_source_keeps_cyrillic_columns_distinct(connection):
+    declaration_graph = ModelBindingGraph()
     await connection.execute_script(
         'CREATE TABLE "inspect_cyr" (id INTEGER PRIMARY KEY, '
         '"\u0438\u043c\u044f" TEXT, "\u0444\u0430\u043c" TEXT, "\u0438\u043c\u044f 2" TEXT)'
@@ -3049,7 +3113,7 @@ async def test_generate_model_source_keeps_cyrillic_columns_distinct(connection)
     finally:
         await connection.execute_script('DROP TABLE "inspect_cyr"')
 
-    assert set(generated_cls._meta.fields_db_projection.values()) == {
+    assert set(declaration_graph.include(generated_cls).fields_db_projection.values()) == {
         "id",
         "\u0438\u043c\u044f",
         "\u0444\u0430\u043c",
@@ -3062,6 +3126,7 @@ async def test_generate_model_source_keeps_cyrillic_columns_distinct(connection)
 @pytest.mark.asyncio
 async def test_generate_model_source_renames_columns_reserved_by_model(connection):
 
+    declaration_graph = ModelBindingGraph()
     reserved_columns = sorted(
         {"pk", "Meta", "save", "delete", "filter", "get", "all", "create", "first", "fetch_related", "refresh_from_db"}
         & ModelFieldCollection.get_reserved_field_names()
@@ -3074,7 +3139,7 @@ async def test_generate_model_source_renames_columns_reserved_by_model(connectio
     finally:
         await connection.execute_script('DROP TABLE "inspect_reserved"')
 
-    assert set(generated_cls._meta.fields_db_projection.values()) == {"id", *reserved_columns}
+    assert set(declaration_graph.include(generated_cls).fields_db_projection.values()) == {"id", *reserved_columns}
     for column in reserved_columns:
         assert f"source_field='{column}'" in source
 
@@ -3374,6 +3439,7 @@ async def test_generate_model_source_reads_the_update_action_and_the_deferral_of
 @pytest.mark.asyncio
 async def test_a_through_table_of_the_run_is_rebuilt_as_a_many_to_many_field(connection):
     """Collapse only when the reconstructed targets preserve the through columns' storage types."""
+    declaration_graph = ModelBindingGraph()
     source = await SchemaInspector.inspect(connection, tables=["event", "team", "event_team"])
     if connection.dialect.name == "sqlite":
         # INTEGER rowid metadata cannot distinguish Event's original BigIntField
@@ -3385,16 +3451,18 @@ async def test_a_through_table_of_the_run_is_rebuilt_as_a_many_to_many_field(con
         exec(source, namespace)  # noqa: S102 - source generated by inspectdb
         through = namespace["EventTeam"]
         relations = [
-            field for field in through._meta.fields_map.values() if isinstance(field, ForeignKeyFieldInstance)
+            field
+            for field in declaration_graph.include(through).fields_map.values()
+            if isinstance(field, ForeignKeyFieldInstance)
         ]
         assert {field.model_name for field in relations} == {"models.Event", "models.Team"}
         assert all(field.on_delete is OnDelete.CASCADE for field in relations)
         assert next(field for field in relations if field.model_name == "models.Event").source_field == "idEvent"
         assert any(
             index.unique and set(index.fields) == {field.model_field_name for field in relations}
-            for index in through._meta.indexes
+            for index in declaration_graph.include(through).indexes
         )
-        assert not through._meta.has_primary_key
+        assert not declaration_graph.include(through).has_primary_key
     else:
         assert "ManyToManyField('models.Team', through='event_team'" in source
         assert "backward_key='idEvent'" in source

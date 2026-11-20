@@ -45,6 +45,11 @@ class ConnectionWrapper(Generic[TConnection]):
             await self.client.create_connection(with_db=True)
             connection = self.client._connection
         self.connection = connection
+        if self.client.is_transaction_client:
+            transaction_client: TransactionClient = self.client  # type: ignore[assignment]
+            transaction = transaction_client._outer_transaction or transaction_client
+            if transaction._begin_pending or transaction._pending_savepoints:
+                await PendingStatements.send_pending_transaction_statements(transaction_client)
 
     async def _acquire_savepoint_span(self, savepoint_lock: NestedSavepointLock) -> None:
         # A query on a transaction takes a transient span of the savepoint lock for its own duration
@@ -90,12 +95,6 @@ class ConnectionWrapper(Generic[TConnection]):
                 if start_time:
                     statistics.add_wait(time.perf_counter() - start_time)
             await self.ensure_connection()
-            if is_transaction_client:
-                # Pending BEGIN and SAVEPOINT statements precede the user's statement.
-                transaction_client: TransactionClient = client  # type: ignore[assignment]
-                transaction = transaction_client._outer_transaction or transaction_client
-                if transaction._begin_pending or transaction._pending_savepoints:
-                    await PendingStatements.send_pending_transaction_statements(transaction_client)
         except BaseException:
             # __aexit__ does not run when entry fails, including cancellation while waiting
             # for the physical lock after taking a savepoint span.

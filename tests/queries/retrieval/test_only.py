@@ -1,5 +1,4 @@
 import pytest
-import pytest_asyncio
 
 from hare.contrib.test import requires_features
 from hare.exceptions import FieldError, IncompleteInstanceError, IntegrityError, NoValuesFetched, StaleObjectError
@@ -272,15 +271,6 @@ async def test_only_related_just_related(db):
 # ============================================================================
 
 
-@pytest_asyncio.fixture
-async def tournament_with_events(db):
-    """Create a tournament with two events for advanced tests."""
-    tournament = await Tournament.objects.create(name="Tournament A", desc="Description A")
-    event1 = await Event.objects.create(name="Event 1", tournament=tournament)
-    event2 = await Event.objects.create(name="Event 2", tournament=tournament)
-    return tournament, event1, event2
-
-
 # ============================================================================
 # TestOnlyAdvanced tests
 # ============================================================================
@@ -458,11 +448,7 @@ async def test_only_advanced_select_related(db, tournament_with_events):
 
 @pytest.mark.asyncio
 async def test_only_select_related_resolves_related_source_field_columns(db):
-    """.only() naming explicit related-model fields whose own columns are renamed via
-    source_field (QuerySet._get_only()'s related-model branch) used to reference the
-    related table by FIELD name instead of its real db column - "no such column" on sqlite,
-    since SourceFields.fk points at another SourceFields row and every one of its own columns
-    is source_field'd."""
+    """Read selected related attributes through their physical source_field columns."""
     parent = await SourceFields.objects.create(chars="root", blip="root-blip")
     child = await SourceFields.objects.create(chars="child", blip="child-blip", fk=parent)
 
@@ -480,11 +466,7 @@ async def test_only_select_related_resolves_related_source_field_columns(db):
 
 @pytest.mark.asyncio
 async def test_select_related_resolves_source_field_columns_without_only(db):
-    """Plain select_related() (no .only() at all) on a related model whose columns are all
-    renamed via source_field - _join_select_related()'s own related-fields branch used a
-    DIFFERENT SELECT-alias convention (db column name) than QuerySet._get_only()'s (field
-    name), so Model._init_from_db()'s row-key handling had to (and, before this fix, didn't
-    consistently) accept both."""
+    """Load all columns of a related model whose database column names differ from its attributes."""
     parent = await SourceFields.objects.create(chars="root", blip="root-blip")
     child = await SourceFields.objects.create(chars="child", blip="child-blip", fk=parent)
 
@@ -504,16 +486,6 @@ async def test_select_related_resolves_source_field_columns_without_only(db):
 # Without forcing it into the selection regardless, these crash deep inside the prefetch machinery
 # with a confusing AttributeError instead of just working - see _prefetch_map_required_local_fields.
 # ============================================================================
-
-
-@pytest_asyncio.fixture
-async def event_with_participants(db):
-    tournament = await Tournament.objects.create(name="Tournament A", desc="Description A")
-    event = await Event.objects.create(name="Event 1", tournament=tournament)
-    team_a = await Team.objects.create(name="Team A")
-    team_b = await Team.objects.create(name="Team B")
-    await event.participants.add(team_a, team_b)
-    return event, team_a, team_b
 
 
 @pytest.mark.asyncio

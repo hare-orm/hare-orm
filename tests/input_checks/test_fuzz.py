@@ -1,5 +1,6 @@
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.exceptions import ValidationError
 from hare.query.functions import Upper
 from tests.shared_models.testmodels import CharFields
@@ -107,7 +108,10 @@ async def test_char_fuzz(db):
     """Test character field handling with various dodgy/edge-case strings."""
     for char in DODGY_STRINGS:
         # print(repr(char))
-        if "\x00" in char and CharFields._meta.connection.dialect.name != "sqlite":
+        if (
+            "\x00" in char
+            and HareContext.require_current().apps.get_queryset(CharFields).get_connection().dialect.name != "sqlite"
+        ):
             # PostgreSQL refuses a null byte in text itself; SQLite stores it as it is.
             continue
 

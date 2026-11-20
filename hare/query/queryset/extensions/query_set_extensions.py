@@ -220,8 +220,3 @@ class QuerySetExtensions:
         for extension_call in query._extension_calls:
             if cls.get_implementation(query, extension_call, dialect).refuses_writes:
                 raise QueryError(WRITE_REFUSED_EXTENSION_MESSAGE.format(method_name=extension_call.name))
-
-    @classmethod
-    def check(cls, query: AwaitableQuery[Any]) -> None:
-        """Check all implementations and result-handler composition before executing cached SQL."""
-        cls.get_bound_calls(query)

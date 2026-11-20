@@ -10,6 +10,7 @@ use crate::pg::client::StatementCaching;
 use crate::pg::client::{CancelQueryOnDrop, PinnedConnectionState};
 use crate::pg::error::DriverError;
 use crate::pg::one_round_trip::{binds_in_one_round_trip, get_result_columns, typed_parameters};
+use crate::pg::parameter_values::ParameterValues;
 use crate::pg::pending_statements::PendingStatements;
 use crate::pg::result_columns::ResultColumns;
 use crate::pg::result_data::ResultData;
@@ -61,20 +62,19 @@ impl<'a> PgStatementLease<'a> {
         sql: &str,
         params: &[Value],
         caching: &StatementCaching,
+        built_sql: bool,
     ) -> Result<u64, DriverError> {
         let client = self.client();
         let pending = &self.pending;
         let outcome = PendingStatements::run(pending.as_deref(), client, async {
-            if binds_in_one_round_trip(caching, params) {
+            if built_sql && binds_in_one_round_trip(caching, params) {
                 return client.execute_typed(sql, &typed_parameters(params)).await.map_err(DriverError::from);
             }
+            let types = ParameterValues::type_hints(params, built_sql);
             caching
-                .run(
-                    client,
-                    sql,
-                    params,
-                    |statement| async move { client.execute_raw(&statement, params.iter()).await },
-                )
+                .run(client, sql, params, &types, |statement, description| async move {
+                    client.execute_raw(&statement, description.bind(params)).await
+                })
                 .await
                 .map(|(_, affected)| affected)
         })
@@ -88,19 +88,21 @@ impl<'a> PgStatementLease<'a> {
         sql: &str,
         params: &[Value],
         caching: &StatementCaching,
+        built_sql: bool,
     ) -> Result<(Arc<ResultColumns>, ResultData), DriverError> {
         let client = self.client();
         let pending = &self.pending;
         let outcome = PendingStatements::run(pending.as_deref(), client, async {
-            let (columns, rows, row_count) = if binds_in_one_round_trip(caching, params) {
+            let (columns, rows, row_count) = if built_sql && binds_in_one_round_trip(caching, params) {
                 let stream = client.query_typed_raw(sql, typed_parameters(params)).await?;
                 let (rows, row_count) = Self::read_stream(stream).await?;
                 let columns = get_result_columns(client, sql, params, &rows).await?;
                 (columns, rows, row_count)
             } else {
+                let types = ParameterValues::type_hints(params, built_sql);
                 let (statement, (rows, row_count)) = caching
-                    .run(client, sql, params, |statement| async move {
-                        let stream = client.query_raw(&statement, params.iter()).await?;
+                    .run(client, sql, params, &types, |statement, description| async move {
+                        let stream = client.query_raw(&statement, description.bind(params)).await?;
                         Self::read_stream(stream).await
                     })
                     .await?;

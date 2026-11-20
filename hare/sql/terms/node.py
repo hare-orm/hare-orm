@@ -87,9 +87,7 @@ class Node:
         Returns:
             True for an aggregate call, a window function call or a subquery.
         """
-        from hare.sql.terms.functions.aggregate_function import AggregateFunction
-
-        return self.is_subquery or self.is_analytic or isinstance(self, AggregateFunction)
+        return self.is_subquery or self.is_analytic or isinstance(self, Node.aggregate_function_class)
 
     @property
     def contains_aggregate(self) -> bool:
@@ -119,16 +117,7 @@ class Node:
         Returns:
             The column terms, in the order they appear.
         """
-        from hare.sql.terms.field import Field
-
-        column_terms: list[Term] = []
-        for node in NodeTraversal.walk(self, lambda child: not child._is_group_scope_boundary()):
-            if node._is_group_scope_boundary():
-                if node.is_subquery:
-                    column_terms.extend(node.outer_reference_terms)
-            elif isinstance(node, Field) and node.table is not None:
-                column_terms.append(node)
-        return column_terms
+        return self._get_scope_column_terms(opens_root=False)
 
     def get_window_column_terms(self) -> list[Term]:
         """The columns a window function reads outside the aggregates and subqueries in it - its
@@ -136,12 +125,18 @@ class Node:
         Returns:
             The column terms, in the order they appear.
         """
+        return self._get_scope_column_terms(opens_root=True)
+
+    def _get_scope_column_terms(self, *, opens_root: bool) -> list[Term]:
+        """Read columns within a grouping scope, opening the root only for a window."""
         from hare.sql.terms.field import Field
-        from hare.sql.terms.functions.aggregate_function import AggregateFunction
+
+        def descends(node: Node) -> bool:
+            return (opens_root and node is self) or not node._is_group_scope_boundary()
 
         column_terms: list[Term] = []
-        for node in NodeTraversal.walk(self, lambda child: child is self or not child._is_group_scope_boundary()):
-            if node is not self and (node.is_subquery or node.is_analytic or isinstance(node, AggregateFunction)):
+        for node in NodeTraversal.walk(self, descends):
+            if not descends(node):
                 if node.is_subquery:
                     column_terms.extend(node.outer_reference_terms)
             elif isinstance(node, Field) and node.table is not None:

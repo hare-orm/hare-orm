@@ -4,13 +4,10 @@ what it refuses."""
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from hare import Model, fields
 from hare.contrib.test import requires_features
-from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.core.connections.connections import Connections
 from hare.exceptions import ConfigurationError, FieldError, IntegrityError, QueryError, ValidationError
 from hare.fields.encrypted import BlindIndexField, EncryptedTextField
@@ -19,6 +16,8 @@ from hare.instrumentation import Observers, RowsChanged
 from hare.query.expressions import F
 from hare.transactions import Transactions
 from tests.fields.encryption.models_blind_index import BlindIndexedCustomer
+from tests.utils.database_under_test import DatabaseUnderTest
+from tests.utils.model_bindings import ModelBindings
 
 SECRET = "blind-index-test-secret"
 
@@ -49,7 +48,7 @@ async def create_customers() -> None:
 
 @pytest.mark.database_independent
 def test_the_model_gets_a_blind_index_field_per_field():
-    meta = BlindIndexedCustomer._meta
+    meta = ModelBindings.prepare(BlindIndexedCustomer).get_binding(BlindIndexedCustomer)
     assert meta.blind_index_fields == {
         "email": "email_blind_index",
         "phone": "phone_blind_index",
@@ -134,12 +133,7 @@ async def test_uniqueness_and_upsert_through_the_index(db_blind_index):
 @pytest.mark.asyncio
 async def test_an_upsert_through_the_index_reports_the_row_it_updates():
     """The rows an upsert finds were read by the index of the index - an updated row was reported inserted."""
-    async with hare_test_context(
-        modules=["tests.fields.encryption.models_blind_index"],
-        db_url=os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:"),
-        app_label="models",
-        connection_label="models",
-    ):
+    async with DatabaseUnderTest.open_model_context(["tests.fields.encryption.models_blind_index"]):
         FieldEncryption.configure(SECRET)
         if not Connections.get("models").features.supports_unique_constraints:
             pytest.skip("the database keeps no unique index to upsert by")
@@ -217,7 +211,7 @@ def test_wrong_declarations_are_refused():
 
 @pytest.mark.database_independent
 def test_the_fields_deconstruct_for_a_migration():
-    meta = BlindIndexedCustomer._meta
+    meta = ModelBindings.prepare(BlindIndexedCustomer).get_binding(BlindIndexedCustomer)
     assert meta.fields_map["email"].deconstruct()[2] == {"blind_index": True, "unique": True}
     path, _args, kwargs = meta.fields_map["phone_blind_index"].deconstruct()
     assert path.endswith("BlindIndexField")

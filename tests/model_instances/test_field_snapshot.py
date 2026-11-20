@@ -1,9 +1,11 @@
 import datetime
 import uuid
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.exceptions import FieldError, IncompleteInstanceError
 from hare.models import FieldSnapshot
 from hare.models.instances.dirty_fields import DirtyFields
@@ -18,6 +20,17 @@ from tests.shared_models.testmodels import (
     UUIDFields,
 )
 from tests.shared_models.testmodels_postgres import DecimalFields
+
+
+@pytest.mark.database_independent
+def test_snapshot_compares_aware_datetimes_by_instant():
+    local = datetime.datetime(2024, 10, 27, 2, 30, tzinfo=ZoneInfo("Europe/Berlin"))
+    other_instant = local.replace(fold=1)
+    same_instant = datetime.datetime(2024, 10, 27, 0, 30, tzinfo=datetime.UTC)
+
+    assert FieldSnapshot.values_differ(local, other_instant)
+    assert not FieldSnapshot.values_differ(local, same_instant)
+    assert FieldSnapshot.values_differ({"moments": [local]}, {"moments": [other_instant]})
 
 
 @pytest.mark.asyncio
@@ -51,7 +64,7 @@ async def test_reassignment_is_visible_in_diff(db):
 @pytest.mark.asyncio
 async def test_default_snapshot_covers_every_direct_field(db):
     record = await JSONFields.objects.create(data={"url": "a"})
-    assert record.snapshot().fields == JSONFields._meta.direct_fields
+    assert record.snapshot().fields == HareContext.require_current().apps.get_binding(JSONFields).direct_fields
 
 
 @pytest.mark.asyncio
@@ -259,8 +272,9 @@ async def test_tracked_model_dirty_baseline_shares_immutable_values(db):
 
 
 @pytest.mark.database_independent
+@pytest.mark.usefixtures("model_conversion_context")
 def test_field_snapshot_repr_and_mapping_protocol():
-    snapshot = FieldSnapshot(DirtyTrackedThing, {"name": "A"})
+    snapshot = FieldSnapshot(HareContext.require_current().apps.get_binding(DirtyTrackedThing), {"name": "A"})
     assert "DirtyTrackedThing" in repr(snapshot)
     assert list(snapshot) == ["name"]
     assert snapshot.get("missing") is None

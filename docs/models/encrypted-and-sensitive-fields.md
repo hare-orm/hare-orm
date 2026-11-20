@@ -4,6 +4,12 @@ Fields whose values the database stores encrypted (`EncryptedTextField`, `Encryp
 index that lets one be filtered by equality, and `sensitive=True` — the mark keeping a field's value out
 of schemas, errors and logs.
 
+Field-aware diagnostics also hide sensitive primary-key components in `Model[key]`, relation
+assignment conflicts, and tenant mismatch messages. A malformed composite key is hidden entirely
+when any component is sensitive. Schema conversion diagnostics protect a stored value if either
+the old or the new field marks it sensitive. Blind-index comparisons apply the plaintext field
+validators before computing the index.
+
 ## <a id="encrypted-fields"></a>Encrypted fields
 
 ```python
@@ -144,6 +150,10 @@ run, drop the old secret from `previous_keys`. A `batch_size` that isn't a posit
 `QueryError`, a model without a primary key `ConfigurationError`, and a value encrypted with a key that
 isn't configured `DecryptionError`.
 
+An active tenant scope does not narrow rotation. The batch temporarily spans every row tenant
+of the rotated model; other models keep their row and schema scopes. The caller's scope is
+restored after each batch, including on failure. Ordinary `bulk_update()` scope checks remain in force.
+
 ### <a id="blind-index"></a>Equality filters on an encrypted field: a blind index
 
 ```python
@@ -199,10 +209,10 @@ class Reader(Model):
     password_hash = fields.CharField(max_length=128, sensitive=True)
     api_key = fields.EncryptedTextField()  # sensitive=True by default
 
-Reader._meta.sensitive_fields  # frozenset({"email", "password_hash", "api_key"})
+apps.get_binding(Reader).sensitive_fields  # frozenset({"email", "password_hash", "api_key"})
 ```
 
-- `Model._meta.sensitive_fields: frozenset[str]` — every field declared with `sensitive=True`. A
+- `apps.get_binding(Model).sensitive_fields: frozenset[str]` — every field declared with `sensitive=True`. A
   sensitive `ForeignKeyField`/`OneToOneField` also marks its own shadow column (`owner_id`), and so does
   a relation to a sensitive field (a sensitive primary key, a sensitive `to_field`): the column holds
   that field's value. A `GeneratedField` inherits `sensitive` from its `output_field` unless it passes
@@ -217,7 +227,8 @@ Reader._meta.sensitive_fields  # frozenset({"email", "password_hash", "api_key"}
 - `to_dict()` is unaffected — it still returns every field.
 - A `ValidationError` raised for a sensitive field (a failed validator, a value of the wrong type, ...)
   shows `<hidden>` instead of the value, and carries no chained exception (`__cause__` and `__context__`
-  are `None`), so a logged or reported traceback doesn't show the value either.
+  are `None`), so a logged or reported traceback doesn't show the value either. Containers apply this
+  policy to every nested field, including map keys in error paths and unexpected named-tuple keys.
 - `repr()` of a `snapshot()` shows `<hidden>` for a sensitive field. `diff_against()` returns the real
   values — mask them before logging its result.
 - A query's parameter holding a sensitive field's value is shown as `<hidden>` — in the DEBUG log of

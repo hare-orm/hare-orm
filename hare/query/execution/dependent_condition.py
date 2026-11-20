@@ -32,8 +32,7 @@ class DependentCondition(Q):
     def __eq__(self, other: object) -> bool:
         return isinstance(other, DependentCondition) and self.get_structure_key() == other.get_structure_key()
 
-    def __hash__(self) -> int:
-        return hash(self.get_structure_key())
+    __hash__ = Q.__hash__
 
     def __invert__(self) -> Q:
         return ~Q(self)

@@ -5,16 +5,22 @@ from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import FieldError, QueryError, ValidationError
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
-from hare.fields.relations.fields.one_to_one_field_instance import OneToOneFieldInstance
 
 if TYPE_CHECKING:
+    from hare.core.hare_context import HareContext
     from hare.models.model import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class RelationValues:
     """The values a relation of an instance is made of: the fields of the instance a relation
     references it by, and the check that an instance assigned to a relation is a saved instance of
     the related model."""
+
+    @staticmethod
+    def get_default_component(value: Any, position: int) -> Any:
+        """Read one component of a returned default, preserving indexable inputs and NULL."""
+        return None if value is None else value[position]
 
     @staticmethod
     def raise_if_not_of_model(obj: Any, model: type[Model], filter_key: str) -> None:
@@ -63,28 +69,34 @@ class RelationValues:
         return tuple(values)
 
     @staticmethod
-    def validate_relation_type(model: type[Model], field_key: str, value: Model | None) -> None:
+    def get_checked_relation_key_values(
+        binding: ModelBinding, field_key: str, value: Model | None, *, context: HareContext | None = None
+    ) -> tuple[Any, ...]:
         """Checks an instance assigned to a forward relation: an instance of the related model, saved,
         with the field the relation references set.
 
         Args:
-            model: The model the relation is declared on.
+            binding: The prepared model binding declaring the relation.
             field_key: The relation's name.
             value: The assigned instance, None for no related row.
+            context: The application context for checking the assigned instance's origin.
+
+        Returns:
+            The referenced key values after validation, or NULL components for None.
 
         Raises:
             FieldError: ``field_key`` isn't a foreign key or one-to-one relation.
             ValidationError: ``value`` isn't an instance of the related model.
             QueryError: ``value`` is unsaved, or saved without the referenced field.
         """
-        if value is None:
-            return
-
-        field = model._meta.fields_map[field_key]
-        if not isinstance(field, (OneToOneFieldInstance, ForeignKeyFieldInstance)):
+        field = binding.fields_map[field_key]
+        if not isinstance(field, ForeignKeyFieldInstance):
             raise FieldError(
                 f"Field {field_key!r} must be a OneToOne or ForeignKey relation, got {type(field).__name__}"
             )
+
+        if value is None:
+            return (None,) * len(field.source_fields)
 
         expected_model = field.related_model
         received_model = type(value)
@@ -94,15 +106,17 @@ class RelationValues:
                 f"Expected model type {expected_model.__name__!r}, but got {received_model.__name__!r}. "
                 "Make sure you're using the correct model class for this relationship."
             )
+        from hare.models.instances.instance_origins import InstanceOrigins
+
+        InstanceOrigins.check(field.get_related_binding(), context, value, f"Relation {field_key!r}")
         if not value._saved_in_db:
             raise QueryError(f"You should first call .save() on {value!r} before referring to it")
-        for to_field_instance in field.to_field_instances:
-            to_field_name = to_field_instance.model_field_name
-            # hasattr() first: a .only()/.defer() instance that never loaded the target column
-            # has no attribute at all, which is not the same as a loaded, still-None one.
-            if hasattr(value, to_field_name) and getattr(value, to_field_name) is None:
+        key_values = RelationValues.get_relation_key_values(value, field.to_field_names, f"Assigning {field_key!r}")
+        for to_field_name, key_value in zip(field.to_field_names, key_values, strict=True):
+            if key_value is None:
                 raise QueryError(
                     f"{type(value).__name__} is marked saved but its {to_field_name!r} is None (saved by "
                     f"bulk_create() without returning=True?), so {field_key!r} would silently be stored as "
                     "NULL - use bulk_create(returning=True), or reload the object first"
                 )
+        return key_values

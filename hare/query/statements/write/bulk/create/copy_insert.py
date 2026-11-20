@@ -11,6 +11,7 @@ TModel = TypeVar("TModel", bound="Model")
 
 if TYPE_CHECKING:
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.statements.write.bulk.create.bulk_create_query import BulkCreateQuery
 
 
@@ -33,7 +34,8 @@ class CopyInsert:
             UnSupportedError: The bulk load doesn't load a field's type.
         """
         parameters = bulk_create._connection.dialect.parameters
-        fields_map = bulk_create.model._meta.fields_map
+        model_binding: ModelBinding = bulk_create._binding  # type: ignore[assignment]
+        fields_map = model_binding.fields_map
         column_types = [
             parameters.get_copy_column_type(fields_map[copied_field_name]) for copied_field_name in field_names
         ]
@@ -62,7 +64,7 @@ class CopyInsert:
         """
         if not objects or not db_columns:
             return []
-        meta = bulk_create.model._meta
+        meta: ModelBinding = bulk_create._binding  # type: ignore[assignment]
         column_types = CopyInsert.get_copy_column_types(bulk_create, field_names)
         batches: list[BoundInsertBatch] = []
         for objects_item in BulkWriteBatches.get_batches(objects, bulk_create._batch_size):
@@ -70,7 +72,7 @@ class CopyInsert:
             if not objects_item:
                 continue
             rows = BulkWriteBatches.serialize_instances(
-                bulk_create.model, bulk_create._connection.dialect.types, objects_item, field_names
+                meta, bulk_create._connection.dialect.types, objects_item, field_names
             )
             batches.append(
                 BoundInsertBatch(

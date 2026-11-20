@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 
+from hare.exceptions import IntegrityError
 from hare.migrations import operations as ops
 from tests.utils.database_under_test import DatabaseUnderTest
 
@@ -44,7 +45,7 @@ async def test_to_field_change_refuses_rows_and_repoints_an_empty_relation(proje
     await project.assert_in_sync()
     await project.query("UPDATE book SET author_id = 'b' WHERE id = 1")
     if DatabaseUnderTest.get_dialect().features.supports_foreign_keys:
-        with pytest.raises(Exception, match=r"(?i)foreign key"):
+        with pytest.raises(IntegrityError, match=r"(?i)foreign key"):
             await project.query("UPDATE book SET author_id = 'missing' WHERE id = 2")
 
     await project.query("UPDATE book SET author_id = NULL")
@@ -112,7 +113,7 @@ async def test_to_field_target_replaced_without_rename_repoints_the_relation_bef
     await project.query("INSERT INTO author (id, ident) VALUES (1, 'a')")
     await project.query("INSERT INTO book (id, author_id) VALUES (1, 'a')")
     if DatabaseUnderTest.get_dialect().features.supports_foreign_keys:
-        with pytest.raises(Exception, match=r"(?i)foreign key"):
+        with pytest.raises(IntegrityError, match=r"(?i)foreign key"):
             await project.query("INSERT INTO book (id, author_id) VALUES (2, 'missing')")
 
     await project.query("DELETE FROM book")
@@ -124,7 +125,7 @@ async def test_to_field_target_replaced_without_rename_repoints_the_relation_bef
     await project.query("INSERT INTO author (id, code) VALUES (1, 'a')")
     await project.query("INSERT INTO book (id, author_id) VALUES (1, 'a')")
     if DatabaseUnderTest.get_dialect().features.supports_foreign_keys:
-        with pytest.raises(Exception, match=r"(?i)foreign key"):
+        with pytest.raises(IntegrityError, match=r"(?i)foreign key"):
             await project.query("INSERT INTO book (id, author_id) VALUES (2, 'missing')")
 
 

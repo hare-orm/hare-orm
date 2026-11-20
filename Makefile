@@ -105,7 +105,6 @@ help:
 	@echo  "    ci                 Runs check and the testall suites"
 	@echo  "    docs               Builds the docs into site/, failing on a broken link or anchor"
 	@echo  "    build              Builds the sdist/wheel into dist/"
-	@echo  "    publish            Builds and uploads to PyPI via twine"
 
 up:
 	poetry lock
@@ -145,12 +144,14 @@ actionlint:
 	$(ACTIONLINT) -color
 
 style: deps
+	"$(MAKE)" _style
+
+_style:
 	poetry run ruff format $(checkfiles)
 	poetry run ruff check --fix $(checkfiles)
 
-lint: deps _lint
-_lint:
-	"$(MAKE)" style
+lint: deps
+	"$(MAKE)" _style
 	"$(MAKE)" _codeqc
 
 codeqc: deps _codeqc
@@ -302,6 +303,7 @@ test_clickhouse_cluster:
 # extras its tests require, nothing else optional - in a virtualenv of its own.
 # The catalog is readable before installing dependencies. Override its interpreter if needed.
 matrix_catalog_python ?= python
+matrix_ports = $(matrix_catalog_python) -m tests.matrix.matrix_ports
 matrix_catalog = $(or $(shell $(matrix_catalog_python) -m tests.matrix.matrix_catalog $(1)),$(error Cannot read matrix catalog $(1)))
 matrix_python_versions = $(call matrix_catalog,versions.python)
 matrix_postgres_versions = $(call matrix_catalog,versions.postgres)
@@ -329,9 +331,10 @@ MATRIX_OPTIONS ?=
 
 test_db_matrix_up:
 	for version in $(matrix_postgres_versions); do \
+		port=$$($(matrix_ports) postgres "$$version") || exit 1; \
 		docker build -t hare-orm-test-postgres:$$version --build-arg PG_MAJOR=$$version tests/docker/postgres || exit 1; \
 		docker start hare-orm-test-db-$$version 2>/dev/null || docker run -d $(test_container_logs) --name hare-orm-test-db-$$version \
-			--restart unless-stopped --tmpfs $(test_db_data_dir):$(test_db_data_tmpfs_options) $(test_db_memory) -p 54$$version:5432 -e POSTGRES_USER=$(HARE_POSTGRES_USER) \
+			--restart unless-stopped --tmpfs $(test_db_data_dir):$(test_db_data_tmpfs_options) $(test_db_memory) -p $$port:5432 -e POSTGRES_USER=$(HARE_POSTGRES_USER) \
 			-e POSTGRES_PASSWORD=$(HARE_POSTGRES_PASS) hare-orm-test-postgres:$$version -c fsync=off \
 			-c synchronous_commit=off -c full_page_writes=off -c max_prepared_transactions=64 \
 			-c max_connections=400 -c shared_buffers=256MB $(test_db_wal_options) || exit 1; \
@@ -357,10 +360,11 @@ test_pgbouncer_matrix_up:
 		image=$$(for entry in $(matrix_pgbouncer_images); do [ "$${entry%%=*}" = "$$version" ] && echo "$${entry#*=}"; done); \
 		[ -n "$$image" ] || { echo "No PgBouncer image for $$version in matrix_pgbouncer_images"; exit 1; }; \
 		docker build -t hare-orm-test-pgbouncer:$$version --build-arg PGBOUNCER_IMAGE=$$image tests/docker/pgbouncer || exit 1; \
-		port=1$$(printf %02d $${version#*.})$$postgres; \
+		ports=$$($(matrix_ports) pgbouncer "$$version" "$$postgres") || exit 1; \
+		set -- $$ports; \
 		docker start hare-orm-test-pgbouncer-$$version-$$postgres 2>/dev/null || docker run -d $(test_container_logs) \
 			--name hare-orm-test-pgbouncer-$$version-$$postgres --add-host=host.docker.internal:host-gateway \
-			-p $$port:6432 -e PGBOUNCER_SERVER_PORT=54$$postgres hare-orm-test-pgbouncer:$$version || exit 1; \
+			-p "$$1:6432" -e PGBOUNCER_SERVER_PORT="$$2" hare-orm-test-pgbouncer:$$version || exit 1; \
 	done
 
 test_pgbouncer_matrix_down:
@@ -370,10 +374,11 @@ test_pgbouncer_matrix_down:
 # on 3YYMM, its native protocol on 4YYMM and its Keeper on 6YYMM - 32508, 42508, 62508 for 25.8.
 test_clickhouse_matrix_up:
 	for version in $(matrix_clickhouse_versions); do \
-		digits=$$(printf %02d%02d $${version%%.*} $${version#*.}); \
+		host_ports=$$($(matrix_ports) clickhouse "$$version") || exit 1; \
+		set -- $$host_ports; \
 		docker build -t hare-orm-test-clickhouse:$$version --build-arg CLICKHOUSE_VERSION=$$version tests/docker/clickhouse || exit 1; \
 		docker start hare-orm-test-clickhouse-$$version 2>/dev/null || docker run -d $(test_container_logs) --name hare-orm-test-clickhouse-$$version \
-			$(clickhouse_data_tmpfs) $(clickhouse_memory) -p 3$$digits:8123 -p 4$$digits:9000 -p 6$$digits:9181 \
+			$(clickhouse_data_tmpfs) $(clickhouse_memory) -p "$$2:8123" -p "$$3:9000" -p "$$5:9181" \
 			-e CLICKHOUSE_PASSWORD=$(HARE_CLICKHOUSE_PASS) --ulimit nofile=262144:262144 $(clickhouse_no_core_dumps) hare-orm-test-clickhouse:$$version || exit 1; \
 	done
 	for version in $(matrix_clickhouse_versions); do \
@@ -388,12 +393,13 @@ test_clickhouse_matrix_down:
 # gives it; the first one's HTTP interface on 5YYMM, its native protocol on 2YYMM - 52508, 22508 for 25.8.
 test_clickhouse_cluster_matrix_up:
 	for version in $(matrix_clickhouse_versions); do \
-		digits=$$(printf %02d%02d $${version%%.*} $${version#*.}); \
+		host_ports=$$($(matrix_ports) clickhouse "$$version") || exit 1; \
+		set -- $$host_ports; \
 		docker network create hare-orm-test-clickhouse-cluster-$$version 2>/dev/null || true; \
 		for node in $(clickhouse_cluster_nodes); do \
 			docker build -t hare-orm-test-clickhouse-node$$node:$$version --build-arg CLICKHOUSE_VERSION=$$version \
 				--build-arg NODE=node$$node tests/docker/clickhouse_cluster || exit 1; \
-			if [ $$node = 1 ]; then ports="-p 5$$digits:8123 -p 2$$digits:9000"; else ports=; fi; \
+			if [ $$node = 1 ]; then ports="-p $$4:8123 -p $$1:9000"; else ports=; fi; \
 			docker start hare-orm-test-clickhouse-$$version-node$$node 2>/dev/null || docker run -d $(test_container_logs) \
 				--name hare-orm-test-clickhouse-$$version-node$$node --hostname hare-orm-test-clickhouse-node$$node \
 				--network hare-orm-test-clickhouse-cluster-$$version --network-alias hare-orm-test-clickhouse-node$$node \
@@ -417,19 +423,19 @@ test_clickhouse_cluster_matrix_down:
 # hare-orm-test-rabbitmq-<version>, hare-orm-test-kafka-<version>.
 test_brokers_matrix_up:
 	for version in $(matrix_redis_versions); do \
-		port=16$${version%%.*}$$(printf %02d $${version#*.}); \
+		port=$$($(matrix_ports) broker redis "$$version") || exit 1; \
 		docker start hare-orm-test-redis-$$version 2>/dev/null || docker run -d $(test_container_logs) --name hare-orm-test-redis-$$version \
 			--tmpfs /data:rw,size=256m -p $$port:6379 redis:$$version-alpine || exit 1; \
 	done
 	for version in $(matrix_rabbitmq_versions); do \
-		port=15$${version%%.*}$$(printf %02d $${version#*.}); \
+		port=$$($(matrix_ports) broker rabbitmq "$$version") || exit 1; \
 		docker start hare-orm-test-rabbitmq-$$version 2>/dev/null || docker run -d $(test_container_logs) --name hare-orm-test-rabbitmq-$$version \
 			--tmpfs /var/lib/rabbitmq:rw,size=512m -p $$port:5672 rabbitmq:$$version-management-alpine || exit 1; \
 	done
 	for version in $(matrix_kafka_versions); do \
 		image=$$(for entry in $(matrix_kafka_images); do [ "$${entry%%=*}" = "$$version" ] && echo "$${entry#*=}"; done); \
 		[ -n "$$image" ] || { echo "No Kafka image for $$version in matrix_kafka_images"; exit 1; }; \
-		port=19$${version%%.*}$$(printf %02d $${version#*.}); \
+		port=$$($(matrix_ports) broker kafka "$$version") || exit 1; \
 		docker start hare-orm-test-kafka-$$version 2>/dev/null || docker run -d $(test_container_logs) --name hare-orm-test-kafka-$$version \
 			--tmpfs /tmp/kraft-combined-logs:rw,size=1g -p $$port:$$port \
 			-e KAFKA_NODE_ID=1 -e KAFKA_PROCESS_ROLES=broker,controller \
@@ -522,11 +528,10 @@ build_native:
 # the container, which also takes the extensions out of the wheels and removes them, so no file the
 # container's root owns is left to delete outside it.
 # Match the extension builder used by wheel CI and the local Poetry environment.
-maturin_version = $(shell python3 -c 'import tomllib; from pathlib import Path; print(next(package["version"] for package in tomllib.loads(Path("poetry.lock").read_text(encoding="utf-8"))["package"] if package["name"] == "maturin"))')
-
 build_native_linux:
-	rm -f rust/native*-linux-gnu.so
-	docker run --rm -v "$(CURDIR)":/io -w /io --entrypoint sh ghcr.io/pyo3/maturin:v$(maturin_version) -c \
+	maturin_version=$$(python3 .github/scripts/locked_tool_versions.py maturin) && \
+	rm -f rust/native*-linux-gnu.so && \
+	docker run --rm -v "$(CURDIR)":/io -w /io --entrypoint sh "ghcr.io/pyo3/maturin:v$$maturin_version" -c \
 		"maturin build --release --manifest-path rust/native/Cargo.toml --interpreter $(addprefix python,$(matrix_python_versions)) --out rust/native/wheels \
 		&& python$(lastword $(matrix_python_versions)) .github/scripts/extract_native_extensions.py rust/native/wheels \
 		&& rm -rf rust/native/wheels"
@@ -557,6 +562,3 @@ build: deps
 	rm -fR dist/
 	poetry build
 	poetry run twine check dist/*
-
-publish: build
-	poetry run twine upload dist/*

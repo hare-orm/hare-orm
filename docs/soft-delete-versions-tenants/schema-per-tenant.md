@@ -69,6 +69,10 @@ class Invoice(Model):           # one table in each tenant's schema
   carries out in every schema visits none — only for a `PROTECT` relation, a `db_constraint=False` one,
   captured changes or an overridden `delete()` of a tenant's model. A schema without a model's table
   (made before its migration) holds no row of it and is passed over.
+  An explicit shared client passed through `using=` retains its actual schema even inside
+  a tenant scope; the schema visits still cover every tenant. Comparing a related model's
+  connection alias or capabilities does not select the ambient tenant's client. Ordinary
+  transactions still reject a change of tenant schema within the transaction.
 - A `Meta.tenant_schema` model on a connection without `tenant_schema_template` raises
   `ConfigurationError` on its first query and when its tables are created.
 

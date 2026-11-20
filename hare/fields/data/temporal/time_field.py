@@ -168,7 +168,6 @@ class TimeField(Field[TTime]):
             # A span of time is no time of day - one database refused it, another stored its text.
             self.raise_if_duration(value)
             self.raise_if_not_time(value)
-            value = value
             if ZoneSettings.get_use_timezone():
                 if Timezone.is_naive(value):
                     shown_value = SENSITIVE_VALUE_PLACEHOLDER if self.sensitive else value

@@ -7,6 +7,7 @@ import pytest_asyncio
 
 from hare import fields, prefetch_related_objects
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.exceptions import (
     DoesNotExist,
     FieldError,
@@ -56,6 +57,9 @@ from tests.shared_models.testmodels import (
     VersionedThing,
 )
 from tests.shared_models.testmodels_postgres import DefaultModel
+from tests.utils.model_bindings import ModelBindings
+
+pytestmark = pytest.mark.usefixtures("model_conversion_context")
 
 # ============================================================================
 # TestModelCreate
@@ -1158,7 +1162,9 @@ async def test_save_with_empty_update_fields_is_a_noop(db):
 @pytest.mark.asyncio
 async def test_save_with_only_database_default_update_fields_is_a_noop(db):
     default_model = await DefaultModel.objects.create()
-    default_model.int_default = DatabaseDefault(DefaultModel._meta.fields_map["int_default"])
+    default_model.int_default = DatabaseDefault(
+        HareContext.require_current().apps.get_binding(DefaultModel).fields_map["int_default"]
+    )
     await default_model.save(update_fields=["int_default"])
     assert (await DefaultModel.objects.get(pk=default_model.pk)).int_default == 1
 
@@ -1892,7 +1898,8 @@ def test_model_copies_preserve_slots_and_detach_rollback_state(method):
     import copy as copy_module
     import pickle
 
-    obj = SlottedBook(id=7, payload={"items": [1]})
+    apps = ModelBindings.prepare(SlottedBook)
+    obj = apps.new(SlottedBook, id=7, payload={"items": [1]})
     obj._SlottedBook__note = "slot value"
     obj.description = "dictionary value"
     obj._pending_rollback_restore_stack = [lambda: None]

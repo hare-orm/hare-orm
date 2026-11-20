@@ -27,10 +27,16 @@ from hare.query.functions import Cast, Concat, Lower, Upper
 from hare.query.functions.datetime.extract import Extract
 from hare.query.functions.datetime.trunc import Trunc
 from hare.sql import functions
-from tests.migrations.round_trips.test_round_trip_real_db import build_model
+from tests.migrations.round_trips.test_round_trip_real_db import build_model as build_declared_model
 from tests.utils.fake_client import FakeClient
+from tests.utils.model_bindings import ModelBindings
 
 pytestmark = pytest.mark.database_independent
+
+
+def build_model(*args, **kwargs):
+    model = build_declared_model(*args, **kwargs)
+    return ModelBindings.prepare(model).get_binding(model)
 
 
 class LowerCaseNamingDialect(SqlDialect):
@@ -58,7 +64,7 @@ def build_indexed_model():
 
 
 def test_migration_file_keeps_the_declared_expressions():
-    index = build_indexed_model()._meta.indexes[0]
+    index = build_indexed_model().indexes[0]
 
     rendered = DeclarationValueSerializer.render_call(*index.deconstruct(), ImportManager())
 
@@ -67,7 +73,7 @@ def test_migration_file_keeps_the_declared_expressions():
 
 def test_each_dialect_renders_its_own_keys():
     model = build_indexed_model()
-    index = model._meta.indexes[0]
+    index = model.indexes[0]
 
     assert index.get_key_sqls(model, LOWER_CASE_NAMING_DIALECT) == [
         '(LCASE("name"))',
@@ -78,7 +84,7 @@ def test_each_dialect_renders_its_own_keys():
 
 def test_the_generated_name_is_the_same_on_every_dialect():
     model = build_indexed_model()
-    index = model._meta.indexes[0]
+    index = model.indexes[0]
     name_before = index.get_generated_name(model)
 
     index.get_key_sqls(model, LOWER_CASE_NAMING_DIALECT)
@@ -99,10 +105,10 @@ def test_shared_index_keeps_its_declaration_across_model_bindings():
             [("title", CharField(max_length=40, source_field=column))],
             options={"table": "book", "indexes": [index]},
         ).state_forward("models", state)
-        model = state.apps.get_model("models.Book")
-        assert index.get_key_names(model) == [f'(LOWER("{column}"))']
-        assert column in index.get_key_sqls(model, SQLITE_DIALECT)[0]
-        names.append(index.get_generated_name(model))
+        state.apps.get_model("models.Book")
+        assert index.get_key_names(state.apps.get_binding("models.Book")) == [f'(LOWER("{column}"))']
+        assert column in index.get_key_sqls(state.apps.get_binding("models.Book"), SQLITE_DIALECT)[0]
+        names.append(index.get_generated_name(state.apps.get_binding("models.Book")))
         assert vars(index) == original
         assert equivalent in declarations
     assert names[0] != names[1]
@@ -151,7 +157,7 @@ def build_function_indexed_model():
 def test_keys_of_dialect_functions_are_named_apart():
     model = build_function_indexed_model()
     names = []
-    for index in model._meta.indexes:
+    for index in model.indexes:
         names.append(index.get_generated_name(model))
 
     assert len(set(names)) == len(names)
@@ -159,7 +165,7 @@ def test_keys_of_dialect_functions_are_named_apart():
 
 def test_a_key_needing_a_function_of_hare_connections_is_refused_in_ddl():
     model = build_function_indexed_model()
-    trunc_index, *_others, json_index = model._meta.indexes
+    trunc_index, *_others, json_index = model.indexes
 
     with pytest.raises(UnSupportedError, match="hare_trunc_date_part"):
         trunc_index.get_key_sqls(model, SQLITE_DIALECT)

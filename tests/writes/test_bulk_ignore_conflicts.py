@@ -2,6 +2,8 @@
 by the given keys or by on_conflict - and marks only those saved."""
 
 import math
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -90,6 +92,16 @@ def test_a_nan_of_a_key_is_equal_to_itself_as_a_unique_index_holds_it():
     assert ReturnedValues.get_hashable({"a": [1, {"b": math.nan}]}) == frozenset(
         {("a", (1, frozenset({("b", ReturnedValues.NAN_KEY)})))}
     )
+
+
+@pytest.mark.database_independent
+def test_timestamp_keys_distinguish_the_two_instants_of_a_repeated_hour():
+    zone = ZoneInfo("Europe/Berlin")
+    first = datetime(2024, 10, 27, 2, 30, tzinfo=zone)
+    second = first.replace(fold=1)
+
+    assert ReturnedValues.get_hashable(first) == datetime(2024, 10, 27, 0, 30, tzinfo=UTC)
+    assert ReturnedValues.get_hashable(second) == datetime(2024, 10, 27, 1, 30, tzinfo=UTC)
 
 
 @pytest.mark.database_independent

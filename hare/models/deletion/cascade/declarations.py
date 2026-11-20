@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
     from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset import QuerySet
     from hare.sql import Table
     from hare.sql.terms.criteria.criterion import Criterion
@@ -38,7 +39,7 @@ class ForeignKeyChange:
 class ThroughChange:
     """A through-table action with the connection, table and key predicates already bound."""
 
-    model: type[Model]
+    binding: ModelBinding
     field: ManyToManyFieldInstance[Any]
     connection: DatabaseClient
     table: Table

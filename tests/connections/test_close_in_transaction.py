@@ -1,6 +1,5 @@
 """Context shutdown closes the shared client even when a transaction is bound to its alias."""
 
-import os
 from contextlib import AsyncExitStack
 
 import pytest
@@ -17,7 +16,7 @@ from tests.utils.database_under_test import DatabaseUnderTest
 async def test_context_shutdown_rolls_back_and_closes_the_shared_client(tmp_path, monkeypatch, nested):
     if not DatabaseUnderTest.get_dialect().features.supports_transactions:
         pytest.skip("requires transactions")
-    url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+    url = DatabaseUnderTest.get_url()
     if url.startswith("sqlite"):
         url = f"sqlite+aiosqlite://{tmp_path / 'shutdown.sqlite3'}"
         monkeypatch.setattr("hare.dialects.sqlite.client.sqlite_client.SQLITE_CLOSE_TIMEOUT_SECONDS", 0)
@@ -62,4 +61,5 @@ async def test_context_shutdown_rolls_back_and_closes_the_shared_client(tmp_path
             await checker.close()
             # Also cleans up the original failing implementation, which forgot its open client.
             await shared.close()
-            await context.init(config)
+            with pytest.raises(ConfigurationError, match="one application configuration"):
+                await context.init(config)

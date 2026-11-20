@@ -10,12 +10,14 @@ from hare.dialects.base.schema.plans.enums import SchemaEffect
 from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.dialects.base.schema.plans.schema_statement import SchemaStatement
 from hare.dialects.base.schema.plans.stored_value_rewrite import StoredValueRewrite
+from hare.dialects.base.schema.plans.stored_value_snapshot import StoredValueSnapshot
 from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
 from hare.exceptions import ConfigurationError
 from hare.fields.data.temporal.datetime_field import DatetimeField
 from hare.fields.data.temporal.time_field import TimeField
 from hare.fields.field import Field
-from hare.models import Model
+from hare.models.model_binding import ModelBinding
+from hare.sql.identifiers import Identifiers
 
 
 class ColumnBackfill(SchemaEditorPart):
@@ -24,13 +26,14 @@ class ColumnBackfill(SchemaEditorPart):
 
     __slots__ = ()
 
-    def backfill_default_sql_literal(self, field: Field[Any], default_value: Any, model: type[Model]) -> str:
+    def backfill_default_sql_literal(self, field: Field[Any], default_value: Any, binding: ModelBinding) -> str:
         """Renders a field's Python ``default`` as the SQL literal existing rows are filled with.
 
         Raises:
             ConfigurationError: The default is a callable - computed once, it would give every row
                 one value.
         """
+        model = binding._model
         if callable(default_value):
             raise ConfigurationError(
                 f"Can't backfill {model.__name__}.{field.model_field_name} during this schema "
@@ -69,36 +72,38 @@ class ColumnBackfill(SchemaEditorPart):
             and (field.default is not None or cls.is_auto_now_field(field))
         )
 
-    def auto_now_backfill_sql_literal(self, field: Field[Any], model: type[Model]) -> str:
+    def auto_now_backfill_sql_literal(self, field: Field[Any], binding: ModelBinding) -> str:
         """The current time as a SQL literal for filling existing rows of an ``auto_now``/
         ``auto_now_add`` field, written exactly as a regular save() would write it.
 
         Args:
             field: An auto_now/auto_now_add DatetimeField or TimeField.
-            model: The field's model.
+            binding: The field's model.
 
         Returns:
             The SQL literal.
         """
+        model = binding._model
         auto_now_field: DatetimeField[Any] | TimeField[Any] = field  # type: ignore[assignment]
         return self.editor.client.dialect.literals.get_literal_sql(
             self.editor.client.dialect.types.get_db_value(auto_now_field, auto_now_field.get_auto_now_value(), model)
         )
 
-    async def added_column_backfill_sql_literal(self, field: Field[Any], model: type[Model]) -> str:
+    async def added_column_backfill_sql_literal(self, field: Field[Any], binding: ModelBinding) -> str:
         """``field``'s Python default as a SQL literal for the rows that exist when its column is
         added. A callable (or async) default is evaluated once, so every existing row gets that
         same value.
 
         Args:
             field: The field being added.
-            model: The field's model.
+            binding: The field's model.
 
         Returns:
             The SQL literal.
         """
+        model = binding._model
         if field.default is None and self.is_auto_now_field(field):
-            return self.auto_now_backfill_sql_literal(field, model)
+            return self.auto_now_backfill_sql_literal(field, binding)
         default_value = field.default() if callable(field.default) else field.default
         if inspect.isawaitable(default_value):
             default_value = await default_value
@@ -106,9 +111,11 @@ class ColumnBackfill(SchemaEditorPart):
             self.editor.client.dialect.types.get_db_value(field, default_value, model)
         )
 
-    def get_added_column_backfill_plan(self, model: type[Model], field: Field[Any], db_field: str) -> SchemaChangePlan:
+    def get_added_column_backfill_plan(
+        self, binding: ModelBinding, field: Field[Any], db_field: str
+    ) -> SchemaChangePlan:
         """Prepare a constant assignment, or an explicit default-evaluation step."""
-        table = self.editor.get_row_change_table_sql(model)
+        table = self.editor.get_row_change_table_sql(binding)
         column = self.editor.quote(db_field)
         if (
             callable(field.default)
@@ -118,17 +125,17 @@ class ColumnBackfill(SchemaEditorPart):
             return SchemaChangePlan(
                 (
                     ColumnDefaultBackfill(
-                        model, copy(field), table, column, recovery=self.editor.get_row_recovery(model)
+                        binding, copy(field), table, column, recovery=self.editor.get_row_recovery(binding)
                     ),
                 )
             )
-        value = self.backfill_default_sql_literal(field, field.default, model)
+        value = self.backfill_default_sql_literal(field, field.default, binding)
         return SchemaChangePlan(
             (
                 SchemaStatement(
                     self.get_fill_nulls_sql(table, column, value),
                     effects=frozenset({SchemaEffect.BACKFILL_ROWS}),
-                    recovery=self.editor.get_row_recovery(model),
+                    recovery=self.editor.get_row_recovery(binding),
                 ),
             )
         )
@@ -139,17 +146,21 @@ class ColumnBackfill(SchemaEditorPart):
             table=table_sql, assignments=f"{column_sql} = {value_sql}", condition=f"{column_sql} IS NULL"
         )
 
-    def get_added_column_default_plan(self, model: type[Model], field: Field[Any], db_field: str) -> SchemaChangePlan:
+    def get_added_column_default_plan(
+        self, binding: ModelBinding, field: Field[Any], db_field: str
+    ) -> SchemaChangePlan:
         """Prepare persistence of a database default; ordinary ADD COLUMN already stores it."""
         return SchemaChangePlan(())
 
-    def get_added_column_not_null_plan(self, model: type[Model], field: Field[Any], db_field: str) -> SchemaChangePlan:
+    def get_added_column_not_null_plan(
+        self, binding: ModelBinding, field: Field[Any], db_field: str
+    ) -> SchemaChangePlan:
         """Prepare the final NOT NULL change; a rebuild includes its target definition."""
         column_definitions = self.editor.column_definitions
-        table_column_type = column_definitions.get_table_column_type(model, field)
+        table_column_type = column_definitions.get_table_column_type(binding, field)
         sql_type = column_definitions.get_altered_column_type(table_column_type, False)
         return self.get_not_null_plan(
-            model,
+            binding,
             field,
             self.editor.quote(db_field),
             sql_type,
@@ -158,7 +169,7 @@ class ColumnBackfill(SchemaEditorPart):
 
     def get_not_null_plan(
         self,
-        model: type[Model],
+        binding: ModelBinding,
         field: Field[Any],
         column: str,
         sql_type: str,
@@ -168,7 +179,7 @@ class ColumnBackfill(SchemaEditorPart):
         """The ALTER making a column NOT NULL, its NULL rows already given a value.
 
         Args:
-            model: The column's model.
+            binding: The column's model.
             field: The column's field, as it ends up.
             column: The quoted column.
             sql_type: The column's type, as it ends up.
@@ -178,13 +189,13 @@ class ColumnBackfill(SchemaEditorPart):
             The prepared column changes with their explicit failure targets.
         """
         sql = self.editor.get_column_change_sql(
-            model,
+            binding,
             self.editor.ALTER_FIELD_TEMPLATE,
             changes=self.editor.ALTER_FIELD_NOT_NULL_TEMPLATE.format(column=column, sql_type=sql_type),
         )
-        return SchemaChangePlan((SchemaStatement(sql, recovery=self.editor.get_schema_recovery(model)),))
+        return SchemaChangePlan((SchemaStatement(sql, recovery=self.editor.get_schema_recovery(binding)),))
 
-    def field_backfill_sql_literal(self, field: Field[Any], model: type[Model]) -> str | None:
+    def field_backfill_sql_literal(self, field: Field[Any], binding: ModelBinding) -> str | None:
         """The SQL literal existing rows get in a column: the field's ``default``, else its
         ``db_default``.
 
@@ -192,11 +203,11 @@ class ColumnBackfill(SchemaEditorPart):
             The literal, None when the field has neither.
         """
         if field.default is not None:
-            return self.backfill_default_sql_literal(field, field.default, model)
+            return self.backfill_default_sql_literal(field, field.default, binding)
         if field.has_db_default():
-            return self.editor.column_definitions.get_field_db_default_sql(field, model)
+            return self.editor.column_definitions.get_field_db_default_sql(field, binding)
         if self.is_auto_now_field(field):
-            return self.auto_now_backfill_sql_literal(field, model)
+            return self.auto_now_backfill_sql_literal(field, binding)
         return None
 
     def get_row_identity_sql(self) -> str | None:
@@ -208,12 +219,12 @@ class ColumnBackfill(SchemaEditorPart):
         """
         return None
 
-    def get_backfill_key_sql(self, model: type[Model], field_name: str) -> list[str]:
+    def get_backfill_key_sql(self, binding: ModelBinding, field_name: str) -> list[str]:
         """The columns a backfill's batches pick their rows by: the primary key's - every one of
         a composite key - or the database's own name of a row for a model without one.
 
         Args:
-            model: The model backfilled.
+            binding: The model backfilled.
             field_name: The field filled, for the error.
 
         Returns:
@@ -222,9 +233,11 @@ class ColumnBackfill(SchemaEditorPart):
         Raises:
             ConfigurationError: The model has no primary key and the database names no row otherwise.
         """
-        meta = model._meta
-        if meta.has_primary_key:
-            return [self.editor.quote(meta.fields_db_projection[name]) for name in meta.primary_key_attribute_names]
+        model = binding._model
+        if binding.has_primary_key:
+            return [
+                self.editor.quote(binding.fields_db_projection[name]) for name in binding.primary_key_attribute_names
+            ]
         row_identity_sql = self.get_row_identity_sql()
         if row_identity_sql is None:
             raise ConfigurationError(
@@ -281,27 +294,37 @@ class ColumnBackfill(SchemaEditorPart):
         return f"SELECT COUNT(*) AS null_count FROM {qualified_table} WHERE {quoted_column} IS NULL"  # nosec B608
 
     def get_stored_value_rewrite_plan(
-        self, model: type[Model], old_field: Field[Any], new_field: Field[Any]
+        self, binding: ModelBinding, old_field: Field[Any], new_field: Field[Any]
     ) -> SchemaChangePlan:
         """Compile a field conversion and row identity before changing the schema."""
+        model = binding._model
         conversion = copy(new_field).get_stored_value_conversion(copy(old_field))
         if conversion is None:
             return SchemaChangePlan(())
-        meta = model._meta
         description = f"{model.__name__}.{new_field.model_field_name}"
-        meta.raise_if_no_primary_key(f"Rewriting the stored values of {description}")
+        binding.raise_if_no_primary_key(f"Rewriting the stored values of {description}")
         dialect = self.editor.client.dialect
-        table = self.editor.qualify_table_name(meta.db_table, meta.schema)
-        column = meta.fields_db_projection[new_field.model_field_name]
-        key_columns = tuple(meta.fields_db_projection[name] for name in meta.primary_key_attribute_names)
+        table = self.editor.qualify_table_name(binding.db_table, binding.schema)
+        column = binding.fields_db_projection[new_field.model_field_name]
+        key_columns = tuple(binding.fields_db_projection[name] for name in binding.primary_key_attribute_names)
         quoted_keys = [self.editor.quote(name) for name in key_columns]
         quoted_column = self.editor.quote(column)
+        selected_columns = ", ".join(dict.fromkeys((*quoted_keys, quoted_column)))
         select_sql = (
-            f"SELECT {', '.join(quoted_keys)}, {quoted_column} FROM {table} "  # nosec B608
+            f"SELECT {selected_columns} FROM {table} "  # nosec B608
             f"WHERE {quoted_column} IS NOT NULL ORDER BY {', '.join(quoted_keys)}"
         )
+        snapshot = None
+        if column in key_columns:
+            snapshot_name = Identifiers.get_temporary_name("hare rewrite")
+            snapshot_table = self.editor.qualify_table_name(snapshot_name, binding.schema)
+            snapshot = StoredValueSnapshot(
+                self.editor.CREATE_STORED_SNAPSHOT_TEMPLATE.format(table=snapshot_table, select=select_sql),
+                f"SELECT {selected_columns} FROM {snapshot_table} ORDER BY {', '.join(quoted_keys)}",  # nosec B608
+                f"DROP TABLE {snapshot_table}",
+            )
         update_sql = self.editor.UPDATE_ROWS_TEMPLATE.format(
-            table=self.editor.get_row_change_table_sql(model),
+            table=self.editor.get_row_change_table_sql(binding),
             assignments=f"{quoted_column} = {dialect.parameters.get_placeholder(1)}",
             condition=" AND ".join(
                 f"{key} = {dialect.parameters.get_placeholder(position)}"
@@ -317,7 +340,8 @@ class ColumnBackfill(SchemaEditorPart):
                     key_columns,
                     conversion,
                     description,
-                    recovery=self.editor.get_row_recovery(model),
+                    recovery=self.editor.get_row_recovery(binding),
+                    snapshot=snapshot,
                 ),
             )
         )

@@ -10,12 +10,10 @@ from hare.dialects.postgresql.lookups.json.postgresql_json_lookups import Postgr
 from hare.dialects.postgresql.lookups.postgresql_regex_lookups import PostgresqlRegexLookups
 from hare.dialects.postgresql.lookups.trigram.postgresql_trigram_lookups import PostgresqlTrigramLookups
 from hare.dialects.postgresql.search.criterion.search_criterion import SearchCriterion
-from hare.dialects.postgresql.search.functions.plain_to_ts_query import PlainToTsQuery
 from hare.dialects.postgresql.search.messages import SEARCH_QUERY_CONFIG_REQUIRED
 from hare.exceptions import QueryError
 from hare.query.filters import JsonLookups, Lookups
 from hare.sql.terms.term import Term
-from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
@@ -67,8 +65,7 @@ class PostgresqlFilterOperators(FilterOperators):
             not isinstance(value, Term) or not SearchCriterion.has_explicit_query_config(value)
         ):
             raise QueryError(SEARCH_QUERY_CONFIG_REQUIRED)
-        query = value if isinstance(value, Term) else PlainToTsQuery(ValueWrapper(value), config=config)
-        return SearchCriterion(term, expression=query, vectorize=not field_is_vector, config=config)
+        return SearchCriterion(term, expression=value, vectorize=not field_is_vector, config=config)
 
     def get_column_type(self, field: Field[Any] | None) -> str | None:
         """The PostgreSQL type of a list's elements, None to type them by their values."""

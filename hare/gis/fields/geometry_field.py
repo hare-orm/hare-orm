@@ -54,6 +54,9 @@ class GeometryField(Field[Geometry]):
         ConfigurationError: An argument is of the wrong type or out of range.
     """
 
+    #: A computed value's internal domain; declared columns keep their strict dimensions.
+    _result_dimensions: frozenset[int] | None = None
+
     argument_value_type = GEOMETRY_VALUE_TYPE
 
     COLUMN_TYPE_FROM_DIALECT = True
@@ -177,7 +180,11 @@ class GeometryField(Field[Geometry]):
             raise ValidationError(
                 f"{self.model_field_name}: expected a {geometry_type.value}, got a {geometry.GEOMETRY_TYPE.value}"
             )
-        if not geometry.is_empty and geometry.has_z != (self.dimensions == 3):
+        if (
+            not geometry.is_empty
+            and geometry.has_z != (self.dimensions == 3)
+            and (self._result_dimensions is None or (3 if geometry.has_z else 2) not in self._result_dimensions)
+        ):
             raise ValidationError(
                 f"{self.model_field_name}: expected {self.dimensions} coordinates, got {3 if geometry.has_z else 2}"
             )
@@ -185,6 +192,10 @@ class GeometryField(Field[Geometry]):
         if self.geography and not geometry.is_empty:
             self.raise_if_off_the_globe(geometry)
         return geometry
+
+    def get_geometry_dimensions(self) -> frozenset[int]:
+        """The computed result's dimensions, or the single dimension of a column declaration."""
+        return self._result_dimensions if self._result_dimensions is not None else frozenset((self.dimensions,))
 
     def raise_if_other_srid(self, geometry: Geometry) -> None:
         """Refuses a geometry of another SRID than the column's.

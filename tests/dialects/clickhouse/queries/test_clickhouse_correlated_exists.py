@@ -5,6 +5,7 @@ EXISTS where the server runs correlated subqueries."""
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError, UnSupportedError
 from hare.fields.uuid7 import Uuid7
 from hare.models.tenancy.tenancy import Tenancy
@@ -34,7 +35,12 @@ async def test_a_subquery_correlated_by_a_comparison_is_the_servers_own_exists(c
     # The same table inside and around - the outer one's name reads the outer row.
     later_of_team = Player.objects.filter(team=OuterReference("team"), id__gt=OuterReference("id"))
     latest = Player.objects.filter(~Exists(later_of_team)).order_by("id").values_list("id", flat=True)
-    if not Player._meta.connection.features.supports_correlated_subqueries:
+    if (
+        not HareContext.require_current()
+        .apps.get_queryset(Player)
+        .get_connection()
+        .features.supports_correlated_subqueries
+    ):
         with pytest.raises(UnSupportedError, match="has no correlated subqueries"):
             await latest
         return
@@ -61,7 +67,12 @@ async def test_latest_versions_keep_the_latest_version_of_each_record(clickhouse
             PageVersion(id=second, version=1, title="b1"),
         ]
     )
-    if not PageVersion._meta.connection.features.supports_correlated_subqueries:
+    if (
+        not HareContext.require_current()
+        .apps.get_queryset(PageVersion)
+        .get_connection()
+        .features.supports_correlated_subqueries
+    ):
         with pytest.raises(ConfigurationError, match="runs no correlated subqueries"):
             LatestPageQuery.check_declaration()
         return

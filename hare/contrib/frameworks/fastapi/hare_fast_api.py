@@ -13,11 +13,13 @@ from hare.contrib.frameworks.fastapi.hare_exception_handlers import HareExceptio
 from hare.contrib.frameworks.fastapi.middleware.request_state_reset_middleware import RequestStateResetMiddleware
 from hare.contrib.frameworks.fastapi.middleware.transaction_failing_handler import TransactionFailingHandler
 from hare.contrib.frameworks.fastapi.middleware.transaction_middleware import TransactionMiddleware
+from hare.contrib.frameworks.fastapi.request_query_dependency import RequestQueryDependency
 from hare.contrib.frameworks.hare_lifecycle import HareLifecycle
 from hare.contrib.frameworks.health_routes import HealthRoutes
 from hare.contrib.frameworks.request_transaction import RequestTransaction
 
 if TYPE_CHECKING:
+    from hare.contrib.request_query.request_query import RequestQuery
     from hare.core.config import HareConfig
     from hare.core.hare_context import HareContext
 
@@ -84,6 +86,14 @@ class HareFastAPI(FastAPI):
         if health_routes is not None:
             self.add_health_routes(health_routes)
 
+    def request_query(self, query_class: type[RequestQuery[Any]]) -> Any:
+        """Build a dependency whose startup schema uses this application's explicit registry.
+
+        The dependency keeps the original declaration class. Each request constructs its
+        parameter generation in the application's runtime scope after startup.
+        """
+        return RequestQueryDependency.provide(query_class, apps=self.hare.model_apps)
+
     def add_health_routes(self, health_routes: HealthRoutes) -> None:
         """Adds the readiness and liveness routes - outside the request's transaction and the OpenAPI
         schema.
@@ -116,9 +126,10 @@ class HareFastAPI(FastAPI):
         """
         if not self.hare.transaction_connection_names:
             return RequestStateResetMiddleware(super().build_middleware_stack(), self.hare)
+        TransactionFailingHandler.prepare_mounts(self)
         exception_handlers = self.exception_handlers
         self.exception_handlers = {
-            key: TransactionFailingHandler(handler) for key, handler in exception_handlers.items()
+            key: TransactionFailingHandler.wrap(handler) for key, handler in exception_handlers.items()
         }
         try:
             return RequestStateResetMiddleware(super().build_middleware_stack(), self.hare)

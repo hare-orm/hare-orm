@@ -26,18 +26,22 @@ CONFIG = {
     "apps": {"models": {"models": ["tests.contrib.frameworks.models"], "default_connection": "default"}},
 }
 
+MODEL_APPS = Hare.bind_models(CONFIG)
+
 
 class Profile(BaseModel):
     city: str
 
 
 class CountedWriterDTO(HareDTO[Writer]):
+    binding = MODEL_APPS.get_binding(Writer)
     config = DTOConfig(exclude={"chapters", "tags"})
     extra_fields = {"chapter_count": int, "profile": Profile}
     computed = ("initial", "shouted_name")
 
 
 class FlatChapterDTO(HareDTO[Chapter]):
+    binding = MODEL_APPS.get_binding(Chapter)
     config = DTOConfig(exclude={"writer.chapters", "writer.tags"})
     extra_fields = {"writer.chapter_count": int}
     computed = ("writer.initial",)
@@ -181,30 +185,37 @@ async def test_the_openapi_schema_lists_the_extra_fields_with_their_types():
 
 
 class UnknownRelationDTO(HareDTO[Chapter]):
+    binding = MODEL_APPS.get_binding(Chapter)
     extra_fields = {"editor.count": int}
 
 
 class NotComputedDTO(HareDTO[Writer]):
+    binding = MODEL_APPS.get_binding(Writer)
     computed = ("name_length",)
 
 
 class UnannotatedComputedDTO(HareDTO[Writer]):
+    binding = MODEL_APPS.get_binding(Writer)
     computed = ("loose_name",)
 
 
 class ToManyRelatedValueDTO(HareDTO[Writer]):
+    binding = MODEL_APPS.get_binding(Writer)
     related_values = {"chapter_title": "chapters.title"}
 
 
 class RelationEndingRelatedValueDTO(HareDTO[Chapter]):
+    binding = MODEL_APPS.get_binding(Chapter)
     related_values = {"writer_tags": "writer.tags"}
 
 
 class FieldNamedExtraDTO(HareDTO[Writer]):
+    binding = MODEL_APPS.get_binding(Writer)
     extra_fields = {"name": str}
 
 
 class TwiceDeclaredDTO(HareDTO[Writer]):
+    binding = MODEL_APPS.get_binding(Writer)
     extra_fields = {"initial": str}
     computed = ("initial",)
 
@@ -269,8 +280,8 @@ def test_a_computed_value_of_a_row_reads_the_property_of_its_own_class():
         def initial(self) -> str:
             return "!"
 
-    extra_fields = HareDTOExtraFields(Writer, {}, ("initial",), {}, HareDTO.read_attribute)
+    extra_fields = HareDTOExtraFields(MODEL_APPS.get_binding(Writer), {}, ("initial",), {}, HareDTO.read_attribute)
     # Only the class of the row matters - its property reads no field.
-    rows = (Writer(name="anna"), LoudWriter.__new__(LoudWriter))
+    rows = (MODEL_APPS.new(Writer, name="anna"), object.__new__(LoudWriter))
     readings = [extra_fields.find(row, "initial").read(row) for row in rows]
     assert readings == ["A", "!"]

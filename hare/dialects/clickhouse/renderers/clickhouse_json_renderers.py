@@ -5,6 +5,7 @@ import json
 from hare.dialects.base.renderers.json_renderers import JsonRenderers
 from hare.dialects.clickhouse.lookups.constants import CLICKHOUSE_JSON_TYPED_VALUE_SQL, CLICKHOUSE_JSON_VALUE_TEXT_SQL
 from hare.dialects.clickhouse.renderers.clickhouse_json_texts import ClickhouseJsonTexts
+from hare.query.filters.lookups.json.json_filter_parser import JsonFilterParser
 from hare.sql import functions
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms import criteria
@@ -66,20 +67,21 @@ class ClickhouseJsonRenderers(JsonRenderers):
         # The JSON text - of a JSON column, or of a String one holding it.
         column_sql = f"toString({column_sql})"
         literals = sql_context.dialect.literals
-        if any(isinstance(part, int) for part in criterion.path):
+        if any(JsonFilterParser.is_index_segment(part) for part in criterion.path):
             # A digit is an index of an array and a key of an object, the meaning of hare's path - each
             # step taken on the value the steps before it reached.
             value_sql = column_sql
             for part in criterion.path:
-                if isinstance(part, int):
-                    index_sql = str(part + 1 if part >= 0 else part)
+                if JsonFilterParser.is_index_segment(part):
+                    index = int(part)
+                    index_sql = str(index + 1 if index >= 0 else index)
                     key_sql = literals.get_string_literal_sql(str(part))
                     value_sql = (
                         f"if(JSONType({value_sql}) = 'Array', JSONExtractRaw({value_sql}, {index_sql}), "
                         f"JSONExtractRaw({value_sql}, {key_sql}))"
                     )
                 else:
-                    value_sql = f"JSONExtractRaw({value_sql}, {literals.get_string_literal_sql(part)})"
+                    value_sql = f"JSONExtractRaw({value_sql}, {literals.get_string_literal_sql(part)})"  # type: ignore[arg-type]
             raw_sql = f"nullIf({value_sql}, '')"
             if not criterion.as_text:
                 return raw_sql

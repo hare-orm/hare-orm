@@ -11,7 +11,9 @@ from hare.fields.validators.validator import Validator
 
 
 class EmailValidator(Validator):
-    """Validates an email address by RFC 3696.
+    """Check the address format and the validator's 320-character limit.
+
+    A field may impose a smaller limit through its ``max_length``.
 
     Args:
         allowed_domains: Domains accepted as they are, even ones the domain pattern refuses (``localhost``);
@@ -22,7 +24,7 @@ class EmailValidator(Validator):
         InvalidEmailAddress: The value isn't a valid email address.
     """
 
-    # The maximum length of an email is 320 characters per RFC 3696 section 3
+    #: This validator's length limit, independent of the field's column size.
     MAX_EMAIL_LENGTH = 320
 
     USER_REGEX = (

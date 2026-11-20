@@ -19,7 +19,7 @@ from hare.core.caching.constants import (
 from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 TCacheValue = TypeVar("TCacheValue")
 
@@ -34,8 +34,6 @@ class Cache(MutableMapping[tuple[Any, ...], TCacheValue]):
 
     All entries use CacheBucket, including shared storage. Invalidating a cache
     clears retained buckets in place. No key is inspected to infer its lifetime.
-    A cache holding SQL (``holds_sql``) drops a model's bucket when the model is bound
-    to another query builder (``Caches.forget_model_sql()``).
     """
 
     __eq__ = object.__eq__
@@ -46,12 +44,10 @@ class Cache(MutableMapping[tuple[Any, ...], TCacheValue]):
     def __init__(
         self,
         max_size: int = 0,
-        holds_sql: bool = True,
         depends_on_other_models: bool = False,
         dropped_with: Cache[Any] | None = None,
     ) -> None:
         self.max_size = max_size
-        self.holds_sql = holds_sql
         self.depends_on_other_models = depends_on_other_models
         self.bucket_id = next(Cache.bucket_ids)
         self.global_bucket: CacheBucket[TCacheValue] = CacheBucket(max_size)
@@ -61,14 +57,9 @@ class Cache(MutableMapping[tuple[Any, ...], TCacheValue]):
         if dropped_with is not None:
             dropped_with.dependent_caches.append(self)
         Caches.register(self)
-        if holds_sql:
-            Caches.sql_caches.append(self)
 
     @staticmethod
     def _get_buckets(holder: Any) -> dict[int, CacheBucket[Any]]:
-        meta = getattr(holder, "_meta", None)
-        if meta is not None:
-            return meta.plan_cache_buckets
         buckets = (
             vars(holder).get("cache_buckets") if isinstance(holder, type) else getattr(holder, "cache_buckets", None)
         )
@@ -111,18 +102,18 @@ class Cache(MutableMapping[tuple[Any, ...], TCacheValue]):
     def get_value(self, holder: Any, default: Any = None) -> Any:
         return self.get_bucket(holder).get(None, default)
 
-    def get_model_value(self, model: type[Model], default: Any = None) -> Any:
-        """The one value kept for ``model`` - its bucket read straight from the model's metadata, holding
+    def get_model_value(self, binding: ModelBinding, default: Any = None) -> Any:
+        """The one value kept for ``binding`` - its bucket read straight from the model's metadata, holding
         that one entry, so the read leaves the LRU order as it is.
 
         Args:
-            model: The model.
+            binding: The structural binding.
             default: Returned when no value is kept.
 
         Returns:
             The value or ``default``.
         """
-        bucket = model._meta.plan_cache_buckets.get(self.bucket_id)
+        bucket = self._get_buckets(binding).get(self.bucket_id)
         if bucket is None:
             return default
         return bucket.peek(None, default)
@@ -169,13 +160,17 @@ class Cache(MutableMapping[tuple[Any, ...], TCacheValue]):
         for bucket in buckets:
             bucket.clear()
 
-    def forget_model(self, model: type[Model]) -> None:
-        if self.depends_on_other_models:
-            self.clear()
-            return
+    def forget_model(self, binding: ModelBinding, *, includes_graph: bool = False) -> None:
+        """Drop the selected binding and dependent facts within this graph only.
+
+        A dependent cache can describe another model of the same graph. Its complete
+        graph scope expires when the source changes; independent graphs remain valid.
+        """
+        holders = binding.graph.bindings.values() if includes_graph or self.depends_on_other_models else (binding,)
+        for holder in holders:
+            self.forget_holder(holder)
         for dependent_cache in self.dependent_caches:
-            dependent_cache.clear()
-        self.forget_holder(model)
+            dependent_cache.forget_model(binding, includes_graph=True)
 
     def forget_all(self) -> None:
         self.clear()

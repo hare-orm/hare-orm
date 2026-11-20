@@ -15,7 +15,6 @@ from hare.dialects.postgresql.schema.constants import (
     POSTGRESQL_ENUM_TYPE_GRANTS_SQL,
     POSTGRESQL_ENUM_TYPE_METADATA_SQL,
     POSTGRESQL_ENUM_UNSUPPORTED_DEPENDENCIES_SQL,
-    POSTGRESQL_REPLACED_ENUM_TYPE_SUFFIX,
 )
 from hare.exceptions import UnSupportedError
 from hare.sql.identifiers import Identifiers
@@ -38,6 +37,7 @@ class PostgresqlEnumReplacement:
 
     old: EnumType
     new: EnumType
+    changed_schemas: frozenset[str] = frozenset()
     effects: ClassVar[frozenset[SchemaEffect]] = frozenset(
         {SchemaEffect.READ_CATALOG, SchemaEffect.LOCK_TABLES, SchemaEffect.CHECK_ROWS, SchemaEffect.REWRITE_ROWS}
     )
@@ -61,6 +61,8 @@ class PostgresqlEnumReplacement:
         client = editor.client
         type_sql = editor.enum_types.get_type_sql(self.old)
         (metadata,) = await client.execute_dicts(POSTGRESQL_ENUM_TYPE_METADATA_SQL, [type_sql])
+        if metadata["schema_name"] in self.changed_schemas and tuple(metadata["labels"]) == self.new.labels:
+            return
         old = EnumType(metadata["name"], tuple(metadata["labels"]), metadata["schema_name"])
         new = EnumType(old.name, self.new.labels, old.schema)
         type_sql = editor.enum_types.get_type_sql(old)
@@ -88,7 +90,7 @@ class PostgresqlEnumReplacement:
             raise UnSupportedError(POSTGRESQL_ENUM_GRANTS_UNSUPPORTED.format(type=type_sql))
         await editor.enum_types.check_removed_labels_unused(old, new, columns=columns)
 
-        old_name = Identifiers.get_within_limit(f"{new.name}{POSTGRESQL_REPLACED_ENUM_TYPE_SUFFIX}")
+        old_name = Identifiers.get_temporary_name(f"{new.name} previous")
         replacement_type_sql = editor.enum_types.get_type_sql(new)
         await editor.run_sql(f"ALTER TYPE {type_sql} RENAME TO {editor.quote(old_name)}")
         await editor.run_sql(editor.enum_types.get_enum_type_create_sql(new))

@@ -42,11 +42,11 @@ class InstanceDeletion:
         """
         if not obj._saved_in_db:
             raise QueryError("Can't delete unpersisted record")
-        if not all(hasattr(obj, pk_name) for pk_name in obj._meta.primary_key_attribute_names):
+        if not all(hasattr(obj, pk_name) for pk_name in obj._binding.primary_key_attribute_names):
             raise IncompleteInstanceError(
                 PARTIAL_INSTANCE_WITHOUT_KEY_MESSAGE.format(model_name=obj.__class__.__name__, action="delete")
             )
-        if any(getattr(obj, pk_name) is None for pk_name in obj._meta.primary_key_attribute_names):
+        if any(getattr(obj, pk_name) is None for pk_name in obj._binding.primary_key_attribute_names):
             raise QueryError(
                 f"Can't delete a {obj.__class__.__name__} whose primary key isn't set - bulk_create() leaves a "
                 "generated primary key unset unless returning=True"
@@ -66,7 +66,7 @@ class InstanceDeletion:
         # A row soft-deleted already is left alone - nothing changed to report.
         if deleted and ChangeEvents.is_observed():
             await ChangeEvents.report_deletion(
-                connection, type(obj), pks=[obj.pk], soft=obj._meta.soft_delete_field is not None
+                connection, obj._binding, pks=[obj.pk], soft=obj._binding.soft_delete_field is not None
             )
 
     @staticmethod
@@ -81,7 +81,7 @@ class InstanceDeletion:
         with ChangeEvents.reporting_as_a_whole():
             await InstanceDeletion.delete_row_permanently(obj, connection, apply_active_tenant_scope_guard=True)
         if ChangeEvents.is_observed():
-            await ChangeEvents.report_deletion(connection, type(obj), pks=[obj.pk])
+            await ChangeEvents.report_deletion(connection, obj._binding, pks=[obj.pk])
 
     @staticmethod
     async def restore_and_report(obj: Model, connection: DatabaseClient, cascade: bool) -> None:
@@ -98,17 +98,17 @@ class InstanceDeletion:
         else:
             async with connection._in_transaction() as transaction_connection:
                 soft_delete_values = await RelatedRows.lock_soft_delete_values(
-                    type(obj), [obj.pk], transaction_connection
+                    obj._binding, [obj.pk], transaction_connection, source_model=type(obj)
                 )
                 await SoftDeletion.write_soft_delete_field(obj, transaction_connection, None, "restore")
                 if (deleted_at := soft_delete_values.get(obj.pk)) is not None:
-                    await CascadeRestore(transaction_connection, deleted_at).run(type(obj), [obj.pk])
+                    await CascadeRestore(transaction_connection, deleted_at).run(obj._binding, [obj.pk])
         await WriteSteps.report(
             connection,
-            type(obj),
+            obj._binding,
             RowOperation.UPDATE,
             instances=[obj],
-            fields=[obj._meta.soft_delete_field],  # type: ignore[list-item]
+            fields=[obj._binding.soft_delete_field],  # type: ignore[list-item]
         )
 
     @staticmethod
@@ -131,13 +131,13 @@ class InstanceDeletion:
             Same as ``delete()``, except the tenant-scope ``QueryError``.
         """
         InstanceDeletion.check_deletable(obj)
-        soft_delete_field = obj._meta.soft_delete_field
+        soft_delete_field = obj._binding.soft_delete_field
         if await SoftDeletion.is_already_soft_deleted(obj, connection):
             # Already soft-deleted - nothing to do; its deletion time stays.
             return False
         if soft_delete_field:
             InstanceSaving.check_optimistic_lock_field_loaded(obj, "delete")
-            if DeletionGraph.is_unreferenced(type(obj)) and await SoftDeletion.write_soft_delete_field(
+            if DeletionGraph.is_unreferenced(obj._binding) and await SoftDeletion.write_soft_delete_field(
                 obj,
                 connection,
                 CascadeDeletion.get_deleted_at(),
@@ -149,17 +149,17 @@ class InstanceDeletion:
                 # row it didn't match (soft-deleted meanwhile, gone, a stale version) is settled by
                 # the full delete below.
                 return True
-        await DeletionCollector.check_protected(type(obj), [obj.pk], connection)
-        if not obj._meta.soft_delete_field:
+        await DeletionCollector.check_protected(obj._binding, [obj.pk], connection)
+        if not obj._binding.soft_delete_field:
             # The database's own cascade is invisible to Python - a PROTECT further down it is
             # looked for up front.
-            await DeletionCollector.check_protected_transitively(type(obj), [obj.pk], connection)
-        if obj._meta.soft_delete_field:
+            await DeletionCollector.check_protected_transitively(obj._binding, [obj.pk], connection)
+        if obj._binding.soft_delete_field:
             # The cascade on this connection and the obj's UPDATE share a transaction where supported.
             deleted_at = CascadeDeletion.get_deleted_at()
             async with connection._in_transaction() as transaction_connection:
                 soft_delete_values = await RelatedRows.lock_soft_delete_values(
-                    type(obj), [obj.pk], transaction_connection
+                    obj._binding, [obj.pk], transaction_connection, source_model=type(obj)
                 )
                 if (current_soft_delete_value := soft_delete_values.get(obj.pk)) is not None:
                     # Soft-deleted since this obj was read (a stale copy, or a concurrent
@@ -197,13 +197,13 @@ class InstanceDeletion:
             connection: Connection the delete and its cascade run through.
             apply_active_tenant_scope_guard: See ``delete_with_cascade()``.
         """
-        route = DeletionRoutes.get(type(obj), connection.features, permanent=True)
+        route = DeletionRoutes.get(obj._binding, connection.features, permanent=True)
         if route is DeletionRoute.PYTHON_CASCADE:
             # A relation the database doesn't enforce, or rows of a captured model it reaches: its
             # on_delete is carried out in Python, in one transaction with the DELETE.
             async with (
                 connection._in_transaction() as transaction_connection,
-                ProtectConstraintDeferral.defer(type(obj), transaction_connection),
+                ProtectConstraintDeferral.defer(obj._binding, transaction_connection),
             ):
                 root_reached_again = await CascadeDeletion.run_below(
                     obj, transaction_connection, only_unconstrained=True, persist_as_hard_delete=True
@@ -228,7 +228,7 @@ class InstanceDeletion:
             except CascadeDepthLimitError:
                 async with (
                     connection._in_transaction() as transaction_connection,
-                    ProtectConstraintDeferral.defer(type(obj), transaction_connection),
+                    ProtectConstraintDeferral.defer(obj._binding, transaction_connection),
                 ):
                     root_reached_again = await CascadeDeletion.run_below(
                         obj,
@@ -248,7 +248,7 @@ class InstanceDeletion:
             # ProtectConstraintDeferral.
             async with (
                 connection._in_transaction() as transaction_connection,
-                ProtectConstraintDeferral.defer(type(obj), transaction_connection),
+                ProtectConstraintDeferral.defer(obj._binding, transaction_connection),
             ):
                 await InstanceDeletion.persist_hard_delete(
                     obj, transaction_connection, apply_active_tenant_scope_guard=apply_active_tenant_scope_guard
@@ -281,10 +281,10 @@ class InstanceDeletion:
             IntegrityError: The row no longer exists and ``allow_already_deleted`` is not set.
         """
         InstanceSaving.check_optimistic_lock_field_loaded(obj, "delete")
-        writer = InstanceWriter(obj.__class__, connection)
+        writer = InstanceWriter(obj._binding, connection)
         rows = await writer.execute_delete(obj, apply_active_tenant_scope_guard=apply_active_tenant_scope_guard)
         if rows == 0 and not allow_already_deleted:
-            optimistic_lock_field = obj._meta.optimistic_lock_field
+            optimistic_lock_field = obj._binding.optimistic_lock_field
             await InstanceSaving.raise_for_unmatched_update(
                 obj,
                 connection,

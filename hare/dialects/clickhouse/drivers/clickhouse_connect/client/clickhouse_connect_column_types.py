@@ -29,7 +29,7 @@ class ClickhouseConnectColumnTypes:
     codecs, including Dynamic inside arrays, maps, tuples, variants and typed JSON paths.
     """
 
-    declarations: ClassVar[Cache[Any]] = Cache(512, holds_sql=False)
+    declarations: ClassVar[Cache[Any]] = Cache(512)
 
     def __init__(self) -> None:
         self.columns = self.declarations.new_shared_bucket()

@@ -16,6 +16,7 @@ class ClientSchema:
         """The DDL creating every model of this connection.
 
         Args:
+            client: The database client whose schema and type settings are used.
             safe: Whether each object is created only when it doesn't exist yet.
 
         Returns:
@@ -23,17 +24,27 @@ class ClientSchema:
         """
         return client.dialect.schema_editor_class(client).table_creation.get_create_schema_sql(safe)
 
-    @staticmethod
-    async def generate_schema(client: DatabaseClient, safe: bool) -> None:
+    @classmethod
+    async def generate_schema(cls, client: DatabaseClient, safe: bool) -> None:
         """Creates every model of this connection in the database.
 
         Args:
+            client: The database client whose schema and type settings are used.
             safe: Whether each object is created only when it doesn't exist yet.
         """
-        # Connected first, so the DDL is written for the features of the server's own version.
+        schema = await cls.build_connected_sql(client, safe)
+        await cls.execute_schema(client, schema)
+
+    @staticmethod
+    async def build_connected_sql(client: DatabaseClient, safe: bool) -> str:
+        """Render schema SQL using the connected server's capabilities."""
         async with client.acquire_connection():
             pass
-        schema = client.get_schema_sql(safe)
+        return client.get_schema_sql(safe)
+
+    @staticmethod
+    async def execute_schema(client: DatabaseClient, schema: str) -> None:
+        """Execute schema SQL and invalidate the affected client caches."""
         client.log.debug("Creating schema: %s", schema)
         if schema:
             async with SchemaCacheInvalidation.run(client):

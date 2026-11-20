@@ -115,6 +115,13 @@ class LoanRecord(Model):
 которой не подходит ни одна партиция, база отвергает (`IntegrityError`). Порядок, в котором перечислены
 партиции, не важен.
 
+У партиции можно задать физические `table` и `schema`. Например,
+`ListPartition("archived", (7,), table="legacy_archive", schema="archive")` сохраняет логическое имя
+`archived` и обращается к `archive.legacy_archive` в PostgreSQL. Для партиции по умолчанию используется
+`DefaultPartition("other", table="legacy_other", schema="archive")`. В `HashPartitioning.locations`
+адрес отдельной партиции записывается кортежем `(остаток, схема, таблица)`. Смена адреса при тех же
+границах выполняется операцией `RenamePartition` с сохранением строк.
+
 То, что требует PostgreSQL, проверяется до записи любого DDL — при создании таблицы и когда последующая
 миграция добавляет ограничение, индекс или поле либо меняет поле (`AddConstraint`, `AddIndex`,
 `AddField`, `AlterField`), — `ConfigurationError` называет проблему:

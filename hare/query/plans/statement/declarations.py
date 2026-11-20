@@ -23,6 +23,13 @@ class RenderedStatement(NamedTuple):
     parameters: list[Any]
 
 
+class ValuesPlanReading(NamedTuple):
+    """Physical columns and converters shared by values queries of one SQL plan."""
+
+    converters: list[tuple[str, Callable[[Any], Any] | None]]
+    column_names: tuple[str, ...]
+
+
 class ValuesReading(NamedTuple):
     """A result shape's reader and logical grouping, separate from a shared SQL plan."""
 

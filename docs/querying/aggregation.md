@@ -5,7 +5,19 @@ count a row twice (hare raises `QueryError` there instead of returning an inflat
 with subtotals, and window functions with their frames. The aggregates themselves are on
 [Database functions](functions.md#aggregates).
 
+An `aggregate()` result key may repeat a source field, relation or annotation name. Its expressions
+and earlier filters still read the source value:
+`annotate(total=Count("books")).aggregate(total=Sum("total"))`
+sums the earlier counts and returns the result under `total`. A genuinely circular annotation remains
+an error. Output names differing only by letter case stay distinct when aggregated through a derived table.
+
 ## <a id="implicit-group-by"></a>Implicit `GROUP BY`
+
+A plain `distinct()` model query with `only()` or `defer()` is summarized over the actual selected
+rows, including hidden ordering columns that keep rows distinct. `count()` preserves the same row
+identity. `aggregate()` can read the selected fields and annotations, but does not add omitted model
+columns or primary keys to that DISTINCT source. A `values()` query likewise retains its actual SQL
+projection while returning values in the requested public order.
 
 The implicit `GROUP BY` of an aggregate `annotate()` follows these rules:
 
@@ -133,6 +145,10 @@ await Loan.objects.values("branch", "genre").annotate(total=Count("id")).group_b
   row's group leaves the field out — `Grouping("genre")` is 1 in the branch subtotals. It is computed per
   group, like an aggregate. It reads the fields the query groups by — of a plain one it is always 0;
   one of another field, or in a query grouped by nothing, is the database's to refuse (PostgreSQL does).
+- A composite key or relation is one logical field for `Grouping()`: its columns are grouped
+  together and contribute one bit, including a composite-key alias declared with `F("pk")`.
+  A grouped annotation keeps the same bound SQL expression and parameters in `GROUP BY` and
+  `Grouping()`, including when the grouping annotation is declared before its input.
 - `aggregate()` over the groups raises `QueryError` — the subtotal rows would count every row again.
 - PostgreSQL has them (`Features.supports_grouping_sets`); on SQLite and ClickHouse a grouping set and
   `Grouping()` raise `UnSupportedError` before the query is sent. One `group_by()` takes one grouping set —

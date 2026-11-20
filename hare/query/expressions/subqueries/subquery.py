@@ -8,7 +8,6 @@ from hare.exceptions import (
     QueryError,
 )
 from hare.query.expressions.arithmetic.combinable_expression import CombinableExpression
-from hare.query.expressions.constants import UNBINDABLE_VALUE_ORIGIN
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
 from hare.query.expressions.structure.expression_structure import ExpressionStructure
@@ -82,29 +81,22 @@ class Subquery(CombinableExpression, Term):  # type: ignore[misc]
         """The query building the subquery's SQL - a queryset selecting values is built by its
         values query."""
         if self._query is None:
-            query = self._query = self.source_query._get_compiler()  # type: ignore[assignment]
+            query = self._query = self.source_query._get_compiler()
             if query is not self.source_query:
                 # Its values come from the query given.
                 query._plan_origin = self.source_query
-        return self._query  # type: ignore[return-value]
+        return self._query
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
-        declaration_query = self.query
         bound = copy(self)
         bound._plan_origin = self
-        built_query = self._get_wrapped_query(declaration_query, expression_context)
+        built_query = self._get_wrapped_query(self.source_query, expression_context)
+        bound._query = built_query
         value_wrapper_references = expression_context.value_wrapper_references
         # A subquery sharing the outer scope is built in the scope already open: its OuterRefs - and
         # what they report - go to the query the enclosing one is nested in.
         with nullcontext() if self.shares_outer_scope else OuterScope.entered(expression_context) as scope:
-            if value_wrapper_references is not None and built_query.plannable:
-                # The enclosing query keeps its plan with this subquery in it: the subquery's
-                # values are recorded among the enclosing query's own.
-                built_query._make_subquery(value_wrapper_references=value_wrapper_references)
-            else:
-                built_query._make_subquery()
-                if value_wrapper_references is not None:
-                    value_wrapper_references.append((UNBINDABLE_VALUE_ORIGIN, None))
+            built_query._make_embedded_subquery(value_wrapper_references)
         bound._built_query = built_query
         bound.sensitive = bound.selects_sensitive_value()
         if scope is None:
@@ -143,7 +135,7 @@ class Subquery(CombinableExpression, Term):  # type: ignore[misc]
 
         query = self.query
         if isinstance(query, CombinedQuery):
-            return list(query._get_output_names()) if query._combines_values else None
+            return query._get_output_names() if query._combines_values else None
         if isinstance(query, ValuesQuery):
             return ValuesOutput.get_output_names_for_set_operation(query)
         return None
@@ -178,7 +170,6 @@ class Subquery(CombinableExpression, Term):  # type: ignore[misc]
         # Local import: the query statements import the expressions.
         from hare.query.statements.select.combined.combined_derived_queries import CombinedDerivedQueries
         from hare.query.statements.select.combined_query import CombinedQuery
-        from hare.query.statements.select.values.values_output import ValuesOutput
         from hare.query.statements.select.values_query import ValuesQuery
 
         query = self._built_query or self.query
@@ -186,10 +177,10 @@ class Subquery(CombinableExpression, Term):  # type: ignore[misc]
             return CombinedDerivedQueries.get_single_column_value_field(query)
         if not isinstance(query, ValuesQuery):
             return None
-        fields_for_select = list(ValuesOutput.get_output_field_names(query))
+        fields_for_select = query._get_selected_field_names()
         if len(fields_for_select) != 1:
             return None
-        return self.get_selected_field(fields_for_select[0])
+        return self.get_selected_field(next(iter(fields_for_select)))
 
     def get_selected_field(self, selected_name: str) -> ModelField[Any] | None:
         """The field of a column a ``values()``/``values_list()`` subquery selects.
@@ -206,8 +197,19 @@ class Subquery(CombinableExpression, Term):  # type: ignore[misc]
         query = self._built_query or self.query
         if not isinstance(query, ValuesQuery):
             return None
-        field_name = ValuesOutput.get_selected_fields_by_alias(query).get(selected_name, selected_name)
-        return ValuesOutput.get_output_value_field(query, field_name)
+        return ValuesOutput.get_field_by_selected_name(query, selected_name)
+
+    def get_selected_column_name(self, selected_name: str) -> str:
+        """The bound SQL column behind a public selected name, including protected aliases."""
+        from hare.query.statements.select.combined_query import CombinedQuery
+        from hare.query.statements.select.select_query import SelectQuery
+
+        query = self._built_query
+        if isinstance(query, (SelectQuery, CombinedQuery)):
+            for public_name, _source_name, sql_name, _field in query._get_output_columns():
+                if public_name == selected_name and sql_name is not None:
+                    return sql_name
+        return selected_name
 
     def _build_if_needed(self) -> None:
         # Used as a raw Term, never resolved as an expression: an OuterReference inside has no outer

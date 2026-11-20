@@ -28,19 +28,14 @@ from hare.dialects.sqlite.constants import (
     SQLITE_FULL_TEXT_TABLE_PATTERN,
     SQLITE_FULL_TEXT_TOKENIZE_OPTION,
     SQLITE_IDENTIFIER_PATTERN,
-    SQLITE_INDEX_ON_RE,
-    SQLITE_INDEX_TERM_COLLATE_RE,
-    SQLITE_INDEX_TERM_ORDER_RE,
     SQLITE_INDEX_WHERE_RE,
     SQLITE_INT_TYPE,
-    SQLITE_MAIN_SCHEMA,
     SQLITE_NOW_UTC_SQL,
     SQLITE_ROW_ID_TYPE,
     SQLITE_SHARED_COLUMN_TYPE_NOTES,
     SQLITE_SIZE_RE,
     SQLITE_TABLE_EXISTS_SQL,
     SQLITE_TABLE_NAMES_SQL,
-    SQLITE_TABLE_OPTIONS_PATTERN,
     SQLITE_TRIGGERDEF_RE,
     SQLITE_TYPE_MAP,
     SQLITE_VIEWS_SQL,
@@ -52,6 +47,7 @@ from hare.dialects.sqlite.introspection.sqlite_catalog_parts import SqliteCatalo
 from hare.dialects.sqlite.introspection.sqlite_catalog_reader import SqliteCatalogReader
 from hare.dialects.sqlite.introspection.sqlite_column_declarations import SqliteColumnDeclarations
 from hare.dialects.sqlite.introspection.sqlite_declaration_mapper import SqliteDeclarationMapper
+from hare.dialects.sqlite.literals.constants import SQLITE_MAIN_SCHEMA
 from hare.dialects.sqlite.schema.constants import SQLITE_COMMENT_UNESCAPES
 from hare.dialects.sqlite.spatial.constants import SPATIALITE_COLUMN_TYPES
 from hare.dialects.sqlite.types.sqlite_physical_type import SqlitePhysicalType
@@ -65,10 +61,8 @@ from hare.inspectdb.introspection.column_info import ColumnInfo
 from hare.inspectdb.introspection.index_info import IndexInfo
 from hare.inspectdb.introspection.schema_introspector import SchemaIntrospector
 from hare.inspectdb.introspection.table_info import TableInfo
-from hare.sql.order import Order
 
 if TYPE_CHECKING:
-    from hare.ddl.table_options import TableOptions
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.dialect import Dialect
     from hare.inspectdb.introspection.schema_part import SchemaPart
@@ -117,9 +111,11 @@ class SqliteIntrospector(SchemaIntrospector):
         Raises:
             SchemaNotFoundError: The connection has no such database.
         """
-        if schema != SQLITE_MAIN_SCHEMA:
-            database_names = {row["name"] for row in await connection.execute_dicts(SQLITE_DATABASE_LIST_SQL)}
-            if schema not in database_names:
+        get_key = connection.dialect.literals.get_identifier_key
+        schema_key = get_key(schema)
+        if schema_key != get_key(SQLITE_MAIN_SCHEMA):
+            database_names = {get_key(row["name"]) for row in await connection.execute_dicts(SQLITE_DATABASE_LIST_SQL)}
+            if schema_key not in database_names:
                 raise SchemaNotFoundError(schema)
         return SchemaIntrospector.quote_identifier(schema)
 
@@ -501,60 +497,6 @@ class SqliteIntrospector(SchemaIntrospector):
         return re.sub(r"\\(.)", lambda match: SQLITE_COMMENT_UNESCAPES.get(match[1], match[0]), comment)
 
     @staticmethod
-    def _get_table_options(table_options_class: type[TableOptions] | None, table_sql: str) -> TableOptions | None:
-        """Reads the ``WITHOUT ROWID``/``STRICT`` options of a table from its CREATE TABLE text, as
-        the connection's dialect declares them.
-
-        Args:
-            table_options_class: The configured dialect's table option declaration.
-            table_sql: The table's CREATE TABLE text from ``sqlite_master``.
-
-        Returns:
-            The dialect's table options, None when the table has none or the dialect declares none.
-        """
-        if table_options_class is None:
-            return None
-        options_match = SQLITE_TABLE_OPTIONS_PATTERN.search(table_sql)
-        option_words = (
-            {" ".join(option.upper().split()) for option in options_match["options"].split(",")}
-            if options_match is not None
-            else set()
-        )
-        return table_options_class.from_observed(
-            {"without_rowid": "WITHOUT ROWID" in option_words, "strict": "STRICT" in option_words}
-        )
-
-    @staticmethod
-    def _get_sqlite_key_details(index_terms: list[str]) -> tuple[list[str], list[str] | None, list[str]]:
-        """Reads the sort order and collation of each key of an index over plain columns.
-
-        Args:
-            index_terms: Each key's text from the CREATE INDEX statement.
-
-        Returns:
-            Each key's ``Order`` value (a descending key's NULLs first, as the declaration's), the
-            keys without their sort order when one is collated (the index is then an expression
-            index) or None, and the keys a model can't declare (a collated descending key).
-        """
-        key_orders: list[str] = []
-        unordered_terms: list[str] = []
-        has_collation = False
-        unrepresentable_properties: list[str] = []
-        for term in index_terms:
-            order_match = SQLITE_INDEX_TERM_ORDER_RE.search(term)
-            is_descending = order_match is not None and order_match.group("direction").upper() == Order.DESC
-            key_orders.append((Order.DESC_NULLS_FIRST if is_descending else Order.ASC_NULLS_LAST).value)
-            unordered_term = term[: order_match.start()].strip() if order_match else term
-            unordered_terms.append(unordered_term)
-            if SQLITE_INDEX_TERM_COLLATE_RE.search(unordered_term):
-                has_collation = True
-                if is_descending:
-                    unrepresentable_properties.append(term)
-        if not has_collation or unrepresentable_properties:
-            return key_orders, None, unrepresentable_properties
-        return key_orders, unordered_terms, []
-
-    @staticmethod
     def _parse_sqlite_index_definition(index_sql: str) -> tuple[list[str] | None, str | None]:
         """Splits sqlite_master's literal CREATE INDEX text into its key terms and WHERE predicate.
 
@@ -562,19 +504,16 @@ class SqliteIntrospector(SchemaIntrospector):
             index_sql: The index's CREATE INDEX statement.
 
         Returns:
-            (stripped key term texts, or None when the key list can't be located; the raw WHERE
+            (complete key term texts, or None when the key list can't be located; the raw WHERE
             predicate text, or None when the index has no parseable WHERE clause).
         """
-        on_match = SQLITE_INDEX_ON_RE.search(index_sql)
-        if on_match is None:
-            return None, None
-        open_paren_index = on_match.end() - 1
-        terms_sql = CatalogSql.extract_parentheses(index_sql, open_paren_index)
+        _, terms_sql, remainder = CatalogSql.get_parenthesized_parts(index_sql)
         if terms_sql is None:
             return None, None
-        index_terms = [term.strip() for term in CatalogSql.split_terms(terms_sql)]
-        remainder = index_sql[open_paren_index + len(terms_sql) + 2 :]
-        where_match = SQLITE_INDEX_WHERE_RE.match(remainder)
+        # A line comment at the end of a key needs its newline before the delimiter.
+        index_terms = [term.lstrip().rstrip(" \t\r") for term in CatalogSql.split_terms(terms_sql)]
+        where_start = CatalogSql.get_first_unquoted_nonspace_offset(remainder)
+        where_match = SQLITE_INDEX_WHERE_RE.match(remainder[len(remainder) if where_start is None else where_start :])
         return index_terms, where_match.group("condition") if where_match else None
 
     @staticmethod

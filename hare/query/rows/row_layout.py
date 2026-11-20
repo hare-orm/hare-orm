@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from hare.native.native_modules import NativeModules
 from hare.query.enums import RowShape
-from hare.query.rows.row_column import RowColumn
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,10 +15,10 @@ class RowLayout:
     Columns are selected explicitly, so unrelated driver columns never enter the
     result. Multi-column groups represent composite keys: an all-NULL group is
     absent, while a partially NULL group retains all its components. Without
-    groups, each column is one value. Model and values readers share this decoder.
+    groups, each column is one value. A reader of None keeps the driver's value.
     """
 
-    columns: tuple[RowColumn, ...]
+    columns: tuple[tuple[int | str, Callable[[Any], Any] | None], ...]
     groups: tuple[int, ...] = ()
     _native_layout: Any = field(default=None, init=False, repr=False, compare=False)
 
@@ -30,7 +30,7 @@ class RowLayout:
         plan retains this decoder across executions; it contains no execution inputs.
         """
         if self._native_layout is None:
-            object.__setattr__(self, "_native_layout", NativeModules.rows.ValueLayout(self))
+            object.__setattr__(self, "_native_layout", NativeModules.rows.ValueLayout(self.columns, self.groups))
         return self._native_layout
 
     def read(self, row: Any) -> tuple[Any, ...]:
@@ -39,8 +39,8 @@ class RowLayout:
         Each field reader receives its raw value once, including NULL. Conversions
         finish before composite groups are assembled; driver rows stay unchanged.
         """
-        return NativeModules.rows.read_row_values(row, self)
+        return self.native_layout.read(row)
 
     def read_many(self, rows: Any) -> list[tuple[Any, ...]]:
         """Decode rows in order with the same column callbacks and NULL grouping as read()."""
-        return NativeModules.rows.read_values_batch(rows, self, RowShape.TUPLE, (), None)
+        return NativeModules.rows.read_values_batch(rows, self.native_layout, RowShape.TUPLE, (), None)

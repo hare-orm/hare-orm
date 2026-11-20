@@ -24,6 +24,7 @@ from hare.sql.terms.criteria.criterion import Criterion
 
 if TYPE_CHECKING:
     from hare.fields.field import Field
+    from hare.models.model_binding import ModelBinding
     from hare.query.statements.awaitable_query import AwaitableQuery
     from hare.sql.terms.term import Term
 
@@ -35,7 +36,6 @@ class KeysetBounds:
     #: A bounded cache of field comparison support, cleared with model and lookup registrations.
     ordered_fields: ClassVar[Cache[bool]] = Cache(
         max_size=KEYSET_FIELD_ORDER_CACHE_SIZE,
-        holds_sql=False,
         depends_on_other_models=True,
     )
 
@@ -162,22 +162,24 @@ class KeysetBounds:
         Returns:
             The criterion, ``None`` only for an empty ordering.
         """
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
         context = ExpressionContext(
-            model=query.model,
+            binding=model_binding,
             table=query._effective_basetable(),
             annotations=query._annotations,
             dialect=query.dialect,
             connection=query._connection,
             visibility=query._visibility,
             select_related_extra_conditions=query._select_related_extra_conditions,
+            application_context=query._context,
         )
-        features = query._connection.features if query._connection is not None else query.dialect.features
+        features = query._connection.features if query._connection is not None else context.dialect.features
         criterion: Criterion | None = None
         equalities: list[Criterion] = []
         for index, ((field_name, order), value) in enumerate(
             zip(orderings[: len(cursor_values)], cursor_values, strict=True)
         ):
-            bound_path = BoundLookupPath.bind(context, ConcreteFieldPaths.get_path(query.model, field_name))
+            bound_path = BoundLookupPath.bind(context, ConcreteFieldPaths.get_path(model_binding, field_name))
             for join in bound_path.joins:
                 QueryJoins.join_table(query, join)
             ordering = BoundOrdering.bind(context, bound_path.term, bound_path.field, order)
@@ -227,7 +229,7 @@ class KeysetBounds:
                         (
                             PlanOrigins.get_value_origin(query, cursor_attribute, index),
                             LiteralValueReference(
-                                wrapper, query.dialect.types.get_read_column_encoder(field, query.model)
+                                wrapper, context.dialect.types.get_read_column_encoder(field, query.model)
                             )
                             if field is not None
                             else None,

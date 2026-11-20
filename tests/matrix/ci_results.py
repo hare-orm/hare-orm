@@ -15,10 +15,11 @@ class CIResults:
         jobs: Mapping[str, Mapping[str, object]], expected: Sequence[str], *, skip_tests: bool
     ) -> list[str]:
         errors = []
-        if set(jobs) != set(expected):
+        job_names, expected_names = set(jobs), set(expected)
+        if job_names != expected_names:
             errors.append(
-                f"Unexpected CI job set: missing={sorted(set(expected) - set(jobs))}, "
-                f"extra={sorted(set(jobs) - set(expected))}"
+                f"Unexpected CI job set: missing={sorted(expected_names - job_names)}, "
+                f"extra={sorted(job_names - expected_names)}"
             )
         for name, job in jobs.items():
             required = "skipped" if skip_tests and name != "catalog" else "success"

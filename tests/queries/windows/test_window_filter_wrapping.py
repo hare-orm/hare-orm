@@ -1,6 +1,6 @@
 import pytest
-import pytest_asyncio
 
+from hare.core.hare_context import HareContext
 from hare.exceptions import (
     QueryError,
 )
@@ -8,17 +8,6 @@ from hare.query.expressions import Case, F, Q, RawSQL, Value, When, Window
 from hare.query.functions import Count, Sum
 from hare.query.functions.window import Lag, Rank, RowNumber
 from tests.shared_models.testmodels import Author, Book
-
-
-@pytest_asyncio.fixture
-async def library(db):
-    first_author = await Author.objects.create(name="First")
-    second_author = await Author.objects.create(name="Second")
-    third_author = await Author.objects.create(name="Third")
-    await Book.objects.create(name="A", author=first_author, rating=1.0)
-    await Book.objects.create(name="B", author=first_author, rating=2.0)
-    await Book.objects.create(name="C", author=second_author, rating=5.0)
-    return first_author, second_author, third_author
 
 
 def position_in_author() -> Window:
@@ -156,7 +145,7 @@ async def test_window_filter_applies_before_the_cursor(library):
 
 @pytest.mark.asyncio
 async def test_window_filter_with_select_for_update_raises(library):
-    if not Book._meta.connection.features.supports_select_for_update:
+    if not HareContext.require_current().apps.get_queryset(Book).get_connection().features.supports_select_for_update:
         pytest.skip("select_for_update() is not supported by this backend")
     with pytest.raises(QueryError, match="select_for_update"):
         await (

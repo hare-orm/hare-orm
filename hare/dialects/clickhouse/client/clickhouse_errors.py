@@ -46,6 +46,7 @@ class ClickhouseErrors:
         """hare's exception for a driver's.
 
         Args:
+            client: The ClickHouse client supplying driver capabilities and connection settings.
             error: The driver's exception.
             sql: The statement.
             parameters: Its values.

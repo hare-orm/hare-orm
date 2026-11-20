@@ -29,10 +29,7 @@ class ActiveRecordSuite:
         self.orm = ActiveRecordOrm(target)
         ActiveRecordOrm.current = self.orm
         models = importlib.import_module("orm_benchmark.suites.active_record.active_record_models")
-        self.widget_class, self.gadget_class = models.Widget, models.Gadget
-        self.widgets = self.orm.get_queries(models.Widget)
-        self.gadgets = self.orm.get_queries(models.Gadget)
-        self.tags = self.orm.get_queries(models.Tag)
+        self.widget_class, self.gadget_class, self.tag_class = models.Widget, models.Gadget, models.Tag
 
     def make_widgets(self, prefix: str, count: int, category_offset: int = 0) -> list[Any]:
         return [
@@ -91,6 +88,10 @@ class ActiveRecordSuite:
 
         try:
             cold_start = await BenchmarkScenarioRun.measure(connect, 1)
+            # Query entries capture the initialized graph, outside cold-start timing.
+            self.widgets = self.orm.get_queries(self.widget_class)
+            self.gadgets = self.orm.get_queries(self.gadget_class)
+            self.tags = self.orm.get_queries(self.tag_class)
             await self.orm.init_class.generate_schemas()
             async with asyncio.TaskGroup() as warmup:
                 for _ in range(POOL_MAX_SIZE):

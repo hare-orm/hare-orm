@@ -14,7 +14,7 @@ pub(crate) enum PgParameterMode {
 enum ParameterEncoder<'a> {
     Binary,
     Text(&'a str),
-    TextArray(&'a [Value]),
+    TextArray(&'a [Value], Option<u8>),
 }
 
 pub(crate) struct PgParameterEncoding<'a> {
@@ -33,7 +33,7 @@ impl<'a> PgParameterEncoding<'a> {
                 ParameterEncoder::Text(text)
             }
             (PgParameterMode::Negotiated, Value::Array(items)) if is_text_format_array(value, postgres_type) => {
-                ParameterEncoder::TextArray(items)
+                ParameterEncoder::TextArray(items, None)
             }
             _ => ParameterEncoder::Binary,
         };
@@ -47,6 +47,13 @@ impl<'a> PgParameterEncoding<'a> {
         }
     }
 
+    pub(crate) fn with_text_array_delimiter(mut self, delimiter: Option<u8>) -> Self {
+        if let ParameterEncoder::TextArray(_, current) = &mut self.encoder {
+            *current = delimiter;
+        }
+        self
+    }
+
     pub(crate) fn encode(&self, out: &mut BytesMut) -> Result<IsNull, BoxError> {
         match self.encoder {
             ParameterEncoder::Binary => self.value.encode_binary(self.postgres_type, out),
@@ -54,10 +61,9 @@ impl<'a> PgParameterEncoding<'a> {
                 out.extend_from_slice(text.as_bytes());
                 Ok(IsNull::No)
             }
-            ParameterEncoder::TextArray(items) => {
-                let mut literal = String::new();
-                write_text_array_literal(items, &mut literal);
-                out.extend_from_slice(literal.as_bytes());
+            ParameterEncoder::TextArray(items, delimiter) => {
+                let delimiter = delimiter.ok_or("text-array binding requires its native element delimiter")?;
+                write_text_array_literal(items, out, delimiter);
                 Ok(IsNull::No)
             }
         }

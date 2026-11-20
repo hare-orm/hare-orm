@@ -16,16 +16,22 @@ from hare.dialects.base.results import StatementResult
 from hare.dialects.sqlite.constants import SQLITE_DIALECT
 from hare.dialects.sqlite.query import SqliteQuery
 from hare.exceptions import IntegrityError
+from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
 from hare.migrations.exceptions import IrreversibleMigrationError, MigrationLoadError, PartiallyAppliedMigrationError
+from hare.migrations.execution.connections_plan import ConnectionsPlan
 from hare.migrations.execution.executor import MigrationExecutor, MigrationTarget
+from hare.migrations.execution.migration_runner import MigrationRunner
 from hare.migrations.loading.graph import MigrationGraph, MigrationKey
+from hare.migrations.loading.migration_definitions import MigrationDefinitions
 from hare.migrations.loading.migration_loader import MigrationLoader
 from hare.migrations.loading.recorder import MigrationRecorder
+from hare.migrations.making.migration_optimizer import MigrationOptimizer
 from hare.migrations.migration import Migration
-from hare.migrations.operations import HareOperation
+from hare.migrations.operations import AddField, AlterField, CreateModel, HareOperation, RunSQL
 from hare.migrations.state.state import State
 from hare.models import Model
 from tests.utils.migration_plans import plan_migrations
+from tests.utils.project_sources import ProjectSources
 
 
 class FakeConnection:
@@ -48,16 +54,55 @@ class FakeConnection:
         rows = [{"app": key.app_label, "name": key.name} for key in self._applied]
         return StatementResult(0, rows)
 
+    def _execute_built(self, query: str, values: list | None = None):
+        return self.execute(query, values)
+
     async def execute_script(self, query: str, *, recovery: StatementRecovery | None = None) -> None:
         self.executed_scripts.append(query)
 
 
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reverse_connections", (False, True))
+async def test_shared_replacement_graph_uses_each_apps_authoritative_journal(reverse_connections):
+    configs = {
+        app: {"migrations": f"unused_{app}", "default_connection": alias}
+        for app, alias in (("alpha", "left"), ("beta", "right"))
+    }
+    migrations = {}
+    for app in configs:
+        initial = Migration("0001_initial", app, operations=[])
+        first = Migration("0002_first", app, dependencies=[(app, initial.name)], operations=[])
+        second = Migration("0002_second", app, dependencies=[(app, initial.name)], operations=[])
+        merge = Migration("0003_merge", app, dependencies=[(app, first.name), (app, second.name)], operations=[])
+        replacement = Migration("0001_squashed", app, operations=[])
+        replacement.replaces = [(app, migration.name) for migration in (initial, first, second, merge)]
+        for migration in (initial, first, second, merge, replacement):
+            migrations[MigrationKey(app, migration.name)] = migration
+    definitions = MigrationDefinitions(migrations, frozenset(configs), frozenset())
+    executors = {}
+    items = list(configs.items())
+    if reverse_connections:
+        items.reverse()
+    for app, config in items:
+        branch = "0002_first" if app == "alpha" else "0002_second"
+        connection = FakeConnection(applied=[MigrationKey(app, "0001_initial"), MigrationKey(app, branch)])
+        connection.connection_alias = config["default_connection"]
+        executors[connection.connection_alias] = MigrationExecutor(
+            connection, {app: config}, full_apps_config=configs, definitions=definitions
+        )
+    groups, applied = await ConnectionsPlan(executors).get_groups()
+    assert applied == {
+        MigrationKey(app, name)
+        for app in configs
+        for name in ("0001_initial", "0002_first" if app == "alpha" else "0002_second")
+    }
+    planned = {alias: [step.migration.name for step in steps] for alias, steps in groups}
+    assert planned == {"left": ["0002_second", "0003_merge"], "right": ["0002_first", "0003_merge"]}
+
+
 def _write_migrations(tmp_path: Path, app_label: str, migrations: list[tuple[str, list[tuple[str, str]]]]) -> str:
-    package_dir = tmp_path / app_label
-    migrations_dir = package_dir / "migrations"
-    migrations_dir.mkdir(parents=True)
-    (package_dir / "__init__.py").write_text("", encoding="ascii")
-    (migrations_dir / "__init__.py").write_text("", encoding="ascii")
+    migrations_dir = ProjectSources(tmp_path).prepare_migrations(tmp_path / app_label)
     for name, dependencies in migrations:
         content = [
             "from hare import migrations",
@@ -73,11 +118,7 @@ def _write_migrations(tmp_path: Path, app_label: str, migrations: list[tuple[str
 
 
 def _write_runpython_migrations(tmp_path: Path, app_label: str) -> str:
-    package_dir = tmp_path / app_label
-    migrations_dir = package_dir / "migrations"
-    migrations_dir.mkdir(parents=True)
-    (package_dir / "__init__.py").write_text("", encoding="ascii")
-    (migrations_dir / "__init__.py").write_text("", encoding="ascii")
+    migrations_dir = ProjectSources(tmp_path).prepare_migrations(tmp_path / app_label)
 
     (migrations_dir / "0001_initial.py").write_text(
         "\n".join(
@@ -117,14 +158,14 @@ def _write_runpython_migrations(tmp_path: Path, app_label: str) -> str:
                 "",
                 "async def populate_summary(apps, schema_editor) -> None:",
                 "    CALLS.append('forward')",
-                "    Post = apps.get_model('blog.Post')",
-                "    await Post.objects.filter(summary=None).update(summary=F('title'))",
+                "    posts = apps.get_queryset('blog.Post', using=schema_editor.client)",
+                "    await posts.filter(summary=None).update(summary=F('title'))",
                 "",
                 "",
                 "async def reset_summary(apps, schema_editor) -> None:",
                 "    CALLS.append('reverse')",
-                "    Post = apps.get_model('blog.Post')",
-                "    await Post.objects.all().update(summary=None)",
+                "    posts = apps.get_queryset('blog.Post', using=schema_editor.client)",
+                "    await posts.all().update(summary=None)",
                 "",
                 "",
                 "class Migration(migrations.Migration):",
@@ -171,11 +212,7 @@ def _write_cascade_migrations(tmp_path: Path, app_label: str) -> str:
     """A parent/child pair where the child has an ON DELETE CASCADE FK to the parent, followed
     by a migration that ALTERs an unrelated field on the parent - triggers SqliteSchemaEditor's
     table-rebuild path (DROP TABLE + CREATE TABLE + RENAME) for a table other tables reference."""
-    package_dir = tmp_path / app_label
-    migrations_dir = package_dir / "migrations"
-    migrations_dir.mkdir(parents=True)
-    (package_dir / "__init__.py").write_text("", encoding="ascii")
-    (migrations_dir / "__init__.py").write_text("", encoding="ascii")
+    migrations_dir = ProjectSources(tmp_path).prepare_migrations(tmp_path / app_label)
 
     (migrations_dir / "0001_initial.py").write_text(
         "\n".join(
@@ -243,11 +280,7 @@ def _write_cascade_migrations(tmp_path: Path, app_label: str) -> str:
 async def test_sqlite_table_rebuild_does_not_cascade_delete_referencing_rows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """SqliteSchemaEditor._remake_table() drops and recreates a table for most ALTER-adjacent
-    operations - with PRAGMA foreign_keys=ON (hare's own default), DROP TABLE on a table
-    another table has an ON DELETE CASCADE FK pointed at performs an implicit DELETE of every
-    row first, cascading into that other table's own rows. An unrelated AlterField on the
-    PARENT here must not delete the CHILD row referencing it."""
+    """Replacing a SQLite table for a column change preserves rows referencing it with ON DELETE CASCADE."""
     module_path = _write_cascade_migrations(tmp_path, "cascadeapp")
     monkeypatch.syspath_prepend(str(tmp_path))
 
@@ -294,11 +327,7 @@ def _write_fk_to_unmanaged_migration(tmp_path: Path, app_label: str) -> str:
     """One CreateModel for 'Widget', with a ForeignKeyField string-referencing
     '<app_label>.ExternalThing' - a model this migration sequence never creates, standing in
     for a Meta.managed=False model the test registers live instead (see the test itself)."""
-    package_dir = tmp_path / app_label
-    migrations_dir = package_dir / "migrations"
-    migrations_dir.mkdir(parents=True)
-    (package_dir / "__init__.py").write_text("", encoding="ascii")
-    (migrations_dir / "__init__.py").write_text("", encoding="ascii")
+    migrations_dir = ProjectSources(tmp_path).prepare_migrations(tmp_path / app_label)
 
     (migrations_dir / "0001_initial.py").write_text(
         "\n".join(
@@ -389,11 +418,7 @@ def _write_non_atomic_partial_failure_migration(tmp_path: Path, app_label: str) 
     """One migration, ``atomic = False``, with two operations - CreateModel (succeeds) followed
     by a RunPython that always raises - simulating a non-atomic migration failing partway
     through, used by the PartiallyAppliedMigrationError test below."""
-    package_dir = tmp_path / app_label
-    migrations_dir = package_dir / "migrations"
-    migrations_dir.mkdir(parents=True)
-    (package_dir / "__init__.py").write_text("", encoding="ascii")
-    (migrations_dir / "__init__.py").write_text("", encoding="ascii")
+    migrations_dir = ProjectSources(tmp_path).prepare_migrations(tmp_path / app_label)
 
     (migrations_dir / "0001_initial.py").write_text(
         "\n".join(
@@ -473,6 +498,112 @@ async def test_non_atomic_migration_failing_partway_raises_partially_applied_err
         await connection.close()
 
 
+@requires_features(supports_transactions=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("atomic", [False, True], ids=["non-atomic", "atomic"])
+@pytest.mark.parametrize("forwards", [False, True], ids=["unapply", "apply"])
+@pytest.mark.parametrize("squashed", [False, True], ids=["single", "squashed"])
+async def test_journal_failure_reports_the_persisted_migration_state(
+    db_isolated_no_schema, monkeypatch, atomic, forwards, squashed
+):
+    connection = db_isolated_no_schema.get_connection("models")
+    recorder = MigrationRecorder(connection)
+    runner = MigrationRunner(connection, recorder=recorder)
+    await runner.ensure_journal()
+    table = "journal_boundary"
+    before = State()
+    migration = Migration(
+        "journal_check",
+        "models",
+        operations=[RunSQL(f"CREATE TABLE {table} (id integer)", reverse_sql=f"DROP TABLE {table}")],
+    )
+    migration.atomic = atomic
+    if squashed:
+        migration.replaces = [("models", "initial"), ("models", "second")]
+    if not forwards:
+        await runner.apply(migration, before)
+    recorded = set(await recorder.applied_migrations())
+
+    method = "record_applied" if forwards else "record_unapplied"
+    record = getattr(recorder, method)
+
+    async def fail_journal(app, name, connection=None):
+        if name == ("initial" if squashed else migration.name):
+            raise IntegrityError("journal refused the change")
+        await record(app, name, connection=connection)
+
+    monkeypatch.setattr(recorder, method, fail_journal)
+    operation = runner.apply if forwards else runner.unapply
+    error_class = IntegrityError if atomic else PartiallyAppliedMigrationError
+    with pytest.raises(error_class, match="journal refused the change"):
+        await operation(migration, before)
+    assert await DatabaseCatalog.table_exists(connection, table) is (forwards != atomic)
+    assert set(await recorder.applied_migrations()) == recorded
+
+
+@requires_features(supports_transactions=True)
+@pytest.mark.asyncio
+async def test_optimized_column_changes_preserve_values_of_existing_rows(db_isolated_no_schema):
+    connection = db_isolated_no_schema.get_connection("models")
+    runner = MigrationRunner(connection)
+    initial = Migration(
+        "initial",
+        "models",
+        operations=[
+            CreateModel("Widget", [("id", fields.IntField(primary_key=True)), ("code", fields.TextField())]),
+        ],
+    )
+    state = await runner.apply(initial, State())
+    await connection.execute_script("INSERT INTO widget (id, code) VALUES (1, '007'), (2, '-002')")
+    operations = MigrationOptimizer("models").optimize(
+        [
+            AddField("Widget", "score", fields.IntField(db_default=3)),
+            AlterField("Widget", "score", fields.IntField(db_default=7)),
+            AlterField("Widget", "code", fields.IntField()),
+            AlterField("Widget", "code", fields.TextField()),
+        ],
+        state,
+    )
+    await runner.apply(Migration("optimized", "models", operations=operations), state)
+    await connection.execute_script("INSERT INTO widget (id, code) VALUES (3, '009')")
+    rows = await connection.execute_dicts("SELECT id, code, score FROM widget ORDER BY id")
+    assert rows == [
+        {"id": 1, "code": "7", "score": 3},
+        {"id": 2, "code": "-2", "score": 3},
+        {"id": 3, "code": "009", "score": 7},
+    ]
+
+
+@requires_features(supports_not_valid_constraints=True)
+@pytest.mark.asyncio
+async def test_squashing_creation_preserves_the_foreign_keys_pending_validation(db_isolated_no_schema):
+    connection = db_isolated_no_schema.get_connection("models")
+    runner = MigrationRunner(connection)
+    state = await runner.apply(
+        Migration(
+            "parents", "models", operations=[CreateModel("Writer", [("id", fields.IntField(primary_key=True))])]
+        ),
+        State(),
+    )
+    optimizer = MigrationOptimizer("models")
+    for model_name, table_name, optimize in (("Article", "article", False), ("Draft", "draft", True)):
+        operations = [
+            CreateModel(model_name, [("id", fields.IntField(primary_key=True))]),
+            AddField(model_name, "writer", fields.ForeignKeyField("models.Writer", null=True), not_valid=True),
+        ]
+        if optimize:
+            operations = optimizer.optimize(operations, state)
+        state = await runner.apply(Migration(table_name, "models", operations=operations), state)
+
+    rows = await connection.execute_dicts("""
+        SELECT conrelid::regclass::text AS table_name, convalidated
+          FROM pg_constraint
+         WHERE contype = 'f' AND conrelid IN ('article'::regclass, 'draft'::regclass)
+         ORDER BY table_name
+    """)
+    assert rows == [{"table_name": table, "convalidated": False} for table in ("article", "draft")]
+
+
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_graph_planning_with_keys() -> None:
@@ -527,8 +658,8 @@ async def test_loader_builds_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
     key1 = MigrationKey(app_label="app", name="0001_initial")
     key2 = MigrationKey(app_label="app", name="0002_second")
-    assert key1 in loader.graph.nodes
-    assert key2 in loader.graph.nodes
+    assert key1 in loader.graph.node_map
+    assert key2 in loader.graph.node_map
     assert loader.graph.forwards_plan(key2) == [key1, key2]
 
 
@@ -738,11 +869,7 @@ MIGRATION_SOURCE_HEADER = "from hare import migrations, fields\nfrom hare.migrat
 
 
 def _write_migration_sources(tmp_path: Path, app_label: str, sources: dict[str, str]) -> str:
-    package_dir = tmp_path / app_label
-    migrations_dir = package_dir / "migrations"
-    migrations_dir.mkdir(parents=True, exist_ok=True)
-    (package_dir / "__init__.py").write_text("", encoding="ascii")
-    (migrations_dir / "__init__.py").write_text("", encoding="ascii")
+    migrations_dir = ProjectSources(tmp_path).prepare_migrations(tmp_path / app_label)
     for name, body in sources.items():
         (migrations_dir / f"{name}.py").write_text(MIGRATION_SOURCE_HEADER + body, encoding="ascii")
     return f"{app_label}.migrations"
@@ -835,7 +962,7 @@ async def test_migrate_dry_run_does_not_create_the_migrations_table(
     await asyncio.wait_for(executor.migrate(dry_run=True), timeout=30)
 
     recorder = MigrationRecorder(connection)
-    assert await recorder._table_exists() is False
+    assert not await DatabaseCatalog.table_exists(connection, recorder.table_name)
     assert await recorder.applied_migrations() == []
 
 

@@ -15,12 +15,14 @@ import pytest
 from hare.contrib.test import requires_features
 from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.core.connections.connections import Connections
+from hare.core.hare_context import HareContext
 from hare.core.resource_completion import ResourceCompletion
-from hare.exceptions import DBConnectionError
+from hare.exceptions import ConfigurationError, DBConnectionError
 from hare.instrumentation.pools.pool_registry import PoolRegistry
 from hare.transactions.transactions import Transactions
 from tests.shared_models.testmodels import Tournament
 from tests.utils.connection_acquisition_gate import ConnectionAcquisitionGate
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 @pytest.mark.sqlite_only
@@ -28,11 +30,7 @@ from tests.utils.connection_acquisition_gate import ConnectionAcquisitionGate
 async def test_a_sqlite_file_replaced_by_a_copy(tmp_path):
     live_path = tmp_path / "live.sqlite3"
     copy_path = tmp_path / "copy.sqlite3"
-    async with hare_test_context(
-        ["tests.shared_models.testmodels"],
-        db_url=f"sqlite+aiosqlite:///{live_path}?synchronous=OFF",
-        connection_label="models",
-    ):
+    async with DatabaseUnderTest.open_file_model_context(live_path):
         await Tournament.objects.create(id=1, name="kept in the copy")
         # The file the connection opened - a parallel test run gives each worker its own name.
         live_path = Path(Connections.current().get("models").filename)
@@ -102,12 +100,14 @@ async def test_a_connection_dropped_by_close_all_opens_no_pool_again(db_isolated
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
-async def test_queries_running_through_a_repeated_init_all_finish(db_isolated):
-    """A repeated init() with the same configuration closed the connections it replaced at once - a
-    query that had taken one of them and had no pool connection yet failed with "closed and dropped",
-    or "Pool has been closed" with rust_pg, instead of running on the new connection."""
+@pytest.mark.parametrize("reuse_databases", [False, True], ids=["fresh", "reused"])
+async def test_rejected_reinitialization_preserves_inflight_queries(db_isolated, reuse_databases):
+    """Refusing another init leaves the original graph and connection usable by waiting queries."""
     async with hare_test_context(
-        ["tests.shared_models.testmodels"], db_url=os.environ["HARE_TEST_DB"], connection_label="models"
+        ["tests.shared_models.testmodels"],
+        db_url=os.environ["HARE_TEST_DB"],
+        connection_label="models",
+        reuse_databases=reuse_databases,
     ) as context:
         config = {
             "connections": {"models": context.connections.db_config["models"]},
@@ -119,8 +119,13 @@ async def test_queries_running_through_a_repeated_init_all_finish(db_isolated):
             assert await Tournament.objects.filter(id=tournament.id).count() == 1
             return tournament.id
 
+        apps = context.apps
+
         async def reinitialize() -> None:
-            await context.init(config)
+            with pytest.raises(ConfigurationError, match="one application configuration"):
+                await context.init(config)
+            assert context.apps is apps
+            assert context.connections.get("models") is clients[-1]
 
         clients = [context.connections.get("models")]
         written: list[int] = []
@@ -141,11 +146,7 @@ async def test_queries_running_through_a_repeated_init_all_finish(db_isolated):
 async def test_queries_running_through_a_reconnect_of_a_sqlite_file_all_finish(tmp_path):
     """A statement waiting for the SQLite connection while Connections.reconnect() closed it had taken
     the closed connection before it waited - "no active connection" instead of running on a new one."""
-    async with hare_test_context(
-        ["tests.shared_models.testmodels"],
-        db_url=f"sqlite+aiosqlite:///{tmp_path / 'live.sqlite3'}?synchronous=OFF",
-        connection_label="models",
-    ):
+    async with DatabaseUnderTest.open_file_model_context(tmp_path / "live.sqlite3"):
 
         async def write(worker: int) -> int:
             tournament = await Tournament.objects.create(name=f"worker-{worker}")
@@ -167,7 +168,7 @@ async def test_queries_running_through_a_reconnect_of_a_sqlite_file_all_finish(t
 async def test_a_pool_opened_while_a_close_waits_keeps_its_settings(db_isolated, monkeypatch):
     """A close still closing the tenant clients took the template of the pool a query opened meanwhile and
     cleared it - the opened pool then read its max_size from the empty template (KeyError on rust_pg)."""
-    client = Tournament._meta.connection
+    client = HareContext.require_current().apps.get_queryset(Tournament).get_connection()
     await client.close()
     client_type = type(client)
     close_tenant_clients = client_type.close_tenant_clients
@@ -246,9 +247,5 @@ async def test_transactions_running_through_a_reconnect_all_finish(db_isolated):
 async def test_transactions_running_through_a_reconnect_of_a_sqlite_file_all_finish(tmp_path):
     """A transaction made before a close took the connection it found then - closed by the time it ran
     ("no active connection")."""
-    async with hare_test_context(
-        ["tests.shared_models.testmodels"],
-        db_url=f"sqlite+aiosqlite:///{tmp_path / 'live.sqlite3'}?synchronous=OFF",
-        connection_label="models",
-    ):
+    async with DatabaseUnderTest.open_file_model_context(tmp_path / "live.sqlite3"):
         await run_transactions_through_reconnects()

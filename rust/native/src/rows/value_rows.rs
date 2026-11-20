@@ -1,6 +1,5 @@
 //! Values result shapes assembled with one layout for each batch.
 
-use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
@@ -40,24 +39,22 @@ fn make_row<'py>(
 #[pyfunction]
 pub fn read_values_row<'py>(
     row: &Bound<'py, PyAny>,
-    layout: &Bound<'py, PyAny>,
+    layout: &Bound<'py, ValueLayout>,
     row_type: &str,
     names: &Bound<'py, PyTuple>,
     row_class: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let layout = layout.getattr(intern!(layout.py(), "native_layout"))?.cast_into::<ValueLayout>()?;
     make_row(layout.get().read_values(row)?, row_type, names, row_class)
 }
 
 #[pyfunction]
 pub fn read_values_batch<'py>(
     rows: &Bound<'py, PyAny>,
-    layout: &Bound<'py, PyAny>,
+    layout: &Bound<'py, ValueLayout>,
     row_type: &str,
     names: &Bound<'py, PyTuple>,
     row_class: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyList>> {
-    let layout = layout.getattr(intern!(layout.py(), "native_layout"))?.cast_into::<ValueLayout>()?;
     let result = PyList::empty(rows.py());
     for row in rows.try_iter()? {
         result.append(make_row(layout.get().read_values(&row?)?, row_type, names, row_class)?)?;

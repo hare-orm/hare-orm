@@ -2,13 +2,13 @@
 text: its parameter is shown as ``<hidden>`` - written, filtered by, updated, in bulk and through a
 query plan alike. A statement binding no such value keeps a plain list of parameters."""
 
-import os
 import traceback
 
 import pytest
 import pytest_asyncio
 
-from hare.contrib.test import RollbackIsolation, hare_test_context
+from hare.contrib.test import RollbackIsolation
+from hare.core.hare_context import HareContext
 from hare.exceptions import IntegrityError, OperationalError, QueryError
 from hare.instrumentation.declarations import QueryExecuted
 from hare.instrumentation.observers.observers import Observers
@@ -18,18 +18,14 @@ from hare.sql.constants import HIDDEN_PARAMETER_TEXT
 from hare.sql.terms.parameters.query_parameters import QueryParameters
 from hare.transactions.transactions import Transactions
 from tests.observability.sensitive_values_models import Account, Badge, Passport, Profile, RegionAccount, Trip, Visa
+from tests.utils.database_under_test import DatabaseUnderTest
 
 SECRETS = ("P-100200", "P-300400", "tok-secret-1", "P-500600", "P-700800")
 
 
 @pytest_asyncio.fixture(scope="module")
 async def accounts_module():
-    async with hare_test_context(
-        modules=["tests.observability.sensitive_values_models"],
-        db_url=os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:"),
-        app_label="models",
-        connection_label="models",
-    ) as context:
+    async with DatabaseUnderTest.open_model_context(["tests.observability.sensitive_values_models"]) as context:
         yield context
 
 
@@ -128,7 +124,7 @@ async def test_a_refused_write_shows_no_sensitive_value_in_its_error_or_its_caus
     """The driver's error, chained as the cause, carried the database's DETAIL with the value; a
     bulk insert binding a column of values hid the column but not each value of it; and the checks
     hare runs in a database's place wrote the value into their messages."""
-    features = Account._meta.connection.features
+    features = HareContext.require_current().apps.get_queryset(Account).get_connection().features
     if not (features.supports_unique_constraints or features.checks_constraints_before_write):
         pytest.skip("the database keeps no uniqueness, and hare checks none")
     await Account.objects.create(id=1, name="ann", passport=SECRETS[0])
@@ -215,7 +211,7 @@ async def test_a_key_reaching_a_sensitive_field_shows_no_value(accounts, events,
     """A part of a composite key, a key inside a sensitive JSON field, a sensitive primary key and the
     relations keyed by it - filtered, saved, deleted, linked - bound their values shown."""
     monkeypatch.setattr(Observers, "slow_query_threshold_ms", -1.0)
-    assert "passport_id" in Visa._meta.sensitive_fields
+    assert "passport_id" in HareContext.require_current().apps.get_binding(Visa).sensitive_fields
     with caplog.at_level("DEBUG", logger="hare.db_client"):
         await Profile.objects.create(id=1, settings={"token": "tok-secret-1"})
         assert await Profile.objects.filter(settings__token="tok-secret-1").count() == 1
@@ -303,8 +299,11 @@ async def test_one_walk_answers_every_model_of_a_relation_graph(accounts):
 
     cache = SensitiveFilterKeys.reaches_sensitive_fields.cache
     cache.clear()
-    assert SensitiveFilterKeys.reaches_sensitive_fields(Visa) is True
-    assert (cache.get(Passport), cache.get(Trip)) == (True, True)
-    assert SensitiveFilterKeys.reaches_sensitive_fields(Tour) is False
-    assert cache.get(Guide) is False
+    assert SensitiveFilterKeys.reaches_sensitive_fields(HareContext.require_current().apps.get_binding(Visa)) is True
+    assert (
+        cache.get(HareContext.require_current().apps.get_binding(Passport)),
+        cache.get(HareContext.require_current().apps.get_binding(Trip)),
+    ) == (True, True)
+    assert SensitiveFilterKeys.reaches_sensitive_fields(HareContext.require_current().apps.get_binding(Tour)) is False
+    assert cache.get(HareContext.require_current().apps.get_binding(Guide)) is False
     assert await Tour.objects.filter(guide__name="ann").count() == 0

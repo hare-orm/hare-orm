@@ -12,7 +12,7 @@ from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyF
 from hare.migrations.operations import AddField, CreateModel, DeleteModel, RemoveField, RenameModel
 from hare.migrations.state.prepared_operation_states import PreparedOperationStates
 from hare.migrations.state.state import State
-from hare.models import Model
+from hare.models.model_binding import ModelBinding
 
 pytestmark = pytest.mark.database_independent
 
@@ -52,8 +52,7 @@ def get_operations() -> list[CreateModel]:
     ]
 
 
-def get_meta_description(model: type[Model]) -> tuple[Any, ...]:
-    meta = model._meta
+def get_meta_description(meta: ModelBinding) -> tuple[Any, ...]:
     return (
         sorted((name, type(field).__name__) for name, field in meta.fields_map.items()),
         sorted(meta.backward_foreign_key_fields),
@@ -70,7 +69,10 @@ def get_meta_description(model: type[Model]) -> tuple[Any, ...]:
 
 
 def get_apps_description(state: State) -> dict[str, tuple[Any, ...]]:
-    return {name: get_meta_description(model) for name, model in state.apps.apps.get("app", {}).items()}
+    return {
+        name: get_meta_description(state.apps.get_binding(model))
+        for name, model in state.apps.apps.get("app", {}).items()
+    }
 
 
 def test_each_prepared_boundary_renders_the_same_relations_as_a_fresh_snapshot() -> None:
@@ -86,17 +88,20 @@ def test_a_model_nothing_points_at_is_taken_out_without_rendering(render_count: 
     DeleteModel("Review").state_forward("app", state)
     author = state.apps.get_model("app.Author")
     assert render_count == []
-    assert "reviews" not in author._meta.fields_map
-    assert sorted(author._meta.backward_foreign_key_fields) == ["books", "edited_books"]
+    assert "reviews" not in state.apps.get_binding(author).fields_map
+    assert sorted(state.apps.get_binding(author).backward_foreign_key_fields) == ["books", "edited_books"]
 
 
-def test_a_through_model_a_model_left_goes_through_is_rendered_again(render_count: list[str]) -> None:
+def test_removing_a_through_model_rebuilds_bindings_without_recreating_unchanged_classes(
+    render_count: list[str],
+) -> None:
     state = PreparedOperationStates("app", get_operations()[:-1], State()).after
     _ = state.apps
     render_count.clear()
     DeleteModel("Membership").state_forward("app", state)
-    assert state.apps.get_model("app.Shelf")._meta._inited is False
-    assert render_count != []
+    assert state.apps.get_binding("app.Shelf")._inited is False
+    assert render_count == []
+    assert state.apps.binding_graph.sealed
 
 
 def test_a_model_rendered_again_keeps_the_hidden_backward_relations_pointing_at_it() -> None:
@@ -121,4 +126,4 @@ def test_a_model_rendered_again_keeps_the_hidden_backward_relations_pointing_at_
     _ = prepared.after.apps
     state = prepared.operations[-1].before
     assert get_apps_description(state) == get_apps_description(state.clone())
-    assert list(state.apps.get_model("app.Writer")._meta.hidden_backward_relations) == ["app.Tag.writer"]
+    assert list(state.apps.get_binding("app.Writer").hidden_backward_relations) == ["app.Tag.writer"]

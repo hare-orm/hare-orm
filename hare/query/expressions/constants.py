@@ -88,9 +88,6 @@ LITERAL_CAST_SQL_TYPE: dict[type, str] = {
 #: The integers a bare integer literal binds as beside any integer column - its type is taken from the
 #: column beside it, a smallint the narrowest; one beyond is cast to the integer type holding it
 #: (``INTEGER_LITERAL_RANGE``, ``BIG_INTEGER_LITERAL_RANGE``), and one beyond them to a number.
-#: The literals bound in the stored form of their field's type whose bare cast is text - a UUID, a dict as
-#: JSON: a function's main argument is cast to the field's column type, which a column beside it shares.
-FIELD_TYPED_LITERAL_TYPES = (UUID, dict)
 SMALL_INTEGER_LITERAL_RANGE = (-(2**15), 2**15 - 1)
 INTEGER_LITERAL_RANGE = (-(2**31), 2**31 - 1)
 BIG_INTEGER_LITERAL_RANGE = (-(2**63), 2**63 - 1)

@@ -15,6 +15,7 @@ from hare.migrations.operations.operation import Operation
 from hare.migrations.operations.operation_rewrite import OperationRewrite
 from hare.migrations.reports.operation_effect import OperationEffect
 from hare.migrations.state.state import State
+from hare.migrations.state.state_values import StateValues
 
 if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
@@ -33,16 +34,17 @@ class AlterField(ModelBoundOperation):
         return [self.field]
 
     def get_rewrite(self, other: Operation, app_label: str) -> OperationRewrite | None:
-        """A later change or removal of the same field takes this one's place."""
+        """An index-only change or removal of the same field takes this one's place."""
         if (
             isinstance(other, (AlterField, RemoveField))
             and self.is_same_model_name(self.model_name, other.model_name)
             and other.name == self.name
         ):
-            return OperationRewrite((other,))
+            if isinstance(other, RemoveField) or StateValues.same_field_except_index(self.field, other.field):
+                return OperationRewrite((other,))
         return super().get_rewrite(other, app_label)
 
-    def get_provided_dependencies(self, app_label: str) -> list[OperationDependency]:
+    def get_provided_dependencies(self, app_label: str, state: State) -> list[OperationDependency]:
         return [OperationDependency.of_field(app_label, self.model_name, self.name, DependencyType.CHANGED)]
 
     def get_required_dependencies(self, app_label: str, state: State) -> list[OperationDependency]:
@@ -61,15 +63,23 @@ class AlterField(ModelBoundOperation):
         model_state.set_field(self.name, self.field.snapshot())  # type: ignore[union-attr]
         state.mark_models_changed(self.get_changed_model_keys(app_label, self.field, state))
 
-    def get_effect(self, app_label: str, state: State, schema_editor: BaseSchemaEditor) -> OperationEffect:
-        new_state = state.clone()
-        self.state_forward(app_label, new_state)
-        old_model = self._model(state, app_label)
-        new_model = self._model(new_state, app_label)
-        plan = schema_editor.get_alter_field_plan(old_model, new_model, self.name, new_state.get_models_with_tables())
+    def get_effect(
+        self, app_label: str, old_state: State, new_state: State, schema_editor: BaseSchemaEditor
+    ) -> OperationEffect:
+        old_binding = self.get_model_binding(old_state, app_label)
+        new_binding = self.get_model_binding(new_state, app_label)
+        plan = schema_editor.get_alter_field_plan(
+            old_binding,
+            new_binding,
+            self.name,
+            new_state.get_bindings_with_tables(),
+        )
         rewrites_table = SchemaEffect.REWRITE_ROWS in plan.effects
         loses_data = schema_editor.column_type_changes.changes_column_type(
-            old_model, new_model, self.name, schema_editor.client.dialect
+            old_binding,
+            new_binding,
+            self.name,
+            schema_editor.client.dialect,
         )
         reasons = []
         if loses_data:
@@ -89,9 +99,11 @@ class AlterField(ModelBoundOperation):
     def raise_if_unsupported(
         self, app_label: str, old_state: State, new_state: State, schema_editor: BaseSchemaEditor
     ) -> None:
-        model = self._model(new_state, app_label)
+        binding = self.get_model_binding(new_state, app_label)
         DeclaredUniquenessChecks.raise_if_unsupported(
-            schema_editor, model, DeclaredUniquenessChecks.get_unique_field_declarations(model, [self.name])
+            schema_editor,
+            binding,
+            DeclaredUniquenessChecks.get_unique_field_declarations(binding, [self.name]),
         )
 
     async def database_forward(
@@ -104,9 +116,12 @@ class AlterField(ModelBoundOperation):
         if not state_editor:
             return
         self.raise_if_table_options_unsupported(app_label, new_state, state_editor)
-        old_model = self._model(old_state, app_label)
-        new_model = self._model(new_state, app_label)
-        await state_editor.alter_field(old_model, new_model, self.name, new_state.get_models_with_tables())
+        await state_editor.alter_field(
+            self.get_model_binding(old_state, app_label),
+            self.get_model_binding(new_state, app_label),
+            self.name,
+            new_state.get_bindings_with_tables(),
+        )
 
     async def database_backward(
         self,

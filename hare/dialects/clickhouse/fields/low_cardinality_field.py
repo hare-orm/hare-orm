@@ -62,12 +62,20 @@ class LowCardinalityField(Field[Any]):
     def constraints(self) -> dict[str, Any]:
         return self.base_field.constraints
 
+    def get_snapshot_comparison_value(self, value: Any) -> Any:
+        return self.base_field.get_snapshot_comparison_value(value)
+
     def to_db_value(self, value: Any, instance: type[Model] | Model | None) -> Any:
         self.validate(value)
         return None if value is None else self.base_field.to_db_value(value, instance)
 
     def to_python(self, value: Any) -> Any:
         return None if value is None else self.base_field.to_python(value)
+
+    def get_assign_normalized_types(self) -> frozenset[type]:
+        return self._get_unchanged_assign_types(
+            LowCardinalityField.to_python, *self.base_field.get_assign_normalized_types()
+        )
 
     def from_db_value(self, value: Any) -> Any:
         return None if value is None else self.base_field.from_db_value(value)

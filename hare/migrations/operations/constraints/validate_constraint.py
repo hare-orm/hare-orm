@@ -56,5 +56,5 @@ class ValidateConstraint(ModelBoundOperation):
         if not state_editor:
             return
         await state_editor.constraint_statements.get_constraint_validation_plan(
-            self._model(new_state, app_label), self.name
+            self.get_model_binding(new_state, app_label), self.name
         ).execute(state_editor)

@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from hare.core.connections.connections import Connections
 from hare.core.connections.model_connection_choice import ModelConnectionChoice
-from hare.core.hare_context import HareContext
+from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
@@ -31,45 +30,31 @@ class InstanceConnections:
             obj: The model obj.
             for_write: Whether the connection is chosen for a write.
             model: The model queried - this obj's own when omitted.
-            using: An explicit alias or client, checked against the queried model's tenancy too.
+            using: An explicit alias or client of the instance's context, checked against
+                the queried model's tenancy too.
 
         Returns:
             The chosen connection.
+
+        Raises:
+            ConfigurationError: The graph is unpublished, the instance is detached, its context
+                is closed, or the selected client belongs to another HareContext.
         """
-        queried_model = model if model is not None else type(obj)
-        connection = Connections.get_client(using)
-        if connection is not None:
-            return ModelConnectionChoice.get_checked(queried_model, connection)
-        connection_alias = obj._connection_alias
-        if connection_alias is None or queried_model._meta.default_connection != obj._meta.default_connection:
-            return queried_model.get_connection(for_write=for_write)
-        context = HareContext.require_current()
-        router = context.router
-        if router.has_routers:
-            connection = ModelConnectionChoice.get_routed(context, queried_model, for_write)
-            if connection is not None:
-                return ModelConnectionChoice.get_checked(queried_model, connection)
-        connection = ModelConnectionChoice.get_instance_fallback(
-            context, queried_model, type(obj), connection_alias, for_write
-        )
+        obj._binding.graph.check_published()
+        context = obj._context
+        if context is None:
+            raise ConfigurationError("A detached model instance needs an explicitly attached application context")
+        context.check_open()
+        binding = obj._binding if model is None else obj._binding.graph.get_binding(model)
+        connection = context.connections.get(using) if isinstance(using, str) else using
         if connection is None:
-            connection = ModelConnectionChoice.get_default(context, queried_model)
-        return ModelConnectionChoice.get_checked(queried_model, connection)
-
-    @staticmethod
-    def is_routed(model: type[Model], for_write: bool = False) -> bool:
-        """Whether the router chooses the connection for this model.
-
-        Args:
-            model: The model.
-            for_write: Whether the connection is chosen for a write.
-
-        Returns:
-            True when a router has an opinion for this model.
-        """
-        context = HareContext.require_current()
-        router = context.router
-        if not router.has_routers:
-            return False
-        connection = ModelConnectionChoice.get_routed(context, model, for_write)
-        return connection is not None
+            connection_alias = obj._connection_alias
+            if context.router.has_routers:
+                connection = ModelConnectionChoice.get_routed(context, binding, for_write)
+            if connection is None and connection_alias is not None:
+                connection = ModelConnectionChoice.get_instance_fallback(
+                    context, binding, obj._binding, connection_alias, for_write
+                )
+            if connection is None:
+                connection = ModelConnectionChoice.get_default(context, binding)
+        return ModelConnectionChoice.get_checked(binding, connection, context=context)

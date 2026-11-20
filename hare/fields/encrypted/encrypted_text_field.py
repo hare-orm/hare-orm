@@ -5,8 +5,8 @@ from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import FieldError, ValidationError
 from hare.fields.constants import BLIND_INDEX_NAME_SUFFIX
+from hare.fields.data.text.string_field import StringField
 from hare.fields.data.text.text_field import TextField
-from hare.fields.data.text.text_values import TextValues
 from hare.fields.encrypted.constants import (
     BLIND_INDEX_COMPARED_LOOKUPS,
     BLIND_INDEX_SUPPORTED_LOOKUPS,
@@ -106,8 +106,8 @@ class EncryptedTextField(EncryptedFieldBase, TextField):
             return super().to_lookup_value(value, instance)
         if value is None:
             return None
-        TextValues.raise_if_not_text(self, value)
-        return FieldEncryption.get_blind_index(value)
+        value = TextField.to_db_value(self, value, instance)
+        return None if value is None else FieldEncryption.get_blind_index(value)
 
     @FieldEncryption.bind()
     def to_db_value(self, value: Any, instance: type[Model] | Model | None) -> str | None:
@@ -126,8 +126,11 @@ class EncryptedTextField(EncryptedFieldBase, TextField):
             raise ValidationError(f"{self.get_field_label()}: expected an encrypted token, got {type(value).__name__}")
         return FieldEncryption.decrypt(value, self.get_field_label())
 
+    def get_assign_normalized_types(self) -> frozenset[type]:
+        return self._get_unchanged_assign_types(EncryptedTextField.to_python, self.field_type)
+
     def to_python(self, value: Any) -> Any:
         # A freshly assigned value is plaintext - never decrypted, a str only.
         if value is not None:
-            TextValues.raise_if_not_text(self, value)
+            StringField.raise_if_not_text(self, value)
         return value

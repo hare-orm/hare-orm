@@ -2,17 +2,16 @@
 
 import os
 
-import pytest
 import pytest_asyncio
 
 from hare.contrib.test import hare_test_context, truncate_all_models
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 @pytest_asyncio.fixture(scope="module")
 async def clickhouse_lightweight_updates_module():
     db_url = os.getenv("HARE_TEST_DB", "")
-    if not db_url.startswith("clickhouse"):
-        pytest.skip("runs against the ClickHouse test server - make test_clickhouse")
+    DatabaseUnderTest.skip_unless_clickhouse(db_url)
     async with hare_test_context(
         modules=["tests.dialects.clickhouse.lightweight_updates.models"],
         db_url=db_url,

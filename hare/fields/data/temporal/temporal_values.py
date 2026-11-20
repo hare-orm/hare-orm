@@ -56,12 +56,18 @@ class TemporalValues:
             ValidationError: The text is no time of day - 24:00 is the end of a day, which Python 3.14
                 reads as midnight at its start.
         """
-        if value.strip().startswith(END_OF_DAY_HOUR_TEXT):
-            raise ValidationError(
-                f"{field.model_field_name}: {field.get_value_for_message(value)} is the end of a day - no time "
-                "of day holds it"
-            )
-        return TemporalValues.parse_text(field, value, datetime.time.fromisoformat, catch=ValueError)
+        return TemporalValues.parse_text(field, value, TemporalValues.parse_iso_time, catch=ValueError)
+
+    @staticmethod
+    def parse_iso_time(value: str) -> datetime.time:
+        """Parse a clock time without collapsing ISO end-of-day forms to midnight.
+
+        The optional ISO ``T`` prefix and compact notation do not change hour 24 into
+        a time of day. ValueError lets each caller retain its field or lookup error contract.
+        """
+        if value.strip().removeprefix("T").startswith(END_OF_DAY_HOUR_TEXT):
+            raise ValueError("the end of a day is not a time of day")
+        return datetime.time.fromisoformat(value)
 
     @staticmethod
     def raise_if_not_full_date(field: Field[Any], value: str) -> None:

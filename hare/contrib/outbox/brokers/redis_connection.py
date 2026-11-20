@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from hare.core.resource_completion import ResourceCompletion
+
 try:
     import redis.asyncio as redis_asyncio
 except ImportError:
@@ -39,4 +41,4 @@ class RedisConnection:
         """Closes a client made of the URL; one given by the application stays open."""
         if self.closes_client and self.client is not None:
             client, self.client = self.client, None
-            await client.aclose()
+            await ResourceCompletion.wait(client.aclose())

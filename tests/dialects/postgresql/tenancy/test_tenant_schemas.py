@@ -15,20 +15,26 @@ import pytest
 
 from hare.contrib.test import hare_test_context
 from hare.core.connections.connections import Connections
+from hare.ddl.constraints import CheckConstraint
+from hare.ddl.indexes import Index
 from hare.exceptions import ConfigurationError, DBConnectionError, QueryError, UnSupportedError, ValidationError
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
+from hare.migrations import Migration, MigrationRunner, State
 from hare.migrations.api.migrate import migrate
 from hare.migrations.autodetection.diffs.state_model_diff import StateModelDiff
 from hare.migrations.exceptions import TenantMigrationError
 from hare.migrations.execution.executor.migration_executor import MigrationExecutor
 from hare.migrations.execution.executor.migration_target import MigrationTarget
+from hare.migrations.operations import AddConstraint, AddIndex
 from hare.migrations.state.model_state import ModelState
 from hare.models.tenancy.tenancy import Tenancy
 from hare.models.tenancy.tenant_schemas import TenantSchemas
+from hare.query.expressions import Q
 from hare.transactions import Transactions
 from tests.dialects.postgresql.conftest import skip_if_not_postgres
 from tests.dialects.postgresql.tenancy.models_tenant_schemas import TenantCompany, TenantNote
 from tests.utils.database_under_test import DatabaseUnderTest
+from tests.utils.module_loader import ModuleLoader
 
 MODULE = "tests.dialects.postgresql.tenancy.models_tenant_schemas"
 TEMPLATE_QUERY = "tenant_schema_template=tenant_%7Btenant%7D"
@@ -189,7 +195,7 @@ def test_the_template_maps_tenants_to_schemas_and_back():
 
 @pytest.mark.asyncio
 async def test_a_connection_without_a_template_refuses_tenant_models():
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+    db_url = DatabaseUnderTest.get_url()
     async with hare_test_context(
         modules=[MODULE], db_url=db_url, app_label="models", connection_label="models", _generate_schemas=False
     ) as ctx:
@@ -223,10 +229,10 @@ async def test_tenant_schema_declarations_are_checked(module, message):
 
 @pytest.mark.database_independent
 def test_migrations_carry_the_flag_and_refuse_changing_it():
-    model_state = ModelState.make_from_model("models", TenantNote)
+    model_state = ModelState.make_from_declaration("models", TenantNote)
     assert model_state.options["tenant_schema"] is True
-    assert "tenant_schema" not in ModelState.make_from_model("models", TenantCompany).options
-    new_state = ModelState.make_from_model("models", TenantNote)
+    assert "tenant_schema" not in ModelState.make_from_declaration("models", TenantCompany).options
+    new_state = ModelState.make_from_declaration("models", TenantNote)
     new_state.options.pop("tenant_schema")
     with pytest.raises(ConfigurationError, match="tenant_schema"):
         StateModelDiff(model_state, new_state).generate_operations()
@@ -239,7 +245,7 @@ from hare.migrations import operations as ops
 
 async def seed_notes(apps, schema_editor):
     note_model = apps.get_model("models.TenantNote")
-    await note_model.objects.create(id=1, text="seeded")
+    await apps.get_queryset(note_model, using=schema_editor.client).create(id=1, text="seeded")
 
 
 class Migration(migrations.Migration):
@@ -345,11 +351,7 @@ async def test_migrate_runs_in_the_shared_schema_and_every_tenant_schema(tmp_pat
         # models is, including when the public API reloads the model registry inside that scope.
         await get_executor().migrate()
         model_module = sys.modules[MODULE]
-        spec = importlib.util.spec_from_file_location(MODULE, model_module.__file__)
-        assert spec is not None and spec.loader is not None
-        reloaded_module = importlib.util.module_from_spec(spec)
-        monkeypatch.setitem(sys.modules, MODULE, reloaded_module)
-        spec.loader.exec_module(reloaded_module)
+        ModuleLoader.load(MODULE, model_module.__file__, monkeypatch)
         config = {
             "connections": Connections.current().db_config,
             "apps": {
@@ -373,6 +375,73 @@ async def test_migrate_runs_in_the_shared_schema_and_every_tenant_schema(tmp_pat
             assert await get_journal(schema) == []
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tenant", ["acme", 0], ids=["text", "zero"])
+@pytest.mark.parametrize("fake", [False, True], ids=["ddl", "journal-only"])
+async def test_single_tenant_migration_preserves_other_schemas_and_their_journals(tmp_path, monkeypatch, tenant, fake):
+    skip_if_not_postgres()
+    await DatabaseUnderTest.skip_if_the_pooler_loses_the_search_path()
+    monkeypatch.syspath_prepend(str(tmp_path))
+    migrations_module = write_migrations(tmp_path)
+    apps_config = {"models": {"models": [MODULE], "default_connection": "models", "migrations": migrations_module}}
+    async with tenant_context(_generate_schemas=False):
+        selected_schema = await TenantSchemas.create(tenant, "models", create_tables=False)
+        await TenantSchemas.create("other", "models", create_tables=False)
+        executor = MigrationExecutor(Connections.get("models"), apps_config)
+        await executor.migrate()
+        initial = ["0001_initial", "0002_add_size"]
+        with Tenancy.scope(tenant):
+            await executor.migrate([MigrationTarget(app_label="models", name="zero")], fake=fake)
+        assert await get_journal(selected_schema) == []
+        assert await get_journal("public") == initial
+        assert await get_journal("tenant_other") == initial
+        assert {"tenant_company", "shared_marker"} <= await get_tables("public")
+        assert {"tenant_note", "tenant_marker"} <= await get_tables("tenant_other")
+        remaining = await get_tables(selected_schema)
+        assert (
+            ({"tenant_note", "tenant_marker"} <= remaining)
+            if fake
+            else not {"tenant_note", "tenant_marker"} & remaining
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["index", "constraint"])
+@pytest.mark.parametrize("scope", [None, "acme", "beta"], ids=["unset", "matching", "other"])
+async def test_explicit_tenant_migration_binds_metadata_without_switching_its_transaction(operation, scope):
+    skip_if_not_postgres()
+    await DatabaseUnderTest.skip_if_the_pooler_loses_the_search_path()
+    async with tenant_context():
+        await TenantSchemas.create("acme", "models")
+        await TenantSchemas.create("beta", "models")
+        for tenant, number in (("acme", 1), ("beta", 2)):
+            with Tenancy.scope(tenant):
+                await TenantNote.objects.create(id=number, text=tenant)
+        base = Connections.current().get_main("models")
+        client = base.get_schema_client("tenant_acme")
+        state = State.from_models([TenantCompany, TenantNote], default_connections={"models": "models"})
+        original_options = dict(state.models[("models", "TenantNote")].options)
+        name = "explicit_tenant_object"
+        change = (
+            AddIndex("TenantNote", Index(fields=("text",), name=name))
+            if operation == "index"
+            else AddConstraint("TenantNote", CheckConstraint(name=name, check=Q(id__gte=0)))
+        )
+        with Tenancy.scope(scope):
+            await MigrationRunner(client).apply(Migration("change", "models", operations=[change]), state)
+        if operation == "index":
+            catalog = "SELECT schemaname AS schema FROM pg_indexes WHERE indexname=$1"
+        else:
+            catalog = (
+                "SELECT n.nspname AS schema FROM pg_constraint c JOIN pg_namespace n "
+                "ON n.oid=c.connamespace WHERE c.conname=$1"
+            )
+        assert await base.execute_dicts(catalog, [name]) == [{"schema": "tenant_acme"}]
+        assert await base.execute_dicts("SELECT id,text FROM tenant_acme.tenant_note") == [{"id": 1, "text": "acme"}]
+        assert await base.execute_dicts("SELECT id,text FROM tenant_beta.tenant_note") == [{"id": 2, "text": "beta"}]
+        assert state.models[("models", "TenantNote")].options == original_options
+
+
 FAILING_FOR_A_TENANT_MIGRATION = """
 from hare import migrations
 from hare.migrations import operations as ops
@@ -384,7 +453,7 @@ async def seed_or_fail(apps, schema_editor):
     note_model = apps.get_model("models.TenantNote")
     if schema_editor.client.tenant_schema in FAILING_SCHEMAS:
         raise ValueError("this tenant's data can't be seeded")
-    await note_model.objects.create(id=2, text="second")
+    await apps.get_queryset(note_model, using=schema_editor.client).create(id=2, text="second")
 
 
 class Migration(migrations.Migration):
@@ -434,7 +503,7 @@ async def test_drift_compares_each_model_in_the_schema_holding_it():
         await TenantSchemas.create("acme", "models")
         state = State()
         for model in (TenantCompany, TenantNote):
-            state.models[("models", model.__name__)] = ModelState.make_from_model("models", model)
+            state.models[("models", model.__name__)] = ModelState.make_from_declaration("models", model)
         shared = Connections.get("models")
         tenant = shared.get_schema_client("tenant_acme")
         for connection in (shared, tenant):
@@ -446,7 +515,7 @@ async def test_drift_compares_each_model_in_the_schema_holding_it():
         await tenant.execute_script('ALTER TABLE "tenant_note" DROP COLUMN "text"')
         assert [
             type(operation).__name__ for operation in (await detect_drift(tenant, state, ["models"])).operations
-        ] == ["AddField"]
+        ] == ["SeparateDatabaseAndState", "AddField"]
         assert (await detect_drift(shared, state, ["models"])).operations == []
 
 

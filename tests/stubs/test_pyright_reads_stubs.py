@@ -10,11 +10,35 @@ import sys
 
 import pytest
 
-from tests.stubs.stub_configs import REPOSITORY_PATH
+from hare.core.config import HareConfig
+from tests.stubs.stub_configs import REPOSITORY_PATH, write_stubs
 
 # The pyright command line - its environment installs it and node.
 
 pytestmark = pytest.mark.database_independent
+
+
+def test_pyright_reads_nested_abstract_fields_and_their_concrete_subclasses(tmp_path):
+    config = HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"nested": ["tests.stubs.stub_nested_models"]})
+    generated = tmp_path / "generated"
+    write_stubs(generated, config, relation_depth=0)
+    usage = "from tests.stubs import stub_nested_models as models\n"
+    for index, name in enumerate(
+        ("Declarations.ScalarBase", "Declarations.Nested.CompositeBase", "ScalarEntry", "CompositeEntry")
+    ):
+        usage += (
+            f"def check_{index}(obj: models.{name}) -> None:\n"
+            "    reveal_type(obj.code)\n"
+            "    valid: int = obj.code\n"
+            "    invalid: str = obj.code\n"
+        )
+    diagnostics = run_pyright(tmp_path, generated, usage)
+    errors = [item for item in diagnostics if item["severity"] == "error"]
+    revealed = [item["message"] for item in diagnostics if item["severity"] == "information"]
+    assert [item["rule"] for item in errors] == ["reportAssignmentType"] * 4
+    assert len(revealed) == 4
+    assert all('"obj.code"' in message and '"int"' in message for message in revealed)
+
 
 USAGE = """
 from hare.query.expressions import F

@@ -86,12 +86,18 @@ numbers and reads the labels from the type:
   by those numbers, so hare reads it as its label there (`toString(status)`): `order_by()`, `__gt` and
   `Min`/`Max` follow the text, as on PostgreSQL.
 
+  Filter values, cursor boundaries, window defaults and selected literals use that label too.
+  Binary inserts keep the numeric encoding required by the driver; its codes are not text labels.
+
 A migration changes the members with `MODIFY COLUMN`. Removing a member checks first that no row holds it
 — the server refuses to drop a label in use.
 
 An `Enum16` column takes no arithmetic, average or math function, so an `IntEnumField` is read by its
 number there (`toInt16(level)`): `F("level") + 1`, `Avg("level")` and `Abs("level")` work on the number.
-`Max`/`Min` keep the member. An `update()` setting an `IntEnumField` from an expression
+`Max`/`Min` keep the member. Literal branches of `Case` and fallbacks of `Coalesce`
+retain the enum type: a numeric member binds its label and is cast back to the declared enum,
+so a selected or assigned result keeps its numeric enum semantics. An `update()` setting an
+`IntEnumField` from an expression
 (`update(level=F("tiny"))`) refuses a number no member has — the server's mutation would write it into the
 column, which the drivers then read as `None` or fail on.
 
@@ -124,6 +130,11 @@ an enum at any depth — and a path of any length reads through them: `history__
 second number under the key `open` of the first map. A lookup at the end of a path is the one of the
 field there.
 
+A map path names a logical Python key, just as a key in an assigned dict does. The key field's
+path converter parses it before the normal dialect encoding; a custom database read codec does
+not decode the path text. Integer key paths such as `values__17` parse a number even though a
+direct assignment to an integer field still requires an integer.
+
 - **`NULL`.** An array, a map and a tuple are never `Nullable` in ClickHouse, so `null=True` on one —
   at the top or inside another container — has no column: the model raises `UnSupportedError` when it is
   bound. `None` given to the model (`Delivery(tags=None)`, `create(tags=None)`) raises `QueryError`, as on
@@ -135,6 +146,8 @@ field there.
   value is NULL, which a container has no form of — and for `NthValue` they raise `UnSupportedError` before
   any SQL. A `Dynamic` or a `Variant` holds NULL itself and takes all three.
   A `GeneratedField` with a container `output_field` has the same behavior, including empty aggregates.
+  Array element access also retains the server's default for nonnullable container and geometry
+  results past either end: an empty array/map or a tuple of zeros, including a point `(0, 0)`.
 - **Through a relation.** A related row that isn't there — a parent with no children, an unset foreign
   key — has its container and geometry columns read as their empty value, not `None`: in `values()`,
   `F()` and `order_by()`. A filter and an aggregate through the relation still tell it from a row: a

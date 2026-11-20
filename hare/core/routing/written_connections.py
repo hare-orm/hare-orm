@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping
-from contextvars import ContextVar
+from contextvars import Context, ContextVar
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
+
+if TYPE_CHECKING:
+    from hare.dialects.base.client.database_client import DatabaseClient
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,23 +43,57 @@ class WrittenConnections:
         return self.writes.get(None if context is None else context.identity, WrittenConnections.empty_writes)
 
     @classmethod
-    def record(cls, connection_alias: str) -> None:
-        """Records a write through a connection in the current task - when the task's context
-        routes models: a write made before its routers existed changes no read.
+    def record(cls, connection: DatabaseClient) -> None:
+        """Record a write for the application's handler that supplied its actual client.
+
+        Explicit clients may come from another application than the active context.
+        A standalone client without a handler has no application's read history.
 
         Args:
-            connection_alias: The connection.
+            connection: The client the write ran through.
         """
-        # Local import: the context imports the routing package.
-        from hare.core.hare_context import HareContext
-
-        context = HareContext.get_current()
-        if context is None or not context.router.has_routers:
+        handler = connection.connection_handler
+        if handler is None or handler.routing_router is None or not handler.routing_router.has_routers:
             return
+        identity = handler.routing_identity
         written = cls.current.get()
         writes = {} if written is None else written.writes
-        application_writes = MappingProxyType({**writes.get(context.identity, {}), connection_alias: cls.get_time()})
-        cls.current.set(cls(MappingProxyType({**writes, context.identity: application_writes})))
+        application_writes = MappingProxyType(
+            {**writes.get(identity, {}), connection.connection_alias: cls.get_time()}
+        )
+        cls.current.set(cls(MappingProxyType({**writes, identity: application_writes})))
+
+    @classmethod
+    def publish_from_context(cls, context: Context, previous: WrittenConnections | None) -> None:
+        """Publish new writes from a completed ORM operation's internal task.
+
+        Ordinary user tasks retain independent history. Only entries changed by the
+        operation are merged; inherited entries cannot restore forgotten history.
+        Other ContextVars and published immutable snapshots are untouched.
+        """
+        completed = context.get(cls.current)
+        current = cls.current.get()
+        if completed is None or completed is previous or completed is current:
+            return
+        writes = {} if current is None else dict(current.writes)
+        changed = False
+        for identity, times in completed.writes.items():
+            inherited = {} if previous is None else previous.writes.get(identity, {})
+            additions = {alias: timestamp for alias, timestamp in times.items() if inherited.get(alias) != timestamp}
+            if additions:
+                existing = writes.get(identity, {})
+                writes[identity] = MappingProxyType(
+                    {
+                        **existing,
+                        **{
+                            alias: max(existing.get(alias, timestamp), timestamp)
+                            for alias, timestamp in additions.items()
+                        },
+                    }
+                )
+                changed = True
+        if changed:
+            cls.current.set(cls(MappingProxyType(writes)))
 
     @classmethod
     def forget(cls) -> None:

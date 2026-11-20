@@ -10,9 +10,6 @@ RUST_PG_MESSAGE_ENCODING_ERROR_MESSAGE = "error encoding message to server"
 #: How the driver refuses a login itself when the server asks for a password the configuration
 #: has none of - a credential the server would refuse too.
 RUST_PG_MISSING_PASSWORD_MESSAGE = "password missing"  # nosec B105 - the text of a driver error, not a credential
-#: Most bind parameters the Postgres wire protocol carries in one statement (an unsigned 16-bit
-#: count) - an encoding failure for a longer parameter list is that limit.
-RUST_PG_PROTOCOL_MAX_BIND_PARAMETERS = 65535
 
 #: How long to wait for the connection pool to close gracefully before terminating it.
 POOL_CLOSE_TIMEOUT_SECONDS = 10

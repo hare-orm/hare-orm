@@ -3,17 +3,23 @@ created, in another database, a Distributed table over the local table of the fi
 
 import pytest
 
+from hare import Model, fields
 from hare.dialects.clickhouse.constants import CLICKHOUSE_DIALECT
 from hare.dialects.clickhouse.introspection.clickhouse_catalog_engine import ClickhouseCatalogEngine
-from hare.models import Model
+from tests.utils.model_bindings import ModelBindings
 
 pytestmark = pytest.mark.database_independent
 
 
 def test_a_distributed_engine_over_its_own_database_names_it_current():
+    class Visit(Model):
+        id = fields.IntField(primary_key=True)
+
+    binding = ModelBindings.prepare(Visit).get_binding(Visit)
+
     def get_engine(database, sql):
         engine = ClickhouseCatalogEngine.get(sql, database)
-        return engine if isinstance(engine, str) else engine.get_sql(Model, CLICKHOUSE_DIALECT)
+        return engine if isinstance(engine, str) else engine.get_sql(binding, CLICKHOUSE_DIALECT)
 
     assert (
         get_engine("analytics", "Distributed('cluster', 'analytics', 'visit_local', intHash64(id))")

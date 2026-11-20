@@ -18,6 +18,7 @@ from hare.time.zone_settings import ZoneSettings
 if TYPE_CHECKING:
     from hare.dialects.base.types.type_registry import TypeRegistry
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 TModel = TypeVar("TModel", bound="Model")
 
@@ -25,12 +26,10 @@ TModel = TypeVar("TModel", bound="Model")
 class BulkWriteBatches:
     """How bulk writes split their objects into statements and serialize them."""
 
-    SERIALIZE_INSTANCES_CACHE: ClassVar[Cache[tuple[tuple[str, Callable[..., Any]], ...]]] = Cache(
-        holds_sql=False,
-    )
+    SERIALIZE_INSTANCES_CACHE: ClassVar[Cache[tuple[tuple[str, Callable[..., Any]], ...]]] = Cache()
 
     @staticmethod
-    def get_batches(instances: Iterable[Any], batch_size: int | None = None) -> Iterable[Iterable[Any]]:
+    def get_batches(instances: Iterable[Any], batch_size: int | None) -> Iterable[Iterable[Any]]:
         """Batches of at most ``batch_size`` items - the whole iterable as one batch for None.
 
         Args:
@@ -53,13 +52,13 @@ class BulkWriteBatches:
 
     @staticmethod
     def get_values_rows_sql(
-        model: type[Model], placeholder_templates: tuple[str, ...], first_index: int, row_count: int
+        binding: ModelBinding, placeholder_templates: tuple[str, ...], first_index: int, row_count: int
     ) -> str:
         """The rows of a ``VALUES`` list of bound parameters, ``(p1, p2), (p3, p4)``, made once per
         shape and kept with the model's plans.
 
         Args:
-            model: The model written.
+            binding: The model written.
             placeholder_templates: Each column's placeholder, formatted with the parameter's index.
             first_index: The index of the first parameter.
             row_count: How many rows.
@@ -68,10 +67,10 @@ class BulkWriteBatches:
             The SQL.
         """
         key = (placeholder_templates, first_index, row_count)
-        values_rows_sql = StatementPlans.values_rows_sql
-        sql = values_rows_sql.get_bucket(model).get(key)
+        bucket = StatementPlans.values_rows_sql.get_bucket(binding)
+        sql = bucket.get(key)
         if sql is None:
-            sql = values_rows_sql.get_bucket(model)[key] = BulkWriteBatches.build_values_rows_sql(*key)
+            sql = bucket[key] = BulkWriteBatches.build_values_rows_sql(*key)
         return sql
 
     @staticmethod
@@ -127,39 +126,41 @@ class BulkWriteBatches:
 
     @staticmethod
     def get_instance_writers(
-        model: type[Model],
+        binding: ModelBinding,
         columns: tuple[str, ...],
         types: TypeRegistry,
     ) -> tuple[tuple[str, Callable[..., Any]], ...]:
         """The writers of a column layout (``TypeRegistry.get_db_writer()``) - a datetime's and a time's depend
         on ``use_timezone``."""
-        bucket = BulkWriteBatches.SERIALIZE_INSTANCES_CACHE.get_bucket(model)
+        bucket = BulkWriteBatches.SERIALIZE_INSTANCES_CACHE.get_bucket(binding)
         key = (columns, types, ZoneSettings.get_use_timezone())
         writers = bucket.get(key)
         if writers is None:
-            writers = tuple((name, types.get_db_writer(model._meta.fields_map[name])) for name in columns)
+            writers = tuple((name, types.get_db_writer(binding.fields_map[name])) for name in columns)
             bucket.store(key, writers)
         return writers
 
     @staticmethod
-    def serialize_instance(model: type[TModel], types: TypeRegistry, obj: TModel, columns: Sequence[str]) -> list[Any]:
+    def serialize_instance(
+        binding: ModelBinding, types: TypeRegistry, obj: TModel, columns: Sequence[str]
+    ) -> list[Any]:
         """Convert one object's values through its Python field writers."""
-        writers = BulkWriteBatches.get_instance_writers(model, tuple(columns), types)
+        writers = BulkWriteBatches.get_instance_writers(binding, tuple(columns), types)
         return [writer(getattr(obj, name), obj) for name, writer in writers]
 
     @staticmethod
-    def get_sensitive_positions(model: type[Model], field_names: Sequence[str]) -> list[int]:
+    def get_sensitive_positions(binding: ModelBinding, field_names: Sequence[str]) -> list[int]:
         """The positions of the ``sensitive=True`` fields among a row's written fields - their
         parameters are never shown (``QueryParameters``).
 
         Args:
-            model: The written model.
+            binding: The written model.
             field_names: The fields of a row, in order.
 
         Returns:
             The positions, none for a model without sensitive fields.
         """
-        sensitive_fields = model._meta.sensitive_fields
+        sensitive_fields = binding.sensitive_fields
         if not sensitive_fields:
             return []
         return [position for position, name in enumerate(field_names) if name in sensitive_fields]
@@ -181,11 +182,11 @@ class BulkWriteBatches:
 
     @staticmethod
     def serialize_instances(
-        model: type[TModel],
+        binding: ModelBinding,
         types: TypeRegistry,
         objs: list[TModel],
         columns: list[str],
     ) -> list[list[Any]]:
         """Convert every row through the same field writers as a single-object write."""
-        writers = BulkWriteBatches.get_instance_writers(model, tuple(columns), types)
+        writers = BulkWriteBatches.get_instance_writers(binding, tuple(columns), types)
         return NativeModules.rows.serialize_instances(objs, writers)

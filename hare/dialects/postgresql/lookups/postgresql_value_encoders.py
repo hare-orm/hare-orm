@@ -10,8 +10,9 @@ from hare.dialects.postgresql.fields.constants import (
     POSTGRESQL_LTXTQUERY_TYPE,
 )
 from hare.dialects.postgresql.fields.ranges.range import Range
-from hare.exceptions import UnSupportedError, ValidationError
+from hare.exceptions import ValidationError
 from hare.fields import Field
+from hare.query.filters.lookups.value_encoders import ValueEncoders
 from hare.sql.functions.cast import Cast
 from hare.sql.terms.term import Term
 from hare.sql.terms.values.value_wrapper import ValueWrapper
@@ -44,11 +45,7 @@ class PostgresqlValueEncoders:
         Raises:
             UnSupportedError: ``values`` isn't a list, tuple or set.
         """
-        if not isinstance(values, (list, tuple, set)):
-            raise UnSupportedError(
-                f"{field.model_field_name}: expected a list/tuple/set of values for this lookup, got "
-                f"{field.get_value_for_message(values)}"
-            )
+        ValueEncoders.check_list_values(values, field)
         return [
             None if value is None else PostgresqlValueEncoders.encode_range(value, obj, field, dialect)
             for value in values

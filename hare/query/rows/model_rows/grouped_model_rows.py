@@ -8,9 +8,9 @@ from hare.models.instances.dirty_fields import DirtyFields
 from hare.query.rows.model_rows.model_rows import ModelRows
 
 if TYPE_CHECKING:
+    from hare.core.hare_context import HareContext
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.results.statement_result import StatementResult
-    from hare.query.rows.model_rows.model_columns import ModelColumns
 
 
 class GroupedModelRows(ModelRows):
@@ -21,18 +21,16 @@ class GroupedModelRows(ModelRows):
     grouping does not retain driver rows or install temporary attributes on the instances.
     """
 
-    def get_result_layout(
-        self, columns: list[ModelColumns], annotations: tuple[tuple[str, int | str, Any], ...]
-    ) -> Any:
+    def get_result_layout(self, columns: list[Any], annotations: tuple[tuple[str, int | str, Any], ...]) -> Any:
         ((_name, owner_key, owner_reader),) = annotations
         return self.native_rows.GroupedModelLayout(
-            columns[0], self.model._meta.primary_key_attribute_names, owner_key, owner_reader
+            columns[0], self._binding.primary_key_attribute_names, owner_key, owner_reader
         )
 
-    async def read_all(self, connection: DatabaseClient, result: StatementResult) -> list[Any]:
-        layout = self.prepared_result or self.get_result_layout(
-            self.get_columns(connection, result), self.get_annotation_layout(connection, result.column_names)
-        )
+    async def read_all(
+        self, connection: DatabaseClient, result: StatementResult, *, context: HareContext | None = None
+    ) -> list[Any]:
+        layout = self.prepared_result or self._get_unprepared_result_layout(connection, result)
         shared: dict[Any, Any] = {}
         entries: list[Any] = []
         for start in range(0, len(result.rows), CHUNK_SIZE):
@@ -43,6 +41,7 @@ class GroupedModelRows(ModelRows):
                     start,
                     stop,
                     connection.connection_alias,
+                    context,
                     DirtyFields.snapshot_dirty_fields,
                     shared,
                 )

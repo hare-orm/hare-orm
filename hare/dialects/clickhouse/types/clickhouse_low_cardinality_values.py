@@ -51,12 +51,12 @@ class ClickhouseLowCardinalityValues:
         return f"LowCardinality({base_type})"
 
     def prepare_db(self, field: Field[Any]) -> Callable[[Any, Any], Any]:
-        """Bind the inner writer while retaining the outer field's NULL validation."""
-        write = TypeRegistry.get_db_writer(self.types, field.base_field)  # type: ignore[attr-defined]
+        """Bind the inner writer and validate every value through the outer declaration."""
+        write = self.types.get_db_writer(field.base_field)  # type: ignore[attr-defined]
 
         def write_value(value: Any, instance: Any) -> Any:
+            field.validate(value)
             if value is None:
-                field.validate(value)
                 return None
             return write(value, instance)
 
@@ -64,9 +64,16 @@ class ClickhouseLowCardinalityValues:
 
     def prepare_lookup(self, field: Field[Any]) -> Callable[[Any, Any], Any]:
         """Comparisons retain the base field's lookup contract, including NULL."""
-        return TypeRegistry.get_lookup_writer(self.types, field.base_field)  # type: ignore[attr-defined]
+        write = self.types.get_lookup_writer(field.base_field)  # type: ignore[attr-defined]
+
+        def write_value(value: Any, instance: Any) -> Any:
+            if value is not None:
+                field.validate(value)
+            return write(value, instance)
+
+        return write_value
 
     def prepare_python(self, field: Field[Any]) -> Callable[[Any], Any]:
         """Bind the inner reader without passing an outer NULL through it."""
-        read = TypeRegistry.get_python_reader(self.types, field.base_field)  # type: ignore[attr-defined]
+        read = self.types.get_python_reader(field.base_field)  # type: ignore[attr-defined]
         return lambda value: None if value is None else read(value)

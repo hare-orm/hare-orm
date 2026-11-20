@@ -4,6 +4,7 @@ import pytest
 
 from hare import Model, fields
 from hare.contrib.test import hare_test_context
+from hare.core.hare_context import HareContext
 
 pytestmark = pytest.mark.sqlite_only
 
@@ -32,5 +33,5 @@ async def test_composite_set_default_encodes_each_component_once():
         book = await Book.objects.create(schedule=original)
         await original.delete()
         stored = await Book.objects.get(pk=book.pk)
-        relation = Book._meta.fields_map["schedule"]
+        relation = HareContext.require_current().apps.get_binding(Book).fields_map["schedule"]
         assert tuple(getattr(stored, name) for name in relation.source_fields) == fallback.pk

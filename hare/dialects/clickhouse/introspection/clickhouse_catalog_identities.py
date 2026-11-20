@@ -7,14 +7,15 @@ from typing import TYPE_CHECKING
 from sqlparse import tokens
 from sqlparse.lexer import tokenize
 
+from hare.ddl.enums import SchemaPartType
 from hare.dialects.clickhouse.clickhouse_engine import ClickhouseEngine
 from hare.dialects.clickhouse.introspection.clickhouse_sql_parts import ClickhouseSqlParts
 from hare.dialects.clickhouse.introspection.constants import (
     CLICKHOUSE_DISTRIBUTED_ENGINE_NAME,
     CLICKHOUSE_ENGINE_CLAUSES,
 )
-from hare.inspectdb.enums import SchemaPartType
 from hare.inspectdb.introspection.catalog_identities import CatalogIdentities
+from hare.inspectdb.introspection.catalog_sql import CatalogSql
 
 if TYPE_CHECKING:
     from hare.dialects.base.literals.sql_literals import SqlLiterals
@@ -31,9 +32,8 @@ class ClickhouseCatalogIdentities(CatalogIdentities):
 
     def map_engine(self, sql: str) -> str:
         """Preserve opaque engines; map known database arguments and scoped replica paths."""
-        name = ClickhouseSqlParts.get_before_parentheses(sql)
-        arguments_sql, suffix = ClickhouseSqlParts.get_parenthesised(sql)
-        arguments = ClickhouseSqlParts.split(arguments_sql)
+        name, arguments_sql, suffix = CatalogSql.get_parenthesized_parts(sql)
+        arguments = ClickhouseSqlParts.split(arguments_sql or "")
         if not arguments:
             return sql
         if name == CLICKHOUSE_DISTRIBUTED_ENGINE_NAME:
@@ -94,9 +94,9 @@ class ClickhouseCatalogIdentities(CatalogIdentities):
         if source_position < 0:
             return sql
         source, suffix = ClickhouseSqlParts.get_parenthesised(sql[source_position:])
-        if ClickhouseSqlParts.get_before_parentheses(source) != "CLICKHOUSE":
+        name, arguments, _ = CatalogSql.get_parenthesized_parts(source)
+        if name != "CLICKHOUSE" or arguments is None:
             return sql
-        arguments, _ = ClickhouseSqlParts.get_parenthesised(source)
         database_position = ClickhouseSqlParts.find_words(arguments, "DB")
         if database_position < 0 or ClickhouseSqlParts.find_words(arguments, "HOST") >= 0:
             return sql

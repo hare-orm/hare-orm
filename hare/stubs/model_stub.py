@@ -26,7 +26,7 @@ from hare.typing_info.write_value_types import WriteValueTypes
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.fields.relations.fields.relational_field import RelationalField
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.lookup_info.lookup_info import LookupInfo
 
 
@@ -42,8 +42,9 @@ class ModelStub:
         relation_depth: How many relations a filter key crosses at most.
     """
 
-    def __init__(self, model: type[Model], dialect: Dialect, imports: StubImports, relation_depth: int) -> None:
-        self.model = model
+    def __init__(self, binding: ModelBinding, dialect: Dialect, imports: StubImports, relation_depth: int) -> None:
+        model = binding._model
+        self._binding = binding
         self.dialect = dialect
         self.imports = imports
         self.relation_depth = relation_depth
@@ -55,34 +56,34 @@ class ModelStub:
         self.updates_name = imports.declare(f"{model_name}{UPDATES_SUFFIX}")
         self.queryset_name = imports.declare(f"{model_name}{QUERYSET_SUFFIX}")
 
-    def get_paths(self, model: type[Model], prefix: str, depth: int) -> list[str]:
+    def get_paths(self, binding: ModelBinding, prefix: str, depth: int) -> list[str]:
         """The field paths a filter key may start with - the model's fields, and the fields of the
         models its relations lead to, ``depth`` relations deep - back to a model crossed before too
         (``shop__items__name``, ``parent__parent__name``).
 
         Args:
-            model: The model the paths start at.
+            binding: The model the paths start at.
             prefix: The path to the model.
             depth: How many more relations a path crosses.
 
         Returns:
             The paths.
         """
-        paths = [f"{prefix}{name}" for name in model._meta.generic_foreign_key_fields]
-        for name, field in model._meta.fields_map.items():
+        paths = [f"{prefix}{name}" for name in binding.generic_foreign_key_fields]
+        for name, field in binding.fields_map.items():
             path = f"{prefix}{name}"
             paths.append(path)
             related_model = getattr(field, "related_model", None)
             if depth > 0 and isinstance(related_model, type):
-                paths.extend(self.get_paths(related_model, f"{path}__", depth - 1))
+                paths.extend(self.get_paths(binding.graph.get_binding(related_model), f"{path}__", depth - 1))
         return paths
 
     def get_filter_types(self) -> dict[str, ValueType]:
         """The type of the value of each filter key."""
         filter_types: dict[str, ValueType] = {}
-        for path in [PRIMARY_KEY_ALIAS, *self.get_paths(self.model, "", self.relation_depth)]:
+        for path in [PRIMARY_KEY_ALIAS, *self.get_paths(self._binding, "", self.relation_depth)]:
             try:
-                lookups = self.get_generic_lookups(path) or self.model._meta.get_lookups(path, self.dialect)
+                lookups = self.get_generic_lookups(path) or self._binding.get_lookups(path, self.dialect)
             except FieldError:
                 # A field no filter reads (a generic relation's own attribute).
                 continue
@@ -108,7 +109,7 @@ class ModelStub:
             for lookup in sorted(GENERIC_FOREIGN_KEY_LOOKUPS):
                 suffix = LOOKUP_SEPARATOR.join(part for part in (type_suffix, lookup) if part)
                 lookup_info = GenericForeignKeyPaths.get_lookup_info(
-                    self.model, f"{path}{LOOKUP_SEPARATOR}{suffix}" if suffix else path
+                    self._binding, f"{path}{LOOKUP_SEPARATOR}{suffix}" if suffix else path
                 )
                 if lookup_info is None:
                     return {}
@@ -117,11 +118,11 @@ class ModelStub:
 
     def get_write_types(self) -> dict[str, ValueType]:
         """The type of each field value accepted by ``create()``."""
-        return WriteValueTypes.get_all(self.model)
+        return WriteValueTypes.get_all(self._binding)
 
     def get_update_types(self) -> dict[str, ValueType]:
         """The shared write contracts with expressions accepted for updates."""
-        return WriteValueTypes.get_all(self.model, accepts_expressions=True, write_type=WriteType.UPDATE)
+        return WriteValueTypes.get_all(self._binding, accepts_expressions=True, write_type=WriteType.UPDATE)
 
     def get_typed_dict(self, name: str, types_by_key: dict[str, ValueType]) -> list[str]:
         """The lines of a ``TypedDict`` whose keys are optional - the functional form takes any key."""
@@ -136,7 +137,7 @@ class ModelStub:
 
     def get_declarations(self) -> list[str]:
         """The lines the stub adds for the model."""
-        model = self.imports.add_class(self.model)
+        model = self.imports.add_class(self._binding._model)
         filters = self.filters_name
         writes = self.writes_name
         updates = self.updates_name
@@ -162,7 +163,7 @@ class ModelStub:
             "",
             *self.get_typed_dict(updates, self.get_update_types()),
             "",
-            f"class {queryset_name}({self.get_queryset_base_text(self.model._meta.manager.queryset_class)}):",
+            f"class {queryset_name}({self.get_queryset_base_text(self._binding.manager.queryset_class)}):",
             f"    def filter(self, *args: {q_name} | {exists}, **kwargs: {unpack}[{filters}]) -> {self_name}: ...",
             f"    def exclude(self, *args: {q_name} | {exists}, **kwargs: {unpack}[{filters}]) -> {self_name}: ...",
             f"    @{overload}",
@@ -268,26 +269,22 @@ class ModelStub:
         Relation paths and expression outputs retain the queryset's general return type.
         """
         selected_types: dict[str, ValueType] = {}
-        for name in self.model._meta.fields_db_projection:
+        for name in self._binding.fields_db_projection:
             try:
-                lookup_info = self.model._meta.get_lookup_info(name)
+                lookup_info = self._binding.get_lookup_info(name)
             except FieldError:
                 continue
             selected_types[name] = FilterValueTypes.get_selected_value_type(lookup_info)
         return selected_types
 
-    def get_attribute_annotations(self) -> dict[str, str]:
-        """The annotation of each field of the model's class."""
-        return ModelStub.get_field_annotations(self.model, self.imports)
-
     @staticmethod
-    def get_field_annotations(model: type[Model], imports: StubImports) -> dict[str, str]:
+    def get_field_annotations(binding: ModelBinding, imports: StubImports) -> dict[str, str]:
         """The annotation of each field of a model's class - abstract too - ``Field[<value>]``, a
         descriptor giving the field on the class and its value on an instance; a relation's value is
         the related object, ``Any`` while the relation names its model by a string.
 
         Args:
-            model: The model.
+            binding: The model.
             imports: The stub's imports.
 
         Returns:
@@ -295,18 +292,17 @@ class ModelStub:
         """
         value_type_text = ValueTypeText(imports)
         field_class = imports.add("hare.fields.field", "Field")
-        meta = model._meta
-        relation_names = meta.foreign_key_fields | meta.one_to_one_fields
+        relation_names = binding.forward_key_relation_names
         annotations: dict[str, str] = {}
-        for name in meta.fields_db_projection:
-            field = meta.fields_map[name]
+        for name in binding.fields_db_projection:
+            field = binding.fields_map[name]
             value_class = getattr(field, "enum_type", None) or field.get_python_type()
             value_type = ValueType(classes=(value_class,), nullable=field.null)
             annotations[name] = f"{field_class}[{value_type_text.get_text(value_type)}]"
-        for name in meta.fields_map:
+        for name in binding.fields_map:
             if name not in relation_names:
                 continue
-            relation: RelationalField[Any] = meta.fields_map[name]  # type: ignore[assignment]
+            relation: RelationalField[Any] = binding.fields_map[name]  # type: ignore[assignment]
             related_model = relation.related_model
             value_type = (
                 ValueType(models=(related_model,), nullable=relation.null)
@@ -319,9 +315,9 @@ class ModelStub:
     def get_primary_key_lines(self) -> list[str]:
         """The lines declaring ``pk`` in the model's class - the key's value, a tuple of the key fields'
         values for a composite key, None also taken on assignment; none for a model without a key."""
-        if not self.model._meta.primary_key_attribute:
+        if not self._binding.primary_key_attribute:
             return []
-        key_type = FilterValueTypes.get_selected_value_type(self.model._meta.get_lookup_info(PRIMARY_KEY_ALIAS))
+        key_type = FilterValueTypes.get_selected_value_type(self._binding.get_lookup_info(PRIMARY_KEY_ALIAS))
         key_text = self.value_type_text.get_text(key_type)
         name = PRIMARY_KEY_ALIAS
         return [
@@ -336,9 +332,9 @@ class ModelStub:
         declares besides) - the queryset it gives: the stub's queryset for the default manager's
         queryset class, else the class itself."""
         class_var = self.imports.add("typing", "ClassVar")
-        default_queryset_class = self.model._meta.manager.queryset_class
+        default_queryset_class = self._binding.manager.queryset_class
         managers: dict[str, BaseManager] = {}
-        for model_class in reversed(self.model.__mro__):
+        for model_class in reversed(self._binding._model.__mro__):
             managers.update(
                 (name, value) for name, value in vars(model_class).items() if isinstance(value, BaseManager)
             )
@@ -388,7 +384,7 @@ class ModelStub:
         Returns:
             The annotation.
         """
-        model = self.imports.add_class(self.model)
+        model = self.imports.add_class(self._binding._model)
         any_name = self.imports.add("typing", "Any")
         class_text = self.value_type_text.get_class_text(queryset_class)
         if queryset_class is QuerySet or class_text == any_name:

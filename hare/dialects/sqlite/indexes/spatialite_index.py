@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.dialects.base.features import Features
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class SpatialiteIndex(SeparateTableIndex):
@@ -62,17 +62,17 @@ class SpatialiteIndex(SeparateTableIndex):
             raise ConfigurationError("SpatialiteIndex has no key order - its field is named without '-'")
 
     @classmethod
-    def get_covering(cls, model: type[Model], field_name: str) -> SpatialiteIndex | None:
+    def get_covering(cls, binding: ModelBinding, field_name: str) -> SpatialiteIndex | None:
         """The model's spatial index of a field.
 
         Args:
-            model: The model.
+            binding: The model.
             field_name: The field.
 
         Returns:
             The index, None when the field has none.
         """
-        for index in model._meta.indexes:
+        for index in binding.indexes:
             if isinstance(index, cls) and index.fields[0] == field_name:
                 return index
         return None
@@ -131,11 +131,11 @@ class SpatialiteIndex(SeparateTableIndex):
                 "features.supports_spatial_index - SpatiaLite loaded with its spatial metadata"
             )
 
-    def get_geometry_field(self, model: type[Model]) -> GeometryField:
+    def get_geometry_field(self, binding: ModelBinding) -> GeometryField:
         """The indexed field.
 
         Args:
-            model: The indexed model.
+            binding: The indexed model.
 
         Returns:
             The field.
@@ -143,14 +143,15 @@ class SpatialiteIndex(SeparateTableIndex):
         Raises:
             ConfigurationError: The field isn't a ``GeometryField``.
         """
-        field = model._meta.fields_map.get(self.fields[0])
+        model = binding._model
+        field = binding.fields_map.get(self.fields[0])
         if not isinstance(field, GeometryField):
             raise ConfigurationError(
                 f"{model.__name__}: SpatialiteIndex indexes a GeometryField - {self.fields[0]!r} isn't one"
             )
         return field
 
-    def get_extra(self, model: type[Model], client: DatabaseClient) -> str:
+    def get_extra(self, binding: ModelBinding, client: DatabaseClient) -> str:
         """Rejects the index where it can't be created - a plain ``CREATE INDEX`` is never written
         for it.
 
@@ -160,7 +161,7 @@ class SpatialiteIndex(SeparateTableIndex):
         self.raise_if_missing_feature(client.features, repr(client.connection_alias))
         return ""
 
-    def get_create_sqls(self, schema_editor: BaseSchemaEditor, model: type[Model], safe: bool) -> list[str]:
+    def get_create_sqls(self, schema_editor: BaseSchemaEditor, binding: ModelBinding, safe: bool) -> list[str]:
         """Returns the statements registering the column and creating its R*Tree - each answers 1
         in ``SPATIALITE_INDEX_RESULT_COLUMN`` when it did its part, 0 when SpatiaLite refused it.
 
@@ -169,23 +170,24 @@ class SpatialiteIndex(SeparateTableIndex):
                 hasn't the field's SRID, or the table is in an attached database.
             ConfigurationError: The field isn't a geometry, or the model has no integer primary key.
         """
+        model = binding._model
         client = schema_editor.client
         self.raise_if_other_dialect(client.dialect)
         self.raise_if_missing_feature(client.features, repr(client.connection_alias))
-        if model._meta.schema is not None:
+        if binding.schema is not None:
             raise UnSupportedError(
                 f"SpatialiteIndex(fields={list(self.fields)!r}) of {model.__name__}: SpatiaLite registers and "
                 f"indexes the geometry columns of the main database only, not of the attached database "
-                f"{model._meta.schema!r}"
+                f"{binding.schema!r}"
             )
-        field = self.get_geometry_field(model)
-        self.get_row_key_column(model)
+        field = self.get_geometry_field(binding)
+        self.get_row_key_column(binding)
         SpatialFeatures.raise_if_unknown_reference_system(
             client, f"SpatialiteIndex(fields={list(self.fields)!r}) of {model.__name__}", field.srid
         )
         literals = client.dialect.literals
-        table_sql = literals.get_string_literal_sql(model._meta.db_table)
-        column_sql = literals.get_string_literal_sql(model._meta.get_column_names(self.fields)[0])
+        table_sql = literals.get_string_literal_sql(binding.db_table)
+        column_sql = literals.get_string_literal_sql(binding.get_column_names(self.fields)[0])
         result_sql = schema_editor.quote(SPATIALITE_INDEX_RESULT_COLUMN)
         register_sql = SPATIALITE_REGISTER_COLUMN_SQL.format(
             table=table_sql,

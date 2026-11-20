@@ -47,6 +47,10 @@ class SqliteTransactionClient(TransactionClient, SqliteClient):
         #: The connection's busy timeout before a top-level transaction with a lock timeout set it.
         self._previous_busy_timeout: int | None = None
 
+    def get_physical_client(self) -> SqliteClient:
+        """Keep the physical root pinned by this transaction, even after context replacement."""
+        return self.get_non_transactional_client()  # type: ignore[return-value]
+
     async def _take_transaction_resources(self) -> None:
         # The one connection belongs to one top-level transaction at a time.
         parent = self._parent
@@ -186,8 +190,4 @@ class SqliteTransactionClient(TransactionClient, SqliteClient):
         return None
 
     def _get_new_savepoint_name(self) -> str:
-        return self._gen_savepoint_name()
-
-    @classmethod
-    def _gen_savepoint_name(cls) -> str:
-        return f"hare_savepoint_{next(cls._savepoint_name_counter)}"
+        return f"hare_savepoint_{next(type(self)._savepoint_name_counter)}"

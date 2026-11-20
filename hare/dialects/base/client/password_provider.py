@@ -98,8 +98,8 @@ class PasswordProvider:
         same time.
 
         Args:
-            stale_password: The password the caller found too old or refused; a fetch that already
-                replaced it while the caller waited is used as it is.
+            stale_password: The password the caller found too old or refused; a fetch completed
+                while this caller waited is reused even if the provider returned the same text.
 
         Returns:
             The password.
@@ -107,8 +107,9 @@ class PasswordProvider:
         Raises:
             ConfigurationError: The function gave no password.
         """
+        fetched_at = self.fetched_at
         async with self._fetch_lock:
-            if self.password is not None and self.password != stale_password:
+            if self.password is not None and (self.password != stale_password or self.fetched_at != fetched_at):
                 return self.password
             password = self.get_password()
             if inspect.isawaitable(password):

@@ -21,7 +21,7 @@ class SearchPath:
     def __init__(self, *schemas: str) -> None:
         if any(not schema or "\0" in schema for schema in schemas):
             raise ConfigurationError(INVALID_SEARCH_PATH_ELEMENT)
-        object.__setattr__(self, "schemas", tuple(schemas))
+        object.__setattr__(self, "schemas", schemas)
 
     @classmethod
     def parse(cls, setting: str) -> SearchPath:

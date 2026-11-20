@@ -14,7 +14,6 @@ from hare.dialects.base.client.password_provider import PasswordProvider
 from hare.dialects.base.results import StatementResult
 from hare.dialects.clickhouse.keeper.keeper_session import KeeperSession
 from hare.dialects.postgresql.client.postgresql_client import PostgresqlClient
-from hare.dialects.sqlite.client.sqlite_client import SqliteClient
 from hare.exceptions import ConfigurationError
 from hare.models.write.write_steps import WriteSteps
 from tests.utils.fake_client import FakeClient
@@ -75,11 +74,14 @@ async def test_postgresql_shutdown_closes_all_pools_after_tenant_failure(cancel)
 @pytest.mark.parametrize("original", [0, 1])
 async def test_sqlite_constraint_scope_restores_setting_and_context_after_cancellation(phase, original):
     client = FakeClient("sqlite")
-    client.pragmas = {"foreign_keys": original}
+    client.foreign_keys_enabled = bool(original)
+    client.get_physical_client = lambda: client
     editor = client.dialect.schema_editor_class(client)
     statements = []
     failure = asyncio.CancelledError("scope cancelled")
-    previous_context = SqliteClient.foreign_keys_switched_off.get()
+
+    async def read_foreign_key_state():
+        return client.foreign_keys_enabled
 
     async def execute(sql):
         statements.append(sql)
@@ -87,15 +89,16 @@ async def test_sqlite_constraint_scope_restores_setting_and_context_after_cancel
             raise failure
         return StatementResult(0, [])
 
+    client.read_foreign_key_state = read_foreign_key_state
     client.execute = execute
     with pytest.raises(asyncio.CancelledError) as raised:
         async with editor.constraint_checking_disabled():
             assert editor.foreign_key_check_required is bool(original)
-            assert client.connection_alias in SqliteClient.foreign_keys_switched_off.get()
+            assert not client.foreign_keys_enabled
             raise failure
     assert raised.value is failure
-    assert statements == ["PRAGMA foreign_keys = OFF", f"PRAGMA foreign_keys = {original}"]
-    assert SqliteClient.foreign_keys_switched_off.get() == previous_context
+    assert statements == (["PRAGMA foreign_keys = OFF", "PRAGMA foreign_keys = 1"] if original else [])
+    assert client.foreign_keys_enabled is bool(original)
     assert not editor.foreign_key_check_required
 
 

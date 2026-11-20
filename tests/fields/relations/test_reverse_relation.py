@@ -70,7 +70,7 @@ async def test_an_unfetched_reverse_relation_is_refused(
     parent = await parent_class.objects.create(**parent_values)
     with pytest.raises(
         NoValuesFetched,
-        match="No values were fetched for this relation - await it or prefetch it",
+        match="No values were fetched for this relation - use async for or prefetch it",
     ):
         use_children(getattr(parent, related_name))
 

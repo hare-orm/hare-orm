@@ -4,12 +4,26 @@ Fields define conversion and validation for individual writes, bulk writes, filt
 and result materialization. Native drivers decode database wire formats;
 they do not provide a second implementation of ORM field rules.
 
+`get_snapshot_comparison_value(value)` supplies a value for dirty tracking and `diff_against()`
+without calling a database writer. Ordinary fields keep Python equality; JSON fields expose typed
+documents' JSON representation and containers apply the same hook to held values. Override it when
+the field's stored distinctions differ from its Python object's equality.
+
 A column writer is bound once to the field or dialect conversion. Exact scalar values
-declared by `get_unchanged_write_types()` may pass through the native serializer unchanged;
-the field's `validate()` still runs once. Other values call the ordinary writer, including
-its validation. Conversion or validation failures propagate without retrying the writer
-or a user validator. Decimal rounding uses `decimal`; UUID, duration and JSON helpers share
-their native implementation with direct field calls.
+declared by `get_unchanged_write_types()` may pass through the native serializer unchanged.
+For unchanged non-NULL values, field validation runs once. Default validation calls the same
+native routine as `Field.validate()`, without a Python wrapper call. A captured custom
+`validate()` callback retains its normal invocation; validators are still read from the field
+in order on each validation. A nullable `None` passes through unchanged. Other values call
+the ordinary writer, including its validation. Conversion or validation failures propagate without
+retrying the writer or a user validator. Decimal rounding uses `decimal`; UUID, duration and JSON
+helpers share their native implementation with direct field calls.
+
+String fields share text conversion through an internal `StringField` base. `CharField`,
+`TextField`, `CitextField` and `FixedStringField` keep their concrete SQL declarations,
+normalization and native-reading settings. Override the concrete field's `to_python()` or
+`from_db_value()` to customize conversion; inherited readers still call `self.to_python()`.
+Fixed-width byte padding and encrypted-text conversion remain specific to their fields.
 
 Container subclasses implement `encode_value(value, instance, types, path)`,
 `decode_value(value, types)` and `normalize_value(value, path)`. These hooks apply
@@ -30,6 +44,33 @@ Prepared writers and readers preserve overrides of `TypeRegistry.get_db_value()`
 selection is performed during preparation; an overridden value or selection method remains
 part of each conversion. Writers receive the current model or instance at invocation time.
 Preparation does not retain query values, tenant bindings or execution connections.
+
+Field declarations can be pickled when their configured values and callbacks are picklable.
+The built-in native JSON codecs and clock callbacks retain their qualified module identity;
+custom callbacks follow Python's normal pickle rules. Runtime writer/reader caches
+are excluded from the declaration's serialized state.
+
+Overrides of `get_db_writer()`, `get_lookup_writer()` and `get_python_reader()` are also retained
+when selecting child codecs, generated-field output codecs, native hydration and returned-key
+matching. An identity shortcut cannot bypass an overridden selector. Matching stored keys uses
+the same writers and readers for every batch size.
+
+Without an explicit lookup conversion, lookups use the registry's storage writer, including
+registered `to_db` conversions. A field's explicit `to_lookup_value()` or registered `to_lookup`
+retains priority. Ordinary fields retain their batch lookup hook when no registry conversion
+changes its semantics.
+
+Container predicates use the same lookup selection. An array's `__item` compares through
+the held field's lookup hook; `__has_key`, `__has_keys` and `__has_any_keys` use the map key
+field's hook. A whole-container literal uses the container field's lookup conversion and
+retains its declared SQL type. Storage conversion is the fallback, not a replacement for an
+explicit lookup hook.
+
+CASE branches and functions selecting an argument, such as `Coalesce`, `Greatest` and `Least`,
+choose literal conversion before binding and keep the matching value field and SQL type with
+the prepared encoder. Encoded text is not reinterpreted as plain text when it represents a
+different field type. Existing encoder hooks remain authoritative and each value is converted
+once. Only `None` means no encoder; a callable's truthiness does not change that choice.
 
 Lookup lists share `TypeRegistry.get_lookup_values()` and `Field.to_lookup_values()` for
 batch conversion. NULL positions are preserved without converting NULL, and each applicable
@@ -80,6 +121,14 @@ What you typically override:
   ClickHouse's `ClickhouseDatetimeField` gives its precision and zone.
 - `deconstruct()` — returns `(path, args, kwargs)`: what a migration file writes and the autodetector
   compares. Extend it if your field takes constructor args beyond the base ones.
+- `get_stored_value_conversion(old_field)` — returns a stored-value converter for `AlterField`, or
+  `None` when storage needs no rewrite. Existing SQL NULLs are skipped. A converter may return `None`
+  for a nullable column; later batches still visit every remaining value exactly once.
+  A rewrite of a primary-key column first stages its original rows in a private database table, so
+  moving keys cannot be visited again or skipped. Every client read is a bounded batch; selected rows
+  are not all retained in Python memory. The staging table is dropped on success, failure or cancellation.
+  Offline SQL collection only describes the conversion. Database constraints and restrictions on key
+  updates still apply.
 - `migration_import_path` — a stable dotted path, if the field's module might move.
 
 ```python
@@ -106,12 +155,23 @@ class MoneyField(Field[int]):
 `Model(**kwargs)`/`Model.objects.create(**kwargs)` construction runs each keyword value through
 `to_python(self, value)`, not `from_db_value()` — a value read from the database and a value the caller
 just typed in are different things, even though they often need the same handling. The default
-implementation returns the value unchanged, which is safe for any field whose
+implementation keeps an already-typed Python value unchanged, which is safe for any field whose
 `to_db_value`/`from_db_value` pair isn't a faithful, idempotent encode/decode of an already-Python value.
 
 Override `to_python()` (typically to just call `self.from_db_value(value)`, the same conversion a value
 read from the database gets) when a freshly assigned value genuinely needs that same normalization — e.g.
 parsing a bare ISO string into a real `datetime`.
+
+Built-in fields can skip that call for exact types whose values their converter always keeps
+unchanged. Overriding `to_python()` in a subclass disables the inherited built-in shortcut;
+`field_type` alone does not establish that a value is already normalized. Keyword values,
+static and callable defaults, and `update_from_dict()` use the same declaration. Copying an
+already-normalized instance does not normalize its ordinary fields again.
+
+A custom `get_assign_normalized_types()` can return a `frozenset` of exact types that its
+converter always leaves unchanged. Return an empty set if values of that type can change, for
+example trimming a string or converting its time zone. This is an unconditional guarantee,
+not a list of accepted input types.
 
 **Don't** override it (keep the default) when `to_db_value`/`from_db_value` are asymmetric — an
 encoder/decoder pair that isn't its own inverse when applied to an already-decoded value, as with
@@ -217,6 +277,10 @@ are copied; callbacks retain their identity. The snapshot drops model/name/refer
 derived conversion caches. Relation snapshots retain physical column overrides and declaration
 references, while removing the bound target model and key fields.
 
+The same treatment applies when fields or callbacks are held inside custom containers such as
+`UserDict`, `deque` or dataclasses. Shared references and cycles use the same deepcopy memo;
+the wrapper's copying protocol still controls how the wrapper itself is copied.
+
 `get_declaration_values()` returns the state to retain, including inherited and private slots.
 Runtime copies, deep copies and snapshots preserve slot values automatically. A custom field can
 override this method to exclude runtime attributes. Override `snapshot(memo=...)`
@@ -279,3 +343,20 @@ in `ExtensionContribution.transforms` from `Dialect.get_contribution()`. Each de
 field class, segment and `RegisteredTransform(get_transform, required_extension)`.
 `get_transform(field)` returns the same pair as `get_path_transform()`. Outside factories,
 `FieldClass.register_transform(segment, get_transform, required_extension=...)` publishes one declaration.
+
+Query paths consult registered declarations before the field's `get_path_transform()` hook,
+including container fields. An explicit registration can override a built-in segment;
+subclass registrations precede base-class registrations. The selected declaration supplies
+both the transform and its required extension. `GeneratedField` paths use the output field.
+
+When a field is a map's key, `get_path_key_value(segment)` turns a path segment into its logical
+Python value. The default uses `to_python()`, preserving assignment normalization without calling
+`from_db_value()` on user text. Integer fields first parse the textual number, then call their
+ordinary `to_python()` hook; this also covers integer enums. The map's dialect writer encodes the
+key afterwards. A custom field with another textual key format can override this hook.
+
+For migration narrowing, `get_narrowing_limit(old_field)` returns a scalar `NarrowingLimit`
+or `None`. `get_held_narrowing_limits(old_field)` returns a sequence of `(HeldValuePath, limit)`
+pairs for nested values, empty by default. The schema checker consumes both hooks without
+classifying the field as a container. `GeneratedField` delegates both to its output field,
+comparing that field with the previous effective output.

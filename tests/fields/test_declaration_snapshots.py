@@ -5,11 +5,13 @@ from pickle import dumps, loads
 import pytest
 
 from hare import Model, fields
+from hare.core.apps.model_binding_graph import ModelBindingGraph
 from hare.migrations import Migration, State
 from hare.migrations.operations import CreateModel, RunPython, SeparateDatabaseAndState
-from hare.migrations.state.state_apps import StateApps
 from hare.query.expressions import F
+from hare.query.managers.manager import Manager
 from tests.fields.field_declaration.subclass_fields import EnumField
+from tests.utils.model_bindings import ModelBindings
 
 pytestmark = pytest.mark.database_independent
 
@@ -53,12 +55,9 @@ def test_slotted_field_state_survives_model_publication_and_foreign_key_copy():
     class Book(Model):
         author = fields.ForeignKeyField("library.Author", to_field="label")
 
-    apps = StateApps()
-    apps.register_model("library", Author)
-    apps.register_model("library", Book)
-    apps.init_relations()
-    published = Author._meta.fields_map["label"]
-    shadow = Book._meta.fields_map["author_id"]
+    apps = ModelBindings.prepare(Author, Book, app_label="library")
+    published = apps.get_binding(Author).fields_map["label"]
+    shadow = apps.get_binding(Book).fields_map["author_id"]
     assert published is not declaration
     assert published.enum_type is shadow.enum_type is Label
     assert shadow.to_python("book") is Label.BOOK
@@ -93,11 +92,13 @@ def test_nested_field_snapshot_copies_literals_and_preserves_callbacks():
 
 
 def test_generated_field_snapshot_does_not_keep_its_output_model_binding():
+    declaration_graph = ModelBindingGraph()
+
     class Book(Model):
         price = fields.IntField()
         total = fields.GeneratedField(F("price") + 1, output_field=fields.IntField())
 
-    original = Book._meta.fields_map["total"]
+    original = declaration_graph.include(Book).fields_map["total"]
     copied = original.snapshot()
     assert copied.model is None
     assert copied.model_field_name == ""
@@ -113,16 +114,12 @@ def test_historical_relation_declaration_rebinds_without_live_model_references()
     class Book(Model):
         author = fields.ForeignKeyField("library.Author", to_field="name", source_field="author_name")
 
-    apps = StateApps()
-    apps.register_model("library", Author)
-    apps.register_model("library", Book)
-    apps.init_relations()
     state = State.from_models([Author, Book], app_label="library")
     relation = state.models[("library", "Book")].fields["author"]
     assert relation.model is relation.related_model is relation.to_field_instance is None
     assert relation.to_field_instances == relation.source_fields == ()
     assert relation.source_field == "author_name"
-    historical = state.apps.get_model("library.Book")._meta.fields_map["author"]
+    historical = state.apps.get_binding("library.Book").fields_map["author"]
     assert historical.related_model is state.apps.get_model("library.Author")
     assert historical.related_model is not Author
     assert relation.related_model is None
@@ -148,6 +145,7 @@ def test_operation_snapshot_preserves_field_factory_and_nested_python_callback()
 
 
 def test_one_declaration_can_be_published_under_different_model_field_names():
+    declaration_graph = ModelBindingGraph()
     factory = DefaultFactory()
     declaration = fields.ArrayField(fields.JSONField(default=factory))
 
@@ -157,8 +155,8 @@ def test_one_declaration_can_be_published_under_different_model_field_names():
     class Author(Model):
         tags = declaration
 
-    book_field = Book._meta.fields_map["labels"]
-    author_field = Author._meta.fields_map["tags"]
+    book_field = declaration_graph.include(Book).fields_map["labels"]
+    author_field = declaration_graph.include(Author).fields_map["tags"]
     assert declaration.model is None
     assert declaration.model_field_name == ""
     assert book_field is not author_field
@@ -170,6 +168,7 @@ def test_one_declaration_can_be_published_under_different_model_field_names():
 
 
 def test_publication_snapshot_and_conversion_buckets_have_separate_lifetimes():
+    declaration_graph = ModelBindingGraph()
     from copy import copy
 
     from hare.core.caching.cache import Cache
@@ -177,7 +176,7 @@ def test_publication_snapshot_and_conversion_buckets_have_separate_lifetimes():
     class Book(Model):
         payload = fields.JSONField(default={"labels": []})
 
-    field = Book._meta.fields_map["payload"]
+    field = declaration_graph.include(Book).fields_map["payload"]
     binding = field.get_binding()
     cache = Cache()
     cache.get_bucket(field)["conversion"] = object()
@@ -199,17 +198,15 @@ def test_publication_snapshot_and_conversion_buckets_have_separate_lifetimes():
 
 
 def test_relation_snapshot_keeps_implicit_column_declaration_after_linking():
+
     class Author(Model):
         name = fields.TextField()
 
     class Book(Model):
         author = fields.ForeignKeyField("library.Author")
 
-    apps = StateApps()
-    apps.register_model("library", Author)
-    apps.register_model("library", Book)
-    apps.init_relations()
-    field = Book._meta.fields_map["author"]
+    apps = ModelBindings.prepare(Author, Book, app_label="library")
+    field = apps.get_binding(Book).fields_map["author"]
     assert field.source_field == "author_id"
     declaration = field.snapshot()
     assert declaration.source_field is None
@@ -218,6 +215,7 @@ def test_relation_snapshot_keeps_implicit_column_declaration_after_linking():
 
 
 def test_abstract_inheritance_uses_the_same_factory_without_copying_its_resources():
+    declaration_graph = ModelBindingGraph()
     factory = DefaultFactory()
 
     class Base(Model):
@@ -232,7 +230,53 @@ def test_abstract_inheritance_uses_the_same_factory_without_copying_its_resource
     class Author(Base):
         pass
 
-    assert Book._meta.fields_map["payload"].default is factory
-    assert Author._meta.fields_map["payload"].default is factory
-    assert Book._meta.fields_map["payload"] is not Author._meta.fields_map["payload"]
+    assert declaration_graph.include(Book).fields_map["payload"].default is factory
+    assert declaration_graph.include(Author).fields_map["payload"].default is factory
+    assert (
+        declaration_graph.include(Book).fields_map["payload"]
+        is not declaration_graph.include(Author).fields_map["payload"]
+    )
     assert factory.calls == 0
+
+
+def test_abstract_meta_inheritance_uses_the_captured_options():
+    class Base(Model):
+        value = fields.IntField()
+
+        class Meta:
+            abstract = True
+            indexes = [["value"]]
+            pydantic = {"exclude": ["value"]}
+
+    Base.Meta.indexes[0].append("missing")
+    Base.Meta.pydantic["exclude"].append("missing")
+
+    class Child(Base):
+        pass
+
+    assert Child._declaration.meta.indexes == (("value",),)
+    assert Child._declaration.meta.pydantic == {"exclude": ["value"]}
+    assert Base._declaration.meta.indexes == (("value",),)
+
+
+def test_meta_capture_and_inheritance_do_not_invoke_manager_descriptors():
+    class RecordingManager(Manager):
+        reads = 0
+
+        def __get__(self, obj, owner):
+            type(self).reads += 1
+            return super().__get__(obj, owner)
+
+    class Base(Model):
+        title = fields.TextField()
+
+        class Meta:
+            abstract = True
+            manager = RecordingManager()
+
+    class Book(Base):
+        pass
+
+    assert RecordingManager.reads == 0
+    assert isinstance(Base._declaration.declared_options["manager"], RecordingManager)
+    assert isinstance(Book._declaration.manager, RecordingManager)

@@ -27,7 +27,7 @@ class BookSchema(BaseModel):
 
 
 @app.get("/books", response_model=PageSchema[BookSchema])
-async def list_books(books: BookQuery = RequestQueryDependency.provide(BookQuery)) -> Page[Book]:
+async def list_books(books: BookQuery = app.request_query(BookQuery)) -> Page[Book]:
     return await books.page()
 ```
 
@@ -53,8 +53,10 @@ what `FastAPI()` takes.
 - **The models are bound when the application is created** (`Hare.bind_models()`, no connection). FastAPI
   reads a route's parameters when the route is declared, and a request query's parameters —
   [`Meta.filters`](request-queries.md#meta-filters), the descriptions of its filters — are read from the
-  models. A router declared in a module imported before the application is created needs
-  `Hare.bind_models(HARE_CONFIG)` called before that import.
+  selected registry. For a separately declared router, pass an explicit offline registry to
+  `RequestQueryDependency.provide(QueryClass, apps=apps)`, where
+  `apps = Hare.bind_models(HARE_CONFIG)`. The returned registry must be passed to the dependency;
+  calling `bind_models()` alone does not change global model metadata.
 - **The `HareContext`.** Opened when the application starts, before its own `lifespan` — which already
   has the database — and closed when it stops. Middleware activates this application's context for each
   request. On shutdown `HareContext.close_connections()` also waits for the background observers still
@@ -85,7 +87,7 @@ what `FastAPI()` takes.
 
 ## <a id="request-queries-as-dependencies"></a>Request queries as dependencies
 
-`RequestQueryDependency.provide(QueryClass)` is the `Depends()` building a request query from the
+`app.request_query(QueryClass)` is the `Depends()` building a request query from the
 request. Each parameter of the class is a parameter of the route, validated by FastAPI and listed in the
 OpenAPI schema with its type, default, limits, enum and description:
 
@@ -102,7 +104,7 @@ class ChapterQuery(RequestQuery[Chapter]):
 
 
 @app.get("/chapters/{pk}", response_model=ChapterSchema)
-async def get_chapter(chapter: ChapterQuery = RequestQueryDependency.provide(ChapterQuery)) -> Chapter:
+async def get_chapter(chapter: ChapterQuery = app.request_query(ChapterQuery)) -> Chapter:
     return await chapter.get()
 ```
 
@@ -110,6 +112,11 @@ async def get_chapter(chapter: ChapterQuery = RequestQueryDependency.provide(Cha
 The query gets the request: `query.request`, and the addresses of a page's `next` and `previous`. A value
 the query refuses — an ordering it doesn't allow, a malformed cursor — is answered as FastAPI answers an
 invalid parameter.
+
+For a plain FastAPI application, use `RequestQueryDependency.provide(QueryClass, apps=apps)`,
+where `apps = Hare.bind_models(config)` selects its startup metadata. The dependency reads only
+its schema from that registry; requests construct the original declaration in the runtime
+application scope.
 
 ## <a id="responses"></a>Responses
 

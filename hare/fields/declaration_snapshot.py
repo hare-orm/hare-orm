@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from copy import deepcopy
+from gc import get_referents
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -17,15 +19,20 @@ class DeclarationSnapshot:
 
     @staticmethod
     def copy_values(values: dict[str, Any], memo: dict[int, Any]) -> dict[str, Any]:
-        DeclarationSnapshot.prepare_memo(values, memo)
+        DeclarationSnapshot.prepare_memo(values.values(), memo)
         return deepcopy(values, memo)
 
     @staticmethod
-    def prepare_memo(values: dict[str, Any], memo: dict[int, Any]) -> None:
-        """Register fields and callbacks before Python copies the containing declaration."""
+    def prepare_memo(values: Iterable[Any], memo: dict[int, Any]) -> None:
+        """Register fields and callbacks through the declaration's actual object references.
+
+        Python containers and custom wrappers share this walk, including slots and cycles.
+        The subsequent deepcopy still decides how each wrapper itself is copied; fields and
+        callbacks are leaves so their bound metadata and callback state are never traversed.
+        """
         from hare.fields.field import Field
 
-        pending = list(values.values())
+        pending = list(values)
         visited = set()
         while pending:
             value = pending.pop()
@@ -35,13 +42,10 @@ class DeclarationSnapshot:
             visited.add(identity)
             if isinstance(value, Field):
                 value.snapshot(memo=memo)
-            elif callable(value):
+            elif callable(value) or isinstance(value, (classmethod, staticmethod, property)):
                 memo[identity] = value
-            elif isinstance(value, dict):
-                pending.extend(value.keys())
-                pending.extend(value.values())
-            elif isinstance(value, (list, tuple, set, frozenset)):
-                pending.extend(value)
+            else:
+                pending.extend(get_referents(value))
 
     @staticmethod
     def field(field: Field[Any], memo: dict[int, Any] | None = None) -> Field[Any]:

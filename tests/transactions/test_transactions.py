@@ -1,24 +1,26 @@
 import asyncio
 import inspect
-import os
 import sqlite3
 import threading
 import types
+from collections.abc import Iterator
+from contextlib import contextmanager
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import pytest_asyncio
 
 from hare import Connections
-from hare.contrib.test import requires_features
+from hare.contrib.test import hare_test_context, requires_features
 from hare.contrib.test.databases.test_database_config import TestDatabaseConfig as DatabaseConfig
 from hare.core.hare_context import HareContext
 from hare.dialects.base.client.transaction_lifecycle.transaction_ending import TransactionEnding
 from hare.dialects.base.transactions.savepoints.nested_savepoint_lock import NestedSavepointLock
-from hare.exceptions import OperationalError, QueryError, TransactionManagementError
+from hare.exceptions import ConfigurationError, DatabaseError, OperationalError, QueryError, TransactionManagementError
 from hare.transactions.transactions import Transactions
 from tests.shared_models import multi_database_models
 from tests.shared_models.testmodels import CharPkModel, Event, Team, Tournament
+from tests.transactions.rollback_callback_models import CompositeRollbackRecord, RollbackRecord
 from tests.utils.database_under_test import DatabaseUnderTest
 from tests.utils.multi_database_context import MultiDatabaseTestContext
 from tests.utils.waiting import wait_until
@@ -28,6 +30,53 @@ class SomeException(Exception):
     """
     A very specific exception so as to not accidentally catch another exception.
     """
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", [RollbackRecord, CompositeRollbackRecord], ids=["single-key", "composite-key"])
+@pytest.mark.parametrize("nested", [False, True], ids=["transaction", "savepoint"])
+@pytest.mark.parametrize("register_before_write", [False, True], ids=["late-callback", "early-callback"])
+async def test_rollback_callback_save_keeps_its_published_state(model, nested, register_before_write):
+    async with hare_test_context(["tests.transactions.rollback_callback_models"], db_url=DatabaseUnderTest.get_url()):
+        if not model.get_connection().features.supports_transactions:
+            pytest.skip("The database has no transactions")
+        key = (
+            {"batch": 1, "sequence": 2}
+            if HareContext.require_current().apps.get_binding(model).has_composite_primary_key
+            else {"id": 1}
+        )
+        obj = await model.objects.create(**key, number=10)
+        called = []
+
+        async def save_after_rollback():
+            called.append("save")
+            obj.number = 30
+            await obj.save(update_fields=["number"])
+            assert obj.get_dirty_fields() == {}
+
+        async def roll_back_write():
+            with pytest.raises(SomeException):
+                async with Transactions.atomic():
+                    Transactions.on_rollback(lambda: called.append("first"))
+                    if register_before_write:
+                        Transactions.on_rollback(save_after_rollback)
+                    obj.number = 20
+                    await obj.save(update_fields=["number"])
+                    if not register_before_write:
+                        Transactions.on_rollback(save_after_rollback)
+                    Transactions.on_rollback(lambda: called.append("last"))
+                    raise SomeException()
+            assert called == ["first", "save", "last"]
+            assert obj.number == 30
+            assert (await model.objects.get(pk=obj.pk)).number == 30
+            assert obj.get_dirty_fields() == {}
+
+        if nested:
+            async with Transactions.atomic():
+                await roll_back_write()
+        else:
+            await roll_back_write()
+        assert obj.get_dirty_fields() == {}
 
 
 @Transactions.atomic()
@@ -334,20 +383,9 @@ async def test_nested_gather_sibling_rollback_does_not_corrupt_the_other(db_trun
 @requires_features(supports_transactions=True)
 @pytest.mark.asyncio
 async def test_ambient_write_survives_a_gather_siblings_own_savepoint_rollback(db_truncate):
-    """An "ambient" write (no using= of its own - resolves through the outer transaction
-    directly) issued from one asyncio.gather() sibling used to be silently discarded by a
-    DIFFERENT sibling's own nested-savepoint rollback: ordinary query execution
-    (ConnectionWrapper/self._lock, a fresh asyncio.Lock() per wrapper instance) was never
-    synchronized against NestedSavepointLock at all - only SAVEPOINT/RELEASE SAVEPOINT/
-    ROLLBACK TO calls were - so nothing stopped this write from landing on the wire BETWEEN a
-    sibling's SAVEPOINT and its later ROLLBACK TO, which discarded it too even though it was
-    never logically inside that sibling's own nested block and its own code path never raised.
-
-    Runs on all 3 backends: sqlite/asyncpg via ConnectionWrapper's own span-acquire, rust_pg via
-    RustPgTransactionClient._run_under_savepoint_span() (hare/backends/rust_pg/client.py) - a separate
-    reproduction of the same fix, since that wrapper calls self._active_native_transaction.execute()/fetch_all()
-    (the Rust PyO3 transaction object) directly, never through ConnectionWrapper/
-    acquire_connection() at all."""
+    """A write on the parent transaction waits for a sibling's savepoint to finish, so a rollback of that savepoint
+    cannot undo it.
+    """
 
     class ForceRollback(Exception):
         pass
@@ -382,23 +420,9 @@ async def test_ambient_write_survives_a_gather_siblings_own_savepoint_rollback(d
 @requires_features(supports_transactions=True)
 @pytest.mark.asyncio
 async def test_ambient_write_blocked_by_a_stuck_sibling_savepoint_raises_clear_error(db_truncate):
-    """The fix for the race above bounds its own wait - a sibling that holds its savepoint open
-    across an await unrelated to the database (waiting on another task/an external signal, not
-    further DB work) must not be able to block an ambient write forever. Confirmed live before
-    this timeout existed: this exact shape hung indefinitely instead of raising.
-
-    branch_with_savepoint is deliberately never allowed to finish on its own (direct_write_done
-    never gets set, since the ambient write times out instead of completing) - started as its
-    own Task and explicitly cancelled in `finally` so it doesn't linger past this test.
-
-    Runs on all 3 backends - see test_ambient_write_survives_a_gather_siblings_own_savepoint_
-    rollback above for why rust_pg needs its own, separate fix/reproduction. The timeout constant
-    is imported independently into each backend's own client module (a plain module-level name,
-    not a shared mutable object), so patching it short for this test needs patching BOTH
-    hare.dialects.base.client's copy (read by ConnectionWrapper, sqlite/asyncpg) AND, only when
-    rust_pg is the backend under test, hare.dialects.postgresql.drivers.rust_pg.client's own copy (read by
-    RustPgTransactionClient._run_under_savepoint_span) - patching only the former would leave rust_pg
-    waiting out the real 30s default instead of the short timeout this test needs."""
+    """An ambient write times out when a sibling's savepoint remains open. The test lowers the shared wait limit and
+    cancels the sibling during cleanup.
+    """
     import hare.dialects.base.transactions.savepoints.nested_savepoint_lock as client_module
 
     savepoint_open = asyncio.Event()
@@ -613,7 +637,7 @@ async def two_independent_sqlite_aliases():
     test_two_databases.py's two_databases fixture, which never drops its own databases.
 
     Registering tests.shared_models.testmodels here with "default_connection": "alias_a" stamps that value
-    directly onto each model class's MetaInfo (a plain shared attribute, not scoped to any one
+    directly onto each model class's ModelBinding (a plain shared attribute, not scoped to any one
     HareContext - see Apps.build_initial_querysets()'s own "KNOWN LIMITATION" docstring).
     HareContext.__aexit__'s "reclaim previous context" step rebuilds the OUTER context's
     basequery/basetable bindings once this fixture's own context exits, but does not touch
@@ -624,10 +648,13 @@ async def two_independent_sqlite_aliases():
     explicitly here, back to whatever the outer (module-shared) context had it bound to, keeps
     this fixture's own effect fully self-contained regardless of which other fixtures the rest of
     the file uses."""
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+    db_url = DatabaseUnderTest.get_url()
     outer_ctx = HareContext.get_current()
     original_default_connections = (
-        {model: model._meta.default_connection for model in outer_ctx.apps.apps.get("models", {}).values()}
+        {
+            model: HareContext.require_current().apps.get_binding(model).default_connection
+            for model in outer_ctx.apps.apps.get("models", {}).values()
+        }
         if outer_ctx is not None and outer_ctx.apps is not None
         else {}
     )
@@ -662,7 +689,7 @@ async def two_independent_sqlite_aliases():
                     ctx.connections.discard(conn.connection_alias)
     finally:
         for model, default_connection in original_default_connections.items():
-            model._meta.default_connection = default_connection
+            HareContext.require_current().apps.get_binding(model).default_connection = default_connection
 
 
 @requires_features(connection_alias="alias_a", supports_transactions=True)
@@ -1122,48 +1149,36 @@ async def test_sqlite_manual_commit_finalizes_before_on_commit_callback_raises(d
     assert saved is not None
 
 
-@requires_features(dialect="sqlite")
-@pytest.mark.asyncio
-async def test_sqlite_cancelled_commit_still_lands_and_finalizes(db_truncate):
-    """aiosqlite dispatches the real sqlite3 COMMIT to a single background worker thread via a
-    queue - once the worker pulls it off the queue it runs to completion no matter what happens
-    on the asyncio side afterwards, so cancelling the task awaiting commit() only detaches the
-    awaiting Future early and aiosqlite silently drops the eventual result (its
-    set_result()/set_exception() both no-op on an already-cancelled Future). commit() used to
-    set _finalized=True only after its own await returned, so a task cancelled while the real
-    COMMIT was still running in the worker thread left _finalized False even though the write
-    had already landed permanently - confirmed live via this same monkeypatch technique.
-    commit() now shields the real DB call so the flag and the real COMMIT always land together,
-    and CancelledError only propagates after that."""
-    base_client = Connections.get("models")
-    real_connection = base_client._connection
+@contextmanager
+def _hold_sqlite_commit(real_connection) -> Iterator[tuple[asyncio.Event, threading.Event]]:
+    """Pause an enqueued COMMIT on aiosqlite's worker before it calls sqlite3."""
     original_commit = real_connection.commit
-
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     commit_started = asyncio.Event()
     operation_released = threading.Event()
 
-    def patched_commit(self):
-        # Only the end-of-transaction COMMIT goes through aiosqlite's commit() - begin() ends a
-        # leftover transaction on the worker thread directly, together with its BEGIN.
+    async def patched_commit(self):
+        def slow_commit():
+            loop.call_soon_threadsafe(commit_started.set)
+            operation_released.wait()
+            return self._conn.commit()
 
-        async def _commit():
-            def slow_commit():
-                # Runs on aiosqlite's background worker thread - by the time this fires, the
-                # real commit is irrevocably queued and about to run, regardless of whether the
-                # asyncio side is later cancelled.
-                loop.call_soon_threadsafe(commit_started.set)
-                operation_released.wait()
-                return self._conn.commit()
-
-            future = loop.create_future()
-            self._tx.put_nowait((future, slow_commit))
-            return await future
-
-        return _commit()
+        future = loop.create_future()
+        self._tx.put_nowait((future, slow_commit))
+        return await future
 
     real_connection.commit = types.MethodType(patched_commit, real_connection)
+    try:
+        yield commit_started, operation_released
+    finally:
+        operation_released.set()
+        real_connection.commit = original_commit
 
+
+@requires_features(dialect="sqlite")
+@pytest.mark.asyncio
+async def test_sqlite_cancelled_commit_still_lands_and_finalizes(db_truncate):
+    """A COMMIT enqueued on the worker must finalize before cancellation reaches the caller."""
     tournament = Tournament(name="cancelled-commit")
     captured: dict = {}
 
@@ -1179,19 +1194,13 @@ async def test_sqlite_cancelled_commit_still_lands_and_finalizes(db_truncate):
             conn.rollback = AsyncMock()
             await tournament.save()
 
-    try:
+    with _hold_sqlite_commit(Connections.get("models")._connection) as (commit_started, operation_released):
         task = asyncio.ensure_future(do_transaction())
         await asyncio.wait_for(commit_started.wait(), timeout=2)
-        # The worker thread is now genuinely mid-commit (inside its 0.3s sleep) - cancel here to
-        # reproduce a cancellation landing while the real COMMIT is irrevocably in flight.
         task.cancel()
-        # The operation is held in flight until the cancellation landed.
         operation_released.set()
         with pytest.raises(asyncio.CancelledError):
             await task
-    finally:
-        operation_released.set()
-        real_connection.commit = original_commit
 
     conn = captured["wrapper"]
     assert conn.transaction_state.finished is True, "commit() must finalize once the real COMMIT actually lands"
@@ -1217,29 +1226,6 @@ async def test_sqlite_cancelled_commit_still_runs_on_commit_callbacks(db_truncat
     between those two calls let the real COMMIT land (and _finalized get set) while the second
     call's shield never even started, silently dropping every on_commit() callback with no trace.
     Both now run inside ONE shielded coroutine - see commit()'s own comment."""
-    base_client = Connections.get("models")
-    real_connection = base_client._connection
-    original_commit = real_connection.commit
-
-    loop = asyncio.get_event_loop()
-    commit_started = asyncio.Event()
-    operation_released = threading.Event()
-
-    def patched_commit(self):
-        async def _commit():
-            def slow_commit():
-                loop.call_soon_threadsafe(commit_started.set)
-                operation_released.wait()
-                return self._conn.commit()
-
-            future = loop.create_future()
-            self._tx.put_nowait((future, slow_commit))
-            return await future
-
-        return _commit()
-
-    real_connection.commit = types.MethodType(patched_commit, real_connection)
-
     tournament = Tournament(name="cancelled-commit-callback")
     on_commit_callback = Mock()
     captured: dict = {}
@@ -1251,17 +1237,13 @@ async def test_sqlite_cancelled_commit_still_runs_on_commit_callbacks(db_truncat
             await tournament.save()
             Transactions.on_commit(on_commit_callback)
 
-    try:
+    with _hold_sqlite_commit(Connections.get("models")._connection) as (commit_started, operation_released):
         task = asyncio.ensure_future(do_transaction())
         await asyncio.wait_for(commit_started.wait(), timeout=2)
         task.cancel()
-        # The operation is held in flight until the cancellation landed.
         operation_released.set()
         with pytest.raises(asyncio.CancelledError):
             await task
-    finally:
-        operation_released.set()
-        real_connection.commit = original_commit
 
     conn = captured["wrapper"]
     assert conn.transaction_state.finished is True
@@ -1865,6 +1847,28 @@ async def test_savepoint_wrapper_finalizes_and_rejects_queries_after_rollback(db
     assert await Tournament.objects.filter(name="inside-rolled-back-savepoint").first() is None
 
 
+@contextmanager
+def _hold_asyncpg_commit_after_landing() -> Iterator[tuple[asyncio.Event, asyncio.Event]]:
+    """Pause the asyncpg commit coroutine after PostgreSQL acknowledges the COMMIT."""
+    from asyncpg.transaction import Transaction
+
+    original_commit = Transaction._Transaction__commit
+    real_commit_landed = asyncio.Event()
+    operation_released = asyncio.Event()
+
+    async def patched_commit(self):
+        await original_commit(self)
+        real_commit_landed.set()
+        await operation_released.wait()
+
+    Transaction._Transaction__commit = patched_commit
+    try:
+        yield real_commit_landed, operation_released
+    finally:
+        operation_released.set()
+        Transaction._Transaction__commit = original_commit
+
+
 @pytest.mark.requires("asyncpg")
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
@@ -1893,19 +1897,6 @@ async def test_asyncpg_cancelled_commit_still_lands_and_finalizes(db_truncate):
             "which rust_pg never calls (it doesn't use the asyncpg library at all)"
         )
 
-    import asyncpg.transaction
-
-    original_commit = asyncpg.transaction.Transaction._Transaction__commit
-    real_commit_landed = asyncio.Event()
-    operation_released = asyncio.Event()
-
-    async def patched_commit(self):
-        await original_commit(self)
-        real_commit_landed.set()
-        await operation_released.wait()
-
-    asyncpg.transaction.Transaction._Transaction__commit = patched_commit
-
     tournament = Tournament(name="cancelled-commit-asyncpg")
     captured: dict = {}
 
@@ -1914,17 +1905,13 @@ async def test_asyncpg_cancelled_commit_still_lands_and_finalizes(db_truncate):
             captured["wrapper"] = conn
             await tournament.save()
 
-    try:
+    with _hold_asyncpg_commit_after_landing() as (real_commit_landed, operation_released):
         task = asyncio.ensure_future(do_transaction())
         await asyncio.wait_for(real_commit_landed.wait(), timeout=2)
         task.cancel()
-        # The operation is held in flight until the cancellation landed.
         operation_released.set()
         with pytest.raises(asyncio.CancelledError):
             await task
-    finally:
-        operation_released.set()
-        asyncpg.transaction.Transaction._Transaction__commit = original_commit
 
     conn = captured["wrapper"]
     assert conn.transaction_state.finished is True, "commit() must finalize once the real COMMIT actually lands"
@@ -1956,19 +1943,6 @@ async def test_asyncpg_cancelled_commit_still_runs_on_commit_callbacks(db_trunca
             "which rust_pg never calls (it doesn't use the asyncpg library at all)"
         )
 
-    import asyncpg.transaction
-
-    original_commit = asyncpg.transaction.Transaction._Transaction__commit
-    real_commit_landed = asyncio.Event()
-    operation_released = asyncio.Event()
-
-    async def patched_commit(self):
-        await original_commit(self)
-        real_commit_landed.set()
-        await operation_released.wait()
-
-    asyncpg.transaction.Transaction._Transaction__commit = patched_commit
-
     tournament = Tournament(name="cancelled-commit-callback-asyncpg")
     on_commit_callback = Mock()
     captured: dict = {}
@@ -1979,17 +1953,13 @@ async def test_asyncpg_cancelled_commit_still_runs_on_commit_callbacks(db_trunca
             await tournament.save()
             Transactions.on_commit(on_commit_callback)
 
-    try:
+    with _hold_asyncpg_commit_after_landing() as (real_commit_landed, operation_released):
         task = asyncio.ensure_future(do_transaction())
         await asyncio.wait_for(real_commit_landed.wait(), timeout=2)
         task.cancel()
-        # The operation is held in flight until the cancellation landed.
         operation_released.set()
         with pytest.raises(asyncio.CancelledError):
             await task
-    finally:
-        operation_released.set()
-        asyncpg.transaction.Transaction._Transaction__commit = original_commit
 
     conn = captured["wrapper"]
     assert conn.transaction_state.finished is True
@@ -2424,11 +2394,15 @@ async def test_rust_pg_begin_cancelled_after_landing_rolls_back_and_finalizes(db
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("replacement", ["reinit", "close_connections"])
-async def test_transaction_finishes_when_its_context_replaces_its_connections(replacement):
+@pytest.mark.parametrize("reuse_databases", [False, True], ids=["fresh", "reused"])
+async def test_transaction_finishes_when_its_context_replaces_its_connections(
+    replacement, reuse_databases, monkeypatch
+):
     """A transaction reset its alias through the context's CURRENT connection handler - after a
     re-init or close_connections() in another task replaced it, leaving the block raised
     "ValueError: <Token ...> was created by a different ContextVar" instead of committing."""
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+    monkeypatch.setenv("HARE_TEST_REUSE_DATABASES", "1" if reuse_databases else "0")
+    db_url = DatabaseUnderTest.get_url()
     if not DatabaseUnderTest.get_driver(db_url).get_client_classes()[0].features.supports_transactions:
         pytest.skip("The database has no transactions")
     apps = {"models": {"models": ["tests.shared_models.multi_database_models"], "default_connection": "models"}}
@@ -2448,9 +2422,14 @@ async def test_transaction_finishes_when_its_context_replaces_its_connections(re
         connections_before = ctx._connections
         clients_before = connections_before.all()
         if replacement == "reinit":
-            replacing_task = asyncio.create_task(ctx.init(config=config))
-        else:
-            replacing_task = asyncio.create_task(ctx.close_connections())
+            try:
+                with pytest.raises(ConfigurationError, match="one application configuration"):
+                    await ctx.init(config=config)
+            finally:
+                release.set()
+            await asyncio.wait_for(transaction_task, 20)
+            return
+        replacing_task = asyncio.create_task(ctx.close_connections())
         # The transaction ends only once the context replaced its connections, or began closing them.
         await wait_until(
             lambda: (
@@ -2459,7 +2438,11 @@ async def test_transaction_finishes_when_its_context_replaces_its_connections(re
             )
         )
         release.set()
-        await asyncio.wait_for(transaction_task, 20)
+        try:
+            await asyncio.wait_for(transaction_task, 20)
+        except DatabaseError:
+            # Shutdown can close the database before this transaction commits.
+            pass
         await asyncio.wait_for(replacing_task, 20)
 
 

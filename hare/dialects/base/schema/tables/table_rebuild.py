@@ -4,6 +4,7 @@ from collections.abc import Iterable, Sequence
 from copy import copy
 from typing import Any
 
+from hare.ddl.table_options import TableOptions
 from hare.dialects.base.schema.data.referencing_key_columns import ReferencingKeyColumns
 from hare.dialects.base.schema.plans.column_copy import ColumnCopy
 from hare.dialects.base.schema.plans.enums import SchemaEffect
@@ -14,7 +15,7 @@ from hare.dialects.base.schema.plans.table_rows_copy import TableRowsCopy
 from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
 from hare.fields.field import Field
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
-from hare.models import Model
+from hare.models.model_binding import ModelBinding
 from hare.sql.identifiers import Identifiers
 
 
@@ -54,29 +55,24 @@ class TableRebuild(SchemaEditorPart):
     @staticmethod
     def get_rebuilt_table_name(table_name: str) -> str:
         """Choose the staging name once when compiling a rebuild plan."""
-        return Identifiers.get_within_limit(f"new__{table_name}")
+        return Identifiers.get_temporary_name(f"new__{table_name}")
 
-    def get_storage_table_name(self, model: type[Model]) -> str:
-        """The physical table selected by this model's declared storage options."""
-        options = model._meta.get_table_options(self.editor.client.dialect)
-        return options.get_storage_table_name(model._meta.db_table) if options else model._meta.db_table
-
-    def get_copy_source_table(self, model: type[Model]) -> str:
+    def get_copy_source_table(self, binding: ModelBinding) -> str:
         """Read rows from the old declaration, before applying any storage-name change."""
-        return self.get_storage_table_name(model)
+        return self.editor.get_storage_table_name(binding)
 
-    def get_before_replace_plan(self, old_model: type[Model], new_model: type[Model]) -> SchemaChangePlan:
+    def get_before_replace_plan(self, old_binding: ModelBinding, new_binding: ModelBinding) -> SchemaChangePlan:
         """Prepare dependent objects for replacement after the row copy succeeds."""
         return SchemaChangePlan(())
 
     def get_staging_plan(
-        self, model: type[Model], rebuilt_table_name: str, preparation: SchemaChangePlan
+        self, binding: ModelBinding, rebuilt_table_name: str, preparation: SchemaChangePlan
     ) -> SchemaChangePlan:
         """Scope preparation after CREATE has acquired the replacement table."""
         return preparation
 
     def get_rebuild_finalization_plan(
-        self, old_model: type[Model], new_model: type[Model], rebuilt_table_name: str
+        self, old_binding: ModelBinding, new_binding: ModelBinding, rebuilt_table_name: str
     ) -> SchemaChangePlan:
         """Finish dialect-specific objects and release any retained previous table."""
         return SchemaChangePlan(())
@@ -92,17 +88,17 @@ class TableRebuild(SchemaEditorPart):
             The column name - for a single-column FK/O2O its key column, since the relation
             field's own source_field names the shadow attribute rather than the column.
         """
-        if isinstance(field, ForeignKeyFieldInstance) and len(field.db_column_names) == 1:
-            return field.db_column_names[0]
+        if isinstance(field, ForeignKeyFieldInstance) and len(column_names := field.db_column_names) == 1:
+            return column_names[0]
         return field.source_field or field.model_field_name
 
     def get_copy_plan(
-        self, model: type[Model], new_table_name: str, source_sql: str, columns: tuple[ColumnCopy, ...]
+        self, binding: ModelBinding, new_table_name: str, source_sql: str, columns: tuple[ColumnCopy, ...]
     ) -> SchemaChangePlan:
         """Prepare a row copy; dialects may wrap it in a temporary-resource scope."""
         copy = TableRowsCopy(
-            model,
-            self.editor.qualify_table_name(new_table_name, model._meta.schema),
+            binding,
+            self.editor.qualify_table_name(new_table_name, binding.schema),
             source_sql,
             columns,
         )
@@ -115,8 +111,8 @@ class TableRebuild(SchemaEditorPart):
 
     def get_copy_columns(
         self,
-        old_model: type[Model],
-        new_model: type[Model],
+        old_binding: ModelBinding,
+        new_binding: ModelBinding,
         altered_fields: Sequence[tuple[Field[Any], Field[Any]]] = (),
     ) -> tuple[ColumnCopy, ...]:
         """What each column of the rebuilt table is filled from: the column of the field of the same
@@ -124,15 +120,15 @@ class TableRebuild(SchemaEditorPart):
         the field's default, NULL without one. A generated column takes no value.
 
         Args:
-            old_model: The model the table matches now.
-            new_model: The model the table is rebuilt to.
+            old_binding: The binding of the model the table matches now.
+            new_binding: The binding of the model the table is rebuilt to.
             altered_fields: (old, new) fields paired otherwise than by name - a renamed field.
 
         Returns:
             Prepared source expressions and defaults, with clocks deferred until execution.
         """
-        old_meta = old_model._meta
-        new_meta = new_model._meta
+        old_meta = old_binding
+        new_meta = new_binding
         old_field_by_new_name: dict[str, Field[Any]] = {}
         for old_field, new_field in altered_fields:
             old_field_by_new_name[new_field.model_field_name] = old_field
@@ -145,7 +141,7 @@ class TableRebuild(SchemaEditorPart):
         columns: list[ColumnCopy] = []
         for field_name, column in new_meta.fields_db_projection.items():
             new_field = new_meta.fields_map[field_name]
-            if column_definitions.get_non_pk_generated_field_sql(new_model, new_field, column) is not None:
+            if column_definitions.get_non_pk_generated_field_sql(new_binding, new_field, column) is not None:
                 continue
             # A paired field is the column it names; one matched by name only when the old table has it.
             source_field = old_field_by_new_name.get(field_name)
@@ -168,14 +164,14 @@ class TableRebuild(SchemaEditorPart):
                 ):
                     clock_field = copy(new_field)
                 else:
-                    default_sql = backfill.field_backfill_sql_literal(new_field, new_model)
+                    default_sql = backfill.field_backfill_sql_literal(new_field, new_binding)
             columns.append(ColumnCopy(self.editor.quote(column), source_sql, default_sql, clock_field))
         return tuple(columns)
 
     def get_rebuild_plan(
         self,
-        old_model: type[Model],
-        new_model: type[Model],
+        old_binding: ModelBinding,
+        new_binding: ModelBinding,
         altered_fields: Sequence[tuple[Field[Any], Field[Any]]] = (),
     ) -> SchemaChangePlan:
         """Compile creation, copying, replacement and dependent objects before any DDL.
@@ -185,43 +181,43 @@ class TableRebuild(SchemaEditorPart):
         temporary name is confined to its prepared commands.
 
         Args:
-            old_model: The model the table matches now.
-            new_model: The model the table is rebuilt to, including its dependent objects.
+            old_binding: The binding of the model the table matches now.
+            new_binding: The binding of the model the table is rebuilt to, including its dependent objects.
             altered_fields: Old and new fields paired otherwise than by name, such as a renamed field.
         """
-        table_options = new_model._meta.get_table_options(self.editor.client.dialect)
+        table_options = new_binding.get_table_options(self.editor.client.dialect)
         if table_options is not None:
-            table_options.raise_if_unsupported(new_model, self.editor.client.features)
-        db_table = self.get_storage_table_name(new_model)
-        old_db_table = self.get_storage_table_name(old_model)
+            table_options.raise_if_unsupported(new_binding, self.editor.client.features)
+        db_table = TableOptions.get_effective_storage_table_name(new_binding.db_table, table_options)
+        old_db_table = self.editor.get_storage_table_name(old_binding)
         new_table_name = self.get_rebuilt_table_name(db_table)
-        schema = new_model._meta.schema
-        definition = self.editor.table_creation.get_definition(new_model, storage_table_name=new_table_name)
+        schema = new_binding.schema
+        definition = self.editor.table_creation.get_definition(new_binding, storage_table_name=new_table_name)
         steps: list[SchemaStep] = [SchemaStatement(definition.get_create_sql(self.editor.TABLE_CREATE_TEMPLATE))]
         preparation: list[SchemaStep] = []
         if table_options is not None:
             preparation.extend(
                 SchemaStatement(sql)
-                for sql in table_options.get_after_create_sqls(new_model, new_table_name, self.editor)
+                for sql in table_options.get_after_create_sqls(new_binding, new_table_name, self.editor)
             )
-        columns = self.get_copy_columns(old_model, new_model, altered_fields)
+        columns = self.get_copy_columns(old_binding, new_binding, altered_fields)
         if columns:
             preparation.extend(
                 self.get_copy_plan(
-                    new_model,
+                    new_binding,
                     new_table_name,
-                    self.editor.qualify_table_name(self.get_copy_source_table(old_model), old_model._meta.schema),
+                    self.editor.qualify_table_name(self.get_copy_source_table(old_binding), old_binding.schema),
                     columns,
                 ).steps
             )
-        steps.extend(self.get_staging_plan(new_model, new_table_name, SchemaChangePlan(tuple(preparation))).steps)
-        steps.extend(self.get_before_replace_plan(old_model, new_model).steps)
+        steps.extend(self.get_staging_plan(new_binding, new_table_name, SchemaChangePlan(tuple(preparation))).steps)
+        steps.extend(self.get_before_replace_plan(old_binding, new_binding).steps)
         steps.extend(
             self.get_replace_plan(
                 old_db_table,
                 new_table_name,
                 schema,
-                [new_model._meta.fields_map[name] for name in new_model._meta.fields_db_projection],
+                [new_binding.fields_map[name] for name in new_binding.fields_db_projection],
             ).steps
         )
         if old_db_table != db_table:
@@ -229,20 +225,20 @@ class TableRebuild(SchemaEditorPart):
         if table_options is not None:
             steps.extend(
                 SchemaStatement(sql)
-                for sql in table_options.get_companion_table_sqls(new_model, self.editor, replaces=True)
+                for sql in table_options.get_companion_table_sqls(new_binding, self.editor, replaces=True)
             )
         steps.extend(
             SchemaStatement(sql)
-            for trigger in new_model._meta.triggers
-            for sql in self.editor.trigger_statements.get_trigger_create_sqls(new_model, trigger)
+            for trigger in new_binding.triggers
+            for sql in self.editor.trigger_statements.get_trigger_create_sqls(new_binding, trigger)
         )
-        steps.extend(SchemaStatement(sql) for sql in self.editor.table_creation.get_model_index_sqls(new_model))
+        steps.extend(SchemaStatement(sql) for sql in self.editor.table_creation.get_model_index_sqls(new_binding))
         steps.extend(SchemaStatement(sql) for sql in definition.constraints)
-        steps.extend(self.get_rebuild_finalization_plan(old_model, new_model, new_table_name).steps)
+        steps.extend(self.get_rebuild_finalization_plan(old_binding, new_binding, new_table_name).steps)
         return SchemaChangePlan(
             tuple(steps),
-            before=self.editor.table_creation.get_definition(old_model),
-            after=self.editor.table_creation.get_definition(new_model),
+            before=self.editor.table_creation.get_definition(old_binding),
+            after=self.editor.table_creation.get_definition(new_binding),
         )
 
     def get_referencing_key_rebuild_plan(self, referencing: ReferencingKeyColumns) -> SchemaChangePlan | None:
@@ -250,7 +246,7 @@ class TableRebuild(SchemaEditorPart):
         return None
 
     def get_column_change_rebuild_plan(
-        self, model: type[Model], old_field: Field[Any], new_field: Field[Any]
+        self, binding: ModelBinding, old_field: Field[Any], new_field: Field[Any]
     ) -> SchemaChangePlan | None:
         """Select a prepared rebuild when a column change cannot be made in place."""
         return None

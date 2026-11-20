@@ -5,6 +5,7 @@ from types import ModuleType
 import pytest
 
 from hare.cli.config_locator import ConfigLocator
+from hare.cli.context.command_context import CommandContext
 from hare.core.config import HareConfig
 from hare.exceptions import ConfigurationError
 from hare.migrations.loading.migrations_modules import MigrationsModules
@@ -12,6 +13,28 @@ from hare.migrations.loading.migrations_modules import MigrationsModules
 pytestmark = pytest.mark.database_independent
 
 EMPTY_HARE_ORM = None
+
+
+@pytest.mark.parametrize("iterable_type", [list, tuple, iter, map, "generator", "dict-keys"])
+@pytest.mark.parametrize("labels", [[], ["alpha"], ["beta", "alpha", "beta"]])
+def test_app_selection_reads_iterable_contents_including_empty_iterators(iterable_type, labels):
+    config = HareConfig.from_dict(
+        {
+            "connections": {"default": "sqlite+aiosqlite://:memory:"},
+            "apps": {"alpha": {"models": []}, "beta": {"models": []}},
+        }
+    )
+    if iterable_type == "generator":
+        requested = (label for label in labels)
+    elif iterable_type == "dict-keys":
+        requested = dict.fromkeys(labels).keys()
+    elif iterable_type is map:
+        requested = map(str, labels)
+    else:
+        requested = iterable_type(labels)
+    selected = CommandContext.select_apps(config, requested)
+    assert list(selected) == list(dict.fromkeys(labels)) if labels else list(selected) == ["alpha", "beta"]
+    assert all(selected[label] is config.apps[label] for label in selected)
 
 
 def test_hare_orm_config_env(monkeypatch: pytest.MonkeyPatch) -> None:

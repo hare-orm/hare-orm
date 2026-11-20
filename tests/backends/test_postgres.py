@@ -14,6 +14,7 @@ import sys
 import textwrap
 import uuid
 import xml.etree.ElementTree as ET
+from contextlib import nullcontext
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,7 @@ from hare.instrumentation.declarations import QueryExecuted
 from hare.instrumentation.observers.observers import Observers
 from hare.transactions.transactions import Transactions
 from tests.shared_models.testmodels import IntFields, Tournament
+from tests.utils.connection_setup import assert_statement_waits_for_post_connect
 from tests.utils.database_under_test import DatabaseUnderTest
 from tests.utils.postgresql_query_cancellation import PostgresqlQueryCancellation
 from tests.utils.server_session import ServerSession
@@ -50,7 +52,7 @@ from tests.utils.waiting import wait_until
 
 def _get_db_config():
     """Get database config and check which Postgres driver it resolves to."""
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+    db_url = DatabaseUnderTest.get_url()
     db_config = DbUrlConfigGenerator.build(
         db_url,
         app_modules={"models": ["tests.shared_models.testmodels"]},
@@ -998,8 +1000,9 @@ async def test_rust_pg_mid_query_connection_loss_raises_db_connection_error(db_s
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
+@pytest.mark.parametrize("discard", [False, True], ids=["close", "discard"])
 async def test_closing_the_pool_under_a_checked_out_connection_does_not_break_its_release(
-    db_isolated_no_schema, monkeypatch
+    db_isolated_no_schema, monkeypatch, discard
 ):
     # close() stops waiting for the busy connection and terminates the pool almost at once.
     client_class = DatabaseUnderTest.get_driver().get_client_class({})
@@ -1017,10 +1020,19 @@ async def test_closing_the_pool_under_a_checked_out_connection_does_not_break_it
 
     busy_task = asyncio.create_task(busy_query())
     await wait_until(lambda: _is_running(conn, busy_query_sql))
-    await conn.close()
+    await db_isolated_no_schema.connections.close_all(discard=discard)
     await asyncio.wait_for(busy_task, timeout=10)
 
-    assert await conn.execute_dicts("SELECT 1 AS ok") == [{"ok": 1}]
+    assert conn._pool is None
+    replacement = db_isolated_no_schema.get_connection()
+    if discard:
+        assert replacement is not conn
+        with pytest.raises(DBConnectionError, match="closed and dropped"):
+            await conn.execute_dicts("SELECT 1 AS ok")
+        assert conn._pool is None
+    else:
+        assert replacement is conn
+    assert await replacement.execute_dicts("SELECT 1 AS ok") == [{"ok": 1}]
 
 
 @requires_features(dialect="postgresql")
@@ -1429,6 +1441,54 @@ async def test_pool_acquire_timeout_none_waits_indefinitely(db_simple):
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["pool-wait", "statement", "savepoint"])
+async def test_cancellation_releases_a_single_slot_and_preserves_committed_rows(db_isolated_no_schema, boundary):
+    client = Connections.current().create_independent(
+        "models", {"min_size": 1, "max_size": 1, "pool_acquire_timeout": None}
+    )
+    try:
+        await client.execute_script("CREATE TABLE cancellation_rows (id INTEGER PRIMARY KEY)")
+        async with asyncio.timeout(30):
+            if boundary == "pool-wait":
+                async with client._in_transaction() as outer:
+                    await outer.execute("INSERT INTO cancellation_rows VALUES (1)")
+                    pending = asyncio.create_task(client.execute("INSERT INTO cancellation_rows VALUES (2)"))
+                    try:
+                        await wait_until(lambda: client.get_pool_status().waiting == 1)
+                    finally:
+                        pending.cancel()
+                        with pytest.raises(asyncio.CancelledError):
+                            await pending
+            elif boundary == "statement":
+                await client.execute("INSERT INTO cancellation_rows VALUES (1)")
+
+                async def write_and_wait(sql):
+                    async with client._in_transaction() as transaction:
+                        await transaction.execute("INSERT INTO cancellation_rows VALUES (2)")
+                        await transaction.execute(sql)
+
+                await PostgresqlQueryCancellation.cancel(write_and_wait)
+            else:
+                async with client._in_transaction() as outer:
+                    await outer.execute("INSERT INTO cancellation_rows VALUES (1)")
+
+                    async def write_and_wait(sql):
+                        async with outer._in_transaction() as inner:
+                            await inner.execute("INSERT INTO cancellation_rows VALUES (2)")
+                            await inner.execute(sql)
+
+                    await PostgresqlQueryCancellation.cancel(write_and_wait)
+                    await outer.execute("INSERT INTO cancellation_rows VALUES (3)")
+            async with client._in_transaction() as next_transaction:
+                assert await next_transaction.execute_dicts("SELECT id FROM cancellation_rows ORDER BY id") == (
+                    [{"id": 1}, {"id": 3}] if boundary == "savepoint" else [{"id": 1}]
+                )
+    finally:
+        await client.close()
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
 async def test_rust_pg_transaction_finished_race_does_not_mask_the_real_exception(db_isolated_no_schema):
     """rust.pg's `Transaction.commit()`/`.rollback()` `.take()` the connection out of their
     Arc<Mutex<Option<Object>>> before the real COMMIT/ROLLBACK round-trip even starts (see
@@ -1505,7 +1565,7 @@ async def test_rust_pg_abandoned_query_cancel_never_hits_the_next_callers_query(
 
     from hare.contrib.test.isolated_contexts import hare_test_context
 
-    db_url = raw_db_url.replace("\\{", "{").replace("\\}", "}").format(uuid.uuid4().hex)
+    db_url = DatabaseUnderTest.normalize_url_template(raw_db_url).format(uuid.uuid4().hex)
     db_url += ("&" if "?" in db_url else "?") + "min_size=1&max_size=1"
     async with hare_test_context(["tests.shared_models.testmodels"], db_url=db_url, connection_label="models"):
         client = Connections.get("models")
@@ -1675,6 +1735,78 @@ async def test_list_of_strings_binds_to_an_array_of_a_non_text_type(db):
     )
 
     assert rows[0]["addresses"] == "{08:00:2b:01:02:03,NULL,08:00:2b:01:02:04}"
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capacity", [0, 1, 2, None])
+async def test_native_array_bind_keeps_more_member_types_than_its_metadata_cache(db_isolated_no_schema, capacity):
+    shared = db_isolated_no_schema.get_connection()
+    if shared.driver_name != "postgresql":
+        pytest.skip("Native metadata cache")
+    connection = shared.create_independent_client({"statement_cache_size": capacity, "min_size": 1, "max_size": 1})
+    try:
+        await connection.create_connection(with_db=True)
+        sql = "SELECT $1::box[]::text AS boxes,$2::inet[]::text AS addresses,$3::macaddr[]::text AS macs"
+        expected = await connection.execute_dicts(
+            "SELECT ARRAY[box '(1,1),(0,0)',NULL]::text AS boxes,"
+            "ARRAY[inet '127.0.0.1',NULL]::text AS addresses,"
+            "ARRAY[macaddr '08:00:2b:01:02:03',NULL]::text AS macs"
+        )
+        # Exercise a retained hit followed by misses and several evictions in one bind.
+        for _ in range(2):
+            await connection.execute("SELECT $1::box[]", [[["(1,1),(0,0)"]]])
+            assert (
+                await connection.execute_dicts(
+                    sql, [["(1,1),(0,0)", None], ["127.0.0.1", None], ["08:00:2b:01:02:03", None]]
+                )
+                == expected
+            )
+    finally:
+        await connection.close()
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+async def test_native_array_parameters_keep_the_element_delimiter_across_execution_routes(db_isolated_no_schema):
+    connection = db_isolated_no_schema.get_connection()
+    if connection.driver_name != "postgresql":
+        pytest.skip("Native text-array parameter negotiation")
+    await connection.execute_script(
+        "CREATE DOMAIN box_member AS box;"
+        "CREATE DOMAIN boxed_array AS box[];"
+        "CREATE TABLE parameter_array_results(n int)"
+    )
+    values = [["(1,1),(0,0)", None], ["(3,3),(2,2)", "(1,1),(0,0)"]]
+    oracle = await connection.execute_dicts(
+        "SELECT cardinality(ARRAY[ARRAY[box '(1,1),(0,0)',NULL::box],ARRAY[box '(3,3),(2,2)',box '(1,1),(0,0)']]) AS n"
+    )
+    assert oracle == [{"n": 4}]
+    for transactional in (False, True):
+        scope = connection._in_transaction() if transactional else nullcontext(connection)
+        async with scope as client:
+            for target in ("box[]", "box_member[]", "boxed_array"):
+                sql = f"SELECT cardinality($1::{target}) AS n"
+                for _ in range(2):
+                    assert await client.execute_dicts(sql, [values]) == oracle
+                    await client.execute(
+                        f"INSERT INTO parameter_array_results SELECT cardinality($1::{target})", [values]
+                    )
+                    await client.execute_many(
+                        f"INSERT INTO parameter_array_results SELECT cardinality($1::{target})",
+                        [[None], [[]], [values]],
+                    )
+                    assert await client.execute_dicts(
+                        "SELECT n FROM parameter_array_results ORDER BY n NULLS FIRST"
+                    ) == [{"n": None}, {"n": 0}, {"n": 4}, {"n": 4}]
+                    await client.execute("DELETE FROM parameter_array_results")
+                    if transactional:
+                        streamed = [
+                            row[0]
+                            async for chunk in client._driver_stream_batches(sql, [values], chunk_size=1)
+                            for row in chunk
+                        ]
+                        assert streamed == [4]
 
 
 @requires_features(dialect="postgresql")
@@ -1973,10 +2105,13 @@ async def test_rust_pg_connection_error_names_its_cause(db_isolated_no_schema):
 @pytest.mark.asyncio
 async def test_a_pooled_connection_left_unused_is_closed(db_isolated_no_schema):
     """An idle connection expires and the same client can open another for its next query."""
-    connection = Connections.current().create_independent("models", {"max_inactive_connection_lifetime": 1})
+    connection = Connections.current().create_independent(
+        "models", {"min_size": 1, "max_inactive_connection_lifetime": 1}
+    )
     try:
         await connection.execute("SELECT 1")
         await wait_until(lambda: connection.get_pool_status().size == 0)
+        assert connection.get_pool_status().min_size == 1
         assert await connection.execute_dicts("SELECT 1 AS one") == [{"one": 1}]
     finally:
         await connection.close()
@@ -2039,14 +2174,11 @@ async def test_rust_pg_closing_the_pool_ends_a_transaction_still_open(db_isolate
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
-async def test_rust_pg_statement_without_cache_reads_rows_and_columns_in_one_round_trip(db_isolated_no_schema):
-    """rust_pg caching no statements (``statement_cache_size=0``) sends a statement whose values all
-    carry a type of their own (a UUID, a moment, NULL) with them in one round trip - the rows, the
-    column names of a result of no row, and a write's count are the ones a prepared statement gives,
-    outside a transaction and inside one."""
+async def test_rust_pg_uncached_statements_keep_rows_columns_and_counts(db_isolated_no_schema):
+    """Raw and ORM statements keep their metadata without a statement cache, including inside a transaction."""
     _, _, is_rust_pg = _get_db_config()
     if not is_rust_pg:
-        pytest.skip("the one-round-trip statement is rust_pg's")
+        pytest.skip("checks the native driver's uncached statements")
     shared = Connections.get("models")
     conn = Connections.current().create_independent(
         "models",
@@ -2070,20 +2202,24 @@ async def test_rust_pg_statement_without_cache_reads_rows_and_columns_in_one_rou
         moment = datetime.datetime(2024, 1, 2, 3, 4, 5, tzinfo=datetime.UTC)
         select_sql = "SELECT id, note FROM one_trip WHERE id = $1 AND at = $2 AND ($3::text IS NULL)"
 
-        _, rows = await conn.execute(select_sql, [present, moment, None])
+        _, rows = await conn._execute_built(select_sql, [present, moment, None])
         assert [(row["id"], row["note"]) for row in rows] == [(present, "a")]
         described = await conn.execute_described(select_sql, [absent, moment, None])
         assert (list(described.columns), list(described.rows)) == (["id", "note"], [])
-        count, _ = await conn.execute("UPDATE one_trip SET at = $1 WHERE id = $2", [moment, present])
+        count, _ = await conn._execute_built(
+            "UPDATE one_trip SET at = $1 WHERE id = $2", [moment, present], returns_rows=False
+        )
         assert count == 1
 
         async with conn._in_transaction() as transaction:
             await transaction.execute("SELECT 1")
-            _, rows = await transaction.execute(select_sql, [present, moment, None])
+            _, rows = await transaction._execute_built(select_sql, [present, moment, None])
             assert [row["note"] for row in rows] == ["a"]
             described = await transaction.execute_described(select_sql, [absent, moment, None])
             assert list(described.columns) == ["id", "note"]
-            count, _ = await transaction.execute("DELETE FROM one_trip WHERE id = $1", [present])
+            count, _ = await transaction._execute_built(
+                "DELETE FROM one_trip WHERE id = $1", [present], returns_rows=False
+            )
             assert count == 1
     finally:
         await conn.close()
@@ -2225,33 +2361,4 @@ async def test_a_statement_of_another_task_waits_for_the_pool_being_set_up(db_si
     """Another task's statement ran on a pool the opening task had published but still set up - before
     its server's features and the checks of the connection."""
     client = Connections.current().create_independent("models", {"min_size": 1, "max_size": 2})
-    set_up = asyncio.Event()
-    set_up_released = asyncio.Event()
-    post_connect = client._post_connect
-
-    async def slow_post_connect():
-        await post_connect()
-        await set_up_released.wait()
-        set_up.set()
-
-    client._post_connect = slow_post_connect
-    try:
-        opening = asyncio.create_task(client.execute_dicts("SELECT 1 AS n"))
-        await wait_until(lambda: client._pool is not None)
-        set_up_seen: list[bool] = []
-
-        async def other_statement() -> list[dict[str, Any]]:
-            rows = await client.execute_dicts("SELECT 2 AS n")
-            set_up_seen.append(set_up.is_set())
-            return rows
-
-        other = asyncio.create_task(other_statement())
-        # The other statement gets every chance to run before the set-up ends.
-        for _ in range(100):
-            await asyncio.sleep(0)
-        set_up_released.set()
-        assert await other == [{"n": 2}]
-        assert set_up_seen == [True]
-        assert await opening == [{"n": 1}]
-    finally:
-        await client.close()
+    await assert_statement_waits_for_post_connect(client, lambda: client._pool is not None)

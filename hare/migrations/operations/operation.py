@@ -39,8 +39,12 @@ class Operation(abc.ABC):
         external handles may override this method to copy only declaration state.
         """
         memo: dict[int, Any] = {}
-        DeclarationSnapshot.prepare_memo({"state": object.__getstate__(self)}, memo)
+        DeclarationSnapshot.prepare_memo((object.__getstate__(self),), memo)
         return deepcopy(self, memo)
+
+    def get_nested_operations(self) -> tuple[Operation, ...]:
+        """Child declarations inspected without preparing state or executing callbacks."""
+        return ()
 
     def describe(self) -> str:
         return self.__class__.__name__
@@ -94,11 +98,12 @@ class Operation(abc.ABC):
         """
         return None
 
-    def get_provided_dependencies(self, app_label: str) -> list[OperationDependency]:
+    def get_provided_dependencies(self, app_label: str, state: State) -> list[OperationDependency]:
         """What the operation creates, removes or changes - an operation needing it runs after it.
 
         Args:
             app_label: The migration's app.
+            state: The state before the operation, for dependencies inferred from existing declarations.
 
         Returns:
             The dependencies - none by default.
@@ -154,12 +159,15 @@ class Operation(abc.ABC):
         """
         return None
 
-    def get_effect(self, app_label: str, state: State, schema_editor: BaseSchemaEditor) -> OperationEffect:
+    def get_effect(
+        self, app_label: str, old_state: State, new_state: State, schema_editor: BaseSchemaEditor
+    ) -> OperationEffect:
         """What the operation does to the database's data - known before it runs.
 
         Args:
             app_label: The migration's app.
-            state: The state before the operation.
+            old_state: The state before the operation.
+            new_state: The prepared state after the operation.
             schema_editor: The configured editor used to prepare schema plans without executing them.
 
         Returns:

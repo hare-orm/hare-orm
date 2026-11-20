@@ -7,8 +7,6 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from hare.dialects.postgresql.fields.constants import (
     MULTIRANGE_SPAN_PATH_FUNCTION,
     MULTIRANGE_SPAN_PATH_SEGMENT,
-    RANGE_BOUND_PATH_FUNCTIONS,
-    RANGE_FLAG_PATH_FUNCTIONS,
     RANGE_MAPPING_KEYS,
     RANGE_VALUE_LOOKUPS,
 )
@@ -103,26 +101,18 @@ class MultiRangeField(Field[list[Range[Any]]]):
     def get_path_transform(self, segment: str) -> tuple[Callable[[Term], Term], Field[Any]] | None:
         """A bound (``busy__startswith``/``busy__endswith``), a flag (``busy__isempty``,
         ``busy__lower_inc``, ...) or the smallest range holding every member (``busy__span``)."""
-        # Local import: the SQL terms import the fields package.
-        from hare.sql.terms.functions.function import Function
-
-        if segment in RANGE_BOUND_PATH_FUNCTIONS:
-            return partial(Function, RANGE_BOUND_PATH_FUNCTIONS[segment]), self.range_field.get_bound_field()
-        if segment in RANGE_FLAG_PATH_FUNCTIONS:
-            return partial(Function, segment), self.range_field.FLAG_FIELD
         if segment == MULTIRANGE_SPAN_PATH_SEGMENT:
+            # Local import: the SQL terms import the fields package.
+            from hare.sql.terms.functions.function import Function
+
             return partial(Function, MULTIRANGE_SPAN_PATH_FUNCTION), self.range_field
-        return None
+        # Use the built-in metadata for a multirange even if its member customizes the range hook.
+        return RangeField.get_path_transform(self.range_field, segment)
 
     def get_lookup_value_description(self, lookup: str) -> tuple[LookupValueShape, Any] | None:
         """Equality, containment and position take a range (a multirange of it alone); ``contains``
         also one value."""
-        bound_type = self.range_field.get_bound_field().field_type
-        if lookup in RANGE_VALUE_LOOKUPS:
-            return LookupValueShape.RANGE, bound_type
-        if lookup == Lookup.CONTAINS:
-            return LookupValueShape.VALUE, bound_type
-        return None
+        return RangeField.get_lookup_value_description(self.range_field, lookup)
 
     def get_members_type(self) -> Any:
         """The type of a multirange given as a sequence of its ranges - each a ``Range`` or its bounds."""

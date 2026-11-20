@@ -8,7 +8,7 @@ from hare.models.deletion.enums import DeletionRoute
 
 if TYPE_CHECKING:
     from hare.dialects.base.features import Features
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class DeletionRoutes:
@@ -19,37 +19,37 @@ class DeletionRoutes:
 
     @staticmethod
     @ModelCache.fact(depends_on_other_models=True)
-    def get_requirements(model: type[Model]) -> tuple[bool, bool, bool]:
+    def get_requirements(binding: ModelBinding) -> tuple[bool, bool, bool]:
         """What of the model graph the decision reads - a fact of the model.
 
         Args:
-            model: The model whose rows are deleted.
+            binding: The model whose rows are deleted.
 
         Returns:
             Whether hare walks the cascade, whether the model is on a cycle of database-enforced
             CASCADE relations, and whether a PROTECT relation is inside its cascade.
         """
         return (
-            DeletionGraph.needs_python_cascade(model),
-            DeletionGraph.has_self_cascading_constrained_relations(model),
-            DeletionGraph.has_protect_within_cascade(model),
+            DeletionGraph.needs_python_cascade(binding),
+            DeletionGraph.has_self_cascading_constrained_relations(binding),
+            DeletionGraph.has_protect_within_cascade(binding),
         )
 
     @staticmethod
-    def get(model: type[Model], features: Features, permanent: bool = False) -> DeletionRoute:
+    def get(binding: ModelBinding, features: Features, permanent: bool = False) -> DeletionRoute:
         """How the rows of ``model`` are removed.
 
         Args:
-            model: The model whose rows are deleted.
+            binding: The model whose rows are deleted.
             features: The features of the connection the deletion runs on.
             permanent: Whether a soft-deleting model's rows are removed for good.
 
         Returns:
             The route.
         """
-        if not permanent and model._meta.soft_delete_field is not None:
-            return DeletionRoute.SOFT_UPDATE if DeletionGraph.is_unreferenced(model) else DeletionRoute.SOFT_CASCADE
-        python_cascade, cascade_cycle, protect_within_cascade = DeletionRoutes.get_requirements(model)
+        if not permanent and binding.soft_delete_field is not None:
+            return DeletionRoute.SOFT_UPDATE if DeletionGraph.is_unreferenced(binding) else DeletionRoute.SOFT_CASCADE
+        python_cascade, cascade_cycle, protect_within_cascade = DeletionRoutes.get_requirements(binding)
         if python_cascade:
             return DeletionRoute.PYTHON_CASCADE
         if features.cascade_depth_limit is not None and cascade_cycle:

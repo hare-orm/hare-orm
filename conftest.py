@@ -7,7 +7,7 @@ Uses function-scoped fixtures for true test isolation.
 import gc
 import os
 import sqlite3
-import uuid
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +17,8 @@ import pytest_asyncio
 from hare.contrib.test import RollbackIsolation, truncate_all_models
 from hare.contrib.test.databases.postgresql.reusable_test_schemas import ReusableTestSchemas
 from hare.contrib.test.isolated_contexts import hare_test_context
+from hare.core.connections.connections import Connections
+from hare.core.hare_context import HareContext
 from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
 from hare.dialects.base.constants import SLOW_QUERY_THRESHOLD_MS
 from hare.instrumentation.observers.observers import Observers
@@ -39,6 +41,40 @@ from tests.utils.constants import (
 from tests.utils.database_under_test import DatabaseUnderTest
 from tests.utils.driver_classes import DriverClasses
 from tests.utils.kept_shared_test_database import KeptSharedTestDatabase
+
+pytest.register_assert_rewrite("tests.utils.expression_type_parity")
+
+
+@pytest_asyncio.fixture
+async def migration_context() -> AsyncGenerator[HareContext]:
+    """Activate transaction routing for standalone clients without creating a database."""
+    async with HareContext() as context:
+        yield context
+
+
+@pytest_asyncio.fixture
+async def model_conversion_context(request: pytest.FixtureRequest) -> AsyncGenerator[None]:
+    """Bind codec-only tests without opening a connection or sharing another test's graph."""
+    if request.node.get_closest_marker("database_independent") is None:
+        yield
+        return
+    async with HareContext() as context:
+        await context.init(
+            {
+                "connections": {"default": "sqlite+aiosqlite://:memory:"},
+                "apps": {
+                    "models": {
+                        "models": getattr(
+                            request,
+                            "param",
+                            ["tests.shared_models.testmodels", "tests.shared_models.testmodels_postgres"],
+                        )
+                    }
+                },
+            },
+            connect=False,
+        )
+        yield
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -70,9 +106,28 @@ def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool 
 
 
 @pytest.fixture
+def cleared_process_observers():
+    """Keep the process-wide observer registry and dispatcher errors isolated per test."""
+    Observers.process_observers.clear()
+    for dispatcher in Observers.process_observers.dispatchers.values():
+        dispatcher.pending_errors.clear()
+    yield
+    Observers.process_observers.clear()
+    for dispatcher in Observers.process_observers.dispatchers.values():
+        dispatcher.pending_errors.clear()
+
+
+@pytest.fixture
 def client_class(request: pytest.FixtureRequest) -> Any:
     """The driver class a test parametrized with ``DriverClasses.get_parameters()`` (``indirect=True``) runs on."""
     return DriverClasses.get_class(request.param)
+
+
+@pytest.fixture
+def connection(db):
+    """The first configured connection inside the current test's database scope."""
+    alias = next(iter(Connections.current().db_config))
+    return Connections.get(alias)
 
 
 @pytest.fixture(autouse=True)
@@ -83,23 +138,6 @@ def _reset_slow_query_threshold():
     touches it (only Hare.init() does)."""
     yield
     Observers.slow_query_threshold_ms = SLOW_QUERY_THRESHOLD_MS
-
-
-# ============================================================================
-# HELPER FUNCTIONS
-# ============================================================================
-
-
-def _get_test_database_url() -> str:
-    """Read HARE_TEST_DB and fill its optional "{}" placeholder with a per-call UUID.
-
-    Unescape "\\{"/"\\}" first, as TestDatabaseConfig.from_url() does, accepting the Makefile's
-    shell-escaped URLs. The shared database fixture distributes this concrete URL to its
-    modules, which reconnect to the same database.
-    """
-    raw_db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    raw_db_url = raw_db_url.replace("\\{", "{").replace("\\}", "}")
-    return raw_db_url.format(uuid.uuid4().hex) if "{}" in raw_db_url else raw_db_url
 
 
 # ============================================================================
@@ -223,13 +261,13 @@ async def _shared_test_db_url(test_run_resources: TestRunResources):
     Module contexts reset rows and close their own clients. Kept leases and disposable databases
     follow their resource owners' cleanup policies.
     """
-    raw_db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+    raw_db_url = DatabaseUnderTest.get_url()
     if DatabaseUnderTest.is_file_database(raw_db_url):
         yield raw_db_url
         return
 
     untagged_db_url = os.environ.get(UNTAGGED_URL_ENVIRONMENT_VARIABLE, raw_db_url)
-    untagged_db_url = untagged_db_url.replace("\\{", "{").replace("\\}", "}")
+    untagged_db_url = DatabaseUnderTest.normalize_url_template(untagged_db_url)
     # Past a transaction pooler none is kept: a kept database dropped and created again by a run going
     # straight to the server leaves the pooler its server connections to the dropped one.
     keeps_database = (
@@ -247,7 +285,7 @@ async def _shared_test_db_url(test_run_resources: TestRunResources):
             DbUrlConfigGenerator.expand(resolved_db_url)["credentials"]["database"], force=True
         )
     else:
-        resolved_db_url = _get_test_database_url()
+        resolved_db_url = DatabaseUnderTest.get_fresh_url()
     print(f"[_shared_test_db_url] creating {resolved_db_url}", flush=True)
     async with hare_test_context(
         modules=KeptSharedTestDatabase.get_modules(),
@@ -284,15 +322,7 @@ async def db_module(_shared_test_db_url):
             yield ctx
         return
 
-    async with hare_test_context(
-        modules=KeptSharedTestDatabase.get_modules(),
-        db_url=_shared_test_db_url,
-        app_label="models",
-        connection_label="models",
-        _create_db=False,
-        _generate_schemas=False,
-        _drop_db_on_exit=False,
-    ) as ctx:
+    async with KeptSharedTestDatabase.open_context(_shared_test_db_url, KeptSharedTestDatabase.get_modules()) as ctx:
         await ReusableTestSchemas.reset_rows(ctx.get_connection())  # type: ignore[arg-type]
         yield ctx
 
@@ -339,6 +369,28 @@ async def db_simple(db_module):
     yield db_module
 
 
+@pytest_asyncio.fixture(scope="module")
+async def db_array_fields_module():
+    """Open the shared model schema with PostgreSQL array fields for the test module."""
+    db_url = DatabaseUnderTest.get_url()
+    if DatabaseUnderTest.get_dialect().name != "postgresql":
+        pytest.skip("Array fields require PostgreSQL")
+    async with hare_test_context(
+        modules=["tests.shared_models.testmodels", "tests.shared_models.testmodels_postgres"],
+        db_url=db_url,
+        app_label="models",
+        connection_label="models",
+    ) as context:
+        yield context
+
+
+@pytest_asyncio.fixture(scope="function")
+async def db_array_fields(db_array_fields_module):
+    """Give an array test a transaction rolled back on exit."""
+    async with RollbackIsolation(db_array_fields_module) as context:
+        yield context
+
+
 @pytest_asyncio.fixture(scope="function")
 async def db_isolated():
     """
@@ -358,13 +410,8 @@ async def db_isolated():
             # Completely fresh database
             ...
     """
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    async with hare_test_context(
-        modules=KeptSharedTestDatabase.get_modules(),
-        db_url=db_url,
-        app_label="models",
-        connection_label="models",
-    ) as ctx:
+    db_url = DatabaseUnderTest.get_url()
+    async with DatabaseUnderTest.open_model_context(KeptSharedTestDatabase.get_modules(), db_url=db_url) as ctx:
         yield ctx
 
 
@@ -381,13 +428,9 @@ async def db_isolated_no_schema():
             # Isolated database, no shared-model tables
             ...
     """
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    async with hare_test_context(
-        modules=KeptSharedTestDatabase.get_modules(),
-        db_url=db_url,
-        app_label="models",
-        connection_label="models",
-        _generate_schemas=False,
+    db_url = DatabaseUnderTest.get_url()
+    async with DatabaseUnderTest.open_model_context(
+        KeptSharedTestDatabase.get_modules(), db_url=db_url, generate_schemas=False
     ) as ctx:
         yield ctx
 

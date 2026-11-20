@@ -13,7 +13,7 @@ from hare.exceptions import ConfigurationError
 if TYPE_CHECKING:
     from hare.dialects.base.features import Features
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclasses.dataclass(frozen=True)
@@ -61,17 +61,18 @@ class PostgresqlTableOptions(TableOptions):
     def __hash__(self) -> int:
         return hash((self.tablespace, self.unlogged, tuple(self.storage_parameters.items()), self.partitioning))
 
-    def raise_if_unsupported(self, model: type[Model], features: Features) -> None:
+    def raise_if_unsupported(self, binding: ModelBinding, features: Features) -> None:
         """Rejects a partitioned table that is unlogged - PostgreSQL has no unlogged partitioned
         tables - and a partitioning that doesn't fit the model.
 
         Args:
-            model: The model.
+            binding: The model.
             features: The features of the connection the table is created on.
 
         Raises:
             ConfigurationError: The options don't fit the model.
         """
+        model = binding._model
         if self.partitioning is None:
             return
         if self.unlogged:
@@ -79,7 +80,7 @@ class PostgresqlTableOptions(TableOptions):
                 f"{model.__name__}: PostgresqlTableOptions can't be both unlogged and partitioned - PostgreSQL "
                 "has no unlogged partitioned tables"
             )
-        self.partitioning.raise_if_unsupported(model)
+        self.partitioning.raise_if_unsupported(binding)
 
     def get_partitions(self) -> dict[str, Any]:
         return self.partitioning.get_partitions() if self.partitioning is not None else {}
@@ -126,11 +127,11 @@ class PostgresqlTableOptions(TableOptions):
     def get_create_prefix_sql(self) -> str:
         return "UNLOGGED " if self.unlogged else ""
 
-    def get_create_suffix_sql(self, model: type[Model], editor: BaseSchemaEditor) -> str:
+    def get_create_suffix_sql(self, binding: ModelBinding, editor: BaseSchemaEditor) -> str:
         quote = editor.quote
         if self.partitioning is not None:
             # A partitioned table holds no rows - its storage parameters go to its partitions.
-            sql = f" {self.partitioning.get_partition_by_sql(model, quote)}"
+            sql = f" {self.partitioning.get_partition_by_sql(binding, quote)}"
             return sql + (f" TABLESPACE {quote(self.tablespace)}" if self.tablespace else "")
         return self.get_storage_sql(editor)
 

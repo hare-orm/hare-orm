@@ -31,6 +31,10 @@ class Book(Model):
 The key column (`author_id`; one per key column of a composite key) stands among the table's columns
 where the relation is declared among the model's fields.
 
+Assigning a related instance copies its referenced key columns, including when its `__bool__`
+or `__len__` makes it false in Python. Only `None` clears a nullable relation. Prefetching a
+related instance preserves those same key columns.
+
 | Argument | Meaning |
 |---|---|
 | `to` | The related model class, a `"app.Model"` string, or `swappable("SETTING")` (see [Swappable models](#swappable-models)). |
@@ -152,6 +156,10 @@ expression), so either one is enough. The same Python-side cascade is what runs 
 `Meta.soft_delete_field`. For a composite-target foreign key, the same `db_default` value is copied onto
 every shadow column and can't be split per component, so a different value per component needs
 `db_constraint=False` with a tuple `default=`.
+
+The Python-side cascade awaits an asynchronous `default` before updating the referencing rows.
+A callable may return `None` for a nullable relation; a composite relation then has all its key
+columns set to `NULL` together.
 
 Fields declared inside a migration file are not checked: they describe a schema that was already applied.
 To give such a column a `DEFAULT`, add `db_default` to the model and generate a new migration — it sets
@@ -326,6 +334,11 @@ await book.contributors.add(author, through_defaults={"role": "translator"})
 ```
 
 Applied only to rows this call actually inserts — an already-existing pair is left as-is.
+An explicit through-field value suppresses that field's synchronous or asynchronous default,
+even when other fields still need their defaults. `set(..., through_defaults=...)` follows the same rule.
+Explicit values are converted once per operation, including `set(clear=True)` and `create()`.
+Restoring a uniquely declared soft-deleted pair reuses those converted assignments, including
+encrypted values and blind indexes. A single-pass input is not consumed again during insertion or restore.
 `through_defaults` is meaningless (raises `QueryError`) without a real `through=Model`, for a field name
 that doesn't exist on the through model, or for one of the through model's own FK fields making up the
 relation itself. A through-model field nothing fills — not nullable, without a default, not generated —
@@ -422,6 +435,9 @@ of keys, another relation. `get_or_create()`/`update_or_create()` look among the
 object is created and added in the same transaction (an existing row that isn't a member is created again
 — a unique key then raises `IntegrityError`).
 
+A single flat tuple passed to `set((store, number))` is one composite key; a tuple of objects or key
+tuples is a collection of members.
+
 `set()` makes `objs` the relation's members in one transaction: it removes the members missing from
 `objs` (soft-deleting their through rows when the through model has `Meta.soft_delete_field`) and adds
 the new ones — with `through_defaults`, as `add()` does — while the through rows of members that stay are
@@ -459,6 +475,11 @@ once for the operation. `set()` checks explicit through defaults before modifyin
 when the requested membership needs no additions.
 
 ## <a id="genericforeignkeyfield"></a>`GenericForeignKeyField`
+
+A static saved-instance `default` of a generic relation captures its model identity and primary-key
+values when declared. It retains no source application or live instance; each prepared graph interprets
+those keys through its own target binding. A callable default runs at construction in the originating
+application and must return a compatible saved instance.
 
 A relation to a row of one of several models — a comment on a book, an author or an edition. It is an
 **exclusive arc of real foreign keys**: each target gets a branch, a nullable `ForeignKeyField` with a
@@ -502,8 +523,9 @@ or `swappable("SETTING")`. The branch name is the public name of the target: it 
 - renaming a target model changes neither the columns nor the `type`; renaming a branch is a
   `RenameField` of its column and a change of the `type` the API reports.
 
-The field itself has no column and is no entry of `Model._meta.fields_map` — its branches are;
-`Model._meta.generic_foreign_key_fields` lists it. `ConfigurationError` is raised when the model is
+The field itself has no column and is no entry of `apps.get_binding(Model).fields_map` — its branches are;
+`apps.get_binding(Model).generic_foreign_key_fields` lists it. `ConfigurationError` is raised when the model
+is
 declared for an empty dict, a branch name that isn't a Python identifier or is taken by another attribute
 of the model, one model named twice (an object of it couldn't tell its branch), `to_field=` (each branch
 references its target's primary key), `on_delete=SET_NULL` without `null=True`, `on_delete=SET_DEFAULT`
@@ -648,6 +670,14 @@ async for book in author.books: ...
 - A relation read off an instance that was never saved can't be queried (`QueryError`): there is no key
   the related rows could reference yet.
 
+`await author.books` returns a fresh list without filling this loaded-row cache; keep the returned
+list when synchronous access to that result is needed.
+
+A relation declaration changed by `.using()`, `.include_deleted()`, `.only_deleted()` or
+`.all_tenants()` has its own initially empty loaded-row cache. It neither consumes the instance's
+prefetched rows nor replaces them when iterated. A write through the declaration still invalidates
+the instance's original relation cache, and rollback invalidates it again if it was reloaded.
+
 The manager of a backward foreign key writes the relation too:
 
 ```python
@@ -669,12 +699,27 @@ removes the rows missing from its members and adds the new ones — for a non-nu
 adds; `clear=True` clears first. A `kwargs` value pointing the foreign key at another row than the parent
 raises `QueryError` in `create()`, `get_or_create()` and `update_or_create()`, as an object pointing it
 there does in `bulk_create()`.
+With `bulk=False`, the row's previous foreign key is checked by the update that clears it. A
+concurrent move to another parent is preserved. On a database that reports affected rows,
+`remove()` raises `DoesNotExist` for the moved row and `clear()` and `set()` skip it.
+Accepted key representations are compared after field normalization, so a UUID string can name the
+same parent as its UUID object. Reverse `bulk_create()` assigns parent keys when the write prepares;
+preparation/SQL failure, skipped conflicts and transaction rollback restore the original object keys.
 
 Relation writes invalidate prefetched members when they execute. In particular, constructing a
 `bulk_create()` query does not invalidate the relation before the query is awaited. Transaction
 rollback invalidates the members again through the client that performed the write; rebinding a
 connection alias does not move this callback to another transaction. A rolled-back reassignment
 restores foreign keys before the related objects that were loaded before the transaction.
+
+A deferred relation `bulk_create()` chooses its routed connection and current transaction when
+awaited, using the parent's saved connection as its normal fallback. Building it inside a
+transaction does not retain that transaction client after the transaction ends.
+
+Write queries derived from a relation retain its declared `include_deleted()`, `only_deleted()`
+and `all_tenants()` visibility. This applies to the member lookup of `get_or_create()` and
+`update_or_create()` and to a deferred reverse `bulk_create()`. It does not disable the related
+model manager's other row policies or change which model owns an M2M through table.
 
 ```python
 class Book(Model):
@@ -828,7 +873,8 @@ await Hare.init(config={**HARE_CONFIG, "swappable": {"USER_MODEL": "accounts.Use
   its `through=` too). At `init()` it resolves to the model the setting points at — the configured one,
   else the model declaring `Meta.swappable = "USER_MODEL"`. The field keeps the reference itself:
   `deconstruct()` returns it, so a migration file stores the setting, not the model it points at.
-- A default model its setting points away from is **swapped**: `Model._meta.swapped` holds the label of
+- A default model its setting points away from is **swapped**: `apps.get_binding(Model).swapped` holds the
+  label of
   the model used instead (`None` otherwise). It has no table — `Hare.generate_schemas()` and migrations
   skip it and drift ignores it — and every query or write through it (`User.objects.all()`,
   `User.objects.create(...)`) raises `ConfigurationError`:

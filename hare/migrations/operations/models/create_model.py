@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from hare.ddl.indexes.index import Index
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.ddl.schema_references import SchemaReferences
-from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
-from hare.migrations.constants import MODEL_OPTIONS_WITH_DEDICATED_OPERATIONS
-from hare.migrations.operations.constants import DIRECT_RELATION_FIELDS
+from hare.fields.field import Field
+from hare.migrations.constants import MODEL_OPTIONS_WITH_DEDICATED_OPERATIONS, RELATION_FIELDS
+from hare.migrations.operations.constraints.add_constraint import AddConstraint
 from hare.migrations.operations.declared_uniqueness_checks import DeclaredUniquenessChecks
+from hare.migrations.operations.dependencies.native_dependencies import NativeDependencies
 from hare.migrations.operations.dependencies.operation_dependency import OperationDependency
 from hare.migrations.operations.dependencies.relation_dependencies import RelationDependencies
 from hare.migrations.operations.enums import DependencyType
@@ -17,6 +17,7 @@ from hare.migrations.operations.fields.alter_field import AlterField
 from hare.migrations.operations.fields.field_like import FieldLike
 from hare.migrations.operations.fields.remove_field import RemoveField
 from hare.migrations.operations.fields.rename_field import RenameField
+from hare.migrations.operations.indexes.add_index import AddIndex
 from hare.migrations.operations.models.alter_model_options import AlterModelOptions
 from hare.migrations.operations.models.alter_model_table import AlterModelTable
 from hare.migrations.operations.models.delete_model import DeleteModel
@@ -124,21 +125,15 @@ class CreateModel(ModelTableOperation):
             return OperationRewrite((self.with_changes(options=options),))
         if isinstance(other, AlterModelTable) and self.is_same_model_name(self.name, other.name):
             options = dict(self.options or {})
-            for option in (ModelOption.TABLE, ModelOption.TABLE_IS_EXPLICIT):
-                options.pop(option, None)
-                options.pop(str(option), None)
-            # As the alteration leaves the state - a table other than the class's is the model's own, which
-            # a later rename keeps.
-            table_is_explicit = other.table != self.name.lower()
-            if table_is_explicit:
-                options[str(ModelOption.TABLE)] = other.table
-            options[str(ModelOption.TABLE_IS_EXPLICIT)] = table_is_explicit
+            ModelState.record_table_option(options, self.name, other.table)
             return OperationRewrite((self.with_changes(options=options),))
         if isinstance(other, (AddField, AlterField, RemoveField, RenameField)) and self.is_same_model_name(
             self.name, other.model_name
         ):
             field_names = [field_name for field_name, _field in self.fields]
             if isinstance(other, AddField) and other.name not in field_names:
+                if other.not_valid:
+                    return None
                 return OperationRewrite((self.with_changes(fields=[*self.fields, (other.name, other.field)]),))
             if isinstance(other, AlterField) and other.name in field_names:
                 return OperationRewrite((self._get_created_with_altered_field(other),))
@@ -186,7 +181,7 @@ class CreateModel(ModelTableOperation):
         options = None if self.options is None else dict(self.options)
         if options is not None and options.get(ModelOption.TABLE) is not None:
             options[ModelOption.TABLE] = rename.get_renamed_table(
-                options[ModelOption.TABLE], options.get(ModelOption.TABLE_IS_EXPLICIT)
+                options[ModelOption.TABLE], ModelState.is_table_explicit(options)
             )
         return self.with_changes(
             name=rename.new_name,
@@ -194,43 +189,49 @@ class CreateModel(ModelTableOperation):
             options=options,
         )
 
-    def split_field(self, field_name: str) -> tuple[CreateModel, FieldLike, list[Index]]:
-        """Return a creation without a relation and its indexes, leaving this declaration unchanged.
+    def split_field(self, field_name: str, *, app_label: str, state: State) -> tuple[CreateModel, list[Operation]]:
+        """Detach a relation and its complete structured dependency closure.
 
-        The sorter adds the returned field and indexes in separate operations after
-        the tables they require exist. Structured expression dependencies participate;
-        raw SQL does not provide inferred field references.
-
-        Args:
-            field_name: The field's name.
-
-        Returns:
-            The replacement creation, extracted field and indexes.
+        Dependent generated columns, indexes and constraints are added separately,
+        with their normal field dependencies. Every intermediate creation remains
+        valid. Opaque SQL supplies no inferred references; the input is unchanged.
         """
-        field = next(field for name, field in self.fields if name == field_name)
-        fields = [pair for pair in self.fields if pair[0] != field_name]
+        field_map = dict(self.fields)
+        field_attributes = RelationDependencies.get_field_attributes(app_label, field_map, state)
+        extracted_names = SchemaReferences.get_dependent_field_names(
+            field_map, field_name, field_attributes=field_attributes
+        )
+        attributes = {
+            attribute for name, field in self.fields if name in extracted_names for attribute in field_attributes[name]
+        }
+        fields = [pair for pair in self.fields if pair[0] not in extracted_names]
+        extracted: list[Operation] = [
+            AddField(self.name, name, field) for name, field in self.fields if name in extracted_names
+        ]
         options = dict(self.options or {})
-        kept_indexes: list[Any] = []
-        removed_indexes: list[Index] = []
-        for entry in options.get(ModelOption.INDEXES, ()):
-            index = entry if isinstance(entry, Index) else Index(fields=tuple(entry))
-            if field_name in SchemaReferences.get_index_field_names(index):
-                removed_indexes.append(index)
+        for object_type, operation_class in ((IndexObjectType, AddIndex), (ConstraintObjectType, AddConstraint)):
+            retained = []
+            for entry in options.get(object_type.option, ()):
+                schema_object: Any = object_type.as_schema_object(entry)
+                if attributes.isdisjoint(object_type.get_referenced_field_names(schema_object)):
+                    retained.append(entry)
+                else:
+                    extracted.append(operation_class(self.name, schema_object))
+            if retained:
+                options[object_type.option] = tuple(retained)
             else:
-                kept_indexes.append(entry)
-        if removed_indexes:
-            if kept_indexes:
-                options[ModelOption.INDEXES] = tuple(kept_indexes)
-            else:
-                options.pop(ModelOption.INDEXES, None)
-        return self.with_changes(fields=fields, options=options), field, removed_indexes
+                options.pop(object_type.option, None)
+        return self.with_changes(fields=fields, options=options), extracted
 
-    def get_provided_dependencies(self, app_label: str) -> list[OperationDependency]:
+    def get_provided_dependencies(self, app_label: str, state: State) -> list[OperationDependency]:
         return [
             OperationDependency.of_model(app_label, self.name, DependencyType.CREATED),
             *(
-                OperationDependency.of_field(app_label, self.name, field_name, DependencyType.CREATED)
-                for field_name, _field in self.fields
+                dependency
+                for field_name, field in self.fields
+                for dependency in RelationDependencies.get_provided_for_field(
+                    app_label, self.name, field_name, field, state
+                )
             ),
         ]
 
@@ -243,23 +244,21 @@ class CreateModel(ModelTableOperation):
             for _field_name, field in self.fields
             for dependency in RelationDependencies.get_required_for_relation(app_label, self.name, field, state)
         ]
-        schema = options.get(ModelOption.SCHEMA)
-        if schema:
-            dependencies.append(OperationDependency.of_schema(schema, DependencyType.CREATED))
         dependencies.extend(
-            OperationDependency.of_enum_type(enum_type.schema, enum_type.name, DependencyType.CREATED)
-            for _field_name, field in self.fields
-            if (enum_type := getattr(field, "requires_enum_type", None)) is not None
+            NativeDependencies.get_required(
+                {name: field for name, field in self.fields if isinstance(field, Field)}, options
+            )
         )
         if not self.state_only:
-            table = options.get(ModelOption.TABLE) or self.name.lower()
-            dependencies.extend(
-                OperationDependency.of_model(*model_key, DependencyType.REMOVED)
-                for model_key, model_state in state.models.items()
-                if model_key != (app_label, self.name)
-                and (model_state.table or model_state.name.lower()) == table
-                and model_state.options.get(ModelOption.SCHEMA) == schema
-            )
+            alias = state.default_connections.get(app_label)
+            schema = options.get(ModelOption.SCHEMA)
+            table = options.get(ModelOption.TABLE) or ModelState.get_default_table_name(self.name)
+            for model_key in state.models:
+                if model_key == (app_label, self.name) or state.default_connections.get(model_key[0]) != alias:
+                    continue
+                model_state = state.models[model_key]
+                if model_state.db_table == table and model_state.options.get(ModelOption.SCHEMA) == schema:
+                    dependencies.append(OperationDependency.of_model(*model_key, DependencyType.REMOVED))
         return dependencies
 
     def describe(self) -> str:
@@ -269,14 +268,11 @@ class CreateModel(ModelTableOperation):
 
     def deconstruct(self) -> tuple[str, list[Any], dict[str, Any]]:
         # A relation's shadow key column belongs to the relation - written as the relation alone.
-        source_fields = {
-            field.source_field or f"{name}_id"
-            for name, field in self.fields
-            if field is not None and isinstance(field, ForeignKeyFieldInstance)
-        }
         path, args, kwargs = super().deconstruct()
         kwargs["fields"] = [
-            (name, field) for name, field in self.fields if field is not None and name not in source_fields
+            (name, field)
+            for name, field in self.fields
+            if field is not None and getattr(field, "reference", None) is None
         ]
         if self.options:
             kwargs["options"] = AlterModelOptions.get_written_options(self.options)
@@ -293,7 +289,7 @@ class CreateModel(ModelTableOperation):
         return self._model
 
     def state_forward(self, app_label: str, state: State) -> None:
-        model_state = ModelState.make_from_model(app_label, self.model)
+        model_state = ModelState.make_from_declaration(app_label, self.model)
         replaces_a_model = (app_label, self.name) in state.models
         state.models[(app_label, self.name)] = model_state
         if not replaces_a_model:
@@ -304,7 +300,7 @@ class CreateModel(ModelTableOperation):
         changed_model_keys = {(app_label, self.name)}
 
         for field in model_state.fields.values():
-            if not isinstance(field, DIRECT_RELATION_FIELDS):
+            if not isinstance(field, RELATION_FIELDS):
                 continue
 
             related_key = state.get_model_key(field.model_name)
@@ -315,15 +311,13 @@ class CreateModel(ModelTableOperation):
         # This handles the case where a model with a FK was created before its
         # target (e.g. alphabetical ordering: Alert before Warehouse).
         new_model_key = (app_label, self.name)
-        for key, existing_state in state.models.items():
+        for key in state.models:
             if key == new_model_key:
                 continue
+            existing_state = state.models[key]
             for field in existing_state.fields.values():
                 # A label, a model class or a swappable reference alike.
-                if (
-                    isinstance(field, DIRECT_RELATION_FIELDS)
-                    and state.get_model_key(field.model_name) == new_model_key
-                ):
+                if isinstance(field, RELATION_FIELDS) and state.get_model_key(field.model_name) == new_model_key:
                     changed_model_keys.add(key)
                     break
 
@@ -334,22 +328,27 @@ class CreateModel(ModelTableOperation):
     ) -> None:
         if self.state_only:
             return
-        model = new_state.apps.get_model(f"{app_label}.{self.name}")
-        if model._meta.managed is False:
+        binding = new_state.apps.get_binding(f"{app_label}.{self.name}")
+        if binding.managed is False:
             return
-        table_options = model._meta.get_table_options(schema_editor.client.dialect)
+        table_options = binding.get_table_options(schema_editor.client.dialect)
         if table_options is not None:
-            table_options.raise_if_unsupported(model, schema_editor.client.features)
+            table_options.raise_if_unsupported(binding, schema_editor.client.features)
         DeclaredUniquenessChecks.raise_if_unsupported(
-            schema_editor, model, DeclaredUniquenessChecks.get_unique_field_declarations(model, model._meta.fields_map)
+            schema_editor,
+            binding,
+            DeclaredUniquenessChecks.get_unique_field_declarations(
+                binding,
+                binding.fields_map,
+            ),
         )
-        for index in model._meta.indexes:
-            IndexObjectType.raise_if_object_unsupported(schema_editor, model, index)
-        for constraint in model._meta.constraints:
-            ConstraintObjectType.raise_if_object_unsupported(schema_editor, model, constraint)
+        for index in binding.indexes:
+            IndexObjectType.raise_if_object_unsupported(schema_editor, binding, index)
+        for constraint in binding.constraints:
+            ConstraintObjectType.raise_if_object_unsupported(schema_editor, binding, constraint)
         # Created with the table - a database without triggers refused them after it.
-        for trigger in model._meta.triggers:
-            TriggerObjectType.raise_if_object_unsupported(schema_editor, model, trigger)
+        for trigger in binding.triggers:
+            TriggerObjectType.raise_if_object_unsupported(schema_editor, binding, trigger)
 
     async def database_forward(
         self,

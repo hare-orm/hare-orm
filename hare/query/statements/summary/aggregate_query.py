@@ -6,9 +6,10 @@ from copy import copy
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.exceptions import QueryError
-from hare.query.constants import AGGREGATE_OVER_DISTINCT_ON_MESSAGE
+from hare.query.constants import AGGREGATE_OVER_DISTINCT_ON_MESSAGE, PRIMARY_KEY_ALIAS
 from hare.query.execution.query_execution import QueryExecution
-from hare.query.expressions import Expression, ExpressionContext, Q
+from hare.query.expressions import Expression, ExpressionContext, F, Q
+from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
 from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
 from hare.query.plans.constants import NO_CALL_PLAN
 from hare.query.plans.description.plan_context import PlanContext
@@ -29,9 +30,11 @@ from hare.query.statements.building.query_conditions import QueryConditions
 from hare.query.statements.building.query_ctes import QueryCtes
 from hare.query.statements.building.query_grouping import QueryGrouping
 from hare.query.statements.building.query_joins import QueryJoins
+from hare.query.statements.building.query_ordering import QueryOrdering
 from hare.query.statements.constants import (
     AGGREGATE_FIELD_NAMED_METRIC_PREFIX,
     AGGREGATE_SUBQUERY_ALIAS,
+    AGGREGATE_SUBQUERY_COLUMN_ALIAS_PREFIX,
     AGGREGATE_SUBQUERY_GROUP_BY_ALIAS_PREFIX,
     AGGREGATE_SUBQUERY_PRIMARY_KEY_ALIAS_PREFIX,
     AGGREGATE_UNGROUPED_METRIC_MESSAGE,
@@ -41,13 +44,16 @@ from hare.query.statements.projections.derived_projection import DerivedProjecti
 from hare.query.statements.projections.projected_value import ProjectedValue
 from hare.query.statements.summary.rows_summary_query import RowsSummaryQuery
 from hare.sql.builder.queries.correlated_subqueries import CorrelatedSubqueries
+from hare.sql.identifiers import Identifiers
 from hare.sql.terms.criteria.basic_criterion import BasicCriterion
 from hare.sql.terms.functions.aggregate_function import AggregateFunction
 from hare.sql.terms.term import Term
+from hare.sql.terms.tuple import Tuple
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.fields.field import Field
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset.queryset import QuerySet
     from hare.sql.builder.queries.query_builder import QueryBuilder
     from hare.sql.builder.tables.selectable import Selectable
@@ -68,14 +74,17 @@ class AggregateQuery(RowsSummaryQuery):
     #: A plain SELECT of aggregate expressions - see AwaitableQuery.is_read_only.
     is_read_only: ClassVar[bool] = True
 
-    __slots__ = ("_metric_keys",)
+    __slots__ = ("_metric_keys", "_metric_output_names")
 
     #: The keyset boundary compares in the ordering's directions (.before_cursor() reverses them).
     plan_slots: ClassVar[DeclaredPlanSlots] = (
         *StatementPlanDescriptions.HEAD_SLOTS,
         ("_metric_keys", PlanKeyForm.VALUE),
+        ("_metric_output_names", PlanKeyForm.TUPLE),
         ("_is_none", PlanKeyForm.VALUE),
         ("_orderings", PlanKeyForm.TUPLE),
+        ("_limit", PlanKeyForm.BOUND),
+        ("_offset", PlanKeyForm.BOUND_WHEN_TRUE),
         *StatementPlanDescriptions.ROWS_SLOTS,
         *StatementPlanDescriptions.CURSOR_SLOTS,
     )
@@ -104,6 +113,8 @@ class AggregateQuery(RowsSummaryQuery):
             selected_rows=selected_rows,
             selected_rows_arguments=dict(metrics) if selected_rows is not None else None,
         )
+        if self._group_bys and (self._limit is not None or self._offset):
+            self._orderings = source._orderings
         self._apply_summary_arguments(dict(metrics))
 
     def _apply_summary_arguments(self, arguments: dict[str, Any]) -> None:
@@ -113,7 +124,7 @@ class AggregateQuery(RowsSummaryQuery):
             self._limit = None
             self._offset = 0
         self._raise_if_annotation_names_are_unsafe(metrics)
-        metrics = self._get_metrics_apart_from_columns(metrics)
+        metrics = self._get_metrics_apart_from_source(metrics)
         # The queryset's own .annotate()/.alias() keys stay, so a filter reading one of them still
         # resolves - only the metrics are requested and returned (see _execute()).
         self._annotations = {**self._annotations, **metrics}
@@ -124,11 +135,11 @@ class AggregateQuery(RowsSummaryQuery):
         # filter(i__gt=1) reading the field.
         return {key: value for key, value in self._annotations.items() if key not in self._metric_keys}
 
-    def _get_metrics_apart_from_columns(
-        self, metrics: Mapping[str, Expression | Term]
-    ) -> dict[str, Expression | Term]:
-        """The metrics, one named as a column of the model under ``AGGREGATE_FIELD_NAMED_METRIC_PREFIX`` - so
-        no filter or join reads it for the column. ``_execute()`` returns it under its own name.
+    def _get_metrics_apart_from_source(self, metrics: Mapping[str, Expression | Term]) -> dict[str, Expression | Term]:
+        """Separate metric names from source columns and annotations using internal aliases.
+
+        Filters and metric dependencies keep reading the source value. The terminal reader
+        restores each metric's public output name.
 
         Args:
             metrics: The metrics, by the name each is returned under.
@@ -136,13 +147,29 @@ class AggregateQuery(RowsSummaryQuery):
         Returns:
             The metrics by the name each is selected as.
         """
-        column_names = self.model._meta.fields_db_projection
-        return {
-            f"{AGGREGATE_FIELD_NAMED_METRIC_PREFIX}{name}"
-            if name in column_names or name in column_names.values()
-            else name: metric
-            for name, metric in metrics.items()
-        }
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        column_names = model_binding.fields_db_projection
+        taken_names = Identifiers(
+            {*model_binding.fields_map, *column_names.values(), *self._annotations, *metrics, PRIMARY_KEY_ALIAS}
+        )
+        separated_metrics = {}
+        output_names = []
+        for name, metric in metrics.items():
+            if (
+                name == PRIMARY_KEY_ALIAS
+                or name in model_binding.fields_map
+                or name in column_names
+                or name in column_names.values()
+                or name in self._annotations
+            ):
+                alias = taken_names.get_free_name(f"{AGGREGATE_FIELD_NAMED_METRIC_PREFIX}{name}")
+                taken_names.add(alias)
+            else:
+                alias = name
+            separated_metrics[alias] = metric
+            output_names.append((alias, name))
+        self._metric_output_names = tuple(output_names)
+        return separated_metrics
 
     def _prepare_build(self) -> None:
         """Prepare the bound rows and retain only annotations the aggregate computation reads.
@@ -158,11 +185,17 @@ class AggregateQuery(RowsSummaryQuery):
         metrics = [annotation for name, annotation in annotations.items() if name in self._metric_keys]
         grouped = [name for name in self._group_bys if name in annotations]
         referenced = self._get_referenced_annotation_keys(
-            annotations, [*metrics, *(annotations[name] for name in grouped)], self._q_objects
+            annotations, [*metrics, *self._get_grouped_annotation_references(annotations)], self._q_objects
         )
         used = self._metric_keys | set(referenced) | set(grouped)
         self._annotations = {name: annotation for name, annotation in annotations.items() if name in used}
         self._alias_keys = self._alias_keys.intersection(self._annotations)
+
+    def _get_grouped_annotation_references(self, annotations: dict[str, Any]) -> Iterable[F]:
+        """The annotations that establish the groups or order them before taking a slice."""
+        yield from (F(name) for name in self._group_bys if name in annotations)
+        if self._group_bys and (self._limit is not None or self._offset):
+            yield from (F(name) for name, _ in self._orderings if name in annotations)
 
     def _get_call_signature_type_part(self) -> tuple[Any, Sequence[Any]]:
         # The metrics - their structure in the key, their values bound after the calls'.
@@ -171,7 +204,7 @@ class AggregateQuery(RowsSummaryQuery):
         description = self._get_metrics_plan_description()
         if description is None:
             return None, ()
-        return description.structure, list(description.values)
+        return description.structure, description.values
 
     def _build_statement(
         self, value_wrapper_references: RecordedValueReferences | None, *, records_for_caller: bool
@@ -205,7 +238,7 @@ class AggregateQuery(RowsSummaryQuery):
         self,
         fields_for_select: Collection[str],
         *,
-        value_wrapper_references: RecordedValueReferences | None = None,
+        value_wrapper_references: RecordedValueReferences | None,
     ) -> None:
         """Builds the SELECT/JOIN/WHERE/HAVING parts of the query, then rejects a SELECTed
         aggregate that nests another aggregate function inside itself.
@@ -348,7 +381,6 @@ class AggregateQuery(RowsSummaryQuery):
         self._annotation_ordering_terms = prepared._annotation_ordering_terms
         self._expression_term_references = prepared._expression_term_references
         self._joined_tables = prepared._joined_tables
-        self._joined_tables_set = prepared._joined_tables_set
         self._has_aggregate = prepared._has_aggregate
         self._window_filter_criterion = prepared._window_filter_criterion
 
@@ -368,9 +400,10 @@ class AggregateQuery(RowsSummaryQuery):
         """
         annotations = self._annotations
         effective_table = self._effective_basetable()
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
         primary_key_columns = [
-            self.model._meta.fields_db_projection[attribute_name]
-            for attribute_name in self.model._meta.primary_key_attribute_names
+            model_binding.fields_db_projection[attribute_name]
+            for attribute_name in model_binding.primary_key_attribute_names
         ]
 
         inner = self._new_build({key: annotation for key, annotation in annotations.items() if key in referenced_keys})
@@ -380,15 +413,13 @@ class AggregateQuery(RowsSummaryQuery):
                 effective_table[column].as_(f"{AGGREGATE_SUBQUERY_PRIMARY_KEY_ALIAS_PREFIX}{index}")
             )
         inner.query = inner.query.groupby(*(effective_table[column] for column in primary_key_columns))
-        projection = DerivedProjection(
-            inner.query,
-            output_fields={
-                key: inner._get_annotation_value_field(annotations[key], annotations) for key in aggregate_keys
-            },
-        )
+        output_fields = {
+            key: inner._get_annotation_value_field(annotations[key], annotations) for key in aggregate_keys
+        }
+        projection = DerivedProjection(inner.query, column_prefix=AGGREGATE_SUBQUERY_COLUMN_ALIAS_PREFIX)
         grouped_subquery = projection.query.as_(AGGREGATE_SUBQUERY_ALIAS)
         outer_annotations = {
-            key: ProjectedValue(grouped_subquery[projection.by_alias[key].name], projection.by_alias[key].field)
+            key: ProjectedValue(grouped_subquery[projection.by_alias[key].name], output_fields[key])
             if key in aggregate_keys
             else annotation
             for key, annotation in annotations.items()
@@ -406,7 +437,7 @@ class AggregateQuery(RowsSummaryQuery):
         join_criterion = None
         for index, column in enumerate(primary_key_columns):
             column_criterion = effective_table[column].eq(
-                grouped_subquery[f"{AGGREGATE_SUBQUERY_PRIMARY_KEY_ALIAS_PREFIX}{index}"]
+                grouped_subquery[projection.by_alias[f"{AGGREGATE_SUBQUERY_PRIMARY_KEY_ALIAS_PREFIX}{index}"].name]
             )
             join_criterion = column_criterion if join_criterion is None else join_criterion & column_criterion
         outer.query = outer.query.join(grouped_subquery).on(join_criterion)
@@ -436,7 +467,7 @@ class AggregateQuery(RowsSummaryQuery):
         metric_annotations = [annotation for key, annotation in annotations.items() if key in self._metric_keys]
         referenced_keys = self._get_referenced_annotation_keys(
             annotations,
-            [*metric_annotations, *(annotations[name] for name in grouped_annotation_names)],
+            [*metric_annotations, *self._get_grouped_annotation_references(annotations)],
             self._q_objects,
         )
         referenced_keys = [key for key in annotations if key in referenced_keys or key in grouped_annotation_names]
@@ -451,10 +482,11 @@ class AggregateQuery(RowsSummaryQuery):
         for key in (*aggregate_keys, *grouped_annotation_names):
             grouped_subquery_columns[key] = (key, inner._get_annotation_value_field(annotations[key], annotations))
         group_by_terms = QueryGrouping.get_group_bys(inner, *self._group_bys)
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
         grouped_field_names = [
             path
             for name in self._group_bys
-            for path in ((name,) if name in annotations else ConcreteFieldPaths.get_paths(self.model, name))
+            for path in ((name,) if name in annotations else ConcreteFieldPaths.get_paths(model_binding, name))
         ]
         for index, (field_name, group_by_term) in enumerate(zip(grouped_field_names, group_by_terms, strict=True)):
             if field_name in annotations:
@@ -466,9 +498,26 @@ class AggregateQuery(RowsSummaryQuery):
                 QueryAnnotations.get_field_object_by_path(inner, field_name),
             )
         inner.query._groupbys = group_by_terms
-        projection = DerivedProjection(
-            inner.query, output_fields={alias: field for alias, field in grouped_subquery_columns.values()}
-        )
+        if self._limit is not None or self._offset:
+            # Like grouped values(), an unordered group selection ignores Meta.ordering.
+            inner._default_ordering_disabled = True
+            QueryOrdering.get_ordering(
+                inner,
+                binding=model_binding,
+                table=inner._effective_basetable(),
+                orderings=self._orderings,
+                annotations=inner._annotations,
+                fields_for_select=grouped_subquery_columns.keys(),
+            )
+            if self._limit is not None:
+                inner.query._limit = inner.query._wrapper_class(self._limit)
+                if value_wrapper_references is not None:
+                    ExpressionArguments.record_literal(value_wrapper_references, self, "_limit", inner.query._limit)
+            if self._offset:
+                inner.query._offset = inner.query._wrapper_class(self._offset)
+                if value_wrapper_references is not None:
+                    ExpressionArguments.record_literal(value_wrapper_references, self, "_offset", inner.query._offset)
+        projection = DerivedProjection(inner.query, column_prefix=AGGREGATE_SUBQUERY_COLUMN_ALIAS_PREFIX)
         grouped_subquery = projection.query.as_(AGGREGATE_SUBQUERY_ALIAS)
 
         QueryJoins.reset_joined_tables(self)
@@ -476,7 +525,7 @@ class AggregateQuery(RowsSummaryQuery):
         outer_annotations = {
             **annotations,
             **{
-                name: ProjectedValue(grouped_subquery[column_alias], output_field)
+                name: ProjectedValue(grouped_subquery[projection.by_alias[column_alias].name], output_field)
                 for name, (column_alias, output_field) in grouped_subquery_columns.items()
             },
         }
@@ -513,7 +562,9 @@ class AggregateQuery(RowsSummaryQuery):
                 continue
             if not isinstance(annotation, Expression):
                 return None
-            description = annotation.get_plan_description(PlanContext(model=self.model))
+            description = annotation.get_plan_description(
+                PlanContext(binding=self._binding, application_context=self._context)
+            )
             if description is None:
                 return None
             structures.append((key, description.structure))
@@ -543,19 +594,37 @@ class AggregateQuery(RowsSummaryQuery):
         output_columns = built_rows_query._get_output_columns()  # type: ignore[attr-defined]
         projection = DerivedProjection(
             built_rows_query.query,
-            output_fields={alias: field for _, _, alias, field in output_columns},
+            column_prefix=AGGREGATE_SUBQUERY_COLUMN_ALIAS_PREFIX,
         )
         inner_query = projection.query
         with_clauses, inner_query._with = inner_query._with, []
         rows_subquery = inner_query.as_(AGGREGATE_SUBQUERY_ALIAS)
         column_annotations: dict[str, Any] = {}
-        for output_name, _selected_name, alias, output_field in output_columns:
-            column = projection.by_alias[alias]
-            column_annotations[output_name] = ProjectedValue(rows_subquery[column.name], column.field)
-        for _output_name, selected_name, alias, output_field in output_columns:
-            if selected_name not in column_annotations:
-                column = projection.by_alias[alias]
-                column_annotations[selected_name] = ProjectedValue(rows_subquery[column.name], column.field)
+        cells = tuple(zip(output_columns, projection.columns, strict=True))
+        for (output_name, _selected_name, _alias, output_field), column in cells:
+            if output_name is not None:
+                column_annotations[output_name] = ProjectedValue(rows_subquery[column.name], output_field)
+        for (_output_name, selected_name, _alias, output_field), column in cells:
+            if selected_name is not None and selected_name not in column_annotations:
+                column_annotations[selected_name] = ProjectedValue(rows_subquery[column.name], output_field)
+        from hare.query.rows.values_rows.combined_values_rows import CombinedValuesRows
+        from hare.query.statements.select.values_query import ValuesQuery
+
+        if isinstance(built_rows_query, ValuesQuery):
+            composite_outputs = built_rows_query._rows.get_composite_output_aliases(
+                built_rows_query._result_column_aliases
+            )
+            for alias, original_name in built_rows_query._selection.renamed_fields:
+                if alias in composite_outputs:
+                    composite_outputs.setdefault(original_name, composite_outputs[alias])
+        elif isinstance(rows := getattr(built_rows_query, "_rows", None), CombinedValuesRows):
+            composite_outputs = rows.first_leaf._rows.get_composite_output_aliases()
+        else:
+            composite_outputs = {}
+        for name, aliases in composite_outputs.items():
+            column_annotations[name] = ProjectedValue(
+                Tuple(*(rows_subquery[projection.by_alias[alias].name] for alias in aliases)), None
+            )
         QueryJoins.reset_joined_tables(self)
         query = self._connection.query_class.from_(rows_subquery)
         # Track declared references too: Count(*) no longer carries a base-table column
@@ -600,14 +669,14 @@ class AggregateQuery(RowsSummaryQuery):
         a reference outside the table is rejected with the caller's grouped or selected-row message.
         """
         if isinstance(annotation, Term) and not isinstance(annotation, Expression):
-            term = annotation
+            term, joins = annotation, []
         else:
             result = annotation.get_result(context)
-            term = result.term
-            if self.reads_outside_derived_table(result.joins, term, table):
-                raise QueryError(error_message.format(key=key))
+            term, joins = result.term, result.joins
             if getattr(annotation, "populate_field_object", False):
                 self._annotation_output_fields[key] = annotation.get_value_field(result)
+        if self.reads_outside_derived_table(joins, term, table):
+            raise QueryError(error_message.format(key=key))
         return term.as_(key)
 
     @staticmethod
@@ -668,8 +737,8 @@ class AggregateQuery(RowsSummaryQuery):
         Returns:
             The metrics, in the order they were passed.
         """
-        result = await connection.execute_dicts(sql, parameters, retry_read=True)
-        row = result[0] if result else dict.fromkeys(self._metric_keys)
+        _, rows = await connection._execute_built(sql, parameters, returns_rows=True, retry_read=True)
+        row = connection.row_to_dict(rows[0]) if rows else dict.fromkeys(self._metric_keys)
         for key in self._metric_keys:
             # Mirrors ValuesOutput.get_selected_value_field()'s identical read of this same
             # per-query-execution dict, populated by QueryAnnotations.get_annotate() only for the specific
@@ -677,7 +746,4 @@ class AggregateQuery(RowsSummaryQuery):
             field_object = annotation_output_fields.get(key)
             if field_object:
                 row[key] = connection.dialect.types.get_python_value(field_object, row[key])
-        # In the order the metrics were passed, like Django - self._metric_keys is a set.
-        ordered_metric_keys = [key for key in self._annotations if key in self._metric_keys]
-        ordered_metric_keys += sorted(self._metric_keys.difference(ordered_metric_keys))
-        return {key.removeprefix(AGGREGATE_FIELD_NAMED_METRIC_PREFIX): row[key] for key in ordered_metric_keys}
+        return {public_name: row[alias] for alias, public_name in self._metric_output_names}

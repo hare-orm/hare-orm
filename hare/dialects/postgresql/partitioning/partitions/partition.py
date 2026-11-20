@@ -6,6 +6,9 @@ from collections.abc import Callable
 from typing import Any
 
 from hare.classes.class_path import ClassPath
+from hare.dialects.base.literals.constants import SQL_NULL_BYTE
+from hare.dialects.postgresql.partitioning.partitioning import Partitioning
+from hare.exceptions import ConfigurationError
 
 
 @dataclasses.dataclass(frozen=True)
@@ -16,9 +19,31 @@ class Partition(abc.ABC):
 
     Attributes:
         name: The partition's name - letters, digits and underscores.
+        table: An explicit physical table name. None derives it from the parent and partition names.
+        schema: An explicit physical schema. None uses the parent table's schema.
     """
 
     name: str
+    table: str | None = dataclasses.field(default=None, kw_only=True)
+    schema: str | None = dataclasses.field(default=None, kw_only=True)
+
+    def __post_init__(self) -> None:
+        Partitioning.check_partition_name(type(self).__name__, self.name)
+        for identifier in (self.table, self.schema):
+            if identifier is not None and (not identifier or SQL_NULL_BYTE in identifier):
+                raise ConfigurationError(f"Partition {self.name!r} has an invalid physical identifier.")
+
+    def get_location(self, parent_table: str, parent_schema: str | None) -> tuple[str | None, str]:
+        """The schema and table migration statements address."""
+        table = self.table or Partitioning.get_partition_table_name(parent_table, self.name)
+        return self.schema or parent_schema, table
+
+    def has_same_bound(self, other: object) -> bool:
+        """Whether changing only the partition's name and address preserves its bound."""
+        return (
+            isinstance(other, Partition)
+            and dataclasses.replace(self, name=other.name, table=other.table, schema=other.schema) == other
+        )
 
     @abc.abstractmethod
     def get_bound_sql(self, render_value: Callable[[int, Any], str]) -> str:
@@ -42,5 +67,6 @@ class Partition(abc.ABC):
             if isinstance(getattr(self, option.name), tuple)
             else getattr(self, option.name)
             for option in dataclasses.fields(self)
+            if getattr(self, option.name) is not None or option.default is not None
         }
         return ClassPath.get(type(self)), [], kwargs

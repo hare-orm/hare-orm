@@ -6,7 +6,29 @@ from types import SimpleNamespace
 import pytest
 
 from hare.contrib.application_lifecycle import ApplicationLifecycle
+from hare.contrib.frameworks.hare_lifecycle import HareLifecycle
 from hare.core.hare_context import HareContext
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bind_before_startup", [False, True])
+async def test_model_iterable_is_reused_on_application_startup_and_restart(bind_before_startup):
+    config = {
+        "connections": {"default": "sqlite+aiosqlite://:memory:"},
+        "apps": {
+            "models": {"models": iter(["tests.contrib.frameworks.models"]), "default_connection": "default"},
+        },
+    }
+    if bind_before_startup:
+        lifecycle = HareLifecycle(config)
+        assert lifecycle.bind_models().get_model("models.Writer").__name__ == "Writer"
+    else:
+        lifecycle = ApplicationLifecycle(config)
+
+    for _ in range(2):
+        async with lifecycle.running():
+            assert lifecycle.get_context().apps.get_model("models.Writer").__name__ == "Writer"
 
 
 @pytest.mark.database_independent
@@ -45,7 +67,7 @@ async def test_application_lifecycle_preserves_work_and_cleanup_errors(monkeypat
 
     monkeypatch.setattr(HareContext, "init", initialize)
     monkeypatch.setattr(HareContext, "close_connections", close)
-    lifecycle = ApplicationLifecycle({})
+    lifecycle = ApplicationLifecycle({"connections": {}, "apps": {}})
     if phase.startswith("robyn_"):
         from hare.contrib.frameworks.robyn import HareRobyn
 

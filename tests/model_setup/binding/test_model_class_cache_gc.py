@@ -4,14 +4,12 @@ import gc
 import sys
 import types
 import weakref
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from hare import Hare, fields
 from hare.contrib.test.isolated_contexts import hare_test_context
-from hare.core.apps.apps import Apps
 from hare.core.caching.cache import Cache
 from hare.core.config import HareConfig
 from hare.core.hare_context import HareContext
@@ -22,8 +20,9 @@ from hare.models.deletion.cascade.deletion_graph import DeletionGraph
 from hare.query.plans.statement.statement_plans import StatementPlans
 from hare.query.queryset.lazy_relation_names import LazyRelationNames
 from hare.query.statements.write.bulk.bulk_write_batches import BulkWriteBatches
-from hare.sql.builder.queries.query import Query
 from tests.shared_models.testmodels import Author, Book
+
+pytestmark = pytest.mark.usefixtures("model_conversion_context")
 
 
 @pytest.mark.sqlite_only
@@ -54,9 +53,9 @@ async def test_dynamic_model_classes_are_garbage_collected_after_context_teardow
         sys.modules[module_name] = module
         try:
             async with hare_test_context([module_name], app_label=app_label):
-                DeletionGraph.get_backward_relations(CacheGCTarget)
-                DeletionGraph.get_cascade_models(CacheGCOwner)
-                LazyRelationNames.get(CacheGCTarget)
+                DeletionGraph.get_backward_relations(HareContext.require_current().apps.get_binding(CacheGCTarget))
+                DeletionGraph.get_cascade_models(HareContext.require_current().apps.get_binding(CacheGCOwner))
+                LazyRelationNames.get(HareContext.require_current().apps.get_binding(CacheGCTarget))
                 owner = await CacheGCOwner.objects.create(target=await CacheGCTarget.objects.create())
                 await owner.tags.add(await CacheGCTarget.objects.create())
                 await CacheGCOwner.objects.filter(target__id__gte=0).prefetch_related("tags").all()
@@ -100,7 +99,7 @@ async def test_replaced_live_model_class_is_garbage_collected_after_queries_and_
         await live_widget.objects.bulk_create([live_widget(name="c")])
         await live_widget.objects.filter(name="c").update(name="d")
         await widget.delete()
-        assert StatementPlans.plans.get_bucket(live_widget)
+        assert StatementPlans.plans.get_bucket(HareContext.require_current().apps.get_binding(live_widget))
         return weakref.ref(live_widget)
 
     async with HareContext():
@@ -155,15 +154,20 @@ async def test_serialize_instances_cache_isolates_replaced_model_into_its_own_bu
         first_widget = build_live_widget()
         Hare.register_live_models([first_widget], app_label="gc_live_serialize")
         # A different class under the same name needs the old one unregistered first.
+        first_binding = HareContext.require_current().apps.get_binding(first_widget)
         Hare.unregister_live_models([first_widget])
-        first_serializer = BulkWriteBatches.get_instance_writers(first_widget, ("name",), SQLITE_DIALECT.types)
+        first_serializer = BulkWriteBatches.get_instance_writers(first_binding, ("name",), SQLITE_DIALECT.types)
 
         second_widget = build_live_widget()
         Hare.register_live_models([second_widget], app_label="gc_live_serialize")
-        second_serializer = BulkWriteBatches.get_instance_writers(second_widget, ("name",), SQLITE_DIALECT.types)
+        second_serializer = BulkWriteBatches.get_instance_writers(
+            HareContext.require_current().apps.get_binding(second_widget), ("name",), SQLITE_DIALECT.types
+        )
 
-        assert BulkWriteBatches.SERIALIZE_INSTANCES_CACHE.get_bucket(first_widget)
-        assert BulkWriteBatches.SERIALIZE_INSTANCES_CACHE.get_bucket(second_widget)
+        assert BulkWriteBatches.SERIALIZE_INSTANCES_CACHE.get_bucket(first_binding)
+        assert BulkWriteBatches.SERIALIZE_INSTANCES_CACHE.get_bucket(
+            HareContext.require_current().apps.get_binding(second_widget)
+        )
         assert first_serializer is not second_serializer
 
 
@@ -179,7 +183,7 @@ def test_iter_never_yields_a_key_the_cache_would_not_serve() -> None:
         assert list(cache) == [(Author, "shape"), (Book, "shape")]
         assert len(cache) == 2
 
-        cache.forget_model(Book)
+        cache.forget_model(HareContext.require_current().apps.get_binding(Book))
         assert len(cache) == 2
         cache.clear()
         assert list(cache) == []
@@ -197,7 +201,7 @@ def test_a_cache_hit_returns_the_stored_value_itself() -> None:
     with, the largest single cost of a simple `get()`. A hit is one lookup now."""
     cache: Cache[tuple[Any, ...]] = Cache(max_size=8)
     try:
-        value = (Author, ("nested", [1, 2]), Author._meta.fields_map["name"])
+        value = (Author, ("nested", [1, 2]), HareContext.require_current().apps.get_binding(Author).fields_map["name"])
         cache[(Author, "shape")] = value
         assert cache[(Author, "shape")] is value
         assert cache.get((Author, "shape")) is value
@@ -209,26 +213,29 @@ def test_a_cache_hit_returns_the_stored_value_itself() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_value_without_sql_is_served_whichever_builder_the_model_is_bound_to(db, monkeypatch) -> None:
-    """A cache whose values hold no SQL (``holds_sql=False``) keeps a model's entries when the
-    model is bound to another query builder; forgetting the model still drops them."""
-    cache: Cache[str] = Cache(max_size=8, holds_sql=False)
+async def test_clearing_cache_buckets_is_limited_to_their_binding(db) -> None:
+    cache: Cache[str] = Cache(max_size=8)
     sql_cache: Cache[str] = Cache(max_size=8)
-    try:
-        cache.get_bucket(Author)[("schema",)] = "value"
-        sql_cache.get_bucket(Author)[("schema",)] = "sql"
-        # As if Author were bound to another context's builder.
-        for name in ("basetable", "basequery", "basequery_all_fields"):
-            monkeypatch.setattr(Author._meta, name, getattr(Author._meta, name))
-        Apps.bind_model_base_queries(Author, SimpleNamespace(query_class=Query))
-        assert cache.get_bucket(Author)[("schema",)] == "value"
-        assert list(cache.get_bucket(Author)) == [("schema",)]
-        assert ("schema",) not in sql_cache.get_bucket(Author)
-        cache.forget_model(Author)
-        assert ("schema",) not in cache.get_bucket(Author)
-    finally:
-        cache.clear()
-        sql_cache.clear()
+    first = HareContext.require_current().apps.get_binding(Author)
+    async with HareContext() as other:
+        await other.init(
+            HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": ["tests.shared_models.testmodels"]}),
+            connect=False,
+        )
+        second = other.apps.get_binding(Author)
+        try:
+            cache.get_bucket(first)["schema"] = "first fact"
+            sql_cache.get_bucket(first)["schema"] = "first SQL"
+            sql_cache.get_bucket(second)["schema"] = "second SQL"
+            cache.get_bucket(second)["schema"] = "second fact"
+            Cache.clear_holder(first)
+            assert not cache.get_bucket(first)
+            assert not sql_cache.get_bucket(first)
+            assert cache.get_bucket(second)["schema"] == "second fact"
+            assert sql_cache.get_bucket(second)["schema"] == "second SQL"
+        finally:
+            cache.clear()
+            sql_cache.clear()
 
 
 def _walk_reachable_objects(root: Any) -> Any:

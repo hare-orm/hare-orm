@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, get_args
 from hare.contrib.pydantic.descriptions.pydantic_field_source import PydanticFieldSource
 from hare.contrib.pydantic_field_aliases import PydanticFieldAliases
 from hare.core.caching.cache import Cache
+from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
     from hare.contrib.pydantic.models.pydantic_model import PydanticModel
@@ -25,7 +26,7 @@ class PydanticSerializationDescription:
     field_sources: tuple[PydanticFieldSource, ...]
     fetch_fields: tuple[str, ...] | None
 
-    descriptions: ClassVar[Cache[PydanticSerializationDescription]] = Cache(holds_sql=False)
+    descriptions: ClassVar[Cache[PydanticSerializationDescription]] = Cache()
 
     @classmethod
     def get(cls, schema: type[PydanticModel]) -> PydanticSerializationDescription:
@@ -40,6 +41,8 @@ class PydanticSerializationDescription:
         cls, schema: type[PydanticModel], ancestors: tuple[type[PydanticModel], ...]
     ) -> PydanticSerializationDescription:
         model = schema.source_model
+        if model is not None and schema.source_binding is None:
+            raise ConfigurationError("An ORM Pydantic schema requires an explicit source_binding")
         sources: list[PydanticFieldSource] = []
         paths: list[str] = []
         finite = True
@@ -48,7 +51,11 @@ class PydanticSerializationDescription:
                 source = PydanticFieldSource(PydanticFieldAliases.get_paths(name, parameter, schema.model_config))
                 sources.append(source)
                 for input_path in source.paths:
-                    targets = source.get_fetch_targets(model, input_path)
+                    targets = (
+                        source.get_fetch_targets(schema.source_binding, input_path)
+                        if schema.source_binding is not None
+                        else ()
+                    )
                     for relation_path, related_model in targets:
                         relation_name = "__".join(relation_path)
                         nested_schemas = tuple(

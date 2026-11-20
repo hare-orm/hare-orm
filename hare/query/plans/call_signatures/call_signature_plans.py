@@ -18,7 +18,9 @@ from hare.query.plans.statement.statement_plans import StatementPlans
 from hare.query.scopes.row_scopes import RowScopes
 
 if TYPE_CHECKING:
+    from hare.core.hare_context import HareContext
     from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.models.model_binding import ModelBinding
     from hare.query.plans.statement.statement_plan import StatementPlan
     from hare.query.queryset.query_specification import QuerySpecification
     from hare.query.statements.awaitable_query import AwaitableQuery
@@ -35,6 +37,8 @@ class CallSignaturePlans:
         call_values: tuple[Any, ...],
         single_parameter_in_list_min_length: int | None,
         model: Any,
+        *,
+        application_context: HareContext | None = None,
     ) -> tuple[tuple[Any, ...], list[Any]] | None:
         """Describes the calls: each call with the structure of its filter values - a ``Q`` condition
         by its own description - and the values a plan binds.
@@ -45,6 +49,7 @@ class CallSignaturePlans:
             single_parameter_in_list_min_length: The dialect's length from which an ``__in`` list
                 binds as one parameter.
             model: The model queried.
+            application_context: The application context used to bind values and check model routing.
 
         Returns:
             The structure and the values, None when a condition keeps no plan.
@@ -56,7 +61,12 @@ class CallSignaturePlans:
         for call in call_signature[1:]:
             if call[0] in CALL_SIGNATURE_ANNOTATION_CALLS:
                 if context is None:
-                    context = PlanContext(None, single_parameter_in_list_min_length, model=model)
+                    context = PlanContext(
+                        None,
+                        single_parameter_in_list_min_length,
+                        binding=model,
+                        application_context=application_context,
+                    )
                 annotation_structures = []
                 for _key in call[1]:
                     description = next(values_of_calls).get_plan_description(context)
@@ -73,7 +83,12 @@ class CallSignaturePlans:
             if call[0] in CALL_SIGNATURE_CONDITION_FILTER_CALLS:
                 # The Q conditions, before the kwargs.
                 if context is None:
-                    context = PlanContext(None, single_parameter_in_list_min_length, model=model)
+                    context = PlanContext(
+                        None,
+                        single_parameter_in_list_min_length,
+                        binding=model,
+                        application_context=application_context,
+                    )
                 for _condition_number in range(call[2]):
                     description = next(values_of_calls).get_plan_description(context)
                     if description is None:
@@ -85,7 +100,12 @@ class CallSignaturePlans:
                 if isinstance(value, Plannable):
                     # An expression or a query compared with - described as a condition does.
                     if context is None:
-                        context = PlanContext(None, single_parameter_in_list_min_length, model=model)
+                        context = PlanContext(
+                            None,
+                            single_parameter_in_list_min_length,
+                            binding=model,
+                            application_context=application_context,
+                        )
                     description = FilterPlanDescriptions.get_filter_value_plan_description(value, context)
                     if description is None:
                         return None
@@ -102,21 +122,21 @@ class CallSignaturePlans:
 
     @staticmethod
     def find_with_value_positions(
-        model: Any, key: tuple[Any, ...]
+        binding: ModelBinding, key: tuple[Any, ...]
     ) -> tuple[StatementPlan, tuple[int, ...] | None, Any] | None:
         """The plan kept under the key of a queryset's calls, with the position of each value of its
         description among the values bound - the calls' values, then the query class's own - and
         what the query class reads the result of the plan with.
 
         Args:
-            model: The model queried.
+            binding: The binding of the model queried.
             key: The structural key of the calls and their execution settings.
 
         Returns:
             The plan, the positions - None when they come in the plan's order - and the reading
             (``AwaitableQuery._get_call_plan_reading()``); None when no plan is kept yet.
         """
-        return StatementPlans.call_signature_plans.get_bucket(model).get(key)
+        return StatementPlans.call_signature_plans.get_bucket(binding).get(key)
 
     @staticmethod
     def get_value_origins(specification: QuerySpecification[Any], connection: DatabaseClient) -> list[Any] | None:
@@ -131,7 +151,8 @@ class CallSignaturePlans:
             The origins, None when a value's origin isn't known.
         """
         origins: list[Any] = []
-        row_scopes = RowScopes.of(specification.model)
+        model_binding: ModelBinding = specification._binding  # type: ignore[assignment]
+        row_scopes = RowScopes.of(model_binding)
         if row_scopes.field_scopes:
             scope = row_scopes.get_filters_plan_description(
                 specification._visibility.get_for_active_tenant(), uses_default_scope=specification._uses_default_scope
@@ -141,7 +162,12 @@ class CallSignaturePlans:
             # The default scope's conditions name the query they are put in (_apply_ambient_scope()).
             origins += [PlanOrigins.get_value_origin(specification, scope_key) for scope_key in scope[1]]
         single_parameter_in_list_min_length = connection.dialect.parameters.single_parameter_in_list_min_length
-        context = PlanContext(None, single_parameter_in_list_min_length, model=specification.model)
+        context = PlanContext(
+            None,
+            single_parameter_in_list_min_length,
+            binding=model_binding,
+            application_context=specification._context,
+        )
         call_values = iter(specification._call_values)  # type: ignore[attr-defined]
         # One kept filter call per filter call of the signature, in their order.
         pending_filter_calls = iter(specification._pending_filter_calls)
@@ -206,7 +232,7 @@ class CallSignaturePlans:
             plan: The plan.
             description: The description of the query of the calls, with the origin of each value.
         """
-        if plan.sql is None or description is None or description.origins is None:
+        if description is None or description.origins is None:
             return
         position_by_origin = {origin: position for position, origin in enumerate(value_origins)}
         if len(position_by_origin) != len(value_origins):
@@ -226,7 +252,7 @@ class CallSignaturePlans:
             # A value of the calls the plan doesn't bind, or a value of no known origin.
             return
         reading = query._get_call_plan_reading(plan)
-        StatementPlans.call_signature_plans.get_bucket(query.model)[key] = (
+        StatementPlans.call_signature_plans.get_bucket(query._binding)[key] = (
             plan,
             None if positions == list(range(len(positions))) else tuple(positions),
             reading,

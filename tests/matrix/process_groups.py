@@ -46,7 +46,6 @@ class ProcessGroups:
             errors.append(error)
             try:
                 self.terminate(process)
-                process.wait()
             except BaseException as cleanup_error:
                 errors.append(cleanup_error)
         try:

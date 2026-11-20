@@ -55,6 +55,10 @@ class SeparateDatabaseAndState(HareOperation):
             )
         )
 
+    def get_nested_operations(self) -> tuple[Operation, ...]:
+        """Both declaration branches; physical execution keeps their boundaries intact."""
+        return (*self.state_operations, *self.database_operations)
+
     def deconstruct(self) -> tuple[str, list[Any], dict[str, Any]]:
         path, args, kwargs = super().deconstruct()
         if not self.database_operations:

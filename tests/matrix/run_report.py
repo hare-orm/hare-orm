@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from tests.matrix.constants import RUN_REPORT_ENVIRONMENT_VARIABLE, RUN_REPORT_PACKAGES
+from tests.matrix.contract_coverage import ContractCoverage
 
 
 class RunReport:
@@ -37,6 +38,7 @@ class RunReport:
             },
             "seed": session.config.getoption("randomly_seed", default=None),
             "tool_versions": versions,
+            "contracts": ContractCoverage.get_outcomes(reporter.stats),
         }
         Path(target).write_text(json.dumps(report, indent=2), encoding="utf-8")
 

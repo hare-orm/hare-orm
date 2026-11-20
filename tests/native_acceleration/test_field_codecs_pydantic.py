@@ -10,5 +10,7 @@ from tests.shared_models.testmodels_pydantic import JSONFieldsDeclaredType
 pytestmark = pytest.mark.database_independent
 
 
+@pytest.mark.usefixtures("model_conversion_context")
+@pytest.mark.parametrize("model_conversion_context", [["tests.shared_models.testmodels_pydantic"]], indirect=True)
 def test_declared_type_reads_match():
     assert_reads_match(JSONFieldsDeclaredType, "item", [None, '{"name": "x", "value": 1}', '{"name": 5}', "[]"])

@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.query.plans.statement.statement_plans import StatementPlans
 from hare.query.statements.awaitable_query import AwaitableQuery
 from tests.plan_verification.exceptions import PlanMismatchError
@@ -62,8 +63,8 @@ def broken_plans_of(model: type):
     for the block."""
     original_sqls = {
         id(plan): (plan, plan.sql)
-        for plan in StatementPlans.plans.get_bucket(model).values()
-        if plan.sql is not None and model._meta.db_table in plan.sql
+        for plan in StatementPlans.plans.get_bucket(HareContext.require_current().apps.get_binding(model)).values()
+        if plan.sql is not None and HareContext.require_current().apps.get_binding(model).db_table in plan.sql
     }
     for plan, sql in original_sqls.values():
         plan.sql = f"{sql} "

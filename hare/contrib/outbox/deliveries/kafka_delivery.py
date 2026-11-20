@@ -70,6 +70,12 @@ class KafkaDelivery(OutboxDelivery):
     async def deliver(self, event: OutboxEvent) -> None:
         await (await self.send(await self.broker_connection.get_producer(), event))
 
+    @staticmethod
+    def _observe_confirmation(confirmation: asyncio.Future[Any]) -> None:
+        """Retrieve the delivery failure even when the caller has stopped waiting."""
+        if not confirmation.cancelled():
+            confirmation.exception()
+
     async def deliver_batch(
         self, events: Sequence[OutboxEvent], *, concurrency: int, timeout_seconds: float
     ) -> list[DeliveryResult]:
@@ -81,7 +87,9 @@ class KafkaDelivery(OutboxDelivery):
         async def send_all() -> None:
             for position, event in enumerate(events):
                 try:
-                    confirmations[position] = await self.send(producer, event)
+                    confirmation = await self.send(producer, event)
+                    confirmation.add_done_callback(self._observe_confirmation)
+                    confirmations[position] = confirmation
                 except Exception as error:
                     outcomes[position] = error
             if confirmations:

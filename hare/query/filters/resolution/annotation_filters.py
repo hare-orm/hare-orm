@@ -9,6 +9,7 @@ from hare.exceptions import QueryError
 from hare.fields.data.temporal.time_delta_field import TimeDeltaField
 from hare.fields.field import Field
 from hare.fields.generated_field import GeneratedField
+from hare.query.constants import PLAN_CACHE_MISS
 from hare.query.expressions.expression import Expression
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
@@ -53,7 +54,7 @@ class AnnotationFilters:
             if len(value_wrappers) != 1:
                 return None
             return LiteralValueReference(
-                value_wrappers[0], partial(FilterValues.get_converted_term_parameter, parameter_converter)
+                value_wrappers[0], partial(AnnotationFilters._get_converted_term_parameter, parameter_converter)
             )
         if (
             isinstance(criterion, BasicCriterion)
@@ -61,10 +62,28 @@ class AnnotationFilters:
             and criterion.right.value is value
         ):
             return LiteralValueReference(criterion.right, parameter_converter)
-        value_wrappers = [node for node in criterion.find_(ValueWrapper) if node.value is value]
-        if len(value_wrappers) != 1:
+        value_wrapper = FilterValues.get_unique_value_wrapper(criterion, value)
+        if value_wrapper is None:
             return None
-        return LiteralValueReference(value_wrappers[0], parameter_converter)
+        return LiteralValueReference(value_wrapper, parameter_converter)
+
+    @staticmethod
+    def _get_converted_term_parameter(parameter_converter: Callable[[Any], Any], value: Any) -> Any:
+        """The one parameter of the term a value of a filter on an annotation converts into.
+
+        Args:
+            parameter_converter: The conversion.
+            value: The value.
+
+        Returns:
+            The parameter's value; ``PLAN_CACHE_MISS`` - of no type a plan binds - when the value
+            converts into anything else.
+        """
+        term = parameter_converter(value)
+        if not isinstance(term, Term):
+            return PLAN_CACHE_MISS
+        value_wrappers = term.find_(ValueWrapper)
+        return value_wrappers[0].value if len(value_wrappers) == 1 else PLAN_CACHE_MISS
 
     @staticmethod
     def encode_annotation_filter_value(

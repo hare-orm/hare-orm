@@ -37,8 +37,8 @@ class IndexInfo:
     #: Every column's opclass name when all of them are the access method's defaults (and
     #: opclasses is therefore left empty) - where the database has opclasses.
     default_opclasses: list[str] = dataclass_field(default_factory=list)
-    #: Each key term's SQL, in order, for an index with an expression term - rebuilt as
-    #: Index(*expressions). None for plain columns.
+    #: Each key term's SQL, in order, for an index with an expression term. A dialect can
+    #: retain complete keys from its catalog. None for plain columns.
     expression_terms: list[str] | None = None
     #: The index's ``WITH (...)`` storage parameters, e.g.
     #: ``{"lists": "5"}`` - raw value text, empty when none were set.
@@ -65,10 +65,6 @@ class IndexInfo:
     #: out) - an expression key's too; empty for
     #: ascending keys whose order wasn't read.
     key_orders: list[str] = dataclass_field(default_factory=list)
-    #: What the index has that no hare index or constraint can declare - the sort order of a
-    #: collated key - each described as SQL text (``a COLLATE NOCASE DESC``);
-    #: reconstructed without it and flagged in a comment.
-    unrepresentable_properties: list[str] = dataclass_field(default_factory=list)
 
     def is_special(self, *, unique_include_is_constraint: bool = False) -> bool:
         """Whether the index has what a plain ``Index(fields=...)``/``UniqueConstraint`` can't
@@ -121,9 +117,7 @@ class IndexInfo:
         if self.expression_terms is not None:
             key_orders = self.key_orders or [Order.ASC_NULLS_LAST.value] * len(self.expression_terms)
             arguments = [
-                RawSQLTerm(term)
-                if key_order == Order.ASC_NULLS_LAST
-                else OrderedIndexKey(RawSQLTerm(term), Order(key_order))
+                self.get_expression_key(term, Order(key_order))
                 for term, key_order in zip(self.expression_terms, key_orders, strict=True)
             ]
         elif self.has_explicit_null_placement():
@@ -155,6 +149,11 @@ class IndexInfo:
             if parameter_name in self.storage_parameters:
                 keyword_arguments[parameter_name] = float(self.storage_parameters[parameter_name])
         return index_class, arguments, keyword_arguments
+
+    @staticmethod
+    def get_expression_key(sql: str, order: Order) -> RawSQLTerm | OrderedIndexKey:
+        term = RawSQLTerm(sql)
+        return term if order is Order.ASC_NULLS_LAST else OrderedIndexKey(term, order)
 
     def has_explicit_null_placement(self) -> bool:
         """Whether a key places NULLs other than its direction's default - declared as

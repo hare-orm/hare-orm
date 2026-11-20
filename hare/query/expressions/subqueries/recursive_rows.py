@@ -23,7 +23,7 @@ from hare.query.key_columns import KeyColumns
 from hare.query.lookup_info.lookup_paths import LookupPaths
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
-from hare.sql import Table
+from hare.sql import Query, Table
 from hare.sql.terms.field import Field
 from hare.sql.terms.tuple import Tuple
 from hare.sql.terms.values.value_wrapper import ValueWrapper
@@ -91,7 +91,7 @@ class RecursiveRows(KeyRowsQuery):
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
         model = self.start.model
-        meta = model._meta
+        meta = expression_context.binding.graph.get_binding(model)
         relation = meta.fields_map.get(self.relation_name)
         if (
             not isinstance(relation, RelationalField)
@@ -107,13 +107,16 @@ class RecursiveRows(KeyRowsQuery):
         walk = Table(RECURSIVE_ROWS_CTE_NAME)
 
         # The query class of the connection: a set operation renders in its base query's dialect.
-        connection = expression_context.connection if expression_context.connection is not None else meta.connection
-        if not connection.features.supports_recursive_queries:
+        connection = expression_context.connection
+        dialect = expression_context.dialect
+        features = connection.features if connection is not None else dialect.features
+        if not features.supports_recursive_queries:
             raise UnSupportedError(
-                f"with_recursive({self.relation_name!r}) needs a recursive WITH query, which the {connection.dialect} "
-                f"server of connection {connection.connection_alias!r} doesn't run"
+                f"with_recursive({self.relation_name!r}) needs a recursive WITH query, which the {dialect} "
+                f"server of connection "
+                f"{connection.connection_alias if connection is not None else meta.default_connection!r} doesn't run"
             )
-        query_class = connection.query_class
+        query_class = connection.query_class if connection is not None else Query
 
         start_table = meta.basetable.as_(RECURSIVE_ROWS_START_ALIAS)
         start_keys = self.get_start_keys().get_result(expression_context).term
@@ -139,6 +142,7 @@ class RecursiveRows(KeyRowsQuery):
             visibility=expression_context.visibility,
             dialect=expression_context.dialect,
             connection=expression_context.connection,
+            application_context=expression_context.application_context,
         )
         next_table = relation_joins[-1][0]
         step = (
@@ -161,7 +165,7 @@ class RecursiveRows(KeyRowsQuery):
             max_depth = ExpressionArguments.get_result(self, "max_depth", self.max_depth, expression_context).term
             step = step.where(walk[depth_column] < max_depth)
 
-        if connection.features.supports_recursive_union_distinct:
+        if features.supports_recursive_union_distinct:
             # UNION: a row reached twice comes once, so a cycle ends.
             walked_rows = base.union(step)
         elif has_depth:
@@ -171,7 +175,7 @@ class RecursiveRows(KeyRowsQuery):
             walked_rows = base.union_all(step.distinct())
         else:
             raise UnSupportedError(
-                f"with_recursive({self.relation_name!r}) needs max_depth on {connection.dialect}: its recursive "
+                f"with_recursive({self.relation_name!r}) needs max_depth on {dialect}: its recursive "
                 "query adds rows by UNION ALL alone, which no cycle in the rows would end"
             )
         column_names = [*key_columns, *([depth_column] if has_depth else [])]

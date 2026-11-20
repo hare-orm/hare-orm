@@ -25,6 +25,12 @@ books = await Book.objects.raw("SELECT * FROM book WHERE title LIKE %s", ["%dune
 больше одного раза (`SELECT b.*, a.id ...`), даёт `QueryError` — задайте лишней колонке другое имя через
 `AS`.
 
+Дополнительные колонки не могут заменять методы, свойства, состояние сохранения или кэши связей
+(`save`, `_binding`, `_context`, `_declaration`, `_saved_in_db`, `_connection_alias`, `_books`): до возврата
+объектов выдаётся
+`FieldError`. Безопасные пользовательские атрибуты, включая имена с `_` и значения по умолчанию,
+заданные на классе, сохраняются. Текст SQL и значения обычных полей модели остаются ответственностью автора.
+
 ## <a id="rawsql"></a>`RawSQL`
 
 ```python
@@ -180,3 +186,5 @@ result.row_count  # 2
 
 Работает на SQLite, asyncpg, rust_pg и ClickHouse, в том числе на подключении транзакции. `sql` пишется
 для диалекта подключения, с его обозначениями параметров для `values`.
+В PostgreSQL укажите тип явно, например `$1::uuid`, если из запроса он не выводится.
+См. [параметры готового SQL в PostgreSQL](../dialects/postgresql/connecting.ru.md#driver-differences).

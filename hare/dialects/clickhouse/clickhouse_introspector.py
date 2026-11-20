@@ -7,6 +7,7 @@ from collections.abc import Collection, Mapping
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.ddl.enums import SchemaPartType
 from hare.dialects.clickhouse.constants import (
     CLICKHOUSE_CURRENT_DATABASE_SQL,
     CLICKHOUSE_DATABASE_EXISTS_SQL,
@@ -48,7 +49,6 @@ from hare.dialects.clickhouse.schema.constants import (
 )
 from hare.dialects.clickhouse.types.clickhouse_physical_type import ClickhousePhysicalType
 from hare.dialects.clickhouse.types.clickhouse_type_names import ClickhouseTypeNames
-from hare.inspectdb.enums import SchemaPartType
 from hare.inspectdb.exceptions import SchemaNotFoundError
 from hare.inspectdb.introspection.catalog_snapshot import CatalogSnapshot
 from hare.inspectdb.introspection.column_info import ColumnInfo
@@ -252,9 +252,8 @@ class ClickhouseIntrospector(SchemaIntrospector):
             TextField, marked ambiguous.
         """
         # The type as reported, its LowCardinality(...) kept - the column's NULLs are its own flag.
-        type_sql, _nullable = ClickhouseTypeParser.unwrap(column.full_type or column.db_type)
         specification = ClickhouseTypeParser.get_specification(
-            type_sql, f"{column.name}_{CLICKHOUSE_INSPECTED_ENUM_NAME}"
+            column.full_type or column.db_type, f"{column.name}_{CLICKHOUSE_INSPECTED_ENUM_NAME}"
         )
         kwargs = {name: value for name, value in specification.kwargs.items() if name != "null"}
         if "enum_type" in kwargs:
@@ -265,31 +264,3 @@ class ClickhouseIntrospector(SchemaIntrospector):
             or specification.path == CLICKHOUSE_ENUM_LABEL_FIELD_PATH
         )
         return specification.path, kwargs, is_ambiguous
-
-    @staticmethod
-    def unwrap_type(type_sql: str) -> tuple[str, bool]:
-        """A column type without the wrappers that change no field, and whether it holds NULLs.
-
-        Args:
-            type_sql: The type as ``system.columns`` reports it.
-
-        Returns:
-            The type, and whether the column is nullable.
-        """
-        physical_type = ClickhousePhysicalType.from_sql(type_sql)
-        return physical_type.unwrapped.sql, physical_type.nullable
-
-    @staticmethod
-    def get_decimal_precision_scale(db_type: str) -> tuple[int | None, int | None]:
-        """The precision and scale of a ``Decimal(P, S)`` type.
-
-        Args:
-            db_type: The unwrapped type.
-
-        Returns:
-            The precision and scale, None for any other type.
-        """
-        physical_type = ClickhousePhysicalType.from_sql(db_type)
-        if physical_type.name != ClickhouseTypeName.DECIMAL:
-            return None, None
-        return physical_type.precision, physical_type.scale

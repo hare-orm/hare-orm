@@ -33,6 +33,7 @@ from tests.model_setup.primary_keys.primary_keyless_models import (
     VisitLog,
     VisitNote,
 )
+from tests.utils.model_bindings import ModelBindings
 
 
 @pytest_asyncio.fixture(scope="module")
@@ -57,7 +58,7 @@ async def visits(visits_module):
 
 @pytest.mark.database_independent
 def test_the_model_has_no_primary_key():
-    meta = VisitLog._meta
+    meta = ModelBindings.prepare(VisitLog).get_binding(VisitLog)
     assert meta.primary_key_attribute == ()
     assert meta.pk is None
     assert meta.pk_fields == ()
@@ -352,7 +353,7 @@ async def test_migrations_create_and_change_a_table_without_primary_key(db_isola
         {"sensor": "a", "value": 1, "unit": "C"}
     ]
     assert round_trip.get_pending_operations(second) == []
-    assert not create_model.model._meta.has_primary_key
+    assert create_model.model._declaration.primary_key_attribute == ()
 
 
 @pytest.mark.asyncio

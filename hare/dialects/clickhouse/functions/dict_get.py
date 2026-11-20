@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.classes.class_path import ClassPath
 from hare.classes.value_descriptions import ValueDescriptions
-from hare.core.hare_context import HareContext
 from hare.dialects.clickhouse.constants import (
     CLICKHOUSE_DICTIONARY_DEFAULT_FUNCTION,
     CLICKHOUSE_DICTIONARY_FUNCTION,
@@ -18,14 +17,14 @@ from hare.query.expressions import Expression, ExpressionContext, ExpressionResu
 from hare.query.expressions.dialect_expressions import DialectExpressions
 from hare.query.expressions.structure.enums import ArgumentRole
 from hare.query.expressions.structure.expression_structure import ExpressionStructure
+from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 from hare.sql.terms.functions.function import Function
 from hare.sql.terms.values.literal_value import LiteralValue
 
 if TYPE_CHECKING:
-    from hare.dialects.base.types.type_registry import TypeRegistry
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class DictGet(Expression):
@@ -128,30 +127,25 @@ class DictGet(Expression):
             if isinstance(key, Value)
         )
 
-    def get_declaration(self) -> tuple[type[Model], ClickhouseDictionary] | None:
+    def get_declaration(
+        self, expression_context: ExpressionContext
+    ) -> tuple[ModelBinding, ClickhouseDictionary] | None:
         """The model declaring the dictionary and its declaration, among the models of the active
         context.
 
         Returns:
             The model and the dictionary, None for a dictionary no model declares.
         """
-        context = HareContext.get_current()
-        apps = context.apps if context is not None else None
-        if apps is None:
-            return None
-        for model in apps.get_models_iterable():
-            for dictionary in model._meta.dictionaries:
+        for binding in expression_context.binding.graph.bindings.values():
+            for dictionary in binding.dictionaries:
                 if dictionary.name == self.dictionary and isinstance(dictionary, ClickhouseDictionary):
-                    return model, dictionary
+                    return binding, dictionary
         return None
 
-    def get_attribute_column(
-        self, types: TypeRegistry, declaration: tuple[type[Model], ClickhouseDictionary] | None
-    ) -> str:
+    def get_attribute_column(self, declaration: tuple[ModelBinding, ClickhouseDictionary] | None) -> str:
         """The dictionary's column of the attribute read - checked against a declared dictionary.
 
         Args:
-            types: The types of the dialect a key literal is written by.
             declaration: The model and dictionary selected for this expression build, if declared.
 
         Returns:
@@ -159,12 +153,11 @@ class DictGet(Expression):
 
         Raises:
             QueryError: A declared dictionary has no such attribute or another number of keys.
-            ValidationError: A key literal isn't a value of the dictionary's key field.
         """
         if declaration is None:
             return self.attribute
         model, dictionary = declaration
-        fields_db_projection = model._meta.fields_db_projection
+        fields_db_projection = model.fields_db_projection
         columns_by_attribute = {name: fields_db_projection[name] for name in dictionary.attributes}
         column = columns_by_attribute.get(self.attribute)
         if column is None and self.attribute not in columns_by_attribute.values():
@@ -177,15 +170,10 @@ class DictGet(Expression):
                 f"DictGet: the dictionary {self.dictionary!r} is keyed by {', '.join(dictionary.key)} - got "
                 f"{len(self.keys)} key(s)"
             )
-        for key, key_field_name in zip(self.keys, dictionary.key, strict=True):
-            if isinstance(key, Value):
-                key_field = model._meta.fields_map[key_field_name]
-                # Range and type checked as a value written to the field is.
-                key_field.validate(types.get_db_value(key_field, key.value, model))
         return column or self.attribute
 
     def get_qualified_name(
-        self, expression_context: ExpressionContext, declaration: tuple[type[Model], ClickhouseDictionary] | None
+        self, expression_context: ExpressionContext, declaration: tuple[ModelBinding, ClickhouseDictionary] | None
     ) -> str:
         """The dictionary's name with its database - the database of the model declaring it, else the
         connection's: the shards a distributed table's query runs on look a bare name up in their default
@@ -200,17 +188,36 @@ class DictGet(Expression):
         """
         if "." in self.dictionary:
             return self.dictionary
-        database = declaration[0]._meta.schema if declaration is not None else None
+        database = declaration[0].schema if declaration is not None else None
         if database is None and expression_context.connection is not None:
             database = getattr(expression_context.connection, "database", None)
         return self.dictionary if database is None else f"{database}.{self.dictionary}"
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
-        DialectExpressions.raise_if_dialect_lacks(self, expression_context.dialect)
+        DialectExpressions.raise_if_dialect_lacks(
+            self, expression_context.dialect, checks_admission=expression_context.checks_dialect_admission
+        )
         literals = expression_context.dialect.literals
-        declaration = self.get_declaration()
-        attribute_column = self.get_attribute_column(expression_context.dialect.types, declaration)
-        key_results = [key.get_result(expression_context) for key in self.keys]
+        declaration = self.get_declaration(expression_context)
+        attribute_column = self.get_attribute_column(declaration)
+        key_results = []
+        for index, key in enumerate(self.keys):
+            encoder = None
+            if declaration is not None and isinstance(key, Value):
+                declaring_binding, dictionary = declaration
+                key_field = declaring_binding.fields_map[dictionary.key[index]]
+                encoder = expression_context.dialect.types.get_field_encoder(key_field, declaring_binding._model)
+            key_results.append(
+                ExpressionArguments.get_result(
+                    self,
+                    "keys",
+                    key,
+                    expression_context,
+                    index=index,
+                    encoder=encoder,
+                    typed_by_encoder=encoder is not None,
+                )
+            )
         joins = [join for key_result in key_results for join in key_result.joins]
         key_term = (
             key_results[0].term

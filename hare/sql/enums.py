@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from hare.dialects.base.clauses.enums import JoinType as JoinType
-
 
 class Arithmetic(StrEnum):
     ADD = "+"

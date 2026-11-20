@@ -4,6 +4,7 @@ replace() - a copy of a capture with other options, for a model refining its abs
 import pytest
 
 from hare.contrib.outbox import ChangeCapture, ChangeExtension
+from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError, ValidationError
 from hare.instrumentation.enums import RowOperation
 from tests.contrib.outbox.capture_models import (
@@ -43,7 +44,11 @@ async def test_extend_many_is_called_once_per_write_statement_with_its_rows(db_c
 
 @pytest.mark.asyncio
 async def test_extend_many_giving_another_number_of_extensions_fails_the_write(db_capture, monkeypatch):
-    monkeypatch.setattr(BatchExtendedRow._meta.change_capture, "extend_many", lambda changes: [None])
+    monkeypatch.setattr(
+        HareContext.require_current().apps.get_binding(BatchExtendedRow).change_capture,
+        "extend_many",
+        lambda changes: [None],
+    )
     with pytest.raises(ValidationError, match="1 extensions for 2 changes"):
         await BatchExtendedRow.objects.bulk_create(
             [BatchExtendedRow(id=1, name="a"), BatchExtendedRow(id=2, name="b")]
@@ -54,7 +59,7 @@ async def test_extend_many_giving_another_number_of_extensions_fails_the_write(d
 @pytest.mark.asyncio
 async def test_an_extension_of_extend_many_is_checked_as_one_of_extend(db_capture, monkeypatch):
     monkeypatch.setattr(
-        BatchExtendedRow._meta.change_capture,
+        HareContext.require_current().apps.get_binding(BatchExtendedRow).change_capture,
         "extend_many",
         lambda changes: [ChangeExtension(payload={"operation": "x"}) for _ in changes],
     )
@@ -66,7 +71,7 @@ async def test_an_extension_of_extend_many_is_checked_as_one_of_extend(db_captur
 @pytest.mark.parametrize("headers", [{"": "a"}, {1: "a"}], ids=["empty_name", "number_name"])
 async def test_headers_of_an_extension_are_checked_as_enqueue_checks_them(db_capture, monkeypatch, headers):
     monkeypatch.setattr(
-        BatchExtendedRow._meta.change_capture,
+        HareContext.require_current().apps.get_binding(BatchExtendedRow).change_capture,
         "extend_many",
         lambda changes: [ChangeExtension(headers=headers) for _ in changes],
     )
@@ -88,7 +93,7 @@ async def test_a_replaced_capture_writes_to_the_same_outbox_with_its_options(db_
     (event,) = await CaptureOutboxEvent.objects.all()
     assert event.topic == "models.capturedaccount.inserted"
     assert event.payload["after"] == {"id": 1, "name": "ann"}
-    capture = CapturedAccount._meta.change_capture
+    capture = HareContext.require_current().apps.get_binding(CapturedAccount).change_capture
     assert isinstance(capture, LabelledChangeCapture)
     assert capture.label == "service"
     assert capture.operations == frozenset({RowOperation.INSERT})
@@ -131,7 +136,9 @@ def test_replace_swaps_the_options_of_a_pair_and_checks_the_values():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("option", ["topic", "ordering_key"])
 async def test_an_empty_topic_or_ordering_key_of_a_change_is_refused(db_capture, monkeypatch, option):
-    monkeypatch.setattr(BatchExtendedRow._meta.change_capture, option, lambda change: "")
+    monkeypatch.setattr(
+        HareContext.require_current().apps.get_binding(BatchExtendedRow).change_capture, option, lambda change: ""
+    )
     with pytest.raises(ValidationError, match="1 to 255 characters"):
         await BatchExtendedRow.objects.create(id=1, name="a")
     assert await CaptureOutboxEvent.objects.count() == 0

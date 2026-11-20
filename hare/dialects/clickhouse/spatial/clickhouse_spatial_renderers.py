@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from hare.dialects.clickhouse.spatial.clickhouse_geometry_values import ClickhouseGeometryValues
 from hare.dialects.clickhouse.spatial.constants import (
     CLICKHOUSE_AREA_DISTANCE_FUNCTIONS,
     CLICKHOUSE_AREA_FUNCTIONS,
@@ -24,7 +23,6 @@ from hare.gis.terms.spatial_aggregate_function import SpatialAggregateFunction
 from hare.gis.terms.spatial_function_term import SpatialFunctionTerm
 from hare.gis.terms.spatial_relation_term import SpatialRelationTerm
 from hare.sql.terms.functions.function import Function
-from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
     from hare.dialects.base.renderers.term_renderers import TermRenderers
@@ -64,9 +62,7 @@ class ClickhouseSpatialRenderers:
             raise UnSupportedError(
                 CLICKHOUSE_OTHER_SRID_MESSAGE.format(target_srid=value.target_srid, srid=value.srid)
             )
-        return Function.get_arg_sql(
-            ValueWrapper(ClickhouseGeometryValues.get_typed_value(value.geometry)), sql_context
-        )
+        return Function.get_arg_sql(value.args[0], sql_context)
 
     @staticmethod
     def get_geometry_type(argument: Any, field: GeometryField | None) -> GeometryType:

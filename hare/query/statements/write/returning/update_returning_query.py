@@ -13,6 +13,7 @@ from hare.query.statements.write.update_query import UpdateQuery
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.models.model_binding import ModelBinding
     from hare.query.execution.prepared_write import PreparedWrite
     from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
     from hare.query.queryset.query_specification import QuerySpecification
@@ -62,7 +63,7 @@ class UpdateReturningQuery(UpdateQuery):
 
     async def _execute_bound(self) -> list[Any]:
         if self._is_none:
-            return await self._return_none()
+            return []
         connection = self.get_connection(for_write=True)
         if not connection.features.supports_returning:
             raise UnSupportedError(f"update().returning() needs RETURNING, which {connection.dialect} doesn't have")
@@ -73,11 +74,8 @@ class UpdateReturningQuery(UpdateQuery):
                 "server of this connection doesn't have"
             )
         if WrittenConnections.is_recording:
-            WrittenConnections.record(connection.connection_alias)
+            WrittenConnections.record(connection)
         return await self._execute_returning(connection, self._make_prepared_write(connection.dialect))
-
-    async def _return_none(self) -> list[Any]:
-        return []
 
     async def _execute_returning(self, connection: DatabaseClient, prepared: PreparedWrite) -> list[Any]:
         """Runs the update - the instances read back in its transaction - and reports it.
@@ -85,20 +83,21 @@ class UpdateReturningQuery(UpdateQuery):
         Returns:
             The returned rows, in the order the database returned them.
         """
-        capture_needs = self.model._meta.change_capture_needs
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        capture_needs = model_binding.change_capture_needs
         if capture_needs is not None and not capture_needs.captures(RowOperation.UPDATE):
             capture_needs = None
-        if not self.returned_rows.returns_instances and capture_needs is None:
-            count, raw_rows = await self._run_on(connection, prepared, returns_rows=True)
+        if not self.returned_rows.returns_instances:
+            if capture_needs is None:
+                count, raw_rows = await self._run_on(connection, prepared, returns_rows=True)
+            else:
+                captured = self._get_captured_write(capture_needs, connection)
+                async with captured.transaction():
+                    count, raw_rows = await self._run_captured(captured, prepared)
             rows: list[Any] = self.returned_rows.get_rows(connection.dialect.types, raw_rows)
-        elif not self.returned_rows.returns_instances:
-            captured = self._get_captured_write(capture_needs, connection)
-            async with captured.transaction():
-                count, raw_rows = await self._run_captured(captured, prepared)
-            rows = self.returned_rows.get_rows(connection.dialect.types, raw_rows)
         elif self.returned_rows.builds_instances_from_rows:
             count, raw_rows = await self._run_on(connection, prepared, returns_rows=True)
-            rows = await self.returned_rows.get_instances(connection, raw_rows)
+            rows = await self.returned_rows.get_instances(connection, raw_rows, context=self._context)
         else:
             async with connection._in_transaction() as transaction_connection:
                 if capture_needs is not None:
@@ -109,7 +108,10 @@ class UpdateReturningQuery(UpdateQuery):
                     count, raw_rows = await self._run_on(transaction_connection, prepared, returns_rows=True)
                 keys = self.returned_rows.get_primary_keys(transaction_connection.dialect.types, raw_rows)
                 rows = await self.returned_rows.read(
-                    transaction_connection, self._visibility.get_for_active_tenant(), keys
+                    transaction_connection,
+                    self._visibility.get_for_active_tenant(),
+                    keys,
+                    context=self._context,
                 )
         await self._report_updated_rows(count, connection)
         return rows

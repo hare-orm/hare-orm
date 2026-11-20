@@ -29,13 +29,6 @@ class PlainStrMixinEnum(str, enum.Enum):
 # --- CharFields tests ---
 
 
-@pytest_asyncio.fixture
-async def char_fields_data(db):
-    await CharFields.objects.create(char="moo")
-    await CharFields.objects.create(char="baa", char_null="baa")
-    await CharFields.objects.create(char="oink")
-
-
 @pytest.mark.parametrize(
     ("model_class", "filter_key", "message"),
     [

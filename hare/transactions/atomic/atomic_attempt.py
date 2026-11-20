@@ -10,6 +10,7 @@ from hare.transactions.enums import TransactionOutcome
 if TYPE_CHECKING:
     from types import TracebackType
 
+    from hare.dialects.base.client.database_client import DatabaseClient
     from hare.transactions.atomic.atomic_attempts import AtomicAttempts
 
 
@@ -34,8 +35,11 @@ class AtomicAttempt(Atomic):
 
     async def __aenter__(self) -> TransactionClient:
         self.entered = True
-        self.is_nested = isinstance(self._get_connection(), TransactionClient)
         return await super().__aenter__()
+
+    async def _enter_transaction(self, connection: DatabaseClient) -> TransactionClient:
+        self.is_nested = isinstance(connection, TransactionClient)
+        return await super()._enter_transaction(connection)
 
     async def __aexit__(  # type: ignore[override]
         self,

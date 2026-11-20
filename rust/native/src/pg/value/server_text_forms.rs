@@ -6,11 +6,22 @@ use crate::pg::value::{BoxError, Value};
 
 pub(crate) struct ServerTextForms<'a> {
     requests: Vec<(Type, &'a [u8])>,
+    field_types: &'a [Type],
 }
 
 impl<'a> ServerTextForms<'a> {
+    #[cfg(test)]
     pub(crate) fn collecting() -> Self {
-        Self { requests: Vec::new() }
+        Self::with_field_types(&[])
+    }
+
+    pub(crate) fn with_field_types(field_types: &'a [Type]) -> Self {
+        Self { requests: Vec::new(), field_types }
+    }
+
+    /// Type metadata supplied by the same client's ordinary statement preparation.
+    pub(crate) fn get_field_type(&self, oid: u32) -> Option<&Type> {
+        self.field_types.iter().find(|field_type| field_type.oid() == oid)
     }
 
     pub(crate) fn take_requests(&mut self) -> Vec<(Type, &'a [u8])> {

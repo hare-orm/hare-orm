@@ -23,7 +23,6 @@ class RunSpec:
     test_paths: tuple[str, ...] = ()
     marker_expression: str = f"not {DATABASE_INDEPENDENT_MARKER}"
     resources: frozenset[str] = frozenset()
-    allow_empty: bool = False
     sqlite_version: str | None = None
 
     @property

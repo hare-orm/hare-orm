@@ -9,6 +9,7 @@ import pytest
 
 from hare import Connections
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError, DecryptionError, FieldError
 from hare.fields import EncryptedJSONField, IntField
 from hare.fields.encrypted.field_encryption import FieldEncryption
@@ -16,10 +17,10 @@ from hare.migrations.migration import Migration
 from hare.migrations.operations import AlterField, CreateModel
 from hare.migrations.state.state import State
 from hare.query.expressions import F
+from tests.fields.encryption.constants import SECRET_KEY
 from tests.fields.models_encrypted import EncryptedDocumentRecord
 from tests.utils.operations import apply_operations
 
-SECRET_KEY = "test-field-encryption-secret"
 NEW_SECRET_KEY = "test-field-encryption-secret-2"
 
 #: Documents of every shape: each root type, nesting of lists and dicts, every type of leaf.
@@ -43,11 +44,7 @@ DOCUMENTS = {
 }
 
 
-@pytest.fixture(autouse=True)
-def field_encryption_key():
-    FieldEncryption.configure(SECRET_KEY)
-    yield
-    FieldEncryption.reset()
+pytestmark = pytest.mark.usefixtures("field_encryption_key")
 
 
 async def fetch_raw_document(record_id: int, column: str, table: str = "encrypted_document_record") -> Any:
@@ -181,7 +178,7 @@ async def test_a_wrong_key_or_a_plain_stored_value_raises_decryption_error(db_en
     with pytest.raises(DecryptionError):
         await EncryptedDocumentRecord.objects.get(id=1)
     FieldEncryption.configure(SECRET_KEY)
-    field = EncryptedDocumentRecord._meta.fields_map[column]
+    field = HareContext.require_current().apps.get_binding(EncryptedDocumentRecord).fields_map[column]
     with pytest.raises(DecryptionError, match="plain int"):
         field.from_db_value(json.dumps([FieldEncryption.encrypt("1"), 2]))
     with pytest.raises(DecryptionError, match="no JSON value"):

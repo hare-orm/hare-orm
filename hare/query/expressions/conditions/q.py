@@ -12,15 +12,11 @@ from hare.fields.generated_field import GeneratedField
 from hare.query.enums import Connector
 from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import AggregatedMultiValuedPaths
 from hare.query.expressions.conditions.query_modifier import QueryModifier
-from hare.query.expressions.constants import (
-    LIST_LOOKUP_SUFFIXES,
-)
 from hare.query.expressions.expression import Expression
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.structure.declarations import ExpressionChild
 from hare.query.expressions.structure.enums import ArgumentRole
 from hare.query.expressions.subqueries.exists import Exists
-from hare.query.expressions.value import Value
 from hare.query.filters.resolution.filter_kwargs import FilterKwargs
 from hare.query.filters.resolution.filter_values import FilterValues
 from hare.query.filters.resolution.to_many_filters import ToManyFilters
@@ -35,7 +31,7 @@ from hare.sql.terms.criteria.not_criterion import Not
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.generic_foreign_keys.generic_foreign_key_paths import GenericForeignKeyPaths
 
 
@@ -124,7 +120,7 @@ class Q(Plannable, FieldCondition):
         Args:
             connector: How the conditions join.
             args: Inner ``Q`` expressions, or ``Exists(...)`` conditions.
-            kwargs: Filter statements.
+            kwargs: The constructor's fresh keyword dictionary; values are captured in place.
 
         Raises:
             QueryError: ``connector`` isn't a ``Connector``, or a positional condition is
@@ -141,24 +137,15 @@ class Q(Plannable, FieldCondition):
             if len(args) == 1 and not kwargs and isinstance(args[0], Exists):
                 self.expression = args[0]
             else:
-                nodes = [Q(arg) if isinstance(arg, Exists) else arg for arg in args]
+                children = [Q(arg) if isinstance(arg, Exists) else arg for arg in args]
                 if kwargs:
-                    nodes.insert(0, Q.with_connector(connector, **kwargs))
+                    children.insert(0, Q.with_connector(connector, **kwargs))
                     kwargs = {}
-                for node in nodes:
+                for node in children:
                     if not isinstance(node, Q):
                         raise QueryError("All ordered arguments must be Q nodes or Exists(...) conditions")
-                    children.append(node)
-        if kwargs:
-            filters = {}
-            for key, value in kwargs.items():
-                value = FilterValues.get_detached_value(value)
-                if type(value) is Value:
-                    value = FilterValues.get_literal_value(value)
-                if key.endswith(LIST_LOOKUP_SUFFIXES):
-                    value = FilterValues.get_list_lookup_value(key, value)
-                filters[key] = value
-            kwargs = filters
+        for key, value in kwargs.items():
+            kwargs[key] = FilterValues.get_captured_filter_value(key, value)
         #: The conditions this Q joins by its connector (``children``); None for a ``get_extended()`` Q
         #: until they are first read.
         self._children: tuple[Q, ...] | None = tuple(children)
@@ -310,16 +297,16 @@ class Q(Plannable, FieldCondition):
             return f"{self.get_negation_prefix()}Q.with_connector({', '.join(['Connector.OR', *arguments])})"
         return f"{self.get_negation_prefix()}Q({', '.join(arguments)})"
 
-    def names_generic_field(self, model: type[Model]) -> bool:
+    def names_generic_field(self, binding: ModelBinding) -> bool:
         """Whether a filter key of this node reaches a generic foreign key of the model.
 
         Args:
-            model: The model the keys start from.
+            binding: The model the keys start from.
 
         Returns:
             True when a key names a generic foreign key, directly or through relations.
         """
-        return any(Q.generic_foreign_key_paths.get_generic_path(model, key) is not None for key in self.filters)
+        return any(Q.generic_foreign_key_paths.get_generic_path(binding, key) is not None for key in self.filters)
 
     def get_negation_prefix(self) -> str:
         """The ``~`` operators that rebuild this node's negation from a plain ``Q(...)``."""
@@ -432,7 +419,7 @@ class Q(Plannable, FieldCondition):
         return modifier & other if self.connector == Connector.AND else modifier | other
 
     def _finalize_modifier(
-        self, modifier: QueryModifier, expression_context: ExpressionContext, recorded_paths_mark: int = 0
+        self, modifier: QueryModifier, expression_context: ExpressionContext, recorded_paths_mark: int
     ) -> QueryModifier:
         """Applies this node's negation to the combined modifier of its kwargs or children.
 
@@ -518,12 +505,12 @@ class Q(Plannable, FieldCondition):
         if self.expression is not None:
             return self._get_expression(expression_context)
         if self.filters:
-            if self.names_generic_field(expression_context.model):
+            if self.names_generic_field(expression_context.binding):
                 # A condition built outside filter() - in When(), an aggregate's filter= - may
                 # name a generic foreign key.
                 from hare.query.generic_foreign_keys.generic_foreign_key_filters import GenericForeignKeyFilters
 
-                rewritten = GenericForeignKeyFilters.rewrite_q(expression_context.model, self)
+                rewritten = GenericForeignKeyFilters.rewrite_q(expression_context.binding, self)
                 if rewritten is not self:
                     return rewritten.get_result(expression_context)
             return FilterKwargs.get_kwargs(self, expression_context)

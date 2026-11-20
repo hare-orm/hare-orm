@@ -28,7 +28,7 @@ use crate::pg::error::TransactionFinishedError;
 use crate::pg::parameter_value_rows::ParameterValueRows;
 use crate::pg::parameter_values::ParameterValues;
 use crate::pg::pending_statements::PendingStatements;
-use crate::pg::result::PgResult;
+use crate::pg::pinned_statements;
 use crate::pg::result_columns::ResultColumns;
 use crate::pg::timed_manager::Object;
 use crate::pg::tls::PgTls;
@@ -42,11 +42,12 @@ use std::sync::{Arc, Mutex as StdMutex, Weak};
 /// transaction, and its columns, to a cursor of the same name.
 static STREAM_NUMBERS: AtomicU64 = AtomicU64::new(0);
 use std::time::Duration;
-use tokio::sync::Mutex;
 
 mod closing_transaction;
 mod cursor_rows;
+mod schema_changes;
 use closing_transaction::ClosingTransaction;
+use schema_changes::SchemaChanges;
 mod row_stream_iterator;
 
 use cursor_rows::CursorRows;
@@ -95,6 +96,7 @@ fn validate_isolation_level(level: &str) -> Result<&'static str, DriverError> {
 #[pyclass]
 pub struct Transaction {
     executor: PgConnectionExecutor,
+    schema_changes: Arc<SchemaChanges>,
     /// Every `RowStreamIterator` opened on this transaction - ending the transaction closes them.
     open_streams: Arc<StdMutex<Vec<Weak<RowStreamSlot>>>>,
 }
@@ -115,7 +117,8 @@ impl Transaction {
         let pending = Arc::new(PendingStatements::default());
         pending.begin(begin_sql);
         executor.pending = Some(pending);
-        Ok(Transaction { executor, open_streams: Arc::new(StdMutex::new(Vec::new())) })
+        let schema_changes = Arc::new(SchemaChanges::new(executor.caching.clone()));
+        Ok(Transaction { executor, schema_changes, open_streams: Arc::new(StdMutex::new(Vec::new())) })
     }
 
     /// Closes every registered iterator, discarding buffered rows and marking future fetches
@@ -133,6 +136,25 @@ impl Transaction {
         let mut registered = open_streams.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         registered.retain(|weak| weak.strong_count() > 0);
         registered.push(Arc::downgrade(slot));
+    }
+
+    fn begin_closing(&self) -> impl std::future::Future<Output = PyResult<ClosingTransaction>> + Send + 'static {
+        let connection = self.executor.connection.clone();
+        let pending_cancels = self.executor.state.pending_cancels.clone();
+        let open_streams = self.open_streams.clone();
+        let schema_changes = self.schema_changes.clone();
+        // Stop existing iterators before waiting and catch in-flight declarations after taking the connection.
+        Self::close_open_streams(&open_streams);
+        async move {
+            let closing = ClosingTransaction::new(
+                connection.lock().await.take().ok_or_else(tx_finished)?,
+                pending_cancels.clone(),
+                schema_changes,
+            );
+            Self::close_open_streams(&open_streams);
+            pending_cancels.wait_until_delivered().await;
+            Ok(closing)
+        }
     }
 
     /// Sends ROLLBACK, bounded by `ROLLBACK_TIMEOUT`, then releases the connection.
@@ -172,10 +194,11 @@ impl Drop for Transaction {
         let inner = self.executor.connection.clone();
         let pinned = self.executor.state.clone();
         let pending = self.executor.pending.clone();
+        let schema_changes = self.schema_changes.clone();
         Transaction::close_open_streams(&self.open_streams);
         pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
             if let Some(client) = inner.lock().await.take() {
-                let closing = ClosingTransaction::new(client, pinned.pending_cancels.clone());
+                let closing = ClosingTransaction::new(client, pinned.pending_cancels.clone(), schema_changes);
                 pinned.pending_cancels.wait_until_delivered().await;
                 if pinned.connection_poisoned.load(Ordering::Acquire)
                     || pending.as_ref().is_some_and(|pending| pending.has_begin())
@@ -195,29 +218,29 @@ impl Drop for Transaction {
 #[pymethods]
 impl Transaction {
     fn invalidate_schema_cache(&self) {
-        self.executor.caching.invalidate();
+        self.schema_changes.invalidate();
     }
 
-    fn execute<'py>(&self, py: Python<'py>, sql: String, parameters: ParameterValues) -> PyResult<Bound<'py, PyAny>> {
-        let params = parameters.0;
-        let executor = self.executor.clone();
-        future_into_py(py, async move {
-            let mut lease = executor.acquire().await.map_err(to_pyerr)?.ok_or_else(tx_finished)?;
-            lease.execute(&sql, &params, &executor.caching).await.map_err(to_pyerr)
-        })
+    #[pyo3(signature = (sql, parameters, *, built_sql = false))]
+    fn execute<'py>(
+        &self,
+        py: Python<'py>,
+        sql: String,
+        parameters: ParameterValues,
+        built_sql: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        pinned_statements::execute(&self.executor, py, sql, parameters, built_sql, tx_finished)
     }
 
-    fn fetch_all<'py>(&self, py: Python<'py>, sql: String, parameters: ParameterValues) -> PyResult<Bound<'py, PyAny>> {
-        let params = parameters.0;
-        let executor = self.executor.clone();
-        future_into_py(py, async move {
-            let mut lease = executor.acquire().await.map_err(to_pyerr)?.ok_or_else(tx_finished)?;
-            lease
-                .fetch(&sql, &params, &executor.caching)
-                .await
-                .map(|(columns, data)| PgResult::new(columns, data))
-                .map_err(to_pyerr)
-        })
+    #[pyo3(signature = (sql, parameters, *, built_sql = false))]
+    fn fetch_all<'py>(
+        &self,
+        py: Python<'py>,
+        sql: String,
+        parameters: ParameterValues,
+        built_sql: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        pinned_statements::fetch_all(&self.executor, py, sql, parameters, built_sql, tx_finished)
     }
 
     fn fetch_all_described<'py>(
@@ -231,7 +254,7 @@ impl Transaction {
         future_into_py(py, async move {
             let mut lease = executor.acquire().await.map_err(to_pyerr)?.ok_or_else(tx_finished)?;
             lease
-                .fetch(&sql, &params, &executor.caching)
+                .fetch(&sql, &params, &executor.caching, false)
                 .await
                 .map(|(columns, data)| DescribedRows { columns, data })
                 .map_err(to_pyerr)
@@ -250,7 +273,14 @@ impl Transaction {
     /// The stream is registered with this transaction: ending the transaction (commit, rollback,
     /// drop) closes it first, and its later `__anext__()` calls raise `TransactionFinishedError`. Its
     /// cursor ends with the transaction.
-    fn stream<'py>(&self, py: Python<'py>, sql: String, parameters: ParameterValues) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (sql, parameters, *, built_sql = false))]
+    fn stream<'py>(
+        &self,
+        py: Python<'py>,
+        sql: String,
+        parameters: ParameterValues,
+        built_sql: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let params = parameters.0;
         let executor = self.executor.clone();
         let caching = self.executor.caching.clone();
@@ -260,21 +290,19 @@ impl Transaction {
             let mut lease = executor.acquire().await.map_err(to_pyerr)?.ok_or_else(tx_finished)?;
             let client = lease.client();
             let outcome: Result<_, DriverError> = PendingStatements::run(executor.pending.as_deref(), client, async {
-                let statement = caching.prepare_values(client, &sql, &params).await?;
+                let types = ParameterValues::type_hints(&params, built_sql);
+                let (statement, description) =
+                    caching.prepare_bound(client, &sql, &types, std::iter::once(params.as_slice())).await?;
                 let columns = ResultColumns::of_statement(&statement);
                 let declare_sql = format!("DECLARE \"{cursor_name}\" NO SCROLL CURSOR FOR {sql}");
                 let declare = client.prepare_typed(&declare_sql, statement.params()).await?;
-                client.execute_raw(&declare, params.iter()).await?;
+                client.execute_raw(&declare, description.bind(&params)).await?;
                 Ok(columns)
             })
             .await;
             let columns = lease.finish(outcome).map_err(to_pyerr)?;
             let rows = CursorRows::new(cursor_name, executor.clone());
-            let slot = Arc::new(RowStreamSlot {
-                state: Mutex::new(Some(OpenRowStream { rows, columns, pending_error: None })),
-                close_requested: AtomicBool::new(false),
-                closed_by_transaction_end: AtomicBool::new(false),
-            });
+            let slot = Arc::new(RowStreamSlot::new(OpenRowStream { rows, columns, pending_error: None }));
             // Registered while the connection lock is still held - commit()/rollback() close the
             // registered streams again once they hold that lock, so none can slip past them.
             Transaction::register_stream(&open_streams, &slot);
@@ -288,11 +316,13 @@ impl Transaction {
     /// caller's transaction). One `prepare`, then every row's `execute_raw()` fired without
     /// awaiting each individually, so `bulk_create/bulk_update` keep one round trip per batch
     /// inside `Transactions.atomic()` too.
+    #[pyo3(signature = (sql, parameter_rows, *, built_sql = false))]
     fn execute_many<'py>(
         &self,
         py: Python<'py>,
         sql: String,
         parameter_rows: ParameterValueRows,
+        built_sql: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let rows = parameter_rows.0;
         let executor = self.executor.clone();
@@ -301,12 +331,13 @@ impl Transaction {
             if rows.is_empty() {
                 return Ok(());
             }
-            let types = ParameterValues::batch_types(&rows).map_err(to_pyerr)?;
+            let types = ParameterValues::batch_types(&rows, built_sql).map_err(to_pyerr)?;
             let mut lease = executor.acquire().await.map_err(to_pyerr)?.ok_or_else(tx_finished)?;
             let client = lease.client();
             let outcome: Result<(), DriverError> = PendingStatements::run(executor.pending.as_deref(), client, async {
-                let statement = caching.prepare(client, &sql, &types).await?;
-                let futures = rows.iter().map(|row| client.execute_raw(&statement, row.iter()));
+                let (statement, description) =
+                    caching.prepare_bound(client, &sql, &types, rows.iter().map(Vec::as_slice)).await?;
+                let futures = rows.iter().map(|row| client.execute_raw(&statement, description.bind(row)));
                 futures_util::future::try_join_all(futures).await?;
                 Ok(())
             })
@@ -357,39 +388,30 @@ impl Transaction {
     /// `TRUNCATE` from a second pool connection would block forever on the lock this transaction
     /// already holds.
     fn execute_script<'py>(&self, py: Python<'py>, sql: String) -> PyResult<Bound<'py, PyAny>> {
-        self.run_on_connection(py, sql)
+        self.run_on_connection(py, sql, false)
     }
 
     fn commit<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.executor.connection.clone();
-        let pinned = self.executor.state.clone();
-        let open_streams = self.open_streams.clone();
+        let connection_poisoned = self.executor.state.connection_poisoned.clone();
         let pending = self.executor.pending.clone();
-        // Stop existing iterators before waiting; repeat under the lock to catch a stream whose
-        // declaration was still in flight when this transaction began closing.
-        Transaction::close_open_streams(&open_streams);
+        let closing = self.begin_closing();
         future_into_py(py, async move {
-            let closing = ClosingTransaction::new(
-                inner.lock().await.take().ok_or_else(tx_finished)?,
-                pinned.pending_cancels.clone(),
-            );
+            let closing = closing.await?;
             let client = closing.connection();
-            Transaction::close_open_streams(&open_streams);
-            pinned.pending_cancels.wait_until_delivered().await;
             if pending.as_ref().is_some_and(|pending| pending.has_begin()) {
-                closing.release(&pinned.connection_poisoned);
+                closing.release(&connection_poisoned);
                 return Ok(());
             }
             if client.is_closed() {
                 // Certainly never reached the server - unlike an error while the COMMIT is in
                 // flight, which leaves its outcome unknown.
-                pinned.connection_poisoned.store(true, Ordering::Release);
-                closing.release(&pinned.connection_poisoned);
+                connection_poisoned.store(true, Ordering::Release);
+                closing.release(&connection_poisoned);
                 return Err(connection_closed_before("COMMIT"));
             }
             let outcome = client.batch_execute("COMMIT").await.map_err(DriverError::from);
-            let result = Transaction::note_outcome(&pinned.connection_poisoned, outcome);
-            closing.release(&pinned.connection_poisoned);
+            let result = Transaction::note_outcome(&connection_poisoned, outcome);
+            closing.release(&connection_poisoned);
             result
         })
     }
@@ -398,18 +420,10 @@ impl Transaction {
     /// `PREPARE TRANSACTION`, which already ended the SQL-level transaction block itself (a COMMIT
     /// or ROLLBACK would error with "no transaction in progress").
     fn finish_prepared<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.executor.connection.clone();
-        let pinned = self.executor.state.clone();
-        let open_streams = self.open_streams.clone();
-        Transaction::close_open_streams(&open_streams);
+        let connection_poisoned = self.executor.state.connection_poisoned.clone();
+        let closing = self.begin_closing();
         future_into_py(py, async move {
-            let closing = ClosingTransaction::new(
-                inner.lock().await.take().ok_or_else(tx_finished)?,
-                pinned.pending_cancels.clone(),
-            );
-            Transaction::close_open_streams(&open_streams);
-            pinned.pending_cancels.wait_until_delivered().await;
-            closing.release(&pinned.connection_poisoned);
+            closing.await?.release(&connection_poisoned);
             Ok(())
         })
     }
@@ -417,64 +431,65 @@ impl Transaction {
     /// Bounded by `ROLLBACK_TIMEOUT`: past it the connection is closed (aborting the transaction
     /// server-side) and `ConnectionError` is raised.
     fn rollback<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.executor.connection.clone();
-        let pinned = self.executor.state.clone();
-        let open_streams = self.open_streams.clone();
+        let connection_poisoned = self.executor.state.connection_poisoned.clone();
         let pending = self.executor.pending.clone();
-        // See commit() for why this also runs before the lock is taken.
-        Transaction::close_open_streams(&open_streams);
+        let closing = self.begin_closing();
         future_into_py(py, async move {
-            let closing = ClosingTransaction::new(
-                inner.lock().await.take().ok_or_else(tx_finished)?,
-                pinned.pending_cancels.clone(),
-            );
+            let closing = closing.await?;
             let client = closing.connection();
-            Transaction::close_open_streams(&open_streams);
-            pinned.pending_cancels.wait_until_delivered().await;
             if pending.as_ref().is_some_and(|pending| pending.has_begin()) {
-                closing.release(&pinned.connection_poisoned);
+                closing.release(&connection_poisoned);
                 return Ok(());
             }
-            if pinned.connection_poisoned.load(Ordering::Acquire) {
+            if connection_poisoned.load(Ordering::Acquire) {
                 // Closing the connection aborts the transaction server-side - no ROLLBACK for a
                 // CancelRequest whose delivery was never confirmed to hit.
-                closing.release(&pinned.connection_poisoned);
+                closing.release(&connection_poisoned);
                 return Ok(());
             }
             if client.is_closed() {
-                pinned.connection_poisoned.store(true, Ordering::Release);
-                closing.release(&pinned.connection_poisoned);
+                connection_poisoned.store(true, Ordering::Release);
+                closing.release(&connection_poisoned);
                 return Err(connection_closed_before("ROLLBACK"));
             }
-            Transaction::roll_back_and_release(closing, &pinned.connection_poisoned).await.map_err(to_pyerr)
+            Transaction::roll_back_and_release(closing, &connection_poisoned).await.map_err(to_pyerr)
         })
     }
 
     fn savepoint<'py>(&self, py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
         validate_identifier(name)?;
-        self.run_on_connection(py, format!("SAVEPOINT {name}"))
+        self.run_on_connection(py, format!("SAVEPOINT {name}"), false)
     }
 
     fn release<'py>(&self, py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
         validate_identifier(name)?;
-        self.run_on_connection(py, format!("RELEASE SAVEPOINT {name}"))
+        self.run_on_connection(py, format!("RELEASE SAVEPOINT {name}"), false)
     }
 
     fn rollback_to<'py>(&self, py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
         validate_identifier(name)?;
-        self.run_on_connection(py, format!("ROLLBACK TO SAVEPOINT {name}"))
+        self.run_on_connection(py, format!("ROLLBACK TO SAVEPOINT {name}"), true)
     }
 }
 
 impl Transaction {
     /// Runs one simple-protocol statement (a savepoint statement, a script) on the pinned
     /// connection, following pending control statements through the same leased operation.
-    fn run_on_connection<'py>(&self, py: Python<'py>, sql: String) -> PyResult<Bound<'py, PyAny>> {
+    fn run_on_connection<'py>(
+        &self,
+        py: Python<'py>,
+        sql: String,
+        republishes_schema: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let executor = self.executor.clone();
+        let schema_changes = self.schema_changes.clone();
         future_into_py(py, async move {
             let mut lease = executor.acquire().await.map_err(to_pyerr)?.ok_or_else(tx_finished)?;
             let client = lease.client();
             let outcome = PendingStatements::run(executor.pending.as_deref(), client, client.batch_execute(&sql)).await;
+            if outcome.is_ok() && republishes_schema {
+                schema_changes.publish();
+            }
             lease.finish(outcome.map_err(DriverError::from)).map_err(to_pyerr)
         })
     }

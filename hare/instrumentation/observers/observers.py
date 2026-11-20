@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import inspect
 import time
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
     from hare.instrumentation.declarations import QueryCall
     from hare.instrumentation.queries.query_wrapper import QueryWrapper
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.transactions.enums import TransactionEventType
 
 TCallback = TypeVar("TCallback", bound=ObserverCallback)
@@ -55,7 +57,7 @@ class Observers:
     """
 
     #: The observers of the whole process.
-    process_observers: ClassVar[ObserverSet] = ObserverSet()
+    process_observers: ClassVar[ObserverSet] = ObserverSet(validate_model_labels=False)
 
     #: The observers ``observing()`` installed in the current context - ``(event type, observer)``
     #: pairs, innermost last.
@@ -83,15 +85,15 @@ class Observers:
             callback: The observer.
             models: For ``RowsChanged``: the models whose changes it gets - their subclasses'
                 too; None for every model. A model is given by its class, its ``"app.Model"`` label or a
-                ``swappable()`` setting; a label is looked up in the current context when one is set up,
-                else when a context binds its models.
+                ``swappable()`` setting. Process-wide labels match each event's originating binding;
+                independent applications need not contain the subscribed models.
 
         Returns:
             The callback, to pass to ``unobserve()``.
 
         Raises:
             QueryError: ``models`` given for an event that isn't narrowed by model.
-            ConfigurationError: A label names no model of the current context.
+            ConfigurationError: A label is not a valid "app.Model" reference.
         """
         cls.process_observers.add(event_type, callback, models)
         return callback
@@ -187,25 +189,30 @@ class Observers:
         return observers
 
     @classmethod
-    def is_observed(cls, event_type: type, model: type[Model] | None = None) -> bool:
+    def is_observed(
+        cls, event_type: type, model: type[Model] | None = None, *, binding: ModelBinding | None = None
+    ) -> bool:
         """Whether an observer gets events of ``event_type`` - of ``model``, when given.
 
         Args:
             event_type: The event type.
             model: The model of the events.
+            binding: The binding to match against the registered observers.
 
         Returns:
             True when such an observer exists.
         """
         if ObserverSet.total_count:
-            if cls.process_observers.observes(event_type, model):
+            if cls.process_observers.observes(event_type, model, binding=binding):
                 return True
             hare_context_observers = cls.get_hare_context_observers()
-            if hare_context_observers is not None and hare_context_observers.observes(event_type, model):
+            if hare_context_observers is not None and hare_context_observers.observes(
+                event_type, model, binding=binding
+            ):
                 return True
         context_observers = cls.context_observers.get()
         return bool(context_observers) and any(
-            observed_type is event_type and (model is None or observer.observes_model(model))
+            observed_type is event_type and (model is None or observer.observes_model(model, binding=binding))
             for observed_type, observer in context_observers
         )
 
@@ -266,7 +273,11 @@ class Observers:
                 result = observer.callback(event)
                 if inspect.isawaitable(result):
                     await result
-            except Exception:
+            except (Exception, asyncio.CancelledError) as error:
+                if isinstance(error, asyncio.CancelledError):
+                    task = asyncio.current_task()
+                    if task is not None and task.cancelling():
+                        raise
                 logger.exception("Observer %r raised on %r", observer.callback, event)
 
     @classmethod

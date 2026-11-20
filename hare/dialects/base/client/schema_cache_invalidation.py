@@ -31,10 +31,8 @@ class SchemaCacheInvalidation:
             yield
         except BaseException as error:
             if schema_change:
-                try:
+                with ResourceCompletion.preserve_error(error, SCHEMA_CACHE_INVALIDATION_FAILED):
                     await ResourceCompletion.wait(client.invalidate_schema_cache())
-                except BaseException as cleanup_error:
-                    raise BaseExceptionGroup(SCHEMA_CACHE_INVALIDATION_FAILED, [error, cleanup_error]) from None
             raise
         else:
             if schema_change:

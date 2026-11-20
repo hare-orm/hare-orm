@@ -73,8 +73,7 @@ def test_trigger_on_accepts_combined_events_as_raw_text() -> None:
 
 @pytest.mark.database_independent
 def test_trigger_equality_is_field_based() -> None:
-    """StateModelDiff._generate_trigger_operations() relies on this to detect an unchanged
-    trigger (same name, same everything else) vs. one that needs AlterTrigger."""
+    """Equivalent trigger declarations compare equal. Changing a trigger's definition requires AlterTrigger."""
     a = Trigger(name="t", on=TriggerEvent.INSERT, body=RawSQLTerm("RETURN NEW;"))
     b = Trigger(name="t", on=TriggerEvent.INSERT, body=RawSQLTerm("RETURN NEW;"))
     c = Trigger(name="t", on=TriggerEvent.UPDATE, body=RawSQLTerm("RETURN NEW;"))

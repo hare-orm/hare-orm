@@ -24,7 +24,7 @@ from hare.query.expressions.structure.expression_traversal import ExpressionTrav
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclass(frozen=True, init=False)
@@ -88,11 +88,11 @@ class ClickhouseEngine:
     def is_replicated(self) -> bool:
         return self.name.startswith(CLICKHOUSE_ENGINE_PREFIXES) and self.is_merge_tree()
 
-    def get_sql(self, model: type[Model], dialect: Dialect) -> str:
+    def get_sql(self, binding: ModelBinding, dialect: Dialect) -> str:
         """Render arguments once, binding expressions to the table's actual columns."""
         if self.sql is not None:
             return self.sql.sql
-        arguments = [self.get_argument_sql(argument, model, dialect) for argument in self.arguments]
+        arguments = [self.get_argument_sql(argument, binding, dialect) for argument in self.arguments]
         if self.replica_path is not None:
             arguments[:0] = [
                 dialect.literals.get_string_literal_sql(self.replica_path),
@@ -101,24 +101,24 @@ class ClickhouseEngine:
         return f"{self.name}({', '.join(arguments)})" if arguments else self.name
 
     @classmethod
-    def get_argument_sql(cls, argument: Any, model: type[Model], dialect: Dialect) -> str:
+    def get_argument_sql(cls, argument: Any, binding: ModelBinding, dialect: Dialect) -> str:
         """Render a literal, expression or tuple of engine arguments without parsing SQL."""
         if isinstance(argument, (Expression, RawSQLTerm)):
-            return DeclaredExpressions.get_sql(argument, model, dialect)
+            return DeclaredExpressions.get_sql(argument, binding, dialect)
         if isinstance(argument, tuple):
-            return f"({', '.join(cls.get_argument_sql(item, model, dialect) for item in argument)})"
+            return f"({', '.join(cls.get_argument_sql(item, binding, dialect) for item in argument)})"
         return dialect.literals.get_literal_sql(argument)
 
-    def get_column_names(self, model: type[Model], dialect: Dialect) -> frozenset[str]:
+    def get_column_names(self, binding: ModelBinding, dialect: Dialect) -> frozenset[str]:
         """Read expression dependencies and explicitly supplied fields, never SQL text."""
         columns: set[str] = set()
         for field_name in self.read_fields:
-            columns.update(DeclaredExpressions.get_column_names(field_name, model, dialect) or ())
+            columns.update(DeclaredExpressions.get_column_names(field_name, binding, dialect) or ())
         pending = list(self.arguments)
         while pending:
             argument = pending.pop()
             if isinstance(argument, Expression):
-                columns.update(DeclaredExpressions.get_column_names(argument, model, dialect) or ())
+                columns.update(DeclaredExpressions.get_column_names(argument, binding, dialect) or ())
             elif isinstance(argument, tuple):
                 pending.extend(argument)
         return frozenset(columns)

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from hare import Model, fields
+from hare.core.apps.model_binding_graph import ModelBindingGraph
 from hare.ddl.indexes.index import Index
 from hare.dialects.base.results import StatementResult
 from hare.dialects.base.schema.plans.enums import SchemaEffect
@@ -21,11 +22,34 @@ from hare.dialects.sqlite.sqlite_table_options import SqliteTableOptions
 from hare.exceptions import ConfigurationError
 from hare.migrations.exceptions import FieldNarrowingDataLossError
 from hare.migrations.migration import Migration
-from hare.migrations.operations import AddField, AlterField, AlterModelOptions, CreateModel
+from hare.migrations.operations import AddField, AlterField, AlterModelOptions, CreateModel, RunPython, RunSQL
 from hare.migrations.safety import MigrationRiskCode, MigrationSafetyChecker
 from hare.migrations.state.state import State
 from hare.migrations.state.state_apps import StateApps
 from tests.utils.fake_client import FakeClient
+
+
+@pytest.mark.asyncio
+async def test_collecting_editor_never_opens_a_transaction_or_runs_python():
+    client = FakeClient("sqlite")
+    client.features = client.features.replace(supports_transactions=True, can_rollback_ddl=True)
+    client._in_transaction = Mock(side_effect=AssertionError("SQL collection opened a transaction"))
+    client.execute = AsyncMock(side_effect=AssertionError("SQL collection read the database"))
+    callback = Mock()
+    editor = client.dialect.schema_editor_class(client, collect_sql=True)
+    migration = Migration(
+        "preview",
+        "models",
+        operations=[
+            RunSQL("CREATE TABLE preview_only (id INTEGER)"),
+            RunPython(callback),
+        ],
+    )
+    await migration.apply(State(), schema_editor=editor)
+    client._in_transaction.assert_not_called()
+    client.execute.assert_not_called()
+    callback.assert_not_called()
+    assert "CREATE TABLE preview_only (id INTEGER)" in editor.collected_sql
 
 
 @pytest.mark.database_independent
@@ -78,11 +102,11 @@ async def test_concurrent_index_plan_matches_execution(partitioned, unique):
         [("id", fields.IntField(primary_key=True, generated=False))],
         options={"table": "book", "table_options": options},
     ).state_forward("models", state)
-    model = state.apps.get_model("models.Book")
+    state.apps.get_model("models.Book")
     client = FakeClient("postgresql")
     editor = client.dialect.schema_editor_class(client, atomic=False)
     index = Index(fields=("id",), name="book_index", unique=unique)
-    plan = editor.get_add_index_plan(model, index, concurrently=True)
+    plan = editor.get_add_index_plan(state.apps.get_binding("models.Book"), index, concurrently=True)
     preview = client.dialect.schema_editor_class(client, collect_sql=True, atomic=False)
     await plan.execute(preview)
     statements = preview.collected_sql
@@ -95,7 +119,7 @@ async def test_concurrent_index_plan_matches_execution(partitioned, unique):
     await plan.execute(editor)
     assert [call.args[0] for call in editor.run_sql.await_args_list] == statements
 
-    removal = editor.get_remove_index_plan(model, index, concurrently=True)
+    removal = editor.get_remove_index_plan(state.apps.get_binding("models.Book"), index, concurrently=True)
     preview.collected_sql.clear()
     await removal.execute(preview)
     assert len(preview.collected_sql) == 1
@@ -145,6 +169,8 @@ pytestmark = pytest.mark.database_independent
 
 @pytest.mark.asyncio
 async def test_prepared_table_creation_preserves_defaults_and_matches_preview():
+    declaration_graph = ModelBindingGraph()
+
     class PlannedTable(Model):
         id = fields.IntField(primary_key=True)
         label = fields.TextField(db_default="prepared default")
@@ -159,8 +185,8 @@ async def test_prepared_table_creation_preserves_defaults_and_matches_preview():
     apps.init_relations()
     client = FakeClient("sqlite")
     editor = client.dialect.schema_editor_class(client)
-    plan = editor.table_creation.get_create_plan(PlannedTable)
-    PlannedTable._meta.fields_map["label"].db_default = "later default"
+    plan = editor.table_creation.get_create_plan(declaration_graph.include(PlannedTable))
+    declaration_graph.include(PlannedTable).fields_map["label"].db_default = "later default"
     preview = client.dialect.schema_editor_class(client, collect_sql=True)
     await plan.execute(preview)
     assert client.executed == []
@@ -181,6 +207,7 @@ async def test_prepared_table_creation_preserves_defaults_and_matches_preview():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("default_factory", [Mock, AsyncMock])
 async def test_backfill_preview_does_not_evaluate_default(default_factory):
+    declaration_graph = ModelBindingGraph()
     default = default_factory(return_value="evaluated once")
 
     class BackfilledTable(Model):
@@ -196,8 +223,10 @@ async def test_backfill_preview_does_not_evaluate_default(default_factory):
     apps.init_relations()
     client = FakeClient("sqlite")
     editor = client.dialect.schema_editor_class(client)
-    field = BackfilledTable._meta.fields_map["label"]
-    plan = editor.column_backfill.get_added_column_backfill_plan(BackfilledTable, field, "label")
+    field = declaration_graph.include(BackfilledTable).fields_map["label"]
+    plan = editor.column_backfill.get_added_column_backfill_plan(
+        declaration_graph.include(BackfilledTable), field, "label"
+    )
     assert plan.effects == frozenset({SchemaEffect.BACKFILL_ROWS})
     preview = client.dialect.schema_editor_class(client, collect_sql=True)
     await plan.execute(preview)
@@ -244,6 +273,50 @@ async def test_legacy_rename_restores_connection_setting(monkeypatch, previous, 
         assert database.execute("PRAGMA legacy_alter_table").fetchone() == (previous,)
     finally:
         database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("release_on_success", [False, True])
+@pytest.mark.parametrize("acquisition_fails", [False, True])
+async def test_cancelled_schema_acquisition_releases_only_a_successfully_created_resource(
+    monkeypatch, release_on_success, acquisition_fails
+):
+    client = FakeClient("sqlite")
+    editor = client.dialect.schema_editor_class(client)
+    entered, release, observed = (asyncio.Event() for _ in range(3))
+    completed = []
+
+    async def execute_script(sql, *, recovery=None):
+        if sql == "create":
+            entered.set()
+            await release.wait()
+            if acquisition_fails:
+                raise ValueError("create refused")
+        completed.append(sql)
+
+    monkeypatch.setattr(client, "execute_script", execute_script)
+    scope = SchemaCleanup(
+        SchemaChangePlan((SchemaStatement("body"),)),
+        SchemaChangePlan((SchemaStatement("drop"),)),
+        release_on_success=release_on_success,
+        acquisition=SchemaStatement("create"),
+    )
+    task = asyncio.create_task(scope.execute(editor))
+    try:
+        await entered.wait()
+        task.cancel()
+        asyncio.get_running_loop().call_soon(observed.set)
+        await observed.wait()
+        assert not task.done()
+        task.cancel()
+        release.set()
+        with pytest.raises(BaseExceptionGroup if acquisition_fails else asyncio.CancelledError):
+            await task
+        assert completed == ([] if acquisition_fails else ["create", "drop"])
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -300,6 +373,7 @@ async def test_schema_cleanup_finishes_under_repeated_cancellation(monkeypatch, 
 
 @pytest.mark.asyncio
 async def test_rebuild_rejects_callable_default_before_ddl():
+    declaration_graph = ModelBindingGraph()
     default = Mock(return_value="later")
 
     class Before(Model):
@@ -324,13 +398,16 @@ async def test_rebuild_rejects_callable_default_before_ddl():
     client = FakeClient("sqlite")
     editor = client.dialect.schema_editor_class(client)
     with pytest.raises(ConfigurationError, match="callable"):
-        await editor.table_rebuild.get_rebuild_plan(Before, After).execute(editor)
+        await editor.table_rebuild.get_rebuild_plan(
+            declaration_graph.include(Before), declaration_graph.include(After)
+        ).execute(editor)
     default.assert_not_called()
     assert client.executed == []
 
 
 @pytest.mark.asyncio
 async def test_prepared_field_addition_backfills_once_and_creates_one_index(monkeypatch):
+    declaration_graph = ModelBindingGraph()
     default = AsyncMock(return_value="prepared value")
 
     class Before(Model):
@@ -366,10 +443,10 @@ async def test_prepared_field_addition_backfills_once_and_creates_one_index(monk
     monkeypatch.setattr(client, "execute_script", execute_script)
     editor = client.dialect.schema_editor_class(client)
     try:
-        await editor.create_model(Before)
+        await editor.create_model(declaration_graph.include(Before))
         database.execute("INSERT INTO book DEFAULT VALUES")
-        plan = editor.get_add_field_plan(Before, After, "title")
-        After._meta.fields_map["title"].default = "changed declaration"
+        plan = editor.get_add_field_plan(declaration_graph.include(Before), declaration_graph.include(After), "title")
+        declaration_graph.include(After).fields_map["title"].default = "changed declaration"
         preview = client.dialect.schema_editor_class(client, collect_sql=True)
         await plan.execute(preview)
         default.assert_not_called()
@@ -428,9 +505,11 @@ def test_operation_effect_uses_prepared_rewrite_steps(dialect_name, length, monk
     monkeypatch.setattr(client, "execute_dicts", forbidden)
     monkeypatch.setattr(client, "execute_script", forbidden)
     operation = AlterField("Book", "title", fields.CharField(max_length=length))
-    effect = operation.get_effect("models", state, client.dialect.schema_editor_class(client, collect_sql=True))
+    after = state.clone()
+    operation.state_forward("models", after)
+    effect = operation.get_effect("models", state, after, client.dialect.schema_editor_class(client, collect_sql=True))
     assert effect.rewrites_table is (dialect_name != "postgresql" or length == 4)
-    assert state.apps.get_model("models.Book")._meta.fields_map["title"].max_length == 20
+    assert state.apps.get_binding("models.Book").fields_map["title"].max_length == 20
     forbidden.assert_not_called()
 
 
@@ -464,11 +543,11 @@ async def test_rename_and_narrow_checks_old_column_before_ddl(value, monkeypatch
     monkeypatch.setattr(client, "execute_script", execute_script)
     editor = client.dialect.schema_editor_class(client)
     try:
-        await editor.create_model(state.apps.get_model("models.Book"))
+        await editor.create_model(state.apps.get_binding("models.Book"))
         database.execute("INSERT INTO book(title) VALUES (?)", [value])
         editor.run_statement_count = 0
         plan = editor.get_alter_field_plan(
-            state.apps.get_model("models.Book"), target.apps.get_model("models.Book"), "title"
+            state.apps.get_binding("models.Book"), target.apps.get_binding("models.Book"), "title"
         )
         if value == "too long":
             with pytest.raises(FieldNarrowingDataLossError):
@@ -518,8 +597,8 @@ async def test_through_copy_keeps_links_and_evaluates_extra_default_once(monkeyp
     monkeypatch.setattr(client, "get_generated_key_sql", AsyncMock(return_value=None))
     editor = client.dialect.schema_editor_class(client)
     try:
-        for model in state.get_models_with_tables():
-            await editor.create_model(model)
+        for binding in state.get_bindings_with_tables():
+            await editor.create_model(binding)
         database.executescript(
             "INSERT INTO note(id) VALUES (1); INSERT INTO tag(id) VALUES (1),(2); "
             "INSERT INTO note_tag(note_id,tag_id) VALUES (1,1),(1,2);"
@@ -529,17 +608,17 @@ async def test_through_copy_keeps_links_and_evaluates_extra_default_once(monkeyp
             "Note", "tags", fields.ManyToManyField("models.Tag", related_name="notes", through="models.NoteTag")
         ).state_forward("models", target)
         plan = editor.get_alter_field_plan(
-            state.apps.get_model("models.Note"),
-            target.apps.get_model("models.Note"),
+            state.apps.get_binding("models.Note"),
+            target.apps.get_binding("models.Note"),
             "tags",
-            target.get_models_with_tables(),
+            target.get_bindings_with_tables(),
         )
         await plan.execute(client.dialect.schema_editor_class(client, collect_sql=True))
         default.assert_not_called()
         client.get_generated_key_sql.assert_not_called()
         await plan.execute(editor)
         default.assert_awaited_once_with()
-        table = target.apps.get_model("models.NoteTag")._meta.db_table
+        table = target.apps.get_binding("models.NoteTag").db_table
         assert database.execute(f'SELECT note_id,tag_id,label FROM "{table}" ORDER BY tag_id').fetchall() == [
             (1, 1, "copied"),
             (1, 2, "copied"),

@@ -1,22 +1,15 @@
 """The database of tests/contrib/taskiq/ - its own models, emptied after each test: the tests check
 real commits and rollbacks, which a wrapping rollback transaction would hide."""
 
-import os
-
 import pytest_asyncio
 
 from hare.contrib.test import truncate_all_models
-from hare.contrib.test.isolated_contexts import hare_test_context
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 @pytest_asyncio.fixture(scope="module")
 async def db_taskiq_module():
-    async with hare_test_context(
-        modules=["tests.contrib.taskiq.models"],
-        db_url=os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:"),
-        app_label="models",
-        connection_label="models",
-    ) as context:
+    async with DatabaseUnderTest.open_model_context(["tests.contrib.taskiq.models"]) as context:
         yield context
 
 

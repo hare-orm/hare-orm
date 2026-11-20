@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Collection, Iterable
 from typing import TYPE_CHECKING, Any
 
+from hare.core.resource_completion import ResourceCompletion
 from hare.ddl.table_options import TableOptions
+from hare.exceptions import FieldError
 from hare.fields.constants import ROLLBACK_RESTORE_UNSET
 from hare.fields.enums import RelationLoadStrategy
 from hare.fields.relations.fields.relational_field import RelationalField
@@ -11,12 +13,15 @@ from hare.fields.relations.relation_accessors import RelationAccessors
 from hare.models.constants import REFRESH_RESTORE_FAILURES_MESSAGE
 from hare.models.instances.dirty_fields import DirtyFields
 from hare.models.write.instance_snapshot import InstanceSnapshot
+from hare.query.constants import PRIMARY_KEY_ALIAS
+from hare.query.queryset.arguments.collection_arguments import CollectionArguments
 from hare.query.scopes.row_scopes import RowScopes
 from hare.query.scopes.row_visibility import RowVisibility
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.models.model import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset import QuerySet
 
 
@@ -25,22 +30,57 @@ class InstanceRefresh:
     relations carried over to the refreshed obj."""
 
     @staticmethod
-    def get_refreshed_field_names(model: type[Model], field_names: list[str]) -> list[str]:
-        """The fields read again - a key column of a relation keyed by several brings the others: the
-        instance never holds half of one key and half of another.
+    def get_refresh_field_names(binding: ModelBinding, field_names: Iterable[str]) -> list[str]:
+        """Validate the requested field names and prepare the complete list to refresh.
 
         Args:
-            model: The model.
-            field_names: The validated fields asked for.
+            binding: The model.
+            field_names: Model field names, any iterable (a generator is consumed here, once).
 
         Returns:
-            The fields, in order.
+            The names in order, including blind indexes and every component of requested
+            primary keys and relation keys.
+
+        Raises:
+            FieldError: If a name is not a column-backed field or a forward relation of this model.
         """
-        meta = model._meta
-        refreshed = dict.fromkeys(field_names)
-        for relation_name in meta.foreign_key_fields | meta.one_to_one_fields:
-            source_fields = meta.fields_map[relation_name].source_fields  # type: ignore[attr-defined]
-            if len(source_fields) > 1 and refreshed.keys() & set(source_fields):
+        field_names = CollectionArguments.get_list(field_names, "'fields'")
+        validated_names: dict[str, None] = {}
+        for field_name in field_names:
+            if field_name == PRIMARY_KEY_ALIAS:
+                validated_names.update(dict.fromkeys(binding.primary_key_attribute_names))
+            elif field_name in binding.fields_db_projection:
+                validated_names[field_name] = None
+            elif field_name in binding.foreign_key_fields or field_name in binding.one_to_one_fields:
+                # A forward relation stands for its key column(s), like Django.
+                source_fields = binding.fields_map[field_name].source_fields  # type: ignore[attr-defined]
+                validated_names.update(dict.fromkeys(source_fields))
+            elif field_name in binding.generic_foreign_key_fields:
+                validated_names.update(
+                    dict.fromkeys(binding.generic_foreign_key_fields[field_name].get_source_fields())
+                )
+            elif (
+                field_name in binding.backward_foreign_key_fields
+                or field_name in binding.backward_one_to_one_fields
+                or (field_name in binding.many_to_many_fields)
+            ):
+                raise FieldError(
+                    f"'fields' names the relation {field_name!r} of model {binding.full_name}, "
+                    "which has no column on this model's table"
+                )
+            else:
+                raise FieldError(f"Unknown field {field_name!r} in 'fields' for model {binding.full_name}")
+        validated_fields = binding.get_with_blind_indexes(validated_names)
+        if not validated_fields:
+            return validated_fields
+        refreshed = dict.fromkeys(validated_fields)
+        for relation_name in binding.forward_key_relation_names:
+            source_fields = binding.fields_map[relation_name].source_fields  # type: ignore[attr-defined]
+            if len(source_fields) > 1 and not refreshed.keys().isdisjoint(source_fields):
+                refreshed.update(dict.fromkeys(source_fields))
+        for generic_field in binding.generic_foreign_key_fields.values():
+            source_fields = generic_field.get_source_fields()
+            if not refreshed.keys().isdisjoint(source_fields):
                 refreshed.update(dict.fromkeys(source_fields))
         return list(refreshed)
 
@@ -58,11 +98,11 @@ class InstanceRefresh:
         """
         # Read through the base manager with the model's default scope. An obj soft-deleted in
         # memory is refreshed with the soft-delete filter lifted - its row can't be found otherwise.
-        soft_delete_field = obj._meta.soft_delete_field
+        soft_delete_field = obj._binding.soft_delete_field
         is_soft_deleted_in_memory = soft_delete_field is not None and getattr(obj, soft_delete_field, None) is not None
         queryset = TableOptions.get_key_read_queryset(
             RowScopes.get_base_queryset(
-                obj.__class__,
+                obj._binding,
                 RowVisibility(include_deleted=True) if is_soft_deleted_in_memory else RowVisibility.DEFAULT,
             ).using(connection)
         )
@@ -86,7 +126,7 @@ class InstanceRefresh:
             refreshed_obj: The row read again.
             fields: The fields refreshed, None for all.
         """
-        meta = obj._meta
+        meta = obj._binding
         # Field names, not column names - what .only() takes.
         refresh_fields = tuple(fields if fields is not None else meta.fields_db_projection)
         # Read every requested value before publication. A missing column is not a
@@ -119,10 +159,8 @@ class InstanceRefresh:
                 else:
                     DirtyFields.snapshot_dirty_fields(obj)
         except BaseException as error:
-            try:
+            with ResourceCompletion.preserve_error(error, REFRESH_RESTORE_FAILURES_MESSAGE):
                 InstanceSnapshot.restore_all((before,))
-            except BaseException as restore_error:
-                raise BaseExceptionGroup(REFRESH_RESTORE_FAILURES_MESSAGE, [error, restore_error]) from None
             raise
         finally:
             InstanceSnapshot.restore_value(obj, "_allow_soft_delete_write", before.values["_allow_soft_delete_write"])
@@ -137,18 +175,21 @@ class InstanceRefresh:
             refreshed_obj: The row read again.
             refresh_fields: The fields refreshed.
         """
-        meta = obj._meta
-        for relation_name in meta.foreign_key_fields | meta.one_to_one_fields:
+        meta = obj._binding
+        for relation_name in meta.forward_key_relation_names:
             relation_field: RelationalField[Any] = meta.fields_map[relation_name]  # type: ignore[assignment]
             if getattr(relation_field, "lazy", None) not in {RelationLoadStrategy.JOINED, RelationLoadStrategy.SELECT}:
                 continue
-            if not set(relation_field.source_fields) & refresh_fields:
+            if refresh_fields.isdisjoint(relation_field.source_fields):
                 continue
             cache_key = f"_{relation_name}"
-            if hasattr(refreshed_obj, cache_key):
-                object.__setattr__(obj, cache_key, getattr(refreshed_obj, cache_key))
-            elif hasattr(obj, cache_key):
-                object.__delattr__(obj, cache_key)
+            try:
+                cached_value = getattr(refreshed_obj, cache_key)
+            except AttributeError:
+                if hasattr(obj, cache_key):
+                    object.__delattr__(obj, cache_key)
+            else:
+                object.__setattr__(obj, cache_key, cached_value)
 
     @staticmethod
     def reset_reverse_relations(obj: Model, refreshed_obj: Model) -> None:
@@ -159,7 +200,7 @@ class InstanceRefresh:
             obj: The obj refreshed.
             refreshed_obj: The row read again.
         """
-        meta = obj._meta
+        meta = obj._binding
         for relation_name in (
             meta.backward_foreign_key_fields | meta.backward_one_to_one_fields | meta.many_to_many_fields
         ):
@@ -175,4 +216,4 @@ class InstanceRefresh:
             refreshed_relation = RelationAccessors.get_relation(refreshed_obj, relation_name)
             if refreshed_relation._fetched:
                 relation = RelationAccessors.get_relation(obj, relation_name)
-                relation._set_result_for_query(list(refreshed_relation.related_objects))
+                relation.relation_rows.set_fetched(list(refreshed_relation.related_objects))

@@ -2,17 +2,15 @@
 parameters - no copy of the stored query, no clone of its WHERE tree, no render."""
 
 import datetime
-from contextlib import contextmanager
 from unittest.mock import patch
 
 import pytest
 
 from hare.query.expressions import F, RawSQL
 from hare.query.functions import Count, Max, Upper
-from hare.query.plans.call_signatures.call_signature_plans import CallSignaturePlans
-from hare.query.plans.statement.statement_plan_runs import StatementPlanRuns
 from hare.sql.builder.queries import QueryBuilder
 from tests.shared_models.testmodels import Event, Tournament
+from tests.utils.statement_plan_checks import StatementPlanChecks
 
 # Counts the builds a run on a plan saves - plan verification compares after the body.
 pytestmark = pytest.mark.plan_verification_after_test
@@ -22,16 +20,6 @@ async def create_tournaments() -> list[Tournament]:
     return [
         await Tournament.objects.create(name=name, desc=f"{name} desc") for name in ("alpha", "beta", "gamma", "delta")
     ]
-
-
-@contextmanager
-def full_build():
-    """Runs a query the way it ran before compiled statements: always built and rendered."""
-    with (
-        patch.object(CallSignaturePlans, "find_with_value_positions", return_value=None),
-        patch.object(StatementPlanRuns, "find_plan", return_value=None),
-    ):
-        yield
 
 
 @pytest.mark.asyncio
@@ -51,7 +39,10 @@ async def test_a_second_query_of_a_shape_renders_no_sql(db):
         assert await Tournament.objects.filter(name="nothing").first() is None
     assert rendered == []
     # A full build renders - the check above would notice a render.
-    with patch.object(QueryBuilder, "get_parameterized_sql", counting_get_parameterized_sql), full_build():
+    with (
+        patch.object(QueryBuilder, "get_parameterized_sql", counting_get_parameterized_sql),
+        StatementPlanChecks.full_build(),
+    ):
         await Tournament.objects.filter(name="delta").first()
     assert len(rendered) == 1
 
@@ -105,7 +96,7 @@ async def test_a_compiled_query_returns_what_the_full_build_returns(db, name, bu
     first_value, second_value = values
     await build(first_value)
     compiled = [comparable(await build(value)) for value in (second_value, first_value)]
-    with full_build():
+    with StatementPlanChecks.full_build():
         built = [comparable(await build(value)) for value in (second_value, first_value)]
     assert compiled == built
     assert compiled[0] != compiled[1] or first_value == second_value or name == "exists"
@@ -226,7 +217,7 @@ async def test_a_later_query_of_the_shape_renders_no_sql(db, name, build, values
     with patch.object(QueryBuilder, "get_parameterized_sql", counting_get_parameterized_sql):
         compiled = comparable(await build(second_value))
     assert rendered == []
-    with full_build():
+    with StatementPlanChecks.full_build():
         assert compiled == comparable(await build(second_value))
 
 

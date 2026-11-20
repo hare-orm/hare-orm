@@ -1,6 +1,7 @@
 # Описание фильтров и сортировок
 
-`Model._meta.get_lookup_info(key)` сообщает, к чему относится ключ `.filter()`: через какие связи он
+`apps.get_binding(Model).get_lookup_info(key)` сообщает, к чему относится ключ `.filter()`: через какие связи
+он
 проходит, с каким полем сравнивает, какой это оператор фильтра и какое значение он принимает, — ничего не
 строя и не выполняя. `get_ordering_info(name)` делает то же для имени в `.order_by()`, а
 `get_lookups(path, dialect)` перечисляет все операторы поля, которые выполняет диалект.
@@ -15,9 +16,12 @@ hare сам пользуется этими описаниями: `.filter()`, `
 ## <a id="get_lookup_info"></a>`get_lookup_info()`
 
 ```python
+from hare import Hare
 from hare.query.enums import Lookup, LookupValueShape
 
-info = Book._meta.get_lookup_info("author__name__icontains")
+apps = Hare.get_context().apps
+
+info = apps.get_binding(Book).get_lookup_info("author__name__icontains")
 info.relations      # (Book.author,)
 info.field          # Author.name
 info.lookup         # Lookup.ICONTAINS
@@ -95,7 +99,8 @@ info.value_type     # str
   (`draft__gt=`) даёт `QueryError`: он был бы неоднозначным — фильтруйте по каждой колонке ключа.
 - Модель, которая ещё не привязана (см.
   [Пока подключения не настроены](#before-the-connections-are-set-up)), ничего не описывает:
-  `get_lookup_info()`, `get_lookups()` и `get_ordering_info()` — и у `Model._meta`, и у запроса — дают
+  `get_lookup_info()`, `get_lookups()` и `get_ordering_info()` — и у `apps.get_binding(Model)`, и у запроса —
+  дают
   `ConfigurationError`:
   `Book is not bound yet: call Hare.bind_models() or Hare.init() before describing its filters or orderings`.
 
@@ -115,7 +120,7 @@ info.value_type     # str
 from hare.dialects.dialect_registry import DialectRegistry
 
 sqlite = DialectRegistry.get_dialect("sqlite")
-info = Book._meta.get_lookup_info("title__trigram_similar")
+info = apps.get_binding(Book).get_lookup_info("title__trigram_similar")
 info.is_supported(sqlite)                                  # False
 info.is_supported(DialectRegistry.get_dialect("postgresql"))  # True
 ```
@@ -130,7 +135,7 @@ Book.objects.filter(title__trigram_similar=...) can't run on sqlite: the sqlite 
 ## <a id="get_lookups"></a>`get_lookups()`
 
 ```python
-lookups = Book._meta.get_lookups("added_at", connection.dialect)
+lookups = apps.get_binding(Book).get_lookups("added_at", connection.dialect)
 lookups[""]            # простое равенство
 lookups["year__gte"]   # LookupInfo(value_type=int, ...)
 ```
@@ -151,7 +156,7 @@ lookups["year__gte"]   # LookupInfo(value_type=int, ...)
 ## <a id="get_ordering_info"></a>`get_ordering_info()`
 
 ```python
-info = Book._meta.get_ordering_info("-author__name")
+info = apps.get_binding(Book).get_ordering_info("-author__name")
 info.relations    # (Book.author,)
 info.fields       # (Author.name,)
 info.paths        # ("author__name",)
@@ -168,6 +173,12 @@ info.descending   # True
 названную связь. Неизвестное имя даёт `FieldError`:
 `Unknown field nme for ordering: Book has no field 'nme'`.
 
+Часть даты может идти после пути внутри контейнера: `moments__0__year` и
+`during__startswith__year` сохраняют оба сегмента в `transforms`. Составные фильтры
+`moments__0__year__gte` и `moments__0__date__in` описываются оператором и типом входного
+значения извлечённого поля. Известный тип скалярной annotation не добавляет ей путей поля;
+при сортировке пути внутри annotations предназначены для значений JSON.
+
 ## <a id="on-a-queryset"></a>У запроса
 
 `QuerySet.get_lookup_info()`, `get_lookups()` и `get_ordering_info()` учитывают ещё и вычисляемые
@@ -179,38 +190,26 @@ queryset = Author.objects.annotate(book_count=Count("books"))
 queryset.get_lookup_info("book_count__gte").value_type    # int
 ```
 
-## <a id="before-the-connections-are-set-up"></a>Пока подключения не настроены
+## <a id="before-the-connections-are-set-up"></a>До открытия подключений
 
-Для любого описания нужны только модели, подключения не нужны. `Hare.bind_models()` привязывает модели
-всей конфигурации — связи между ними, заменяемые модели, фильтры и сортировки каждой модели — синхронно и
-не оставляет текущего `HareContext`:
+Описания требуют подготовленного графа, но не соединения с БД:
 
 ```python
 from hare import Hare
 
-Hare.bind_models(config=CONFIG)  # та же конфигурация, что принимает Hare.init()
-
-Book._meta.get_lookup_info("author__name__icontains").value_type  # str
-Book.objects.all().get_ordering_info("-published_at").descending           # True
+apps = Hare.bind_models(CONFIG)
+binding = apps.get_binding(Book)
+binding.get_lookup_info("author__name__icontains").value_type  # str
+apps.get_queryset(Book).get_ordering_info("-published_at").descending  # True
 ```
 
-Он принимает конфигурацию в любом виде, который принимает `Hare.init()` (словарь, `HareConfig`, путь к
-файлу или `"module.VARIABLE"`), и описывает все ключи, которые описывает полный `Hare.init()`. Фреймворк,
-который строит сигнатуры и схемы обработчиков запросов при создании приложения, ещё до того, как при
-запуске откроются подключения, читает фильтры отсюда. `Hare.init()` — или `HareContext.init()` в любом
-контексте, в том числе с глобальным запасным контекстом, — позже настраивает подключения как обычно.
+`bind_models()` возвращает независимый `Apps`, не меняя классы моделей или текущий контекст.
+Используйте именно его для всех последующих описаний и интеграций. В работающем приложении
+получайте привязку через `context.apps.get_binding(Book)`. `_declaration` класса содержит только
+объявление, а не признак настройки класса каким-либо приложением.
 
-`Model._meta.is_bound` показывает, привязана ли модель: `False` сразу после объявления класса и `True`,
-как только его привяжет любой из этих вызовов:
-
-```python
-Book._meta.is_bound  # False
-Hare.bind_models(config=CONFIG)
-Book._meta.is_bound  # True
-```
-
-До этого любое описание даёт `ConfigurationError` (см. [Ошибки](#errors)). Запрос, созданный до привязки
-(`BOOKS = Book.objects.all()` на уровне модуля), описывает свои ключи, как только модель будет привязана.
+Шаблон запроса без графа не описывает поля. Его цепочка проверяется при привязке локальной копии
+к реестру во время выполнения. Инициализация приложения не ищет и не меняет общие шаблоны.
 
 ## <a id="validation-in-filter-and-order-by"></a>Проверка в `.filter()` и `.order_by()`
 

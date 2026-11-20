@@ -11,8 +11,12 @@ from tests.resources.test_run_resources import TestRunResources as RunResources
 pytestmark = pytest.mark.database_independent
 
 
-def test_workers_tag_the_original_template_and_restore_environment():
-    original = {"HARE_TEST_DB": "postgresql://localhost/test_{}", REUSE_DATABASES_ENVIRONMENT_VARIABLE: "0"}
+@pytest.mark.parametrize("prefix", ("test_", "test_h1e2_hydration_"))
+def test_workers_tag_the_original_template_and_restore_environment(prefix):
+    original = {
+        "HARE_TEST_DB": f"postgresql:///{prefix}{{}}?host=%2Ftmp&application_name=hare_tests",
+        REUSE_DATABASES_ENVIRONMENT_VARIABLE: "0",
+    }
     controller_environment = dict(original)
     controller = RunResources(controller_environment)
     controller.configure()
@@ -20,7 +24,9 @@ def test_workers_tag_the_original_template_and_restore_environment():
     inherited = dict(worker_environment)
     worker = RunResources(worker_environment)
     worker.configure()
-    assert worker_environment["HARE_TEST_DB"] == f"postgresql://localhost/test_{worker.run_tag}_{{}}"
+    assert worker_environment["HARE_TEST_DB"] == (
+        f"postgresql:///test_{worker.run_tag}_{{}}?host=%2Ftmp&application_name=hare_tests"
+    )
     assert worker.run_tag != controller.run_tag
     assert worker_environment[REUSE_DATABASES_ENVIRONMENT_VARIABLE] == "0"
     worker.restore_environment()

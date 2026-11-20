@@ -201,6 +201,11 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
                 POSTGRES_UNUSABLE_ROOT_CERTIFICATE_MESSAGE.format(path=path, reason=reason)
             ) from None
 
+    def _get_listen_client(self, channel: str) -> Self:
+        """Validate the channel and select the server connection that can hold a LISTEN session."""
+        self.raise_if_channel_unusable(channel)
+        return self.get_server_client()
+
     @staticmethod
     def raise_if_channel_unusable(channel: str) -> None:
         """Rejects a LISTEN channel the server can't take, before a connection is opened for it.
@@ -395,15 +400,6 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
         """
         return await self._pool.acquire()
 
-    async def _pool_release(self, pool: Any, connection: Any) -> None:
-        """Hands a connection back to the pool it was taken from.
-
-        Args:
-            pool: The pool.
-            connection: The connection.
-        """
-        await pool.release(connection)
-
     async def _post_connect(self) -> None:
         await super()._post_connect()
         if self.transaction_pooling and "search_path" in self.server_settings:
@@ -430,7 +426,7 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
         pool, self._pool = self._pool, None
         await self._close_pool(pool)
 
-    def get_server_client(self) -> PostgresqlClient:
+    def get_server_client(self) -> Self:
         """The client of the server past the transaction pooler (``direct_host``) - this client for a
         connection going straight to the server.
 
@@ -667,21 +663,28 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
         finally:
             await session_client.close()
 
-    async def _reconnect(self, with_db: bool) -> None:
-        """Opens a fresh pool for a database-level statement (CREATE/DROP DATABASE), closing the
-        current pool first - its sessions would keep the database from being dropped.
-
-        Args:
-            with_db: Whether to connect to the configured database - False connects to the server's
-                default one.
-        """
-        await self.close()
-        await self.create_connection(with_db)
-
     async def db_create(self) -> None:
         if not self.database:
             raise ConfigurationError("Can't create a database without a configured database name")
         await self._create_database()
+
+    async def _execute_database_statement(self, statement: str) -> None:
+        """Execute database DDL through an independent server connection.
+
+        A retired application client may forward ordinary queries to its replacement.
+        Database administration must never follow that replacement into the database
+        being created or dropped. Retire this pool and use the common independent-client
+        factory with the direct endpoint; both PostgreSQL drivers follow this path.
+        """
+        await self.close()
+        client = self.create_independent_client(
+            {**POSTGRESQL_SINGLE_CONNECTION_POOL_SETTINGS, **TransactionPooler.get_direct_settings(self)}
+        )
+        try:
+            await client.create_connection(with_db=False)
+            await client.execute_script(statement)
+        finally:
+            await client.close()
 
     async def _create_database(self) -> None:
         """Runs CREATE DATABASE for the configured database, owned by the configured user."""
@@ -691,26 +694,16 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
         # owns the new database - there is no role name to name here.
         if self.user:
             statement += f" OWNER {self.dialect.literals.quote_identifier(self.user)}"
-        await self._reconnect(with_db=False)
-        try:
-            await self.execute_script(statement)
-        finally:
-            await self.close()
+        await self._execute_database_statement(statement)
 
     async def db_delete(self) -> None:
         if not self.database:
             raise ConfigurationError("Can't drop a database without a configured database name")
-        await self._reconnect(with_db=False)
         # A test database is dropped with whatever sessions are still on it - a pooler's, or one an
         # event loop closed in the middle of a query left running.
-        try:
-            await self.execute_script(
-                POSTGRES_FORCED_DROP_DATABASE_SQL.format(
-                    database=self.dialect.literals.quote_identifier(self.database)
-                )
-            )
-        finally:
-            await self.close()
+        await self._execute_database_statement(
+            POSTGRES_FORCED_DROP_DATABASE_SQL.format(database=self.dialect.literals.quote_identifier(self.database))
+        )
 
     def acquire_connection(self) -> ConnectionWrapper[Any] | PoolConnectionWrapper[Any]:
         return PoolConnectionWrapper(self)

@@ -56,6 +56,7 @@ from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.expressions.conditions.q import Q
     from hare.query.expressions.value_references.composite_key_value_reference import CompositeKeyValueReference
     from hare.query.expressions.value_references.value_reference_types import FilterValueReference, ValueReference
@@ -123,7 +124,7 @@ class FilterKwargs:
             )
             if kwarg_expression_context.annotations:
                 raw_key = KeyColumns.get_primary_key_name(
-                    kwarg_expression_context.model, kwarg_expression_context.annotations, raw_key
+                    kwarg_expression_context.binding, kwarg_expression_context.annotations, raw_key
                 )
             expression_context, annotation_name = JsonPathFilters.get_json_path_expression_context(
                 kwarg_expression_context, raw_key
@@ -148,7 +149,7 @@ class FilterKwargs:
                 if expanded is not None:
                     expanded_modifier, expanded_reference, value_recorded_itself = expanded
                     FilterKwargs.hide_values_of_sensitive_key(
-                        expanded_modifier, node_expression_context.model, filter_key
+                        expanded_modifier, node_expression_context.binding, filter_key
                     )
                     modifier = condition._combine_modifier(modifier, expanded_modifier)
                     if recording is not None and not value_recorded_itself:
@@ -205,14 +206,14 @@ class FilterKwargs:
                     pass
                 elif isinstance(raw_value, RawSQL) and bindable:
                     # The SQL text is part of the plan key; its parameters are the values.
-                    ExpressionArguments.record_parameters(recording, raw_value, "parameters", raw_value.parameters)
+                    ExpressionArguments.record_raw_sql_parameters(recording, raw_value)
                 else:
                     recording.append((PlanOrigins.get_value_origin(condition, filter_key), recorded_reference))
             if value_joins:
                 # An expression value crossing a relation of its own (F("relation__field")) - its
                 # joins come with this kwarg's modifier, as its term does.
                 filter_modifier = QueryModifier(joins=value_joins) & filter_modifier
-            FilterKwargs.hide_values_of_sensitive_key(filter_modifier, node_expression_context.model, filter_key)
+            FilterKwargs.hide_values_of_sensitive_key(filter_modifier, node_expression_context.binding, filter_key)
             modifier = condition._combine_modifier(modifier, filter_modifier)
         return condition._finalize_modifier(modifier, node_expression_context, recorded_paths_mark)
 
@@ -279,7 +280,11 @@ class FilterKwargs:
         encoder_field = GeneratedField.get_effective_field(value_field)
         if not isinstance(value, Term):
             field_object = model_field
-            value_encoder = field_lookup.get_value_encoder(encoder_field, expression_context.dialect)  # type: ignore[union-attr]
+            value_encoder = field_lookup.get_value_encoder(  # type: ignore[union-attr]
+                encoder_field,
+                expression_context.dialect,
+                is_column=model_field is encoder_field and not lookup_info.term_transforms,
+            )
             if value_encoder is not None:
                 # A GeneratedField is encoded as its output_field - an encoder reaches for that
                 # field's own attributes (a range's element type, an array's base_field).
@@ -292,8 +297,8 @@ class FilterKwargs:
         )
         term: Term = table[
             model_field.source_field
-            or model._meta.fields_db_projection.get(model_field.model_field_name)
-            or model_field.model_field_name
+            or expression_context.binding.fields_db_projection.get(model_field_name := model_field.model_field_name)
+            or model_field_name
         ]
         if field_object is not None:
             function_cast = field_object.get_function_cast(expression_context.dialect)
@@ -333,23 +338,23 @@ class FilterKwargs:
         if isinstance(value, related_model):
             return True
         return isinstance(value, (list, tuple, set)) and not any(
-            isinstance(element, (Term, Expression, Plannable)) for element in value
+            isinstance(element, (Term, Plannable)) for element in value
         )
 
     @staticmethod
-    def hide_values_of_sensitive_key(modifier: QueryModifier, model: type[Model], key: str) -> None:
+    def hide_values_of_sensitive_key(modifier: QueryModifier, binding: ModelBinding, key: str) -> None:
         """Marks every value a filter binds when its key compares a sensitive field's values - a
         part of ``pk``, a key inside a JSON value, a relation compared by a sensitive key too - or
         its condition reads a sensitive field's column: an annotation or alias over the field.
 
         Args:
             modifier: The filter's parts.
-            model: The filtered model.
+            binding: The filtered model.
             key: The filter key.
         """
         criteria = (modifier.where_criterion, modifier.having_criterion)
         # A sensitive column, a subquery selecting one's value, or a value already hidden.
-        if SensitiveFilterKeys.reads_sensitive_values(model, key) or any(
+        if SensitiveFilterKeys.reads_sensitive_values(binding, key) or any(
             node.sensitive for criterion in criteria for node in criterion.nodes_()
         ):
             for criterion in criteria:
@@ -424,10 +429,11 @@ class FilterKwargs:
                 # belongs in the ON clause, as for a nested books__field=... lookup.
                 ScopeJoinConditions.fold_ambient_scope_into_join(
                     joins,
-                    relation.related_model,
+                    relation.get_related_binding(),
                     visibility=expression_context.visibility,
                     dialect=expression_context.dialect,
                     connection=expression_context.connection,
+                    application_context=expression_context.application_context,
                 )
                 join = joins[0]
             else:
@@ -437,6 +443,7 @@ class FilterKwargs:
                     visibility=expression_context.visibility,
                     dialect=expression_context.dialect,
                     connection=expression_context.connection,
+                    application_context=expression_context.application_context,
                 )
                 join = joins[0]
                 if isinstance(relation, ManyToManyFieldInstance):
@@ -623,8 +630,9 @@ class FilterKwargs:
         if lookup_info.target != LookupTarget.RELATION or len(lookup_info.relations) != 1:
             return None
         relation: RelationalField[Model] = lookup_info.relations[0]  # type: ignore[assignment]
-        meta = expression_context.model._meta
-        if relation.model_field_name in meta.foreign_key_fields or relation.model_field_name in meta.one_to_one_fields:
+        meta = expression_context.binding
+        relation_name = relation.model_field_name
+        if relation_name in meta.foreign_key_fields or relation_name in meta.one_to_one_fields:
             modifier = RelationFilters.get_forward_relation_isnull_kwarg(expression_context, key, value)
             if modifier is not None or len(relation.source_fields) <= 1:
                 return None if modifier is None else (modifier, None, False)
@@ -670,7 +678,7 @@ class FilterKwargs:
         """
         path_prefix = expression_context.select_related_path_prefix
         label = f"Unknown filter param '{path_prefix}__{key}'" if path_prefix else None
-        return expression_context.model._meta._get_lookup_info(key, label)
+        return expression_context.binding._get_lookup_info(key, label)
 
     @staticmethod
     def crosses_relation(lookup_info: LookupInfo) -> bool:

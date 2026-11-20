@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from copy import copy
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, overload
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import ConfigurationError
@@ -13,6 +13,8 @@ if TYPE_CHECKING:
     from hare.ddl.raw_sql_term import RawSQLTerm
     from hare.ddl.schema_objects.enum_type import EnumType
     from hare.dialects.base.dialect import Dialect
+    from hare.fields.data.containers.container_field import HeldValuePath
+    from hare.fields.narrowing.narrowing_limit import NarrowingLimit
     from hare.query.expressions.expression import Expression
     from hare.sql.terms.term import Term
 
@@ -84,15 +86,23 @@ class GeneratedField(Field[Any]):
         self.field_type = output_field.field_type
 
     @staticmethod
-    def get_effective_field(field: Field[Any]) -> Field[Any]:
+    @overload
+    def get_effective_field(field: Field[Any]) -> Field[Any]: ...
+
+    @staticmethod
+    @overload
+    def get_effective_field(field: None) -> None: ...
+
+    @staticmethod
+    def get_effective_field(field: Field[Any] | None) -> Field[Any] | None:
         """The field a value of ``field`` has: a GeneratedField's output field, any other field
         itself.
 
         Args:
-            field: The field.
+            field: The field, or None if it is unknown.
 
         Returns:
-            The field the value has.
+            The field the value has, or None for an unknown field.
         """
         return field.output_field if isinstance(field, GeneratedField) else field
 
@@ -111,6 +121,19 @@ class GeneratedField(Field[Any]):
 
     def get_column_type(self, dialect: Dialect) -> str:
         return self.output_field.get_column_type(dialect)
+
+    def get_narrowing_limit(self, old_field: Field[Any]) -> NarrowingLimit | None:
+        """Preserve the output field's semantic limits when altering computed columns.
+
+        Stored and virtual columns can become unreadable without changing their SQL
+        type or expression, for example when an output enum loses a member. Compare
+        the effective old output through the normal field hook before schema changes.
+        """
+        return self.output_field.get_narrowing_limit(self.get_effective_field(old_field))
+
+    def get_held_narrowing_limits(self, old_field: Field[Any]) -> Sequence[tuple[HeldValuePath, NarrowingLimit]]:
+        """The output container's element limits, preserving its custom narrowing hooks."""
+        return self.output_field.get_held_narrowing_limits(self.get_effective_field(old_field))
 
     def exists_on(self, dialect: Dialect) -> bool:
         return self.output_field.exists_on(dialect)
@@ -138,7 +161,9 @@ class GeneratedField(Field[Any]):
         return self.output_field.to_python(value)
 
     def get_assign_normalized_types(self) -> frozenset[type]:
-        return self.output_field.get_assign_normalized_types()
+        return self._get_unchanged_assign_types(
+            GeneratedField.to_python, *self.output_field.get_assign_normalized_types()
+        )
 
     @property
     def constraints(self) -> dict[str, Any]:

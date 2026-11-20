@@ -4,14 +4,11 @@ from copy import copy
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.exceptions import QueryError
-from hare.query.execution.query_execution import QueryExecution
 from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
 from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
-from hare.query.plans.constants import NO_CALL_PLAN
 from hare.query.plans.description.plan_context import PlanContext
 from hare.query.plans.description.plan_description import PlanDescription
 from hare.query.plans.enums import PlanKeyForm
-from hare.query.plans.statement.declarations import CallPlanHit
 from hare.query.plans.statement.declared_plan_slots import DeclaredPlanSlots
 from hare.query.plans.statement.statement_plan_descriptions import StatementPlanDescriptions
 from hare.query.statements.awaitable_query import AwaitableQuery
@@ -52,6 +49,14 @@ class ExistsQuery(RowsSummaryQuery):
         *StatementPlanDescriptions.CURSOR_SLOTS,
     )
 
+    rows_plan_slots: ClassVar[DeclaredPlanSlots] = (
+        *RowsSummaryQuery.rows_plan_slots,
+        ("_has_empty_slice", PlanKeyForm.METHOD),
+    )
+
+    def _needs_dependency_values(self) -> bool:
+        return super()._needs_dependency_values() and self._limit != 0
+
     def _has_empty_slice(self) -> bool:
         """Whether the queryset is a slice of no rows - ``[:0]``, ``.limit(0)``."""
         return self._limit == 0
@@ -82,18 +87,19 @@ class ExistsQuery(RowsSummaryQuery):
         self, value_wrapper_references: RecordedValueReferences | None, *, records_for_caller: bool
     ) -> bool:
         if self._bound_rows_query is not None:
-            return self._build_statement_over_rows(value_wrapper_references)
-        self._build_rows_selection(value_wrapper_references)
-        QueryCtes.apply_with_ctes(self, value_wrapper_references=value_wrapper_references)
-        self.query._limit = self.query._wrapper_class(1)
+            self._build_statement_over_rows(value_wrapper_references)
+        else:
+            self._build_rows_selection(value_wrapper_references)
+            QueryCtes.apply_with_ctes(self, value_wrapper_references=value_wrapper_references)
+            self.query._limit = self.query._wrapper_class(1)
+            if self._offset:
+                self.query._offset = self.query._wrapper_class(self._offset)
+                if value_wrapper_references is not None:
+                    ExpressionArguments.record_literal(value_wrapper_references, self, "_offset", self.query._offset)
+            self._finalize_select_list()
         if self._has_empty_slice():
             # A slice of no rows matches none - the statement reads one row whatever the slice.
             self.query = self.query.where(BasicCriterion.always_false())
-        if self._offset:
-            self.query._offset = self.query._wrapper_class(self._offset)
-            if value_wrapper_references is not None:
-                ExpressionArguments.record_literal(value_wrapper_references, self, "_offset", self.query._offset)
-        self._finalize_select_list()
         return True
 
     applies_offset_over_rows: ClassVar[bool] = True
@@ -132,36 +138,14 @@ class ExistsQuery(RowsSummaryQuery):
             )
         if self.query._groupbys:
             return
-        effective_table = self._effective_basetable()
-        self.query = self.query.groupby(
-            *(
-                effective_table[self.model._meta.fields_db_projection[attribute_name]]
-                for attribute_name in self.model._meta.primary_key_attribute_names
-            )
-        )
+        RowsSummaryQuery._group_by_primary_key(self)
 
     async def _execute_bound(self) -> bool:
         if self._is_none or self._limit == 0:
-            return await self._execute_none()
-        lookup = NO_CALL_PLAN
-        connection: DatabaseClient | None = None
-        if self._call_signature is not None:
-            connection = self.get_connection()
-            call_plan = self._find_call_plan(connection)
-            if isinstance(call_plan, CallPlanHit):
-                return await QueryExecution.read(
-                    self, connection, self._exists(connection, call_plan.sql, call_plan.parameters)
-                )
-            lookup = call_plan
-        query = self._get_execution_query_to_build(lookup, connection)
-        statement = query._make_query_to_run()
-        return await QueryExecution.read(query, query._connection, query._exists(query._connection, *statement))
+            return False
+        return await self._execute_scalar_summary()
 
-    async def _execute_none(self) -> bool:
-        return False
-
-    @staticmethod
-    async def _exists(connection: DatabaseClient, sql: str, parameters: list[Any]) -> bool:
+    async def _read_scalar_summary(self, connection: DatabaseClient, sql: str, parameters: list[Any]) -> bool:
         """Runs the statement and tells whether it returned a row.
 
         Args:
@@ -169,5 +153,5 @@ class ExistsQuery(RowsSummaryQuery):
             sql: The statement.
             parameters: Its parameters.
         """
-        result, _ = await connection.execute(sql, parameters, returns_rows=True, retry_read=True)
+        result, _ = await connection._execute_built(sql, parameters, returns_rows=True, retry_read=True)
         return bool(result)

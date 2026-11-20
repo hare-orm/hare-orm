@@ -17,10 +17,7 @@ from tests.utils.operations import apply_operations
 
 
 def _get_schema_editor(conn):
-    """Get the correct backend-specific SchemaEditor for the given connection.
-
-    Mirrors the factory logic in test_operations_real_db.py / MigrationExecutor._schema_editor().
-    """
+    """Build an executing schema editor for the connection's dialect."""
     return conn.dialect.schema_editor_class(conn, atomic=True, collect_sql=False)
 
 
@@ -403,9 +400,10 @@ def test_backfill_of_a_model_without_a_key_needs_a_name_of_a_row():
     without a primary key in batches - it couldn't pick a batch's rows."""
     from types import SimpleNamespace
 
+    from hare.core.apps.model_binding_graph import ModelBindingGraph
     from hare.dialects.base.schema.columns.column_backfill import ColumnBackfill
     from tests.model_setup.primary_keys.primary_keyless_models import VisitNote
 
     editor = SimpleNamespace(client=SimpleNamespace(dialect="third_party"), quote=lambda name: f'"{name}"')
     with pytest.raises(ConfigurationError, match=r"VisitNote\.text in batches - the model has no primary key"):
-        ColumnBackfill(editor).get_backfill_key_sql(VisitNote, "text")
+        ColumnBackfill(editor).get_backfill_key_sql(ModelBindingGraph().include(VisitNote), "text")

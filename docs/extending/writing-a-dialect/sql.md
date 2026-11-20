@@ -40,6 +40,7 @@ schema editor, the SQL renderer and the introspector all ask it:
 |---|---|
 | `identifier_quote_char`, `alias_quote_char`, `quote_identifier(name)`, `qualify_table_name(table, schema)` | Quoting of table/column/index/constraint names and of SELECT aliases. |
 | `get_identifier_key(name)` | What a name is told apart by — two names of one key name one table or column; the name as written by default, lower-cased where the database compares names regardless of case. |
+| `get_field_literal_sql(field, value)` | A literal of an already converted column value, retaining its declared type. Used for DDL defaults; delegates to `get_literal_sql` by default. It does not run conversion again. |
 | `get_string_literal_sql(text)`, `get_literal_sql(value)`, `get_boolean_literal_sql(value)`, `get_bytes_literal_sql(value)`, `get_array_literal_sql(element_sqls)` | Literals written into SQL text — a string, a column default, a boolean of a query, bytes, an array. |
 
 `SqlParameters` binds values:
@@ -49,6 +50,7 @@ schema editor, the SQL renderer and the introspector all ask it:
 | `placeholder_template`, `get_placeholder(index)`, `numbers_parameters` | A bound parameter's placeholder, `{}` standing for its index from 1 (`$1` on PostgreSQL, `?` on SQLite). Cached query shapes substitute values by position, so any placeholder style works with the query cache. |
 | `get_parameter_cast_type(value, position)`, `get_field_parameter_cast_type(field)`, `get_row_key_cast_type(field)`, `get_json_object_value_cast_type(value, value_type)`, `get_cast_parameter_sql(sql, value)` | The type a bound value is cast to where nothing around it gives the parameter a type — see [`get_parameter_cast_type()`](#get-parameter-cast-type) |
 | `get_bindable_number(value)` | How a number standing for a JSON number is bound. |
+| `get_result_literal_cast_type(field)` | SQL typing for a converted literal selected through a compatible field, without narrowing ordinary numeric results. |
 | `single_parameter_in_list_min_length` | The length from which an `__in`/`__not_in` list binds as one parameter. |
 | `get_default_rows_source_sql(row_count)`, `get_column_arrays_rows_source_sql(column_cast_types, first_parameter_index, *, column_values_sql=None)` | The sources a multi-row `INSERT` reads rows of defaults, or of one array per column, from — None for a statement per row and `VALUES`. The optional expressions render already-bound arrays inline; otherwise the source uses parameter placeholders. |
 | `get_copy_column_type(field)` | The type a bulk load (`copy()`) is told a field's column has — the type the table declares by default. |
@@ -62,6 +64,24 @@ column's value, as a key column's value in a row of `bulk_update()` (the column'
 of a JSON object, or as rendered SQL. None or the SQL unchanged by default; PostgreSQL, which types a
 parameter only from what's around it, casts; ClickHouse casts the keys, a bare literal taking the
 narrowest type that holds it.
+
+A selected literal keeps its prepared encoder and value field together while being lowered.
+`get_result_literal_cast_type()` delegates to the field parameter type for converted values,
+except numeric result descriptors and fields exposing a function-cast representation. Those
+retain ordinary literal typing rather than a physical column's limits. Main function arguments
+are typed after the main-lowering hook returns, preserving its explicit output field; CASE
+branches and default arguments use the same prepared binding before generic literal typing.
+That type applies to literal array and tuple terms as well as single parameters; SQL `NULL`
+retains its existing representation. Cursor boundaries receive their field's physical type
+before the same ordering transformation used for the source column. The original parameter
+wrapper remains the source for rebinding, so typing does not repeat value conversion.
+
+Spatial input parameters use the same rule. `GeometryValue` is prepared with its dialect;
+its original wrapper already contains the native value produced by the registered geometry
+writer. Spatial renderers consume that wrapper rather than creating another parameter or
+encoding the coordinates again. Functions, spatial lookups and `Value(geometry)` all use this
+preparation. The literal's shape, dimensions and SRID describe its input domain; the source
+column's domain controls any SQL transform, not an artificial restriction on that operand.
 
 `Dialect.sql_context` is the context every statement renders in; the query class sets
 `SQL_CONTEXT = dialect.sql_context`.
@@ -143,6 +163,13 @@ missing ones. A third-party dialect may start from it the same way, or from a pl
 A subclass of `TermRenderers` also gives the terms the dialect puts in place of an expression where its
 SQL needs another:
 
+`get_spatial_output_domain(term, domain)` refines the portable `SpatialOutputDomain` of a
+geometry-producing function before its output field is selected. Return its native shape, allowed
+dimensions, SRID and geometry/geography type; the default returns `domain` unchanged. Share the
+operand-cast decision with the spatial SQL renderer so metadata describes the overload actually
+called. This hook is not called for scalar spatial results. It must not mutate the source field;
+compatible result fields retain their custom reader through a snapshot.
+
 | Member | Meaning |
 |---|---|
 | `is_distinct_from_operator` | The NULL-safe inequality (`IS NOT` on SQLite). |
@@ -170,7 +197,8 @@ SQL needs another:
 `build_filter_operators()` returns the `FilterOperators` — a mapping from a lookup's own operator to the
 dialect's replacement (`FilterOperators(self, {Lookups.is_in: colstore_is_in, ...})`, `{}` for none). An
 operator only dialects implement (`DialectImplementedOperators`) has to be replaced, or the lookup is
-unsupported: `FilterOperators.supports_lookup()` — and with it `Model._meta.get_lookups(path, dialect)` —
+unsupported: `FilterOperators.supports_lookup()` — and with it `apps.get_binding(Model).get_lookups(path,
+dialect)` —
 leaves it out, and a filter using it fails before any SQL is built.
 
 The replacements are built from the blocks of `hare.query.filters`: `Lookups` (the comparison operators,
@@ -295,11 +323,20 @@ bound like a filter's.
 | `phase=` | `ExtensionPhase.ROW_SOURCE` (default) applies before derived-table wrapping; `ExtensionPhase.STATEMENT` applies to the final statement, as ClickHouse settings do. |
 | `refuses_writes=True` | Rejects UPDATE and DELETE with this call before selecting their rows. |
 
+For `changes_rows=True`, iteration pages a complete extended source, after its declared extension
+phases and window wrapping. SQL boundary parameters retain their original owner: replacing a
+builder's limit does not make that replacement a binding slot for the caller's limit. Model, values
+and combined sources use the same ownership contract.
+
 Implementations and their `changes_rows` effects are bound to the actual connection. A method registered
 for another dialect cannot change the current query's summary strategy. At most one result handler
 is allowed per query; combining handlers raises `QueryError` before SQL execution. Result handlers
 shape the complete awaited result. `iterator()` and `stream()` yield the ordinary decoded rows and
 do not apply whole-result transformations to individual pages or batches.
+
+JOINs added through `get_condition()` or `get_expression()` participate in the same plan
+recording in either phase. Their tenant and custom row-scope values are bound from the current
+execution; a cached extension statement does not retain the scope values of its first build.
 
 
 `QueryBuilder.set_dialect_clause(name, value)` keeps what a call sets for the dialect's `QueryClauses` to
@@ -348,9 +385,10 @@ Mutable builders (`immutable=False`) are updated in place; unchanged references 
 Ancestor hashes are invalidated even when a child changed in place. This does not make an undeclared
 subclass transparent to structural identity or the default `NodeStructure.rewrite()`.
 
-Derived queries use `DerivedProjection` to associate structural identities with column names,
-output types. The enclosing query chooses its output aliases explicitly. Window filters and
-ordering can request hidden columns without
-changing the visible result. GROUP BY uses the same structural identities. Aggregate statements
+Derived queries use `DerivedProjection` to associate structural identities with column names.
+The enclosing query chooses its output aliases explicitly. Aggregates carry the inferred field
+type to the enclosing expression through `ProjectedValue`. Window filters and ordering can
+request hidden columns without changing the visible result. GROUP BY uses the same structural
+identities. Aggregate statements
 build independent inner and outer query states; parameter occurrences point to their declared
 sources instead of replaying earlier construction steps.

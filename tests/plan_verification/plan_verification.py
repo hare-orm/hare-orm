@@ -54,10 +54,10 @@ class PlanVerification:
         try:
             cls.patch(AwaitableQuery, "_make_query_to_run", cls.get_verified_make_query_to_run)
             cls.patch(RawSQLQuery, "_get_statements", cls.get_verified_raw_sql_statements)
-            cls.patch(StatementPlans, "find", cls.get_planless_lookup)
-            cls.patch(StatementPlans, "record", cls.get_planless_record)
-            cls.patch(CallSignaturePlans, "find_with_value_positions", cls.get_planless_lookup)
-            cls.patch(CallSignaturePlans, "record", cls.get_planless_record)
+            cls.patch(StatementPlans, "find", cls.get_planless_method)
+            cls.patch(StatementPlans, "record", cls.get_planless_method)
+            cls.patch(CallSignaturePlans, "find_with_value_positions", cls.get_planless_method)
+            cls.patch(CallSignaturePlans, "record", cls.get_planless_method)
             from hare.query.plans.statement.statement_plan_runs import StatementPlanRuns
             from hare.query.statements.write.matching_rows_query import MatchingRowsQuery
 
@@ -123,25 +123,15 @@ class PlanVerification:
             cls.planless.reset(token)
 
     @classmethod
-    def get_planless_lookup(cls, original: Callable[..., Any]) -> Callable[..., Any]:
-        """A plan lookup finding nothing while a query is built in full."""
+    def get_planless_method(cls, original: Callable[..., Any]) -> Callable[..., Any]:
+        """Skip plan lookups and writes during a full query build."""
 
-        def lookup(*args: Any) -> Any:
+        def access_plans(*args: Any) -> Any:
             if cls.planless.get():
                 return None
             return original(*args)
 
-        return lookup
-
-    @classmethod
-    def get_planless_record(cls, original: Callable[..., Any]) -> Callable[..., Any]:
-        """Keeping a plan - skipped while a query is built in full."""
-
-        def record(*args: Any) -> None:
-            if not cls.planless.get():
-                original(*args)
-
-        return record
+        return access_plans
 
     @classmethod
     def get_verified_write_statement(cls, original: Callable[..., Any]) -> Callable[..., Any]:
@@ -156,7 +146,7 @@ class PlanVerification:
                 def make_query() -> AwaitableQuery[Any]:
                     unbuilt = copy(query)
                     if source is not None:
-                        unbuilt._take_rows_of(source, keeps_ordering=True)
+                        unbuilt._take_rows_of(source)
                     unbuilt._apply_connection(connection)
                     if kwargs.get("prepared") is not None:
                         unbuilt._prepared_write = kwargs["prepared"]
@@ -209,7 +199,7 @@ class PlanVerification:
             statement = original(query)
             if StatementPlans.hits != hits:
                 if hasattr(type(query), "_prepared_write"):
-                    unbuilt_query._prepared_write = query._prepared_write
+                    unbuilt_query._prepared_write = query._prepared_write  # type: ignore[attr-defined]
                 cls.verify(type(query).__name__, query.model, lambda: unbuilt_query, statement)
             return statement
 

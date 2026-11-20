@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from itertools import chain
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.exceptions import (
@@ -13,6 +14,7 @@ from hare.models.write.write_steps import WriteSteps
 from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.execution.dependent_condition import DependentCondition
 from hare.query.key_columns import KeyColumns
+from hare.query.key_comparison import KeyComparison
 from hare.query.lookup_info.lookup_paths import LookupPaths
 from hare.query.queryset.relations.many_to_many.linked_keys import LinkedKeys
 from hare.query.queryset.relations.many_to_many.linked_rows_dependency import LinkedRowsDependency
@@ -29,6 +31,7 @@ from hare.query.statements.write.create_or_update import CreateOrUpdate
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.models import Model
+    from hare.query.queryset.relations.many_to_many.through_values import ThroughValues
 
 TModel = TypeVar("TModel", bound="Model")
 
@@ -61,23 +64,26 @@ class ManyToManyRelation(RelatedQuerySet[TModel]):
         Custom manager querysets are preserved in both cases. Cross-connection reads declare
         their through-table keys as an execution dependency of the ordinary queryset.
         """
-        reads_linked_rows = (
-            any(
-                isinstance(dependency, LinkedRowsDependency) and dependency.relation is self
-                for dependency in self._execution_dependencies
+        from hare.query.execution.query_execution import QueryExecution
+
+        with QueryExecution(self._context):
+            reads_linked_rows = (
+                any(
+                    isinstance(dependency, LinkedRowsDependency) and dependency.relation is self
+                    for dependency in self._execution_dependencies
+                )
+                if self._is_bound
+                else not self.field._generated and LookupPaths.crosses_connections(self.field)
             )
-            if self._is_bound
-            else not self.field._generated and LookupPaths.crosses_connections(self.field)
-        )
-        if reads_linked_rows:
-            queryset = self.model._meta.manager.create_queryset()
-            dependency = LinkedRowsDependency(self)
-            queryset._execution_dependencies = (*queryset._execution_dependencies, dependency)
-            queryset._q_objects.append(DependentCondition(dependency))
-            queryset._call_signature = None
-            self._copy_bound_settings(queryset, None)
-            return
-        super()._bind()
+            if reads_linked_rows:
+                queryset = self._binding.manager.create_queryset(binding=self._binding, context=self._context)
+                dependency = LinkedRowsDependency(self)
+                queryset._execution_dependencies = (*queryset._execution_dependencies, dependency)
+                queryset._q_objects.append(DependentCondition(dependency))
+                queryset._call_signature = None
+                self._copy_bound_settings(queryset, None)
+                return
+            super()._bind()
 
     def __getstate__(self) -> dict[str, Any]:
         state = super().__getstate__()
@@ -108,38 +114,42 @@ class ManyToManyRelation(RelatedQuerySet[TModel]):
             IntegrityError: ``self.instance`` is soft-deleted, or the related model's default scope
                 doesn't show one of ``objs``.
         """
-        if not objs:
-            return
-        through_model = self.field.through_model_class
-        connection = ThroughRows.through_table_connection(self, for_write=True, using=using)
-        if through_model is not None and through_model._meta.change_capture_needs is not None:
+        from hare.query.execution.query_execution import QueryExecution
+
+        with QueryExecution(self._context):
+            if not objs:
+                return
+            connection = ThroughRows.through_table_connection(self, for_write=True, using=using)
+            prepared = ThroughDefaults.prepare(self, through_defaults, connection.dialect.types)
+            await self._add_prepared(objs, prepared, connection)
+
+    async def _add_prepared(self, objs: tuple[Any, ...], prepared: ThroughValues, connection: DatabaseClient) -> None:
+        """Write and report links using assignments bound by the enclosing operation."""
+        through_binding = self.field.get_through_binding()
+        if through_binding is not None and through_binding.change_capture_needs is not None:
             # The links' captured changes are written with them.
             async with ChangeCapturing.transaction(connection) as transaction_connection:
                 await WriteSteps.get_whole_run(
                     transaction_connection,
-                    self._add_and_report(objs, through_defaults, transaction_connection, transaction_connection),
+                    self._add_and_report(objs, prepared, transaction_connection),
                 )
             return
-        await WriteSteps.get_whole_run(connection, self._add_and_report(objs, through_defaults, using, connection))
+        await WriteSteps.get_whole_run(connection, self._add_and_report(objs, prepared, connection))
 
     async def _add_and_report(
         self,
         objs: tuple[Any, ...],
-        through_defaults: dict[str, Any] | None,
-        using: str | DatabaseClient | None,
+        prepared: ThroughValues,
         connection: DatabaseClient,
     ) -> None:
         """Adds the related instances and reports the links (``ChangeEvents``).
 
         Args:
             objs: See ``add()``.
-            through_defaults: See ``add()``.
-            using: See ``add()``.
+            prepared: Explicit through assignments of the enclosing operation.
             connection: The connection the through rows are written on.
         """
-        related_instances, inserts_through_rows = await ThroughRowInserting.add_links(
-            self, objs, through_defaults, using
-        )
+        related_instances, inserts_through_rows = await ThroughRowInserting.add_links(self, objs, prepared, connection)
         # A pair linked already adds no link - nothing is reported; None names no related row.
         if related_instances != [] and ChangeEvents.is_observed():
             await ThroughRows.report_links(
@@ -159,9 +169,15 @@ class ManyToManyRelation(RelatedQuerySet[TModel]):
             all_tenants: Clear the links to rows of every tenant - by default only those to the
                 active tenant's rows.
         """
-        await ThroughRowUnlinking.remove_or_clear(
-            self, using=using, check_tenant_scope=not all_tenants, visibility=RowVisibility(all_tenants=all_tenants)
-        )
+        from hare.query.execution.query_execution import QueryExecution
+
+        with QueryExecution(self._context):
+            await ThroughRowUnlinking.remove_or_clear(
+                self,
+                using=using,
+                check_tenant_scope=not all_tenants,
+                visibility=RowVisibility(all_tenants=all_tenants),
+            )
 
     async def remove(self, *objs: Any, using: str | DatabaseClient | None = None) -> None:
         """Removes related instances, or their primary key values, from the relation - every through
@@ -174,22 +190,25 @@ class ManyToManyRelation(RelatedQuerySet[TModel]):
                 saved.
             ValidationError: One of ``objs`` is not an instance of the related model.
         """
-        if not objs:
-            raise QueryError("remove() called on no instances")
-        related_instances = tuple(member for member in objs if ManyToManyMembers.is_model_instance(member))
-        if len(related_instances) == len(objs):
-            await ThroughRowUnlinking.remove_or_clear(self, related_instances, using)
-            return
-        connection = ThroughRows.through_table_connection(self, for_write=True, using=using)
-        writers = KeyColumns.get_instance_writers(self.model._meta, connection.dialect.types)
-        forward_pk_values = [
-            ManyToManyMembers.get_member_pk_db_values(self, member, writers=writers)
-            for member in objs
-            if not ManyToManyMembers.is_model_instance(member)
-        ]
-        await WriteSteps.get_whole_run(
-            connection, self._remove_members(related_instances, forward_pk_values, connection)
-        )
+        from hare.query.execution.query_execution import QueryExecution
+
+        with QueryExecution(self._context):
+            if not objs:
+                raise QueryError("remove() called on no instances")
+            related_instances = tuple(member for member in objs if ManyToManyMembers.is_model_instance(member))
+            if len(related_instances) == len(objs):
+                await ThroughRowUnlinking.remove_or_clear(self, related_instances, using)
+                return
+            connection = ThroughRows.through_table_connection(self, for_write=True, using=using)
+            writers = KeyColumns.get_instance_writers(self._binding, connection.dialect.types)
+            forward_pk_values = [
+                ManyToManyMembers.get_member_pk_db_values(self, member, writers=writers)
+                for member in objs
+                if not ManyToManyMembers.is_model_instance(member)
+            ]
+            await WriteSteps.get_whole_run(
+                connection, self._remove_members(related_instances, forward_pk_values, connection)
+            )
 
     async def _remove_members(
         self,
@@ -232,17 +251,21 @@ class ManyToManyRelation(RelatedQuerySet[TModel]):
         Raises:
             QueryError: ``self.instance`` is not saved.
         """
-        ManyToManyMembers.validate_owner_saved(self)
-        connection = ThroughRows.through_table_connection(self, for_write=True, using=using)
-        # Checked before the object is written - a database without transactions keeps what a failure
-        # leaves.
-        ThroughDefaults.through_defaults_columns_and_values(self, through_defaults, connection.dialect.types)
-        async with connection._in_transaction() as transaction_connection:
-            created_instance = await self._get_model_queryset(
-                ManyToManyMembers.get_connection_of(self.model, transaction_connection)
-            ).create(**kwargs)
-            await self.add(created_instance, through_defaults=through_defaults, using=transaction_connection)
-        return created_instance
+        from hare.query.execution.query_execution import QueryExecution
+
+        with QueryExecution(self._context):
+            ManyToManyMembers.validate_owner_saved(self)
+            connection = ThroughRows.through_table_connection(self, for_write=True, using=using)
+            # Checked before the object is written - a database without transactions keeps what a failure
+            # leaves.
+            prepared = ThroughDefaults.prepare(self, through_defaults, connection.dialect.types)
+            ThroughDefaults.get_default_fields(self, prepared.given_values, collect_defaults=False)
+            async with connection._in_transaction() as transaction_connection:
+                created_instance = await self._get_model_queryset(
+                    ManyToManyMembers.get_connection_of(self, self.model, transaction_connection)
+                ).create(**kwargs)
+                await self._add_prepared((created_instance,), prepared, transaction_connection)
+            return created_instance
 
     async def set(
         self,
@@ -265,19 +288,20 @@ class ManyToManyRelation(RelatedQuerySet[TModel]):
             QueryError: ``self.instance`` or one of ``objs`` is not saved.
             ValidationError: One of ``objs`` is not an instance of the related model.
         """
-        members = await self._get_set_members(objs)
-        ManyToManyMembers.validate_owner_saved(self)
-        connection = ThroughRows.through_table_connection(self, for_write=True, using=using)
-        writers = KeyColumns.get_instance_writers(self.model._meta, connection.dialect.types)
-        members_by_pk_values = {
-            ManyToManyMembers.get_member_pk_db_values(self, member, writers=writers): member for member in members
-        }
-        # Checked before the first write - a database without transactions keeps what a failure leaves.
-        ThroughDefaults.through_defaults_columns_and_values(self, through_defaults, connection.dialect.types)
-        # On a database without transactions the removals and additions are one step a cancel can't split.
-        await WriteSteps.get_whole_run(
-            connection, self._set_members(members_by_pk_values, through_defaults, clear, connection)
-        )
+        from hare.query.execution.query_execution import QueryExecution
+
+        with QueryExecution(self._context):
+            members = await ManyToManyMembers.get_set_members(self, objs)
+            ManyToManyMembers.validate_owner_saved(self)
+            connection = ThroughRows.through_table_connection(self, for_write=True, using=using)
+            writers = KeyColumns.get_instance_writers(self._binding, connection.dialect.types)
+            members_by_pk_values = {
+                ManyToManyMembers.get_member_pk_db_values(self, member, writers=writers): member for member in members
+            }
+            # On a database without transactions the removals and additions are one step a cancel can't split.
+            await WriteSteps.get_whole_run(
+                connection, self._set_members(members_by_pk_values, through_defaults, clear, connection)
+            )
 
     async def _set_members(
         self,
@@ -290,34 +314,41 @@ class ManyToManyRelation(RelatedQuerySet[TModel]):
 
         Args:
             members_by_pk_values: The members by their DB-ready primary key values.
-            through_defaults: Passed on to ``add()`` for the added members.
+            through_defaults: Explicit through assignments to prepare before the first write.
             clear: Clear the whole relation first and add every member afresh.
             connection: The connection of the through table.
         """
         async with connection._in_transaction() as transaction_connection:
             if not members_by_pk_values:
+                ThroughDefaults.prepare(self, through_defaults, connection.dialect.types, fills_tenant=False)
                 await self.clear(using=transaction_connection)
                 return
             linked_pk_values = await LinkedKeys.get_linked_pk_values(self, transaction_connection)
+            read_key = await KeyComparison.get_key_reader(
+                transaction_connection, self._binding.pk_fields, chain(members_by_pk_values, linked_pk_values)
+            )
+            members_by_key = members_by_pk_values
+            linked_keys = linked_pk_values
+            if read_key is not KeyComparison.unchanged:
+                members_by_key = {read_key(values): member for values, member in members_by_pk_values.items()}
+                linked_keys = frozenset(map(read_key, linked_pk_values))
+            new_members = [member for key, member in members_by_key.items() if key not in linked_keys]
+            prepared = ThroughDefaults.prepare(
+                self, through_defaults, connection.dialect.types, fills_tenant=bool(new_members) or clear
+            )
             # The new members are added before a link is removed: a member that can't be added - a key of
             # no row - leaves the relation as it was where no transaction undoes the removal.
-            if new_members := [
-                member for pk_values, member in members_by_pk_values.items() if pk_values not in linked_pk_values
-            ]:
-                await self.add(*new_members, through_defaults=through_defaults, using=transaction_connection)
+            if new_members:
+                await self._add_prepared(tuple(new_members), prepared, transaction_connection)
             # clear=True adds every member afresh - the ones linked already are removed and added again.
             if removed_pk_values := [
-                pk_values for pk_values in linked_pk_values if clear or pk_values not in members_by_pk_values
+                values for values in linked_pk_values if clear or read_key(values) not in members_by_key
             ]:
                 await ThroughRowUnlinking.remove_or_clear(
                     self, using=transaction_connection, forward_pk_values=removed_pk_values
                 )
-            if clear and (
-                kept_members := [
-                    member for pk_values, member in members_by_pk_values.items() if pk_values in linked_pk_values
-                ]
-            ):
-                await self.add(*kept_members, through_defaults=through_defaults, using=transaction_connection)
+            if clear and (kept_members := [member for key, member in members_by_key.items() if key in linked_keys]):
+                await self._add_prepared(tuple(kept_members), prepared, transaction_connection)
 
     async def get_or_create(
         self,
@@ -342,22 +373,9 @@ class ManyToManyRelation(RelatedQuerySet[TModel]):
             MultipleObjectsReturned: More than one member matches ``kwargs``.
             QueryError: ``defaults`` conflicts with ``kwargs``.
         """
-        ManyToManyMembers.validate_owner_saved(self)
-        connection = ThroughRows.through_table_connection(self, for_write=True, using=using)
-        async with connection._in_transaction() as transaction_connection:
-            related_connection = ManyToManyMembers.get_connection_of(self.model, transaction_connection)
-            if (
-                member := await self.filter(**kwargs).using(related_connection).get(does_not_exist_exception=None)
-            ) is not None:
-                return member, False
-            return (
-                await self.create(
-                    using=transaction_connection,
-                    through_defaults=through_defaults,
-                    **CreateOrUpdate.get_create_values(self.model, defaults or {}, kwargs),
-                ),
-                True,
-            )
+        return await self._get_or_create_member(
+            None, defaults, through_defaults, using, kwargs, updates_existing=False
+        )
 
     async def update_or_create(
         self,
@@ -385,27 +403,47 @@ class ManyToManyRelation(RelatedQuerySet[TModel]):
             MultipleObjectsReturned: More than one member matches ``kwargs``.
             QueryError: ``defaults`` conflicts with ``kwargs``.
         """
-        ManyToManyMembers.validate_owner_saved(self)
-        connection = ThroughRows.through_table_connection(self, for_write=True, using=using)
-        async with connection._in_transaction() as transaction_connection:
-            related_connection = ManyToManyMembers.get_connection_of(self.model, transaction_connection)
-            if (
-                member := await self.filter(**kwargs).using(related_connection).get(does_not_exist_exception=None)
-            ) is not None:
-                updated_member, _ = await self._get_model_queryset(related_connection).update_or_create(
-                    defaults, pk=member.pk
-                )
-                self._invalidate_local_cache()
-                return updated_member, False
-            creation_values = defaults if create_defaults is None else create_defaults
-            return (
-                await self.create(
+        return await self._get_or_create_member(
+            defaults,
+            defaults if create_defaults is None else create_defaults,
+            through_defaults,
+            using,
+            kwargs,
+            updates_existing=True,
+        )
+
+    async def _get_or_create_member(
+        self,
+        defaults: dict[str, Any] | None,
+        creation_defaults: dict[str, Any] | None,
+        through_defaults: dict[str, Any] | None,
+        using: str | DatabaseClient | None,
+        filters: dict[str, Any],
+        *,
+        updates_existing: bool,
+    ) -> tuple[TModel, bool]:
+        """Find a linked member or create and link one in the through transaction."""
+        from hare.query.execution.query_execution import QueryExecution
+
+        with QueryExecution(self._context):
+            ManyToManyMembers.validate_owner_saved(self)
+            connection = ThroughRows.through_table_connection(self, for_write=True, using=using)
+            async with connection._in_transaction() as transaction_connection:
+                related_connection = ManyToManyMembers.get_connection_of(self, self.model, transaction_connection)
+                member = await self.filter(**filters).using(related_connection).get(does_not_exist_exception=None)
+                if member is not None:
+                    if updates_existing:
+                        member, _ = await self._get_model_queryset(related_connection).update_or_create(
+                            defaults, pk=member.pk
+                        )
+                        self._invalidate_local_cache()
+                    return member, False
+                obj = await self.create(
                     using=transaction_connection,
                     through_defaults=through_defaults,
-                    **CreateOrUpdate.get_create_values(self.model, creation_values or {}, kwargs),
-                ),
-                True,
-            )
+                    **CreateOrUpdate.get_create_values(self._binding, creation_defaults or {}, filters),
+                )
+                return obj, True
 
 
 # The Python type of a many-to-many field's value - set here: this module imports the field

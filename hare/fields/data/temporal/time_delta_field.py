@@ -38,6 +38,9 @@ class TimeDeltaField(Field[TTimedelta]):
             return value
         return self.get_timedelta(value)
 
+    def get_assign_normalized_types(self) -> frozenset[type]:
+        return self._get_unchanged_assign_types(TimeDeltaField.to_python, self.field_type)
+
     def to_python(self, value: Any) -> datetime.timedelta | None:
         # A number is no duration - only one read from the column is microseconds.
         if value is not None:

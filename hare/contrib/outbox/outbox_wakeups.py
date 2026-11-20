@@ -24,7 +24,7 @@ class OutboxWakeups:
         Returns:
             The wakeup, None when the model declares none.
         """
-        return getattr(model._meta.meta, OUTBOX_WAKEUP_META_OPTION, None)
+        return getattr(model._declaration.meta, OUTBOX_WAKEUP_META_OPTION, None)
 
     @staticmethod
     def raise_if_wakeup_unsupported(
@@ -34,6 +34,7 @@ class OutboxWakeups:
         after they committed.
 
         Args:
+            model: The outbox event model, which declares its wakeup transport.
             connection: The connection the events are written on.
             wakeup: The wakeup, the model's ``Meta.outbox_wakeup`` when None.
 
@@ -52,6 +53,7 @@ class OutboxWakeups:
         commits, at once outside a transaction.
 
         Args:
+            model: The outbox event model, which declares its wakeup transport.
             connection: The connection the events were written on.
             topics: Their topics.
             wakeup: The wakeup, the model's ``Meta.outbox_wakeup`` when None.

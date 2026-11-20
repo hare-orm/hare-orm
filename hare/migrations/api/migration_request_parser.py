@@ -22,14 +22,10 @@ class MigrationRequestParser:
         """
         if target is None:
             return [MigrationTarget(app_label=label, name=LATEST_MIGRATION) for label in app_labels]
-        if "." in target:
-            app_label, name = target.split(".", 1)
-            if app_label not in app_labels:
-                raise UnknownMigrationError(f"Unknown app label {app_label}")
-            return [MigrationTarget(app_label=app_label, name=name)]
-        if target not in app_labels:
-            raise UnknownMigrationError(f"Unknown app label {target}")
-        return [MigrationTarget(app_label=target, name=LATEST_MIGRATION)]
+        app_label, separator, name = target.partition(".")
+        if app_label not in app_labels:
+            raise UnknownMigrationError(f"Unknown app label {app_label}")
+        return [MigrationTarget(app_label=app_label, name=name if separator else LATEST_MIGRATION)]
 
     @staticmethod
     def group_selected_apps_by_connection(

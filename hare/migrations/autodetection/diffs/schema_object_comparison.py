@@ -18,11 +18,13 @@ class SchemaObjectComparison:
     Args:
         diff: The comparison rules for this object's schema type.
         schema_object: The original declaration passed to migration operations.
+        schema: The declaration's schema, used for unqualified references.
     """
 
-    def __init__(self, diff: SchemaObjectDiff, schema_object: Any) -> None:
+    def __init__(self, diff: SchemaObjectDiff, schema_object: Any, schema: str | None) -> None:
         self.diff = diff
         self.schema_object = schema_object
+        self.schema = schema
 
     @cached_property
     def name(self) -> str | None:
@@ -42,4 +44,4 @@ class SchemaObjectComparison:
     @cached_property
     def reads_changed_columns(self) -> bool:
         """Whether this declaration reads a column affected by this diff."""
-        return self.diff.reads_changed_columns(self.schema_object)
+        return self.diff.reads_changed_columns(self.schema_object, self.schema)

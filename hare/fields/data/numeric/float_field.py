@@ -101,6 +101,9 @@ class FloatField(Field[TFloat]):
         if isinstance(value, Decimal) and value.is_finite() and math.isinf(float(value)):
             raise ValidationError(f"{self.model_field_name}: Decimal too large to convert to float")
 
+    def get_assign_normalized_types(self) -> frozenset[type]:
+        return self._get_unchanged_assign_types(FloatField.to_python, self.field_type)
+
     def to_python(self, value: Any) -> Any:
         if type(value) is not float and value is not None:
             self.raise_if_not_number(value)

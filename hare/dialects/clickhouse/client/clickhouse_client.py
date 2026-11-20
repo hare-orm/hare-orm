@@ -19,7 +19,6 @@ from hare.dialects.clickhouse.client.constants import (
     CLICKHOUSE_CLIENT_BASE_SETTINGS,
     CLICKHOUSE_CLOSED_WHILE_OPENING_MESSAGE,
     CLICKHOUSE_CONNECTION_OPTION_DEFAULTS,
-    CLICKHOUSE_DEFAULT_DATABASE,
     CLICKHOUSE_DEFAULT_USER,
     CLICKHOUSE_DISCARDED_CLIENT_MESSAGE,
     CLICKHOUSE_KEEPER_CONNECTIONS_SQL,
@@ -64,7 +63,7 @@ from hare.dialects.clickhouse.types.declarations import ClickhouseTypedValue
 from hare.exceptions import ConfigurationError, DBConnectionError, UnSupportedError
 
 if TYPE_CHECKING:
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.sql.builder.tables.table import Table
 
 
@@ -209,9 +208,15 @@ class ClickhouseClient(DatabaseClient):
         raise NotImplementedError
 
     async def db_create(self) -> None:
+        await self._create_database(safe=True)
+
+    async def db_create_exclusive(self) -> None:
+        await self._create_database(safe=False)
+
+    async def _create_database(self, *, safe: bool) -> None:
         await self.create_connection(with_db=False)
         try:
-            await self.run_command_without_database(self.get_database_create_sql(self.database or ""))
+            await self.run_command_without_database(self.get_database_create_sql(self.database or "", safe=safe))
         finally:
             await self.close()
 
@@ -230,7 +235,7 @@ class ClickhouseClient(DatabaseClient):
                 series_keeper_path = (await self.execute_dicts(CLICKHOUSE_SERIES_KEEPER_PATH_SQL))[0]
                 await ClickhouseDatabaseKeeperNodes(
                     ClickhouseMigrationLock.get_addresses(self.options["keeper_hosts"]),
-                    self.database or CLICKHOUSE_DEFAULT_DATABASE,
+                    ClickhousePlacementPlan.get_effective_database(self.database),
                     self.options["connect_timeout"],
                 ).delete(series_keeper_path["series_keeper_path"] or "")
         finally:
@@ -264,7 +269,9 @@ class ClickhouseClient(DatabaseClient):
     def get_write_recovery(self, table: Table) -> ClickhouseMutationRecovery | None:
         """Keep the same explicit storage placement for execution failure handling."""
         placement = ClickhousePlacementPlan.for_table(table, self.sql_context)
-        return ClickhouseMutationRecovery.for_mutation(placement, self.database or CLICKHOUSE_DEFAULT_DATABASE)
+        return ClickhouseMutationRecovery.for_mutation(
+            placement, ClickhousePlacementPlan.get_effective_database(self.database)
+        )
 
     @property
     def sql_context(self) -> ClickhouseSqlContext:
@@ -313,7 +320,7 @@ class ClickhouseClient(DatabaseClient):
     async def generate_schema(self, safe: bool) -> None:
         # The tables a migration would refuse are refused here too, before any of them is created.
         table_creation = self.dialect.schema_editor_class(self).table_creation
-        for model in table_creation.get_models_to_create():
+        for model in table_creation.get_bindings_to_create():
             await table_creation.get_replica_check_plan(model).execute(table_creation.editor)  # type: ignore[attr-defined]
         await super().generate_schema(safe)
 
@@ -402,37 +409,37 @@ class ClickhouseClient(DatabaseClient):
             exception: The error the statement raised, None when it succeeded.
         """
 
-    async def take_generated_keys(self, model: type[Model], count: int) -> list[Any]:
+    async def take_generated_keys(self, binding: ModelBinding, count: int) -> list[Any]:
         """The next keys of the model's series - ``generateSerialID`` of the series named after the
         database and the model (``database.app.Model``), which a rename of its table keeps. Before the
         first keys a process takes of a series, the series is moved past the greatest key of the table."""
-        return await ClickhouseKeySeries.take_generated_keys(self, model, count)
+        return await ClickhouseKeySeries.take_generated_keys(self, binding, count)
 
-    async def get_generated_key_sql(self, model: type[Model]) -> str | None:
+    async def get_generated_key_sql(self, binding: ModelBinding) -> str | None:
         """``generateSerialID`` of the model's series - moved past the greatest key of its table first."""
-        return await ClickhouseKeySeries.get_generated_key_sql(self, model)
+        return await ClickhouseKeySeries.get_generated_key_sql(self, binding)
 
-    def get_key_series_name(self, model: type[Model]) -> str:
+    def get_key_series_name(self, binding: ModelBinding) -> str:
         """The name of the series of a model's keys - the Keeper keeps one series per name for every
         database of the server, so the database is part of it.
 
         Args:
-            model: The model.
+            binding: The model.
 
         Returns:
             ``database.app.Model``.
         """
-        return ClickhouseKeySeries.get_key_series_name(self, model)
+        return ClickhouseKeySeries.get_key_series_name(self, binding)
 
-    async def synchronize_key_series(self, model: type[Model], *, checked_once: bool = False) -> None:
+    async def synchronize_key_series(self, binding: ModelBinding, *, checked_once: bool = False) -> None:
         """Moves the model's series past the greatest key of its table - the series hands out the keys
         after it.
 
         Args:
-            model: The model.
+            binding: The model.
             checked_once: Whether a series this process already moved is left alone.
         """
-        return await ClickhouseKeySeries.synchronize_key_series(self, model, checked_once=checked_once)
+        return await ClickhouseKeySeries.synchronize_key_series(self, binding, checked_once=checked_once)
 
     def hold_migration_lock(self) -> contextlib.AbstractAsyncContextManager[None]:
         # Without keeper_hosts no lock is held: the server has no lock given back when a process dies.
@@ -445,7 +452,7 @@ class ClickhouseClient(DatabaseClient):
         another ``migrate`` holds it."""
         migration_lock = ClickhouseMigrationLock(
             ClickhouseMigrationLock.get_addresses(self.options["keeper_hosts"]),
-            self.database or CLICKHOUSE_DEFAULT_DATABASE,
+            ClickhousePlacementPlan.get_effective_database(self.database),
             self.options["connect_timeout"],
         )
         return migration_lock.hold()
@@ -465,7 +472,7 @@ class ClickhouseClient(DatabaseClient):
         """
         migration_lock = ClickhouseMigrationLock(
             ClickhouseMigrationLock.get_addresses(self.options["keeper_hosts"]),
-            self.database or CLICKHOUSE_DEFAULT_DATABASE,
+            ClickhousePlacementPlan.get_effective_database(self.database),
             self.options["connect_timeout"],
         )
         try:

@@ -76,13 +76,18 @@ def test_a_created_model_takes_its_rename_options_and_table():
     assert result[0].options == {"table": "books", "table_is_explicit": True}
 
 
-def test_a_table_altered_and_then_the_model_renamed_keeps_its_name():
-    """The folded alteration left the table unmarked as the model's own - the rename then named it after the
-    new class, and a clean database got another table than the migrated one."""
-    result = optimize(create_book(), AlterModelTable("Book", "books"), RenameModel("Book", "Volume"))
+@pytest.mark.parametrize(("table", "expected"), [("books", "books"), ("book", "book"), (None, "volume")])
+def test_squashed_table_alteration_and_model_rename_keep_the_same_table(table, expected):
+    operations = (create_book(), AlterModelTable("Book", table), RenameModel("Book", "Volume"))
+    result = optimize(*operations)
     assert describe(result) == ["CreateModel"]
     assert result[0].name == "Volume"
-    assert result[0].options["table"] == "books"
+    assert result[0].options["table"] == expected
+    assert result[0].options["table_is_explicit"] is (table is not None)
+    assert (
+        state_after(*result).models[("app", "Volume")].db_table
+        == state_after(*operations).models[("app", "Volume")].db_table
+    )
 
 
 def test_field_operations_fold_into_each_other():
@@ -102,15 +107,16 @@ def test_field_operations_fold_into_each_other():
         AlterField("Book", "pages", fields.BigIntField()),
         state_before=existing_book,
     )
-    assert describe(result) == ["AddField"]
-    assert isinstance(result[0].field, fields.BigIntField)
+    assert describe(result) == ["AddField", "AlterField"]
+    assert result[0].field.default == 0
+    assert isinstance(result[1].field, fields.BigIntField)
     with_pages = state_after(create_book(), AddField("Book", "pages", fields.IntField()))
     result = optimize(
         AlterField("Book", "pages", fields.IntField()),
         AlterField("Book", "pages", fields.BigIntField()),
         state_before=with_pages,
     )
-    assert describe(result) == ["AlterField"]
+    assert describe(result) == ["AlterField", "AlterField"]
     assert describe(
         optimize(AlterField("Book", "pages", fields.IntField()), RemoveField("Book", "pages"), state_before=with_pages)
     ) == ["RemoveField"]
@@ -206,7 +212,11 @@ def test_a_created_model_takes_the_table_and_its_own_relations_of_a_rename():
         ],
         options={"table": "book", "table_is_explicit": False},
     )
-    result = optimize(created, RenameModel("Book", "Volume"))
+    result = optimize(
+        created,
+        RenameModel("Book", "Volume"),
+        state_before=state_after(CreateModel("Author", [("id", fields.IntField(primary_key=True))])),
+    )
     assert describe(result) == ["CreateModel"]
     assert result[0].options == {"table": "volume", "table_is_explicit": False}
     assert [field.model_name for _name, field in result[0].fields[1:]] == ["app.Volume", "app.Author"]
@@ -384,7 +394,7 @@ async def test_non_initial_squash_uses_predecessor_state_and_preserves_declarati
     result = await MigrationSquasher({"app": {"migrations": "app.migrations"}}, definitions=definitions).squash(
         "app", "0003", start_name="0002"
     )
-    assert len(result.writer.operations) == 1
+    assert describe(result.writer.operations) == ["AddField", "AlterField"]
     assert result.writer.dependencies == [("app", "0001_initial")]
     before = migrations[0].prepare(State()).after
     expected = migrations[2].prepare(migrations[1].prepare(before).after).after

@@ -16,6 +16,7 @@ from hare.sql.terms.term import Term
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.fields.field import Field
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset.queryset import QuerySet
 
 
@@ -68,7 +69,7 @@ class AnnotationArguments:
         """Rejects an annotation named after a field or a relation of the model - every other
         reference to that name (another annotation's F(), a filter, an ordering) would silently read
         the annotation instead of the field - or after an attribute of the model's class or its
-        instances' own state (``save``, ``_meta``, a name starting with ``_``), which the annotation's
+        instances' own state (``save``, ``_binding``, a name starting with ``_``), which the annotation's
         value would replace on each object read.
 
         Args:
@@ -81,7 +82,7 @@ class AnnotationArguments:
         """
         annotation_names = list(annotation_names)
         model = queryset.model
-        meta = model._meta
+        meta: ModelBinding = queryset._binding  # type: ignore[assignment]
         colliding_names = sorted(
             name
             for name in annotation_names
@@ -118,9 +119,12 @@ class AnnotationArguments:
             base_name, __, path = name.partition("__")
             if not path or name in queryset._annotations:
                 continue
-            if base_name in queryset._annotations or ValuePaths.get_value_path_split(queryset.model, name) is not None:
+            if (
+                base_name in queryset._annotations
+                or ValuePaths.get_value_path_split(queryset._binding, name) is not None  # type: ignore[arg-type]
+            ):
                 paths[name] = F(name)
-            elif (date_part_split := ValuePaths.get_date_part_split(queryset.model, name)) is not None:
+            elif (date_part_split := ValuePaths.get_date_part_split(queryset._binding, name)) is not None:  # type: ignore[arg-type]
                 paths[name] = F.get_date_part_expression(*date_part_split)
         return paths
 
@@ -128,7 +132,7 @@ class AnnotationArguments:
     def get_annotation_descriptions(queryset: QuerySet[Any, Any]) -> CacheBucket[Any]:
         """The queryset's cached descriptions of keys starting with an annotation - by (description type, key,
         dialect), the dialect the annotations' types were resolved with. Emptied once a
-        model's fields, lookups or relations change (``LookupInfoBuilder.forget_descriptions()``).
+        model graph or the registered lookups change.
 
         Args:
             queryset: The queryset.

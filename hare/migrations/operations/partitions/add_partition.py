@@ -23,7 +23,7 @@ class AddPartition(PartitionOperation):
         return f"Add partition {self.partition.name} to {self.model_name}"
 
     def state_forward(self, app_label: str, state: State) -> None:
-        self._set_partition_in_state(app_label, state, present=True)
+        self._change_partition_in_state(app_label, state, remove=None, add=self.partition)
 
     async def database_forward(
         self, app_label: str, old_state: State, new_state: State, state_editor: BaseSchemaEditor | None = None

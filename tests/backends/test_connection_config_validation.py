@@ -12,6 +12,7 @@ from hare.contrib.test import requires_features
 from hare.contrib.test.constants import ENV_PYTEST_XDIST_WORKER
 from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.core.config import HareConfig
+from hare.core.connections.connection_handler import ConnectionHandler
 from hare.core.connections.connections import Connections
 from hare.core.hare_context import HareContext
 from hare.dialects.sqlite.drivers.aiosqlite.client import AiosqliteClient
@@ -141,20 +142,59 @@ class _RecordingPostgresClient:
     def make(client_class, **credentials):
         client = _make_postgres_client(client_class, **credentials)
         client.sent_statements = []
+        client.independent_clients = []
+        _RecordingPostgresClient.record_transport(client, client.sent_statements)
+        create_independent_client = client.create_independent_client
+
+        def create_recording_client(settings=None):
+            independent = create_independent_client(settings)
+            _RecordingPostgresClient.record_transport(independent, client.sent_statements)
+            client.independent_clients.append(independent)
+            return independent
+
+        client.create_independent_client = create_recording_client
+        return client
+
+    @staticmethod
+    def record_transport(client, statements):
+        client.closed = False
+        client.connected_with_db = None
 
         async def create_connection(with_db):
             client.connected_with_db = with_db
 
         async def execute_script(statement):
-            client.sent_statements.append(statement)
+            statements.append(statement)
 
         async def close():
-            pass
+            client.closed = True
 
         client.create_connection = create_connection
         client.execute_script = execute_script
         client.close = close
-        return client
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("client_class", POSTGRES_CLIENT_CLASSES, indirect=True)
+@pytest.mark.parametrize("bound_to_application", [False, True])
+@pytest.mark.parametrize("factory", ["independent", "schema"])
+def test_derived_clients_retain_only_the_sources_application_owner(client_class, bound_to_application, factory):
+    source = _make_postgres_client(client_class)
+    if bound_to_application:
+        source.connection_handler = ConnectionHandler()
+    independent = (
+        source.create_independent_client() if factory == "independent" else source.get_schema_client("tenant")
+    )
+    assert independent is not source
+    assert independent.database == source.database
+    assert independent.connection_handler is not None
+    if bound_to_application:
+        assert independent.connection_handler is source.connection_handler
+    else:
+        assert source.connection_handler is None
+        current = HareContext.get_current()
+        if current is not None:
+            assert independent.connection_handler is not current.connections
 
 
 @pytest.mark.database_independent
@@ -167,6 +207,11 @@ async def test_database_name_is_quoted_and_owner_is_omitted_without_a_user(clien
     await client.db_delete()
 
     assert client.sent_statements == ['CREATE DATABASE "my ""db"""', 'DROP DATABASE "my ""db""" WITH (FORCE)']
+    assert client.independent_clients
+    assert all(
+        independent is not client and independent.connected_with_db is False and independent.closed
+        for independent in client.independent_clients
+    )
 
 
 @pytest.mark.database_independent
@@ -178,6 +223,11 @@ async def test_database_owner_is_quoted(client_class):
     await client.db_create()
 
     assert client.sent_statements == ['CREATE DATABASE "plain" OWNER "odd""role"']
+    assert client.independent_clients
+    assert all(
+        independent is not client and independent.connected_with_db is False and independent.closed
+        for independent in client.independent_clients
+    )
 
 
 @pytest.mark.parametrize(

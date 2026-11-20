@@ -17,8 +17,14 @@ from hare.fields.narrowing.enum_values_limit import EnumValuesLimit
 from hare.inspectdb.introspection.schema_introspector import SchemaIntrospector
 from hare.models import Model
 from tests.utils.fake_client import FakeClient
+from tests.utils.model_bindings import ModelBindings
 
 pytestmark = pytest.mark.database_independent
+
+
+@pytest.fixture
+def binding():
+    return ModelBindings.prepare(DefaultsItem).get_binding(DefaultsItem)
 
 
 class DefaultsItem(Model):
@@ -34,7 +40,7 @@ def get_editor() -> BaseSchemaEditor:
     return BaseSchemaEditor(FakeClient("sqlite"))
 
 
-def test_the_default_sql_of_the_parts():
+def test_the_default_sql_of_the_parts(binding):
     editor = get_editor()
     limit = EnumValuesLimit(values=frozenset({"b", "a"}))
     assert (
@@ -46,28 +52,33 @@ def test_the_default_sql_of_the_parts():
         '(CASE WHEN "a" IS NOT NULL THEN 1 ELSE 0 END + CASE WHEN "b" IS NOT NULL THEN 1 ELSE 0 END)'
     )
     assert editor.constraint_statements.get_without_overlaps_extension(("code",), {"code": IntField()}) is None
-    assert editor.table_partitions.get_partition_table_names(DefaultsItem) == []
+    assert editor.table_partitions.get_partition_locations(binding) == {}
     error = editor.views.get_unsupported_error("Views")
     assert str(error) == "Views are not supported on sqlite"
 
 
 @pytest.mark.asyncio
-async def test_the_default_statements_of_the_parts():
+async def test_the_default_statements_of_the_parts(binding):
     editor = get_editor()
     client = editor.client
     await editor.constraint_statements.get_unique_constraint_using_index_plan(
-        DefaultsItem, UniqueConstraint(fields=("code",), name="defaults_item_code"), "defaults_item_code_index"
+        binding,
+        UniqueConstraint(fields=("code",), name="defaults_item_code"),
+        "defaults_item_code_index",
     ).execute(editor)
     # The constraint's own index is built, the one it would take over dropped.
     assert client.executed[-1].startswith('DROP INDEX "defaults_item_code_index"')
     executed_count = len(client.executed)
     # A comment the table keeps inside its CREATE TABLE is changed with the table - nothing is run.
-    await editor.table_comments.alter_table_comment(DefaultsItem, DefaultsItem)
+    await editor.table_comments.alter_table_comment(
+        binding,
+        binding,
+    )
     assert len(client.executed) == executed_count
 
 
 @pytest.mark.asyncio
-async def test_the_default_object_changes_go_through_the_other_parts(monkeypatch):
+async def test_the_default_object_changes_go_through_the_other_parts(monkeypatch, binding):
     editor = get_editor()
     calls: list[tuple[str, object]] = []
 
@@ -80,19 +91,19 @@ async def test_the_default_object_changes_go_through_the_other_parts(monkeypatch
     monkeypatch.setattr(Dictionaries, "drop_dictionary", drop_dictionary)
     monkeypatch.setattr(Dictionaries, "create_dictionary", create_dictionary)
     old, new = SimpleNamespace(name="old"), SimpleNamespace(name="new")
-    await editor.dictionaries.alter_dictionary(DefaultsItem, old, new)
+    await editor.dictionaries.alter_dictionary(binding, old, new)
     assert calls == [("drop", old), ("create", new)]
 
     monkeypatch.setattr(
         TriggerStatements, "get_trigger_create_sqls", lambda self, model, trigger: ["CREATE TRIGGER one", "SECOND"]
     )
-    await editor.trigger_statements.add_trigger(DefaultsItem, SimpleNamespace(name="audit"))
+    await editor.trigger_statements.add_trigger(binding, SimpleNamespace(name="audit"))
     assert editor.client.executed[-2:] == ["CREATE TRIGGER one", "SECOND"]
 
     constraint = ForeignKeyConstraint(
         fields=("code",), to_table='"defaults_item"', to_fields=("id",), on_delete="CASCADE", name="fk_code"
     )
-    await editor.foreign_key_rebuild.get_foreign_key_not_valid_plan(DefaultsItem, constraint).execute(editor)
+    await editor.foreign_key_rebuild.get_foreign_key_not_valid_plan(binding, constraint).execute(editor)
     assert editor.client.executed[-1].startswith('ALTER TABLE "defaults_item" ADD CONSTRAINT "fk_code" FOREIGN KEY')
 
 

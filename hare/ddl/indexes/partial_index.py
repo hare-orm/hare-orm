@@ -10,7 +10,7 @@ from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 from hare.ddl.indexes.index import Index
 from hare.declarations.declaration_values import DeclarationValues
 
@@ -57,7 +57,7 @@ class PartialIndex(Index):
         # A Q is rendered against the model, by get_extra().
         self.extra = self.raw_condition_sql = f" WHERE ({condition.sql})" if isinstance(condition, RawSQLTerm) else ""
 
-    def get_extra(self, model: type[Model], client: DatabaseClient) -> str:
+    def get_extra(self, model: ModelBinding, client: DatabaseClient) -> str:
         extra = super().get_extra(model, client)
         if not client.features.supports_partial_indexes:
             return extra.removesuffix(self.raw_condition_sql)

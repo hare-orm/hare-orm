@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any
 from hare.declarations.declaration_values import DeclarationValues
 from hare.migrations.autodetection.diffs.schema_object_comparison import SchemaObjectComparison
 from hare.migrations.state.model_state import ModelState
+from hare.models.enums import ModelOption
+from hare.sql.identifiers import Identifiers
 
 if TYPE_CHECKING:
     from hare.migrations.operations import HareOperation
@@ -25,7 +27,7 @@ class SchemaObjectDiff(abc.ABC):
         alters_in_place: Whether a changed object is altered - else removed before the columns change
             and added after them, so that unapplying recreates the old object only once the columns
             are back.
-        changed_columns: The columns the migration changes, ``(table, column)`` each - an object
+        changed_columns: The columns the migration changes, ``(schema, table, column)`` each - an object
             reading one is removed before and added after, its declaration changed or not.
     """
 
@@ -34,7 +36,7 @@ class SchemaObjectDiff(abc.ABC):
         old_state: ModelState,
         new_state: ModelState,
         alters_in_place: bool = True,
-        changed_columns: frozenset[tuple[str, str]] = frozenset(),
+        changed_columns: frozenset[tuple[str | None, str, str]] = frozenset(),
     ) -> None:
         self.old_state = old_state
         self.new_state = new_state
@@ -71,7 +73,7 @@ class SchemaObjectDiff(abc.ABC):
         Returns:
             ``(table, column)`` of each field the state has a column of.
         """
-        table = self.old_state.table or self.old_state.name.lower()
+        table = self.old_state.db_table
         columns = []
         for field_name in sorted(field_names):
             field = self.old_state.fields.get(field_name)
@@ -80,9 +82,12 @@ class SchemaObjectDiff(abc.ABC):
                 columns.append((table, column))
         return tuple(columns)
 
-    def reads_changed_columns(self, schema_object: Any) -> bool:
+    def reads_changed_columns(self, schema_object: Any, schema: str | None) -> bool:
         """Whether an object reads a column the migration changes."""
-        return any(column in self.changed_columns for column in self.get_read_columns(schema_object))
+        return any(
+            (*Identifiers.get_schema_and_name(table, schema), column) in self.changed_columns
+            for table, column in self.get_read_columns(schema_object)
+        )
 
     def is_unchanged(self, old_object: SchemaObjectComparison, new_object: SchemaObjectComparison) -> bool:
         """Whether two objects of the two states are the same object, unchanged - and reading no column
@@ -123,11 +128,11 @@ class SchemaObjectDiff(abc.ABC):
             The operations.
         """
         unmatched_old = {
-            position: SchemaObjectComparison(self, schema_object)
+            position: SchemaObjectComparison(self, schema_object, self.old_state.options.get(ModelOption.SCHEMA))
             for position, schema_object in enumerate(self.get_objects(self.old_state))
         }
         unmatched_new = {
-            position: SchemaObjectComparison(self, schema_object)
+            position: SchemaObjectComparison(self, schema_object, self.new_state.options.get(ModelOption.SCHEMA))
             for position, schema_object in enumerate(self.get_objects(self.new_state))
         }
 

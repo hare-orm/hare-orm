@@ -17,7 +17,7 @@ async def test_a_bulk_load_writes_the_rows_of_a_model_in_its_schema():
         category_model = ctx.apps.get_model("models.SchemaCategory")
         product_model = ctx.apps.get_model("models.SchemaProduct")
         tag_model = ctx.apps.get_model("models.SchemaTag")
-        connection = category_model._meta.connection
+        connection = ctx.apps.get_queryset(category_model).get_connection()
         if not (connection.features.supports_copy and connection.features.supports_schemas):
             pytest.skip("a bulk load into a schema of the database's own")
         # A table of the same name the connection's search path finds first.

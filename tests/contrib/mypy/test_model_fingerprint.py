@@ -5,6 +5,7 @@ import pytest
 from hare import fields
 from hare.contrib.mypy.model_registry import ModelRegistry
 from hare.core.config import HareConfig
+from hare.core.hare import Hare
 from hare.fields.composite_primary_key import CompositePrimaryKey
 from hare.models import Model
 from hare.typing_info.bound_models import BoundModels
@@ -51,11 +52,13 @@ def test_fingerprint_tracks_bound_type_contracts(change):
             )
         ]
         bound = BoundModels(
-            HareConfig.from_dict(
-                {
-                    "connections": {"default": "sqlite+aiosqlite://:memory:"},
-                    "apps": {"typing": {"models": [module], "default_connection": "default"}},
-                }
+            Hare.bind_models(
+                HareConfig.from_dict(
+                    {
+                        "connections": {"default": "sqlite+aiosqlite://:memory:"},
+                        "apps": {"typing": {"models": [module], "default_connection": "default"}},
+                    }
+                )
             )
         )
         fingerprints.append(ModelRegistry._get_fingerprint("typing", bound))

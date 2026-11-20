@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
+from hare.dialects.clickhouse.client.constants import CLICKHOUSE_DEFAULT_DATABASE
 from hare.dialects.clickhouse.cluster.messages import DISTRIBUTED_MUTATION_WITHOUT_CLUSTER
 from hare.exceptions import ConfigurationError
 
@@ -29,9 +30,7 @@ class ClickhousePlacementPlan:
     replicates_schema: bool = False
 
     @classmethod
-    def for_table(
-        cls, table: Table, sql_context: SqlContext, *, replicates_schema: bool = False
-    ) -> ClickhousePlacementPlan:
+    def for_table(cls, table: Table, sql_context: SqlContext) -> ClickhousePlacementPlan:
         options = ClickhouseTableOptions.get_of_dialect(table.table_options, sql_context.dialect)
         logical_table = table.get_name_without_alias()
         return cls(
@@ -39,12 +38,16 @@ class ClickhousePlacementPlan:
             options.distributed_over or logical_table,
             table.get_schema_name(),
             getattr(sql_context, "cluster_name", None),
-            replicates_schema,
         )
 
     @property
     def schema_cluster(self) -> str | None:
         return None if self.replicates_schema else self.cluster
+
+    @staticmethod
+    def get_effective_database(database: str | None, schema: str | None = None) -> str:
+        """The concrete database name for a declared schema or the connection's default."""
+        return schema or database or CLICKHOUSE_DEFAULT_DATABASE
 
     @staticmethod
     def get_cluster_sql(cluster: str | None, sql_context: SqlContext) -> str:

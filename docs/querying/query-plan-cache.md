@@ -37,6 +37,10 @@ The first execution uses that SQL without rendering again; extension calls finis
 Origin recording describes the query without a second cache lookup. Current parameters and SQL
 source trees are never retained by a published plan.
 
+Each declared plan describer prepares its attribute readers and key-only structure positions once.
+`NONE` declarations do not enter its runtime parts. Describing still reads current values first,
+then key-only attributes after nested descriptions; the prepared metadata holds no query inputs.
+
 Default field validation runs the current Python validators in order through one native loop.
 It preserves nullable values, enum handling, custom validation overrides and field error formatting;
 it does not compile a second set of validation rules. Statement option chains keep unbound functions
@@ -64,7 +68,14 @@ floats. These loops call each field's reader as the field gives it (`Field.get_d
 a built-in `JSONField` column is decoded natively by the decoder its `from_db_value()` calls, every
 other reader runs as written.
 
-Iterator pages are fetched and decoded under the execution context; their already materialized rows
+Allocation retains a constructor's matching model binding and application context; it supplies them
+when absent and rejects a foreign origin. The result reader keeps its base instance separately from
+the scratch vector of joined instances, so a result without joins needs no attachment-vector allocation.
+Composite values are grouped in the decoded value vector after all physical column conversions finish.
+
+The execution captures the active tenant scope together with its other inputs and reinstalls it on
+each iterator step, restoring the caller's scope before yielding. Iterator pages are fetched and decoded
+under the execution context; their already materialized rows
 are yielded outside it. Dependency conditions inherited by a nested operation are copied only when
 the nested operation writes a new condition. Scope-provider storage and its context are created on
 first use, and the active encryption binding lives on the context directly. The dialect's conversion
@@ -426,8 +437,9 @@ model alive after its application context is released.
 `Cache` and `ModelCache` use the same `CacheBucket` implementation:
 
 - `cache.get_bucket(holder)` selects storage attached to a model (kept in its metadata) or to
-  another class or object. When a model is bound to another query builder (another dialect), the
-  caches holding SQL (`Cache(holds_sql=True)`, the default) drop its entries at that moment.
+  another class or object. Each prepared model graph has its own bindings and cache buckets.
+  New queries use the published graph's buckets. Queries bound to an earlier graph keep using that
+  graph's buckets.
 - `cache.new_shared_bucket()` creates storage retained by its callers.
 - `cache.get_value(holder)` and `set_value(holder, value)` store one derived value.
 - The mapping interface on `Cache` addresses global entries. Keys are opaque:
@@ -436,9 +448,10 @@ model alive after its application context is released.
 
 Every bucket enforces its size bound, including writes through `update()` and
 `setdefault()`. Clearing preserves its identity, so retained references see the
-invalidation. Generation belongs to the bucket; callers do not compare generations
-or maintain parallel metadata dictionaries. Holder buckets use `max_size`, or
-the default holder bound when no size is supplied.
+invalidation. Callers use that same storage and maintain no parallel metadata
+dictionaries. Each entry is keyed by the execution's registration snapshot; one
+LRU bound covers all snapshots, including executions continuing after publication.
+Holder buckets use `max_size`, or the default holder bound when no size is supplied.
 
 Bucket writes, evictions and invalidations hold the bucket's lock; a read takes none. hare runs
 only with the GIL, under which a single dictionary read and the LRU reorder of a hit are each
@@ -447,7 +460,6 @@ Concurrent callers share the same bucket for a holder. A computation between
 reading and writing the cache can still run more than once; cache access does not serialize
 query execution or make a sequence of mapping operations atomic.
 
-`holds_sql=False` marks data independent of a model's SQL builder.
 `depends_on_other_models=True` clears all entries when any model changes.
 `dropped_with=source` clears dependent storage when that cache is invalidated.
 `Caches.forget_model_caches()` and `forget_all_caches()` invalidate registered

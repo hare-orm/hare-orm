@@ -13,15 +13,13 @@ from hare.ddl.schema_references import SchemaReferences
 from hare.dialects.base.client.schema_cache_invalidation import SchemaCacheInvalidation
 from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
 from hare.dialects.base.schema.plans.column_conversion_precondition import ColumnConversionPrecondition
+from hare.dialects.base.schema.plans.enums import SchemaEffect
 from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.dialects.base.schema.plans.schema_statement import SchemaStatement
 from hare.dialects.base.schema.plans.schema_step import SchemaStep
 from hare.dialects.sqlite.client.sqlite_client import SqliteClient
 from hare.dialects.sqlite.client.sqlite_pragma_scope import SqlitePragmaScope
-from hare.dialects.sqlite.constants import (
-    SPATIALITE_METADATA_TABLE_NAMES,
-    SQLITE_DEFAULT_FOREIGN_KEYS,
-)
+from hare.dialects.sqlite.constants import SPATIALITE_METADATA_TABLE_NAMES, SQLITE_DATABASE_LIST_SQL
 from hare.dialects.sqlite.indexes.separate_table_index import SeparateTableIndex
 from hare.dialects.sqlite.indexes.spatialite_index import SpatialiteIndex
 from hare.dialects.sqlite.schema.columns.sqlite_column_backfill import SqliteColumnBackfill
@@ -34,7 +32,7 @@ from hare.dialects.sqlite.schema.constants import (
     SQLITE_DELETE_ROW_SQL,
     SQLITE_FOREIGN_KEY_CHECK_SQL,
     SQLITE_GENERATED_PK_TEMPLATE,
-    SQLITE_PRAGMA_ENABLED_VALUES,
+    SQLITE_REPLACEMENT_FOREIGN_KEYS_ENABLED,
 )
 from hare.dialects.sqlite.schema.constraints.sqlite_constraint_statements import SqliteConstraintStatements
 from hare.dialects.sqlite.schema.indexes.sqlite_generated_index_names import SqliteGeneratedIndexNames
@@ -46,15 +44,15 @@ from hare.dialects.sqlite.schema.runtime_statements.sqlite_tenant_conditions imp
 from hare.dialects.sqlite.schema.tables.sqlite_table_comments import SqliteTableComments
 from hare.dialects.sqlite.schema.tables.sqlite_table_rebuild import SqliteTableRebuild
 from hare.dialects.sqlite.schema.triggers.sqlite_trigger_statements import SqliteTriggerStatements
-from hare.exceptions import IntegrityError
+from hare.exceptions import IntegrityError, TransactionManagementError
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
-from hare.models import Model
 from hare.models.enums import ModelOption
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.statement_recovery import StatementRecovery
     from hare.fields.field import Field
+    from hare.models.model_binding import ModelBinding
 
 
 class SqliteSchemaEditor(BaseSchemaEditor):
@@ -76,6 +74,7 @@ class SqliteSchemaEditor(BaseSchemaEditor):
     trigger_statements_class = SqliteTriggerStatements
     table_clearing_class = SqliteTableClearing
     tenant_conditions_class = SqliteTenantConditions
+    client: SqliteClient
 
     # The table's comment inside its parentheses - SQLite keeps the statement's text up to the
     # closing one only.
@@ -127,48 +126,78 @@ class SqliteSchemaEditor(BaseSchemaEditor):
         return self.quote(table_name)
 
     @asynccontextmanager
-    async def constraint_checking_disabled(self) -> AsyncGenerator[None]:
-        """Switches ``PRAGMA foreign_keys`` off for the block and restores what was configured. A table
-        rebuild drops the table, and with foreign keys on, that deletes its rows first and cascades
-        into the tables referencing it. The pragma can only be changed outside a transaction - the
-        executor enters this block before opening one.
+    async def constraint_checking_disabled(self) -> AsyncGenerator[bool]:
+        """Disable constraints only when this scope can restore the actual previous setting.
+
+        A borrowed transaction keeps its foreign-key and deferral policy. It must not be
+        checked before its caller finishes writing the referenced rows. Table replacements
+        are checked separately before their first step: dropping a referenced table with
+        enforcement enabled can cascade into other tables.
+        The yielded flag belongs only to the scope that actually disabled enforcement.
         """
-        original = self.client.pragmas.get("foreign_keys", SQLITE_DEFAULT_FOREIGN_KEYS)  # type: ignore[attr-defined]
-        self.foreign_key_check_required = str(original).strip().lower() in SQLITE_PRAGMA_ENABLED_VALUES
-        switched_off = SqliteClient.foreign_keys_switched_off
-        token = switched_off.set(switched_off.get() | {self.client.connection_alias})
+        if self.collect_sql:
+            yield False
+            return
+        original = await self.client.read_foreign_key_state()
+        if self.client.is_transaction_client or not original:
+            yield False
+            return
+        previous_check_required = self.foreign_key_check_required
+        self.foreign_key_check_required = original
         try:
-            async with SqlitePragmaScope.run(self.client, "foreign_keys", "OFF", previous=original):
-                yield
+            async with SqlitePragmaScope.run(self.client, "foreign_keys", "OFF", previous=int(original)):
+                yield True
         finally:
-            switched_off.reset(token)
-            self.foreign_key_check_required = False
+            self.foreign_key_check_required = previous_check_required
+
+    @asynccontextmanager
+    async def schema_plan_scope(self, plan: SchemaChangePlan) -> AsyncGenerator[None]:
+        """Protect direct replacement plans and refuse an unsafe borrowed transaction before DDL."""
+        if self.collect_sql or SchemaEffect.REPLACE_TABLE not in plan.effects:
+            yield
+            return
+        async with self.constraint_checking_disabled() as check_constraints:
+            # The scope just observed the physical state or published its successful setter.
+            if self.client.enforces_foreign_keys():
+                raise TransactionManagementError(SQLITE_REPLACEMENT_FOREIGN_KEYS_ENABLED)
+            yield
+            if check_constraints:
+                await self.check_constraints()
 
     async def check_constraints(self) -> None:
         """Raises if the schema changes made while foreign key enforcement was off left
-        dangling references behind.
+        dangling references behind in any attached database, including temporary tables.
 
         Raises:
             IntegrityError: ``PRAGMA foreign_key_check`` reported at least one violation.
         """
         if self.collect_sql or not self.foreign_key_check_required:
             return
-        _, rows = await self.client.execute(SQLITE_FOREIGN_KEY_CHECK_SQL)
-        rows = await self.delete_spatial_metadata_orphans(rows)
-        if not rows:
+        violations: list[str] = []
+        databases = await self.client.execute_dicts(SQLITE_DATABASE_LIST_SQL)
+        for database in databases:
+            schema = database["name"]
+            _, rows = await self.client.execute(SQLITE_FOREIGN_KEY_CHECK_SQL.format(schema=self.quote(schema)))
+            rows = await self.delete_spatial_metadata_orphans(rows, schema=schema)
+            violations.extend(
+                f"{self.qualify_table_name(row['table'], schema)} rowid={row['rowid']} "
+                f"references missing row in {self.qualify_table_name(row['parent'], schema)}"
+                for row in rows
+            )
+        if not violations:
             return
-        violations = "; ".join(
-            f"{row['table']} rowid={row['rowid']} references missing row in {row['parent']}" for row in rows
-        )
-        raise IntegrityError(f"Migration left {len(rows)} foreign key violation(s): {violations}")
+        raise IntegrityError(f"Migration left {len(violations)} foreign key violation(s): {'; '.join(violations)}")
 
-    async def delete_spatial_metadata_orphans(self, violations: Sequence[Any]) -> list[Any]:
+    async def delete_spatial_metadata_orphans(
+        self, violations: Sequence[Any], *, schema: str | None = None
+    ) -> list[Any]:
         """Deletes the rows of SpatiaLite's spatial metadata left naming a column the migration
         unregistered - the ``ON DELETE CASCADE`` of those tables, which doesn't run while foreign keys
         are off.
 
         Args:
             violations: The rows of ``PRAGMA foreign_key_check``.
+            schema: The database those rows and spatial metadata belong to.
 
         Returns:
             The other violations.
@@ -179,7 +208,7 @@ class SqliteSchemaEditor(BaseSchemaEditor):
                 SPATIALITE_METADATA_TABLE_NAMES
             ):
                 await self.client.execute(
-                    SQLITE_DELETE_ROW_SQL.format(table=self.quote(violation["table"])),
+                    SQLITE_DELETE_ROW_SQL.format(table=self.qualify_table_name(violation["table"], schema)),
                     [violation["rowid"]],
                 )
             else:
@@ -187,7 +216,12 @@ class SqliteSchemaEditor(BaseSchemaEditor):
         return remaining
 
     def get_add_field_plan(
-        self, old_model: type[Model], new_model: type[Model], field_name: str, *, foreign_key_not_valid: bool = False
+        self,
+        old_binding: ModelBinding,
+        new_binding: ModelBinding,
+        field_name: str,
+        *,
+        foreign_key_not_valid: bool = False,
     ) -> SchemaChangePlan:
         """Choose a prepared rebuild for additions unsupported by ALTER TABLE.
 
@@ -195,70 +229,70 @@ class SqliteSchemaEditor(BaseSchemaEditor):
         unvalidated key does not change its SQL. Other additions use the shared
         backfill and index plan; required Python defaults finish with a rebuild.
         """
-        field = new_model._meta.fields_map[field_name]
+        field = new_binding.fields_map[field_name]
         if not isinstance(field, ManyToManyFieldInstance) and (
             (isinstance(field, ForeignKeyFieldInstance) and len(field.source_fields) > 1)
             or (field.generated and not field.pk)
             or (
                 field.has_db_default()
                 and not SQLITE_ADDED_COLUMN_DEFAULT_PATTERN.fullmatch(
-                    self.column_definitions.get_field_db_default_sql(field, new_model)
+                    self.column_definitions.get_field_db_default_sql(field, new_binding)
                 )
             )
         ):
-            return self.table_rebuild.get_rebuild_plan(old_model, new_model)
-        return super().get_add_field_plan(old_model, new_model, field_name, foreign_key_not_valid=False)
+            return self.table_rebuild.get_rebuild_plan(old_binding, new_binding)
+        return super().get_add_field_plan(old_binding, new_binding, field_name, foreign_key_not_valid=False)
 
-    def get_add_constraint_plan(self, model: type[Model], constraint: Any) -> SchemaChangePlan:
+    def get_add_constraint_plan(self, binding: ModelBinding, constraint: Any) -> SchemaChangePlan:
         """Adds a constraint: a CHECK by rebuilding the table from the model, which declares it; a unique
         constraint as a unique index under its name.
 
         Args:
-            model: The model with the constraint.
+            binding: The model with the constraint.
             constraint: The constraint.
         """
         if isinstance(constraint, CheckConstraint):
-            return self.table_rebuild.get_rebuild_plan(model, model)
-        return super().get_add_constraint_plan(model, constraint)
+            return self.table_rebuild.get_rebuild_plan(binding, binding)
+        return super().get_add_constraint_plan(binding, constraint)
 
-    def get_remove_constraint_plan(self, model: type[Model], constraint: Any) -> SchemaChangePlan:
+    def get_remove_constraint_plan(self, binding: ModelBinding, constraint: Any) -> SchemaChangePlan:
         """A CHECK requires rebuilding; uniqueness is removed through its index."""
         if isinstance(constraint, CheckConstraint):
-            return self.table_rebuild.get_rebuild_plan(model, model)
-        name = self.constraint_names.constraint_name_for_model(model, constraint)
+            return self.table_rebuild.get_rebuild_plan(binding, binding)
+        name = self.constraint_names.constraint_name_for_model(binding, constraint)
         return SchemaChangePlan(
             (
                 SchemaStatement(
                     self.DROP_INDEX_TEMPLATE.format(
-                        name=self.qualify_table_name(name, model._meta.schema),
+                        name=self.qualify_table_name(name, binding.schema),
                     )
                 ),
             )
         )
 
     def get_rename_constraint_plan(
-        self, model: type[Model], old_constraint: Any, new_constraint: Any
+        self, binding: ModelBinding, old_constraint: Any, new_constraint: Any
     ) -> SchemaChangePlan:
         """A CHECK is recreated with its table; a unique index uses the shared rename plan."""
         if isinstance(old_constraint, CheckConstraint):
-            return self.table_rebuild.get_rebuild_plan(model, model)
-        return super().get_rename_constraint_plan(model, old_constraint, new_constraint)
+            return self.table_rebuild.get_rebuild_plan(binding, binding)
+        return super().get_rename_constraint_plan(binding, old_constraint, new_constraint)
 
     @staticmethod
-    def get_separate_table_indexes(model: type[Model]) -> list[SeparateTableIndex]:
+    def get_separate_table_indexes(binding: ModelBinding) -> list[SeparateTableIndex]:
         """The model's indexes kept in tables of their own - full-text and spatial ones - which
         outlive a DROP TABLE of the model's table and read it and its columns by name.
 
         Args:
-            model: The model.
+            binding: The model.
 
         Returns:
             The indexes.
         """
-        return [index for index in model._meta.indexes if isinstance(index, SeparateTableIndex)]
+        return [index for index in binding.indexes if isinstance(index, SeparateTableIndex)]
 
     def get_separate_index_drop_plan(
-        self, model: type[Model], indexes: Iterable[SeparateTableIndex], table_name: str | None = None
+        self, binding: ModelBinding, indexes: Iterable[SeparateTableIndex], table_name: str | None = None
     ) -> SchemaChangePlan:
         """Prepare all statements removing separate index tables for the current physical name."""
         return SchemaChangePlan(
@@ -267,9 +301,9 @@ class SqliteSchemaEditor(BaseSchemaEditor):
                     "\n".join(
                         index.get_drop_sqls(
                             self,
-                            table_name or model._meta.db_table,
-                            model._meta.get_column_names(index.fields),
-                            model._meta.schema,
+                            table_name or binding.db_table,
+                            binding.get_column_names(index.fields),
+                            binding.schema,
                         )
                     )
                 )
@@ -277,47 +311,48 @@ class SqliteSchemaEditor(BaseSchemaEditor):
             )
         )
 
-    def get_add_index_plan(self, model: type[Model], index: Index, concurrently: bool = False) -> SchemaChangePlan:
+    def get_add_index_plan(self, binding: ModelBinding, index: Index, concurrently: bool = False) -> SchemaChangePlan:
         """Keep SpatiaLite's result checks in both standalone and composed plans."""
+        model = binding._model
         if not isinstance(index, SpatialiteIndex):
-            return super().get_add_index_plan(model, index)
+            return super().get_add_index_plan(binding, index)
         return SchemaChangePlan(
             (
                 SqliteSpatialIndexCreation(
-                    tuple(index.get_create_sqls(self, model, safe=False)),
+                    tuple(index.get_create_sqls(self, binding, safe=False)),
                     f"{index!r} of {model.__name__}",
                 ),
             )
         )
 
-    def get_table_rename_plan(self, model: type[Model], old_name: str, new_name: str) -> SchemaChangePlan:
+    def get_table_rename_plan(self, binding: ModelBinding, old_name: str, new_name: str) -> SchemaChangePlan:
         """Prepare separate-table index removal, the rename and index recreation together."""
         if old_name == new_name:
             return SchemaChangePlan(())
-        indexes = self.get_separate_table_indexes(model)
+        indexes = self.get_separate_table_indexes(binding)
         return SchemaChangePlan(
             (
-                *self.get_separate_index_drop_plan(model, indexes, old_name).steps,
-                *super().get_table_rename_plan(model, old_name, new_name).steps,
-                *(step for index in indexes for step in self.get_add_index_plan(model, index).steps),
+                *self.get_separate_index_drop_plan(binding, indexes, old_name).steps,
+                *super().get_table_rename_plan(binding, old_name, new_name).steps,
+                *(step for index in indexes for step in self.get_add_index_plan(binding, index).steps),
             )
         )
 
-    def get_delete_model_plan(self, model: type[Model]) -> SchemaChangePlan:
+    def get_delete_model_plan(self, binding: ModelBinding) -> SchemaChangePlan:
         """Remove separate index tables before the table and its automatic through tables."""
-        plan = super().get_delete_model_plan(model)
-        drops = self.get_separate_index_drop_plan(model, self.get_separate_table_indexes(model))
+        plan = super().get_delete_model_plan(binding)
+        drops = self.get_separate_index_drop_plan(binding, self.get_separate_table_indexes(binding))
         return SchemaChangePlan((*drops.steps, *plan.steps), before=plan.before)
 
     def get_remove_field_plan(
-        self, old_model: type[Model], new_model: type[Model], field: Field[Any]
+        self, old_binding: ModelBinding, new_binding: ModelBinding, field: Field[Any]
     ) -> SchemaChangePlan:
         """Prepare an in-place removal when supported, otherwise a complete rebuild."""
-        if isinstance(field, ManyToManyFieldInstance) or self._drops_column_in_place(old_model, field):
-            return super().get_remove_field_plan(old_model, new_model, field)
-        return self.table_rebuild.get_rebuild_plan(old_model, new_model)
+        if isinstance(field, ManyToManyFieldInstance) or self._drops_column_in_place(old_binding, field):
+            return super().get_remove_field_plan(old_binding, new_binding, field)
+        return self.table_rebuild.get_rebuild_plan(old_binding, new_binding)
 
-    def _drops_column_in_place(self, model: type[Model], field: Field[Any]) -> bool:
+    def _drops_column_in_place(self, binding: ModelBinding, field: Field[Any]) -> bool:
         """Whether ``ALTER TABLE ... DROP COLUMN`` drops the field's column instead of a table rebuild -
         decided by the model alone. SQLite refuses a column that is a key, unique, indexed, a foreign key
         or named by a CHECK, a generated column, a trigger or a view - such a column, and any column of a
@@ -325,13 +360,12 @@ class SqliteSchemaEditor(BaseSchemaEditor):
         the migrations don't know of keeping the column makes the database refuse it.
 
         Args:
-            model: The model the field is removed from.
+            binding: The model the field is removed from.
             field: The removed field.
 
         Returns:
             True when the column is dropped in place.
         """
-        meta = model._meta
         if (
             isinstance(field, ForeignKeyFieldInstance)
             or field.pk
@@ -339,18 +373,17 @@ class SqliteSchemaEditor(BaseSchemaEditor):
             or field.index
             or field.generated
             or field.reference is not None
-            or field.model_field_name not in meta.fields_db_projection
-            or meta.triggers
+            or field.model_field_name not in binding.fields_db_projection
+            or binding.triggers
             # The triggers of an index kept in a table of its own name the table's columns.
-            or self.get_separate_table_indexes(model)
+            or self.get_separate_table_indexes(binding)
             # A generated column - an auto-incremented primary key is "generated" too, and harmless.
-            or any(other_field.generated and not other_field.pk for other_field in meta.fields_map.values())
-            or any(isinstance(constraint, CheckConstraint) for constraint in meta.constraints)
+            or any(other_field.generated and not other_field.pk for other_field in binding.fields_map.values())
+            or any(isinstance(constraint, CheckConstraint) for constraint in binding.constraints)
         ):
             return False
-        for index in meta.indexes:
-            if not isinstance(index, Index):
-                index = Index(fields=tuple(index))
+        for index in binding.indexes:
+            index = Index.from_declaration(index)
             if (
                 index.declared_expressions
                 or isinstance(index, PartialIndex)
@@ -358,7 +391,7 @@ class SqliteSchemaEditor(BaseSchemaEditor):
                 or SchemaReferences.references_field(SchemaReferences.get_index_field_names(index), field)
             ):
                 return False
-        for constraint in getattr(meta, ModelOption.CONSTRAINTS, None) or ():
+        for constraint in getattr(binding, ModelOption.CONSTRAINTS, None) or ():
             if not isinstance(constraint, UniqueConstraint) or (
                 constraint.condition is not None
                 or field.model_field_name in constraint.include
@@ -369,20 +402,20 @@ class SqliteSchemaEditor(BaseSchemaEditor):
 
     def get_alter_field_plan(
         self,
-        old_model: type[Model],
-        new_model: type[Model],
+        old_binding: ModelBinding,
+        new_binding: ModelBinding,
         field_name: str,
-        candidate_referencing_models: Sequence[type[Model]] = (),
+        candidate_referencing_models: Sequence[ModelBinding] = (),
     ) -> SchemaChangePlan:
         """Keep unchanged columns in place while preparing their validation and Python rewrite."""
-        old_field = old_model._meta.fields_map[field_name]
-        new_field = new_model._meta.fields_map[field_name]
+        old_field = old_binding.fields_map[field_name]
+        new_field = new_binding.fields_map[field_name]
         if not self.column_type_changes.keeps_table(old_field, new_field, self.client.dialect):
-            return super().get_alter_field_plan(old_model, new_model, field_name, candidate_referencing_models)
-        rewrite = self.column_backfill.get_stored_value_rewrite_plan(new_model, old_field, new_field)
+            return super().get_alter_field_plan(old_binding, new_binding, field_name, candidate_referencing_models)
+        rewrite = self.column_backfill.get_stored_value_rewrite_plan(new_binding, old_field, new_field)
         steps: list[SchemaStep] = [
             SqliteKeptValuesCheck(
-                self.qualify_table_name(new_model._meta.db_table, new_model._meta.schema),
+                self.qualify_table_name(new_binding.db_table, new_binding.schema),
                 self.quote(self.table_rebuild.get_remake_column_name(new_field)),
                 copy(new_field),
             )
@@ -395,22 +428,22 @@ class SqliteSchemaEditor(BaseSchemaEditor):
                 if isinstance(new_field, ForeignKeyFieldInstance)
                 else (self.table_rebuild.get_remake_column_name(new_field),)
             )
-            index = Index(fields=tuple(columns))
+            index = Index(fields=columns)
             if not self.index_statements.is_declared_by_another_entry(
-                new_model, index, model_declares_index=new_indexed
+                new_binding, index, model_declares_index=new_indexed
             ):
                 if new_indexed:
-                    steps.extend(self.get_add_index_plan(new_model, index).steps)
+                    steps.extend(self.get_add_index_plan(new_binding, index).steps)
                 else:
-                    steps.append(SchemaStatement(self.index_statements.get_index_drop_sql(new_model, index)))
+                    steps.extend(self.get_remove_index_plan(new_binding, index).steps)
         return SchemaChangePlan(
             (*steps, *rewrite.steps),
-            before=self.table_creation.get_definition(old_model),
-            after=self.table_creation.get_definition(new_model),
+            before=self.table_creation.get_definition(old_binding),
+            after=self.table_creation.get_definition(new_binding),
         )
 
     def get_alter_column_plan(
-        self, model: type[Model], old_field: Field[Any], new_field: Field[Any]
+        self, binding: ModelBinding, old_field: Field[Any], new_field: Field[Any]
     ) -> SchemaChangePlan:
         """Prepare a rename or rebuild, checking stored values before destructive DDL.
 
@@ -421,7 +454,7 @@ class SqliteSchemaEditor(BaseSchemaEditor):
         self.raise_if_generated_field_changes(old_field, new_field)
         old_column = self.table_rebuild.get_remake_column_name(old_field)
         new_column = self.table_rebuild.get_remake_column_name(new_field)
-        table = self.qualify_table_name(model._meta.db_table, model._meta.schema)
+        table = self.qualify_table_name(binding.db_table, binding.schema)
         steps: list[SchemaStep] = []
         only_rename = self.column_type_changes.only_renames_column(old_field, new_field, self.client.dialect)
         if not only_rename:
@@ -430,17 +463,16 @@ class SqliteSchemaEditor(BaseSchemaEditor):
             )
         if old_column != new_column and not isinstance(old_field, ForeignKeyFieldInstance):
             indexes = [
-                index for index in self.get_separate_table_indexes(model) if new_field.model_field_name in index.fields
+                index
+                for index in self.get_separate_table_indexes(binding)
+                if new_field.model_field_name in index.fields
             ]
             for index in indexes:
                 columns = [
-                    old_column if column == new_column else column
-                    for column in model._meta.get_column_names(index.fields)
+                    old_column if column == new_column else column for column in binding.get_column_names(index.fields)
                 ]
                 steps.append(
-                    SchemaStatement(
-                        "\n".join(index.get_drop_sqls(self, model._meta.db_table, columns, model._meta.schema))
-                    )
+                    SchemaStatement("\n".join(index.get_drop_sqls(self, binding.db_table, columns, binding.schema)))
                 )
             steps.append(
                 SchemaStatement(
@@ -452,9 +484,9 @@ class SqliteSchemaEditor(BaseSchemaEditor):
                 )
             )
             if only_rename:
-                steps.extend(step for index in indexes for step in self.get_add_index_plan(model, index).steps)
+                steps.extend(step for index in indexes for step in self.get_add_index_plan(binding, index).steps)
                 return SchemaChangePlan(tuple(steps))
             old_field = copy(old_field)
             old_field.source_field = new_column
-        plan = self.table_rebuild.get_rebuild_plan(model, model, altered_fields=[(old_field, new_field)])
+        plan = self.table_rebuild.get_rebuild_plan(binding, binding, altered_fields=[(old_field, new_field)])
         return SchemaChangePlan((*steps, *plan.steps), after=plan.after)

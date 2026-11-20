@@ -161,7 +161,8 @@ class ClickhouseDatetimeField(DatetimeField[TDatetime]):
                     ClickhouseTypeName.DATETIME if field.precision is None else f"DateTime64({field.precision})"
                 )
                 raise ValidationError(
-                    f"{field.model_field_name}: {value} is outside the moments a {type_name} column holds, "
+                    f"{field.model_field_name}: {field.get_value_for_message(value)} is outside the moments a "
+                    f"{type_name} column holds, "
                     f"{column_first_moment} to {column_last_moment}"
                 )
         return ClickhouseTypedValue(value, field.SQL_TYPE)

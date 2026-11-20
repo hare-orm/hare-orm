@@ -8,13 +8,14 @@ from hare.dialects.base.clauses.enums import MergeAction, MergeMatch
 from hare.exceptions import UnSupportedError
 
 if TYPE_CHECKING:
+    from hare.dialects.base.clauses.enums import JoinType
     from hare.dialects.base.clauses.merge_when_sql import MergeWhenSql
     from hare.dialects.base.dialect import Dialect
     from hare.dialects.base.features import Features
     from hare.sql.builder.queries.query_builder import QueryBuilder
     from hare.sql.builder.returned_value import ReturnedValue
     from hare.sql.builder.update_from_values import UpdateFromValues
-    from hare.sql.enums import JoinType, SetOperation
+    from hare.sql.enums import SetOperation
     from hare.sql.sql_context import SqlContext
     from hare.sql.terms.criteria.like import Like
 
@@ -358,7 +359,7 @@ class QueryClauses:
         on_sql: str,
         whens: Sequence[MergeWhenSql],
         returned: Sequence[ReturnedValue],
-        action_alias_sql: str,
+        action_alias_sql: str | None,
     ) -> str:
         """A ``MERGE`` statement.
 
@@ -368,8 +369,8 @@ class QueryClauses:
             source_alias_sql: The quoted name the source is read under.
             on_sql: The condition matching a source row to a target row.
             whens: The ``WHEN`` branches, in order.
-            returned: The values each written row returns, none for no ``RETURNING``.
-            action_alias_sql: The quoted name the action that wrote a row is returned under, first.
+            returned: The additional values each written row returns.
+            action_alias_sql: The quoted name for the action, or None for no ``RETURNING``.
 
         Returns:
             The statement.
@@ -424,13 +425,13 @@ class QueryClauses:
             return "DELETE"
         return f"INSERT ({', '.join(when.columns_sql)}) VALUES ({', '.join(when.values_sql)})"
 
-    def get_merge_returning_sql(self, returned: Sequence[ReturnedValue], action_alias_sql: str) -> str:
+    def get_merge_returning_sql(self, returned: Sequence[ReturnedValue], action_alias_sql: str | None) -> str:
         """The ``RETURNING`` of a ``MERGE``, with its leading space - the action that wrote the row,
         then the values.
 
         Args:
-            returned: The values, none for no ``RETURNING``.
-            action_alias_sql: The quoted name the action that wrote the row is returned under.
+            returned: The additional values.
+            action_alias_sql: The quoted name for the action, or None for no ``RETURNING``.
 
         Returns:
             The clause, ``""`` when nothing is returned.
@@ -438,7 +439,7 @@ class QueryClauses:
         Raises:
             UnSupportedError: Values are returned - ISO SQL's ``MERGE`` has no ``RETURNING``.
         """
-        if returned:
+        if action_alias_sql is not None:
             raise UnSupportedError(f"MERGE ... RETURNING has no SQL for the {self.dialect} dialect")
         return ""
 
@@ -562,9 +563,7 @@ class QueryClauses:
 
         if builder._joins or builder._from or builder._orderbys or builder._limit is not None:
             raise UnSupportedError(f"An UPDATE joining other tables has no SQL for the {self.dialect} dialect")
-        querystring = QuerySqlRendering.with_sql(builder._with, sql_context) if builder._with else ""
-        querystring += QuerySqlRendering.update_sql(builder, sql_context)
-        querystring += QuerySqlRendering.set_sql(builder, sql_context)
+        querystring = QuerySqlRendering.update_sql(builder, sql_context)
         if builder._wheres:
             querystring += QuerySqlRendering.where_sql(builder, sql_context)
         return querystring
@@ -630,6 +629,33 @@ class QueryClauses:
         columns_sql = self.get_values_table_columns_sql(column_names)
         condition_sql = " WHERE 1 = 0" if matches_no_row else ""
         return f"(SELECT {columns_sql} FROM (VALUES {', '.join(row_sqls)}) AS {alias_sql}{condition_sql})"  # nosec B608
+
+    def get_values_join_sql(
+        self,
+        source_sql: str,
+        inputs_sql: str,
+        source_alias: str,
+        input_alias: str,
+        ordinal: str,
+        columns: Sequence[tuple[str, str]],
+    ) -> str:
+        """Join prepared input rows to a prepared selection, treating two NULL keys as equal.
+
+        Column pairs name the selection's output and the corresponding input column.
+        All identifiers pass through the dialect's quoting rules; the returned ordinal
+        lets the caller restore the input order without changing the row reader.
+        """
+        quote = self.dialect.literals.quote_identifier
+        comparisons = []
+        for source_column, input_column in columns:
+            left = quote(source_alias) + "." + quote(source_column)
+            right = quote(input_alias) + "." + quote(input_column)
+            comparisons.append(f"({left} = {right} OR ({left} IS NULL AND {right} IS NULL))")
+        return (
+            f"SELECT {quote(source_alias)}.*, {quote(input_alias)}.{quote(ordinal)} "  # nosec B608
+            f"FROM ({source_sql}) AS {quote(source_alias)} "
+            f"JOIN {inputs_sql} AS {quote(input_alias)} ON {' AND '.join(comparisons)}"
+        )
 
     def get_update_from_values_sql(
         self, *, write: UpdateFromValues, with_sql: str, values_sql: str, sql_context: SqlContext

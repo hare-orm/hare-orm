@@ -88,15 +88,17 @@ class RequestTransaction(TransactionGroup):
             The response.
 
         Raises:
-            Exception: The handler raised - the transactions are rolled back - or a commit failed.
+            Exception: The handler or response-status callback raised - the transactions are rolled
+                back - or a commit failed.
         """
         await self.begin()
         try:
             response = await call()
+            status_code = get_status_code(response)
         except BaseException as error:
             await self.close(error)
             raise
-        await self.finish(get_status_code(response))
+        await self.finish(status_code)
         return response
 
     async def run_asgi(self, app: Any, scope: Any, receive: Any, send: Any) -> None:

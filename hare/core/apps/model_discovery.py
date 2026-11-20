@@ -6,9 +6,6 @@ from inspect import isclass
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
-from hare.core.apps.cross_connection_checks import CrossConnectionChecks
-from hare.core.apps.enum_member_checks import EnumMemberChecks
-from hare.core.apps.model_binding_graph import ModelBindingGraph
 from hare.core.apps.swappable_models import SwappableModels
 from hare.core.constants import DEFAULT_CONNECTION_NAME
 from hare.exceptions import ConfigurationError, HareError
@@ -23,12 +20,15 @@ class ModelDiscovery:
     it imports - and the apps of the configuration loaded."""
 
     @staticmethod
-    def discover_models(models_path: ModuleType | str, app_label: str) -> list[type[Model]]:
+    def discover_models(
+        models_path: ModuleType | str, app_label: str, *, apps: Apps | None = None
+    ) -> list[type[Model]]:
         """The models a module declares - its concrete ``Model`` subclasses - given the app's label.
 
         Args:
             models_path: The module, or its dotted path.
             app_label: The app the models belong to.
+            apps: The registry being prepared; an already assigned class keeps its app in this registry.
 
         Returns:
             The models.
@@ -80,13 +80,12 @@ class ModelDiscovery:
                     if ModelDiscovery.is_declared_in_module(attribute, module.__name__)
                 ]
         for attribute in possible_models:
-            if isclass(attribute) and issubclass(attribute, Model) and not attribute._meta.abstract:
-                if attribute._meta.app and attribute._meta.app != app_label:
+            if isclass(attribute) and issubclass(attribute, Model) and not attribute._declaration.abstract:
+                registered_app = None if apps is None else apps.get_registered_app_label(attribute)
+                assigned_app = attribute._declaration.app or registered_app
+                if assigned_app is not None and assigned_app != app_label:
                     models_excluded_for_other_app.append(attribute)
                     continue
-                if graph := ModelBindingGraph.current.get():
-                    graph.include((attribute,))
-                attribute._meta.app = app_label
                 discovered_models.append(attribute)
         if not discovered_models:
             if models_excluded_for_other_app:
@@ -141,11 +140,4 @@ class ModelDiscovery:
 
         SwappableModels.check_swappable_settings(apps)
         SwappableModels.init_swapped_models(apps)
-        CrossConnectionChecks.check_cross_connection_constraints(apps)
-        apps.init_relations()
-        EnumMemberChecks.add_to_models(
-            (model for app in apps.apps.values() for model in app.values()), apps._connections
-        )
-        CrossConnectionChecks.check_change_capture_connections(apps)
-        if apps._validate_connections:
-            apps.build_initial_querysets()
+        apps.finish_model_binding()

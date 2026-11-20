@@ -9,10 +9,12 @@ from hare.core.hare_context import HareContext
 from hare.ddl.constraints import UniqueConstraint
 from hare.fields.relations.fields import ForeignKeyFieldInstance
 from hare.migrations.operations import CreateModel
+from hare.migrations.state.migration_environment import MigrationEnvironment
 from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state import State
 from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
+from tests.utils.model_bindings import ModelBindings
 
 pytestmark = pytest.mark.database_independent
 
@@ -31,7 +33,7 @@ def test_model_state_skips_fk_reference_fields() -> None:
         class Meta:
             app = "blog"
 
-    state = ModelState.make_from_model("blog", Post)
+    state = ModelState.make_from_declaration("blog", Post)
     assert "author" in state.fields
     assert "author_id" not in state.fields
 
@@ -58,7 +60,7 @@ def test_model_state_keeps_effective_relation_schema_without_live_bindings() -> 
     for model in (Author, Book, Credit):
         apps.register_model("blog", model)
     apps.init_relations()
-    state = State.from_models((Author, Book, Credit))
+    state = State.from_models((Author, Book, Credit), environment=MigrationEnvironment.from_apps(apps))
     for snapshot in (state, state.clone()):
         credit = snapshot.models[("blog", "Credit")]
         book_field: ForeignKeyFieldInstance = credit.fields["book"]
@@ -72,12 +74,12 @@ def test_model_state_keeps_effective_relation_schema_without_live_bindings() -> 
         assert book.fields["authors"].deconstruct()[2]["through"] == "blog.Credit"
         assert book.fields["reviewers"].deconstruct()[2]["through"] == "book_author"
         rendered = snapshot.apps.get_model("blog.Credit")
-        assert rendered._meta.fields_map["book"].on_delete is fields.SET_NULL
-        assert rendered._meta.fields_map["book"].index is False
+        assert snapshot.apps.get_binding(rendered).fields_map["book"].on_delete is fields.SET_NULL
+        assert snapshot.apps.get_binding(rendered).fields_map["book"].index is False
 
 
 def test_model_state_preserves_tenant_soft_delete_and_optimistic_lock_fields() -> None:
-    """Without these three in ModelState.make_from_model()'s own options dict, a model rendered
+    """Without these three in ModelState.make_from_declaration()'s own options dict, a model rendered
     through this state (e.g. apps.get_model() inside a RunPython migration) silently loses its
     Meta.tenant_field/soft_delete_field/optimistic_lock_field - the default manager then applies no
     tenant/soft-delete ambient filtering at all, and no optimistic-lock version check, regardless
@@ -94,11 +96,12 @@ def test_model_state_preserves_tenant_soft_delete_and_optimistic_lock_fields() -
             soft_delete_field = "deleted_at"
             optimistic_lock_field = "version"
 
-    state = ModelState.make_from_model("blog", Order)
+    state = ModelState.make_from_declaration("blog", Order)
     rendered = state.render()
-    assert rendered._meta.tenant_field == "org_id"
-    assert rendered._meta.soft_delete_field == "deleted_at"
-    assert rendered._meta.optimistic_lock_field == "version"
+    binding = ModelBindings.prepare(rendered).get_binding(rendered)
+    assert binding.tenant_field == "org_id"
+    assert binding.soft_delete_field == "deleted_at"
+    assert binding.optimistic_lock_field == "version"
 
 
 def test_field_signature_ignores_implicit_db_column() -> None:
@@ -135,5 +138,5 @@ def test_state_apps_builds_relations_before_querysets() -> None:
         ).state_forward("blog", state)
 
         post_model = state.apps.get_model("blog.Post")
-        author_field: ForeignKeyFieldInstance = post_model._meta.fields_map["author"]
+        author_field: ForeignKeyFieldInstance = state.apps.get_binding(post_model).fields_map["author"]
         assert author_field.to_field_instance is not None

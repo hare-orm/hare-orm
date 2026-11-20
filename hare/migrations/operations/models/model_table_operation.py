@@ -31,9 +31,9 @@ class ModelTableOperation(HareOperation):
         """
         if not state_editor or self.state_only:
             return
-        model = state.apps.get_model(f"{app_label}.{self.name}")
-        if model._meta.managed is not False:
-            await state_editor.create_model(model)
+        binding = state.apps.get_binding(f"{app_label}.{self.name}")
+        if binding.managed is not False:
+            await state_editor.create_model(binding)
 
     async def _delete_model_table(self, app_label: str, state: State, state_editor: BaseSchemaEditor | None) -> None:
         """Drops the table of the model as ``state`` has it.
@@ -45,6 +45,6 @@ class ModelTableOperation(HareOperation):
         """
         if not state_editor or self.state_only:
             return
-        model = state.apps.get_model(f"{app_label}.{self.name}")
-        if model._meta.managed is not False:
-            await state_editor.delete_model(model)
+        binding = state.apps.get_binding(f"{app_label}.{self.name}")
+        if binding.managed is not False:
+            await state_editor.delete_model(binding)

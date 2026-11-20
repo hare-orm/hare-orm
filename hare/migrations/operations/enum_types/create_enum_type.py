@@ -4,7 +4,6 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from hare.ddl.declared_names import DeclaredNames
-from hare.ddl.schema_objects.enum_type import EnumType
 from hare.migrations.operations.dependencies.operation_dependency import OperationDependency
 from hare.migrations.operations.enum_types.enum_type_operation import EnumTypeOperation
 from hare.migrations.operations.enums import DependencyType
@@ -31,15 +30,14 @@ class CreateEnumType(EnumTypeOperation):
         self.schema = schema
         self.labels = self.get_checked_labels(labels, "CreateEnumType.labels")
 
-    def get_provided_dependencies(self, app_label: str) -> list[OperationDependency]:
+    def get_provided_dependencies(self, app_label: str, state: State) -> list[OperationDependency]:
         return [OperationDependency.of_enum_type(self.schema, self.name, DependencyType.CREATED)]
 
     def describe(self) -> str:
         return f"Create ENUM type {self.get_type_label()}"
 
     def state_forward(self, app_label: str, state: State) -> None:
-        enum_type = EnumType(self.name, self.labels, self.schema)
-        state.enum_types[enum_type.key] = enum_type
+        self._record_type(app_label, state, self.labels)
 
     def get_referenced_model_labels(self, app_label: str) -> frozenset[str] | None:
         return frozenset()
@@ -47,11 +45,9 @@ class CreateEnumType(EnumTypeOperation):
     async def database_forward(
         self, app_label: str, old_state: State, new_state: State, state_editor: BaseSchemaEditor | None = None
     ) -> None:
-        if self._runs_enum_types(state_editor, f"creating the ENUM type {self.name}"):
-            await state_editor.enum_types.create_enum_type(EnumType(self.name, self.labels, self.schema))
+        await self._create_type(app_label, old_state, state_editor, self.labels)
 
     async def database_backward(
         self, app_label: str, old_state: State, new_state: State, state_editor: BaseSchemaEditor | None = None
     ) -> None:
-        if self._runs_enum_types(state_editor, f"dropping the ENUM type {self.name}"):
-            await state_editor.enum_types.drop_enum_type(EnumType(self.name, self.labels, self.schema))
+        await self._drop_type(app_label, new_state, state_editor, self.labels)

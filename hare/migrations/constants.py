@@ -4,10 +4,9 @@ import re
 
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
-from hare.fields.relations.fields.one_to_one_field_instance import OneToOneFieldInstance
 from hare.models.enums import ModelOption
 
-RELATION_FIELDS = (ForeignKeyFieldInstance, OneToOneFieldInstance, ManyToManyFieldInstance)
+RELATION_FIELDS = (ForeignKeyFieldInstance, ManyToManyFieldInstance)
 
 #: Default table of the applied-migration journal.
 DEFAULT_MIGRATION_TABLE_NAME = "hare_migrations"

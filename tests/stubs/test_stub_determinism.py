@@ -17,9 +17,7 @@ STUB_WRITING_SCRIPT = """
 import sys
 from pathlib import Path
 
-from hare.core.config import HareConfig
-from hare.stubs.stub_writer import StubWriter
-from hare.typing_info.bound_models import BoundModels
+from tests.stubs.stub_configs import write_stubs
 
 config = {
     "connections": {"default": "sqlite+aiosqlite://:memory:"},
@@ -27,7 +25,7 @@ config = {
 }
 # stubgen inspects modules in a child process, which imports this script again.
 if __name__ == "__main__":
-    StubWriter(BoundModels(HareConfig.load(config)), Path(sys.argv[1]), 2).write()
+    write_stubs(Path(sys.argv[1]), config)
 """
 
 

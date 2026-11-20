@@ -6,6 +6,7 @@ from hare.models import Model
 
 class ScopedItem(Model):
     id = fields.IntField(primary_key=True, generated=False)
+    region = fields.IntField()
     tenant_id = fields.IntField()
     amount = fields.IntField()
     deleted_at = fields.DatetimeField(null=True)
@@ -18,10 +19,11 @@ class ScopedItem(Model):
 
 class CompositeScopedItem(Model):
     id = fields.IntField()
+    region = fields.IntField()
     tenant_id = fields.IntField()
     amount = fields.IntField()
     deleted_at = fields.DatetimeField(null=True)
-    pk = fields.CompositePrimaryKey("tenant_id", "id")
+    pk = fields.CompositePrimaryKey("region", "id")
 
     class Meta:
         tenant_field = "tenant_id"

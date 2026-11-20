@@ -10,7 +10,7 @@ from hare.ddl.indexes.index import Index
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.fields.field import Field
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class SchemaRequirements:
@@ -20,24 +20,23 @@ class SchemaRequirements:
     None where it needs none; no extension is named here."""
 
     @classmethod
-    def get_extensions_for_model(cls, model: type[Model], dialects: Iterable[Dialect]) -> set[str]:
+    def get_extensions_for_model(cls, binding: ModelBinding, dialects: Iterable[Dialect]) -> set[str]:
         """The extensions a model needs on any of the dialects.
 
         Args:
-            model: The model.
+            binding: The structural binding whose schema declarations are inspected.
             dialects: The dialects.
 
         Returns:
             The extension names.
         """
-        meta = model._meta
         return cls.get_extensions(
             dialects,
-            declared_extensions=meta.extensions,
-            fields_by_name=meta.fields_map,
-            indexes=meta.indexes,
-            constraints=meta.constraints,
-            primary_key_without_overlaps=meta.primary_key_attribute if meta.pk_without_overlaps else None,
+            declared_extensions=binding.extensions,
+            fields_by_name=binding.fields_map,
+            indexes=binding.indexes,
+            constraints=binding.constraints,
+            primary_key_without_overlaps=binding.primary_key_attribute if binding.pk_without_overlaps else None,
         )
 
     @staticmethod

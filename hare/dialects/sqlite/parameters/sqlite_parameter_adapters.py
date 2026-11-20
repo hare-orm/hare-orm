@@ -99,6 +99,6 @@ class SqliteParameterAdapters:
         Returns:
             ``2024-06-01 08:00:00+00:00`` for an aware value, the naive wall-clock text otherwise.
         """
-        if value.tzinfo is not None:
+        if value.utcoffset() is not None:
             value = value.astimezone(datetime.UTC)
         return value.isoformat(" ")

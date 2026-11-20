@@ -39,11 +39,7 @@ class PostgresqlMigrationSafetyRules(MigrationSafetyRules):
         self, client: DatabaseClient, table_name: str, schema: str | None, at_most: int
     ) -> int | None:
         literals = self.dialect.literals
-        qualified_table = (
-            f"{literals.quote_identifier(schema)}.{literals.quote_identifier(table_name)}"
-            if schema
-            else literals.quote_identifier(table_name)
-        )
+        qualified_table = literals.qualify_table_name(table_name, schema)
         rows = await client.execute_dicts(
             POSTGRES_TABLE_ROW_ESTIMATE_SQL.format(table=literals.get_string_literal_sql(qualified_table))
         )

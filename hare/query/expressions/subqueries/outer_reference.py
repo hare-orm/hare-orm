@@ -10,7 +10,6 @@ from hare.exceptions import (
     QueryError,
 )
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
-from hare.fields.relations.fields.one_to_one_field_instance import OneToOneFieldInstance
 from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import AggregatedMultiValuedPaths
 from hare.query.expressions.arithmetic.combinable_expression import CombinableExpression
@@ -77,7 +76,7 @@ class OuterReference(CombinableExpression):
                 "OuterReference() can only be used inside a queryset wrapped in Exists(...), Subquery(...) or "
                 "AsofJoin(on=...)"
             )
-        outer_meta = outer_context.model._meta
+        outer_meta = outer_context.binding
         if (
             "__" in self.field
             and self.field not in outer_context.annotations
@@ -91,7 +90,7 @@ class OuterReference(CombinableExpression):
                 extra_joins.extend(joins)
             # A to-many hop joined into the outer query repeats its rows like any other JOIN.
             if (tracker := AggregatedMultiValuedPaths.get_from(outer_context)) is not None:
-                tracker.record_lookup(outer_context.model, self.field, outer_context.select_related_path_prefix)
+                tracker.record_lookup(outer_context.binding, self.field, outer_context.select_related_path_prefix)
             self._record_outer_reference_terms(term.get_group_by_column_terms())
             return ExpressionResult(term=term, output_field=bound_path.field)
         # A term that always qualifies its column: the reference crosses a query boundary, and the
@@ -103,9 +102,7 @@ class OuterReference(CombinableExpression):
             else self.field
         )
         field_object = outer_meta.fields_map.get(field_name)
-        if field_name not in outer_meta.fields_db_projection and isinstance(
-            field_object, (ForeignKeyFieldInstance, OneToOneFieldInstance)
-        ):
+        if field_name not in outer_meta.fields_db_projection and isinstance(field_object, ForeignKeyFieldInstance):
             # A forward relation's own name means its key column, as F("author") does.
             if len(field_object.source_fields) > 1:
                 raise FieldError(

@@ -92,12 +92,11 @@ class PostgresqlInspectedSchemaObjects:
         return grants, notes
 
     @staticmethod
-    def get_sequence(row: dict[str, Any], owned_by: str | None) -> DatabaseSequence:
+    def get_sequence(row: dict[str, Any]) -> DatabaseSequence:
         """A sequence - each setting PostgreSQL's default for it left out.
 
         Args:
-            row: Its row - start, increment, bounds, cycle and cache.
-            owned_by: The field owning it, None for none.
+            row: The sequence settings and its owning column from the catalog.
 
         Returns:
             The sequence.
@@ -117,7 +116,7 @@ class PostgresqlInspectedSchemaObjects:
             maximum=None if maximum == default_maximum else maximum,
             cycle=bool(row["cycle"]),
             cache=int(row["cache_size"]),
-            owned_by=owned_by,
+            owned_by=row["owner_column"],
         )
 
     @staticmethod
@@ -150,4 +149,4 @@ class PostgresqlInspectedSchemaObjects:
         Returns:
             The arguments.
         """
-        return tuple(argument.strip() for argument in CatalogSql.split_terms(text) if argument.strip())
+        return tuple(argument for raw in CatalogSql.split_terms(text) if (argument := raw.strip()))

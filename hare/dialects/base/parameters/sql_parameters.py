@@ -138,6 +138,24 @@ class SqlParameters:
         """
         return None
 
+    def get_result_literal_cast_type(self, field: Field[Any] | None) -> str | None:
+        """Type a converted selected literal without narrowing inferred expression values.
+
+        Numeric result descriptors describe promoted values, not a physical column's
+        precision or range. A field with a function cast also exposes a representation
+        different from its stored column. Those arguments retain ordinary literal
+        typing; other converted arguments use the dialect's field parameter type.
+        """
+        from hare.query.expressions.numeric.numeric_typing import NumericTyping
+
+        if (
+            field is None
+            or NumericTyping.get_field_type(field) is not None
+            or field.get_function_cast(self.dialect) is not None
+        ):
+            return None
+        return self.get_field_parameter_cast_type(field)
+
     def get_field_parameter_cast_type(self, field: Field[Any]) -> str | None:
         """The SQL type a parameter holding a value of a field's column is cast to where nothing
         around it types the parameter (the operand of ``IS NULL``, a ``VALUES`` row).

@@ -11,11 +11,13 @@ import pytest_asyncio
 
 from hare import fields
 from hare.contrib.test import assert_query_count
+from hare.core.hare_context import HareContext
 from hare.dialects.clickhouse.constants import CLICKHOUSE_DIALECT
 from hare.exceptions import UnSupportedError, ValidationError
 from hare.query.expressions import F
 from hare.query.functions import ArrayItem
 from tests.dialects.clickhouse.models import Measurement, Shipment
+from tests.utils.model_bindings import ModelBindings
 from tests.utils.operations import apply_operations
 
 MOMENT = datetime.datetime(2024, 5, 6, 7, 8, 9, 123456, tzinfo=datetime.UTC)
@@ -65,7 +67,8 @@ async def shipments(clickhouse_db):
 def test_column_types():
     from hare.dialects.clickhouse.constants import CLICKHOUSE_DIALECT
 
-    fields_map = Shipment._meta.fields_map
+    apps = ModelBindings.prepare(Shipment)
+    fields_map = apps.get_binding(Shipment).fields_map
     assert fields_map["tags"].get_column_type(CLICKHOUSE_DIALECT) == "Array(VARCHAR(20))"
     assert fields_map["scores"].get_column_type(CLICKHOUSE_DIALECT) == "Array(Nullable(INT))"
     assert fields_map["grid"].get_column_type(CLICKHOUSE_DIALECT) == "Array(Array(INT))"
@@ -84,10 +87,17 @@ async def test_values_round_trip_written_and_inserted(shipments):
         assert getattr(first, name) == value, name
     rows = await Shipment.objects.order_by("id").values("id", *EXPECTED)
     assert {name: rows[0][name] for name in EXPECTED} == EXPECTED
-    assert rows[1]["tags"] == ["green"]
-    # A NULL container is written as an empty one.
-    assert rows[2]["scores"] == []
-    assert rows[2]["deep"] == []
+    assert [{name: row[name] for name in ("id", *EXPECTED)} for row in rows] == [
+        {"id": 1, **EXPECTED},
+        {
+            "id": 2,
+            **EXPECTED,
+            "tags": ["green"],
+            "prices": {"eur": decimal.Decimal("9.00")},
+            "point": {"lon": 0.0, "lat": -1.0},
+        },
+        {"id": 3, **EXPECTED, "tags": [], "scores": [], "labels": {}, "items": [], "deep": []},
+    ]
 
 
 @pytest.mark.asyncio
@@ -168,11 +178,10 @@ async def test_errors_name_the_path(clickhouse_db):
 async def test_inspectdb_reads_containers_and_drift_finds_none(clickhouse_db):
     from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
     from hare.migrations.drift import detect_drift
-    from hare.migrations.state.model_state import ModelState
     from hare.migrations.state.state import State
     from tests.utils.model_source_generator import ModelSourceGenerator
 
-    connection = Shipment._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Shipment).get_connection()
     table = await DatabaseCatalog.inspect_table(connection, "shipment")
     source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name)
     compile(source, "<generated>", "exec")
@@ -180,8 +189,7 @@ async def test_inspectdb_reads_containers_and_drift_finds_none(clickhouse_db):
     assert "tags = fields.ArrayField(base_field=fields.TextField())" in source
     assert "scores = fields.ArrayField(base_field=fields.IntField(null=True))" in source
     assert "items = fields.NestedField(element_fields={'sku': fields.TextField()" in source
-    state = State()
-    state.models[("models", "Shipment")] = ModelState.make_from_model("models", Shipment)
+    state = State.from_models([Shipment], app_label="models")
     drift = await detect_drift(connection, state, ["models"])
     assert drift.mismatched_columns == []
     assert [
@@ -207,7 +215,7 @@ async def test_a_moment_and_a_decimal_in_one_tuple(clickhouse_db):
     from hare.migrations.operations import CreateModel, DeleteModel
     from hare.migrations.state.state import State
 
-    connection = Shipment._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Shipment).get_connection()
     field = TupleField([DatetimeField(), DecimalField(max_digits=10, decimal_places=2), IntField()])
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()

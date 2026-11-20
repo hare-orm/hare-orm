@@ -72,6 +72,14 @@ class Term(Node):
         renamed.__dict__.pop("_hash_cache", None)
         return renamed
 
+    def without_alias(self) -> Self:
+        """Keep an unnamed term's identity, or copy a named term without its alias."""
+        if self.alias is None:
+            return self
+        term = copy(self)
+        term.alias = None
+        return term
+
     @property
     def tables_(self) -> set[Table]:
         from hare.sql import Table

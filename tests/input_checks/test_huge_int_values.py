@@ -4,6 +4,7 @@ binding (Value(), a function's argument, F() + int on PostgreSQL and ClickHouse)
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.exceptions import OperationalError, QueryError, ValidationError
 from hare.query.expressions import F, Value
 from hare.query.functions import Left, Round
@@ -32,7 +33,7 @@ async def test_a_count_or_option_too_long_to_show_is_refused_with_its_message(db
 @pytest.mark.asyncio
 async def test_a_bound_int_too_long_to_write_is_refused(db):
     await testmodels.IntFields.objects.create(intnum=1)
-    dialect_name = testmodels.IntFields._meta.connection.dialect.name
+    dialect_name = HareContext.require_current().apps.get_queryset(testmodels.IntFields).get_connection().dialect.name
     # SQLite refuses any int past 64 bits itself.
     error_type = OperationalError if dialect_name == "sqlite" else ValidationError
     for annotation in (Value(HUGE), Left(Value("abc"), HUGE), F("intnum") + HUGE):

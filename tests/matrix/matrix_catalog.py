@@ -97,15 +97,19 @@ class MatrixCatalog:
             matrix.update({axis: cls.get(path)[-1:] for axis, path in profile.get("newest_axes", {}).items()})
             if drivers := profile.get("drivers"):
                 combinations = [dict(zip(matrix, values, strict=True)) for values in product(*matrix.values())]
+                driver_options = (
+                    [
+                        (driver, cls.get_latest_python("all", cls.get("databases_by_driver")[driver]))
+                        for driver in cls.get(drivers)
+                    ]
+                    if combinations
+                    else []
+                )
                 matrix = {
                     "include": [
-                        {
-                            **combination,
-                            "driver": driver,
-                            "python": cls.get_latest_python("all", cls.get("databases_by_driver")[driver]),
-                        }
+                        {**combination, "driver": driver, "python": python}
                         for combination in combinations
-                        for driver in cls.get(drivers)
+                        for driver, python in driver_options
                     ]
                 }
                 matrix["include"].extend(profile.get("matrix", {}).get("include", ()))

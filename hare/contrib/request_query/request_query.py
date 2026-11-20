@@ -17,6 +17,7 @@ from hare.contrib.request_query.api_getter.api_source import ApiSource
 from hare.contrib.request_query.api_getter.api_value_mapping import ApiValueMapping
 from hare.contrib.request_query.api_getter.enums import ApiGetterTrigger
 from hare.contrib.request_query.constants import (
+    DESCENDING_PREFIX,
     GENERATION_BUCKET_KEY,
     INVALID_VALUE_ERROR_TYPE,
     LOOKUP_SEPARATOR,
@@ -70,9 +71,11 @@ if TYPE_CHECKING:
     from hare.contrib.request_query.results.cursor_page import CursorPage
     from hare.contrib.request_query.results.page import Page
     from hare.contrib.request_query.results.scroll_page import ScrollPage
+    from hare.core.apps import Apps
     from hare.core.apps.declarations import ModelReference
     from hare.dialects.base.dialect import Dialect
     from hare.fields.relations.swappable_model_reference import SwappableModelReference
+    from hare.models.model_binding import ModelBinding
     from hare.query.lookup_info.ordering_info import OrderingInfo
     from hare.query.queryset.single_rows.get_exception_argument import GetExceptionArgument
 
@@ -264,13 +267,30 @@ class RequestQuery[ModelType: Model](BaseModel):
         return names
 
     @classmethod
-    def get_cache_bucket(cls) -> CacheBucket[Any]:
+    def get_cache_bucket(cls, *, apps: Apps | None = None) -> CacheBucket[Any]:
         """The bounded declaration bucket attached to this request query class.
 
         Returns:
             The bucket.
         """
-        return RequestQueryRegistry.declarations.get_bucket(cls)
+        from hare.core.hare_context import HareContext
+
+        source = cls.get_meta_option("queryset")
+        if source is None or source._binding is not None:
+            # The declaration already selects its graph and origin. Its cache follows the class,
+            # so an application cannot retain a dynamic class through its completed schema.
+            return RequestQueryRegistry.declarations.get_bucket(cls)
+        registry = HareContext.require_current().apps if apps is None else apps
+        if registry is None:
+            raise ConfigurationError("A request-query template needs an initialized model registry")
+        binding = registry.get_binding(source.model)
+        holder = registry._preparation if registry._preparation is not None else registry
+        buckets = RequestQueryRegistry.declarations.get_bucket(holder)
+        key = (cls, binding)
+        bucket = buckets.get(key)
+        if bucket is None:
+            bucket = buckets[key] = RequestQueryRegistry.declarations.new_shared_bucket()
+        return bucket
 
     @classmethod
     def get_meta_option(cls, name: str) -> Any:
@@ -326,7 +346,7 @@ class RequestQuery[ModelType: Model](BaseModel):
         )
 
     @classmethod
-    def prepare_parameters(cls) -> type[Self]:
+    def prepare_parameters(cls, *, apps: Apps | None = None) -> type[Self]:
         """Return the completed Pydantic class for this declaration.
 
         The source class retains only its declared fields and option parameters.
@@ -337,34 +357,36 @@ class RequestQuery[ModelType: Model](BaseModel):
         if cls.is_parameter_schema:
             return cls
         # Read without the lock (one read, atomic under the GIL hare runs with); it guards the build.
-        generation = cls.get_cache_bucket().get(GENERATION_BUCKET_KEY)
-        if generation is not None:
+        generation = cls.get_cache_bucket(apps=apps).get(GENERATION_BUCKET_KEY)
+        if generation is not None and generation.revision == RequestQueryRegistry.revision:
             return generation.schema
         with RequestQueryRegistry.lock:
-            bucket = cls.get_cache_bucket()
+            bucket = cls.get_cache_bucket(apps=apps)
             generation = bucket.get(GENERATION_BUCKET_KEY)
+            if generation is not None and generation.revision != RequestQueryRegistry.revision:
+                generation = None
             while generation is None:
                 revision = RequestQueryRegistry.revision
                 try:
-                    candidate = RequestQueryGenerationBuilder.build(cls)
+                    candidate = RequestQueryGenerationBuilder.build(cls, apps=apps)
                 except BaseException:
                     RequestQueryRegistry.forget_parameters(cls)
                     raise
                 if revision != RequestQueryRegistry.revision:
                     continue
-                generation = bucket[GENERATION_BUCKET_KEY] = candidate
+                generation = cls.get_cache_bucket(apps=apps)[GENERATION_BUCKET_KEY] = candidate
             return generation.schema
 
     @classmethod
-    def forget_model(cls, model: type[Model]) -> None:
+    def forget_model(cls, binding: ModelBinding) -> None:
         """Forgets the declaration and the prepared parameters of every request query class that
         read ``model`` - one on it, or whose filters, search, orderings, fields or include cross
         it. The next use builds them again from the model as it is now.
 
         Args:
-            model: The model that changed.
+            binding: The binding whose request query declarations must be discarded.
         """
-        RequestQueryRegistry.forget_model(model)
+        RequestQueryRegistry.forget_model(binding._model)
 
     @classmethod
     def forget_all(cls) -> None:
@@ -380,7 +402,7 @@ class RequestQuery[ModelType: Model](BaseModel):
         """
         if cls.parameter_generation is not None:
             return cls.parameter_generation.options
-        bucket = cls.get_cache_bucket()
+        bucket = RequestQueryRegistry.declarations.get_bucket(cls)
         options: tuple[RequestOption, ...] | None = bucket.get(REQUEST_OPTIONS_BUCKET_KEY)
         if options is None:
             options = bucket[REQUEST_OPTIONS_BUCKET_KEY] = tuple(
@@ -391,7 +413,7 @@ class RequestQuery[ModelType: Model](BaseModel):
         return options
 
     @classmethod
-    def get_declaration(cls) -> RequestQueryDeclaration:
+    def get_declaration(cls, *, apps: Apps | None = None) -> RequestQueryDeclaration:
         """The class's checked declaration, built the first time it is asked for.
 
         Returns:
@@ -399,15 +421,14 @@ class RequestQuery[ModelType: Model](BaseModel):
 
         Raises:
             ConfigurationError: The class is a base without a queryset, declares a filter, search
-                or ordering the model doesn't have or the class's dialects don't run, or its
-                queryset's model was unregistered.
+                or ordering the selected graph does not have or its dialects do not run. An
+                unbound template also requires its model to be registered in the selected context.
         """
-        schema = cls.prepare_parameters()
+        schema = cls.prepare_parameters(apps=apps)
         generation = schema.parameter_generation
         if generation is None or generation.declaration is None:
             raise ConfigurationError(f"{cls.__qualname__}.Meta.queryset is required")
         declaration = generation.declaration
-        RequestQueryRegistry.check_model_registered(cls, declaration.queryset.model)
         return declaration
 
     @overload
@@ -416,6 +437,7 @@ class RequestQuery[ModelType: Model](BaseModel):
         cls,
         model: type[FactoryModel],
         *,
+        apps: Apps | None = None,
         name: str | None = None,
         queryset: QuerySet[FactoryModel] | None = None,
         filters: Iterable[FilterField] | None = Meta.filters,
@@ -436,6 +458,7 @@ class RequestQuery[ModelType: Model](BaseModel):
         cls,
         model: str | SwappableModelReference,
         *,
+        apps: Apps | None = None,
         name: str | None = None,
         queryset: QuerySet[Any] | None = None,
         filters: Iterable[FilterField] | None = Meta.filters,
@@ -455,6 +478,7 @@ class RequestQuery[ModelType: Model](BaseModel):
         cls,
         model: ModelReference,
         *,
+        apps: Apps | None = None,
         name: str | None = None,
         queryset: QuerySet[Any] | None = None,
         filters: Iterable[FilterField] | None = Meta.filters,
@@ -484,6 +508,7 @@ class RequestQuery[ModelType: Model](BaseModel):
         Args:
             model: The model - bound, so its filters can be checked: its class, its ``"app.Model"`` label
                 or a ``swappable()`` setting, looked up in the current context.
+            apps: The model registry used to read the model's binding.
             name: The class's name, ``<Model>RequestQuery`` by default.
             queryset: The rows the query starts from - ``model.objects`` by default.
             filters: ``Meta.filters``.
@@ -507,6 +532,7 @@ class RequestQuery[ModelType: Model](BaseModel):
         return RequestQueryFactory.for_model(
             cls,
             model,
+            apps=apps,
             name=name,
             queryset=queryset,
             filters=filters,
@@ -522,11 +548,14 @@ class RequestQuery[ModelType: Model](BaseModel):
         )
 
     @classmethod
-    def describe_parameters(cls) -> tuple[ParameterDescription, ...]:
+    def describe_parameters(cls, *, apps: Apps | None = None) -> tuple[ParameterDescription, ...]:
         """What each parameter of the class is - for building a UI over it: a filter's key, path,
         lookup, value and relation, the bound it pairs with, the choices of an enum and of an
         option. Needs the models bound, not the connections, as ``get_declaration()``; a class
         forgotten with its model (a live model registered again) describes the model as it is now.
+
+        Args:
+            apps: The explicit offline registry; the active application's registry when omitted.
 
         Returns:
             One description per parameter, in the parameters' order.
@@ -534,10 +563,10 @@ class RequestQuery[ModelType: Model](BaseModel):
         Raises:
             ConfigurationError: See ``get_declaration()``.
         """
-        return ParameterDescriber(cls.prepare_parameters()).describe()
+        return ParameterDescriber(cls.prepare_parameters(apps=apps)).describe()
 
     @classmethod
-    def check_declaration(cls) -> None:
+    def check_declaration(cls, *, apps: Apps | None = None) -> None:
         """Builds and checks the class's declaration afresh - ``check_declarations()`` for one
         class.
 
@@ -545,10 +574,10 @@ class RequestQuery[ModelType: Model](BaseModel):
             ConfigurationError: See ``get_declaration()``.
         """
         RequestQueryRegistry.forget_parameters(cls)
-        cls.get_declaration()
+        cls.get_declaration(apps=apps)
 
     @classmethod
-    def check_declarations(cls) -> None:
+    def check_declarations(cls, *, apps: Apps | None = None) -> None:
         """Builds and checks the declaration of every request query class below this one whose
         queryset's model is registered in the current Hare context - an application calls it once
         its models are set up, so a wrong declaration fails at startup, not on the first request.
@@ -558,7 +587,7 @@ class RequestQuery[ModelType: Model](BaseModel):
             ConfigurationError: A declaration is wrong - every wrong one is listed - or no Hare
                 context is active.
         """
-        apps = HareContext.require_current().apps
+        apps = HareContext.require_current().apps if apps is None else apps
         registered_models = set(apps.get_models_iterable()) if apps is not None else set()
         errors = []
         for request_query_class in cls.get_concrete_subclasses():
@@ -566,7 +595,7 @@ class RequestQuery[ModelType: Model](BaseModel):
             if isinstance(queryset, QuerySet) and queryset.model not in registered_models:
                 continue
             try:
-                request_query_class.check_declaration()
+                request_query_class.check_declaration(apps=apps)
             except ConfigurationError as error:
                 errors.append(str(error))
         if errors:
@@ -867,7 +896,8 @@ class RequestQuery[ModelType: Model](BaseModel):
         Returns:
             The condition, None without a search or a search text.
         """
-        return RequestQueryBuilding.get_search_condition(self)
+        search = self.get_declaration().search
+        return None if search is None else search.get_condition(RequestQueryParameters.get_parameter_values(self))
 
     def crosses_to_many(self, queryset: QuerySet[Any], condition: Q) -> bool:
         """Whether a condition joins a relation to many rows - the query can then return a row more
@@ -884,7 +914,10 @@ class RequestQuery[ModelType: Model](BaseModel):
         Raises:
             FieldError: A filter key names no field, relation or annotation.
         """
-        return RequestQueryBuilding.crosses_to_many(self, queryset, condition)
+        declaration = self.get_declaration()
+        return any(declaration.get_lookup_info(queryset, key).crosses_to_many for key in condition.filters) or any(
+            self.crosses_to_many(queryset, child) for child in condition.children
+        )
 
     async def build_queryset(
         self,
@@ -930,7 +963,9 @@ class RequestQuery[ModelType: Model](BaseModel):
         Returns:
             True when the filter compares those values - a filter method never is.
         """
-        return RequestQueryBuilding.is_skipped(filter_declaration, skipped_target)
+        if skipped_target is None or filter_declaration.lookup_info is None:
+            return False
+        return ValueTarget.of(filter_declaration.lookup_info) == skipped_target
 
     async def get_filtered_queryset(self) -> QuerySet[ModelType]:
         """The rows the request asks for, each once, not ordered - for what the methods below don't
@@ -965,7 +1000,14 @@ class RequestQuery[ModelType: Model](BaseModel):
         Returns:
             The name.
         """
-        return RequestQueryBuilding.get_ordering_name(item)
+        if not isinstance(item, Ordering):
+            return item.removeprefix(DESCENDING_PREFIX)
+        if not isinstance(item.target, str):
+            raise QueryError(
+                f"A request query orders by names - {item!r} orders by an expression; annotate it and order "
+                "by the annotation's name"
+            )
+        return item.target
 
     def get_ordering_info(self, queryset: QuerySet[Any], item: OrderingItem) -> OrderingInfo:
         """The ORM's description of one ordering item, from the class's declaration - read once
@@ -979,7 +1021,7 @@ class RequestQuery[ModelType: Model](BaseModel):
             The description: the names the query orders by (a relation's key column, ``pk``'s key
             fields), the fields and the relations crossed.
         """
-        return RequestQueryBuilding.get_ordering_info(self, queryset, item)
+        return self.get_declaration().get_ordering_info(queryset, self.get_ordering_name(item))
 
     def apply_selection(
         self, queryset: QuerySet[ModelType], ordering: Iterable[OrderingItem] = ()
@@ -1006,7 +1048,8 @@ class RequestQuery[ModelType: Model](BaseModel):
         Returns:
             The queryset.
         """
-        return RequestQueryBuilding.get_ordered_queryset(self, queryset)
+        ordering = self.get_ordering(queryset)
+        return self.apply_selection(queryset.order_by(*ordering), ordering)
 
     @staticmethod
     @contextmanager

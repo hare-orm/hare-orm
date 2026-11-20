@@ -14,6 +14,7 @@ from hare.fields import CASCADE, SET_DEFAULT, SET_NULL
 from hare.fields.relations.fields import GenericForeignKeyFieldInstance
 from hare.models import Model, swappable
 from tests.fields.relations.models_generic_fk import Photo, Post
+from tests.utils.model_bindings import ModelBindings
 
 
 def build_model(name: str, **attributes: Any) -> type[Model]:
@@ -65,14 +66,14 @@ def test_the_model_gets_the_branches_the_check_and_a_descriptor():
     model = build_model(
         "Declared", target=fields.GenericForeignKeyField({"post": Post, "photo": "models.Photo"}, null=True)
     )
-    meta = model._meta
-    assert list(meta.fields_map) == ["id", "post", "photo"]
+    meta = ModelBindings.prepare(model, Post, Photo).get_binding(model)
+    assert list(model._declaration.fields_map) == ["id", "post", "photo"]
     assert isinstance(model.target, GenericForeignKeyFieldInstance)
-    assert model.target.get_label() == "Declared.target"
+    assert meta.generic_foreign_key_fields["target"].get_label() == "Declared.target"
     [check] = [constraint for constraint in meta.constraints if constraint.name == "target_exclusive_arc"]
     assert check.check == ExclusiveArcCondition(("post", "photo"), allow_none=True)
     assert meta.fields_map["post"].index and meta.fields_map["post"].null
-    assert meta.fields_map["post"].generic_relation is model.target
+    assert meta.fields_map["post"].generic_relation is meta.generic_foreign_key_fields["target"]
     assert model.target.deconstruct()[2] == {"null": True}
 
 
@@ -87,21 +88,22 @@ def test_an_abstract_base_hands_the_field_to_every_concrete_model():
             "Meta": type("Meta", (), {"abstract": True}),
         },
     )
-    assert "post" not in base._meta.fields_map
+    assert "post" not in base._declaration.fields_map
     first = type("FirstConcrete", (base,), {"__module__": __name__, "id": fields.IntField(primary_key=True)})
     second = type("SecondConcrete", (base,), {"__module__": __name__, "id": fields.IntField(primary_key=True)})
-    assert {"post", "photo"} <= set(first._meta.fields_map)
+    assert {"post", "photo"} <= set(first._declaration.fields_map)
     assert first.target is not second.target
-    assert first.target.model is first and second.target.model is second
-    assert first._meta.fields_map["post"] is not second._meta.fields_map["post"]
+    assert first._declaration.generic_foreign_key_fields["target"].model is first
+    assert second._declaration.generic_foreign_key_fields["target"].model is second
+    assert first._declaration.fields_map["post"] is not second._declaration.fields_map["post"]
 
 
 @pytest.mark.database_independent
 def test_a_swappable_dict_of_targets_waits_for_the_configuration():
     model = build_model("SwappableTargets", target=fields.GenericForeignKeyField(swappable("SOME_TARGETS")))
-    assert "target" in model._meta.generic_foreign_key_fields
+    assert "target" in model._declaration.generic_foreign_key_fields
     assert model.target.branch_names == ()
-    assert [name for name in model._meta.fields_map] == ["id"]
+    assert [name for name in model._declaration.fields_map] == ["id"]
 
 
 @pytest.mark.asyncio

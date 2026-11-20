@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from hare.contrib import test
+from hare.core.hare_context import HareContext
 from hare.models.tenancy.tenancy import Tenancy
 from hare.query.expressions import F, OuterReference, Subquery
 from hare.query.functions import Count, Max
@@ -56,7 +57,7 @@ async def _assert_alternating_owners(
 
 
 def _nulls_sort_first(model: Any) -> bool:
-    return model._meta.connection.dialect.name != "postgresql"
+    return HareContext.require_current().apps.get_queryset(model).get_connection().dialect.name != "postgresql"
 
 
 @pytest.mark.asyncio

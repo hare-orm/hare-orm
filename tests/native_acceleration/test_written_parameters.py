@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.dialects.postgresql.drivers.rust_pg.client.rust_pg_client import RustPgClient
 from hare.instrumentation import Observers, QueryExecuted
 from hare.query.statements.write.bulk.bulk_write_batches import BulkWriteBatches
@@ -67,7 +68,10 @@ async def test_written_parameter_rows_run_once_per_instance(db):
     skip_unless_native_postgresql(IntFields)
     db_client = IntFields.get_connection()
     rows = BulkWriteBatches.serialize_instances(
-        IntFields, db_client.dialect.types, [IntFields(intnum=1), IntFields(intnum=2)], ["intnum"]
+        HareContext.require_current().apps.get_binding(IntFields),
+        db_client.dialect.types,
+        [IntFields(intnum=1), IntFields(intnum=2)],
+        ["intnum"],
     )
     assert len(rows) == 2
     await db_client.execute_many('INSERT INTO "intfields" ("intnum") VALUES ($1)', rows)

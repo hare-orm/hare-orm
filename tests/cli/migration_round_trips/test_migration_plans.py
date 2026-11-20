@@ -10,6 +10,171 @@ import re
 import pytest
 
 from hare.migrations import operations as ops
+from tests.utils.database_under_test import DatabaseUnderTest
+
+
+@pytest.mark.skipif(DatabaseUnderTest.get_dialect().name != "postgresql", reason="PostgreSQL view dependencies")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changes_view", (False, True), ids=("same-view", "new-view-column"))
+async def test_shared_view_is_rebuilt_in_the_migration_that_changes_its_source(project_factory, changes_view):
+    project = await project_factory("billing", "counters", "reports")
+    invoice = """
+    class Invoice(Model):
+        id = fields.IntField(primary_key=True)
+        amount = fields.{field}()
+        class Meta:
+            schema = "billing"
+    """
+    adjustment = """
+    class Adjustment(Model):
+        id = fields.IntField(primary_key=True)
+        old_amount = fields.IntField()
+{added_field}        class Meta:
+            schema = "counters"
+    """
+    totals = """
+    from hare.ddl import View
+    class Report(Model):
+        id = fields.IntField(primary_key=True)
+        class Meta:
+            schema = "reports"
+            views = [View(
+                "totals",
+                RawSQLTerm("SELECT i.amount + a.{column} AS total FROM billing.invoice i "
+                           "JOIN counters.adjustment a USING (id)"),
+                read_columns=(("billing.invoice", "amount"), ("counters.adjustment", "{column}")),
+            )]
+    """
+    project.write_models(invoice.format(field="IntField"), "billing")
+    project.write_models(adjustment.format(added_field=""), "counters")
+    await project.cli_ok("makemigrations", "billing", "counters")
+    await project.cli_ok("migrate")
+    project.write_models(totals.format(column="old_amount"), "reports")
+    await project.cli_ok("makemigrations", "reports")
+    await project.cli_ok("migrate")
+    await project.query("INSERT INTO billing.invoice(id, amount) VALUES (1, 11)")
+    await project.query("INSERT INTO counters.adjustment(id, old_amount) VALUES (1, 23)")
+    query = "SELECT total::bigint AS total, pg_typeof(total)::text AS data_type FROM reports.totals"
+    assert await project.query(query) == [{"total": 34, "data_type": "integer"}]
+
+    project.write_models(invoice.format(field="BigIntField"), "billing")
+    if changes_view:
+        added_field = "        new_amount = fields.IntField(db_default=17)\n"
+        project.write_models(adjustment.format(added_field=added_field), "counters")
+        project.write_models(totals.format(column="new_amount"), "reports")
+        await project.cli_ok("makemigrations")
+    else:
+        await project.cli_ok("makemigrations", "billing")
+
+    generated = project.get_latest_migration("billing")
+    assert ("reports", "0001_initial") in generated.dependencies
+    if changes_view:
+        assert ("counters", "0001_initial") in generated.dependencies
+    assert generated.atomic
+    await project.cli_ok("migrate")
+    assert await project.query(query) == [{"total": 28 if changes_view else 34, "data_type": "bigint"}]
+    await project.cli_ok("makemigrations", "--check")
+    await project.cli_ok("migrate", "billing", "0001_initial")
+    assert await project.query(query) == [{"total": 34, "data_type": "integer"}]
+    assert await project.query("SELECT app, name FROM hare_migrations ORDER BY app, name") == [
+        {"app": "billing", "name": "0001_initial"},
+        {"app": "counters", "name": "0001_initial"},
+        {"app": "reports", "name": "0001_initial"},
+    ]
+
+
+@pytest.mark.skipif(DatabaseUnderTest.get_dialect().name != "postgresql", reason="PostgreSQL view dependencies")
+@pytest.mark.asyncio
+async def test_view_owner_changes_in_one_migration_with_the_same_sql(project_factory):
+    project = await project_factory("archive", "reports")
+    model = """
+    from hare.ddl import View
+    class {name}(Model):
+        id = fields.IntField(primary_key=True)
+        class Meta:
+            schema = "reports"
+{views}
+    """
+    totals = '            views = [View("totals", RawSQLTerm("SELECT 7 AS total"))]'
+    project.write_models(model.format(name="Report", views=totals), "reports")
+    await project.cli_ok("makemigrations", "reports")
+    await project.cli_ok("migrate")
+    project.write_models(model.format(name="Archive", views=""), "archive")
+    await project.cli_ok("makemigrations", "archive")
+    await project.cli_ok("migrate")
+
+    project.write_models(model.format(name="Report", views=""), "reports")
+    project.write_models(model.format(name="Archive", views=totals), "archive")
+    await project.cli_ok("makemigrations")
+
+    migration = project.get_latest_migration("archive")
+    remove, add = migration.operations
+    assert isinstance(remove, ops.AppOperation) and remove.app_label == "reports"
+    assert isinstance(remove.operation, ops.RemoveView) and remove.operation.model_name == "Report"
+    assert isinstance(add, ops.AddView) and add.model_name == "Archive"
+    await project.cli_ok("migrate")
+    await project.cli_ok("makemigrations", "--check")
+    assert await project.query("SELECT total FROM reports.totals") == [{"total": 7}]
+
+
+@pytest.mark.skipif(DatabaseUnderTest.get_dialect().name != "postgresql", reason="PostgreSQL view dependencies")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changes_source", [False, True], ids=["rename", "rename-and-alter"])
+async def test_renaming_a_view_updates_its_declared_reader_in_another_app(project_factory, changes_source):
+    project = await project_factory("billing", "reports", "dashboard")
+    invoice = """
+    class Invoice(Model):
+        id = fields.IntField(primary_key=True)
+        amount = fields.{field}()
+        class Meta:
+            schema = "billing"
+    """
+    totals = """
+    from hare.ddl import View
+    class Report(Model):
+        id = fields.IntField(primary_key=True)
+        class Meta:
+            schema = "reports"
+            views = [View("{name}", RawSQLTerm("SELECT amount FROM billing.invoice"),
+                          read_columns=(("billing.invoice", "amount"),))]
+    """
+    summary = """
+    from hare.ddl import View
+    class Tile(Model):
+        id = fields.IntField(primary_key=True)
+        class Meta:
+            schema = "dashboard"
+            views = [View("summary", RawSQLTerm("SELECT amount + 1 AS total FROM reports.{name}"),
+                          read_columns=(("reports.{name}", "amount"),))]
+    """
+    for app, declaration in (
+        ("billing", invoice.format(field="IntField")),
+        ("reports", totals.format(name="totals")),
+        ("dashboard", summary.format(name="totals")),
+    ):
+        project.write_models(declaration, app)
+        await project.cli_ok("makemigrations", app)
+        await project.cli_ok("migrate")
+    await project.query("INSERT INTO billing.invoice(id, amount) VALUES (1, 33)")
+    query = "SELECT total::bigint AS total, pg_typeof(total)::text AS data_type FROM dashboard.summary"
+    assert await project.query(query) == [{"total": 34, "data_type": "integer"}]
+
+    original = await project.query("SELECT 'reports.totals'::regclass::oid::bigint AS oid")
+    if changes_source:
+        project.write_models(invoice.format(field="BigIntField"), "billing")
+    project.write_models(totals.format(name="totals_next"), "reports")
+    project.write_models(summary.format(name="totals_next"), "dashboard")
+    await project.cli_ok("makemigrations")
+    await project.cli_ok("migrate")
+    await project.cli_ok("makemigrations", "--check")
+    assert await project.query(query) == [{"total": 34, "data_type": "bigint" if changes_source else "integer"}]
+    assert await project.query("SELECT to_regclass('reports.totals')::text AS name") == [{"name": None}]
+    if not changes_source:
+        assert await project.query("SELECT 'reports.totals_next'::regclass::oid::bigint AS oid") == original
+
+    await project.cli_ok("migrate", "billing" if changes_source else "dashboard", "0001_initial")
+    assert await project.query(query) == [{"total": 34, "data_type": "integer"}]
+    assert await project.query("SELECT to_regclass('reports.totals_next')::text AS name") == [{"name": None}]
 
 
 @pytest.mark.asyncio
@@ -159,11 +324,11 @@ async def test_an_app_unapplied_after_the_app_depending_on_it_runs_its_code_with
 
 
         async def add_authors(apps, schema_editor):
-            await apps.get_model("a.Author").objects.create(id=1)
+            await apps.get_queryset("a.Author", using=schema_editor.client).create(id=1)
 
 
         async def remove_authors(apps, schema_editor):
-            await apps.get_model("a.Author").objects.all().delete()
+            await apps.get_queryset("a.Author", using=schema_editor.client).all().delete()
 
 
         class Migration(migrations.Migration):

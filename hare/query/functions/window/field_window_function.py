@@ -17,6 +17,7 @@ from hare.sql.terms.functions.analytic_function import AnalyticFunction
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
+    from hare.dialects.base.dialect import Dialect
     from hare.fields.field import Field
     from hare.query.expressions import ExpressionContext
     from hare.query.expressions.expression_result import TableCriterionTuple
@@ -106,7 +107,7 @@ class FieldWindowFunction(WindowFunction):
         self, expression_context: ExpressionContext
     ) -> tuple[AnalyticFunction, list[TableCriterionTuple], Field[Any] | None]:
         field_result, value_field = self._get_field_result(expression_context)
-        self._raise_if_value_type_refused(value_field)
+        self._check_argument_field(value_field, expression_context.dialect)
         output_field = self._coerce_output_field(value_field, expression_context)
         term = field_result.term
         if isinstance(term, ValueWrapper):
@@ -125,21 +126,23 @@ class FieldWindowFunction(WindowFunction):
             joins = ExpressionResult.dedup_joins(joins, condition_modifier.joins)
         return analytic_term, joins, output_field
 
-    def _raise_if_value_type_refused(self, value_field: Field[Any] | None) -> None:
-        """Refuses a value of a type the aggregate this function computes doesn't take
-        (``Function.refused_argument_value_types``).
+    def _check_argument_field(self, value_field: Field[Any] | None, dialect: Dialect) -> None:
+        """Apply the aggregate's input type and ordering restrictions to its window counterpart.
 
         Args:
             value_field: The aggregated field.
+            dialect: The database compiling this expression.
 
         Raises:
             FieldError: The value is of such a type.
+            UnSupportedError: The database cannot compare this field's values with MIN/MAX.
         """
         if self.aggregate_class is None or value_field is None:
             return
         value_type = OutputFieldCompatibility.get_value_type(ResultBranch(None, value_field, is_literal=False))
         if value_type in self.aggregate_class.refused_argument_value_types:
             raise FieldError(f"{type(self).__name__}() doesn't take {value_type} - convert it with Cast()")
+        self.aggregate_class.check_field_orderability(dialect, value_field)
 
     def _coerce_output_field(
         self, field_object: Field[Any] | None, expression_context: ExpressionContext
@@ -148,6 +151,7 @@ class FieldWindowFunction(WindowFunction):
 
         Args:
             field_object: The aggregated/read field.
+            expression_context: SQL context for the expression, including its query, binding and connection.
 
         Returns:
             The field itself - the result has the same type as the values it is computed from.

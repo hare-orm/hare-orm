@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Self
 
 from hare import fields
@@ -152,8 +152,11 @@ class OutboxEvent(Model):
                 wakeup can't signal on the connection's database (``ListenNotifyWakeup`` without
                 listen/notify) - refused before the event is written.
         """
+        from hare.core.hare_context import HareContext
+
+        binding = HareContext.require_current().get_model_binding(cls)
         return await OutboxEnqueue.enqueue(
-            cls,
+            binding,
             topic,
             payload,
             using=using,
@@ -191,7 +194,10 @@ class OutboxEvent(Model):
             IntegrityError: An idempotency key conflicts with an event this call can't see.
             ConfigurationError: As ``enqueue()``.
         """
-        return await OutboxEnqueue.enqueue_many(cls, messages, using=using, wakeup=wakeup)
+        from hare.core.hare_context import HareContext
+
+        binding = HareContext.require_current().get_model_binding(cls)
+        return await OutboxEnqueue.enqueue_many(binding, messages, using=using, wakeup=wakeup)
 
     @classmethod
     def get_enqueue_run_key(cls, message: OutboxMessage) -> tuple[bool, Any]:
@@ -204,60 +210,10 @@ class OutboxEvent(Model):
         Returns:
             The key.
         """
-        return OutboxEnqueue.get_enqueue_run_key(cls, message)
+        from hare.core.hare_context import HareContext
 
-    @classmethod
-    async def write_enqueue_run(
-        cls, messages: Sequence[OutboxMessage], has_idempotency_key: bool, connection: DatabaseClient
-    ) -> tuple[list[Self], set[str]]:
-        """Writes one run of ``enqueue_many()`` - one ``INSERT``, under the tenant its messages name when
-        no tenant scope is active.
-
-        Args:
-            messages: The messages of the run.
-            has_idempotency_key: Whether they have idempotency keys.
-            connection: The connection, in the call's transaction.
-
-        Returns:
-            The events of the messages, in their order, and the topics of the ones inserted.
-        """
-        return await OutboxEnqueue.write_enqueue_run(cls, messages, has_idempotency_key, connection)
-
-    @classmethod
-    async def write_enqueue_run_in_scope(
-        cls, messages: Sequence[OutboxMessage], has_idempotency_key: bool, connection: DatabaseClient
-    ) -> tuple[list[Self], set[str]]:
-        """Writes one run of ``enqueue_many()`` in the tenant scope it runs under.
-
-        Args:
-            messages: The messages of the run.
-            has_idempotency_key: Whether they have idempotency keys.
-            connection: The connection, in the call's transaction.
-
-        Returns:
-            The events of the messages, in their order, and the topics of the ones inserted.
-
-        Raises:
-            IntegrityError: An idempotency key is taken by an event not visible to this call.
-        """
-        return await OutboxEnqueue.write_enqueue_run_in_scope(cls, messages, has_idempotency_key, connection)
-
-    @classmethod
-    def get_write_connection(cls, using: str | DatabaseClient | None, method_name: str = "enqueue") -> DatabaseClient:
-        """The connection an event is written on.
-
-        Args:
-            using: The connection asked for, None for the model's.
-            method_name: The method writing - named by the error.
-
-        Returns:
-            The connection.
-
-        Raises:
-            ConfigurationError: ``using`` wasn't given, the model's connection has no open
-                transaction and another connection has one.
-        """
-        return OutboxEnqueue.get_write_connection(cls, using, method_name)
+        binding = HareContext.require_current().get_model_binding(cls)
+        return OutboxEnqueue.get_enqueue_run_key(binding, message)
 
     @classmethod
     def raise_if_wakeup_unsupported(cls, connection: DatabaseClient, wakeup: OutboxWakeup | None = None) -> None:
@@ -363,22 +319,12 @@ class OutboxEvent(Model):
             ConfigurationError: ``Meta.tenant_field`` is set, ``field_values`` names no tenant and
                 no tenant scope is active; or the named tenant conflicts with the active scope.
         """
+        from hare.core.hare_context import HareContext
+
+        binding = HareContext.require_current().get_model_binding(cls)
         return await OutboxIdempotency.insert_or_get_by_idempotency_key(
-            cls, topic, payload, idempotency_key, ordering_key, headers, write_connection, field_values
+            binding, topic, payload, idempotency_key, ordering_key, headers, write_connection, field_values
         )
-
-    @classmethod
-    def get_idempotency_conflict_field_names(cls) -> list[str]:
-        """The unique field set ``idempotency_key`` conflicts on.
-
-        Returns:
-            ``["idempotency_key"]`` for a unique column, otherwise the fields of the first
-            unconditional ``UniqueConstraint`` that includes it.
-
-        Raises:
-            ConfigurationError: No unique constraint covers ``idempotency_key``.
-        """
-        return OutboxIdempotency.get_idempotency_conflict_field_names(cls)
 
     def __repr__(self) -> str:
         return f"<{type(self).__name__} id={self.id} topic={self.topic!r} published_at={self.published_at!r}>"

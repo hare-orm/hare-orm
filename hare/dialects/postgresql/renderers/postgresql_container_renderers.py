@@ -112,4 +112,6 @@ class PostgresqlContainerRenderers:
     def render_literal(term: ContainerLiteral, sql_context: SqlContext) -> str:
         # The type from the field itself - an array annotation's field (ArrayAgg's result, an item of
         # a nested array) is bound to no model.
+        if sql_context.parameterizer is None or not term.value_wrapper.allow_parametrize:
+            return sql_context.dialect.literals.get_field_literal_sql(term.field, term.value)
         return Cast(term.value_wrapper, term.field.get_column_type(sql_context.dialect)).get_sql(sql_context)

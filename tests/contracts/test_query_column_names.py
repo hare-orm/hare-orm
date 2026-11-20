@@ -2,10 +2,13 @@
 
 import pytest
 
+from hare import Model, fields
 from hare.contrib.test import capture_queries
 from hare.exceptions import UnSupportedError
 from hare.query.expressions import F, Window
+from hare.query.functions import Count, Sum
 from hare.query.functions.window import RowNumber
+from hare.sql.identifiers import Identifiers
 from tests.contracts.constants import CONTRACT_APP, CONTRACT_CONNECTION
 from tests.contracts.query_contract_models import QueryContractModels
 
@@ -57,3 +60,36 @@ async def test_query_columns_do_not_collide(contract_database, letter_case, long
             with pytest.raises(UnSupportedError):
                 await write
         assert counter.count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["published_rating_" + "x" * 46, "оценка_" + "я" * 25])
+@pytest.mark.parametrize("annotation", [False, True])
+@pytest.mark.parametrize("composite", [False, True])
+async def test_aggregate_internal_aliases_preserve_long_public_names(contract_database, name, annotation, composite):
+    reserved_name = Identifiers.get_within_limit(f"hare metric {name}")
+
+    class MetricRecord(Model):
+        id = fields.IntField(primary_key=not composite, generated=False)
+        group_id = fields.IntField(default=1)
+        number = fields.IntField()
+        reserved = fields.IntField(source_field=reserved_name, default=0)
+        if composite:
+            pk = fields.CompositePrimaryKey("group_id", "id")
+        if not annotation:
+            locals()[name] = fields.IntField()
+
+    contract_database.register_live_models([MetricRecord], CONTRACT_APP, CONTRACT_CONNECTION)
+    await contract_database.generate_schemas()
+    for number in (1, 2, 3):
+        await MetricRecord.objects.create(id=number, number=number, **({} if annotation else {name: number}))
+    source = MetricRecord.objects.annotate(**{name: F("number")}) if annotation else MetricRecord.objects.all()
+    for query, total, count in (
+        (source, 6, 3),
+        (source.order_by("id").limit(2), 3, 2),
+        (source.values("number", name), 6, 3),
+    ):
+        for _ in range(2):
+            result = await query.aggregate(**{name: Sum(name), "total": Sum("number"), "count": Count("id")})
+            assert result == {name: total, "total": total, "count": count}
+            assert list(result) == [name, "total", "count"]

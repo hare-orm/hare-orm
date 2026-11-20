@@ -22,9 +22,8 @@ class SlugValidator(Validator):
     """
 
     def __init__(self, allow_unicode: bool = False, message: str | None = None) -> None:
-        self.allow_unicode = allow_unicode
-        self.regex = re.compile(UNICODE_SLUG_PATTERN if allow_unicode else SLUG_PATTERN)
-        self.check = NativeModules.rows.ValueCheck.pattern(self.regex, "fullmatch", True)
+        regex = re.compile(UNICODE_SLUG_PATTERN if allow_unicode else SLUG_PATTERN)
+        self.check = NativeModules.rows.ValueCheck.pattern(regex, "fullmatch", True)
         super().__init__(message)
 
     def __call__(self, value: Any) -> None:

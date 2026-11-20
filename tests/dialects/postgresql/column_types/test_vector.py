@@ -125,10 +125,8 @@ async def test_l2_distance_orders_by_nearest(db_vector):
         .order_by("dist")
         .values("id", "dist")
     )
-    assert rows[0]["id"] == near.id
-    assert rows[0]["dist"] == pytest.approx(0.0)
-    assert rows[-1]["id"] == far.id
-    assert rows[-1]["dist"] > rows[0]["dist"]
+    assert [row["id"] for row in rows] == [near.id, far.id]
+    assert [row["dist"] for row in rows] == pytest.approx([0.0, 101**0.5])
 
 
 @requires_features(dialect="postgresql")

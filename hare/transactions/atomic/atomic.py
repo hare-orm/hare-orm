@@ -61,7 +61,9 @@ class Atomic:
             )
         if self._context is not None:
             raise TransactionManagementError("This transaction was already used - create a new one with atomic()")
-        connection = self._get_connection()
+        return await self._enter_transaction(self._get_connection())
+
+    async def _enter_transaction(self, connection: DatabaseClient) -> TransactionClient:
         if not connection.features.supports_transactions:
             raise UnSupportedError(
                 f"{connection.connection_alias!r} is a {connection.dialect} database, which has no transactions"
@@ -88,7 +90,9 @@ class Atomic:
         """
         apps = HareContext.require_current().apps
         if apps is not None:
-            app_default_connections = {model._meta.default_connection for model in apps.get_models_iterable()}
+            app_default_connections = {
+                apps.get_binding(model).default_connection for model in apps.get_models_iterable()
+            }
             if len(app_default_connections) == 1:
                 return next(iter(app_default_connections))
         if DEFAULT_CONNECTION_NAME in connection_handler.db_config:

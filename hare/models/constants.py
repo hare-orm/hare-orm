@@ -75,6 +75,8 @@ INSTANCE_RESTORE_FAILURES_MESSAGE = "Instance restoration failures"
 #: Persistence bookkeeping is restored without invoking model field setters.
 INSTANCE_STATE_ATTRIBUTE_NAMES = frozenset(
     (
+        "_binding",
+        "_context",
         "_saved_in_db",
         "_custom_generated_pk",
         "_connection_alias",
@@ -92,6 +94,6 @@ WRITE_RESTORE_FAILURES_MESSAGE = "Write failed and instance restoration also fai
 
 REFRESH_RESTORE_FAILURES_MESSAGE = "Refresh failed and instance restoration also failed"
 
-#: Bind stored-key codecs only for batches large enough to amortize their preparation,
-#: including container keys whose write/read conversion costs more than registry lookup.
-MIN_STORED_KEY_CODEC_BATCH_SIZE = 8
+UNBOUND_MODEL_MESSAGE = (
+    "{model_name} is not bound yet: call Hare.bind_models() or Hare.init() before describing its filters or orderings"
+)

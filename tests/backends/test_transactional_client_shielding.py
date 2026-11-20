@@ -104,9 +104,7 @@ async def test_shielded_cancellation_calls_on_timeout_when_the_bound_is_hit(monk
         await asyncio.Event().wait()
 
     async def run_it() -> None:
-        await TransactionEnding.run_shielded_from_cancellation(
-            never_finishes(), on_landed=lambda: None, on_timeout=on_timeout
-        )
+        await TransactionEnding.run_shielded_from_cancellation(never_finishes(), on_timeout=on_timeout)
 
     task = asyncio.ensure_future(run_it())
     await started.wait()
@@ -138,9 +136,7 @@ async def test_shielded_cancellation_does_not_call_on_timeout_when_it_lands_in_t
         await released.wait()
 
     async def run_it() -> None:
-        await TransactionEnding.run_shielded_from_cancellation(
-            finishes_once_released(), on_landed=lambda: None, on_timeout=on_timeout
-        )
+        await TransactionEnding.run_shielded_from_cancellation(finishes_once_released(), on_timeout=on_timeout)
 
     task = asyncio.ensure_future(run_it())
     await started.wait()
@@ -239,7 +235,7 @@ async def test_an_error_after_the_cancellation_is_not_logged_as_one_of_a_shielde
         raise RuntimeError("rolled back instead of committed")
 
     async def run_it() -> None:
-        await TransactionEnding.run_shielded_from_cancellation(fails_later(), on_landed=lambda: None)
+        await TransactionEnding.run_shielded_from_cancellation(fails_later())
 
     try:
         task = asyncio.ensure_future(run_it())

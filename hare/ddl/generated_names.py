@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from hashlib import sha256
-from typing import TYPE_CHECKING
 
 from hare.ddl.enums import GeneratedNamePrefix
 from hare.dialects.base.constants import (
@@ -10,9 +9,6 @@ from hare.dialects.base.constants import (
     INDEX_NAME_HASH_LENGTH,
     INDEX_NAME_TABLE_PREFIX_LENGTH,
 )
-
-if TYPE_CHECKING:
-    from hare.models import Model
 
 
 class GeneratedNames:
@@ -37,7 +33,7 @@ class GeneratedNames:
     def get_index_name(
         cls,
         prefix: GeneratedNamePrefix,
-        model: type[Model] | str,
+        table_name: str,
         field_names: Sequence[str],
         name_parts: Sequence[str] = (),
         *,
@@ -47,7 +43,7 @@ class GeneratedNames:
 
         Args:
             prefix: The name's prefix, e.g. ``idx``.
-            model: The model or its table name.
+            table_name: The table name.
             field_names: The indexed columns or rendered expressions.
             expression_keys: The first key is an expression, explicitly identified by its declaration.
             name_parts: What else sets the index apart from another one on the same columns
@@ -56,7 +52,6 @@ class GeneratedNames:
         Returns:
             The name.
         """
-        table_name = model if isinstance(model, str) else model._meta.db_table
         first_field = field_names[0]
         # An expression key holds SQL - it is left out of the readable part, the hash tells
         # expressions apart.

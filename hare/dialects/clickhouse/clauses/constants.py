@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from hare.dialects.base.clauses.constants import JOIN_KEYWORDS
-from hare.sql.enums import JoinType, SetOperation
+from hare.dialects.base.clauses.enums import JoinType
+from hare.sql.enums import SetOperation
 
 #: The statement a bulk load of rows is reported under to the observers - the rows travel in
 #: ClickHouse's binary Native format, in no SQL text.

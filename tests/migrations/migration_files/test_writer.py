@@ -20,6 +20,7 @@ from hare.declarations.declaration_value_serializer import DeclarationValueSeria
 from hare.declarations.import_manager import ImportManager
 from hare.dialects.postgresql.fields import Range
 from hare.exceptions import ConfigurationError
+from hare.migrations.migration import Migration
 from hare.migrations.operations import (
     AddConstraint,
     AddIndex,
@@ -40,10 +41,13 @@ from hare.migrations.operations import (
     RunPython,
     RunSQL,
 )
+from hare.migrations.state.migration_environment import MigrationEnvironment
+from hare.migrations.state.state import State
 from hare.migrations.writer import MigrationWriter
 from hare.models import Model
 from hare.query.expressions import ConditionValue, Exists, F, Q
 from hare.query.queryset import QuerySet
+from tests.utils.project_sources import ProjectSources
 
 pytestmark = pytest.mark.database_independent
 
@@ -70,15 +74,6 @@ def forget_imported_app_package():
         del sys.modules[module_name]
 
 
-def _prepare_migration_package(tmp_path: Path, app_label: str) -> str:
-    package_dir = tmp_path / app_label
-    migrations_dir = package_dir / "migrations"
-    migrations_dir.mkdir(parents=True)
-    (package_dir / "__init__.py").write_text("", encoding="ascii")
-    (migrations_dir / "__init__.py").write_text("", encoding="ascii")
-    return f"{app_label}.migrations"
-
-
 def _write_migration(
     tmp_path: Path,
     monkeypatch,
@@ -86,7 +81,8 @@ def _write_migration(
     operations,
     expected: str,
 ) -> None:
-    module_path = _prepare_migration_package(tmp_path, "app")
+    ProjectSources(tmp_path).prepare_migrations(tmp_path / "app")
+    module_path = "app.migrations"
     monkeypatch.syspath_prepend(str(tmp_path))
 
     writer = MigrationWriter(
@@ -104,7 +100,8 @@ def test_write_uses_lf_line_endings_on_every_platform(tmp_path: Path, monkeypatc
     """MigrationWriter.write() must always emit LF line endings, even on Windows -
     Path.write_text()'s default text-mode newline translation would otherwise silently turn
     every "\\n" in as_string() into "\\r\\n" there."""
-    module_path = _prepare_migration_package(tmp_path, "app")
+    ProjectSources(tmp_path).prepare_migrations(tmp_path / "app")
+    module_path = "app.migrations"
     monkeypatch.syspath_prepend(str(tmp_path))
 
     operations = [
@@ -339,7 +336,8 @@ def test_writer_handles_tuple_indexes_in_options(tmp_path: Path, monkeypatch) ->
             },
         ),
     ]
-    module_path = _prepare_migration_package(tmp_path, "app")
+    ProjectSources(tmp_path).prepare_migrations(tmp_path / "app")
+    module_path = "app.migrations"
     monkeypatch.syspath_prepend(str(tmp_path))
     writer = MigrationWriter(
         "0001_initial",
@@ -443,7 +441,8 @@ def test_writer_renders_composite_target_fk_to_field(tmp_path: Path, monkeypatch
             ]
         """
     )
-    module_path = _prepare_migration_package(tmp_path, "app")
+    ProjectSources(tmp_path).prepare_migrations(tmp_path / "app")
+    module_path = "app.migrations"
     monkeypatch.syspath_prepend(str(tmp_path))
 
     writer = MigrationWriter("0006_composite_fk", "app", operations, migrations_module=module_path)
@@ -460,13 +459,16 @@ def test_writer_renders_composite_target_fk_to_field(tmp_path: Path, monkeypatch
 
 
 def test_writer_excludes_fk_source_field(tmp_path: Path, monkeypatch) -> None:
+    relation = fields.ForeignKeyField("app.Author", related_name="posts")
+    shadow = fields.IntField(source_field="author_id")
+    shadow.reference = relation
     operations = [
         CreateModel(
             name="Post",
             fields=[
                 ("id", fields.IntField(primary_key=True)),
-                ("author", fields.ForeignKeyField("app.Author", related_name="posts")),
-                ("author_id", fields.IntField(source_field="author_id")),
+                ("author", relation),
+                ("author_id", shadow),
             ],
         )
     ]
@@ -489,6 +491,36 @@ def test_writer_excludes_fk_source_field(tmp_path: Path, monkeypatch) -> None:
         """
     )
     _write_migration(tmp_path, monkeypatch, "0005_fk_source", operations, expected)
+
+
+@pytest.mark.parametrize("relation", [fields.ForeignKeyField, fields.OneToOneField])
+@pytest.mark.parametrize("composite", [False, True], ids=["scalar-key", "composite-key"])
+def test_writer_preserves_explicit_fields_beside_composite_relation(relation, composite):
+    child_fields = [
+        ("number", fields.IntField(primary_key=not composite, generated=False)),
+        ("parent", relation("app.Parent", related_name=False)),
+        ("parent_id", fields.IntField()),
+    ]
+    if composite:
+        child_fields.append(("region", fields.IntField()))
+    operations = [
+        CreateModel(
+            "Parent",
+            [
+                ("region", fields.IntField()),
+                ("number", fields.IntField()),
+            ],
+            options={"primary_key_attribute": ("region", "number")},
+        ),
+        CreateModel(
+            "Child", child_fields, options={"primary_key_attribute": ("region", "number")} if composite else None
+        ),
+    ]
+    source = MigrationWriter("0001_initial", "app", operations).as_string()
+    migration = Migration.from_source(source, name="0001_initial", app_label="app")
+    prepared = migration.prepare(State(environment=MigrationEnvironment()))
+    assert "parent_id" in dict(migration.operations[1].fields)
+    assert "parent_id" in prepared.after.models[("app", "Child")].fields
 
 
 def test_writer_serializes_on_delete_enum(tmp_path: Path, monkeypatch) -> None:
@@ -566,7 +598,8 @@ def test_writer_rejects_lambda_default(tmp_path: Path, monkeypatch) -> None:
             field=fields.CharField(max_length=120, default=lambda: "x"),
         )
     ]
-    module_path = _prepare_migration_package(tmp_path, "app")
+    ProjectSources(tmp_path).prepare_migrations(tmp_path / "app")
+    module_path = "app.migrations"
     monkeypatch.syspath_prepend(str(tmp_path))
     writer = MigrationWriter(
         "0004_lambda",
@@ -590,7 +623,8 @@ def test_writer_allows_partial_default(tmp_path: Path, monkeypatch) -> None:
             field=fields.CharField(max_length=120, default=functools.partial(_default_value)),
         )
     ]
-    module_path = _prepare_migration_package(tmp_path, "app")
+    ProjectSources(tmp_path).prepare_migrations(tmp_path / "app")
+    module_path = "app.migrations"
     monkeypatch.syspath_prepend(str(tmp_path))
     writer = MigrationWriter(
         "0005_partial",
@@ -610,7 +644,8 @@ def test_writer_rejects_partial_lambda(tmp_path: Path, monkeypatch) -> None:
             field=fields.CharField(max_length=120, default=functools.partial(lambda: "x")),
         )
     ]
-    module_path = _prepare_migration_package(tmp_path, "app")
+    ProjectSources(tmp_path).prepare_migrations(tmp_path / "app")
+    module_path = "app.migrations"
     monkeypatch.syspath_prepend(str(tmp_path))
     writer = MigrationWriter(
         "0006_partial_lambda",
@@ -633,7 +668,8 @@ def test_writer_rejects_local_function_default(tmp_path: Path, monkeypatch) -> N
             field=fields.CharField(max_length=120, default=_local_default),
         )
     ]
-    module_path = _prepare_migration_package(tmp_path, "app")
+    ProjectSources(tmp_path).prepare_migrations(tmp_path / "app")
+    module_path = "app.migrations"
     monkeypatch.syspath_prepend(str(tmp_path))
     writer = MigrationWriter(
         "0007_local_default",

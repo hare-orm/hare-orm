@@ -3,19 +3,21 @@ from __future__ import annotations
 import collections
 import math
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from functools import partial
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from hare.dialects.base.types.type_registry import TypeRegistry
 from hare.fields.constants import ROLLBACK_RESTORE_UNSET
-from hare.models.constants import MIN_STORED_KEY_CODEC_BATCH_SIZE
 from hare.models.write.instance_snapshot import InstanceSnapshot
 from hare.models.write.rollback_restores import RollbackRestores
+from hare.time.timezone import Timezone
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.fields.field import Field
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
+    from hare.models.write.bound_rows import BoundRows
 
 TInstance = TypeVar("TInstance", bound="Model")
 
@@ -29,7 +31,7 @@ class ReturnedValues:
 
     @staticmethod
     def apply_row(
-        model: type[Model],
+        binding: ModelBinding,
         types: TypeRegistry,
         obj: Model,
         row: Any,
@@ -42,15 +44,16 @@ class ReturnedValues:
         write's transaction rolls back.
 
         Args:
-            model: The written model.
+            binding: The written model.
             types: The connection's type registry.
             obj: The obj whose row was written.
             row: The row, by column name.
             columns: Only these columns of the row - every one by default.
             connection: The connection the write ran on.
+            readers: Prepared column readers, when already built for this returning projection.
         """
         if readers is None:
-            readers = ReturnedValues.get_returning_readers(model, types, row.keys() if columns is None else columns)
+            readers = ReturnedValues.get_returning_readers(binding, types, row.keys() if columns is None else columns)
         for column, field_name, read in readers:
             value = read(row[column])
             RollbackRestores.register_rollback_restore(
@@ -60,25 +63,26 @@ class ReturnedValues:
 
     @staticmethod
     def get_returning_readers(
-        model: type[Model],
+        binding: ModelBinding,
         types: TypeRegistry,
         columns: Iterable[str],
     ) -> tuple[tuple[str, str, Callable[[Any], Any]], ...]:
         """Prepare readers of a RETURNING projection; assignments and rollback stay row-local."""
-        meta = model._meta
         return tuple(
-            (column, name, types.get_python_reader(meta.fields_map[name]))
+            (column, name, types.get_python_reader(binding.fields_map[name]))
             for column in columns
-            if (name := meta.fields_db_projection_reverse.get(column)) is not None
+            if (name := binding.fields_db_projection_reverse.get(column)) is not None
         )
 
     @staticmethod
     def match_rows(
-        model: type[Model],
+        binding: ModelBinding,
         types: TypeRegistry,
         instances: Iterable[TInstance],
         rows: Sequence[Any],
         field_names: Sequence[str],
+        *,
+        bound_rows: BoundRows | None = None,
     ) -> Iterator[tuple[TInstance, dict[str, Any]]]:
         """Pairs each ``RETURNING`` row with the instance holding the row's values of the given
         fields - the first such instance; a row no instance holds is skipped. An instance's value is
@@ -86,23 +90,31 @@ class ReturnedValues:
         a value otherwise (an email's domain in lower case).
 
         Args:
-            model: The written model.
+            binding: The written model.
             types: The connection's type registry.
             instances: The written instances.
             rows: The rows.
             field_names: The fields telling the rows apart - the primary key, or a conflict target.
+            bound_rows: Converted inputs of this exact statement, when available. Their stored keys
+                replace the source-value fallback without calling a writer again.
 
         Yields:
             Each instance with its row, by column name.
         """
-        meta = model._meta
-        fields = [meta.fields_map[field_name] for field_name in field_names]
-        columns = [meta.fields_db_projection[field_name] for field_name in field_names]
+        fields = [binding.fields_map[field_name] for field_name in field_names]
+        columns = [binding.fields_db_projection[field_name] for field_name in field_names]
         readers = ReturnedValues.get_key_readers(types, fields, columns)
         instances = list(instances)
         instances_by_key: dict[tuple[Any, ...], TInstance] = {}
-        for instance in instances:
-            key = tuple(ReturnedValues.get_hashable(getattr(instance, field_name)) for field_name in field_names)
+        keys = (
+            bound_rows.get_keys(binding, types, field_names)
+            if bound_rows is not None
+            else (
+                tuple(ReturnedValues.get_hashable(getattr(instance, field_name)) for field_name in field_names)
+                for instance in instances
+            )
+        )
+        for key, instance in zip(keys, instances, strict=True):
             instances_by_key.setdefault(key, instance)
         # Built at the first row no instance holds as given.
         instances_by_stored_key: dict[tuple[Any, ...], TInstance] | None = None
@@ -113,6 +125,8 @@ class ReturnedValues:
             key = ReturnedValues.get_row_key(readers, row)
             matched_instance = instances_by_key.get(key)
             if matched_instance is None or id(matched_instance) in matched_instance_ids:
+                if bound_rows is not None:
+                    continue
                 if instances_by_stored_key is None:
                     instances_by_stored_key = ReturnedValues.get_instances_by_stored_key(
                         types, fields, field_names, instances
@@ -151,24 +165,21 @@ class ReturnedValues:
         types: TypeRegistry,
         fields: Sequence[Field[Any]],
         field_names: Sequence[str],
-        count: int,
     ) -> Callable[[Model], tuple[Any, ...]]:
         """Prepare stored-key matching for one operation, always returning a tuple.
 
         NULL and unchanged native keys bypass conversion. Other values are written,
         read and made hashable in field order with the actual instance as context.
-        Small batches retain direct dispatch; larger batches bind the same codecs.
+        Every batch binds the registry's canonical writers and readers, including
+        overrides of those selectors.
         No values or execution connections are retained by the prepared callable.
         """
-        prepares_columns = count >= MIN_STORED_KEY_CODEC_BATCH_SIZE
         codecs = tuple(
             (
                 field_name,
                 types.get_native_key_type(field),
-                TypeRegistry.get_db_writer(types, field) if prepares_columns else partial(types.get_db_value, field),
-                TypeRegistry.get_python_reader(types, field)
-                if prepares_columns
-                else partial(types.get_python_value, field),
+                types.get_db_writer(field),
+                types.get_python_reader(field),
             )
             for field, field_name in zip(fields, field_names, strict=True)
         )
@@ -189,7 +200,7 @@ class ReturnedValues:
         types: TypeRegistry, fields: Sequence[Field[Any]], field_names: Sequence[str], instances: Sequence[Model]
     ) -> list[tuple[Any, ...]]:
         """Read stored matching keys with one preparation, preserving instance order."""
-        read_key = ReturnedValues.get_stored_key_reader(types, fields, field_names, len(instances))
+        read_key = ReturnedValues.get_stored_key_reader(types, fields, field_names)
         return [read_key(instance) for instance in instances]
 
     @staticmethod
@@ -198,8 +209,8 @@ class ReturnedValues:
         a dict or set (a JSON object, a key-value mapping) as the frozenset of its items: a database may give a
         mapping's keys back in an order of its own. Every value inside them too.
 
-        Ordinary scalar values remain unchanged. All floating-point NaNs share one marker so keys
-        compare equal even when Python's original NaN values do not.
+        Aware datetimes compare by their instant in UTC, including both readings of an ambiguous
+        wall time. Floating-point NaNs share one marker so keys compare as they do in an index.
 
         Args:
             value: The value.
@@ -212,6 +223,8 @@ class ReturnedValues:
             return value
         if value_type is float:
             return ReturnedValues.NAN_KEY if math.isnan(value) else value
+        if isinstance(value, datetime):
+            return Timezone.get_comparison_datetime(value)
         if isinstance(value, Mapping):
             return frozenset((key, ReturnedValues.get_hashable(item)) for key, item in value.items())
         if isinstance(value, (list, tuple)):
@@ -254,35 +267,41 @@ class ReturnedValues:
 
     @staticmethod
     def match_rows_in_order(
-        model: type[Model],
+        binding: ModelBinding,
         types: TypeRegistry,
         instances: Iterable[TInstance],
         rows: Sequence[Any],
         field_names: Sequence[str],
+        *,
+        bound_rows: BoundRows | None = None,
     ) -> Iterator[tuple[TInstance, dict[str, Any]]]:
         """Pairs the rows a database returns in the order it wrote them with their instances - each row
         with the next instance after the previous row's whose stored values of the fields are the row's: an
         instance a conflict skipped holds the values of an earlier one, and has no row.
 
         Args:
-            model: The written model.
+            binding: The written model.
             types: The connection's type registry.
             instances: The written instances, in the order written.
             rows: The rows, in that order.
             field_names: The fields telling the rows apart - the conflict target, or the primary key.
+            bound_rows: The prepared row values in the same order as the input objects.
 
         Yields:
             Each instance with its row, by column name.
         """
-        meta = model._meta
-        fields = [meta.fields_map[field_name] for field_name in field_names]
-        columns = [meta.fields_db_projection[field_name] for field_name in field_names]
+        fields = [binding.fields_map[field_name] for field_name in field_names]
+        columns = [binding.fields_db_projection[field_name] for field_name in field_names]
         instances = list(instances)
         if len(rows) == len(instances):
             # Nothing was skipped - each row is its instance's, whatever the instance gave the target.
             yield from ((instance, dict(raw_row)) for instance, raw_row in zip(instances, rows, strict=True))
             return
-        stored_keys = ReturnedValues.get_stored_keys(types, fields, field_names, instances)
+        stored_keys = (
+            bound_rows.get_keys(binding, types, field_names)
+            if bound_rows is not None
+            else ReturnedValues.get_stored_keys(types, fields, field_names, instances)
+        )
         readers = ReturnedValues.get_key_readers(types, fields, columns)
         next_index = 0
         for raw_row in rows:
@@ -297,37 +316,42 @@ class ReturnedValues:
 
     @staticmethod
     def match_rows_by_stored_values(
-        model: type[Model],
+        binding: ModelBinding,
         types: TypeRegistry,
         instances: Iterable[TInstance],
         rows: Sequence[Any],
         field_names: Sequence[str],
+        *,
+        bound_rows: BoundRows | None = None,
     ) -> Iterator[tuple[TInstance, dict[str, Any]]]:
         """Pairs rows a database returns in no order with their instances by every field written - each row
         with the first instance not yet paired whose stored values are the row's; instances alike in all of
         them are interchangeable.
 
         Args:
-            model: The written model.
+            binding: The written model.
             types: The connection's type registry.
             instances: The written instances, in the order written.
             rows: The rows.
             field_names: The fields written.
+            bound_rows: The prepared row values in the same order as the input objects.
 
         Yields:
             Each instance with its row, by column name.
         """
-        meta = model._meta
-        fields = [meta.fields_map[field_name] for field_name in field_names]
-        columns = [meta.fields_db_projection[field_name] for field_name in field_names]
+        fields = [binding.fields_map[field_name] for field_name in field_names]
+        columns = [binding.fields_db_projection[field_name] for field_name in field_names]
         readers = ReturnedValues.get_key_readers(types, fields, columns)
         instances = list(instances)
         instances_by_stored_key: collections.defaultdict[tuple[Any, ...], collections.deque[TInstance]] = (
             collections.defaultdict(collections.deque)
         )
-        for stored_key, instance in zip(
-            ReturnedValues.get_stored_keys(types, fields, field_names, instances), instances, strict=True
-        ):
+        stored_keys = (
+            bound_rows.get_keys(binding, types, field_names)
+            if bound_rows is not None
+            else ReturnedValues.get_stored_keys(types, fields, field_names, instances)
+        )
+        for stored_key, instance in zip(stored_keys, instances, strict=True):
             instances_by_stored_key[stored_key].append(instance)
         for raw_row in rows:
             row = dict(raw_row)
@@ -338,7 +362,7 @@ class ReturnedValues:
 
     @staticmethod
     def leave_unloaded(
-        model: type[Model], objs: Iterable[Model], columns: Iterable[str], *, connection: DatabaseClient
+        binding: ModelBinding, objs: Iterable[Model], columns: Iterable[str], *, connection: DatabaseClient
     ) -> None:
         """Leaves the fields of columns the database gave values to unloaded on the written objects - a
         write returning no row tells none of them; ``refresh_from_db()`` reads them. A field left to its
@@ -347,7 +371,7 @@ class ReturnedValues:
         the write's transaction rolls back.
 
         Args:
-            model: The written model.
+            binding: The written model.
             objs: The written objects.
             columns: The columns.
             connection: The connection the write ran on.
@@ -355,7 +379,7 @@ class ReturnedValues:
         # Local import: the fields' package imports the models' package.
         from hare.fields.database_default import DatabaseDefault
 
-        field_names_by_column = model._meta.fields_db_projection_reverse
+        field_names_by_column = binding.fields_db_projection_reverse
         field_names = [field_names_by_column.get(column, column) for column in columns]
         snapshots: list[InstanceSnapshot] | None = [] if connection.is_transaction_client else None
         for obj in objs:

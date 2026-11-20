@@ -32,6 +32,7 @@ from hare.transactions import DistributedRecovery
 from hare.transactions.distributed.distributed_coordinator import DistributedCoordinator
 from hare.transactions.distributed.distributed_decision_store import DistributedDecisionStore
 from hare.transactions.enums import TransactionOutcome, TransactionPhase
+from tests.cli.constants import WIDGET_INITIAL_MIGRATION
 from tests.utils.cli_commands import CliCommands
 from tests.utils.database_under_test import DatabaseUnderTest
 from tests.utils.project_sources import ProjectSources
@@ -137,15 +138,18 @@ HARE_ORM = {
 
 
 @pytest.mark.parametrize(
-    "migration_name",
+    ("arguments", "expected_target"),
     [
-        pytest.param("0001_initial", id="migrate_passes_target"),
-        pytest.param("zero", id="migrate_zero_targets_the_state_before_the_first_migration"),
+        pytest.param(("app", "0001_initial"), "app.0001_initial", id="migrate_passes_target"),
+        pytest.param(("app", "zero"), "app.zero", id="migrate_zero_targets_the_state_before_the_first_migration"),
+        pytest.param(("app.0001_initial",), "app.0001_initial", id="migrate_accepts_dotted_target"),
     ],
 )
 @pytest.mark.database_independent
 @pytest.mark.asyncio
-async def test_migrate_passes_its_target(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, migration_name: str) -> None:
+async def test_migrate_passes_its_target(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, arguments: tuple[str, ...], expected_target: str
+) -> None:
     ProjectSources(tmp_path).write_package("cli_app")
     module_name = _write_settings(
         tmp_path,
@@ -169,43 +173,9 @@ HARE_ORM = {
 
     monkeypatch.setattr(migration_commands, "migrate_api", fake_migrate)
 
-    result = await CliCommands.run(
-        ["-c", f"{module_name}.HARE_ORM", "migrate", "app", migration_name], project=tmp_path
-    )
+    result = await CliCommands.run(["-c", f"{module_name}.HARE_ORM", "migrate", *arguments], project=tmp_path)
     assert result.exit_code == 0
-    assert called["target"] == f"app.{migration_name}"
-    assert called["app_labels"] is None
-
-
-@pytest.mark.database_independent
-@pytest.mark.asyncio
-async def test_migrate_accepts_dotted_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    ProjectSources(tmp_path).write_package("cli_app")
-    module_name = _write_settings(
-        tmp_path,
-        """
-HARE_ORM = {
-    "connections": {"default": "sqlite+aiosqlite://:memory:"},
-    "apps": {
-        "app": {"models": ["cli_app.models"], "default_connection": "default"},
-    },
-}
-""".lstrip(),
-        f"cli_settings_{tmp_path.name}",
-    )
-    monkeypatch.syspath_prepend(str(tmp_path))
-    importlib.invalidate_caches()
-
-    called: dict[str, object] = {}
-
-    async def fake_migrate(**kwargs) -> None:
-        called.update(kwargs)
-
-    monkeypatch.setattr(migration_commands, "migrate_api", fake_migrate)
-
-    result = await CliCommands.run(["-c", f"{module_name}.HARE_ORM", "migrate", "app.0001_initial"], project=tmp_path)
-    assert result.exit_code == 0
-    assert called["target"] == "app.0001_initial"
+    assert called["target"] == expected_target
     assert called["app_labels"] is None
 
 
@@ -322,18 +292,9 @@ HARE_ORM = {{
 async def test_migrate_composite_target_o2o_unique_constraint_not_duplicated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`Apps._init_fk_o2o_field()`'s own auto-registration of a composite UniqueConstraint for a
-    OneToOneField targeting a composite-PK model used to run twice for the same logical model: once
-    on the live, directly-imported model class (loaded when the CLI reads the app's own models.py to
-    build "current state" for makemigrations' own diff), and again on a SEPARATE class `migrate`
-    renders from the just-written migration's own serialized state (`ModelState.render()`) - which
-    already captured the live class's post-init `Meta.constraints` (including the auto-added
-    composite constraint) into the migration's own `CreateModel` operation. A bare, unconditional
-    append duplicated the constraint on the rendered class, and `CreateModel`'s own DDL (which
-    applies every entry of `model._meta.constraints` once) then tried to create the identical UNIQUE
-    index twice in the same `CREATE TABLE`/constraint-application pass, failing with "index ...
-    already exists" - reproduced here through the real CLI, not by calling internals directly, since
-    that's the exact call sequence (makemigrations, purge cached modules, migrate) that triggers it."""
+    """The live model and the migration state agree on the unique constraint for a one-to-one relation to a composite
+    key.
+    """
     pkg = ProjectSources(tmp_path).write_package("cli_app")
     (pkg / "models.py").write_text(
         """
@@ -572,22 +533,24 @@ HARE_ORM = {
     )
 
 
-@pytest.mark.sqlite_only
+@pytest.mark.parametrize(
+    ("command", "unexpected_output"),
+    [
+        pytest.param("migrate", "No migrations to apply", marks=pytest.mark.sqlite_only, id="migrate-default-target"),
+        pytest.param("heads", "Traceback", marks=pytest.mark.database_independent, id="heads-cli-error"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_migrate_default_target_raises_on_circular_dependency(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_a_circular_dependency_is_reported_as_a_cli_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str, unexpected_output: str
 ) -> None:
-    """A 2-node cycle across apps leaves zero leaf nodes for either app, so the default
-    (no explicit app/migration) `hare migrate` invocation - which plans from `leaf_nodes()` -
-    used to find nothing to walk from and silently report success with nothing applied,
-    instead of the CircularDependencyError this graph genuinely contains."""
     module_name = _write_cyclic_apps_config(tmp_path)
     monkeypatch.syspath_prepend(str(tmp_path))
     importlib.invalidate_caches()
-    result = await CliCommands.run(["-c", f"{module_name}.HARE_ORM", "migrate"], project=tmp_path)
+    result = await CliCommands.run(["-c", f"{module_name}.HARE_ORM", command], project=tmp_path)
     assert result.exit_code != 0
     assert "circular" in result.output.lower()
-    assert "No migrations to apply" not in result.output
+    assert unexpected_output not in result.output
 
 
 @pytest.mark.sqlite_only
@@ -906,21 +869,6 @@ HARE_ORM = {
     assert "app.0001_initial" in result.output
     assert "other.0001_initial" in result.output
     assert "other.0002_more" in result.output
-
-
-@pytest.mark.database_independent
-@pytest.mark.asyncio
-async def test_heads_on_circular_dependency_maps_to_cli_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """heads() called loader.build_graph() with no try/except at all - a genuine circular
-    dependency raised a raw ConfigurationError straight through the CLI instead of a clean
-    CLIError, unlike migrate/makemigrations for the exact same graph shape."""
-    module_name = _write_cyclic_apps_config(tmp_path)
-    monkeypatch.syspath_prepend(str(tmp_path))
-    importlib.invalidate_caches()
-    result = await CliCommands.run(["-c", f"{module_name}.HARE_ORM", "heads"], project=tmp_path)
-    assert result.exit_code != 0
-    assert "circular" in result.output.lower()
-    assert "Traceback" not in result.output
 
 
 @pytest.mark.database_independent
@@ -1706,30 +1654,6 @@ HARE_ORM = {
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
-async def test_makemigrations_merge_requires_app_label(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    ProjectSources(tmp_path).write_package("cli_app")
-    module_name = _write_settings(
-        tmp_path,
-        """
-HARE_ORM = {
-    "connections": {"default": "sqlite+aiosqlite://:memory:"},
-    "apps": {
-        "app": {"models": ["cli_app.models"], "default_connection": "default"},
-    },
-}
-""".lstrip(),
-        f"cli_settings_{tmp_path.name}",
-    )
-    monkeypatch.syspath_prepend(str(tmp_path))
-    importlib.invalidate_caches()
-
-    result = await CliCommands.run(["-c", f"{module_name}.HARE_ORM", "makemigrations", "--merge"], project=tmp_path)
-    assert result.exit_code == 2
-    assert "--merge requires" in result.output
-
-
-@pytest.mark.database_independent
-@pytest.mark.asyncio
 async def test_makemigrations_composite_pk_model_is_stable_on_rerun(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1815,23 +1739,49 @@ HARE_ORM = {
 
 @pytest.mark.database_independent
 @pytest.mark.parametrize(
-    ("error_match", "command", "argument"),
+    ("arguments", "messages", "exit_code"),
     [
         pytest.param(
-            "Unknown app label", "squashmigrations", "ghost 0001_initial", id="squashmigrations_unknown_app_label"
+            ("squashmigrations", "ghost", "0001_initial"),
+            ("Unknown app label",),
+            None,
+            id="squashmigrations_unknown_app_label",
         ),
-        pytest.param("migration_name is required", "sqlmigrate", "app", id="sqlmigrate_requires_migration_name"),
         pytest.param(
-            "--empty requires at least one APP_LABEL",
-            "makemigrations",
-            "--empty",
+            ("sqlmigrate", "app"),
+            ("migration_name is required",),
+            None,
+            id="sqlmigrate_requires_migration_name",
+        ),
+        pytest.param(
+            ("makemigrations", "--empty"),
+            ("--empty requires at least one APP_LABEL",),
+            None,
             id="makemigrations_empty_requires_app_label",
+        ),
+        pytest.param(
+            ("makemigrations", "--merge"),
+            ("--merge requires",),
+            2,
+            id="makemigrations_merge_requires_app_label",
+        ),
+        pytest.param(
+            ("sqlmigrate",),
+            ("app_label is required", "app"),
+            None,
+            id="sqlmigrate_requires_app_label",
+        ),
+        pytest.param(
+            ("sqlmigrate", "ghost", "0001_initial"),
+            ("Unknown app label",),
+            None,
+            id="sqlmigrate_unknown_app_label",
         ),
     ],
 )
 @pytest.mark.asyncio
 async def test_migration_command_with_wrong_arguments_is_refused(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_match, command, argument
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arguments, messages, exit_code
 ) -> None:
     ProjectSources(tmp_path).write_package("cli_app")
     module_name = _write_settings(
@@ -1849,9 +1799,12 @@ HARE_ORM = {
     monkeypatch.syspath_prepend(str(tmp_path))
     importlib.invalidate_caches()
 
-    result = await CliCommands.run(["-c", f"{module_name}.HARE_ORM", command, *argument.split()], project=tmp_path)
+    result = await CliCommands.run(["-c", f"{module_name}.HARE_ORM", *arguments], project=tmp_path)
     assert result.exit_code != 0
-    assert error_match in result.output
+    if exit_code is not None:
+        assert result.exit_code == exit_code
+    for message in messages:
+        assert message in result.output
 
 
 @pytest.mark.database_independent
@@ -1923,23 +1876,7 @@ def _write_widget_chain(pkg: Path) -> None:
     migrations.mkdir()
     (migrations / "__init__.py").write_text("", encoding="utf-8")
     (migrations / "0001_initial.py").write_text(
-        """
-from hare import fields, migrations
-from hare.migrations import operations as ops
-
-
-class Migration(migrations.Migration):
-    operations = [
-        ops.CreateModel(
-            name="Widget",
-            fields=[
-                ("id", fields.IntField(primary_key=True)),
-                ("name", fields.CharField(max_length=50)),
-            ],
-            options={"table": "widget"},
-        ),
-    ]
-""".lstrip(),
+        WIDGET_INITIAL_MIGRATION,
         encoding="utf-8",
     )
     (migrations / "0002_second.py").write_text(
@@ -1973,23 +1910,7 @@ def _write_widget_chain_with_data_migration(pkg: Path) -> None:
     migrations.mkdir()
     (migrations / "__init__.py").write_text("", encoding="utf-8")
     (migrations / "0001_initial.py").write_text(
-        """
-from hare import fields, migrations
-from hare.migrations import operations as ops
-
-
-class Migration(migrations.Migration):
-    operations = [
-        ops.CreateModel(
-            name="Widget",
-            fields=[
-                ("id", fields.IntField(primary_key=True)),
-                ("name", fields.CharField(max_length=50)),
-            ],
-            options={"table": "widget"},
-        ),
-    ]
-""".lstrip(),
+        WIDGET_INITIAL_MIGRATION,
         encoding="utf-8",
     )
     (migrations / "0002_seed_data.py").write_text(
@@ -2249,57 +2170,6 @@ HARE_ORM = {{
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
-async def test_sqlmigrate_requires_app_label(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    ProjectSources(tmp_path).write_package("cli_app")
-    module_name = _write_settings(
-        tmp_path,
-        """
-HARE_ORM = {
-    "connections": {"default": "sqlite+aiosqlite://:memory:"},
-    "apps": {
-        "app": {"models": ["cli_app.models"], "default_connection": "default"},
-    },
-}
-""".lstrip(),
-        f"cli_settings_{tmp_path.name}",
-    )
-    monkeypatch.syspath_prepend(str(tmp_path))
-    importlib.invalidate_caches()
-
-    result = await CliCommands.run(["-c", f"{module_name}.HARE_ORM", "sqlmigrate"], project=tmp_path)
-    assert result.exit_code != 0
-    assert "app_label is required" in result.output
-    assert "app" in result.output
-
-
-@pytest.mark.database_independent
-@pytest.mark.asyncio
-async def test_sqlmigrate_unknown_app_label_maps_to_cli_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    ProjectSources(tmp_path).write_package("cli_app")
-    module_name = _write_settings(
-        tmp_path,
-        """
-HARE_ORM = {
-    "connections": {"default": "sqlite+aiosqlite://:memory:"},
-    "apps": {
-        "app": {"models": ["cli_app.models"], "default_connection": "default"},
-    },
-}
-""".lstrip(),
-        f"cli_settings_{tmp_path.name}",
-    )
-    monkeypatch.syspath_prepend(str(tmp_path))
-    importlib.invalidate_caches()
-
-    result = await CliCommands.run(
-        ["-c", f"{module_name}.HARE_ORM", "sqlmigrate", "ghost", "0001_initial"], project=tmp_path
-    )
-    assert result.exit_code != 0
-    assert "Unknown app label" in result.output
-
-
-@pytest.mark.database_independent
-@pytest.mark.asyncio
 async def test_sqlmigrate_on_circular_dependency_maps_to_cli_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2506,7 +2376,9 @@ async def test_version_flag_exits_zero(tmp_path) -> None:
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_shell_no_provider_available(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    monkeypatch.setattr(cli_module.ShellLauncher, "interactive_shell_class", None)
+    from hare.cli.shell_launcher import ShellLauncher
+
+    monkeypatch.setattr(ShellLauncher, "interactive_shell_class", None)
 
     result = await CliCommands.run(["shell"], project=tmp_path)
     assert result.exit_code == 1
@@ -3019,15 +2891,6 @@ async def test_a_bad_pyproject_toml_maps_to_cli_error(
 # =============================================================================
 
 
-def _distributed_recover_test_pg_template() -> str | None:
-    """Mirrors tests/multiple_connections/test_transactions_distributed.py's own HARE_TEST_DB check - None (skip)
-    unless it's a Postgres URL."""
-    raw_db_url = os.environ.get("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    if DatabaseUnderTest.get_dialect().name != "postgresql":
-        return None
-    return raw_db_url.replace("\\{", "{").replace("\\}", "}")
-
-
 def _fresh_pg_url(template: str) -> str:
     return template.format(uuid.uuid4().hex) if "{}" in template else f"{template}_{uuid.uuid4().hex}"
 
@@ -3041,7 +2904,7 @@ async def distributed_recover_setup(
     test can hand-craft a stuck distributed() scenario (a decision row, a PREPARE TRANSACTION)
     before invoking the CLI against it. Skips cleanly off Postgres or with
     max_prepared_transactions=0, same as tests/multiple_connections/test_transactions_distributed.py."""
-    template = _distributed_recover_test_pg_template()
+    template = DatabaseUnderTest.get_postgresql_url_template()
     if template is None:
         pytest.skip("distributed-recover CLI tests need a Postgres HARE_TEST_DB")
 
@@ -3379,7 +3242,7 @@ async def distributed_recover_multi_participant_setup(
     """Same as distributed_recover_setup, but with TWO participants sharing one coordinator -
     needed to test resolution grouped correctly BY XID (Transactions.distributed()'s real shape
     for 2+ participants), which the single-participant fixture above can't exercise."""
-    template = _distributed_recover_test_pg_template()
+    template = DatabaseUnderTest.get_postgresql_url_template()
     if template is None:
         pytest.skip("distributed-recover CLI tests need a Postgres HARE_TEST_DB")
 

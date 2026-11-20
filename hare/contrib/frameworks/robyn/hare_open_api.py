@@ -16,6 +16,7 @@ from hare.contrib.frameworks.robyn.constants import (
     OPENAPI_PATH_PARAMETER_PATTERN,
     OPENAPI_PATH_PARAMETER_REPLACEMENT,
 )
+from hare.contrib.pydantic_field_aliases import PydanticFieldAliases
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -23,12 +24,16 @@ if TYPE_CHECKING:
     from robyn.openapi import RouteOpenAPIMeta
 
     from hare.contrib.request_query.request_query import RequestQuery
+    from hare.core.apps import Apps
 
 
 class HareOpenAPI(OpenAPI):
     """Robyn's OpenAPI schema with the parameters of each request query a handler takes: a query
     parameter each - a list one repeated - with its type, limits, enum and description, a path
     parameter for one marked ``InPath()``. ``HareRobyn`` uses it unless given another."""
+
+    #: Metadata selected by the application before route signatures are prepared.
+    apps: Apps | None = None
 
     def add_openapi_path_obj(
         self,
@@ -70,17 +75,18 @@ class HareOpenAPI(OpenAPI):
         Returns:
             One parameter object per parameter of the class.
         """
-        request_query_class = request_query_class.prepare_parameters()
-        schema = request_query_class.model_json_schema(ref_template=COMPONENT_REFERENCE_TEMPLATE)
+        request_query_class = request_query_class.prepare_parameters(apps=self.apps)
+        schema = request_query_class.model_json_schema(by_alias=False, ref_template=COMPONENT_REFERENCE_TEMPLATE)
         self.openapi_spec["components"].setdefault("schemas", {}).update(schema.pop("$defs", {}))
         required = set(schema.get("required", []))
         parameters = []
         for name, field_info in request_query_class.model_fields.items():
+            input_paths = PydanticFieldAliases.get_paths(name, field_info, request_query_class.model_config)
             property_schema = dict(schema["properties"][name])
             description = property_schema.pop("description", None)
             in_path = ParameterAnnotation.is_in_path(field_info)
             parameter: dict[str, Any] = {
-                "name": name,
+                "name": input_paths[0][0],
                 "in": PATH_PARAMETER_SOURCE if in_path else QUERY_PARAMETER_SOURCE,
                 "required": in_path or name in required,
                 "schema": property_schema,

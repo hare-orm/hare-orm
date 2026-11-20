@@ -16,11 +16,12 @@ from hare.query.statements.projections.derived_projection import DerivedProjecti
 from hare.sql import Order, Table
 from hare.sql.functions.text.collate import Collate
 from hare.sql.terms.field import Field
+from hare.sql.terms.select_reference import SelectReference
 from hare.sql.terms.term import Term
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.statements.awaitable_query import AwaitableQuery
 
 
@@ -32,7 +33,7 @@ class QueryOrdering:
     @staticmethod
     def get_ordering(
         query: AwaitableQuery[Any],
-        model: type[Model],
+        binding: ModelBinding,
         table: Table,
         orderings: Iterable[tuple[str, Order]],
         annotations: dict[str, Term | Expression],
@@ -43,13 +44,14 @@ class QueryOrdering:
     ) -> None:
         """Attach ordering keys, binding model paths with their full relation scope.
 
-        Selected annotations may use their output aliases when no comparison-key
+        Selected annotations use references to their SELECT positions when no comparison-key
         transformation is needed. Other annotations use their expression, including
         joins and values recorded by the annotation builder. A composite key expands
         into scalar ordering components before binding.
         """
+        model = binding._model
         context = ExpressionContext(
-            model=model,
+            binding=binding,
             table=table,
             annotations=annotations,
             dialect=query.dialect,
@@ -57,6 +59,7 @@ class QueryOrdering:
             visibility=query._visibility,
             select_related_extra_conditions=query._select_related_extra_conditions,
             select_related_path_prefix=select_related_path_prefix,
+            application_context=query._context,
         )
         for field_name, direction in query._apply_default_ordering(orderings):
             if field_name in annotations:
@@ -70,12 +73,11 @@ class QueryOrdering:
                 )
                 needs_expression = value_field is not None and (
                     isinstance(GeneratedField.get_effective_field(value_field), JSONField)
-                    or query.dialect.types.has_ordering_key(value_field)
+                    or context.dialect.types.has_ordering_key(value_field)
                 )
+                term = QueryAnnotations.get_annotation_expression_term(query, field_name, annotations, table)
                 if is_selected and not needs_expression:
-                    term: Term = Field((annotation_output_aliases or {}).get(field_name, field_name))
-                else:
-                    term = QueryAnnotations.get_annotation_expression_term(query, field_name, annotations, table)
+                    term = SelectReference(term.as_((annotation_output_aliases or {}).get(field_name, field_name)))
                 bound_ordering = BoundOrdering.bind(context, term, value_field, direction)
                 if model is query.model:
                     query._annotation_ordering_terms[field_name] = bound_ordering.term
@@ -84,7 +86,7 @@ class QueryOrdering:
                     continue
                 query.query = query.query.orderby(bound_ordering.term, order=direction)
                 continue
-            for path in ConcreteFieldPaths.get_paths(model, field_name):
+            for path in ConcreteFieldPaths.get_paths(binding, field_name):
                 bound_path = BoundLookupPath.bind(context, path)
                 for join in bound_path.joins:
                     QueryJoins.join_table(query, join)
@@ -100,7 +102,7 @@ class QueryOrdering:
         Args:
             query: The query.
         """
-        projection = DerivedProjection(query.query, output_fields=query._annotation_output_fields)
+        projection = DerivedProjection(query.query)
         features = query._connection.features if query._connection is not None else query.dialect.features
         orderbys: list[tuple[Term, Order | None]] = []
         for term, direction in query.query._orderbys:
@@ -112,6 +114,6 @@ class QueryOrdering:
             else:
                 column = projection.include(term)
                 # Reuse the selected expression, including its parameter sources.
-                orderbys.append((column.term, direction))
+                orderbys.append((SelectReference(column.term), direction))
         projection.query._orderbys = orderbys
         query.query = projection.query

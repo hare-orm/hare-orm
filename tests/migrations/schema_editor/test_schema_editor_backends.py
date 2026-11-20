@@ -6,39 +6,15 @@ import pytest
 
 from hare import fields
 from hare.ddl.generated_names import GeneratedNames
-from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-from hare.dialects.base.schema.tables.table_comments import TableComments
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.dialects.postgresql.schema.postgresql_schema_editor import PostgresqlSchemaEditor
 from hare.exceptions import ConfigurationError
-from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
 from tests.utils.fake_client import FakeClient
+from tests.utils.model_bindings import ModelBindings
+from tests.utils.schema_editor import TestSchemaEditor
 
 pytestmark = pytest.mark.database_independent
-
-
-class TestSchemaEditorTableComments(TableComments):
-    __test__ = False
-
-    def get_table_comment_sql(self, table: str, comment: str) -> str:
-        return ""
-
-    def get_column_comment_sql(self, table: str, column: str, comment: str) -> str:
-        return ""
-
-
-class TestSchemaEditor(BaseSchemaEditor):
-    __test__ = False
-
-    table_comments_class = TestSchemaEditorTableComments
-
-
-def init_apps(*models: type[Model]) -> None:
-    apps = StateApps()
-    for model in models:
-        apps.register_model("models", model)
-    apps.init_relations()
 
 
 # ---------------------------------------------------------------------------
@@ -79,9 +55,11 @@ async def test_postgres_db_default_of_an_added_field(make_field, expected) -> No
             table = "widget"
             app = "models"
 
+    prepared_apps = ModelBindings.prepare(Widget)
+
     client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
-    await editor.add_field(Widget, Widget, "setting")
+    await editor.add_field(prepared_apps.get_binding(Widget), prepared_apps.get_binding(Widget), "setting")
 
     assert client.executed == [expected]
 
@@ -98,9 +76,11 @@ async def test_base_editor_bool_db_default_still_uses_integer() -> None:
             table = "widget"
             app = "models"
 
+    prepared_apps = ModelBindings.prepare(Widget)
+
     client = FakeClient("sql")
     editor = TestSchemaEditor(client)
-    await editor.add_field(Widget, Widget, "is_active")
+    await editor.add_field(prepared_apps.get_binding(Widget), prepared_apps.get_binding(Widget), "is_active")
 
     assert len(client.executed) == 1
     assert client.executed[0] == 'ALTER TABLE "widget" ADD COLUMN "is_active" BOOL NOT NULL DEFAULT 1'
@@ -126,9 +106,11 @@ async def test_postgres_alter_field_bool_db_default() -> None:
             table = "widget"
             app = "models"
 
+    prepared_apps = ModelBindings.prepare(OldWidget, NewWidget)
+
     client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
-    await editor.alter_field(OldWidget, NewWidget, "is_active")
+    await editor.alter_field(prepared_apps.get_binding(OldWidget), prepared_apps.get_binding(NewWidget), "is_active")
 
     assert len(client.executed) == 1
     assert client.executed[0] == 'ALTER TABLE "widget" ALTER COLUMN "is_active" SET DEFAULT TRUE'
@@ -185,9 +167,11 @@ async def test_postgres_alter_field_max_length() -> None:
             table = "widget"
             app = "models"
 
+    prepared_apps = ModelBindings.prepare(OldWidget, NewWidget)
+
     client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
-    await editor.alter_field(OldWidget, NewWidget, "name")
+    await editor.alter_field(prepared_apps.get_binding(OldWidget), prepared_apps.get_binding(NewWidget), "name")
 
     assert len(client.executed) == 1
     assert client.executed[0] == 'ALTER TABLE "widget" ALTER COLUMN "name" TYPE VARCHAR(64) USING "name"::VARCHAR(64)'
@@ -220,9 +204,11 @@ async def test_postgres_alter_field_class_change_emits_alter_column_type() -> No
             table = "widget"
             app = "models"
 
+    prepared_apps = ModelBindings.prepare(OldWidget, NewWidget)
+
     client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
-    await editor.alter_field(OldWidget, NewWidget, "amount")
+    await editor.alter_field(prepared_apps.get_binding(OldWidget), prepared_apps.get_binding(NewWidget), "amount")
 
     assert len(client.executed) == 1
     assert (
@@ -260,12 +246,12 @@ async def test_alter_field_plain_to_relation_raises() -> None:
             table = "widget"
             app = "models"
 
-    init_apps(Parent, NewWidget)
+    prepared_apps = ModelBindings.prepare(Parent, OldWidget, NewWidget)
 
     client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
     with pytest.raises(ConfigurationError, match="many-to-many"):
-        await editor.alter_field(OldWidget, NewWidget, "parent")
+        await editor.alter_field(prepared_apps.get_binding(OldWidget), prepared_apps.get_binding(NewWidget), "parent")
 
 
 @pytest.mark.asyncio
@@ -295,12 +281,12 @@ async def test_alter_field_relation_to_plain_raises() -> None:
             table = "widget"
             app = "models"
 
-    init_apps(Parent, OldWidget)
+    prepared_apps = ModelBindings.prepare(Parent, OldWidget, NewWidget)
 
     client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
     with pytest.raises(ConfigurationError, match="many-to-many"):
-        await editor.alter_field(OldWidget, NewWidget, "parent")
+        await editor.alter_field(prepared_apps.get_binding(OldWidget), prepared_apps.get_binding(NewWidget), "parent")
 
 
 # ---------------------------------------------------------------------------
@@ -328,9 +314,11 @@ async def test_postgres_alter_field_description_change() -> None:
             table = "item"
             app = "models"
 
+    prepared_apps = ModelBindings.prepare(OldWidget, NewWidget)
+
     client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
-    await editor.alter_field(OldWidget, NewWidget, "name")
+    await editor.alter_field(prepared_apps.get_binding(OldWidget), prepared_apps.get_binding(NewWidget), "name")
 
     assert len(client.executed) == 1
     assert "COMMENT ON COLUMN" in client.executed[0]
@@ -357,9 +345,11 @@ async def test_postgres_alter_field_description_removal() -> None:
             table = "item"
             app = "models"
 
+    prepared_apps = ModelBindings.prepare(OldWidget, NewWidget)
+
     client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
-    await editor.alter_field(OldWidget, NewWidget, "name")
+    await editor.alter_field(prepared_apps.get_binding(OldWidget), prepared_apps.get_binding(NewWidget), "name")
 
     assert len(client.executed) == 1
     assert "IS NULL" in client.executed[0]
@@ -385,9 +375,11 @@ async def test_base_alter_field_description_change_noop() -> None:
             table = "item"
             app = "models"
 
+    prepared_apps = ModelBindings.prepare(OldWidget, NewWidget)
+
     client = FakeClient("sql")
     editor = TestSchemaEditor(client)
-    await editor.alter_field(OldWidget, NewWidget, "name")
+    await editor.alter_field(prepared_apps.get_binding(OldWidget), prepared_apps.get_binding(NewWidget), "name")
 
     assert len(client.executed) == 0
 
@@ -417,11 +409,11 @@ async def test_postgres_add_field_foreign_key_db_constraint_false_omits_referenc
             table = "item"
             app = "models"
 
-    init_apps(Category, Item)
+    apps_1 = ModelBindings.prepare(Category, Item)
 
     client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
-    await editor.add_field(Item, Item, "category")
+    await editor.add_field(apps_1.get_binding(Item), apps_1.get_binding(Item), "category")
 
     # The column, then the index its relation's db_index gives it.
     assert len(client.executed) == 2
@@ -453,11 +445,11 @@ async def test_postgres_add_field_m2m_db_constraint_false_omits_both_references(
             table = "post"
             app = "models"
 
-    init_apps(Tag, Post)
+    apps_1 = ModelBindings.prepare(Tag, Post)
 
     client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
-    await editor.add_field(Post, Post, "tags")
+    await editor.add_field(apps_1.get_binding(Post), apps_1.get_binding(Post), "tags")
 
     assert len(client.executed) == 1
     sql = client.executed[0]
@@ -490,15 +482,17 @@ async def test_postgres_alter_field_db_constraint_true_to_false_drops_constraint
             table = "item"
             app = "models"
 
-    init_apps(Category, Item)
+    apps_1 = ModelBindings.prepare(Category, Item)
 
-    old_field = Item._meta.fields_map["category"]
+    old_field = apps_1.get_binding(Item).fields_map["category"]
     new_field = copy_field(old_field)
     new_field.db_constraint = False
 
     client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
-    await editor.foreign_key_rebuild.get_foreign_key_change_plan(Item, old_field, new_field).execute(editor)
+    await editor.foreign_key_rebuild.get_foreign_key_change_plan(
+        apps_1.get_binding(Item), old_field, new_field
+    ).execute(editor)
 
     # The constraint's name is the one hare gave it - never read from the database.
     foreign_key_name = GeneratedNames.get_foreign_key_name("item", ("category_id",))
@@ -526,15 +520,17 @@ async def test_postgres_alter_field_db_constraint_false_to_true_adds_constraint(
             table = "item"
             app = "models"
 
-    init_apps(Category, Item)
+    apps_1 = ModelBindings.prepare(Category, Item)
 
-    old_field = Item._meta.fields_map["category"]
+    old_field = apps_1.get_binding(Item).fields_map["category"]
     new_field = copy_field(old_field)
     new_field.db_constraint = True
 
     client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
-    await editor.foreign_key_rebuild.get_foreign_key_change_plan(Item, old_field, new_field).execute(editor)
+    await editor.foreign_key_rebuild.get_foreign_key_change_plan(
+        apps_1.get_binding(Item), old_field, new_field
+    ).execute(editor)
 
     assert len(client.executed) == 1
     sql = client.executed[0]

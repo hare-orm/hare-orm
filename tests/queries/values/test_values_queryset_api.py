@@ -126,7 +126,7 @@ OPERATIONS = {
     "none": (lambda query: query.none(), lambda rows: []),
     "filter_none": (lambda query: query.filter(name="nope").order_by("name"), lambda rows: []),
     "using": (
-        lambda query: query.order_by("name").using(Book._meta.connection),
+        lambda query: query.order_by("name").using(query.get_connection()),
         lambda rows: sorted(rows, key=lambda row: row["name"]),
     ),
     "after_cursor": (

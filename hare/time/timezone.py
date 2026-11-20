@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
-from datetime import UTC, date, datetime, time, timezone as dt_timezone, tzinfo
+from datetime import UTC, date, datetime, time, timedelta, timezone as dt_timezone, tzinfo
 from zoneinfo import ZoneInfo
 
 from hare.exceptions import NonExistentTimeError, QueryError
@@ -107,6 +107,21 @@ class Timezone:
         return dt_timezone(offset) if offset is not None else zone
 
     @staticmethod
+    def get_offset_text(offset: timedelta) -> str:
+        """Format an offset as ``+HH:MM`` or ``+HH:MM:SS`` when it has seconds."""
+        sign = "-" if offset < timedelta(0) else "+"
+        total_seconds = int(abs(offset).total_seconds())
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        text = f"{sign}{hours:02d}:{minutes:02d}"
+        return f"{text}:{seconds:02d}" if seconds else text
+
+    @classmethod
+    def get_fixed_offset_text(cls) -> str:
+        """Format the configured zone's standard offset for a bare time of day."""
+        return cls.get_offset_text(cls.get_fixed_offset().utcoffset(None) or timedelta(0))
+
+    @staticmethod
     def _get_timezone(timezone: tzinfo | str | None = None) -> tzinfo:
         """
         If timezone is None return the default() timezone;
@@ -145,7 +160,8 @@ class Timezone:
     def _is_nonexistent_local_time(value: datetime, timezone: tzinfo) -> bool:
         """Whether a naive wall clock doesn't exist in ``timezone`` - skipped by a DST spring-forward.
         Converting it with its fold=0 offset to UTC and back lands on another wall clock; an
-        ambiguous one comes back unchanged.
+        ambiguous one comes back unchanged. Zones exposing ``localize()`` use that API
+        before the same UTC round trip, rather than attaching a pytz zone with replace().
 
         Args:
             value: A naive datetime.
@@ -154,6 +170,10 @@ class Timezone:
         Returns:
             True for a nonexistent local time.
         """
+        if hasattr(timezone, "localize"):
+            naive_value = value.replace(tzinfo=None)
+            localized = timezone.localize(naive_value, is_dst=True)
+            return localized.astimezone(UTC).astimezone(timezone).replace(tzinfo=None) != naive_value
         fold0 = value.replace(tzinfo=timezone, fold=0)
         fold1 = value.replace(tzinfo=timezone, fold=1)
         if fold0.utcoffset() == fold1.utcoffset():
@@ -163,7 +183,7 @@ class Timezone:
 
     @staticmethod
     def get_start_of_day(day: date, timezone: tzinfo | str | None = None) -> datetime:
-        """The first moment of a day in a zone - midnight, or the end of a DST gap starting at it.
+        """The first moment at or after midnight in a zone.
 
         Args:
             day: The calendar day.
@@ -175,14 +195,30 @@ class Timezone:
         zone = Timezone._get_timezone(timezone)
         midnight = datetime.combine(day, time.min)
         if hasattr(zone, "localize"):
-            return zone.normalize(zone.localize(midnight, is_dst=True))  # type: ignore[attr-defined]
-        # fold=0 reads a wall clock inside a gap with the offset before it - converting that
-        # instant back gives the wall clock right after the gap, the day's first real moment.
-        aware_midnight = midnight.replace(tzinfo=zone, fold=0)
+            first_reading = zone.localize(midnight, is_dst=True)
+            second_reading = zone.localize(midnight, is_dst=False)
+        else:
+            first_reading = midnight.replace(tzinfo=zone, fold=0)
+            second_reading = midnight.replace(tzinfo=zone, fold=1)
         try:
-            return aware_midnight.astimezone(UTC).astimezone(zone)
+            first_utc = first_reading.astimezone(UTC)
+            if first_reading.utcoffset() == second_reading.utcoffset():
+                return first_utc.astimezone(zone)
+            start, end = sorted((first_utc, second_reading.astimezone(UTC)))
+            local_start = start.astimezone(zone)
+            if local_start.replace(tzinfo=None) >= midnight:
+                return local_start
+            # The two offsets bracket the transition in UTC. Midnight can be in the middle of
+            # the skipped interval, so neither round-trip necessarily lands on its boundary.
+            while end - start > timedelta(microseconds=1):
+                middle = start + (end - start) // 2
+                if middle.astimezone(zone).replace(tzinfo=None) < midnight:
+                    start = middle
+                else:
+                    end = middle
+            return end.astimezone(zone)
         except OverflowError:
-            return aware_midnight
+            return first_reading
 
     @staticmethod
     def make_aware(value: datetime, timezone: tzinfo | str | None = None, is_dst: bool | None = None) -> datetime:
@@ -194,11 +230,6 @@ class Timezone:
             NonExistentTimeError: The wall clock is skipped by a DST spring-forward.
         """
         zone = Timezone._get_timezone(timezone)
-        if hasattr(zone, "localize"):
-            # pytz's own localize() already raises pytz.exceptions.NonExistentTimeError (a
-            # ValueError subclass) for a spring-forward gap when is_dst is None - no separate
-            # check needed on this branch.
-            return zone.localize(value, is_dst=is_dst)
         if Timezone.is_aware(value):
             raise QueryError(f"make_aware expects a naive datetime, got {value}")
         # UTC skips no wall clock.
@@ -206,11 +237,18 @@ class Timezone:
             raise NonExistentTimeError(
                 f"{value} is a nonexistent local time in {getattr(zone, 'key', zone)} due to a DST transition"
             )
+        if hasattr(zone, "localize"):
+            return zone.localize(value.replace(tzinfo=None), is_dst=is_dst)
         if is_dst is None:
             return value.replace(tzinfo=zone)
         # ZoneInfo has no localize() - is_dst is a fold: 0 the earlier (daylight) reading, 1 the
         # later one.
         return value.replace(tzinfo=zone, fold=0 if is_dst else 1)
+
+    @staticmethod
+    def get_comparison_datetime(value: datetime) -> datetime:
+        """Use UTC for comparisons so repeated wall times retain their distinct instants."""
+        return value.astimezone(UTC) if Timezone.is_aware(value) else value
 
     @staticmethod
     def make_naive(value: datetime, timezone: tzinfo | str | None = None) -> datetime:

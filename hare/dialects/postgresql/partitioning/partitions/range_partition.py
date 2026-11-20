@@ -5,7 +5,6 @@ from collections.abc import Callable
 from typing import Any
 
 from hare.dialects.postgresql.enums import RangeBound
-from hare.dialects.postgresql.partitioning.partitioning import Partitioning
 from hare.dialects.postgresql.partitioning.partitions.partition import Partition
 from hare.exceptions import ConfigurationError
 
@@ -33,7 +32,7 @@ class RangePartition(Partition):
             ConfigurationError: The name isn't letters, digits and underscores, a bound is empty or
                 mixes ``RangeBound`` members wrongly, or the lower bound isn't below the upper one.
         """
-        Partitioning.check_partition_name(type(self).__name__, self.name)
+        super().__post_init__()
         for attribute in ("from_values", "to_values"):
             value = getattr(self, attribute)
             values = tuple(value) if isinstance(value, (list, tuple)) else (value,)

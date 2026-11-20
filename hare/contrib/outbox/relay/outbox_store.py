@@ -22,7 +22,9 @@ from hare.time import Timezone
 
 if TYPE_CHECKING:
     from hare.contrib.outbox.deliveries.delivery_result import DeliveryResult
+    from hare.core.hare_context import HareContext
     from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset import QuerySet
 
 TOutboxEvent = TypeVar("TOutboxEvent", bound=OutboxEvent)
@@ -38,33 +40,38 @@ class OutboxStore(Generic[TOutboxEvent]):
 
     def __init__(
         self,
-        model: type[TOutboxEvent],
+        binding: ModelBinding,
         client: DatabaseClient,
         *,
+        context: HareContext,
         topics: TopicSelection | None = None,
     ) -> None:
-        self.model = model
+        self._binding = binding
+        self._context = context
+        self.model = binding._model
         self.client = client
         self.topic_selection = topics if topics is not None else TopicSelection(None)
 
     @staticmethod
-    def check_count(option_name: str, value: Any) -> None:
-        """Checks a count option.
+    def check_batch_size(value: Any) -> None:
+        """Check the number of events in a batch.
 
         Raises:
             ConfigurationError: It isn't a positive int.
         """
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ConfigurationError(
-                f"{option_name} must be a positive int, got {ValueDescriptions.get_shown_value(value)}"
+                f"batch_size must be a positive int, got {ValueDescriptions.get_shown_value(value)}"
             )
 
     def get_base_queryset(self) -> QuerySet[TOutboxEvent]:
         """The queryset every relay query starts from - every tenant's events: the relay serves the
         whole table, no tenant scope around it."""
-        if self.model._meta.tenant_field:
-            return self.model.objects.all_tenants().using(self.client)
-        return self.model.objects.all().using(self.client)
+        if self._binding.tenant_field:
+            return (
+                self._binding.manager.get_bound_queryset(self._binding, self._context).all_tenants().using(self.client)
+            )
+        return self._binding.manager.get_bound_queryset(self._binding, self._context).all().using(self.client)
 
     def get_topic_queryset(self) -> QuerySet[TOutboxEvent]:
         """The relay's events - of its ``topics``, none of its ``exclude_topics``."""
@@ -131,7 +138,7 @@ class OutboxStore(Generic[TOutboxEvent]):
     def get_metadata(self, result: DeliveryResult) -> dict[str, Any]:
         """Checks that transport metadata cannot replace queue identity or lease state."""
         metadata = dict(result.metadata)
-        primary_key = self.model._meta.primary_key_attribute
+        primary_key = self._binding.primary_key_attribute
         key_fields = {primary_key} if isinstance(primary_key, str) else set(primary_key)
         forbidden = set(metadata) & (
             RELAY_MANAGED_FIELD_NAMES | ENQUEUE_ARGUMENT_FIELD_NAMES | {"id", PRIMARY_KEY_ALIAS} | key_fields
@@ -314,12 +321,12 @@ class OutboxStore(Generic[TOutboxEvent]):
             ConfigurationError: The model has ``Meta.soft_delete_field``, or ``batch_size`` is out
                 of range.
         """
-        if self.model._meta.soft_delete_field:
+        if self._binding.soft_delete_field:
             raise ConfigurationError(
                 f"{self.model.__name__} has Meta.soft_delete_field set - {method_name}() needs a real DELETE to "
                 "free the rows, which QuerySet.delete() would turn into a soft delete"
             )
-        self.check_count("batch_size", batch_size)
+        self.check_batch_size(batch_size)
         deleted = 0
         while True:
             sequences = await (

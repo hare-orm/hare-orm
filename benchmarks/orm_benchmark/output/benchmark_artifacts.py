@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import os
-import shutil
 import tempfile
 from collections.abc import Iterable
+from contextlib import ExitStack
 from pathlib import Path
 
 
@@ -18,21 +18,19 @@ class BenchmarkArtifacts:
 
     @staticmethod
     def publish(artifacts: dict[Path, str], obsolete: Iterable[Path] = ()) -> None:
-        with tempfile.TemporaryDirectory(prefix="hare-benchmark-report-") as directory:
+        with ExitStack() as cleanup:
             staged = {}
-            for index, (destination, content) in enumerate(artifacts.items()):
-                source = Path(directory) / str(index)
-                source.write_text(content, encoding="utf-8", newline="\n")
-                staged[destination] = source
-            for destination, source in staged.items():
+            for destination, content in artifacts.items():
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as output:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", newline="\n", dir=destination.parent, delete=False
+                ) as output:
                     temporary = Path(output.name)
-                try:
-                    shutil.copyfile(source, temporary)
-                    os.replace(temporary, destination)
-                finally:
-                    temporary.unlink(missing_ok=True)
+                    cleanup.callback(temporary.unlink, missing_ok=True)
+                    output.write(content)
+                staged[destination] = temporary
+            for destination, temporary in staged.items():
+                os.replace(temporary, destination)
             for path in obsolete:
                 if path not in artifacts:
                     path.unlink(missing_ok=True)

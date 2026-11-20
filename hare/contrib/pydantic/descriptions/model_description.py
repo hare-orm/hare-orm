@@ -9,13 +9,13 @@ from hare.fields import Field
 if TYPE_CHECKING:
     from typing import Self
 
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclasses.dataclass
 class ModelDescription:
     """A model's fields grouped by type, each group in declaration order - what the pydantic
-    model creator builds a schema from. ``ModelDescription.from_model(Book)`` describes a model.
+    model creator builds a schema from. ``ModelDescription.from_binding(Book)`` describes a model.
     """
 
     #: The model's primary key, as one Field per component - a single-column PK is a 1-item
@@ -36,34 +36,33 @@ class ModelDescription:
     many_to_many_fields: list[Field[Any]] = dataclasses.field(default_factory=list)
 
     @staticmethod
-    def _fields_in(model: type[Model], names: Iterable[str]) -> list[Field[Any]]:
-        return [field for name, field in model._meta.fields_map.items() if name in names]
+    def _fields_in(binding: ModelBinding, names: Iterable[str]) -> list[Field[Any]]:
+        return [field for name, field in binding.fields_map.items() if name in names]
 
     @classmethod
-    def from_model(cls, model: type[Model]) -> Self:
+    def from_binding(cls, binding: ModelBinding) -> Self:
         """Describes a model's fields.
 
         Args:
-            model: The model; its relations must be initialised (``Hare.init()`` or
+            binding: The model; its relations must be initialised (``Hare.init()`` or
                 ``Hare.bind_models()``).
 
         Returns:
             The description.
         """
-        meta = model._meta
         # The primary key's fields - one or several - are listed here, not among the data fields.
-        primary_key_attribute_names = meta.primary_key_attribute_names
+        primary_key_attribute_names = binding.primary_key_attribute_names
         # A blind index is hare's own column, written with the encrypted field - its HMAC is no data.
-        blind_index_field_names = set(meta.blind_index_fields.values())
+        blind_index_field_names = set(binding.blind_index_fields.values())
         return cls(
-            pk_fields=[meta.fields_map[name] for name in primary_key_attribute_names],
+            pk_fields=[binding.fields_map[name] for name in primary_key_attribute_names],
             data_fields=cls._fields_in(
-                model,
-                meta.fields - meta.fetch_fields - set(primary_key_attribute_names) - blind_index_field_names,
+                binding,
+                binding.fields - binding.fetch_fields - set(primary_key_attribute_names) - blind_index_field_names,
             ),
-            foreign_key_fields=cls._fields_in(model, meta.foreign_key_fields),
-            backward_foreign_key_fields=cls._fields_in(model, meta.backward_foreign_key_fields),
-            one_to_one_fields=cls._fields_in(model, meta.one_to_one_fields),
-            backward_one_to_one_fields=cls._fields_in(model, meta.backward_one_to_one_fields),
-            many_to_many_fields=cls._fields_in(model, meta.many_to_many_fields),
+            foreign_key_fields=cls._fields_in(binding, binding.foreign_key_fields),
+            backward_foreign_key_fields=cls._fields_in(binding, binding.backward_foreign_key_fields),
+            one_to_one_fields=cls._fields_in(binding, binding.one_to_one_fields),
+            backward_one_to_one_fields=cls._fields_in(binding, binding.backward_one_to_one_fields),
+            many_to_many_fields=cls._fields_in(binding, binding.many_to_many_fields),
         )

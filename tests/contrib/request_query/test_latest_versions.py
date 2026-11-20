@@ -8,6 +8,7 @@ import pytest_asyncio
 
 from hare.contrib.request_query import LatestVersions, RequestQuery
 from hare.contrib.test import assert_query_count
+from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError
 from tests.contrib.request_query.models import Article, Book, BookStatus
 from tests.contrib.request_query.queries import ArticleQuery, PublishedArticleQuery, VisibleArticleQuery
@@ -76,4 +77,4 @@ def test_a_database_running_no_correlated_subqueries_is_refused(db_request_query
     connection = Article.get_connection()
     monkeypatch.setattr(connection, "features", connection.features.replace(supports_correlated_subqueries=False))
     with pytest.raises(ConfigurationError, match="runs no correlated subqueries"):
-        LatestVersions().check_model("ArticleQuery", Article)
+        LatestVersions().check_model("ArticleQuery", HareContext.require_current().apps.get_binding(Article))

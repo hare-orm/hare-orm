@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Iterable
+from collections.abc import Iterable, MutableMapping
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from hare.core.apps.swappable_models import SwappableModels
 from hare.ddl.schema_objects.enum_type import EnumType
 from hare.exceptions import ConfigurationError
-from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.fields.relations.swappable_model_reference import SwappableModelReference
+from hare.migrations.constants import RELATION_FIELDS
 from hare.migrations.exceptions import InconsistentMigrationStateError
 from hare.migrations.reports.operation_plan import OperationPlan
 from hare.migrations.state.migration_environment import MigrationEnvironment
@@ -22,6 +23,9 @@ from hare.models.enums import ModelOption
 
 if TYPE_CHECKING:
     from hare.migrations.autodetection.rename_questions import RenameQuestions
+    from hare.migrations.operations.dependencies.operation_dependency import OperationDependency
+    from hare.migrations.operations.operation import Operation
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclass
@@ -30,18 +34,20 @@ class State:
     types the operations created. The model classes (``apps``) are rendered from it only when an
     operation asks for them."""
 
-    models: dict[tuple[str, str], ModelState] = dataclasses.field(default_factory=dict)
+    models: MutableMapping[tuple[str, str], ModelState] = dataclasses.field(default_factory=dict)
     #: Each app's default connection alias.
     default_connections: dict[str, str] = dataclasses.field(default_factory=dict)
     #: Leave a relation declared with ``swappable()`` unresolved without failing - makemigrations
     #: replays a package's migrations before the app its setting points into has any.
     ignores_missing_swappable_relations: bool = False
-    #: The extensions the operations created.
-    extensions: set[str] = dataclasses.field(default_factory=set)
-    #: The schemas the operations created.
-    schemas: set[str] = dataclasses.field(default_factory=set)
-    #: The ``ENUM`` types the operations created, by schema and name.
-    enum_types: dict[tuple[str | None, str], EnumType] = dataclasses.field(default_factory=dict)
+    #: The extensions the operations created, by database alias and name.
+    extensions: set[tuple[str | None, str]] = dataclasses.field(default_factory=set)
+    #: The schemas the operations created, by database alias and name.
+    schemas: set[tuple[str | None, str]] = dataclasses.field(default_factory=set)
+    #: The ``ENUM`` types the operations created, by database alias, schema and name.
+    enum_types: dict[tuple[str | None, str | None, str], EnumType] = dataclasses.field(default_factory=dict)
+    #: The app whose migration provides the current native resource definition.
+    native_providers: dict[OperationDependency, str] = dataclasses.field(default_factory=dict, kw_only=True)
     environment: MigrationEnvironment = dataclasses.field(
         default_factory=MigrationEnvironment.capture, repr=False, compare=False, kw_only=True
     )
@@ -49,6 +55,22 @@ class State:
 
     def __post_init__(self) -> None:
         self.rendering = StateRendering(self.default_connections, self.environment)
+
+    def record_native_operation(self, app_label: str, operation: Operation) -> None:
+        """Keep durable native-resource provenance for cross-app migration dependencies."""
+        # Operations import State while their package initializes.
+        from hare.migrations.operations.dependencies.constants import DATABASE_DEPENDENCY_SUBJECTS
+        from hare.migrations.operations.enums import DependencyType
+
+        alias = self.default_connections.get(app_label)
+        for dependency in operation.get_provided_dependencies(app_label, self):
+            if dependency.subject not in DATABASE_DEPENDENCY_SUBJECTS:
+                continue
+            resource = dataclasses.replace(dependency, dependency_type=DependencyType.CREATED, database_alias=alias)
+            if dependency.dependency_type is DependencyType.REMOVED:
+                self.native_providers.pop(resource, None)
+            else:
+                self.native_providers[resource] = app_label
 
     @property
     def apps(self) -> StateApps:
@@ -93,37 +115,19 @@ class State:
         default_connections: dict[str, str] | None = None,
         environment: MigrationEnvironment | None = None,
     ) -> State:
-        """The state of model classes as they are declared - for a migration built in memory, the
-        models its operations relate to, or the new version of the models it brings.
-
-        A table whose schema an application changes while it runs (``Meta.managed = False``, so
-        migration files leave it alone) gets its current state from its own migrations applied
-        to a state - ``Migration.apply(state)`` without a schema editor - not from its
-        registered class.
-
-        Args:
-            models: The model classes.
-            app_label: The app of a model that names none (``Meta.app``) and isn't registered.
-            default_connections: Each app's default connection alias.
-            environment: Captured application inputs; captures the current application when omitted.
-
-        Returns:
-            The state.
-
-        Raises:
-            ConfigurationError: A model has no app and no ``app_label`` is given.
-        """
-        model_states: dict[tuple[str, str], ModelState] = {}
-        for model in models:
-            model_app_label = model._meta.app or app_label
-            if model_app_label is None:
-                raise ConfigurationError(f"Model {model.__name__} names no app - pass app_label")
-            model_states[(model_app_label, model.__name__)] = ModelState.make_from_model(model_app_label, model)
-        return cls(
-            models=model_states,
-            default_connections=dict(default_connections or {}),
-            environment=environment if environment is not None else MigrationEnvironment.capture(),
-        )
+        """Capture model declarations through one explicit live or offline registry graph."""
+        environment = environment if environment is not None else MigrationEnvironment.capture()
+        bindings = environment.get_bindings(list(models), app_label=app_label, default_connections=default_connections)
+        model_states = {}
+        connections = dict(default_connections or {})
+        for binding in bindings:
+            label = binding.app or app_label
+            if label is None:
+                raise ConfigurationError(f"Model {binding._model.__name__} names no app - pass app_label")
+            if binding.default_connection is not None:
+                connections.setdefault(label, binding.default_connection)
+            model_states[(label, binding._model.__name__)] = environment.get_model_state(label, binding)
+        return cls(models=model_states, default_connections=connections, environment=environment)
 
     def get_operations(
         self, new_state: State, app_label: str, rename_questions: RenameQuestions | None = None
@@ -141,10 +145,18 @@ class State:
             The operations, the warnings and the warnings of what the change can lose.
         """
         # Deferred: the operation generator imports the operations, which import this module.
+        from hare.migrations.autodetection.cross_app_view_changes import CrossAppViewChanges
         from hare.migrations.autodetection.operation_generator import OperationGenerator
 
         generator = OperationGenerator(self, new_state, rename_questions=rename_questions)
         operations = generator.generate(app_labels=[app_label])
+        changes = CrossAppViewChanges(
+            self, new_state, generator.connection_by_app, {app_label: generator.changed_columns}
+        )
+        operations_by_app = {app_label: operations} if operations else {}
+        changes.prepare(operations_by_app)
+        if app_label in changes.groups:
+            operations = changes.surround(app_label, operations_by_app[app_label])
         return OperationPlan(
             operations=tuple(operations),
             warnings=tuple(generator.warnings),
@@ -193,14 +205,18 @@ class State:
         """
         missing_targets_by_field: list[tuple[str, str]] = []
         for field_name, field in model_state.fields.items():
-            if not isinstance(field, (ForeignKeyFieldInstance, ManyToManyFieldInstance)) or getattr(
-                field, "_generated", False
-            ):
+            if not isinstance(field, RELATION_FIELDS) or getattr(field, "_generated", False):
                 continue
             references: list[object] = [self.get_model_reference(field.model_name)]
             if isinstance(field, ManyToManyFieldInstance):
                 references.append(self.get_model_reference(field.through_model))
             for reference in references:
+                if (
+                    isinstance(reference, type)
+                    and issubclass(reference, Model)
+                    and reference._declaration.app is not None
+                ):
+                    reference = f"{reference._declaration.app}.{reference.__name__}"
                 if not isinstance(reference, str) or "." not in reference:
                     continue
                 target_key = tuple(reference.split(".", 1))
@@ -222,6 +238,9 @@ class State:
 
     def get_model_reference(self, reference: Any) -> Any:
         """Bind a swappable reference using this state's captured environment."""
+        if isinstance(reference, type) and reference in self.environment.source_bindings:
+            binding = self.environment.source_bindings[reference]
+            return f"{binding.app}.{reference.__name__}"
         return (
             self.get_swappable_label(reference.setting)
             if isinstance(reference, SwappableModelReference)
@@ -230,9 +249,7 @@ class State:
 
     def get_model_key(self, reference: str | type[Model] | SwappableModelReference) -> tuple[str, str]:
         """Read a model key without consulting the current application."""
-        if isinstance(reference, SwappableModelReference):
-            reference = self.get_swappable_label(reference.setting)
-        return StateApps.split_reference(reference)
+        return StateApps.split_reference(self.get_model_reference(reference))
 
     def get_declared_swappable_label(self, setting: str) -> str:
         """The label of the one model of this state declaring ``Meta.swappable = setting``.
@@ -248,24 +265,15 @@ class State:
             for (app_label, model_name), model_state in self.models.items()
             if model_state.options.get(ModelOption.SWAPPABLE) == setting
         ]
-        if len(labels) == 1:
-            return labels[0]
-        if not labels:
-            raise ConfigurationError(
-                f"Unknown swappable setting {setting!r} - no model declares Meta.swappable = {setting!r}; "
-                'set it in the "swappable" config section'
-            )
-        raise ConfigurationError(
-            f"Swappable setting {setting!r} is declared by several models ({', '.join(labels)}) - "
-            'choose one in the "swappable" config section'
-        )
+        return SwappableModels.get_declared_model_label(setting, labels)
 
-    def get_models_with_tables(self) -> list[type[Model]]:
+    def get_bindings_with_tables(self) -> list[ModelBinding]:
         """Every rendered model of this state except the ones swapped for another model by their
         ``swappable`` setting, which have no table."""
+        apps = self.apps
         return [
-            model
-            for app_label, app in self.apps.apps.items()
+            apps.get_binding(model)
+            for app_label, app in apps.apps.items()
             for model_name, model in app.items()
             if not self.is_swapped_model(app_label, model_name)
         ]
@@ -298,12 +306,17 @@ class State:
     def clone(self) -> State:
         """A copy to change on its own - its classes rendered only when asked for; this state keeps
         its own rendering."""
+        return self._copy_with_models({key: model.clone() for key, model in self.models.items()})
+
+    def _copy_with_models(self, models: MutableMapping[tuple[str, str], ModelState]) -> State:
+        """Copy state metadata around the supplied working model declarations."""
         return self.__class__(
-            models={key: model.clone() for key, model in self.models.items()},
+            models=models,
             default_connections=dict(self.default_connections),
             ignores_missing_swappable_relations=self.ignores_missing_swappable_relations,
             extensions=set(self.extensions),
             schemas=set(self.schemas),
             enum_types=deepcopy(self.enum_types),
+            native_providers=dict(self.native_providers),
             environment=self.environment,
         )

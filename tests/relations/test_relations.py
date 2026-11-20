@@ -6,6 +6,7 @@ import pytest_asyncio
 
 from hare import prefetch_related_objects
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.exceptions import FieldError, NoValuesFetched, QueryError, ValidationError
 from hare.query.functions import Count, Trim
 from tests.shared_models.testmodels import (
@@ -653,10 +654,7 @@ async def test_o2o_fk_model_with_m2m_field(db):
 
 @pytest.mark.asyncio
 async def test_pk_filter_on_model_with_o2o_as_pk(db):
-    """A model whose primary key IS a single OneToOneField(primary_key=True) (Address, keyed
-    by its "event" O2O field) must still support the "pk"/"pk__in" filter alias, same as any
-    plain-scalar-pk model - it previously had no "pk" filter registered at all, since
-    ModelMeta._dispatch_fields() only ever registered it for non-relation fields."""
+    """The pk and pk__in aliases work when a OneToOneField is the model's primary key."""
     tournament = await Tournament.objects.create(name="t")
     event = await Event.objects.create(name="e", tournament=tournament)
     address = await Address.objects.create(city="c", street="s", event=event)
@@ -756,10 +754,10 @@ async def test_fk_to_model_with_o2o_primary_key_stores_the_target_pk(db):
     account = await O2oPkAccount.objects.create(name="a")
     profile = await O2oPkProfile.objects.create(account=account, bio="b")
 
-    note_field = O2oPkProfileNote._meta.fields_map["profile"]
+    note_field = HareContext.require_current().apps.get_binding(O2oPkProfileNote).fields_map["profile"]
     assert note_field.to_field == "account_id"
     assert [field.model_field_name for field in note_field.to_field_instances] == ["account_id"]
-    assert "profile_id" in O2oPkProfileNote._meta.db_fields
+    assert "profile_id" in HareContext.require_current().apps.get_binding(O2oPkProfileNote).db_fields
 
     note = await O2oPkProfileNote.objects.create(text="n", profile=profile)
     assert note.profile_id == account.pk

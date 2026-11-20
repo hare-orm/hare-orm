@@ -4,14 +4,13 @@ from collections import defaultdict
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from hare.ddl.enums import Privilege
+from hare.ddl.enums import Privilege, SchemaPartType
 from hare.declarations.declaration_values import DeclarationValues
 from hare.dialects.postgresql.introspection.constants import (
     POSTGRESQL_CATALOG_COLUMN_NONCOMPARABLE_MEMBERS,
     POSTGRESQL_CATALOG_FOREIGN_KEY_NONCOMPARABLE_MEMBERS,
 )
 from hare.dialects.postgresql.introspection.postgresql_definitions import PostgresqlDefinitions
-from hare.inspectdb.enums import SchemaPartType
 from hare.inspectdb.introspection.schema_part import SchemaPart
 from hare.inspectdb.introspection.table_parts import TableParts
 

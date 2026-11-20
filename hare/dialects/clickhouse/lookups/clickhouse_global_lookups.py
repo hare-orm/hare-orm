@@ -25,18 +25,9 @@ class ClickhouseGlobalLookups:
     operators only ClickHouse implements, a query on another database refused before its SQL is built."""
 
     @staticmethod
-    def get_container(value: Any) -> Term:
-        """The list or subquery a ``GLOBAL IN`` reads.
-
-        Args:
-            value: The encoded values, or a subquery.
-
-        Returns:
-            The container.
-        """
-        if isinstance(value, (list, tuple, set)):
-            return Tuple(*Lookups.get_in_list_terms(list(value)))
-        return value
+    def _get_list_criterion(term: Term, terms: list[Term], negated: bool) -> Criterion:
+        criterion = GlobalContainsCriterion(term, Tuple(*terms))
+        return criterion.negate() if negated else criterion
 
     @staticmethod
     @DialectImplementedOperators.mark
@@ -52,11 +43,9 @@ class ClickhouseGlobalLookups:
         """
         if not isinstance(value, (list, tuple, set)):
             return GlobalContainsCriterion(term, value)
-        non_null_values = [item for item in value if item is not None]
-        if not non_null_values:
-            return term.isnull() if value else Lookups.is_in(term, [])
-        criterion: Criterion = GlobalContainsCriterion(term, ClickhouseGlobalLookups.get_container(non_null_values))
-        return criterion | term.isnull() if len(non_null_values) != len(value) else criterion
+        return Lookups.get_list_membership(
+            term, value, negated=False, criterion_builder=ClickhouseGlobalLookups._get_list_criterion
+        )
 
     @staticmethod
     @DialectImplementedOperators.mark
@@ -72,13 +61,9 @@ class ClickhouseGlobalLookups:
         """
         if not isinstance(value, (list, tuple, set)):
             return GlobalContainsCriterion(term, value).is_not_true()
-        non_null_values = [item for item in value if item is not None]
-        if not non_null_values:
-            return term.notnull() if value else Lookups.not_in(term, [])
-        criterion: Criterion = GlobalContainsCriterion(
-            term, ClickhouseGlobalLookups.get_container(non_null_values)
-        ).negate()
-        return criterion if len(non_null_values) != len(value) else criterion | term.isnull()
+        return Lookups.get_list_membership(
+            term, value, negated=True, criterion_builder=ClickhouseGlobalLookups._get_list_criterion
+        )
 
     @staticmethod
     def get_global_lookup(lookup: Lookup, field: Field[Any] | None) -> FieldLookup:

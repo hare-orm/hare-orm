@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 from hare.classes.class_path import ClassPath
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.ddl.raw_sql_term import RawSQLTerm
+from hare.dialects.clickhouse.schema.messages import PROJECTION_WRONG_MODEL
 from hare.dialects.clickhouse.schema.schema_objects.clickhouse_projection_compiler import ClickhouseProjectionCompiler
 from hare.exceptions import ConfigurationError
 
@@ -15,6 +16,7 @@ if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset import QuerySet
     from hare.query.queryset.model_query import ModelQuery
 
@@ -46,6 +48,8 @@ class ClickhouseProjection:
     name: str
     query: RawSQLTerm | QuerySet[Any, Any] | ModelQuery
     read_columns: tuple[str, ...] = dataclasses.field(default=(), kw_only=True)
+    _binding: ModelBinding | None = dataclasses.field(default=None, init=False, compare=False, repr=False)
+    _source_model: type[Model] | None = dataclasses.field(default=None, init=False, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip():
@@ -73,18 +77,29 @@ class ClickhouseProjection:
                 f"ClickhouseProjection {self.name!r}: the query takes a queryset of the table's model, "
                 f"ModelQuery() or RawSQLTerm(...) of a SELECT, got {ValueDescriptions.get_shown_value(self.query)}"
             )
+        if isinstance(self.query, QuerySet) and (
+            self.query._context is not None or self.query._connection is not None
+        ):
+            object.__setattr__(self, "_source_model", self.query.model)
+            sql, columns = ClickhouseProjectionCompiler.compile(self)
+            object.__setattr__(self, "query", RawSQLTerm(sql))
+            object.__setattr__(self, "read_columns", columns)
 
-    def for_model(self, model: type[Model]) -> Self:
-        """The projection as the model declaring it has it - a ``ModelQuery()`` made on that model.
-
-        Args:
-            model: The model.
-        """
-        from hare.query.queryset.model_query import ModelQuery
-
-        if not isinstance(self.query, ModelQuery):
+    def for_binding(self, binding: ModelBinding) -> Self:
+        """Keep structural identity; compile bound SQL once and replay templates at compilation."""
+        if self._source_model is not None and self._source_model is not binding._model:
+            raise ConfigurationError(
+                PROJECTION_WRONG_MODEL.format(
+                    model=binding._model.__name__,
+                    name=self.name,
+                    query_model=self._source_model.__name__,
+                )
+            )
+        if isinstance(self.query, RawSQLTerm):
             return self
-        return dataclasses.replace(self, query=self.query.for_model(model))
+        bound = dataclasses.replace(self)
+        object.__setattr__(bound, "_binding", binding)
+        return bound
 
     def get_queryset(self) -> QuerySet[Any, Any] | None:
         """The queryset the projection selects, None for raw SQL.
@@ -94,7 +109,7 @@ class ClickhouseProjection:
         """
         from hare.query.queryset.model_query import ModelQuery
 
-        return ModelQuery.get_declared_queryset(self.query)
+        return ModelQuery.get_declared_queryset(self.query, binding=self._binding)
 
     def get_query_sql(self, client: DatabaseClient | None = None) -> str:
         """Compile a SELECT without FROM; raw SQL is returned verbatim."""
@@ -104,17 +119,18 @@ class ClickhouseProjection:
         """Read columns from the same compilation that produces the projection SQL."""
         return ClickhouseProjectionCompiler.compile(self)[1]
 
-    def with_sql_query(self, model: type[Model]) -> ClickhouseProjection:
-        """Bind and snapshot a projection declaration for a migration without changing its queryset."""
-        if isinstance(self.query, RawSQLTerm):
+    def with_sql_query(
+        self, binding: ModelBinding | None, client: DatabaseClient | None = None
+    ) -> ClickhouseProjection:
+        """Snapshot SQL and dependencies, preserving the source-model check without resources."""
+        sql, read_columns = ClickhouseProjectionCompiler.compile(self, client, binding)
+        if isinstance(self.query, RawSQLTerm) and self._binding is None:
             return self
-        projection = self.for_model(model)
-        sql, read_columns = ClickhouseProjectionCompiler.compile(projection, model=model)
-        return dataclasses.replace(projection, query=RawSQLTerm(sql), read_columns=read_columns)
+        return dataclasses.replace(self, query=RawSQLTerm(sql), read_columns=read_columns)
 
-    def get_definition_sql(self, model: type[Model], editor: BaseSchemaEditor) -> str:
+    def get_definition_sql(self, binding: ModelBinding, editor: BaseSchemaEditor) -> str:
         """Render ADD PROJECTION's name and SELECT after one isolated compilation."""
-        sql, _ = ClickhouseProjectionCompiler.compile(self, editor.client, model)
+        sql, _ = ClickhouseProjectionCompiler.compile(self, editor.client, binding)
         return f"{editor.quote(self.name)} ({sql})"
 
     def deconstruct(self) -> tuple[str, list[Any], dict[str, Any]]:

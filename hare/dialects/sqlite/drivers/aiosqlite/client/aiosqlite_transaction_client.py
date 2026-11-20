@@ -11,7 +11,6 @@ import aiosqlite
 from hare.core.resource_completion import ResourceCompletion
 from hare.dialects.base.client.connection_wrapper import ConnectionWrapper
 from hare.dialects.base.client.enums import StatementForm
-from hare.dialects.base.client.transaction_lifecycle.pending_statements import PendingStatements
 from hare.dialects.sqlite.client.sqlite_client import SqliteClient
 from hare.dialects.sqlite.client.sqlite_transaction_client import SqliteTransactionClient
 from hare.dialects.sqlite.constants import SQLITE_TRANSACTION_ABORTED_MESSAGE
@@ -26,7 +25,6 @@ from hare.dialects.sqlite.drivers.constants import (
     SQLITE_EXECUTE_MANY_RELEASE_SQL,
     SQLITE_EXECUTE_MANY_ROLLBACK_SQL,
     SQLITE_EXECUTE_MANY_SAVEPOINT_SQL,
-    SQLITE_FIRST_NUMBERED_PLACEHOLDER,
     SQLITE_STREAM_BATCH_SIZE,
 )
 from hare.exceptions import TransactionManagementError
@@ -70,12 +68,7 @@ class AiosqliteTransactionClient(SqliteTransactionClient, AiosqliteClient):
             raise TransactionManagementError(SQLITE_TRANSACTION_ABORTED_MESSAGE)
         if self.log.isEnabledFor(logging.DEBUG):
             self.log.debug("%s: %s", query, values)
-        bound_values = self.parameter_adapters.bind(values)
-        cursor_values = (
-            self.get_values_by_number(bound_values)
-            if bound_values and self.binds_parameters_by_number and SQLITE_FIRST_NUMBERED_PLACEHOLDER in query
-            else bound_values
-        )
+        cursor_values = self._get_bound_parameters(query, values)
         batch_size = chunk_size or SQLITE_STREAM_BATCH_SIZE
         cursor = await self._open_stream_cursor(query, cursor_values)
         try:
@@ -119,7 +112,9 @@ class AiosqliteTransactionClient(SqliteTransactionClient, AiosqliteClient):
             return await self._run_on_worker_thread(connection, self._fetch_many, cursor, batch_size)
 
     @staticmethod
-    def _execute_on_cursor(raw_connection: sqlite3.Connection, query: str, values: list[Any]) -> sqlite3.Cursor:
+    def _execute_on_cursor(
+        raw_connection: sqlite3.Connection, query: str, values: list[Any] | dict[str, Any]
+    ) -> sqlite3.Cursor:
         """Runs a statement on aiosqlite's worker thread and gives its cursor - of rows read by
         name too."""
         cursor = raw_connection.cursor()
@@ -146,16 +141,16 @@ class AiosqliteTransactionClient(SqliteTransactionClient, AiosqliteClient):
         async with self.acquire_connection() as connection:
             if self.log.isEnabledFor(logging.DEBUG):
                 self.log.debug("%s: %s", query, values)
-            values = [self.parameter_adapters.bind(row) for row in values]
-            if self.binds_parameters_by_number and SQLITE_FIRST_NUMBERED_PLACEHOLDER in query:
-                values = [self.get_values_by_number(row) for row in values]  # type: ignore[misc]
-            if len(values) < 2:
-                await connection.executemany(query, values)
+            bound = self._get_many_parameters(query, values)
+            if len(bound) < 2:
+                await connection.executemany(query, bound)
             else:
-                await self._run_on_worker_thread(connection, self._execute_many_in_savepoint, query, values)
+                await self._run_on_worker_thread(connection, self._execute_many_in_savepoint, query, bound)
 
     @staticmethod
-    def _execute_many_in_savepoint(raw_connection: sqlite3.Connection, query: str, values: list[list[Any]]) -> None:
+    def _execute_many_in_savepoint(
+        raw_connection: sqlite3.Connection, query: str, values: list[list[Any]] | list[dict[str, Any]]
+    ) -> None:
         """Runs every row atomically within the caller's transaction, in one worker-thread hop.
 
         Catching a constraint error must not commit the earlier rows of this call. The savepoint
@@ -210,8 +205,6 @@ class AiosqliteTransactionClient(SqliteTransactionClient, AiosqliteClient):
 
     @SqliteClient.translate_exceptions(StatementForm.CONTROL)
     async def _driver_savepoint(self, name: str) -> None:
-        # A SAVEPOINT outside a transaction would start one its RELEASE commits.
-        await PendingStatements.send_pending_begin(self)
         await self._connection.execute(f"SAVEPOINT {name}")
 
     @SqliteClient.translate_exceptions(StatementForm.CONTROL)

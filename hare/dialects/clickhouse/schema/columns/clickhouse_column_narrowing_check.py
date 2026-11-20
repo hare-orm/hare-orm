@@ -122,11 +122,11 @@ class ClickhouseColumnNarrowingCheck(ColumnNarrowingCheck):
 
     async def check_not_null_change(self, qualified_table: str, quoted_column: str) -> None:
         # The MODIFY COLUMN of a column holding NULL fails in its mutation, which stays and blocks
-        # every later one - checked first and refused.
+        # every later one. Read the value so older parts use the full column when computing its nullness.
         rows = await self.editor.client.execute_dicts(
-            f"SELECT count(*) AS null_count FROM {qualified_table} WHERE {quoted_column} IS NULL"  # nosec B608
+            f"SELECT {quoted_column} FROM {qualified_table} WHERE {quoted_column} IS NULL LIMIT 1"  # nosec B608
         )
-        if rows[0]["null_count"]:
+        if rows:
             raise IntegrityError(
                 CLICKHOUSE_NOT_NULL_CHANGE_REFUSED_MESSAGE.format(column=quoted_column, table=qualified_table)
             )

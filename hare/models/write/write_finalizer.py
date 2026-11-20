@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING
 
+from hare.core.resource_completion import ResourceCompletion
 from hare.fields.constants import ROLLBACK_RESTORE_UNSET
 from hare.instrumentation.change_events import ChangeEvents
 from hare.instrumentation.enums import RowOperation
@@ -36,19 +37,13 @@ class WriteFinalizer:
         last. Repeated registration in the same savepoint keeps the first snapshot.
         """
         before = InstanceSnapshot.capture_persistence(obj)
-        WriteFinalizer.register_snapshots((before,), connection)
+        RollbackRestores.register_snapshots(connection, (before,))
         return before
-
-    @staticmethod
-    def register_snapshots(snapshots: Iterable[InstanceSnapshot], connection: DatabaseClient) -> None:
-        """Attach persistence undo to the exact client, before publishing fields."""
-        if connection.is_transaction_client:
-            RollbackRestores.register_snapshots(connection, snapshots)
 
     @staticmethod
     def settle_values(values: InstanceValues, connection: DatabaseClient, outcome: WriteOutcome) -> None:
         """Keep automatic assignments for a completed write, undo a known non-write."""
-        if not outcome.performed or outcome.row_count == 0:
+        if not outcome.may_have_written:
             values.restore()
         else:
             values.keep(connection)
@@ -58,16 +53,14 @@ class WriteFinalizer:
         values: InstanceValues, error: BaseException, instances: Iterable[Model] | None = None
     ) -> None:
         """Undo preparation without replacing the original error if a setter also fails."""
-        try:
+        with ResourceCompletion.preserve_error(error, WRITE_RESTORE_FAILURES_MESSAGE):
             values.restore(instances)
-        except BaseException as restore_error:
-            raise BaseExceptionGroup(WRITE_RESTORE_FAILURES_MESSAGE, [error, restore_error]) from None
 
     @staticmethod
     def publish_saved(
         snapshots: Sequence[InstanceSnapshot],
         connection: DatabaseClient,
-        outcome: WriteOutcome,
+        operation: RowOperation,
         *,
         updated_fields: Sequence[str] | None = None,
     ) -> None:
@@ -81,7 +74,7 @@ class WriteFinalizer:
             return
         objs = [snapshot.instance for snapshot in snapshots]
         WrittenInstances.mark_saved(objs, connection)
-        if outcome.operation is RowOperation.INSERT:
+        if operation is RowOperation.INSERT:
             # A missing per-instance flag reads the model's False class default.
             WrittenInstances.clear_custom_generated_keys(
                 [
@@ -91,7 +84,7 @@ class WriteFinalizer:
                     or not snapshot.values["_custom_generated_pk"]
                 ]
             )
-        if objs[0]._meta.track_dirty_fields:
+        if objs[0]._binding.track_dirty_fields:
             for obj in objs:
                 if updated_fields is None:
                     DirtyFields.snapshot_dirty_fields(obj)
@@ -112,12 +105,12 @@ class WriteFinalizer:
         Bulk callers publish through ``publish_saved`` and report their entire batch
         through the bulk reporting contract, without emitting one event per object.
         """
-        WriteFinalizer.publish_saved((before,), connection, outcome, updated_fields=updated_fields)
+        WriteFinalizer.publish_saved((before,), connection, outcome.operation, updated_fields=updated_fields)
         obj = before.instance
-        if outcome.performed and ChangeEvents.is_observed(type(obj)):
+        if outcome.performed and ChangeEvents.is_observed(obj._binding):
             await WriteSteps.report(
                 connection,
-                type(obj),
+                obj._binding,
                 outcome.operation,
                 instances=[obj],
                 fields=None if outcome.operation is RowOperation.INSERT else reported_fields,

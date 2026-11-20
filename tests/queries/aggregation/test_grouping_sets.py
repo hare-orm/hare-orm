@@ -3,6 +3,8 @@ query, Grouping() telling a grouping's NULL from a NULL value - and the database
 
 from __future__ import annotations
 
+from collections import Counter
+
 import pytest
 
 from hare.contrib.test import requires_features
@@ -95,6 +97,23 @@ async def test_grouping_tells_a_grouping_null_from_a_null_value(db):
 
 @requires_features(supports_grouping_sets=True)
 @pytest.mark.asyncio
+async def test_summaries_keep_the_groups_when_ordering_by_a_grouping_alias(db):
+    await create_rows()
+    groups = (
+        IntFields.objects.values("intnum")
+        .annotate(mask=Grouping("intnum"), total=Sum("id"))
+        .group_by(Rollup("intnum"))
+        .order_by("mask", "intnum")
+    )
+
+    assert await groups.count() == 3
+    assert await groups.exists()
+    assert await groups[1:2].count() == 1
+    assert not await groups[3:].exists()
+
+
+@requires_features(supports_grouping_sets=True)
+@pytest.mark.asyncio
 async def test_an_annotation_in_a_rollup(db):
     await create_rows()
     rows = (
@@ -147,6 +166,90 @@ async def test_a_relation_to_a_composite_key_is_grouped_whole(db, grouping_set):
 
 @requires_features(supports_grouping_sets=True)
 @pytest.mark.asyncio
+@pytest.mark.parametrize("grouping_type", [Rollup, Cube, GroupingSets])
+@pytest.mark.parametrize("key_source", ["field", "annotation", "alias"])
+async def test_grouping_has_one_bit_per_logical_composite_field(db, grouping_type, key_source):
+    root = await RecursiveCompositeNode.objects.create(a=1, b=1, name="root")
+    await RecursiveCompositeNode.objects.create(a=1, b=2, name="first", parent=root)
+    await RecursiveCompositeNode.objects.create(a=2, b=1, name="second", parent=root)
+    data = [((1, 1), None), ((1, 2), (1, 1)), ((2, 1), (1, 1))]
+    if grouping_type is Rollup:
+        subsets = [(0, 1), (0,), ()]
+    elif grouping_type is Cube:
+        subsets = [(0, 1), (0,), (1,), ()]
+    else:
+        subsets = [(0, 1), (1,), ()]
+    base = RecursiveCompositeNode.objects.all()
+    if key_source == "annotation":
+        base = base.annotate(key=F("pk"))
+    elif key_source == "alias":
+        base = base.alias(key=F("pk"))
+    names = ("pk" if key_source == "field" else "key", "parent")
+    grouping = (
+        GroupingSets(*(tuple(names[index] for index in subset) for subset in subsets))
+        if grouping_type is GroupingSets
+        else grouping_type(*names)
+    )
+    expected = Counter()
+    for subset in subsets:
+        groups = Counter(tuple(row[index] if index in subset else None for index in range(2)) for row in data)
+        mask = sum(1 << (1 - index) for index in range(2) if index not in subset)
+        expected.update((key[0], key[1], count, mask) for key, count in groups.items())
+    rows = await base.values(*names).annotate(nodes=Count("name"), mask=Grouping(*names)).group_by(grouping)
+    assert Counter((row[names[0]], row["parent"], row["nodes"], row["mask"]) for row in rows) == expected
+    assert all(type(row["mask"]) is int for row in rows)
+
+
+@requires_features(supports_grouping_sets=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("grouping_type", [Rollup, Cube, GroupingSets])
+@pytest.mark.parametrize("grouping_first", [False, True])
+async def test_grouping_reuses_parameterized_annotation_inputs(db, grouping_type, grouping_first):
+    await create_rows()
+    names = ("intnum", "bucket")
+    if grouping_type is Rollup:
+        subsets = [(0, 1), (0,), ()]
+    elif grouping_type is Cube:
+        subsets = [(0, 1), (0,), (1,), ()]
+    else:
+        subsets = [(0, 1), (1,), ()]
+    grouping = (
+        GroupingSets(*(tuple(names[index] for index in subset) for subset in subsets))
+        if grouping_type is GroupingSets
+        else grouping_type(*names)
+    )
+    for delta in (5, 9, 5):
+        annotations = {"bucket": F("intnum_null") + delta, "mask": Grouping(*names)}
+        if grouping_first:
+            annotations = dict(reversed(annotations.items()))
+        rows = await (
+            IntFields.objects.annotate(**annotations)
+            .values(*names, "mask")
+            .annotate(nodes=Count("id"))
+            .group_by(grouping)
+        )
+        data = [(1, 10 + delta), (1, 20 + delta), (2, 10 + delta), (2, 10 + delta)]
+        expected = Counter()
+        for subset in subsets:
+            groups = Counter(tuple(row[index] if index in subset else None for index in range(2)) for row in data)
+            mask = sum(1 << (1 - index) for index in range(2) if index not in subset)
+            expected.update((key[0], key[1], count, mask) for key, count in groups.items())
+        assert Counter((row["intnum"], row["bucket"], row["nodes"], row["mask"]) for row in rows) == expected
+
+
+@requires_features(supports_grouping_sets=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutual", [False, True])
+async def test_grouping_annotation_cycles_keep_the_declaration_error(db, mutual):
+    annotations = {"flag": Grouping("other" if mutual else "flag")}
+    if mutual:
+        annotations["other"] = Grouping("flag")
+    with pytest.raises(QueryError, match="Circular annotation reference"):
+        await IntFields.objects.annotate(**annotations).values("flag").group_by("intnum")
+
+
+@requires_features(supports_grouping_sets=True)
+@pytest.mark.asyncio
 async def test_aggregate_over_groupings_is_refused(db):
     await create_rows()
     with pytest.raises(QueryError, match="would count rows once per grouping"):
@@ -183,7 +286,7 @@ async def test_a_database_without_grouping_sets_refuses_them(db):
         ),
     ],
 )
-def test_a_wrong_grouping_is_refused(make, message):
+def test_a_wrong_grouping_is_refused(make, message, db):
     with pytest.raises(QueryError, match=message):
         make()
 

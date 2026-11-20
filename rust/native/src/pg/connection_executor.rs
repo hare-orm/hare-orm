@@ -41,12 +41,18 @@ impl PgConnectionExecutor {
     /// another statement. Cancelling this wait leaves both the connection and deliveries retained.
     pub(crate) async fn acquire(&self) -> Result<Option<PgStatementLease<'_>>, DriverError> {
         let connection = self.connection.lock().await;
-        if connection.is_none() {
+        let Some(retained_connection) = connection.as_ref() else {
             return Ok(None);
-        }
-        self.wait_for_idle(connection.as_ref().expect("retained connection")).await?;
-        self.caching.refresh(connection.as_ref().expect("retained connection"));
+        };
+        self.wait_for_idle(retained_connection).await?;
+        self.caching.refresh(retained_connection);
         Ok(Some(PgStatementLease::new(connection, &self.state, self.pending.clone())))
+    }
+
+    /// Return a statement's checkout after releasing the lock held by its lease.
+    pub(crate) async fn release_after_statement(&self, lease: PgStatementLease<'_>) {
+        drop(lease);
+        self.release().await;
     }
 
     /// No connection is removed from its holder before all cancellable waits finish.

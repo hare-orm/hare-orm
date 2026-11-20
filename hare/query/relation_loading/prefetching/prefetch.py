@@ -4,11 +4,10 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import FieldError, QueryError
-from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.enums import RowShape
 
 if TYPE_CHECKING:
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset import QuerySet
 
 
@@ -49,7 +48,7 @@ class Prefetch:
 
     @staticmethod
     def add_lookups(
-        model: type[Model],
+        binding: ModelBinding,
         prefetch_map: dict[str, set[str | Prefetch]],
         prefetch_queries: dict[str, list[tuple[str | None, QuerySet[Any]]]],
         lookups: Iterable[str | Prefetch],
@@ -58,14 +57,25 @@ class Prefetch:
         ``to_attribute`` of a ``Prefetch`` after that ``Prefetch``, whatever order they are given in.
 
         Args:
-            model: The model the lookups start from.
+            binding: The model the lookups start from.
             prefetch_map: Relation name -> the nested lookups prefetched through the plain relation.
             prefetch_queries: Relation name -> ``(to_attribute, queryset)`` of each explicit prefetch.
             lookups: Relation paths and ``Prefetch`` objects.
         """
-        fetch_fields = model._meta.fetch_fields
+        fetch_fields = binding.fetch_fields
         for lookup in sorted(lookups, key=lambda lookup: Prefetch.get_first_name(lookup) not in fetch_fields):
-            Prefetch.add_lookup(model, prefetch_map, prefetch_queries, lookup)
+            Prefetch.add_lookup(binding, prefetch_map, prefetch_queries, lookup)
+        for entries in prefetch_queries.values():
+            for to_attribute, queryset in entries:
+                if to_attribute and (dependencies := prefetch_map.get(to_attribute)):
+                    # Every sibling declaration is available before a nested attribute is checked.
+                    model_binding: ModelBinding = queryset._binding  # type: ignore[assignment]
+                    Prefetch.add_lookups(
+                        model_binding,
+                        dict(queryset._prefetch_map),
+                        dict(queryset._prefetch_queries),
+                        dependencies,
+                    )
 
     @staticmethod
     def get_first_name(lookup: str | Prefetch) -> str:
@@ -81,7 +91,7 @@ class Prefetch:
 
     @staticmethod
     def add_lookup(
-        model: type[Model],
+        binding: ModelBinding,
         prefetch_map: dict[str, set[str | Prefetch]],
         prefetch_queries: dict[str, list[tuple[str | None, QuerySet[Any]]]],
         lookup: str | Prefetch,
@@ -92,7 +102,7 @@ class Prefetch:
         a changed request container is replaced, never changed in place.
 
         Args:
-            model: The model the lookup starts from.
+            binding: The model the lookup starts from.
             prefetch_map: Relation name -> the nested lookups prefetched through the plain relation.
             prefetch_queries: Relation name -> ``(to_attribute, queryset)`` of each explicit prefetch.
             lookup: A relation path, or a ``Prefetch``.
@@ -107,30 +117,27 @@ class Prefetch:
         if "" in relation_path.split("__"):
             raise FieldError(f"prefetch_related({relation_path!r}): an empty name between or around '__'")
         first_name, __, nested_path = relation_path.partition("__")
-        meta = model._meta
         nested_lookup: str | Prefetch = (
             Prefetch(nested_path, lookup.queryset, to_attribute=lookup.to_attribute)
             if isinstance(lookup, Prefetch) and nested_path
             else nested_path
         )
-        if first_name not in meta.fetch_fields:
+        if first_name not in binding.fetch_fields:
             for entries in prefetch_queries.values():
-                for to_attribute, queryset in entries:
+                for to_attribute, _ in entries:
                     if to_attribute != first_name:
                         continue
                     if nested_lookup:
                         dependencies = {*prefetch_map.get(first_name, ()), nested_lookup}
-                        # Validate the complete dependent request without rewriting the source query.
-                        Prefetch.add_lookups(queryset.model, {}, {}, dependencies)
                         prefetch_map[first_name] = dependencies
                     return
-            if first_name in meta.fields_map:
-                raise FieldError(f"Field {first_name} on {meta.full_name} is not a relation")
-            raise FieldError(f"Relation {first_name} for {meta.full_name} not found")
+            if first_name in binding.fields_map:
+                raise FieldError(f"Field {first_name} on {binding.full_name} is not a relation")
+            raise FieldError(f"Relation {first_name} for {binding.full_name} not found")
         if isinstance(lookup, Prefetch):
-            lookup.check_to_attribute(model)
+            lookup.check_to_attribute(binding)
             if not nested_path:
-                lookup.check_queryset_model(model, first_name)
+                lookup.check_queryset_model(binding, first_name)
                 if Prefetch.is_attribute_set_before(prefetch_queries, first_name, lookup):
                     return
                 prefetch_queries[first_name] = [
@@ -174,46 +181,50 @@ class Prefetch:
                 )
         return False
 
-    def check_queryset_model(self, model: type[Model], relation_name: str) -> None:
+    def check_queryset_model(self, binding: ModelBinding, relation_name: str) -> None:
         """Checks the queryset reads rows of the relation's model - rows of another model would be set
         on the instances by a matching key value, or fail late as a wrong value of the relation.
 
         Args:
-            model: The model owning the relation.
+            binding: The model owning the relation.
             relation_name: The relation's name.
 
         Raises:
             QueryError: The queryset is of another model.
         """
-        related_model = getattr(model._meta.fields_map[relation_name], "related_model", None)
+        model = binding._model
+        related_model = getattr(binding.fields_map[relation_name], "related_model", None)
         if related_model is not None and not issubclass(self.queryset.model, related_model):
             raise QueryError(
                 f"Prefetch({self.relation!r}, queryset=...) reads {self.queryset.model.__name__} rows - the "
                 f"relation {model.__name__}.{relation_name} holds {related_model.__name__} rows"
             )
 
-    def check_to_attribute(self, model: type[Model]) -> None:
+    def check_to_attribute(self, binding: ModelBinding) -> None:
         """Checks ``to_attribute`` doesn't name a field, relation, key column or other attribute of
         the model owning the last relation of ``relation`` - the prefetch result would overwrite it
         on every instance, and ``save()`` would then write that result back.
 
         Args:
-            model: The model ``relation`` starts from.
+            binding: The model ``relation`` starts from.
 
         Raises:
             QueryError: If ``to_attribute`` collides with an attribute of that model.
         """
+        model = binding._model
         to_attribute = self.to_attribute
         if to_attribute is None:
             return
+        from hare.query.statements.select.model_rows.instance_hydration import InstanceHydration
+
         *leading_relation_names, __ = self.relation.split("__")
         for relation_name in leading_relation_names:
-            relation_field = model._meta.fields_map.get(relation_name)
+            relation_field = binding.fields_map.get(relation_name)
             related_model = getattr(relation_field, "related_model", None)
             if related_model is None:
                 return
             model = related_model
-        if to_attribute in model._meta.fields_map or to_attribute == PRIMARY_KEY_ALIAS or hasattr(model, to_attribute):
+        if InstanceHydration.get_colliding_attribute_names(binding, (to_attribute,)):
             raise QueryError(
                 f"Prefetch({self.relation!r}, to_attribute={to_attribute!r}) conflicts with the attribute "
                 f"{model.__name__}.{to_attribute} - pick a to_attribute that isn't a field, relation or "

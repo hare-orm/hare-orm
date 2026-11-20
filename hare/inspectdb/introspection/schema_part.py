@@ -4,8 +4,8 @@ import dataclasses
 from dataclasses import dataclass, field
 from typing import Any
 
+from hare.ddl.enums import SchemaPartType
 from hare.declarations.declaration_values import DeclarationValues
-from hare.inspectdb.enums import SchemaPartType
 
 
 @dataclass(frozen=True)

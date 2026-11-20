@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from hare.sql.enums import JoinType
+from hare.dialects.base.clauses.enums import JoinType
 from hare.sql.exceptions import JoinException
 from hare.sql.terms.criteria.criterion import Criterion
 

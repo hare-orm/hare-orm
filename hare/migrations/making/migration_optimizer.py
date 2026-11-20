@@ -53,14 +53,10 @@ class MigrationOptimizer:
                 rewrite = operation.get_rewrite(operations[later_index], self.app_label)
                 if rewrite is not None and len(rewrite.operations) < 2:
                     between = operations[index + 1 : later_index]
-                    candidates = []
-                    if moves_right:
-                        candidates.append([*between, *rewrite.operations])
-                    if not moves_right and all(
+                    if moves_right or all(
                         graph.can_move_across(position, later_index) for position in range(index + 1, later_index)
                     ):
-                        candidates.append([*rewrite.operations, *between])
-                    for candidate in candidates:
+                        candidate = [*between, *rewrite.operations] if moves_right else [*rewrite.operations, *between]
                         if self.preserves_state(graph, index, later_index, candidate):
                             return [*operations[:index], *candidate, *operations[later_index + 1 :]]
                 moves_right = moves_right and graph.can_move_across(index, later_index)

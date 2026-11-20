@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.classes.value_descriptions import ValueDescriptions
@@ -21,6 +20,7 @@ from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 
 if TYPE_CHECKING:
+    from hare.models.model_binding import ModelBinding
     from hare.query.expressions.expression_result import TableCriterionTuple
     from hare.sql import Table
 
@@ -131,17 +131,18 @@ class FilteredRelation(NamedJoin):
             FieldError: ``relation_name`` isn't a relation of the model.
             QueryError: See ``get_join_condition()``; or the condition reads through a further relation.
         """
-        related_model = self.get_relations(expression_context.model)[-1].related_model
+        related_binding = self.get_relations(expression_context.binding)[-1].get_related_binding()
         join_condition = self.get_join_condition()
         if join_condition is None:
             return
         modifier = join_condition.get_result(
             ExpressionContext(
-                model=related_model,
+                binding=related_binding,
                 dialect=expression_context.dialect,
                 connection=expression_context.connection,
-                table=related_model._meta.basetable,
+                table=related_binding.basetable,
                 annotations={},
+                application_context=expression_context.application_context,
             )
         )
         if modifier.joins:
@@ -150,11 +151,11 @@ class FilteredRelation(NamedJoin):
                 "relation's own fields can be in its JOIN's ON clause"
             )
 
-    def get_relations(self, model: Any) -> list[RelationalField[Any]]:
+    def get_relations(self, binding: ModelBinding) -> list[RelationalField[Any]]:
         """The relations ``relation_name`` goes through, from the queried model on.
 
         Args:
-            model: The queried model.
+            binding: The queried model.
 
         Returns:
             The relations, in order.
@@ -164,18 +165,19 @@ class FilteredRelation(NamedJoin):
         """
         relations: list[RelationalField[Any]] = []
         for segment in self.relation_name.split("__"):
-            relation = model._meta.fields_map.get(segment)
-            if not isinstance(relation, RelationalField) or segment not in model._meta.fetch_fields:
+            relation = binding.fields_map.get(segment)
+            if not isinstance(relation, RelationalField) or segment not in binding.fetch_fields:
                 raise FieldError(
-                    f"FilteredRelation({self.relation_name!r}): {segment!r} isn't a relation of {model.__name__}"
+                    f"FilteredRelation({self.relation_name!r}): {segment!r} isn't a relation of "
+                    f"{binding._model.__name__}"
                 )
             relations.append(relation)
-            model = relation.related_model
+            binding = relation.get_related_binding()
         return relations
 
     def get_relation_joins(
         self, expression_context: ExpressionContext
-    ) -> tuple[Any, Table, list[TableCriterionTuple]]:
+    ) -> tuple[ModelBinding, Table, list[TableCriterionTuple]]:
         """The JOINs of the relation, its last one under this relation's own name with the condition.
 
         Args:
@@ -190,11 +192,13 @@ class FilteredRelation(NamedJoin):
         """
         if self.name is None:
             raise QueryError("A FilteredRelation is used through the name alias()/annotate() gives it")
-        model = expression_context.model
+        binding = expression_context.binding
         table = expression_context.table
         joins: list[TableCriterionTuple] = []
         segments = self.relation_name.split("__")
-        for index, (segment, relation) in enumerate(zip(segments, self.get_relations(model), strict=True)):
+        for index, (segment, relation) in enumerate(
+            zip(segments, self.get_relations(expression_context.binding), strict=True)
+        ):
             is_last = index == len(segments) - 1
             hop_joins = LookupPaths.get_scoped_joins(
                 table,
@@ -204,11 +208,12 @@ class FilteredRelation(NamedJoin):
                 extra_condition=self.get_join_condition() if is_last else None,
                 dialect=expression_context.dialect,
                 connection=expression_context.connection,
+                application_context=expression_context.application_context,
             )
             joins.extend(hop_joins)
             table = hop_joins[-1][0]
-            model = relation.related_model
-        return model, table, joins
+            binding = relation.get_related_binding()
+        return binding, table, joins
 
     def get_path_result(self, path: str, expression_context: ExpressionContext) -> ExpressionResult:
         """What ``<name>__<path>`` reads - a field of the related model, a further relation's, or with
@@ -224,85 +229,56 @@ class FilteredRelation(NamedJoin):
         Raises:
             QueryError: The name alone reads a composite primary key.
         """
-        related_model, related_table, joins = self.get_relation_joins(expression_context)
-        self.record_multi_valued_paths(expression_context, related_model, path)
-        return self.get_field_result(
-            related_model, related_table, joins, path or self.get_primary_key_name(related_model), expression_context
+        related_binding, related_table, joins = self.get_relation_joins(expression_context)
+        self.record_multi_valued_paths(expression_context, related_binding, path)
+        return BoundLookupPath.get_joined_result(
+            expression_context,
+            related_binding,
+            related_table,
+            joins,
+            path or self.get_primary_key_name(related_binding),
         )
 
     def get_joins_result(self, expression_context: ExpressionContext) -> ExpressionResult:
-        related_model, related_table, joins = self.get_relation_joins(expression_context)
-        self.record_multi_valued_paths(expression_context, related_model, "")
+        related_binding, related_table, joins = self.get_relation_joins(expression_context)
+        self.record_multi_valued_paths(expression_context, related_binding, "")
         # The first column of the primary key, a JOIN of any key.
-        return self.get_field_result(
-            related_model,
+        return BoundLookupPath.get_joined_result(
+            expression_context,
+            related_binding,
             related_table,
             joins,
-            related_model._meta.primary_key_attribute_names[0],
-            expression_context,
+            related_binding.primary_key_attribute_names[0],
         )
 
-    @staticmethod
-    def get_field_result(
-        related_model: Any,
-        related_table: Any,
-        joins: list[Any],
-        field_path: str,
-        expression_context: ExpressionContext,
-    ) -> ExpressionResult:
-        """What a field of the related model reads, through the relation's JOINs.
-
-        Args:
-            related_model: The related model.
-            related_table: Its joined table.
-            joins: The relation's JOINs.
-            field_path: The field's path in the related model.
-            expression_context: The context of the queried model.
-
-        Returns:
-            The term, its field and the JOINs.
-        """
-        bound_path = BoundLookupPath.bind(
-            replace(
-                expression_context,
-                model=related_model,
-                table=related_table,
-                annotations={},
-                select_related_extra_conditions=None,
-                select_related_path_prefix="",
-            ),
-            field_path,
-        )
-        return ExpressionResult(
-            term=bound_path.term, joins=joins + list(bound_path.joins), output_field=bound_path.field
-        )
-
-    def is_multi_valued(self, model: Any) -> bool:
+    def is_multi_valued(self, binding: ModelBinding) -> bool:
         """Whether a hop of the relation from ``model`` is to-many - its JOIN may repeat a row."""
         for segment in self.relation_name.split("__"):
-            relation = model._meta.fields_map.get(segment)
+            relation = binding.fields_map.get(segment)
             if not isinstance(relation, RelationalField):
                 return False
             if relation.is_multi_valued:
                 return True
-            model = relation.related_model
+            binding = relation.get_related_binding()
         return False
 
-    def record_multi_valued_paths(self, expression_context: ExpressionContext, related_model: Any, path: str) -> None:
+    def record_multi_valued_paths(
+        self, expression_context: ExpressionContext, related_binding: ModelBinding, path: str
+    ) -> None:
         """Records the to-many JOINs a path through the relation makes - its own under its name, a
         JOIN of its own - for the check of aggregates another JOIN fans out.
 
         Args:
             expression_context: The context of the queried model.
-            related_model: The related model.
+            related_binding: The related model.
             path: The path after the name.
         """
         tracker = AggregatedMultiValuedPaths.get_from(expression_context)
         if tracker is None or self.name is None:
             return
-        if self.is_multi_valued(expression_context.model):
+        if self.is_multi_valued(expression_context.binding):
             tracker.record_path(self.name)
-        tracker.record_lookup(related_model, path, self.name)
+        tracker.record_lookup(related_binding, path, self.name)
 
     def get_path_filter(
         self,
@@ -313,12 +289,12 @@ class FilteredRelation(NamedJoin):
         value_origin: tuple[Any, ...] | None = None,
     ) -> QueryModifier:
         """The relation's JOIN with its condition, then the filter on the related model's rows."""
-        related_model, related_table, joins = self.get_relation_joins(expression_context)
-        filter_key = self.get_filter_key(path, related_model)
-        self.record_multi_valued_paths(expression_context, related_model, filter_key)
+        related_binding, related_table, joins = self.get_relation_joins(expression_context)
+        filter_key = self.get_filter_key(path, related_binding)
+        self.record_multi_valued_paths(expression_context, related_binding, filter_key)
         return self.get_joined_row_filter(
             expression_context,
-            related_model,
+            related_binding,
             related_table,
             joins,
             filter_key,

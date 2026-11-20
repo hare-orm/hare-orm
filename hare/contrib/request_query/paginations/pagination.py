@@ -18,7 +18,7 @@ from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
     from hare.contrib.request_query.request_query import RequestQuery
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.lookup_info.ordering_info import OrderingInfo
 
 
@@ -61,12 +61,12 @@ class Pagination(RequestOption):
             ),
         )
 
-    def check_model(self, owner: str, model: type[Model]) -> None:
+    def check_model(self, owner: str, binding: ModelBinding) -> None:
         """Checks that the pagination can page the model's rows - any model by default.
 
         Args:
             owner: The request query class, for the error.
-            model: The model.
+            binding: The model binding.
         """
 
     def check_ordering(self, owner: str, name: str, ordering_info: OrderingInfo) -> None:

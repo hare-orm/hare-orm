@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from hare import fields
+from hare.core.apps.model_binding_graph import ModelBindingGraph
 from hare.dialects.base.search.enums import TextSearchOperation
 from hare.dialects.postgresql.postgresql_dialect import PostgresqlDialect
 from hare.dialects.postgresql.search import Lexeme
@@ -62,6 +63,8 @@ def test_inverted_search_keeps_configuration_with_rewritten_arguments(configured
 
 @pytest.fixture
 def search_context():
+    declaration_graph = ModelBindingGraph()
+
     class Book(Model):
         id = fields.IntField(primary_key=True)
         title = fields.TextField()
@@ -70,7 +73,7 @@ def search_context():
     apps.register_model("models", Book)
     apps.init_relations()
     dialect = PostgresqlDialect()
-    return ExpressionContext(Book, Table("book"), {}, dialect=dialect, connection=None)
+    return ExpressionContext(declaration_graph.include(Book), Table("book"), {}, dialect=dialect, connection=None)
 
 
 @pytest.mark.parametrize("with_connection", [False, True])

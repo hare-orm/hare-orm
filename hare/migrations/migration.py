@@ -35,6 +35,8 @@ class Migration:
     dependencies: list[tuple[str, str]] = []
     run_before: list[tuple[str, str]] = []
     replaces: list[tuple[str, str]] = []
+    #: Earlier squash journal labels covered by this migration, without repeating their operations.
+    replacement_aliases: tuple[tuple[str, str], ...] = ()
     initial: bool | None = None
     atomic: bool = True
     #: The ``MigrationRiskCode``s the migration safety check accepts in this migration - each one
@@ -55,6 +57,7 @@ class Migration:
         self.dependencies = list(self.__class__.dependencies if dependencies is None else dependencies)
         self.run_before = list(self.__class__.run_before)
         self.replaces = list(self.__class__.replaces)
+        self.replacement_aliases = tuple(self.__class__.replacement_aliases)
         self.safety_exemptions = list(self.__class__.safety_exemptions)
 
     def __str__(self) -> str:
@@ -93,9 +96,12 @@ class Migration:
 
     def prepare(self, state_before: State) -> PreparedOperationStates:
         """Prepare both sides of every operation without changing the input state."""
-        prepared = PreparedOperationStates(self.app_label, self.operations, state_before)
-        prepared.after.validate_relations_initialized()
-        return prepared
+        from hare.query.execution.query_execution import QueryExecution
+
+        with QueryExecution(state_before.environment.context):
+            prepared = PreparedOperationStates(self.app_label, self.operations, state_before)
+            prepared.after.validate_relations_initialized()
+            return prepared
 
     async def apply(
         self,
@@ -113,8 +119,10 @@ class Migration:
         """
         prepared = self.prepare(state)
         if schema_editor is not None and (collect_sql or not dry_run):
-            await PreparedOperationExecution.run(self, prepared, schema_editor, collect_sql=collect_sql)
-        return prepared.after.clone()
+            await PreparedOperationExecution.run_in_constraint_scope(
+                self, prepared, schema_editor, collect_sql=collect_sql
+            )
+        return prepared.after
 
     def raise_if_irreversible(self) -> None:
         """Reject a reverse run before executing any database operation."""
@@ -139,14 +147,14 @@ class Migration:
         self.raise_if_irreversible()
         prepared = self.prepare(state_before)
         if schema_editor is not None and (collect_sql or not dry_run):
-            await PreparedOperationExecution.run(
+            await PreparedOperationExecution.run_in_constraint_scope(
                 self,
                 prepared,
                 schema_editor,
                 backward=True,
                 collect_sql=collect_sql,
             )
-        return prepared.before.clone()
+        return prepared.before
 
     def raise_if_unsupported(self, state: State, schema_editor: BaseSchemaEditor) -> None:
         """Check the prepared database tree before executing any operation."""

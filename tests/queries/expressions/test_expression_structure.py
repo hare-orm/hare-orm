@@ -140,7 +140,7 @@ def test_constraint_dependencies_do_not_compile_expressions(monkeypatch):
 
     monkeypatch.setattr(Q, "get_result", unexpected_render)
     for condition in (Q(author=1), Q(author__in=[1, 2]), Q(author__isnull=True), Q(title=Lower("title"))):
-        ConstraintCondition.raise_if_reads_other_columns(condition, Book)
+        ConstraintCondition.raise_if_reads_other_columns(condition, apps.get_binding(Book))
     for condition in (Q(author__name="title"), Q(title=Sum("id")), Q(Exists(Author.objects.all()))):
         with pytest.raises(ConfigurationError, match="reads only"):
-            ConstraintCondition.raise_if_reads_other_columns(condition, Book)
+            ConstraintCondition.raise_if_reads_other_columns(condition, apps.get_binding(Book))

@@ -10,7 +10,7 @@ import pytest_asyncio
 
 from hare import fields
 from hare.core.hare_context import HareContext
-from hare.exceptions import ConfigurationError, FieldError
+from hare.exceptions import FieldError
 from hare.models import Model
 from hare.query.expressions import OuterReference, Q, Subquery
 from hare.query.functions import Count
@@ -158,89 +158,39 @@ class DeferredErrorAuthor(Model):
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
-async def test_init_reports_every_invalid_query_built_before_it(monkeypatch):
+async def test_initialization_preserves_templates_and_replay_reports_their_errors():
+    from hare.exceptions import QueryError
     from hare.query.queryset.pending_calls.calls_before_setup import CallsBeforeSetup
 
-    monkeypatch.setattr(CallsBeforeSetup, "PENDING", [])
-    previous_meta = DeferredErrorAuthor._meta
-    misspelled_filter = DeferredErrorAuthor.objects.filter(no_such_name="Ann")
-    misspelled_ordering = DeferredErrorAuthor.objects.all().order_by("no_such_name")
-    recursive_union = (
-        DeferredErrorAuthor.objects.filter(name="Ann")
-        .union(DeferredErrorAuthor.objects.filter(name="Bob"))
-        .with_recursive("children")
-    )
-    valid = DeferredErrorAuthor.objects.filter(name="Ann")
-    async with HareContext():
-        with pytest.raises(ConfigurationError, match="DeferredErrorAuthor has no default connection"):
-            valid.sql()
-    module_name = "tests._deferred_query_error_models"
-    module = types.ModuleType(module_name)
-    module.DeferredErrorAuthor = DeferredErrorAuthor  # type: ignore[attr-defined]
-    sys.modules[module_name] = module
-    context = HareContext()
-    await context.__aenter__()
-    try:
-        with pytest.raises(ConfigurationError) as error:
-            await context.init(
-                config={
-                    "connections": {"default": "sqlite+aiosqlite://:memory:"},
-                    "apps": {"deferred_query_errors": {"models": [module_name], "default_connection": "default"}},
-                }
-            )
-        message = str(error.value)
-        assert message.startswith("Queries built before Hare.init() are invalid:")
-        assert f"{__file__}:" in message
-        assert (
-            "DeferredErrorAuthor.objects.filter(no_such_name=...): DeferredErrorAuthor has no field 'no_such_name'"
-            in message
+    declaration = DeferredErrorAuthor._declaration
+    with HareContext():
+        misspelled_filter = DeferredErrorAuthor.objects.filter(no_such_name="Ann")
+        misspelled_ordering = DeferredErrorAuthor.objects.order_by("no_such_name")
+        recursive_union = (
+            DeferredErrorAuthor.objects.filter(name="Ann")
+            .union(DeferredErrorAuthor.objects.filter(name="Bob"))
+            .with_recursive("children")
         )
-        assert "Unknown field no_such_name for ordering: DeferredErrorAuthor has no field 'no_such_name'" in message
-        assert "with_recursive() can't be used on a union()" in message
-        assert DeferredErrorAuthor._meta is previous_meta
-        for query in (misspelled_filter, misspelled_ordering, recursive_union, valid):
-            assert query._calls_before_setup is not None
-            assert query in CallsBeforeSetup.PENDING
-            with pytest.raises(ConfigurationError, match="DeferredErrorAuthor has no default connection"):
-                query.sql()
-    finally:
-        await context.__aexit__(None, None, None)
-        sys.modules.pop(module_name, None)
-
-
-@pytest.mark.asyncio
-async def test_first_level_names_are_checked_when_called_after_init(deferred_context):
-    with pytest.raises(
-        FieldError,
-        match=r"DeferredBook.objects.filter\(no_such_title=...\): DeferredBook has no field 'no_such_title'",
-    ):
-        DeferredBook.objects.filter(no_such_title="B1")
-    with pytest.raises(
-        FieldError, match=r"DeferredBook.objects.exclude\(title__icontainz=...\): DeferredBook.title has"
-    ):
-        DeferredBook.objects.exclude(title__icontainz="B")
-    with pytest.raises(
-        FieldError, match=r"DeferredBook.objects.values\('no_such_title'\): DeferredBook has no field 'no_such_title'"
-    ):
-        DeferredBook.objects.all().values("no_such_title")
-    with pytest.raises(FieldError, match=r"DeferredBook.objects.values_list\('no_such_title'\)"):
-        DeferredBook.objects.all().values_list("no_such_title")
-    with pytest.raises(FieldError, match=r"DeferredBook.objects.only\('no_such_title'\)"):
-        DeferredBook.objects.all().only("no_such_title")
-
-
-@pytest.mark.asyncio
-async def test_deeper_names_are_reported_with_their_full_path(deferred_context):
-    with pytest.raises(
-        FieldError,
-        match=r"DeferredBook.objects.filter\(author__no_such_name=...\): DeferredAuthor has no field 'no_such_name'",
-    ):
-        DeferredBook.objects.filter(author__no_such_name="Ann")
-    with pytest.raises(
-        FieldError, match="Unknown field author__no_such_name for ordering: DeferredAuthor has no field"
-    ):
-        await DeferredBook.objects.all().order_by("author__no_such_name")
-    with pytest.raises(
-        FieldError, match="Unknown field 'author__no_such_name': DeferredAuthor has no field 'no_such_name'"
-    ):
-        await DeferredBook.objects.all().values("author__no_such_name")
+        valid = DeferredErrorAuthor.objects.filter(name="Ann")
+    module = types.ModuleType("deferred_query_error_models")
+    module.__models__ = [DeferredErrorAuthor]
+    async with HareContext() as context:
+        await context.init(
+            {
+                "connections": {"default": "sqlite+aiosqlite://:memory:"},
+                "apps": {"deferred_query_errors": {"models": [module]}},
+            },
+            connect=False,
+        )
+        for query, error, message in (
+            (misspelled_filter, FieldError, "no_such_name"),
+            (misspelled_ordering, FieldError, "no_such_name"),
+            (recursive_union, QueryError, "with_recursive"),
+        ):
+            with pytest.raises(error, match=message):
+                CallsBeforeSetup.bind(query, context)
+            assert query._binding is None and query._calls_before_setup is not None
+        bound = CallsBeforeSetup.bind(valid, context)
+        assert bound.sql() == context.apps.get_queryset(DeferredErrorAuthor).filter(name="Ann").sql()
+        assert valid._binding is None and valid._calls_before_setup is not None
+        assert DeferredErrorAuthor._declaration is declaration

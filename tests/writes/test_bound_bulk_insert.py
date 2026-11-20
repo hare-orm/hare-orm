@@ -6,6 +6,7 @@ import pytest
 
 from hare import fields
 from hare.contrib.test import hare_test_context
+from hare.core.hare_context import HareContext
 from hare.exceptions import QueryError
 from hare.instrumentation.declarations import QueryExecuted
 from hare.instrumentation.observers.observers import Observers
@@ -86,7 +87,7 @@ async def test_execution_uses_the_bound_values_when_source_objects_change(return
             Entry(id=2, name="second", amount=20, modified=moment),
         ]
         query = Entry.objects.bulk_create(objects, batch_size=1, returning=returning)._get_execution_query(True)
-        query._writer = InstanceWriter(Entry, query._connection)
+        query._writer = InstanceWriter(HareContext.require_current().apps.get_binding(Entry), query._connection)
         prepared = PreparedBulkInsert(query)
         assert prepared.bound.requires_transaction
         objects[0].amount = 99

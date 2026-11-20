@@ -23,7 +23,9 @@ class TransactionNow(ConstantExpression):
     populate_field_object = True
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
-        DialectExpressions.raise_if_dialect_lacks(self, expression_context.dialect)
+        DialectExpressions.raise_if_dialect_lacks(
+            self, expression_context.dialect, checks_admission=expression_context.checks_dialect_admission
+        )
         return ExpressionResult(term=LiteralValue("CURRENT_TIMESTAMP"), output_field=self.OUTPUT_FIELD)
 
     value_field = OUTPUT_FIELD

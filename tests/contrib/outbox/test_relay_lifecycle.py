@@ -12,15 +12,32 @@ import pytest
 
 from hare.contrib.outbox import InProcessWakeup, OutboxRelay
 from hare.contrib.outbox.relay.claimed_batch import ClaimedBatch
+from hare.contrib.outbox.wakeups.outbox_wakeup import OutboxWakeup
 from hare.contrib.test import requires_features
 from hare.transactions.transactions import Transactions
 from tests.contrib.outbox.models import DemoOutboxEvent
 from tests.contrib.outbox.wakeup_signals import signal_until_arrived
+from tests.utils.model_bindings import ModelBindings
 from tests.utils.waiting import WAIT_DEADLINE_SECONDS, wait_until
 
 
 async def no_op_deliver(_event: DemoOutboxEvent) -> None:
     pass
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("as_bytes", [False, True])
+@pytest.mark.parametrize(
+    "topics",
+    [frozenset(), frozenset({"plain"}), frozenset({"first\nsecond", "таблица.изменена", 'quote"\\topic', "plain"})],
+)
+def test_broker_wakeup_payload_preserves_exact_topics(monkeypatch, topics, as_bytes):
+    wakeup = OutboxWakeup()
+    received = []
+    monkeypatch.setattr(wakeup, "dispatch", received.append)
+    payload = wakeup.encode_topics(topics)
+    wakeup.dispatch_payload(payload if as_bytes else payload.decode())
+    assert received == [topics]
 
 
 @pytest.mark.database_independent
@@ -106,7 +123,8 @@ async def test_new_subscription_waits_for_the_previous_transport_to_close(monkey
 @pytest.mark.parametrize("through_stop", [False, True])
 async def test_repeated_cancellation_finishes_the_claimed_batch(monkeypatch, through_stop):
     relay = OutboxRelay(DemoOutboxEvent, no_op_deliver, wakeup=InProcessWakeup())
-    batch = ClaimedBatch(uuid4(), (DemoOutboxEvent(id=uuid4(), topic="book.created", payload={}),))
+    apps = ModelBindings.prepare(DemoOutboxEvent)
+    batch = ClaimedBatch(uuid4(), (apps.new(DemoOutboxEvent, id=uuid4(), topic="book.created", payload={}),))
     entered, release = asyncio.Event(), asyncio.Event()
     recorded = []
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Collection
+from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from hare.dialects.enums import ParameterPosition
@@ -18,12 +20,13 @@ from hare.sql import Table
 from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
+    from hare.models.model_binding import ModelBinding
     from hare.query.statements.awaitable_query import AwaitableQuery
 
 
 class QueryAnnotations:
-    """The annotations of a query: each resolved into its term and joins, selected under its key or
-    kept as an alias, and the annotations a GROUP BY, ORDER BY or distinct by fields renders again."""
+    """The annotations of a query: each bound to its term and joins, selected under its output
+    aliases or kept unselected, and expressions read again by GROUP BY, ORDER BY or distinct fields."""
 
     @staticmethod
     def get_annotation_term(query: AwaitableQuery[Any], annotation: Expression | Term) -> Term:
@@ -38,7 +41,8 @@ class QueryAnnotations:
         """
         if isinstance(annotation, Term) and not isinstance(annotation, Expression):
             return annotation
-        return annotation.get_result(query._get_probe_expression_context(query._annotations)).term
+        context = query._get_probe_expression_context(query._annotations)
+        return annotation.get_result(context).term
 
     @staticmethod
     def annotation_is_aggregate(query: AwaitableQuery[Any], annotation: Expression | Term) -> bool:
@@ -52,6 +56,12 @@ class QueryAnnotations:
         Returns:
             True for an aggregate.
         """
+        if (
+            type(annotation) is F
+            and query._binding is not None
+            and len(ConcreteFieldPaths.get_paths(query._binding, annotation.name)) > 1
+        ):
+            return False
         return QueryAnnotations.get_annotation_term(query, annotation).contains_aggregate
 
     @staticmethod
@@ -62,8 +72,10 @@ class QueryAnnotations:
         value_wrapper_references: (RecordedValueReferences | None) = None,
         aggregated_multi_valued_paths: AggregatedMultiValuedPaths | None = None,
     ) -> bool:
-        """Resolves the query's annotations into its SELECT - the ones ``fields_for_select`` names, every one
-        when None.
+        """Build the selected source annotations under the query's output aliases.
+
+        ``fields_for_select`` names source expressions, not output columns. With None every
+        non-alias annotation is selected. Output names never replace expression declarations.
 
         Args:
             query: The query.
@@ -86,6 +98,7 @@ class QueryAnnotations:
         # the order the plan lists the values in. An expression registered under several keys is
         # resolved once.
         results_by_annotation_id: dict[int, ExpressionResult] = {}
+        grouping_annotation_result = partial(QueryAnnotations.get_grouping_annotation_result, query)
         for key, annotation in query._annotations.items():
             if key in unused_alias_keys:
                 continue
@@ -97,7 +110,7 @@ class QueryAnnotations:
             ):
                 from hare.query.key_columns import KeyColumns
 
-                if KeyColumns.get_primary_key_name(query.model, query._annotations, key) != key:
+                if KeyColumns.get_primary_key_name(query._binding, query._annotations, key) != key:  # type: ignore[arg-type]
                     # Composite aliases are read through their individual columns by selections,
                     # filters and ordering; there is no scalar annotation to build here.
                     continue
@@ -114,9 +127,7 @@ class QueryAnnotations:
                 info = ExpressionResult(term=annotation)
                 if isinstance(annotation, RawSQL) and value_wrapper_references is not None:
                     # RawSQL wrapped its params when it was created - recorded as they are.
-                    ExpressionArguments.record_parameters(
-                        value_wrapper_references, annotation, "parameters", annotation.parameters
-                    )
+                    ExpressionArguments.record_raw_sql_parameters(value_wrapper_references, annotation)
             else:
                 get_result = (
                     annotation.get_joins_result
@@ -125,7 +136,7 @@ class QueryAnnotations:
                 )
                 info = get_result(
                     ExpressionContext(
-                        model=query.model,
+                        binding=query._binding,  # type: ignore[arg-type]
                         dialect=query.dialect,
                         connection=query._connection,
                         # The table the FROM clause uses - an alias for a self-referential model
@@ -134,12 +145,14 @@ class QueryAnnotations:
                         annotations=query._annotations,
                         value_wrapper_references=value_wrapper_references,
                         annotation_names_in_progress={key},
+                        grouping_annotation_result=grouping_annotation_result,
                         # An annotation crossing a select_related(extra_condition=...) relation
                         # builds its JOIN with that condition - the JOIN built first is the one
                         # kept.
                         select_related_extra_conditions=query._select_related_extra_conditions,
                         aggregated_multi_valued_paths=aggregated_multi_valued_paths,
                         visibility=query._visibility,
+                        application_context=query._context,
                     )
                 )
             if not resolves_joins_only:
@@ -162,7 +175,8 @@ class QueryAnnotations:
                     select_term = Value.get_typed_term(
                         select_term, annotation.value, ParameterPosition.SELECTED_VALUE, query.dialect
                     )
-                query.query._select_other(select_term.as_(key))
+                for alias in query._get_annotation_column_aliases(key):
+                    query.query._select_other(select_term.as_(alias))
             has_aggregate = has_aggregate or info.term.contains_aggregate
             # The result's field is kept on this build, not on the annotation expression queries
             # share - only for functions whose result has their argument's type
@@ -177,6 +191,15 @@ class QueryAnnotations:
         return has_aggregate
 
     @staticmethod
+    def get_grouping_annotation_result(
+        query: AwaitableQuery[Any], field_name: str, context: ExpressionContext
+    ) -> ExpressionResult:
+        """Bind a grouping input in its current source scope, sharing this build's terms."""
+        return QueryAnnotations.get_annotation_expression_result(
+            query, field_name, context.annotations, context.table, expression_context=context
+        )
+
+    @staticmethod
     def get_annotation_expression_term(
         query: AwaitableQuery[Any], field_name: str, annotations: dict[str, Any], table: Table
     ) -> Term:
@@ -185,7 +208,12 @@ class QueryAnnotations:
 
     @staticmethod
     def get_annotation_expression_result(
-        query: AwaitableQuery[Any], field_name: str, annotations: dict[str, Any], table: Table
+        query: AwaitableQuery[Any],
+        field_name: str,
+        annotations: dict[str, Any],
+        table: Table,
+        *,
+        expression_context: ExpressionContext | None = None,
     ) -> ExpressionResult:
         """Bind an annotation once per name and source table for this statement build.
 
@@ -201,11 +229,18 @@ class QueryAnnotations:
             result = ExpressionResult(term=annotation)
         else:
             value_wrapper_references = query._expression_term_references.setdefault(field_name, [])
-            built = annotation.get_result(
+            context = (
                 QueryAnnotations.get_annotation_expression_context(
                     query, field_name, annotations, table, value_wrapper_references
                 )
+                if expression_context is None
+                else replace(
+                    expression_context,
+                    annotation_names_in_progress=expression_context.annotation_names_in_progress | {field_name},
+                    value_wrapper_references=value_wrapper_references,
+                )
             )
+            built = annotation.get_result(context)
             result = ExpressionResult(
                 term=built.term,
                 joins=built.joins,
@@ -238,16 +273,19 @@ class QueryAnnotations:
         Returns:
             The resolve context.
         """
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
         return ExpressionContext(
-            model=query.model,
+            binding=model_binding,
             dialect=query.dialect,
             connection=query._connection,
             table=table,
             annotations=annotations,
             annotation_names_in_progress={field_name},
+            grouping_annotation_result=partial(QueryAnnotations.get_grouping_annotation_result, query),
             visibility=query._visibility,
             select_related_extra_conditions=query._select_related_extra_conditions,
             value_wrapper_references=value_wrapper_references,
+            application_context=query._context,
         )
 
     @staticmethod
@@ -287,9 +325,7 @@ class QueryAnnotations:
         for name in names:
             annotation = query._annotations[name]
             if isinstance(annotation, RawSQL):
-                ExpressionArguments.record_parameters(
-                    value_wrapper_references, annotation, "parameters", annotation.parameters
-                )
+                ExpressionArguments.record_raw_sql_parameters(value_wrapper_references, annotation)
                 continue
             if name not in query._expression_term_references:
                 QueryAnnotations.get_annotation_expression_term(query, name, query._annotations, table)
@@ -354,10 +390,11 @@ class QueryAnnotations:
                 return None
             seen_annotation_names.add(field_name)
             field_name = annotation.name
-        concrete_field_paths = ConcreteFieldPaths.get_paths(query.model, field_name)
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
+        concrete_field_paths = ConcreteFieldPaths.get_paths(model_binding, field_name)
         if len(concrete_field_paths) == 1:
             field_name = concrete_field_paths[0]
-        return LookupPath.parse(query.model, field_name).get_target_field()
+        return LookupPath.parse(model_binding, field_name).get_target_field()
 
     @staticmethod
     def get_annotation_fields(query: AwaitableQuery[Any]) -> dict[str, ModelField[Any]]:

@@ -11,6 +11,8 @@ from hare.sql.terms.parameters.query_parameters import QueryParameters
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset.relations.many_to_many_relation import ManyToManyRelation
     from hare.sql.terms.field import Field as SqlField
 
@@ -19,6 +21,11 @@ class ThroughRows:
     """The rows of a many-to-many relation's through table, what every write of them shares: the connection
     of the model declaring the field, the statement of a query of them with its sensitive values hidden,
     and the report of the links changed."""
+
+    @staticmethod
+    def get_declaring_model(relation: ManyToManyRelation[Any]) -> type[Model]:
+        """The forward declaration's model, also when accessed through its reverse relation."""
+        return relation.model if relation.field._generated else type(relation.instance)
 
     @staticmethod
     def through_table_connection(
@@ -33,13 +40,13 @@ class ThroughRows:
             for_write: Whether the connection is one to write through.
             using: An explicit connection, subject to the declaring model's tenant checks.
         """
-        owning_model = relation.model if relation.field._generated else type(relation.instance)
+        source_model = ThroughRows.get_declaring_model(relation)
         connection = InstanceConnections.get_connection_for_instance(
-            relation.instance, for_write, model=owning_model, using=using
+            relation.instance, for_write, model=source_model, using=relation._get_connection_argument(using)
         )
-        through_model = relation.field.through_model_class
-        if through_model is not None and through_model._meta.checks_tenant_client:
-            through_model._meta.check_tenant_client(connection)
+        through_binding = relation.field.get_through_binding()
+        if through_binding is not None and through_binding.checks_tenant_client:
+            through_binding.check_tenant_client(connection)
         return connection
 
     @staticmethod
@@ -54,9 +61,7 @@ class ThroughRows:
             True when a primary key field of either model is sensitive.
         """
         return any(
-            field.sensitive
-            for meta in (type(relation.instance)._meta, relation.model._meta)
-            for field in meta.pk_fields
+            field.sensitive for meta in (relation.instance._binding, relation._binding) for field in meta.pk_fields
         )
 
     @staticmethod
@@ -104,16 +109,15 @@ class ThroughRows:
         Returns:
             The fields, one per column; None when a column is of no field.
         """
-        through_model = relation.field.through_model_class
-        if through_model is not None:
-            through_meta = through_model._meta
+        through_binding = relation.field.get_through_binding()
+        if through_binding is not None:
             fields_by_column = {
-                through_meta.fields_db_projection.get(name, field.source_field or name): field
-                for name, field in through_meta.fields_map.items()
+                through_binding.fields_db_projection.get(name, field.source_field or name): field
+                for name, field in through_binding.fields_map.items()
             }
         else:
-            related_meta = relation.model._meta
-            owner_meta = type(relation.instance)._meta
+            related_meta: ModelBinding = relation._binding
+            owner_meta: ModelBinding = relation.instance._binding
             related_key_fields = related_meta.pk_fields
             owner_key_fields = owner_meta.pk_fields
             fields_by_column = {
@@ -147,27 +151,30 @@ class ThroughRows:
         """
         await WriteSteps.report(
             connection,
-            type(relation.instance),
+            relation.instance._binding,
             RowOperation.UPDATE,
             instances=[relation.instance],
             fields=[relation.field.model_field_name],
         )
         related_fields = [relation.field.related_name] if relation.field.related_name else None
         if related_instances is None:
-            await WriteSteps.report(connection, relation.model, RowOperation.UPDATE, fields=related_fields)
+            await WriteSteps.report(connection, relation._binding, RowOperation.UPDATE, fields=related_fields)
         else:
             await WriteSteps.report(
                 connection,
-                relation.model,
+                relation._binding,
                 RowOperation.UPDATE,
                 instances=list(related_instances),
                 fields=related_fields,
             )
-        through_model = relation.field.through_model_class
-        if through_model is not None and reports_through_rows:
-            if operation is RowOperation.DELETE and through_model._meta.soft_delete_field:
+        through_binding = relation.field.get_through_binding()
+        if through_binding is not None and reports_through_rows:
+            if operation is RowOperation.DELETE and through_binding.soft_delete_field:
                 await WriteSteps.report(
-                    connection, through_model, RowOperation.UPDATE, fields=[through_model._meta.soft_delete_field]
+                    connection,
+                    through_binding,
+                    RowOperation.UPDATE,
+                    fields=[through_binding.soft_delete_field],
                 )
             else:
-                await WriteSteps.report(connection, through_model, operation)
+                await WriteSteps.report(connection, through_binding, operation)

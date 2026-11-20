@@ -7,10 +7,10 @@ from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import
 from hare.query.queryset.row_multiplication import RowMultiplication
 from hare.query.statements.building.query_annotations import QueryAnnotations
 from hare.query.statements.building.query_joins import QueryJoins
-from hare.query.statements.select.values.values_output import ValuesOutput
 from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset.queryset import QuerySet
     from hare.query.statements.select.values_query import ValuesQuery
 
@@ -51,7 +51,7 @@ class ValuesGrouping:
         """
         if query._group_bys:
             return True
-        unused_alias_keys = query._get_unused_alias_keys(ValuesOutput.get_output_field_names(query))
+        unused_alias_keys = query._get_unused_alias_keys()
         return any(
             QueryAnnotations.annotation_is_aggregate(query, annotation)
             for name, annotation in query._annotations.items()
@@ -88,7 +88,7 @@ class ValuesGrouping:
             return list(query._group_bys)
         return [
             name
-            for name in ValuesOutput.get_output_field_names(query)
+            for name in query._get_selected_field_names()
             if name not in query._annotations
             or ValuesGrouping.annotation_is_group_key(query, query._annotations[name])
         ]
@@ -108,10 +108,11 @@ class ValuesGrouping:
         if (query._distinct and not query._distinct_on) or ValuesGrouping.is_grouped(query):
             return False
         selected_field_lookups = QueryJoins.get_field_lookups(
-            query, (name for name in ValuesOutput.get_output_field_names(query) if name not in query._annotations)
+            query, (name for name in query._get_selected_field_names() if name not in query._annotations)
         )
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
         if any(
-            AggregatedMultiValuedPaths.get_multi_valued_paths(query.model, lookup)
+            AggregatedMultiValuedPaths.get_multi_valued_paths(model_binding, lookup)
             for lookup in (*selected_field_lookups, *QueryJoins.get_ordering_lookups(query))
         ):
             return False

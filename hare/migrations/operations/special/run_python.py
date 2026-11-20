@@ -14,7 +14,11 @@ if TYPE_CHECKING:
 
 
 class RunPython(HareOperation):
-    """Runs a function on the migration's models and schema editor.
+    """Run a callback with this operation's historical registry and exact schema client.
+
+    Data queries start with ``apps.get_queryset("app.Model", using=schema_editor.client)``.
+    A historical Python class's manager selects the active application registry instead;
+    it does not carry the state registry that returned the class.
 
     Args:
         code: Called with the state's apps and the schema editor when the migration is applied.

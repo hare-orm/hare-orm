@@ -32,7 +32,7 @@ class InstanceValues:
         #: ``ROLLBACK_RESTORE_UNSET`` for a field that wasn't loaded.
         self.old_values: dict[int, tuple[Model, dict[str, Any]]] = {}
 
-    def capture(self, objs: Iterable[Model], field_names: Sequence[str]) -> None:
+    def capture(self, objs: Iterable[Model], field_names: list[str] | tuple[str, ...]) -> None:
         """Remembers the current values of fields the write is about to change - a field already
         remembered keeps its first value.
 
@@ -42,7 +42,35 @@ class InstanceValues:
         """
         if not field_names:
             return
-        self.native_rows.capture_attribute_values(self.old_values, objs, list(field_names), ROLLBACK_RESTORE_UNSET)
+        self.native_rows.capture_attribute_values(self.old_values, objs, field_names, ROLLBACK_RESTORE_UNSET)
+
+    def capture_preparation(self, objs: Sequence[Model]) -> None:
+        """Remember pending defaults and tenant assignments before preparing objects of one model.
+
+        The common attribute capture handles the whole batch. Relation caches precede their
+        columns so reverse restoration returns the columns first, then the cached objects.
+        Pending mappings are copied without copying their factories; a missing instance mapping
+        remains missing on restoration.
+        """
+        if not objs:
+            return
+        meta = objs[0]._binding
+        names = {name for obj in objs for name in obj._await_when_save}
+        if meta.tenant_field is not None:
+            names.add(meta.tenant_field)
+        if not names:
+            return
+        cache_names = {
+            f"_{reference.model_field_name}"
+            for name in names
+            if (reference := meta.fields_map[name].reference) is not None
+        }
+        self.capture(objs, ("_await_when_save", *sorted(cache_names), *sorted(names)))
+        for obj in objs:
+            pending = obj.__dict__.get("_await_when_save", ROLLBACK_RESTORE_UNSET)
+            self.old_values[id(obj)][1]["_await_when_save"] = (
+                ROLLBACK_RESTORE_UNSET if pending is ROLLBACK_RESTORE_UNSET else dict(pending)
+            )
 
     def bump_optimistic_lock(self, obj: Model, field_name: str, connection: DatabaseClient | None = None) -> Any:
         """Increments the optimistic lock field of an obj, remembering its value.
@@ -69,17 +97,8 @@ class InstanceValues:
         return old_version
 
     def restore(self, instances: Iterable[Model] | None = None) -> None:
-        """Puts the remembered values back - the write failed or matched no row.
-
-        Args:
-            instances: The instances whose values go back; every remembered one when None.
-        """
-        entries = (
-            list(self.old_values.values())
-            if instances is None
-            else [entry for instance in instances if (entry := self.old_values.get(id(instance))) is not None]
-        )
-        InstanceSnapshot.restore_all(InstanceSnapshot(instance, values) for instance, values in entries)
+        """Restore fields after a failed write or one that matched no row."""
+        InstanceSnapshot.restore_all(self.get_snapshots(instances))
 
     def keep(self, connection: DatabaseClient, instances: Iterable[Model] | None = None) -> None:
         """Keeps the new values - registering putting each changed one back should the
@@ -92,22 +111,27 @@ class InstanceValues:
         if not connection.is_transaction_client:
             # Outside a transaction a write can't be rolled back.
             return
-        RollbackRestores.register_snapshots(connection, self.get_rollback_snapshots(instances))
+        RollbackRestores.register_snapshots(connection, self.get_snapshots(instances, changed_only=True))
 
-    def get_rollback_snapshots(self, instances: Iterable[Model] | None = None) -> list[InstanceSnapshot]:
-        """The new values ``keep()`` registers putting back - each changed one with its old value.
+    def get_snapshots(
+        self, instances: Iterable[Model] | None = None, *, changed_only: bool = False
+    ) -> list[InstanceSnapshot]:
+        """The old values already captured for a write.
 
         Args:
-            instances: The instances whose write succeeded; every remembered one when None.
+            instances: The instances to restore, or every remembered instance when None.
+            changed_only: Keep only attributes the write changed, for a later transaction rollback.
 
         Returns:
-            One independent snapshot per instance, with changed fields in capture order.
+            One snapshot per instance in capture order.
         """
         entries = (
             list(self.old_values.values())
             if instances is None
             else [entry for instance in instances if (entry := self.old_values.get(id(instance))) is not None]
         )
+        if not changed_only:
+            return [InstanceSnapshot(instance, values) for instance, values in entries]
         return [
             InstanceSnapshot(
                 instance,

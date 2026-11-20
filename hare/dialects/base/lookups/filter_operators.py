@@ -86,6 +86,7 @@ class FilterOperators:
 
         Args:
             field_lookup: The lookup.
+            connection: The client whose dialect and parameter rules apply to the lookup.
 
         Returns:
             The operator.
@@ -110,6 +111,7 @@ class FilterOperators:
             columns: The compared columns, one per value in each row.
             value_rows: The DB-ready value rows.
             array_element_fields: Per column, its field, or None to type it by its values.
+            connection: The client whose dialect and parameter rules apply to the lookup.
 
         Returns:
             The criterion.
@@ -162,7 +164,7 @@ class FilterOperators:
         """Whether a query on this dialect can run a lookup.
 
         Args:
-            lookup_info: The lookup, as ``Model._meta.get_lookup_info()`` describes it.
+            lookup_info: The lookup, as ``ModelBinding.get_lookup_info()`` describes it.
 
         Returns:
             True when the field and the lookup exist on this dialect, the dialect implements the

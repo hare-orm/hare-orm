@@ -54,5 +54,5 @@ class ConcatFunction(functions.Concat):
                 arg = ValueWrapper(format(arg.value, "f"))
             else:
                 arg = ValueWrapper(repr(arg.value))
-        sql = arg.get_sql(sql_context.copy(with_alias=False)) if hasattr(arg, "get_sql") else str(arg)
+        sql = super().get_arg_sql(arg, sql_context)
         return sql_context.dialect.renderers.get_concatenated_argument_sql(sql, arg)

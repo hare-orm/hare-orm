@@ -25,6 +25,8 @@ from hare.dialects.clickhouse.schema.constants import (
     CLICKHOUSE_PROJECTION_REBUILD_SETTINGS,
 )
 from hare.dialects.clickhouse.schema_objects.clickhouse_projection import ClickhouseProjection
+from hare.inspectdb.introspection.catalog_sql import CatalogSql
+from hare.query.expressions import F
 
 
 class ClickhouseObservedTableOptions:
@@ -85,7 +87,7 @@ class ClickhouseObservedTableOptions:
                 # A sample is picked by a key of the sort the options name.
                 "order_by": () if list(order_by) == primary_key_columns and not sampling_key_sql else order_by,
                 "sample_by": cls.get_key(sampling_key_sql, column_names) if sampling_key_sql else None,
-                "partition_by": RawSQLTerm(partition_key_sql) if partition_key_sql else None,
+                "partition_by": cls.get_key(partition_key_sql, column_names) if partition_key_sql else None,
                 "ttl": RawSQLTerm(clauses[CLICKHOUSE_TTL_CLAUSE]) if clauses.get(CLICKHOUSE_TTL_CLAUSE) else None,
                 "settings": tuple(settings.items()),
                 "column_codecs": tuple(
@@ -116,20 +118,20 @@ class ClickhouseObservedTableOptions:
             The keys.
         """
         key_sqls = ClickhouseSqlParts.split(sorting_key_sql)
-        if ClickhouseSqlParts.get_before_parentheses(engine_sql).endswith(CLICKHOUSE_VERSIONED_COLLAPSING_ENGINE_NAME):
-            arguments_sql, _ = ClickhouseSqlParts.get_parenthesised(engine_sql)
-            arguments = ClickhouseSqlParts.split(arguments_sql)
+        engine_name, arguments_sql, _ = CatalogSql.get_parenthesized_parts(engine_sql)
+        if engine_name.endswith(CLICKHOUSE_VERSIONED_COLLAPSING_ENGINE_NAME):
+            arguments = ClickhouseSqlParts.split(arguments_sql or "")
             declared_sql = ClickhouseSqlParts.get_unwrapped(order_by_sql)
             declared_count = (
                 0 if declared_sql in ("", CLICKHOUSE_NO_SORT_SQL) else len(ClickhouseSqlParts.split(declared_sql))
             )
             appended = len(key_sqls) > declared_count
-            if appended and arguments and key_sqls and key_sqls[-1].strip() == arguments[-1].strip():
+            if appended and arguments and key_sqls and key_sqls[-1] == arguments[-1]:
                 return key_sqls[:-1]
         return key_sqls
 
     @staticmethod
-    def get_key(key_sql: str, column_names: set[str]) -> str | RawSQLTerm:
+    def get_key(key_sql: str, column_names: set[str]) -> str | F | RawSQLTerm:
         """A key of a table as its options name it.
 
         Args:
@@ -143,7 +145,9 @@ class ClickhouseObservedTableOptions:
         # (id) reports "(id), version".
         key_sql = ClickhouseSqlParts.get_unwrapped(key_sql)
         identifier = ClickhouseSqlParts.get_identifier(key_sql)
-        return identifier if identifier in column_names else RawSQLTerm(key_sql)
+        if identifier in column_names:
+            return identifier if identifier.isidentifier() else F(identifier)
+        return RawSQLTerm(key_sql)
 
     @staticmethod
     def get_settings(settings_sql: str) -> dict[str, str | int]:

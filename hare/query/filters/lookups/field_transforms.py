@@ -32,11 +32,8 @@ class FieldTransforms:
         Returns:
             The extension, None when the segment needs none or isn't registered.
         """
-        for klass in type(field).__mro__:
-            registered_transform = Field.get_class_transforms(klass).get(segment)
-            if registered_transform is not None:
-                return registered_transform.required_extension
-        return None
+        registered_transform = GeneratedField.get_effective_field(field).get_registered_transform(segment)
+        return None if registered_transform is None else registered_transform.required_extension
 
     @classmethod
     def get_path_required_extension(cls, field: Field[Any], segments: list[str]) -> str | None:
@@ -63,6 +60,10 @@ class FieldTransforms:
     def get_transform(cls, field: Field[Any], segment: str) -> tuple[TermTransform, Field[Any]] | None:
         """The transform one path segment applies to a value of ``field``.
 
+        Explicit registrations precede the field's path hook, including built-in container
+        paths. A subclass declaration precedes a base declaration. Generated values use
+        their output field, as for ordinary field paths.
+
         Args:
             field: The field of the value so far.
             segment: The path segment.
@@ -70,7 +71,11 @@ class FieldTransforms:
         Returns:
             The term transform and the field of its result, or None when the segment isn't one.
         """
-        return GeneratedField.get_effective_field(field).get_path_transform(segment)
+        field = GeneratedField.get_effective_field(field)
+        registered_transform = field.get_registered_transform(segment)
+        if registered_transform is not None:
+            return registered_transform.get_transform(field)
+        return field.get_path_transform(segment)
 
     @classmethod
     def get_path(cls, field: Field[Any], segments: list[str]) -> tuple[list[TermTransform], Field[Any], list[str]]:

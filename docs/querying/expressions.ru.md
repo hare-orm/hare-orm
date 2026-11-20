@@ -373,6 +373,10 @@ class Exists(Expression):
     def __init__(self, queryset: QuerySet[Any, Any], *, negated: bool = False) -> None: ...
 ```
 
+`Subquery(queryset.count())` выбирает одно число строк запроса с учётом его среза
+`limit()`/`offset()`. Пустой источник или пустой срез даёт ноль, в том числе когда не осталось
+ни одной группы. Это относится к строкам моделей, выбранным значениям и операциям над множествами.
+
 ```python
 await Author.objects.annotate(
     has_book_in_print=Exists(Book.objects.filter(author_id=OuterReference("id"), in_print=True)),

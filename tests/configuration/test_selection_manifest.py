@@ -38,7 +38,11 @@ def test_requirements_are_read_without_importing_test_or_fixture_sources(manifes
     manifest.check_inventory()
     assert manifest.get_path_requirements(directory / "conftest.py") == {"framework"}
     assert manifest.get_path_requirements(module_path) == {"framework", "adapter"}
-    manifest.check_cell_requirements(module_path, {"framework", "adapter", "serializer"})
+    manifest.check_cell_requirements(
+        module_path,
+        {"framework", "adapter", "serializer"},
+        module_requirements=manifest.get_path_requirements(module_path),
+    )
     assert not set(sys.modules) - imported
 
 
@@ -57,7 +61,10 @@ def test_undeclared_module_or_cell_cannot_disappear_from_selection(manifest_root
     with pytest.raises(ValueError, match="declare the test module"):
         manifest.get_path_requirements(manifest_root / "tests/test_new.py")
     with pytest.raises(ValueError, match="undeclared cell requirements.*new_extra"):
-        manifest.check_cell_requirements(manifest_root / "tests/test_example.py", {"adapter", "new_extra"})
+        path = manifest_root / "tests/test_example.py"
+        manifest.check_cell_requirements(
+            path, {"adapter", "new_extra"}, module_requirements=manifest.get_path_requirements(path)
+        )
 
 
 def test_inventory_reports_added_and_removed_modules(manifest_root: Path):

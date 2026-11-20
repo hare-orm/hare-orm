@@ -3,9 +3,11 @@ PostgreSQL an ``inet`` IPv4 address before every IPv6 one and a ``TIMETZ`` by it
 ClickHouse a time of day by its stored text, on SQLite an address by its text."""
 
 import datetime
+from ipaddress import ip_address
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.query.functions import Max, Min
 from tests.fields.value_types.models_ip_address import Host
 
@@ -31,7 +33,7 @@ async def ids(**filters):
 
 @pytest.mark.asyncio
 async def test_addresses_order_ipv4_first_then_by_bytes(db_ordered_values):
-    if Host._meta.connection.dialect.name != "postgresql":
+    if HareContext.require_current().apps.get_queryset(Host).get_connection().dialect.name != "postgresql":
         pytest.skip("PostgreSQL's inet order - SQLite orders the stored text, ClickHouse its IPv6 bytes")
     await create_hosts()
     ordered = await Host.objects.filter(address__isnull=False).order_by("address").values_list("id", flat=True)
@@ -40,15 +42,15 @@ async def test_addresses_order_ipv4_first_then_by_bytes(db_ordered_values):
     assert await ids(address__lt="::1") == [2, 4]
     assert await ids(address__range=("1.0.0.0", "::1")) == [1, 2]
     assert await Host.objects.aggregate(low=Min("address"), high=Max("address")) == {
-        "low": Host._meta.fields_map["address"].to_python("0.0.0.0"),
-        "high": Host._meta.fields_map["address"].to_python("2001:db8::1"),
+        "low": ip_address("0.0.0.0"),
+        "high": ip_address("2001:db8::1"),
     }
     assert await ids(address__startswith="10.") == [2]
 
 
 @pytest.mark.asyncio
 async def test_times_order_by_their_utc_time(db_ordered_values):
-    if Host._meta.connection.dialect.name != "postgresql":
+    if HareContext.require_current().apps.get_queryset(Host).get_connection().dialect.name != "postgresql":
         pytest.skip("PostgreSQL's TIMETZ order - SQLite and ClickHouse order a time of day by its stored text")
     await create_hosts()
     ordered = await Host.objects.filter(opens__isnull=False).order_by("opens").values_list("id", flat=True)
@@ -66,7 +68,7 @@ async def test_times_order_by_their_utc_time(db_ordered_values):
 
 @pytest.mark.asyncio
 async def test_times_order_by_their_text_where_stored_as_text(db_ordered_values):
-    if Host._meta.connection.dialect.name == "postgresql":
+    if HareContext.require_current().apps.get_queryset(Host).get_connection().dialect.name == "postgresql":
         pytest.skip("PostgreSQL orders a TIMETZ by its UTC time")
     await create_hosts()
     ordered = await Host.objects.filter(opens__isnull=False).order_by("opens").values_list("id", flat=True)

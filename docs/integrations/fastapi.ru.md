@@ -27,7 +27,7 @@ class BookSchema(BaseModel):
 
 
 @app.get("/books", response_model=PageSchema[BookSchema])
-async def list_books(books: BookQuery = RequestQueryDependency.provide(BookQuery)) -> Page[Book]:
+async def list_books(books: BookQuery = app.request_query(BookQuery)) -> Page[Book]:
     return await books.page()
 ```
 
@@ -53,8 +53,10 @@ class HareFastAPI(FastAPI):
 - **Модели привязываются при создании приложения** (`Hare.bind_models()`, без подключения). FastAPI
   читает параметры маршрута при его объявлении, а параметры запроса из параметров —
   [`Meta.filters`](request-queries.ru.md#meta-filters), описания его фильтров — читаются из моделей.
-  Маршрутизатору, объявленному в модуле, который импортируется до создания приложения, нужен вызов
-  `Hare.bind_models(HARE_CONFIG)` до этого импорта.
+  Для отдельно объявленного маршрутизатора передайте явный офлайн-реестр:
+  `RequestQueryDependency.provide(QueryClass, apps=apps)`, где
+  `apps = Hare.bind_models(HARE_CONFIG)`. Результат `bind_models()` нужно передать зависимости:
+  сам вызов не меняет глобальные метаданные моделей.
 - **`HareContext`.** Открывается при запуске приложения, до его собственного `lifespan` — у которого база
   уже есть, — и закрывается при остановке. Middleware активирует контекст приложения для каждого
   запроса. При остановке `HareContext.close_connections()` ещё и дожидается фоновых наблюдателей, которые ещё
@@ -86,7 +88,7 @@ class HareFastAPI(FastAPI):
 
 ## <a id="request-queries-as-dependencies"></a>Запросы из параметров как зависимости
 
-`RequestQueryDependency.provide(QueryClass)` — это `Depends()`, который строит запрос из параметров
+`app.request_query(QueryClass)` — это `Depends()`, который строит запрос из параметров
 HTTP-запроса. Каждый параметр класса становится параметром маршрута, проверяется FastAPI и перечисляется
 в схеме OpenAPI с типом, значением по умолчанию, ограничениями, перечислением и описанием:
 
@@ -103,7 +105,7 @@ class ChapterQuery(RequestQuery[Chapter]):
 
 
 @app.get("/chapters/{pk}", response_model=ChapterSchema)
-async def get_chapter(chapter: ChapterQuery = RequestQueryDependency.provide(ChapterQuery)) -> Chapter:
+async def get_chapter(chapter: ChapterQuery = app.request_query(ChapterQuery)) -> Chapter:
     return await chapter.get()
 ```
 
@@ -111,6 +113,11 @@ async def get_chapter(chapter: ChapterQuery = RequestQueryDependency.provide(Cha
 получает сам HTTP-запрос: `query.request`, а также адреса `next` и `previous` для страницы. На значение,
 которое запрос отклоняет, — сортировку, которую он не разрешает, испорченный курсор, — отвечают так же,
 как FastAPI отвечает на неверный параметр.
+
+Для обычного приложения FastAPI используйте `RequestQueryDependency.provide(QueryClass, apps=apps)`,
+где `apps = Hare.bind_models(config)` явно выбирает метаданные до запуска. Зависимость читает
+из этого реестра только схему; при обработке запроса исходное объявление создаётся в области
+работающего приложения.
 
 ## <a id="responses"></a>Ответы
 

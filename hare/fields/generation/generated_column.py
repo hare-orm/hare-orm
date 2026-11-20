@@ -52,7 +52,7 @@ class GeneratedColumn:
         sql = (
             expression.sql
             if isinstance(expression, RawSQLTerm)
-            else DeclaredExpressions.get_sql(expression, field.model, dialect)
+            else DeclaredExpressions.get_sql(expression, field.get_binding().model_binding, dialect)  # type: ignore[arg-type]
         )
         schema_editor = dialect.schema_editor_class
         template = (

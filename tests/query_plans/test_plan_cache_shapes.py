@@ -14,8 +14,8 @@ import pytest_asyncio
 
 from hare.contrib.test import RollbackIsolation, hare_test_context, requires_features
 from hare.core.caching.caches import Caches
-from hare.query.plans.statement.statement_plans import StatementPlans
 from tests.query_plans.plan_cache_shapes_models import Category, Edition, Note, Post, Review, Shelf, Tag, Writer
+from tests.utils.statement_plan_checks import StatementPlanChecks
 
 
 @pytest_asyncio.fixture(scope="module")
@@ -65,7 +65,7 @@ async def assert_runs_on_its_plan(
     """Runs a shape with each call's values: each result is the expected one, and every call after
     the first runs on the plan the first one kept - or ``hits`` of them, for a shape keeping a plan
     per something of its values."""
-    with patch.object(StatementPlans, "count_hit", side_effect=StatementPlans.count_hit) as spy:
+    with StatementPlanChecks.spy_on_plan_hits() as spy:
         for values, expected in calls:
             assert await run(*values) == expected
     assert spy.call_count == (len(calls) - 1 if hits is None else hits)

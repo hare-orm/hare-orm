@@ -43,8 +43,10 @@ class ClickhouseJsonValues:
 
     @staticmethod
     def to_lookup(field: Field[Any], value: Any, instance: type[Model] | Model | None) -> Any:
-        """The JSON text a filter compares a field keeping its text with (``JSONTextField``) - marked:
-        it is compared as that text, not as a ``JSON`` value.
+        """Encode comparison JSON without imposing storage-only restrictions.
+
+        A JSONTextField marks its text so equality does not cast it to JSON. Native
+        JSON comparisons use the connection settings, unlike storage mutations.
 
         Args:
             field: The JSON field.
@@ -55,7 +57,10 @@ class ClickhouseJsonValues:
             The text, None for None.
         """
         text = field.to_lookup_value(value, instance)
-        return text if text is None or not isinstance(text, str) else ClickhouseStoredJsonText(text)
+        if field.keeps_json_text:  # type: ignore[attr-defined]
+            return ClickhouseStoredJsonText(text) if isinstance(text, str) else text
+        ClickhouseJsonValues.raise_if_not_an_object(field, value, text)
+        return text
 
     @staticmethod
     def to_db(field: Field[Any], value: Any, instance: type[Model] | Model | None) -> Any:
@@ -76,14 +81,19 @@ class ClickhouseJsonValues:
         text = field.to_db_value(value, instance)
         if text is None:
             return None
-        if not text.lstrip().startswith("{"):
+        ClickhouseJsonValues.raise_if_not_an_object(field, value, text)
+        if ClickhouseJsonValues.may_hold_not_kept_values(text):
+            ClickhouseJsonValues.raise_if_not_kept(field, value if isinstance(value, dict) else json.loads(text))
+        return text
+
+    @staticmethod
+    def raise_if_not_an_object(field: Field[Any], value: Any, text: str | None) -> None:
+        """Check the whole-document shape shared by storage and native JSON comparisons."""
+        if text is not None and not text.lstrip().startswith("{"):
             raise ValidationError(
                 f"{field.model_field_name}: a JSON column of ClickHouse holds an object, got "
                 f"{field.get_value_for_message(value)}"
             )
-        if ClickhouseJsonValues.may_hold_not_kept_values(text):
-            ClickhouseJsonValues.raise_if_not_kept(field, value if isinstance(value, dict) else json.loads(text))
-        return text
 
     @staticmethod
     def to_db_path_value(field: Field[Any], value: Any, instance: type[Model] | Model | None) -> Any:
@@ -140,7 +150,9 @@ class ClickhouseJsonValues:
                 for key, member in item.items():
                     if member is None or (isinstance(member, dict) and not member):
                         raise ValidationError(
-                            f"{name}: a JSON column of ClickHouse keeps no key holding {member!r} - {key!r} would "
+                            f"{name}: a JSON column of ClickHouse keeps no key holding "
+                            f"{field.get_value_for_message(member)} - "
+                            f"{field.get_value_for_message(key)} would "
                             "be read back missing"
                         )
                     pending.append(member)

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from hare.models.model_binding import ModelBinding
+
 from hare.ddl.schema_objects.database_sequence import DatabaseSequence
 from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
-from hare.models import Model
 
 
 class Sequences(SchemaEditorPart):
@@ -13,13 +17,13 @@ class Sequences(SchemaEditorPart):
     __slots__ = ()
 
     def get_sequence_create_sqls(
-        self, model: type[Model], sequence: DatabaseSequence, safe: bool = False
+        self, binding: ModelBinding, sequence: DatabaseSequence, safe: bool = False
     ) -> list[str]:
         """The statements creating a sequence of a model - without its owner column, which
         ``get_sequence_owner_sqls()`` sets once the table exists.
 
         Args:
-            model: The model declaring it.
+            binding: The model declaring it.
             sequence: The sequence.
             safe: Create it only when it doesn't exist yet.
 
@@ -28,7 +32,7 @@ class Sequences(SchemaEditorPart):
         """
         raise self.get_unsupported_error("Sequences")
 
-    def get_sequence_owner_sqls(self, model: type[Model], sequence: DatabaseSequence) -> list[str]:
+    def get_sequence_owner_sqls(self, binding: ModelBinding, sequence: DatabaseSequence) -> list[str]:
         """The statements making a sequence of a model owned by its column - none without
         ``owned_by``.
 
@@ -37,13 +41,13 @@ class Sequences(SchemaEditorPart):
         """
         raise self.get_unsupported_error("Sequences")
 
-    async def create_sequence(self, model: type[Model], sequence: DatabaseSequence) -> None:
+    async def create_sequence(self, binding: ModelBinding, sequence: DatabaseSequence) -> None:
         """Creates a sequence of a model, owned by its column."""
         await self.editor.run_sqls(
-            [*self.get_sequence_create_sqls(model, sequence), *self.get_sequence_owner_sqls(model, sequence)]
+            [*self.get_sequence_create_sqls(binding, sequence), *self.get_sequence_owner_sqls(binding, sequence)]
         )
 
-    async def drop_sequence(self, model: type[Model], sequence: DatabaseSequence) -> None:
+    async def drop_sequence(self, binding: ModelBinding, sequence: DatabaseSequence) -> None:
         """Drops a sequence of a model.
 
         Raises:
@@ -52,7 +56,7 @@ class Sequences(SchemaEditorPart):
         raise self.get_unsupported_error("Sequences")
 
     async def alter_sequence(
-        self, model: type[Model], old_sequence: DatabaseSequence, new_sequence: DatabaseSequence
+        self, binding: ModelBinding, old_sequence: DatabaseSequence, new_sequence: DatabaseSequence
     ) -> None:
         """Gives a sequence of a model its new settings - its current number is kept.
 
@@ -62,7 +66,7 @@ class Sequences(SchemaEditorPart):
         raise self.get_unsupported_error("Sequences")
 
     async def rename_sequence(
-        self, model: type[Model], old_sequence: DatabaseSequence, new_sequence: DatabaseSequence
+        self, binding: ModelBinding, old_sequence: DatabaseSequence, new_sequence: DatabaseSequence
     ) -> None:
         """Renames a sequence of a model.
 
@@ -71,7 +75,7 @@ class Sequences(SchemaEditorPart):
         """
         raise self.get_unsupported_error("Sequences")
 
-    async def get_next_sequence_value(self, model: type[Model], sequence: DatabaseSequence) -> int:
+    async def get_next_sequence_value(self, binding: ModelBinding, sequence: DatabaseSequence) -> int:
         """Takes the next number of a sequence of a model.
 
         Raises:
@@ -80,12 +84,12 @@ class Sequences(SchemaEditorPart):
         raise self.get_unsupported_error("Sequences")
 
     def get_schema_move_plan(
-        self, model: type[Model], sequence: DatabaseSequence, old_schema: str | None, new_schema: str | None
+        self, binding: ModelBinding, sequence: DatabaseSequence, old_schema: str | None, new_schema: str | None
     ) -> SchemaChangePlan:
         """Prepares moving a declared object with its model to another schema.
 
         Args:
-            model: The model, rendered in its old schema.
+            binding: The model, rendered in its old schema.
             sequence: The object.
             old_schema: The schema it is in; None for the connection's current schema.
             new_schema: The schema it moves to; None for the connection's current schema.

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from hare.contrib.outbox.brokers.rabbitmq_connection import RabbitMQConnection
-from hare.contrib.outbox.wakeups.constants import DEFAULT_WAKEUP_CHANNEL, WAKEUP_TOPIC_SEPARATOR
+from hare.contrib.outbox.wakeups.constants import DEFAULT_WAKEUP_CHANNEL
 from hare.contrib.outbox.wakeups.outbox_wakeup import OutboxWakeup
 from hare.contrib.package_checks import PackageChecks
 
@@ -45,7 +45,7 @@ class RabbitMQWakeup(OutboxWakeup):
 
     async def signal(self, topics: frozenset[str]) -> None:
         exchange = await self.broker_connection.get_exchange()
-        body = WAKEUP_TOPIC_SEPARATOR.join(sorted(topics)).encode()
+        body = self.encode_topics(topics)
         await exchange.publish(RabbitMQConnection.aio_pika.Message(body=body), routing_key="")
 
     async def listen(self, connection: str | DatabaseClient) -> None:
@@ -56,8 +56,7 @@ class RabbitMQWakeup(OutboxWakeup):
         async with queue.iterator() as messages:
             async for message in messages:
                 async with message.process():
-                    text = message.body.decode()
-                    self.dispatch(frozenset(topic for topic in text.split(WAKEUP_TOPIC_SEPARATOR) if topic))
+                    self.dispatch_payload(message.body)
         raise ConnectionError("the RabbitMQ queue was closed")
 
     async def close(self) -> None:

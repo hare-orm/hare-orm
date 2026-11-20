@@ -10,7 +10,7 @@ from hare.dialects.sqlite.constants import SQLITE_JSON_DATETIME_FUNCTION_NAME
 from hare.dialects.sqlite.functions.json.sqlite_json_datetime import SqliteJsonDatetime
 from hare.dialects.sqlite.functions.json.sqlite_json_path import SqliteJsonPath
 from hare.dialects.sqlite.functions.sqlite_connection_function import SqliteConnectionFunction
-from hare.dialects.sqlite.lookups.constants import SQLITE_JSON_KEY_PATH_FORMAT, SQLITE_JSON_TYPE_NAMES
+from hare.dialects.sqlite.lookups.constants import SQLITE_JSON_TYPE_NAMES
 from hare.dialects.sqlite.lookups.in_list.sqlite_large_in_list import SqliteLargeInList
 from hare.dialects.sqlite.lookups.json.sqlite_json_type_criterion import SqliteJsonTypeCriterion
 from hare.dialects.sqlite.sqlite_dialect import SqliteDialect
@@ -97,23 +97,23 @@ class SqliteJsonFilterGuards(JsonFilterGuards):
     def key_existence_criterion(
         self, field_term: Term, key_parts: list[str | int], operator_: Any, value: Any
     ) -> Criterion:
-        # A key of an object at the path - json_type() of the key's path is NULL where there's none. The
-        # path is built from the bound key in SQL (the key as a JSON string), so a plan holds no key.
+        # Merge Patch removes a key whose patch value is JSON null. Compare normalized JSON
+        # so whitespace is irrelevant, including for absent keys. json_object() accepts every
+        # label directly, unlike SQLite's path grammar; the key remains a bound parameter.
         document = JsonFilterParser.get_field_path(field_term, key_parts, as_text=False) if key_parts else field_term
         if operator_ is JsonLookups.has_key:
             keys = [self.get_key(value)]
         else:
             keys = self.get_key_list("has_keys" if operator_ is JsonLookups.has_keys else "has_any_keys", value)
-        key_path_format = ValueWrapper(SQLITE_JSON_KEY_PATH_FORMAT, allow_parametrize=False)
         tests = [
-            Function(
-                "json_type", document, Function("printf", key_path_format, Function("json_quote", ValueWrapper(key)))
-            ).notnull()
+            Function("json_patch", document, Function("json_object", ValueWrapper(key), None))
+            != Function("json", document)
             for key in keys
         ]
         if not tests:
             # No key to have: a document has every key of none, and any of none it hasn't.
             if operator_ is JsonLookups.has_keys:
-                return field_term.notnull()
+                return document.notnull()
             return self.membership.is_in(field_term, [])
-        return Criterion.all(tests) if operator_ is JsonLookups.has_keys else Criterion.any(tests)
+        is_object = Function("json_type", document) == ValueWrapper("object", allow_parametrize=False)
+        return is_object & (Criterion.all(tests) if operator_ is JsonLookups.has_keys else Criterion.any(tests))

@@ -12,7 +12,6 @@ from hare.fields.data.numeric import IntField
 from hare.fields.data.text import CharField
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
 from hare.migrations import operations as ops
-from hare.migrations.drift import detect_drift
 from hare.migrations.writer import MigrationWriter
 from hare.query.expressions import F
 from hare.sql.order import Order
@@ -82,7 +81,7 @@ async def test_key_orders_migrate_have_no_drift_and_come_back_from_inspectdb(db_
     book = build_model("Book", "keyo", book_fields(), {"indexes": indexes})
     await round_trip.migrate_to(book)
     assert round_trip.get_pending_operations(book) == []
-    assert (await detect_drift(round_trip.connection, build_live_state(book), [APP_LABEL])).operations == []
+    assert (await round_trip.get_drift(build_live_state(book))).operations == []
     definitions = " ".join((await round_trip.get_index_definitions("keyo")).values())
     assert "DESC" in definitions
 
@@ -106,7 +105,7 @@ async def test_key_orders_migrate_have_no_drift_and_come_back_from_inspectdb(db_
         {"indexes": [Index(fields=("title", "-rank")), Index(F("rank"), F("score").desc(), name="keyo_f_desc")]},
     )
     assert await round_trip.migrate_to(changed)
-    assert (await detect_drift(round_trip.connection, build_live_state(changed), [APP_LABEL])).operations == []
+    assert (await round_trip.get_drift(build_live_state(changed))).operations == []
 
 
 @pytest.mark.asyncio
@@ -157,6 +156,6 @@ async def test_rename_field_keeps_key_order_and_include(db_isolated_no_schema):
         },
     )
     assert round_trip.get_pending_operations(renamed) == []
-    assert (await detect_drift(round_trip.connection, build_live_state(renamed), [APP_LABEL])).operations == []
+    assert (await round_trip.get_drift(build_live_state(renamed))).operations == []
     with pytest.raises(ConfigurationError, match="include columns of Index 'keyo_title'"):
         await round_trip.apply([ops.RemoveField(model_name="Book", name="points")])

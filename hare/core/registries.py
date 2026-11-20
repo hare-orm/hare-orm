@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Generator
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from threading import RLock
 from typing import ClassVar
 
+from hare.core.caching.caches import Caches
 from hare.core.extensions.declarations import ExtensionContribution
 from hare.core.extensions.messages import EXTENSION_REGISTRATION_MESSAGE
 from hare.core.extensions.registry_snapshot import RegistrySnapshot
@@ -19,9 +20,6 @@ class Registries:
     queries rebuild what they need. Each process builds its own caches.
     """
 
-    #: Drops every cache built from the registries - set once the app registry, which knows
-    #: those caches, is loaded; before that no query has run, so nothing is cached.
-    forget_all_caches: ClassVar[Callable[[], None] | None] = None
     snapshot: ClassVar[RegistrySnapshot] = RegistrySnapshot()
     execution_snapshot: ClassVar[ContextVar[RegistrySnapshot | None]] = ContextVar(
         "hare_registry_snapshot", default=None
@@ -73,5 +71,4 @@ class Registries:
     @classmethod
     def changed(cls) -> None:
         """Drops every cache built from the registries - called by each registration."""
-        if cls.forget_all_caches is not None:
-            cls.forget_all_caches()
+        Caches.forget_all_caches()

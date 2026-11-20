@@ -5,6 +5,7 @@ import pytest
 import pytest_asyncio
 
 from hare.contrib.test import RollbackIsolation, assert_query_count, hare_test_context
+from hare.core.hare_context import HareContext
 from hare.dialects.sqlite.indexes import FullTextIndex
 from hare.dialects.sqlite.search import SqliteTextSearch
 from hare.dialects.sqlite.search.sqlite_full_text_query import SqliteFullTextQuery
@@ -45,7 +46,12 @@ async def get_ids(queryset) -> list[int]:
 @pytest.mark.sqlite_only
 @pytest.mark.asyncio
 async def test_the_index_is_an_fts5_table_with_triggers(search_db):
-    index_name = SearchArticle._meta.indexes[0].get_table_name(SearchArticle)
+    index_name = (
+        HareContext.require_current()
+        .apps.get_binding(SearchArticle)
+        .indexes[0]
+        .get_table_name(HareContext.require_current().apps.get_binding(SearchArticle))
+    )
     _, rows = await SearchArticle.get_connection().execute(
         "SELECT type, name, sql FROM sqlite_master WHERE name LIKE ? ORDER BY type, name", [f"{index_name}%"]
     )

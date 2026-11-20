@@ -12,6 +12,7 @@ from hare.fields import Field
 
 if TYPE_CHECKING:
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class FieldMap(UserDict[str, Field[Any] | ComputedFieldDescription]):
@@ -42,17 +43,17 @@ class FieldMap(UserDict[str, Field[Any] | ComputedFieldDescription]):
     def sort_alphabetically(self) -> None:
         self.data = {field_name: self.data[field_name] for field_name in sorted(self.data)}
 
-    def sort_definition_order(self, cls: type[Model], computed: tuple[str, ...]) -> None:
+    def sort_definition_order(self, binding: ModelBinding, computed: tuple[str, ...]) -> None:
         """Orders the map as the model declares its fields, the computed ones after them - a relation's key
         fields in its place when ``relations_as_ids``.
 
         Args:
-            cls: The model.
+            binding: The binding supplying the model's field order.
             computed: The computed fields.
         """
         ordered_names: list[str] = []
-        for name in tuple(cls._meta.fields_map.keys()) + computed:
-            field = cls._meta.fields_map.get(name)
+        for name in tuple(binding.fields_map.keys()) + computed:
+            field = binding.fields_map.get(name)
             if self.relations_as_ids and isinstance(field, ForeignKeyFieldInstance):
                 # A shadow id field takes its relation's place in definition order.
                 ordered_names.extend(field.source_fields)
@@ -68,10 +69,11 @@ class FieldMap(UserDict[str, Field[Any] | ComputedFieldDescription]):
             field: The forward FK/O2O relation.
             meta: The finalized Meta.pydantic settings.
         """
-        names = (field.model_field_name, *field.source_fields)
+        source_fields = field.source_fields
+        names = (field.model_field_name, *source_fields)
         excluded = any(name in meta.exclude for name in names)
         not_included = not any(meta.selects(name) for name in names)
-        for source_field_name in field.source_fields:
+        for source_field_name in source_fields:
             if excluded or not_included:
                 # The shadow id of an O2O primary key stays unless excluded by its own name.
                 if source_field_name in self.pk_raw_fields and source_field_name not in meta.exclude:

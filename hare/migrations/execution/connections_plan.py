@@ -47,9 +47,13 @@ class ConnectionsPlan:
         if not self.executors:
             return [], applied
         for executor in self.executors.values():
-            await executor.build_graph()
-            applied.update(key for key in executor.loader.applied_migrations if key.app_label in executor.apps_config)
+            applied.update(
+                key for key in await executor.recorder.applied_migrations() if key.app_label in executor.apps_config
+            )
+        for executor in self.executors.values():
+            await executor.build_graph(applied=applied)
         planner = next(iter(self.executors.values()))
+        applied = set(planner.loader.applied_migrations)
         steps = planner.get_migration_plan(targets, applied, app_labels=self.connection_by_app)
         groups: list[tuple[str, list[PlanStep]]] = []
         for step in steps:
@@ -101,11 +105,7 @@ class ConnectionsPlan:
                 report=report_steps,
             )
             for step in steps:
-                key = MigrationKey(app_label=step.migration.app_label, name=step.migration.name)
-                if step.backward:
-                    applied.discard(key)
-                else:
-                    applied.add(key)
+                step.update_applied(applied)
         connections_with_steps = {alias for alias, _steps in groups}
         for alias, executor in self.executors.items():
             connection_targets = self.get_targets_of_connection(executor, targets)
@@ -196,12 +196,12 @@ class ConnectionsPlan:
         Returns:
             The risks, in the order of the plan.
         """
-        groups, _applied = await self.get_groups()
+        groups, applied = await self.get_groups()
         positions = {
             (step.migration.app_label, step.migration.name): position
             for position, step in enumerate(step for _alias, steps in groups for step in steps)
         }
         risks: list[MigrationRisk] = []
         for executor in self.executors.values():
-            risks.extend(await executor.check_safety(checker))
+            risks.extend(await executor.check_safety(checker, applied))
         return sorted(risks, key=lambda risk: positions.get((risk.app_label, risk.migration_name), len(positions)))

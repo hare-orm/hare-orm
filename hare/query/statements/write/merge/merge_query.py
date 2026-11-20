@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Generator, Iterable, Mapping, Sequence
 from copy import copy
 from typing import TYPE_CHECKING, Any
@@ -9,9 +10,9 @@ from hare.dialects.base.clauses.enums import MergeAction, MergeMatch
 from hare.dialects.base.clauses.merge_when_sql import MergeWhenSql
 from hare.exceptions import FieldError, QueryError, UnSupportedError
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
-from hare.fields.relations.fields.one_to_one_field_instance import OneToOneFieldInstance
 from hare.instrumentation.capture.captured_write import CapturedWrite
 from hare.instrumentation.capture.change_capturing import ChangeCapturing
+from hare.instrumentation.change_events import ChangeEvents
 from hare.instrumentation.enums import RowOperation
 from hare.models.deletion.cascade.deletion_graph import DeletionGraph
 from hare.models.instances.instance_initialization import InstanceInitialization
@@ -61,6 +62,7 @@ if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.fields.field import Field
     from hare.instrumentation.capture.capture_needs import CaptureNeeds
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset.queryset import QuerySet
     from hare.sql.sql_context import SqlContext
 
@@ -87,15 +89,20 @@ class MergeQuery:
     __slots__ = ("target", "source", "on_columns", "whens", "returned_rows")
 
     def __init__(self, target: QuerySet[Any, Any], source: Any, on: str | Sequence[str] | Mapping[str, str]) -> None:
+        from hare.query.queryset.pending_calls.calls_before_setup import CallsBeforeSetup
+        from hare.query.queryset.queryset import QuerySet
+
+        model_binding: ModelBinding = target._binding  # type: ignore[assignment]
+        if isinstance(source, QuerySet):
+            source = CallsBeforeSetup.bind(source, target._context, model_binding.graph)
         self.target = target
         self.source: QuerySet[Any, Any] | tuple[Mapping[str, Any], ...] = self.get_source(source)
-        model = target.model
         #: The target column and the source column of each matched pair.
         self.on_columns: tuple[tuple[str, str], ...] = tuple(
             (
-                model._meta.fields_db_projection[
+                model_binding.fields_db_projection[
                     RowWriteRules.get_stored_field_names(
-                        model, [target_name], "merge(on=...)", single_column_relations=True
+                        model_binding, [target_name], "merge(on=...)", single_column_relations=True
                     )[0]
                 ],
                 source_column,
@@ -284,11 +291,15 @@ class MergeQuery:
 
         Raises:
             QueryError: No field is named.
-            FieldError: A name isn't a field written in the model's table, or is given twice.
+            FieldError: A name isn't a field written in the model's table, is given twice or is
+                reserved for the merge action in the result.
         """
         if not field_names:
             raise QueryError("merge().returning() takes the names of the fields returned")
-        return self.get_copy(returned_rows=ReturnedRows(self.target.model, field_names, old))
+        if MERGE_ACTION_KEY in field_names:
+            raise FieldError(f"merge().returning() uses {MERGE_ACTION_KEY!r} for the action that wrote each row")
+        model_binding: ModelBinding = self.target._binding  # type: ignore[assignment]
+        return self.get_copy(returned_rows=ReturnedRows(model_binding, field_names, old))
 
     def __await__(self) -> Generator[Any, None, Any]:
         specifications = (self.target,) if isinstance(self.source, tuple) else (self.target, self.source)
@@ -325,7 +336,8 @@ class MergeQuery:
                 f"merge().returning(old=...) needs RETURNING of the old values, which the {connection.dialect} server "
                 "of this connection doesn't have"
             )
-        capture_needs = model._meta.change_capture_needs
+        model_binding: ModelBinding = target._binding  # type: ignore[assignment]
+        capture_needs = model_binding.change_capture_needs
         if capture_needs is not None and not features.supports_merge_returning:
             raise UnSupportedError(
                 f"merge() of {model.__name__}, which captures its changes (Meta.change_capture), needs MERGE ... "
@@ -356,10 +368,10 @@ class MergeQuery:
                 "group_by(), sample() or with_cte()"
             )
         if any(when.action is MergeAction.DELETE for when in self.whens) and (
-            model._meta.soft_delete_field
-            or DeletionGraph.needs_python_cascade(model)
-            or DeletionGraph.has_protecting_relations(model)
-            or DeletionGraph.has_transitive_protect(model)
+            model_binding.soft_delete_field
+            or DeletionGraph.needs_python_cascade(model_binding)
+            or DeletionGraph.has_protecting_relations(model_binding)
+            or DeletionGraph.has_transitive_protect(model_binding)
         ):
             raise QueryError(
                 f"merge() deletes {model.__name__} rows in the database alone - its soft delete, an on_delete the "
@@ -374,9 +386,11 @@ class MergeQuery:
         Returns:
             The column's name.
         """
-        model = self.target.model
+        model_binding: ModelBinding = self.target._binding  # type: ignore[assignment]
         return HareColumnNames.get_free_name(
-            MERGE_ACTION_ALIAS, (model,), HareColumnNames.get_old_value_names(model).values()
+            MERGE_ACTION_ALIAS,
+            (model_binding,),
+            HareColumnNames.get_old_value_names(model_binding).values(),
         )
 
     async def _execute(self) -> Any:
@@ -387,7 +401,7 @@ class MergeQuery:
         """
         model = self.target.model
         action_column = self.get_action_column()
-        meta = model._meta
+        meta: ModelBinding = self.target._binding  # type: ignore[assignment]
         execution_query = self.target._get_execution_query(for_write=True)
         WrittenTargetChecks.raise_if_refused_calls(execution_query, execution_query.dialect)
         connection: DatabaseClient = execution_query._connection  # type: ignore[assignment]
@@ -401,12 +415,13 @@ class MergeQuery:
         table = meta.basetable
         source_sql, fields_by_column = self.get_source_sql(connection, sql_context)
         expression_context = ExpressionContext(
-            model=model,
+            binding=meta,
             dialect=connection.dialect,
             connection=connection,
             table=table,
             annotations={MERGE_SOURCE_KEY: MergeSourceRow(fields_by_column).with_name(MERGE_SOURCE_KEY)},
             visibility=self.target._visibility,
+            application_context=self.target._context,
         )
         on_sql = self.get_on_criterion(expression_context).get_sql(sql_context)
         relation_rows: list[dict[str, Any]] = []
@@ -416,7 +431,7 @@ class MergeQuery:
         ]
         # On the target's all_tenants() the relations are written as given, as by .all_tenants().update().
         if relation_rows and not self.target._visibility.all_tenants:
-            await Tenancy.check_relation_targets(model, relation_rows, connection)
+            await Tenancy.check_relation_targets(meta, relation_rows, connection)
         returned = (
             [
                 *(
@@ -449,8 +464,14 @@ class MergeQuery:
                     ReturnedValue(
                         sql=term.get_sql(sql_context), alias_sql=sql_context.quote(term.alias), column_name=term.alias
                     )
-                    for term in ChangeCapturing.get_old_value_terms(model, capture_needs)
+                    for term in ChangeCapturing.get_old_value_terms(meta, capture_needs)
                 )
+        is_observed = ChangeEvents.is_observed(meta)
+        returns_actions = (
+            capture_needs is not None
+            or self.returned_rows is not None
+            or (is_observed and connection.features.supports_merge_returning)
+        )
         sql = connection.dialect.clauses.get_merge_sql(
             target_sql=table.get_sql(sql_context),
             source_sql=source_sql,
@@ -458,29 +479,36 @@ class MergeQuery:
             on_sql=on_sql,
             whens=whens_sql,
             returned=returned,
-            action_alias_sql=sql_context.quote(action_column),
+            action_alias_sql=sql_context.quote(action_column) if returns_actions else None,
         )
         parameters = sql_context.parameterizer.values  # type: ignore[union-attr]
-        command = WriteStatement(
-            sql, parameters, returns_rows=capture_needs is not None or self.returned_rows is not None
-        )
+        command = WriteStatement(sql, parameters, returns_rows=returns_actions)
         if capture_needs is not None:
             return await self.execute_captured(connection, command, capture_needs)
         count, raw_rows = await BoundWrite.execute_command(connection, command)
         result = self._get_result(connection, count, raw_rows, action_column)
-        if count != 0:
-            for operation in dict.fromkeys(
-                ROW_OPERATION_BY_MERGE_ACTION[when.action]
-                for when in self.whens
-                if when.action in ROW_OPERATION_BY_MERGE_ACTION
-            ):
+        if is_observed and count != 0:
+            operations = (
+                (self.get_row_operation(row, action_column) for row in raw_rows)
+                if returns_actions
+                else (
+                    ROW_OPERATION_BY_MERGE_ACTION[when.action]
+                    for when in self.whens
+                    if when.action in ROW_OPERATION_BY_MERGE_ACTION
+                )
+            )
+            for operation in dict.fromkeys(operations):
                 await WriteSteps.report(
                     connection,
-                    model,
+                    meta,
                     operation,
                     fields=self.get_updated_field_names() if operation is RowOperation.UPDATE else None,
                 )
         return result
+
+    @staticmethod
+    def get_row_operation(row: Any, action_column: str) -> RowOperation:
+        return RowOperation(str(dict(row)[action_column]).lower())
 
     def get_updated_field_names(self) -> tuple[str, ...] | None:
         """The fields the update branches set, as a report names them changed - those of the one update branch,
@@ -489,9 +517,10 @@ class MergeQuery:
         Returns:
             The fields, None when the branches set different ones - which of them changed a row isn't known.
         """
+        model_binding: ModelBinding = self.target._binding  # type: ignore[assignment]
         field_names = {
             RowWriteRules.get(
-                self.target.model,
+                model_binding,
                 WriteType.UPDATE,
                 when.values,
                 MERGE_UPDATE_METHOD_NAME,
@@ -518,17 +547,21 @@ class MergeQuery:
         Returns:
             The number of rows written, or the returned rows.
         """
-        model = self.target.model
         action_column = self.get_action_column()
+        model_binding: ModelBinding = self.target._binding  # type: ignore[assignment]
         captured = CapturedWrite(
-            model, capture_needs, connection, RowOperation.UPDATE, changed=self.get_updated_field_names()
+            model_binding,
+            capture_needs,
+            connection,
+            RowOperation.UPDATE,
+            changed=self.get_updated_field_names(),
         )
         async with captured.transaction() as transaction_connection:
             count, raw_rows = await BoundWrite.execute_command(transaction_connection, command)
-            rows_by_operation: dict[RowOperation, list[Any]] = {}
+            rows_by_operation: defaultdict[RowOperation, list[Any]] = defaultdict(list)
             for raw_row in raw_rows:
-                operation = RowOperation(str(dict(raw_row)[action_column]).lower())
-                rows_by_operation.setdefault(operation, []).append(raw_row)
+                operation = self.get_row_operation(raw_row, action_column)
+                rows_by_operation[operation].append(raw_row)
             changes = [
                 change
                 for operation, operation_rows in rows_by_operation.items()
@@ -542,7 +575,7 @@ class MergeQuery:
         for operation in rows_by_operation:
             await WriteSteps.report(
                 connection,
-                model,
+                model_binding,
                 operation,
                 pks=[change.pk for change in changes if change.operation is operation],
                 fields=captured.changed if operation is RowOperation.UPDATE else None,
@@ -564,7 +597,7 @@ class MergeQuery:
             return count
         result = self.returned_rows.get_rows(connection.dialect.types, raw_rows)
         for row, raw_row in zip(result, raw_rows, strict=True):
-            row[MERGE_ACTION_KEY] = str(dict(raw_row)[action_column]).lower()
+            row[MERGE_ACTION_KEY] = self.get_row_operation(raw_row, action_column).value
         return result
 
     def get_source_sql(
@@ -580,11 +613,11 @@ class MergeQuery:
         Returns:
             The SQL, and the source's columns with the field each one's values are of.
         """
-        model = self.target.model
         source = self.source
+        model_binding: ModelBinding = self.target._binding  # type: ignore[assignment]
         if not isinstance(source, tuple):
             source_query = QueryConnection.get_bound_to(
-                source._get_compiler(), connection, model, "the source of merge()"
+                source, connection, model_binding, "the source of merge()", context=self.target._context
             )
             source_query._make_subquery()
             subquery = Subquery(source_query)
@@ -593,7 +626,7 @@ class MergeQuery:
             }
             self.raise_if_on_columns_missing(fields_by_column)
             return source_query.query.get_sql(sql_context.copy(subquery=True, with_alias=False)), fields_by_column
-        meta = model._meta
+        meta: ModelBinding = model_binding
         dialect = connection.dialect
         rows = source
         matches_no_row = False
@@ -612,8 +645,8 @@ class MergeQuery:
             # A column named after a field of the model is cast to the field's type, a column ``on``
             # matches to the type of its field; another one is left to the database.
             field = meta.fields_map.get(column) or fields_by_on_column.get(column)
-            if isinstance(field, (ForeignKeyFieldInstance, OneToOneFieldInstance)) and len(field.source_fields) == 1:
-                field = meta.fields_map[field.source_fields[0]]
+            if isinstance(field, ForeignKeyFieldInstance) and len(source_field_names := field.source_fields) == 1:
+                field = meta.fields_map[source_field_names[0]]
             fields.append(field if field is not None and field.model_field_name in meta.fields_db_projection else None)
         writers = [None if field is None else dialect.types.get_db_writer(field) for field in fields]
         rows_sql: list[str] = []
@@ -661,10 +694,10 @@ class MergeQuery:
         """
         from hare.models import Model
 
-        model = self.target.model
-        relation = model._meta.fields_map.get(name)
-        if isinstance(value, Model) and isinstance(relation, (ForeignKeyFieldInstance, OneToOneFieldInstance)):
-            return RelationKeyValues.get_key_values(model, name, value)[0]
+        model_binding: ModelBinding = self.target._binding  # type: ignore[assignment]
+        relation = model_binding.fields_map.get(name)
+        if isinstance(value, Model) and isinstance(relation, ForeignKeyFieldInstance):
+            return RelationKeyValues.get_key_values(model_binding, name, value)[0]
         return value
 
     def get_on_criterion(self, expression_context: ExpressionContext) -> Criterion:
@@ -693,17 +726,18 @@ class MergeQuery:
         if self.target._is_none:
             # A none() target uses a portable false criterion to match no row.
             criteria.append(BasicCriterion.always_false())
-        model = self.target.model
         visibility = self.target._visibility
+        model_binding: ModelBinding = self.target._binding  # type: ignore[assignment]
         if visibility.only_deleted:
             # Only the soft-deleted rows of the model itself - the scope a JOIN shares leaves it out.
-            soft_delete_column = model._meta.fields_db_projection[model._meta.soft_delete_field]
+            soft_delete_column = model_binding.fields_db_projection[model_binding.soft_delete_field]  # type: ignore[index]
             criteria.append(expression_context.table[soft_delete_column].notnull())
-        scope = RowScopes.of(self.target.model).get_criterion(
+        scope = RowScopes.of(model_binding).get_criterion(
             expression_context.table,
             visibility=self.target._visibility,
             dialect=expression_context.dialect,
             connection=expression_context.connection,
+            application_context=expression_context.application_context,
         )
         if scope is not None:
             criteria.append(scope)
@@ -783,13 +817,12 @@ class MergeQuery:
                 field of an update, a generated field; a tenant or a relation to a tenant-scoped model is
                 written from a value hare can't check under the active scope.
         """
-        model = self.target.model
-        meta = model._meta
+        meta: ModelBinding = self.target._binding  # type: ignore[assignment]
         dialect = expression_context.dialect
         is_insert = when.action is MergeAction.INSERT
         method_name = MERGE_INSERT_METHOD_NAME if is_insert else MERGE_UPDATE_METHOD_NAME
         rules = RowWriteRules.get(
-            model,
+            meta,
             WriteType.INSERT if is_insert else WriteType.UPDATE,
             when.values,
             method_name,
@@ -798,37 +831,38 @@ class MergeQuery:
             finds_rows_by_key=False,
         )
         values = (
-            InstanceInitialization.expand_pk_kwarg(model, when.values)
+            InstanceInitialization.expand_pk_kwarg(meta, when.values)
             if PRIMARY_KEY_ALIAS in when.values
             else dict(when.values)
         )
         all_tenants = self.target._visibility.all_tenants
         if is_insert:
-            TenantWriteRules.fill_new_values(model, values, "merge", all_tenants=all_tenants)
+            TenantWriteRules.fill_new_values(meta, values, "merge", all_tenants=all_tenants)
         else:
-            TenantWriteRules.raise_if_rows_leave_scope(model, values, all_tenants, method_name, requires_scope=False)
-        TenantWriteRules.raise_if_unchecked_relations(model, values, all_tenants, method_name)
+            TenantWriteRules.raise_if_rows_leave_scope(meta, values, all_tenants, method_name, requires_scope=False)
+        TenantWriteRules.raise_if_unchecked_relations(meta, values, all_tenants, method_name)
         values = rules.add_blind_index_values(values)
         assignments: list[tuple[str, Term]] = []
         written_columns: set[str] = set()
         relation_row: dict[str, Any] = {}
         relation_key_names = {
             key_name
-            for relation_name in meta.foreign_key_fields | meta.one_to_one_fields
-            for key_name in meta.fields_map[relation_name].source_fields
+            for relation_name in meta.forward_key_relation_names
+            for key_name in meta.fields_map[relation_name].source_fields  # type: ignore[attr-defined]
         }
         for name, value in values.items():
             field = meta.fields_map[name]
-            is_relation = isinstance(field, (ForeignKeyFieldInstance, OneToOneFieldInstance))
+            is_relation = isinstance(field, ForeignKeyFieldInstance)
             if is_relation:
-                field = meta.fields_map[field.source_fields[0]]
-            column = meta.fields_db_projection[field.model_field_name]
+                field = meta.fields_map[field.source_fields[0]]  # type: ignore[attr-defined]
+            field_attribute_name = field.model_field_name
+            column = meta.fields_db_projection[field_attribute_name]
             if column in written_columns:
                 raise FieldError(f"{method_name} writes {name!r} twice")
             written_columns.add(column)
             if is_relation and not isinstance(value, (Expression, Term)):
-                value = RelationKeyValues.get_key_values(model, name, value)[0]
-                relation_row[field.model_field_name] = value
+                value = RelationKeyValues.get_key_values(meta, name, value)[0]
+                relation_row[field_attribute_name] = value
             elif name in relation_key_names and not isinstance(value, (Expression, Term)):
                 # A column of a relation's key written by its own name - checked as the relation is.
                 relation_row[name] = value
@@ -840,9 +874,8 @@ class MergeQuery:
             )
             if field.sensitive:
                 # The value written into a sensitive field is never shown (QueryParameters).
-                for value_wrapper in [term, *term.find_(ValueWrapper)]:
-                    if isinstance(value_wrapper, ValueWrapper):
-                        value_wrapper.sensitive = True
+                for value_wrapper in term.find_(ValueWrapper):
+                    value_wrapper.sensitive = True
             assignments.append((column, term))
         for name, field, value in rules.get_stamp_values(now):
             assignments.append(

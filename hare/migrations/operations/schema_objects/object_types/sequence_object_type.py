@@ -8,7 +8,7 @@ from hare.models.enums import ModelOption
 
 if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class SequenceObjectType(SchemaObjectType):
@@ -21,7 +21,7 @@ class SequenceObjectType(SchemaObjectType):
     feature: ClassVar[str | None] = "supports_sequences"
 
     @classmethod
-    async def add(cls, editor: BaseSchemaEditor, model: type[Model], schema_object: Any, **options: Any) -> None:
+    async def add(cls, editor: BaseSchemaEditor, model: ModelBinding, schema_object: Any, **options: Any) -> None:
         cls.raise_if_unsupported(editor)
         grants = editor.grants.get_grant_again_sqls(model, GrantTarget.SEQUENCE, schema_object.name)
         await editor.sequences.create_sequence(model, schema_object)
@@ -31,8 +31,8 @@ class SequenceObjectType(SchemaObjectType):
     async def remove(
         cls,
         editor: BaseSchemaEditor,
-        model: type[Model],
-        remaining_model: type[Model],
+        model: ModelBinding,
+        remaining_model: ModelBinding,
         schema_object: Any,
         **options: Any,
     ) -> None:
@@ -40,11 +40,11 @@ class SequenceObjectType(SchemaObjectType):
         await editor.sequences.drop_sequence(model, schema_object)
 
     @classmethod
-    async def rename(cls, editor: BaseSchemaEditor, model: type[Model], old_object: Any, new_object: Any) -> None:
+    async def rename(cls, editor: BaseSchemaEditor, model: ModelBinding, old_object: Any, new_object: Any) -> None:
         cls.raise_if_unsupported(editor)
         await editor.sequences.rename_sequence(model, old_object, new_object)
 
     @classmethod
-    async def alter(cls, editor: BaseSchemaEditor, model: type[Model], old_object: Any, new_object: Any) -> None:
+    async def alter(cls, editor: BaseSchemaEditor, model: ModelBinding, old_object: Any, new_object: Any) -> None:
         cls.raise_if_unsupported(editor)
         await editor.sequences.alter_sequence(model, old_object, new_object)

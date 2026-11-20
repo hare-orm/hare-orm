@@ -1,18 +1,13 @@
 """A VersionedCollapsingMergeTree model on ClickHouse: the server appends the version column to the
 table's sorting key, and drift and makemigrations saw options no model declared after every migrate."""
 
-import os
 import textwrap
 
 import pytest
 
 from tests.utils.cli_project_factory import project_factory  # noqa: F401
 
-
-@pytest.fixture(autouse=True)
-def skip_without_clickhouse():
-    if not os.getenv("HARE_TEST_DB", "").startswith("clickhouse"):
-        pytest.skip("runs against the ClickHouse test server - make test_clickhouse")
+pytestmark = pytest.mark.usefixtures("skip_without_clickhouse")
 
 
 @pytest.mark.asyncio

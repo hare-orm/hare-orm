@@ -3,13 +3,13 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from hare.ddl.enums import SchemaPartType
 from hare.dialects.base.connection.connection_option import ConnectionOption
 from hare.dialects.base.connection.connection_options import ConnectionOptions
 from hare.dialects.clickhouse.clickhouse_dialect import ClickhouseDialect
 from hare.dialects.clickhouse.enums import ClickhouseTypeName
 from hare.dialects.clickhouse.indexes.constants import CLICKHOUSE_BLOOM_FILTER_FALSE_POSITIVE
 from hare.dialects.enums import ConnectionOptionType
-from hare.inspectdb.enums import SchemaPartType
 
 #: The port of ClickHouse's HTTP interface.
 CLICKHOUSE_DEFAULT_HTTP_PORT = 8123

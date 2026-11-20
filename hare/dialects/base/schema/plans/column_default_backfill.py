@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from hare.dialects.base.client.statement_recovery import StatementRecovery
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
     from hare.fields.field import Field
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,7 +22,7 @@ class ColumnDefaultBackfill:
     default or sampling the clock. Constant defaults use a prepared SQL step.
     """
 
-    model: type[Model]
+    binding: ModelBinding
     field: Field[Any]
     table_sql: str
     column_sql: str
@@ -36,7 +36,7 @@ class ColumnDefaultBackfill:
                 COLUMN_DEFAULT_BACKFILL_PREVIEW.format(table=self.table_sql, column=self.column_sql)
             )
             return
-        value = await editor.column_backfill.added_column_backfill_sql_literal(self.field, self.model)
+        value = await editor.column_backfill.added_column_backfill_sql_literal(self.field, self.binding)
         await editor.run_sql(
             editor.column_backfill.get_fill_nulls_sql(self.table_sql, self.column_sql, value), recovery=self.recovery
         )

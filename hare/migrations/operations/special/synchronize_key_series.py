@@ -40,4 +40,4 @@ class SynchronizeKeySeries(ModelBoundOperation):
                 KEY_SERIES_SYNCHRONIZATION_PREVIEW.format(model=f"{app_label}.{self.model_name}")
             )
             return
-        await state_editor.client.synchronize_key_series(self._model(new_state, app_label))
+        await state_editor.client.synchronize_key_series(self.get_model_binding(new_state, app_label))

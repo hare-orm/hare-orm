@@ -8,11 +8,13 @@ from hare.inspectdb.constants import FACTORY_MODEL_MODULE_NAME
 from hare.inspectdb.exceptions import ManyToManyThroughTableSkippedError
 from hare.inspectdb.generation.declarations import ModelGenerationOptions
 from hare.inspectdb.generation.inspected_model_builder import InspectedModelBuilder
+from hare.inspectdb.generation.inspected_models import InspectedModels
 from hare.models import Model
 from hare.models.enums import ModelOption
 from hare.query.constants import PRIMARY_KEY_ALIAS
 
 if TYPE_CHECKING:
+    from hare.core.apps import Apps
     from hare.inspectdb.generation.inspected_model import InspectedModel
     from hare.inspectdb.introspection.table_info import TableInfo
     from hare.migrations.state.model_state import ModelState
@@ -29,6 +31,9 @@ class ModelFactory:
         app_label: str,
         foreign_key_target_overrides: dict[str, str] | None = None,
         skip_many_to_many_through_tables: bool = True,
+        target_tables: tuple[TableInfo, ...] = (),
+        target_models: dict[str, type[Model]] | None = None,
+        apps: Apps | None = None,
     ) -> type[Model]:
         """Builds an unregistered Model class for one table.
 
@@ -43,6 +48,10 @@ class ModelFactory:
                 FK at an already-registered model.
             skip_many_to_many_through_tables: Whether a table with a possible ManyToManyField through-table
                 shape is refused (the default). This single-table check has no target-table metadata.
+            target_tables: Complete related tables used to determine allocated target attributes
+                and avoid reverse accessor collisions.
+            target_models: Existing target classes, keyed by their full model references.
+            apps: The registry supplying bindings for ``target_models``. Defaults to the active context's registry.
 
         Returns:
             The new model class, not yet registered anywhere.
@@ -52,10 +61,20 @@ class ModelFactory:
                 ``skip_many_to_many_through_tables`` is True.
             ConfigurationError: No model can be declared for the table.
         """
-        inspected = InspectedModelBuilder(
-            table_info,
-            ModelGenerationOptions(dialect, app_label, foreign_key_target_overrides, skip_many_to_many_through_tables),
-        ).build()
+        inspected = InspectedModels.prepare(
+            InspectedModelBuilder(
+                table_info,
+                ModelGenerationOptions(
+                    dialect,
+                    app_label,
+                    foreign_key_target_overrides,
+                    skip_many_to_many_through_tables,
+                    target_tables=target_tables,
+                    target_models=target_models,
+                    apps=apps,
+                ),
+            )
+        )
         if inspected.unmodelable_reason is not None:
             raise ConfigurationError(f"inspectdb: {inspected.unmodelable_reason}")
         if inspected.state is None:

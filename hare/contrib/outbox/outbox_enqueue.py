@@ -4,18 +4,21 @@ import itertools
 from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from hare.contrib.outbox.outbox_idempotency import OutboxIdempotency
 from hare.core.connections.connections import Connections
+from hare.core.connections.model_connection_choice import ModelConnectionChoice
+from hare.core.hare_context import HareContext
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.dialects.base.client.transaction_client import TransactionClient
-from hare.exceptions import ConfigurationError, IntegrityError
+from hare.exceptions import ConfigurationError
+from hare.models.instances.instance_initialization import InstanceInitialization
 from hare.models.tenancy.tenancy import Tenancy
-from hare.query.enums import Connector
-from hare.query.expressions import Q
 
 if TYPE_CHECKING:
     from hare.contrib.outbox.outbox_event import OutboxEvent
     from hare.contrib.outbox.outbox_message import OutboxMessage
     from hare.contrib.outbox.wakeups.outbox_wakeup import OutboxWakeup
+    from hare.models.model_binding import ModelBinding
 
 
 EventType = TypeVar("EventType", bound="OutboxEvent")
@@ -26,7 +29,7 @@ class OutboxEnqueue:
 
     @staticmethod
     async def enqueue(
-        model: type[EventType],
+        binding: ModelBinding,
         topic: str,
         payload: Any,
         *,
@@ -42,6 +45,7 @@ class OutboxEnqueue:
         outside a transaction) the wakeup signals the relays.
 
         Args:
+            binding: The binding of the outbox event model.
             topic: The event's topic - a delivery routes on it.
             payload: The event's payload - JSON values, or values ``OutboxJsonEncoding`` writes.
             using: The connection to write on instead of the model's.
@@ -74,18 +78,34 @@ class OutboxEnqueue:
                 wakeup can't signal on the connection's database (``ListenNotifyWakeup`` without
                 listen/notify) - refused before the event is written.
         """
+        model: type[EventType] = binding._model  # type: ignore[assignment]
         model.validate_enqueue_options(topic, idempotency_key, ordering_key, headers, extra_field_values)
         field_values = dict(extra_field_values or {})
-        write_connection = model.get_write_connection(using)
+        write_connection = OutboxEnqueue.get_write_connection(binding, using)
         model.raise_if_wakeup_unsupported(write_connection, wakeup)
         if idempotency_key is None:
-            event = await model.objects.using(write_connection).create(
-                topic=topic, payload=payload, ordering_key=ordering_key, headers=dict(headers or {}), **field_values
+            event = (
+                await binding.manager.get_bound_queryset(binding, HareContext.require_current())
+                .using(write_connection)
+                .create(
+                    topic=topic,
+                    payload=payload,
+                    ordering_key=ordering_key,
+                    headers=dict(headers or {}),
+                    **field_values,
+                )
             )
             is_new = True
         else:
-            event, is_new = await model.insert_or_get_by_idempotency_key(
-                topic, payload, idempotency_key, ordering_key, dict(headers or {}), write_connection, field_values
+            event, is_new = await OutboxIdempotency.insert_or_get_by_idempotency_key(
+                binding,
+                topic,
+                payload,
+                idempotency_key,
+                ordering_key,
+                dict(headers or {}),
+                write_connection,
+                field_values,
             )
         if is_new:
             await model.signal_wakeup(write_connection, (topic,), wakeup)
@@ -93,7 +113,7 @@ class OutboxEnqueue:
 
     @staticmethod
     async def enqueue_many(
-        model: type[EventType],
+        binding: ModelBinding,
         messages: Iterable[OutboxMessage],
         *,
         using: str | DatabaseClient | None = None,
@@ -105,6 +125,7 @@ class OutboxEnqueue:
         signal of the wakeup for all of them.
 
         Args:
+            binding: The binding of the outbox event model.
             messages: The events - ``OutboxMessage(topic, payload, idempotency_key=..., ...)``.
             using: The connection to write on instead of the model's.
             wakeup: The wakeup to signal instead of the model's ``Meta.outbox_wakeup``.
@@ -119,6 +140,7 @@ class OutboxEnqueue:
             ConfigurationError: As ``enqueue()``.
         """
         # Deferred import: the transactions package imports the models.
+        model: type[EventType] = binding._model  # type: ignore[assignment]
         from hare.transactions.atomic.atomic import Atomic
         from hare.transactions.transaction_options import TransactionOptions
 
@@ -133,15 +155,16 @@ class OutboxEnqueue:
                 message.headers,
                 message.extra_field_values,
             )
-        write_connection = model.get_write_connection(using, "enqueue_many")
+        write_connection = OutboxEnqueue.get_write_connection(binding, using, "enqueue_many")
         model.raise_if_wakeup_unsupported(write_connection, wakeup)
         events: list[EventType] = []
         inserted_topics: set[str] = set()
+        run_events: list[EventType]
         async with Atomic(lambda: write_connection, TransactionOptions.DEFAULT) as transaction_connection:
             for (has_idempotency_key, _), run in itertools.groupby(messages, key=model.get_enqueue_run_key):
                 run_messages = list(run)
-                run_events, run_topics = await model.write_enqueue_run(
-                    run_messages, has_idempotency_key, transaction_connection
+                run_events, run_topics = await OutboxEnqueue.write_enqueue_run(
+                    binding, run_messages, has_idempotency_key, transaction_connection
                 )
                 events.extend(run_events)
                 inserted_topics.update(run_topics)
@@ -150,25 +173,26 @@ class OutboxEnqueue:
         return events
 
     @staticmethod
-    def get_enqueue_run_key(model: type[EventType], message: OutboxMessage) -> tuple[bool, Any]:
+    def get_enqueue_run_key(binding: ModelBinding, message: OutboxMessage) -> tuple[bool, Any]:
         """What the events of one ``INSERT`` of ``enqueue_many()`` share - an idempotency key or none, and
         the tenant a message names where no tenant scope is active.
 
         Args:
+            binding: The binding of the outbox event model.
             message: The message.
 
         Returns:
             The key.
         """
         tenant: Any = None
-        if model._meta.tenant_field and Tenancy.get_scope(model) is None:
-            tenant_given, given_tenant, _ = Tenancy.get_given_tenant(model, dict(message.extra_field_values or {}))
+        if binding.tenant_field and Tenancy.get_scope(binding) is None:
+            tenant_given, given_tenant, _ = Tenancy.get_given_tenant(binding, message.extra_field_values or {})
             tenant = given_tenant if tenant_given else None
         return message.idempotency_key is not None, tenant
 
     @staticmethod
     async def write_enqueue_run(
-        model: type[EventType],
+        binding: ModelBinding,
         messages: Sequence[OutboxMessage],
         has_idempotency_key: bool,
         connection: DatabaseClient,
@@ -177,6 +201,7 @@ class OutboxEnqueue:
         no tenant scope is active.
 
         Args:
+            binding: The binding of the outbox event model.
             messages: The messages of the run.
             has_idempotency_key: Whether they have idempotency keys.
             connection: The connection, in the call's transaction.
@@ -184,15 +209,17 @@ class OutboxEnqueue:
         Returns:
             The events of the messages, in their order, and the topics of the ones inserted.
         """
-        _, tenant = model.get_enqueue_run_key(messages[0])
+        _, tenant = OutboxEnqueue.get_enqueue_run_key(binding, messages[0])
         if tenant is not None:
-            with Tenancy.scope(tenant):
-                return await model.write_enqueue_run_in_scope(messages, has_idempotency_key, connection)
-        return await model.write_enqueue_run_in_scope(messages, has_idempotency_key, connection)
+            with Tenancy.scope_if_unset(binding, tenant):
+                return await OutboxEnqueue.write_enqueue_run_in_scope(
+                    binding, messages, has_idempotency_key, connection
+                )
+        return await OutboxEnqueue.write_enqueue_run_in_scope(binding, messages, has_idempotency_key, connection)
 
     @staticmethod
     async def write_enqueue_run_in_scope(
-        model: type[EventType],
+        binding: ModelBinding,
         messages: Sequence[OutboxMessage],
         has_idempotency_key: bool,
         connection: DatabaseClient,
@@ -200,6 +227,7 @@ class OutboxEnqueue:
         """Writes one run of ``enqueue_many()`` in the tenant scope it runs under.
 
         Args:
+            binding: The binding of the outbox event model.
             messages: The messages of the run.
             has_idempotency_key: Whether they have idempotency keys.
             connection: The connection, in the call's transaction.
@@ -210,72 +238,63 @@ class OutboxEnqueue:
         Raises:
             IntegrityError: An idempotency key is taken by an event not visible to this call.
         """
-        candidates = [
-            model(
+        candidates: list[EventType] = [
+            InstanceInitialization.new(
+                binding,
+                HareContext.require_current(),
                 topic=message.topic,
                 payload=message.payload,
                 idempotency_key=message.idempotency_key,
                 ordering_key=message.ordering_key,
                 headers=dict(message.headers or {}),
                 **dict(message.extra_field_values or {}),
-            )
+            )  # type: ignore[misc]
             for message in messages
         ]
         if not has_idempotency_key:
             topics = {candidate.topic for candidate in candidates}
             if connection.features.supports_returning and connection.features.guarantees_returning_order:
-                await model.objects.using(connection).bulk_create(candidates, returning=True)
+                await (
+                    binding.manager.get_bound_queryset(binding, HareContext.require_current())
+                    .using(connection)
+                    .bulk_create(candidates, returning=True)
+                )
                 return candidates, topics
-            await model.objects.using(connection).bulk_create(candidates)
+            await (
+                binding.manager.get_bound_queryset(binding, HareContext.require_current())
+                .using(connection)
+                .bulk_create(candidates)
+            )
             # RETURNING's rows come in no order here - the events are read back by the ids they were given.
             stored_by_id = {
                 stored.id: stored
-                for stored in await model.objects.using(connection).filter(id__in=[event.id for event in candidates])
+                for stored in await binding.manager.get_bound_queryset(binding, HareContext.require_current())
+                .using(connection)
+                .filter(id__in=[event.id for event in candidates])
             }
             return [stored_by_id[candidate.id] for candidate in candidates], topics
-        conflict_field_names = model.get_idempotency_conflict_field_names()
-        inserted = await model.objects.using(connection).bulk_create(
-            candidates, ignore_conflicts=True, on_conflict=conflict_field_names
+        conflict_field_names = OutboxIdempotency.get_idempotency_conflict_field_names(
+            binding,
         )
-        inserted_ids = {id(event) for event in inserted}
-        events_by_key: dict[tuple[Any, ...], EventType] = {
-            tuple(getattr(event, name) for name in conflict_field_names): event for event in inserted
-        }
-        missing_keys = {
-            key
-            for candidate in candidates
-            if id(candidate) not in inserted_ids
-            for key in [tuple(getattr(candidate, name) for name in conflict_field_names)]
-            if key not in events_by_key
-        }
-        if missing_keys:
-            condition = Q.with_connector(
-                Connector.OR, *(Q(**dict(zip(conflict_field_names, key, strict=True))) for key in missing_keys)
-            )
-            queryset = model.objects.filter(condition).using(connection)
-            if model._meta.soft_delete_field:
-                queryset = queryset.include_deleted()
-            for stored in await queryset:
-                events_by_key[tuple(getattr(stored, name) for name in conflict_field_names)] = stored
-        events: list[EventType] = []
-        for candidate in candidates:
-            event = events_by_key.get(tuple(getattr(candidate, name) for name in conflict_field_names))
-            if event is None:
-                raise IntegrityError(
-                    f"{model.__name__}.enqueue_many(): idempotency_key {candidate.idempotency_key!r} is already used "
-                    "by an event not visible here (another tenant's, or committed after this transaction's "
-                    "snapshot)"
-                )
-            events.append(event)
+        OutboxIdempotency.prepare_candidates(binding, candidates, "enqueue_many")
+        inserted = (
+            await binding.manager.get_bound_queryset(binding, HareContext.require_current())
+            .using(connection)
+            .bulk_create(candidates, ignore_conflicts=True, on_conflict=conflict_field_names)
+        )
+        events = await OutboxIdempotency.read_events_for_inputs(
+            binding, candidates, inserted, conflict_field_names, connection
+        )
         return events, {event.topic for event in inserted}
 
     @staticmethod
     def get_write_connection(
-        model: type[EventType], using: str | DatabaseClient | None, method_name: str = "enqueue"
+        binding: ModelBinding, using: str | DatabaseClient | None, method_name: str = "enqueue"
     ) -> DatabaseClient:
         """The connection an event is written on.
 
         Args:
+            binding: The binding of the outbox model that receives the new event.
             using: The connection asked for, None for the model's.
             method_name: The method writing - named by the error.
 
@@ -286,9 +305,10 @@ class OutboxEnqueue:
             ConfigurationError: ``using`` wasn't given, the model's connection has no open
                 transaction and another connection has one.
         """
+        model = binding._model
         if using is not None:
             return Connections.get_client(using)  # type: ignore[return-value]
-        write_connection = model.get_connection(for_write=True)
+        write_connection = ModelConnectionChoice.get(HareContext.require_current(), binding, True)
         if not write_connection.is_transaction_client:
             for connection_alias in Connections.aliases():
                 if connection_alias != write_connection.connection_alias and isinstance(

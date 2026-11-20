@@ -9,6 +9,7 @@ class ZonedMoment(Model):
     clock = fields.TimeField()
     day = fields.DateField(null=True)
     stamped = fields.DatetimeField(db_default=Now())
+    stamped_clock = fields.TimeField(db_default=Now())
 
     class Meta:
         table = "clickhouse_zoned_moment"

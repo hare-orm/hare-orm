@@ -3,12 +3,13 @@ asyncpg failed reading the server's empty query response, and ClickHouse refused
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from tests.shared_models.testmodels import Author
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("script", ["", "   ", "-- a comment", "/* a comment */", ";"])
 async def test_a_script_of_no_statement_runs_as_nothing(db, script):
-    connection = Author._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Author).get_connection()
     await connection.execute_script(script)
     assert await connection.execute_dicts("SELECT 41 + 1 AS answer") == [{"answer": 42}]

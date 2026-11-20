@@ -1,9 +1,10 @@
-"""What the database clients report - declarations only."""
+"""What the database clients report."""
 
 from __future__ import annotations
 
 import dataclasses
 from collections.abc import Mapping
+from typing import Self
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -21,6 +22,11 @@ class PingResult:
     succeeded: bool
     latency_ms: float | None
     error_type: str | None
+
+    @classmethod
+    def failed(cls, error: Exception) -> Self:
+        """Record the error type without exposing the exception's message."""
+        return cls(False, None, type(error).__name__)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

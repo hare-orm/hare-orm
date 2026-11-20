@@ -5,6 +5,7 @@ from copy import copy
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.ddl.indexes.index import Index
+from hare.ddl.schema_references import SchemaReferences
 from hare.exceptions import ConfigurationError
 from hare.migrations.exceptions import IncompatibleStateError
 from hare.migrations.operations.declared_uniqueness_checks import DeclaredUniquenessChecks
@@ -15,7 +16,7 @@ from hare.models.uniqueness.declared_uniqueness import DeclaredUniqueness
 if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
     from hare.migrations.state.model_state import ModelState
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class IndexObjectType(SchemaObjectType):
@@ -25,11 +26,16 @@ class IndexObjectType(SchemaObjectType):
     option: ClassVar[ModelOption] = ModelOption.INDEXES
     noun: ClassVar[str] = "index"
 
+    @staticmethod
+    def get_referenced_field_names(schema_object: Any) -> frozenset[str]:
+        index = Index.from_declaration(schema_object)
+        return SchemaReferences.get_index_field_names(index)
+
     @classmethod
     def find(
         cls,
         model_state: ModelState,
-        get_model: Callable[[], type[Model]],
+        get_model: Callable[[], ModelBinding],
         *,
         name: str | None = None,
         fields: list[str] | None = None,
@@ -56,7 +62,7 @@ class IndexObjectType(SchemaObjectType):
     def find_for_rename(
         cls,
         model_state: ModelState,
-        get_model: Callable[[], type[Model]],
+        get_model: Callable[[], ModelBinding],
         *,
         name: str | None,
         fields: list[str] | None,
@@ -93,10 +99,10 @@ class IndexObjectType(SchemaObjectType):
 
     @classmethod
     def as_schema_object(cls, entry: Any) -> Index:
-        return entry if isinstance(entry, Index) else Index(fields=tuple(entry))
+        return Index.from_declaration(entry)
 
     @classmethod
-    def raise_if_object_unsupported(cls, editor: BaseSchemaEditor, model: type[Model], schema_object: Any) -> None:
+    def raise_if_object_unsupported(cls, editor: BaseSchemaEditor, model: ModelBinding, schema_object: Any) -> None:
         cls.as_schema_object(schema_object).raise_if_unsupported(editor.client.dialect)
         if DeclaredUniqueness.is_declared_by(schema_object):
             DeclaredUniquenessChecks.raise_if_unsupported(
@@ -112,7 +118,7 @@ class IndexObjectType(SchemaObjectType):
         return renamed_index
 
     @classmethod
-    async def add(cls, editor: BaseSchemaEditor, model: type[Model], schema_object: Any, **options: Any) -> None:
+    async def add(cls, editor: BaseSchemaEditor, model: ModelBinding, schema_object: Any, **options: Any) -> None:
         index = cls.as_schema_object(schema_object)
         if editor.index_statements.is_declared_by_another_entry(model, index, model_declares_index=True):
             # Declared before by another entry - a field's own index - and already in the database.
@@ -123,8 +129,8 @@ class IndexObjectType(SchemaObjectType):
     async def remove(
         cls,
         editor: BaseSchemaEditor,
-        model: type[Model],
-        remaining_model: type[Model],
+        model: ModelBinding,
+        remaining_model: ModelBinding,
         schema_object: Any,
         **options: Any,
     ) -> None:
@@ -135,5 +141,5 @@ class IndexObjectType(SchemaObjectType):
         await editor.remove_index(model, index, concurrently=options.get("concurrently", False))
 
     @classmethod
-    async def rename(cls, editor: BaseSchemaEditor, model: type[Model], old_object: Any, new_object: Any) -> None:
+    async def rename(cls, editor: BaseSchemaEditor, model: ModelBinding, old_object: Any, new_object: Any) -> None:
         await editor.rename_index(model, cls.as_schema_object(old_object), cls.as_schema_object(new_object))

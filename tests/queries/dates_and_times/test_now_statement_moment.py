@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 import pytest
 
 from hare.contrib.test import capture_queries, requires_features
+from hare.core.hare_context import HareContext
 from hare.query.functions.datetime import Now
 from hare.transactions.transactions import Transactions
 from tests.shared_models import testmodels
@@ -41,7 +42,7 @@ async def test_now_is_evaluated_by_each_update_statement(db):
         "postgresql": ("STATEMENT_TIMESTAMP()",),
         "sqlite": ("STRFTIME(", "'NOW'"),
         "clickhouse": ("NOW64(",),
-    }[testmodels.DatetimeFields._meta.connection.dialect.name]
+    }[HareContext.require_current().apps.get_queryset(testmodels.DatetimeFields).get_connection().dialect.name]
     for sql in statements:
         assert all(fragment in sql for fragment in required_sql), sql
     moments = dict(await testmodels.DatetimeFields.objects.all().values_list("id", "datetime"))

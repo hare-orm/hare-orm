@@ -8,6 +8,7 @@ from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.statements.building.query_annotations import QueryAnnotations
 
 if TYPE_CHECKING:
+    from hare.models.model_binding import ModelBinding
     from hare.query.statements.select.values_query import ValuesQuery
 
 
@@ -29,7 +30,8 @@ class ValuesDistinct:
         """
         if not query._distinct:
             return
-        primary_key_attribute = query.model._meta.primary_key_attribute
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
+        primary_key_attribute = model_binding.primary_key_attribute
         selected_field_names = set(output_field_names)
         if isinstance(primary_key_attribute, tuple):
             if set(primary_key_attribute) <= selected_field_names:

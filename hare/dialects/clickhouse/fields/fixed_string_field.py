@@ -8,8 +8,8 @@ from hare.dialects.clickhouse.fields.narrowing.byte_length_limit import ByteLeng
 from hare.exceptions import ConfigurationError, ValidationError
 from hare.fields.data.boolean_field import BooleanField
 from hare.fields.data.text.char_field import CharField
+from hare.fields.data.text.string_field import StringField
 from hare.fields.data.text.text_field import TextField
-from hare.fields.data.text.text_values import TextValues
 from hare.fields.enums import NarrowedValueSource
 from hare.fields.field import Field
 
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 TStr = TypeVar("TStr", str, str | None)
 
 
-class FixedStringField(Field[TStr]):
+class FixedStringField(StringField[TStr]):
     """``FixedString(length)`` - a text of at most ``length`` bytes in UTF-8, stored padded with zero
     bytes to ``length`` and read back without padding. Text containing any zero byte is refused
     so its contents cannot be confused with padding by a driver.
@@ -53,10 +53,6 @@ class FixedStringField(Field[TStr]):
     def constraints(self) -> dict[str, Any]:
         return {"max_length": self.length}
 
-    def get_written_value_of_another_type(self, value: Any) -> Any:
-        TextValues.raise_if_not_text(self, value)
-        return super().get_written_value_of_another_type(value)
-
     def get_narrowing_limit(self, old_field: Field[Any]) -> NarrowingLimit | None:
         if isinstance(old_field, FixedStringField) and self.length >= old_field.length:
             return None
@@ -69,10 +65,8 @@ class FixedStringField(Field[TStr]):
             source = NarrowedValueSource.OTHER
         return ByteLengthLimit(self.length, source)
 
-    def to_python(self, value: Any) -> Any:
-        if value is not None and not isinstance(value, str):
-            TextValues.raise_if_not_text(self, value)
-        return super().to_python(value)
+    def get_assign_normalized_types(self) -> frozenset[type]:
+        return self._get_unchanged_assign_types(FixedStringField.to_python, self.field_type)
 
     def to_db_value(self, value: Any, instance: type[Model] | Model | None) -> Any:
         value = super().to_db_value(value, instance)

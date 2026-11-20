@@ -12,6 +12,7 @@ from enum import Enum
 from typing import Any, ClassVar
 
 from hare.classes.value_descriptions import ValueDescriptions
+from hare.ddl.enums import SchemaNamespace, SchemaPartType
 from hare.dialects.base.literals.constants import SQL_NULL_BYTE, SQL_NULL_BYTE_VALUE_MESSAGE
 from hare.dialects.base.literals.sql_literals import SqlLiterals
 from hare.dialects.clickhouse.client.declarations import ClickhouseValueSet
@@ -42,6 +43,21 @@ class ClickhouseLiterals(SqlLiterals):
     The client binds every parameter of a statement through them."""
 
     writes_bound_values: ClassVar[bool] = True
+
+    def get_schema_object_key(
+        self, object_type: SchemaPartType, schema: str | None, table: str, name: str
+    ) -> tuple[SchemaNamespace, str | None, str | None, str] | None:
+        """Compare only objects sharing a physical name scope on this database."""
+        if object_type is SchemaPartType.INDEX:
+            return self._get_schema_object_key(SchemaNamespace.INDEX, schema, table, name)
+        if object_type in (
+            SchemaPartType.TABLE,
+            SchemaPartType.VIEW,
+            SchemaPartType.MATERIALIZED_VIEW,
+            SchemaPartType.DICTIONARY,
+        ):
+            return self._get_schema_object_key(SchemaNamespace.RELATION, schema, None, name)
+        return None
 
     def quote_identifier(self, name: str) -> str:
         # A backslash escapes the next character of a quoted name - doubled, it is itself.

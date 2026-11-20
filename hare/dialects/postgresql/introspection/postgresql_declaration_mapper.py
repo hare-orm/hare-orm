@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import dataclasses
 from collections import Counter
-from typing import Any
+from decimal import Decimal
+from typing import TYPE_CHECKING, Any
 
 from hare.ddl.constraints.check_constraint import CheckConstraint
 from hare.ddl.constraints.exclusion_constraint import ExclusionConstraint
@@ -17,9 +18,11 @@ from hare.dialects.postgresql.introspection.postgresql_definitions import Postgr
 from hare.dialects.postgresql.introspection.postgresql_inspected_schema_objects import PostgresqlInspectedSchemaObjects
 from hare.dialects.postgresql.partitioning.observed_partitioning import ObservedPartitioning
 from hare.dialects.postgresql.postgresql_table_options import PostgresqlTableOptions
+from hare.dialects.postgresql.schema.constants import POSTGRES_NUMERIC_TYPE_NAMES
 from hare.dialects.postgresql.types.postgresql_physical_type import PostgresqlPhysicalType
 from hare.fields.db_defaults.sql_default import SqlDefault
 from hare.fields.enums import OnDelete
+from hare.inspectdb.constants import FLOAT_LITERAL_RE, INT_LITERAL_RE
 from hare.inspectdb.enums import CatalogDiagnosticCode
 from hare.inspectdb.introspection.catalog_diagnostic import CatalogDiagnostic
 from hare.inspectdb.introspection.catalog_snapshot import CatalogSnapshot
@@ -30,6 +33,9 @@ from hare.inspectdb.introspection.index_info import IndexInfo
 from hare.inspectdb.introspection.schema_introspector import SchemaIntrospector
 from hare.inspectdb.introspection.table_info import TableInfo
 from hare.sql.order import Order
+
+if TYPE_CHECKING:
+    from hare.dialects.postgresql.partitioning.partitioning import Partitioning
 
 
 class PostgresqlDeclarationMapper:
@@ -73,7 +79,7 @@ class PostgresqlDeclarationMapper:
             )
             for row in grouped["sequences"].get(table, []):
                 if row["declaring_table"] == table:
-                    info.sequences.append(PostgresqlInspectedSchemaObjects.get_sequence(row, row["owner_column"]))
+                    info.sequences.append(PostgresqlInspectedSchemaObjects.get_sequence(row))
                 else:
                     info.sequences_of_other_tables.append((row["name"], row["declaring_table"]))
             tables.append(info)
@@ -81,7 +87,7 @@ class PostgresqlDeclarationMapper:
 
     @staticmethod
     def get_table_options(
-        table: str, table_row: dict[str, Any], partition_rows: list[dict[str, Any]]
+        table: str, table_row: dict[str, Any], partition_rows: list[dict[str, Any]], partitioning: Partitioning | None
     ) -> PostgresqlTableOptions | None:
         """Builds a table's ``PostgresqlTableOptions`` from its POSTGRESQL_TABLES_SQL row and, for a
         partitioned table, its POSTGRESQL_PARTITIONS_SQL rows: the storage parameters and the
@@ -91,6 +97,7 @@ class PostgresqlDeclarationMapper:
             table: The table's name.
             table_row: The table's row.
             partition_rows: Its partition rows - none for a plain table.
+            partitioning: The declaration reconstructed from those rows.
 
         Returns:
             The options, None when every one has its default.
@@ -122,32 +129,23 @@ class PostgresqlDeclarationMapper:
                 "unlogged": bool(table_row["unlogged"]),
                 "storage_parameters": storage_parameters,
                 "tablespace": tablespace,
-                "partitioning": ObservedPartitioning.build(table, partition_rows),
+                "partitioning": partitioning,
             }
         )
 
     @staticmethod
-    def get_unparsed_partitioning(table: str, partition_rows: list[dict[str, Any]]) -> str | None:
-        """How a table is partitioned when hare declares no such partitioning - a key over an expression,
-        hash partitions of different moduli, a partition partitioned itself.
-
-        Args:
-            table: The table's name.
-            partition_rows: Its POSTGRESQL_PARTITIONS_SQL rows - none for a plain table.
-
-        Returns:
-            ``PARTITION BY ...`` as PostgreSQL writes it, with the partitions partitioned themselves; None for
-            a plain table and one ``PostgresqlTableOptions(partitioning=...)`` declares.
-        """
+    def get_partitioning(table: str, partition_rows: list[dict[str, Any]]) -> tuple[Partitioning | None, str | None]:
+        """Reconstruct partitioning and describe any layout the declaration cannot reproduce."""
         if not partition_rows:
-            return None
+            return None, None
         partitioned_partitions = [row["partition_table"] for row in partition_rows if row["partition_partitioned"]]
-        if ObservedPartitioning.build(table, partition_rows) is not None and not partitioned_partitions:
-            return None
+        partitioning = ObservedPartitioning.build(table, partition_rows)
+        if partitioning is not None and not partitioned_partitions:
+            return partitioning, None
         unparsed_partitioning = f"PARTITION BY {partition_rows[0]['key_definition']}"
         if partitioned_partitions:
             unparsed_partitioning += f", partitioned partitions {', '.join(partitioned_partitions)}"
-        return unparsed_partitioning
+        return partitioning, unparsed_partitioning
 
     def build_table(
         self,
@@ -196,6 +194,7 @@ class PostgresqlDeclarationMapper:
             not_valid_constraint_names,
         ) = PostgresqlDeclarationMapper.build_constraints(constraint_rows)
 
+        partitioning, unparsed_partitioning = self.get_partitioning(table, partition_rows)
         return TableInfo(
             name=table,
             diagnostics=[
@@ -220,8 +219,8 @@ class PostgresqlDeclarationMapper:
                     for name, definition in unparsed_check_constraints
                 ),
                 *(
-                    [CatalogDiagnostic(CatalogDiagnosticCode.PARTITIONING, table, partitioning)]
-                    if (partitioning := self.get_unparsed_partitioning(table, partition_rows)) is not None
+                    [CatalogDiagnostic(CatalogDiagnosticCode.PARTITIONING, table, unparsed_partitioning)]
+                    if unparsed_partitioning is not None
                     else []
                 ),
             ],
@@ -237,12 +236,16 @@ class PostgresqlDeclarationMapper:
             check_constraints=check_constraints,
             not_valid_constraint_names=not_valid_constraint_names,
             is_in_default_schema=bool(table_row["is_default_schema"]),
-            table_options=PostgresqlDeclarationMapper.get_table_options(table, table_row, partition_rows),
+            table_options=PostgresqlDeclarationMapper.get_table_options(
+                table, table_row, partition_rows, partitioning
+            ),
             row_level_security=PostgresqlDeclarationMapper.get_row_level_security(table_row),
             primary_key_without_overlaps=any(row["is_primary"] and row["without_overlaps"] for row in index_rows),
         )
 
-    def get_column_db_default(self, column_default: str | None, is_generated_key: bool) -> Any:
+    def get_column_db_default(
+        self, column_default: str | None, is_generated_key: bool, data_type: str | None = None
+    ) -> Any:
         """A column's default - a sequence's next value only on a column other than the primary key of one
         column: a generated key takes its own sequence, another column (SERIAL, a column of a composite
         key) the declared one.
@@ -250,17 +253,32 @@ class PostgresqlDeclarationMapper:
         Args:
             column_default: The default's SQL, None for none.
             is_generated_key: Whether the column is the table's primary key of one column.
+            data_type: The catalog's declared type, when parsing a column rather than standalone SQL.
 
         Returns:
             The default.
         """
         if not column_default:
             return None
-        if not is_generated_key and column_default.strip().lower().startswith(
+        if not is_generated_key and (sql := column_default.strip()).lower().startswith(
             self.introspector.SEQUENCE_DEFAULT_PREFIXES
         ):
-            return SqlDefault(column_default.strip())
-        return self.introspector.parse_db_default(column_default)
+            return SqlDefault(sql)
+        parser = self.introspector.parse_db_default
+        if data_type in POSTGRES_NUMERIC_TYPE_NAMES and (
+            getattr(parser, "__func__", None) is SchemaIntrospector.parse_db_default.__func__  # type: ignore[attr-defined]
+        ):
+            sql = column_default.strip()
+            literal_sql, cast_type = self.introspector.split_type_cast(sql)
+            # Preserve casts that change a value before assignment to the numeric column.
+            if cast_type is not None and cast_type not in POSTGRES_NUMERIC_TYPE_NAMES:
+                return SqlDefault(sql)
+            token = self.introspector.parse_string_literal(literal_sql)
+            if token is None:
+                token = literal_sql
+            if INT_LITERAL_RE.match(token) or FLOAT_LITERAL_RE.match(token):
+                return Decimal(token)
+        return parser(column_default)
 
     @staticmethod
     def get_row_level_security(table_row: dict[str, Any]) -> RowLevelSecurity | None:
@@ -304,7 +322,7 @@ class PostgresqlDeclarationMapper:
                 # terms. Not when a term also has a non-default opclass - that index stays unparsed.
                 expression_terms = (
                     [
-                        f"{term} COLLATE {SchemaIntrospector.quote_identifier(collation)}" if collation else term
+                        f"{term} COLLATE {collation}" if collation else term
                         for term, collation in zip(row["term_sqls"], row["key_collations"], strict=True)
                     ]
                     if all(row["opclass_is_default"])
@@ -396,17 +414,17 @@ class PostgresqlDeclarationMapper:
         Returns:
             The columns.
         """
-        pk_columns = {row["column_name"] for row in primary_key_rows}
         # The constraint's own declared column order, not physical table column order - see
         # ColumnInfo.pk_position.
         pk_positions = {row["column_name"]: row["ordinal_position"] for row in primary_key_rows}
+        has_single_pk_column = len(pk_positions) == 1
 
         return [
             ColumnInfo(
                 name=row["column_name"],
                 db_type=row["data_type"],
                 nullable=row["is_nullable"] == "YES",
-                is_pk=row["column_name"] in pk_columns,
+                is_pk=row["column_name"] in pk_positions,
                 pk_position=pk_positions.get(row["column_name"]),
                 is_unique=row["column_name"] in unique_columns,
                 has_index=row["column_name"] in indexed_columns,
@@ -415,7 +433,11 @@ class PostgresqlDeclarationMapper:
                 max_length=row["character_maximum_length"],
                 numeric_precision=row["numeric_precision"],
                 numeric_scale=row["numeric_scale"],
-                db_default=self.get_column_db_default(row["column_default"], pk_columns == {row["column_name"]}),
+                db_default=self.get_column_db_default(
+                    row["column_default"],
+                    has_single_pk_column and row["column_name"] in pk_positions,
+                    row["data_type"],
+                ),
                 description=row["description"],
                 udt_name=row["udt_name"],
                 # An array made with no declaration (CREATE TABLE AS) records none - one, as declared int[].
@@ -434,7 +456,7 @@ class PostgresqlDeclarationMapper:
                 identity_generation=row["identity_generation"] if row["is_identity"] == "YES" else None,
                 full_type=row["full_type"],
                 enum_labels=tuple(row["enum_labels"]) if row["enum_labels"] is not None else None,
-                enum_type_schema=row["enum_type_schema"],
+                enum_type_schema=None if row["enum_type_schema"] == row["default_schema"] else row["enum_type_schema"],
                 todo_reason=None
                 if row["domain_name"] is None
                 else POSTGRESQL_DOMAIN_COLUMN_TODO.format(domain=row["domain_name"], type=row["data_type"]),

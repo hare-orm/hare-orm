@@ -19,6 +19,7 @@ from hare.contrib.outbox.deliveries.outbox_delivery import OutboxDelivery
 from hare.contrib.outbox.deliveries.webhook_target import WebhookTarget
 from hare.contrib.outbox.exceptions import DeliveryError
 from hare.contrib.package_checks import PackageChecks
+from hare.core.resource_completion import ResourceCompletion
 from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
@@ -211,4 +212,4 @@ class WebhookDelivery(OutboxDelivery):
     async def close(self) -> None:
         if self.client is not None:
             client, self.client = self.client, None
-            await client.aclose()
+            await ResourceCompletion.wait(client.aclose())

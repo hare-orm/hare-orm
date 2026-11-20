@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from hare.classes.class_path import ClassPath
 from hare.classes.comparable_values import ComparableValues
 from hare.ddl.indexes.index import Index
-from hare.ddl.schema_objects.trigger import Trigger
 from hare.declarations.declaration_values import DeclarationValues
 from hare.fields.constants import FOREIGN_KEY_COLUMN_SUFFIX
 from hare.fields.field import Field
@@ -25,7 +23,7 @@ if TYPE_CHECKING:
 
 
 class StateSignatures:
-    """Comparable signatures of the fields, indexes, constraints and triggers of migration state."""
+    """Comparable signatures used for migration state comparison."""
 
     @staticmethod
     def get_index_signature(
@@ -64,12 +62,6 @@ class StateSignatures:
         )
 
     @staticmethod
-    def normalize_triggers(value: object) -> list[Trigger]:
-        if not value or not isinstance(value, Iterable):
-            return []
-        return [trigger for trigger in value if isinstance(trigger, Trigger)]
-
-    @staticmethod
     def get_field_signature(field: Field[Any]) -> dict[str, object]:
         """What tells whether a field changed between two model states: the field class and the
         arguments it is rebuilt from - as a migration file records them - and its column types.
@@ -94,7 +86,7 @@ class StateSignatures:
             # By what the enum holds, not by the class - an enum built while the application runs
             # is a new class after every restart.
             signature["enum_type"] = ComparableValues.get_enum_content(enum_type)
-        if isinstance(field, (ForeignKeyFieldInstance, ManyToManyFieldInstance)):
+        if isinstance(field, RELATION_FIELDS):
             signature.pop("related_name", None)
         if isinstance(field, ForeignKeyFieldInstance) and (
             len(field.source_fields) > 1
@@ -120,11 +112,10 @@ class StateSignatures:
         # primary_key_attribute/schema are excluded the same way table/indexes/etc. are - each has its own dedicated
         # detection (a primary_key_attribute change raises separately; a schema change generates AlterModelSchema)
         # instead of falling into the generic AlterModelOptions diff, which never moves a table.
-        return {key: value for key, value in options.items() if key not in MODEL_OPTIONS_WITH_DEDICATED_OPERATIONS}
-
-    @staticmethod
-    def _get_base_signature(bases: Iterable[type]) -> list[str]:
-        return [ClassPath.get(base) for base in bases]
+        # Live models use ModelOption keys, while an operation loaded from disk uses their names.
+        return {
+            str(key): value for key, value in options.items() if key not in MODEL_OPTIONS_WITH_DEDICATED_OPERATIONS
+        }
 
     @staticmethod
     def get_model_signature_key(model_state: ModelState) -> str:
@@ -159,7 +150,7 @@ class StateSignatures:
         return {
             "fields": fields,
             "options": StateSignatures.get_model_options_for_compare(model_state.options),
-            "bases": StateSignatures._get_base_signature(model_state.bases),
+            "bases": [ClassPath.get(base) for base in model_state.bases],
             "pk_field_name": model_state.pk_field_name,
             "abstract": model_state.abstract,
         }

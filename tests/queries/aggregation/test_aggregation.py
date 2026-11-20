@@ -6,6 +6,7 @@ import pytest
 from hare import fields
 from hare.contrib import test
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.exceptions import FieldError, QueryError, UnSupportedError
 from hare.fields.data.containers.array_field import ArrayField
 from hare.query.expressions import Case, Exists, F, OuterReference, Q, RawSQL, Subquery, Value, When, Window
@@ -245,7 +246,7 @@ async def test_alias_excluded_from_unqualified_values_and_values_list(db):
     assert "shifted" not in rows[0]
 
     rows_list = await Tournament.objects.all().alias(shifted=F("id") + 1).values_list()
-    assert len(rows_list[0]) == len(Tournament._meta.db_fields)
+    assert len(rows_list[0]) == len(HareContext.require_current().apps.get_binding(Tournament).db_fields)
 
 
 @pytest.mark.asyncio
@@ -918,12 +919,7 @@ async def test_aggregate_combined_with_prior_alias_and_filter(db):
 
 @pytest.mark.asyncio
 async def test_coalesce_of_json_field_decodes_through_the_fields_own_type(db):
-    """Coalesce never set populate_field_object, so QuerySet._get_annotate() had nothing to
-    decode the annotation's result through - a JSONField argument's own from_db_value()
-    (decoding its stored text back into a dict) never ran, returning the raw driver value
-    instead. Coalesce's result shares its first argument's type (every argument is expected to be
-    type-compatible for a well-formed COALESCE), same as Max/Min/Avg/Sum already do via
-    populate_field_object."""
+    """Decode the result of Coalesce over a JSON field through the field's reader."""
     obj_null = await JSONFields.objects.create(data={"fallback": True}, data_null=None)
     obj_set = await JSONFields.objects.create(data={"fallback": True}, data_null={"y": 2})
 
@@ -939,11 +935,7 @@ async def test_coalesce_of_json_field_decodes_through_the_fields_own_type(db):
 @pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_combined_expression_arithmetic_decodes_through_the_operands_field_type(db):
-    """CombinedExpression (F("decimal") + F("decimal")) computes an output_field internally
-    (to reject mismatched operand types) but never set populate_field_object, so
-    QuerySet._get_annotate() never captured it - a Decimal field's arithmetic result came back
-    as a raw float instead of a Decimal. Checked on a FIRST (cache miss) and a structurally
-    identical SECOND (cache hit) call."""
+    """Read decimal arithmetic as Decimal on both the first execution and a matching cached plan."""
     a = await DecimalFields.objects.create(decimal=Decimal("1.5000"), decimal_nodec=Decimal("1"))
     b = await DecimalFields.objects.create(decimal=Decimal("2.5000"), decimal_nodec=Decimal("2"))
 
@@ -2585,8 +2577,12 @@ async def test_group_by_a_to_many_primary_key_allows_another_to_many_aggregate(d
 @pytest.mark.asyncio
 async def test_group_key_identifies_a_related_row_only_by_its_primary_key_or_a_unique_field(db):
     def lookup_ends_on_unique_field(model, lookup):
-        key = AggregatedMultiValuedPaths.get_last_multi_valued_key(model, lookup)
-        return key is not None and AggregatedMultiValuedPaths.field_names_identify_row(*key)
+        key = AggregatedMultiValuedPaths.get_last_multi_valued_key(
+            HareContext.require_current().apps.get_binding(model), lookup
+        )
+        return key is not None and AggregatedMultiValuedPaths.field_names_identify_row(
+            HareContext.require_current().apps.get_binding(key[0]), key[1]
+        )
 
     assert lookup_ends_on_unique_field(AggregationProduct, "tags")
     assert lookup_ends_on_unique_field(AggregationProduct, "tags__id")
@@ -2831,16 +2827,22 @@ async def test_group_key_uniqueness_needs_non_nullable_unique_fields(db):
     """A nullable unique field was taken as identifying one related row - every NULL row shares
     one group; a full unique_together set or composite primary key wasn't."""
     identify_row = AggregatedMultiValuedPaths.field_names_identify_row
-    assert identify_row(UniqueName, ["id"])
-    assert not identify_row(UniqueName, ["name"])
-    assert identify_row(UniqueTogetherFields, ["first_name", "last_name"])
-    assert not identify_row(UniqueTogetherFields, ["first_name"])
-    assert identify_row(UniqueTogetherFieldsWithFK, ["text", "tournament"])
-    assert identify_row(UniqueTogetherFieldsWithFK, ["text", "tournament_id"])
-    assert identify_row(CompositePkOwningFK, ["a", "b"])
-    assert not identify_row(CompositePkOwningFK, ["a"])
+    assert identify_row(HareContext.require_current().apps.get_binding(UniqueName), ["id"])
+    assert not identify_row(HareContext.require_current().apps.get_binding(UniqueName), ["name"])
+    assert identify_row(
+        HareContext.require_current().apps.get_binding(UniqueTogetherFields), ["first_name", "last_name"]
+    )
+    assert not identify_row(HareContext.require_current().apps.get_binding(UniqueTogetherFields), ["first_name"])
+    assert identify_row(
+        HareContext.require_current().apps.get_binding(UniqueTogetherFieldsWithFK), ["text", "tournament"]
+    )
+    assert identify_row(
+        HareContext.require_current().apps.get_binding(UniqueTogetherFieldsWithFK), ["text", "tournament_id"]
+    )
+    assert identify_row(HareContext.require_current().apps.get_binding(CompositePkOwningFK), ["a", "b"])
+    assert not identify_row(HareContext.require_current().apps.get_binding(CompositePkOwningFK), ["a"])
     # A filter of the JOIN's own .filter() call can rule the NULLs out.
-    assert identify_row(UniqueName, ["name"], ["name"])
+    assert identify_row(HareContext.require_current().apps.get_binding(UniqueName), ["name"], ["name"])
     assert QueryJoins.get_non_null_filtered_lookups(
         Tournament.objects.filter(events__name__isnull=False)._get_compiler()
     ) == {"events__name"}
@@ -3179,7 +3181,7 @@ async def test_array_agg_is_refused_before_the_query_where_there_are_no_arrays(d
 
     tournament = await Tournament.objects.create(name="Arrays")
     queryset = Tournament.objects.filter(id=tournament.id).annotate(names=ArrayAgg("name")).values("names")
-    dialect = Tournament._meta.connection.dialect
+    dialect = HareContext.require_current().apps.get_queryset(Tournament).get_connection().dialect
     try:
         ArrayField(base_field=fields.TextField()).get_column_type(dialect)
         has_arrays = True
@@ -3203,7 +3205,7 @@ async def test_array_agg_of_a_grouped_values_query_is_refused_only_without_array
         .annotate(names=ArrayAgg("name", order_by="name"))
         .values_list("names", flat=True)
     )
-    dialect = Tournament._meta.connection.dialect
+    dialect = HareContext.require_current().apps.get_queryset(Tournament).get_connection().dialect
     try:
         ArrayField(base_field=fields.TextField()).get_column_type(dialect)
         has_arrays = True

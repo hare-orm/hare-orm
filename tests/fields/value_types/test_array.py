@@ -1,15 +1,42 @@
 import pytest
 
 from hare import fields
-from hare.contrib.test import requires_features
+from hare.contrib.test import hare_test_context, requires_features
+from hare.core.hare_context import HareContext
 from hare.dialects.base.types.type_mapping import TypeMapping
 from hare.dialects.base.types.type_registry import TypeRegistry
 from hare.dialects.postgresql.constants import POSTGRESQL_DIALECT
 from hare.exceptions import UnSupportedError, ValidationError
 from hare.fields import ArrayField
 from hare.query.filters.lookups.containers.container_value_encoders import ContainerValueEncoders
+from tests.fields.value_types.array_set_models import ArraySetRecord, CompositeArraySetRecord
 from tests.shared_models import testmodels_postgres as testmodels
 from tests.utils.database_under_test import DatabaseUnderTest
+
+pytestmark = pytest.mark.usefixtures("model_conversion_context")
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize(
+    "outer_name,inner_name", [("base", "base"), ("custom", "base"), ("custom", "custom"), ("custom", "other")]
+)
+@pytest.mark.parametrize(
+    "value", [[[1, 2], [3, 4]], [[1, 2], [3]], [[1, 2], None]], ids=["rectangular", "ragged", "mixed-null"]
+)
+def test_nested_array_subclasses_share_shape_validation(outer_name, inner_name, value):
+    class CustomArray(ArrayField):
+        pass
+
+    class OtherArray(ArrayField):
+        pass
+
+    array_types = {"base": ArrayField, "custom": CustomArray, "other": OtherArray}
+    field = array_types[outer_name](array_types[inner_name](fields.IntField(), null=True))
+    if value == [[1, 2], [3, 4]]:
+        assert POSTGRESQL_DIALECT.types.get_db_value(field, value, None) == value
+    else:
+        with pytest.raises(ValidationError, match="holds sub-arrays of one length at each depth"):
+            POSTGRESQL_DIALECT.types.get_db_value(field, value, None)
 
 
 @requires_features(dialect="postgresql")
@@ -64,7 +91,7 @@ def test_array_to_db_value_sorts_a_set_for_deterministic_order():
     """A plain set has no defined iteration order (PYTHONHASHSEED-dependent for str elements) -
     to_db_value used to store it in whatever order the set happened to iterate in, so the same
     logical set of values came back in a different column order across process runs."""
-    field = testmodels.ArrayFields._meta.fields_map["array_str"]
+    field = HareContext.require_current().apps.get_binding(testmodels.ArrayFields).fields_map["array_str"]
     assert field.to_db_value({"c", "a", "b"}, testmodels.ArrayFields) == ["a", "b", "c"]
 
 
@@ -225,7 +252,7 @@ async def test_array_encoder_applies_base_field_to_db_value_per_element(db_array
     reached the driver as raw enum members instead of their already-coerced .value strings, even
     though storing that same array via create()/save() was already correctly coerced through
     ArrayField.to_db_value()."""
-    field = testmodels.ArrayFields._meta.fields_map["array_enum"]
+    field = HareContext.require_current().apps.get_binding(testmodels.ArrayFields).fields_map["array_enum"]
 
     encoded = ContainerValueEncoders.encode_container(
         [testmodels.Color.RED, testmodels.Color.BLUE], None, field, POSTGRESQL_DIALECT
@@ -508,12 +535,11 @@ async def test_connection_survives_a_ragged_nested_array_insert_attempt(db_array
     wrong with it). The connection pool is pinned to a single connection here so every query in
     this test is provably the same physical connection (confirmed via pg_backend_pid()), not one
     the pool silently swapped out for a fresh one."""
-    import os
 
     from hare import Connections
     from hare.contrib.test.isolated_contexts import hare_test_context
 
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+    db_url = DatabaseUnderTest.get_url()
     if DatabaseUnderTest.get_dialect().name != "postgresql":
         pytest.skip("ArrayFields require PostgreSQL")
     pinned_pool_db_url = db_url + ("&" if "?" in db_url else "?") + "min_size=1&max_size=1"
@@ -760,13 +786,19 @@ def test_array_codecs_keep_custom_dispatch_nulls_and_callback_order(count, opera
 
         monkeypatch.setattr(types, method_name, tracked)
     elif dispatch == "binder":
+        selector = "get_db_writer" if operation == "write" else "get_python_reader"
+        original = getattr(types, selector)
 
-        def unexpected_binding(*args):
-            pytest.fail("Per-value conversion must not switch to a custom binding helper")
+        def bind(selected):
+            convert = original(selected)
 
-        monkeypatch.setattr(
-            types, "get_db_writer" if operation == "write" else "get_python_reader", unexpected_binding
-        )
+            def tracked(value, *arguments):
+                events.append(("bound", value, *arguments))
+                return convert(value, *arguments) + 100
+
+            return tracked
+
+        monkeypatch.setattr(types, selector, bind)
     values = [None if index % 3 == 0 else index for index in range(count)]
     if operation == "write":
         expected = [
@@ -783,6 +815,8 @@ def test_array_codecs_keep_custom_dispatch_nulls_and_callback_order(count, opera
     )
     assert actual == expected
     assert events == expected_events
+    if dispatch == "binder":
+        assert actual == [None if value is None else value + 100 for value in values]
 
 
 @pytest.mark.database_independent
@@ -840,3 +874,55 @@ def test_array_codecs_do_not_require_custom_lists_to_report_their_length():
     values = UnsizedList(range(12))
     assert field.decode_value(values, types) == list(range(12))
     assert field.encode_value(values, None, types, "numbers") == list(range(12))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", [ArraySetRecord, CompositeArraySetRecord], ids=["single-key", "composite-key"])
+async def test_array_set_order_is_preserved_by_constructors_defaults_and_writes(model):
+    if not model._declaration.fields_map["numbers"].exists_on(DatabaseUnderTest.get_dialect()):
+        pytest.skip("The database has no ArrayField column type")
+    async with hare_test_context(["tests.fields.value_types.array_set_models"], db_url=DatabaseUnderTest.get_url()):
+        for index, (given, expected) in enumerate(
+            [
+                ({1, 6, 10}, [1, 6, 10]),
+                ([10, 1, 6], [10, 1, 6]),
+                ((10, 1, 6), [10, 1, 6]),
+                ({8, -1, 2}, [-1, 2, 8]),
+            ],
+            start=1,
+        ):
+            key = (
+                {"batch": 1, "number": index}
+                if HareContext.require_current().apps.get_binding(model).has_composite_primary_key
+                else {"id": index}
+            )
+            obj = await model.objects.create(**key, numbers=given, nested_numbers=[{1, 6, 10}, {2, 8, 11}])
+            assert obj.numbers == expected
+            assert obj.default_numbers == [1, 6, 10]
+            assert obj.nested_numbers == [[1, 6, 10], [2, 8, 11]]
+            loaded = await model.objects.get(pk=obj.pk)
+            assert (loaded.numbers, loaded.default_numbers, loaded.nested_numbers) == (
+                expected,
+                [1, 6, 10],
+                [[1, 6, 10], [2, 8, 11]],
+            )
+            await model.objects.filter(pk=obj.pk).update(numbers=given)
+            assert await model.objects.filter(pk=obj.pk).values_list("numbers", flat=True) == [expected]
+            key = (
+                {"batch": 2, "number": index}
+                if HareContext.require_current().apps.get_binding(model).has_composite_primary_key
+                else {"id": index + 10}
+            )
+            other = model(**key, numbers=given, nested_numbers=[{1, 6, 10}, {2, 8, 11}])
+            await model.objects.bulk_create([other], batch_size=1)
+            loaded = await model.objects.get(pk=other.pk)
+            assert (loaded.numbers, loaded.default_numbers, loaded.nested_numbers) == (
+                expected,
+                [1, 6, 10],
+                [[1, 6, 10], [2, 8, 11]],
+            )
+            loaded.numbers = given
+            await loaded.save(update_fields=["numbers"])
+            await model.objects.bulk_update([loaded], ["numbers"])
+            assert await model.objects.filter(pk=other.pk).values_list("numbers", flat=True) == [expected]
+            assert await model.objects.filter(numbers=given).count() >= 2

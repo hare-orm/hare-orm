@@ -34,4 +34,4 @@ class RelatedFactory(PostDeclaration):
 
     async def apply(self, obj: Model, name: str, given: Any) -> None:
         size = self.size if given is None else given
-        await self.reference.get_factory().create_batch(size, **{self.related_name: obj, **self.values})
+        await self.reference.get_factory().create_batch(size, **{**self.values, self.related_name: obj})

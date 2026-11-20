@@ -11,6 +11,8 @@ from hare.core.extensions.snapshot_mapping import SnapshotMapping
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.fields.field import Field
+    from hare.gis.functions.spatial_output_domain import SpatialOutputDomain
+    from hare.gis.terms.spatial_function_term import SpatialFunctionTerm
     from hare.sql.order import Order
     from hare.sql.sql_context import SqlContext
     from hare.sql.terms.functions.analytic_function import AnalyticFunction
@@ -36,8 +38,8 @@ class TermRenderers:
 
     #: The renderer and the name renderer each set of renderers found for a term class through the
     #: class's bases, kept in a bucket of the set.
-    found_renderers: ClassVar[Cache[Any]] = Cache(holds_sql=False)
-    found_name_renderers: ClassVar[Cache[Any]] = Cache(holds_sql=False)
+    found_renderers: ClassVar[Cache[Any]] = Cache()
+    found_name_renderers: ClassVar[Cache[Any]] = Cache()
 
     def __init__(self, dialect: Dialect) -> None:
         """
@@ -394,3 +396,7 @@ class TermRenderers:
             The value itself by default.
         """
         return value
+
+    def get_spatial_output_domain(self, term: SpatialFunctionTerm, domain: SpatialOutputDomain) -> SpatialOutputDomain:
+        """Refine an expression's value domain to match the dialect's native spatial SQL."""
+        return domain

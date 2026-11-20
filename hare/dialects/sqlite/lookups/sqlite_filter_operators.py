@@ -89,7 +89,10 @@ class SqliteFilterOperators(FilterOperators):
             searched_field: Any = field_lookup.searched_field
             model = getattr(searched_field, "model", None)
             return model is not None and (
-                FullTextIndex.get_covering(model, (searched_field.model_field_name,)) is not None
+                FullTextIndex.get_covering(
+                    searched_field.get_binding().model_binding, (searched_field.model_field_name,)
+                )
+                is not None
             )
         return super().supports_operator(field_lookup)
 

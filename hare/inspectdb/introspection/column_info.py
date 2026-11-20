@@ -58,7 +58,7 @@ class ColumnInfo:
     #: The labels of the column's ``ENUM`` type in their order - of its elements' type for an array;
     #: None for a column of no enum type.
     enum_labels: tuple[str, ...] | None = None
-    #: The schema of the column's ``ENUM`` type when it isn't the connection's default one; None otherwise.
+    #: The schema to declare on a reconstructed ``ENUM`` field, None for the connection's default.
     enum_type_schema: str | None = None
     #: Whether the database gives the column a value an INSERT leaves out - a sequence, an identity, a
     #: row id. Read for an integer primary key; True where it can't be told.

@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.instrumentation.capture.capture_needs import CaptureNeeds
     from hare.instrumentation.capture.captured_change import CapturedChange
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class CapturedWrite:
@@ -22,18 +22,18 @@ class CapturedWrite:
     keys of its rows, their values before it; the changes are built and captured here alike for every write.
 
     Args:
-        model: The written model.
+        binding: The written model in its prepared graph.
         needs: The model's needs.
         connection: The connection of the write.
         operation: What the write does to its rows.
-        changed: The fields an update sets - the ones its caller named.
+        changed: The fields the caller named for the update, when known.
     """
 
-    __slots__ = ("model", "needs", "connection", "operation", "changed", "occurred_at")
+    __slots__ = ("_binding", "needs", "connection", "operation", "changed", "occurred_at")
 
     def __init__(
         self,
-        model: type[Model],
+        binding: ModelBinding,
         needs: CaptureNeeds,
         connection: DatabaseClient,
         operation: RowOperation,
@@ -41,8 +41,8 @@ class CapturedWrite:
         changed: Iterable[str] | None = None,
     ) -> None:
         # Before the write's statements - a refusal of the sink leaves no row written without its changes.
-        needs.sink.check_connection(connection)
-        self.model = model
+        needs.sink.check_connection(binding, connection)
+        self._binding = binding
         self.needs = needs
         #: The connection the write runs on - its transaction once ``transaction()`` opened one.
         self.connection = connection
@@ -74,8 +74,8 @@ class CapturedWrite:
             The values of each row, by its Python primary key.
         """
         if isinstance(keys, Sequence):
-            return await ChangeCapturing.read_values(self.model, self.connection, keys, self.needs, lock=lock)
-        return await ChangeCapturing.read_values_of(self.model, self.connection, keys, self.needs, lock=lock)
+            return await ChangeCapturing.read_values(self._binding, self.connection, keys, self.needs, lock=lock)
+        return await ChangeCapturing.read_values_of(self._binding, self.connection, keys, self.needs, lock=lock)
 
     async def read_before(self, keys: Any) -> dict[Any, dict[str, Any]]:
         """Reads the captured fields of the rows an update is about to write, locked until it ends.
@@ -108,7 +108,7 @@ class CapturedWrite:
             The changes, one per row.
         """
         changes = ChangeCapturing.get_returned_changes(
-            self.model,
+            self._binding,
             self.needs,
             self.connection.dialect.types,
             raw_rows,
@@ -143,9 +143,7 @@ class CapturedWrite:
         await self.capture(changes)
         return changes
 
-    async def capture_read(
-        self, read_before: Mapping[Any, tuple[Mapping[str, Any], Any]], pks: Sequence[Any]
-    ) -> list[CapturedChange]:
+    async def capture_read(self, read_before: Mapping[Any, tuple[Mapping[str, Any], Any]], pks: Sequence[Any]) -> None:
         """Captures the rows of a write on a database whose writes return no rows - as read before it and, for
         an update or an insert, read again after it.
 
@@ -153,17 +151,14 @@ class CapturedWrite:
             read_before: The rows before the write, indexed by their Python primary keys - empty
                 for an insert.
             pks: The keys of the rows written.
-
-        Returns:
-            The changes, one per row.
         """
         read_after = (
             None
             if self.operation is RowOperation.DELETE
-            else await ChangeCapturing.read_values(self.model, self.connection, pks, self.needs)
+            else await ChangeCapturing.read_values(self._binding, self.connection, pks, self.needs)
         )
         changes = ChangeCapturing.get_read_changes(
-            self.model,
+            self._binding,
             self.needs,
             self.operation,
             read_before,
@@ -174,7 +169,6 @@ class CapturedWrite:
         if changes:
             self.occurred_at = changes[0].occurred_at
         await self.capture(changes)
-        return changes
 
     def build_change(
         self,
@@ -198,7 +192,7 @@ class CapturedWrite:
             The change.
         """
         change = ChangeCapturing.build_change(
-            self.model,
+            self._binding,
             self.needs,
             operation or self.operation,
             pk,
@@ -217,21 +211,17 @@ class CapturedWrite:
         Args:
             changes: The changes.
         """
-        await ChangeCapturing.capture(self.connection, self.model, changes)
+        await ChangeCapturing.capture(self.connection, self._binding, changes)
 
     async def capture_values(
         self, rows: Iterable[tuple[Any, Mapping[str, Any] | None, Mapping[str, Any] | None, Any]]
-    ) -> list[CapturedChange]:
+    ) -> None:
         """Captures rows whose values the write knows itself - from the objects it wrote, or read.
 
         Args:
             rows: ``(primary key, values before, values after, tenant)`` of each row.
-
-        Returns:
-            The changes, one per row.
         """
         changes = [
             self.build_change(pk, before=before, after=after, tenant=tenant) for pk, before, after, tenant in rows
         ]
         await self.capture(changes)
-        return changes

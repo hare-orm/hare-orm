@@ -7,7 +7,6 @@ from hare.sql.builder.tables.cte import Cte
 from hare.sql.builder.tables.declarations import SourceBinding
 from hare.sql.builder.tables.selectable import Selectable
 from hare.sql.builder_methods import BuilderMethods
-from hare.sql.constants import DEFAULT_SQL_CONTEXT
 from hare.sql.enums import SetOperation
 from hare.sql.exceptions import SetOperationException
 from hare.sql.order import Order
@@ -18,6 +17,8 @@ from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
     from typing import Self
+
+    from hare.sql.builder.tables.table import Table
 from hare.sql.builder.queries.pagination_sql import PaginationSql
 from hare.sql.builder.queries.query_builder import QueryBuilder
 
@@ -37,7 +38,6 @@ class SetOperationQuery(Selectable, Term):  # type: ignore[misc]
         set_operation_query: QueryBuilder,
         set_operation: SetOperation,
         alias: str | None = None,
-        wrapper_class: type[ValueWrapper] = ValueWrapper,
     ) -> None:
         super().__init__(alias)
         self.base_query = base_query
@@ -47,7 +47,6 @@ class SetOperationQuery(Selectable, Term):  # type: ignore[misc]
         self._limit: ValueWrapper | None = None
         self._offset: ValueWrapper | None = None
 
-        self._wrapper_class = wrapper_class
         # CTEs of the whole set operation - a branch's own WITH would land after UNION.
         self._with: list[Cte] = []
 
@@ -57,7 +56,7 @@ class SetOperationQuery(Selectable, Term):  # type: ignore[misc]
     def __hash__(self) -> int:
         return hash(self.source_binding)
 
-    def get_read_columns(self) -> set[tuple[str, str]]:
+    def get_read_columns(self, visible_ctes: frozenset[str] = frozenset()) -> set[tuple[str, str]]:
         """The columns every query of the set operation reads, by the tables they belong to.
 
         Returns:
@@ -69,10 +68,9 @@ class SetOperationQuery(Selectable, Term):  # type: ignore[misc]
         terms: list[Any] = [
             self.base_query,
             *(query for _operation, query in self._set_operation),
-            *(cte.query for cte in self._with),
             *(term for term, _order in self._orderbys),
         ]
-        return QueryBuilder.get_read_columns_of_terms(terms, self)
+        return QueryBuilder.get_statement_read_columns(terms, self, visible_ctes)
 
     def __copy__(self) -> Self:
         # The lists are copied, or every operation would change them for every branch built from one
@@ -83,6 +81,17 @@ class SetOperationQuery(Selectable, Term):  # type: ignore[misc]
         newone._orderbys = list(self._orderbys)
         newone._with = list(self._with)
         return newone
+
+    def replace_table(self, current_table: Table | None, new_table: Table | None) -> Self:
+        """Retarget the query's branches, CTE bodies and ordering."""
+        combined = self._copy_preserving_source()
+        combined.base_query = self.base_query.replace_table(current_table, new_table)
+        combined._set_operation = [
+            (operation, query.replace_table(current_table, new_table)) for operation, query in self._set_operation
+        ]
+        combined._with = [cte.replace_table(current_table, new_table) for cte in self._with]
+        combined._orderbys = [(term.replace_table(current_table, new_table), order) for term, order in self._orderbys]
+        return combined
 
     @BuilderMethods.builder
     def orderby(self, *fields: Field | str, **kwargs: Any) -> Self:
@@ -140,9 +149,6 @@ class SetOperationQuery(Selectable, Term):  # type: ignore[misc]
 
     def __mul__(self, other: Selectable) -> Self:  # type:ignore[override]
         return self.union_all(other)
-
-    def __str__(self) -> str:
-        return self.get_sql(DEFAULT_SQL_CONTEXT)
 
     def get_sql(self, sql_context: SqlContext) -> str:
         set_operation_template = " {type} {query_string}"

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import tomllib
-from pathlib import Path
 from typing import ClassVar
 
 from tests.matrix.constants import SUITE_ENVIRONMENTS
@@ -66,19 +65,16 @@ class SuiteRequirements:
         return frozenset(installed)
 
     @classmethod
-    def get_path_requirements(cls, path: Path) -> frozenset[str]:
-        """Get a path's declared import requirements without evaluating Python sources."""
-        return cls.manifest.get_path_requirements(path)
-
-    @classmethod
     def get_test_paths(cls, environment: SuiteEnvironment) -> tuple[str, ...]:
         """Select candidate modules from their declared optional cell requirements."""
         installed = cls.get_installed(cls.get_requirements(environment))
         known_names = {name for known in SUITE_ENVIRONMENTS for name in (*known.extras, *known.groups)}
         environment_names = {name for name in known_names if cls.get_installed(frozenset({name})) <= installed}
-        return tuple(
-            path
-            for path, module in sorted(cls.manifest.modules.items())
-            if (module.cells | cls.get_path_requirements(REPOSITORY_DIRECTORY / path)) & environment_names
-            and cls.get_installed(cls.get_path_requirements(REPOSITORY_DIRECTORY / path)) <= installed
-        )
+        paths = []
+        for path, module in sorted(cls.manifest.modules.items()):
+            path_requirements = cls.manifest.get_path_requirements(REPOSITORY_DIRECTORY / path)
+            if (module.cells | path_requirements) & environment_names and cls.get_installed(
+                path_requirements
+            ) <= installed:
+                paths.append(path)
+        return tuple(paths)

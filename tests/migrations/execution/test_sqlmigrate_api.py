@@ -5,6 +5,7 @@ import pytest
 from hare.core.config import AppConfig, ConnectionConfig, HareConfig
 from hare.migrations.api.sqlmigrate import sqlmigrate
 from hare.migrations.exceptions import UnknownMigrationError
+from tests.utils.project_sources import ProjectSources
 
 pytestmark = pytest.mark.database_independent
 
@@ -33,15 +34,6 @@ async def test_sqlmigrate_missing_migration():
         )
 
 
-def _write_migration_package(tmp_path: Path, app_label: str) -> str:
-    package_dir = tmp_path / app_label
-    migrations_dir = package_dir / "migrations"
-    migrations_dir.mkdir(parents=True, exist_ok=True)
-    (package_dir / "__init__.py").write_text("", encoding="ascii")
-    (migrations_dir / "__init__.py").write_text("", encoding="ascii")
-    return f"{app_label}.migrations"
-
-
 def _write_empty_models_module(tmp_path: Path, app_label: str) -> str:
     """A models module with no Model subclasses - this test only needs the migration GRAPH to
     build correctly across apps, not any real model/relation resolution."""
@@ -55,8 +47,8 @@ def _write_migration(
     name: str,
     dependencies: list[tuple[str, str]] | None = None,
 ) -> str:
-    module_path = _write_migration_package(tmp_path, app_label)
-    migrations_dir = tmp_path / app_label / "migrations"
+    migrations_dir = ProjectSources(tmp_path).prepare_migrations(tmp_path / app_label)
+    module_path = f"{app_label}.migrations"
     content = "\n".join(
         [
             "from hare import migrations",
@@ -75,8 +67,8 @@ def _write_migration(
 def _write_create_model_migration(
     tmp_path: Path, app_label: str, model_name: str, table_name: str, *, atomic: bool = True
 ) -> str:
-    module_path = _write_migration_package(tmp_path, app_label)
-    migrations_dir = tmp_path / app_label / "migrations"
+    migrations_dir = ProjectSources(tmp_path).prepare_migrations(tmp_path / app_label)
+    module_path = f"{app_label}.migrations"
     content = "\n".join(
         [
             "from hare import migrations",

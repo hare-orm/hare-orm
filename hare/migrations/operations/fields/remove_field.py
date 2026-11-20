@@ -42,7 +42,7 @@ class RemoveField(FieldAddRemoveOperation):
             "relation is applied first."
         )
 
-    def get_provided_dependencies(self, app_label: str) -> list[OperationDependency]:
+    def get_provided_dependencies(self, app_label: str, state: State) -> list[OperationDependency]:
         return [OperationDependency.of_field(app_label, self.model_name, self.name, DependencyType.REMOVED)]
 
     def get_required_dependencies(self, app_label: str, state: State) -> list[OperationDependency]:
@@ -64,18 +64,28 @@ class RemoveField(FieldAddRemoveOperation):
             model_state = self.get_model_state(state, app_label, self.model_name)
         except IncompatibleStateError:
             return dependencies
+        removed_names = RelationDependencies.get_field_attribute_names(
+            app_label, self.name, model_state.fields.get(self.name), state
+        )
         dependencies.extend(
             OperationDependency.of_field(app_label, self.model_name, field_name, DependencyType.CHANGED)
             for field_name, field in model_state.fields.items()
-            if field_name != self.name and self.name in field.get_generated_from_field_names()
+            if field_name != self.name and not removed_names.isdisjoint(field.get_generated_from_field_names())
+        )
+        dependencies.extend(
+            OperationDependency.of_schema_object(app_label, self.model_name, sequence.name, DependencyType.CHANGED)
+            for sequence in model_state.get_option_list(ModelOption.SEQUENCES)
+            if sequence.owned_by in removed_names
         )
         return dependencies
 
     def describe(self) -> str:
         return f"Remove field {self.name} from {self.model_name}"
 
-    def get_effect(self, app_label: str, state: State, schema_editor: BaseSchemaEditor) -> OperationEffect:
-        field = self.get_model_state(state, app_label, self.model_name).fields.get(self.name)
+    def get_effect(
+        self, app_label: str, old_state: State, new_state: State, schema_editor: BaseSchemaEditor
+    ) -> OperationEffect:
+        field = self.get_model_state(old_state, app_label, self.model_name).fields.get(self.name)
         dropped = "table of links" if isinstance(field, ManyToManyFieldInstance) else "column"
         return OperationEffect(
             operation=self,
@@ -90,8 +100,9 @@ class RemoveField(FieldAddRemoveOperation):
         # Before the pop below - a raised error must leave the state unchanged.
         removed_names = {self.name}
         if isinstance(model_state.fields.get(self.name), ForeignKeyFieldInstance):
-            model = state.apps.get_model(f"{app_label}.{self.model_name}")
-            relation: ForeignKeyFieldInstance[Any] = model._meta.fields_map[self.name]  # type: ignore[assignment]
+            relation: ForeignKeyFieldInstance[Any] = state.apps.get_binding(
+                f"{app_label}.{self.model_name}"
+            ).fields_map[self.name]  # type: ignore[assignment]
             removed_names.update(relation.source_fields)
         self._remove_meta_field_references(model_state, app_label, removed_names)
 
@@ -119,13 +130,13 @@ class RemoveField(FieldAddRemoveOperation):
         primary_key_names = (
             model_state.pk_field_name if isinstance(model_state.pk_field_name, tuple) else (model_state.pk_field_name,)
         )
-        if self.name in primary_key_names:
+        if any(name in removed_names for name in primary_key_names):
             raise self._get_reference_error(
                 app_label,
                 "the model's primary key",
                 "A model keeps its primary key - change it with a hand-written RunSQL migration, or delete the model.",
             )
-        self._reject_generated_field_references(model_state, app_label)
+        self._reject_generated_field_references(model_state, app_label, removed_names)
         self._remove_index_references(model_state, app_label, removed_names)
         self._remove_constraint_references(model_state, app_label)
         for trigger in model_state.get_option_list(ModelOption.TRIGGERS):
@@ -151,7 +162,7 @@ class RemoveField(FieldAddRemoveOperation):
                     app_label, f"read by dictionary {dictionary.name!r}", "Remove or change that dictionary first."
                 )
         for sequence in model_state.get_option_list(ModelOption.SEQUENCES):
-            if sequence.owned_by == self.name:
+            if sequence.owned_by in removed_names:
                 raise self._get_reference_error(
                     app_label, f"the owner of sequence {sequence.name!r}", "Change or remove that sequence first."
                 )
@@ -171,12 +182,15 @@ class RemoveField(FieldAddRemoveOperation):
             f"Can't remove field {self.name!r} from {app_label}.{self.model_name} - it's still {reference}. {advice}"
         )
 
-    def _reject_generated_field_references(self, model_state: ModelState, app_label: str) -> None:
+    def _reject_generated_field_references(
+        self, model_state: ModelState, app_label: str, removed_names: set[str]
+    ) -> None:
         """Raises when another field of the model is computed from the removed one.
 
         Args:
             model_state: The state of the model the field is removed from.
             app_label: The model's app.
+            removed_names: The field and its logical relation key attributes.
 
         Raises:
             ConfigurationError: A field's source fields name it.
@@ -184,7 +198,7 @@ class RemoveField(FieldAddRemoveOperation):
         for other_field_name, other_field in model_state.fields.items():
             if other_field_name == self.name:
                 continue
-            if self.name in other_field.get_generated_from_field_names():
+            if not removed_names.isdisjoint(other_field.get_generated_from_field_names()):
                 raise self._get_reference_error(
                     app_label,
                     f"one of {type(other_field).__name__} {other_field_name!r}'s own source_fields",
@@ -329,8 +343,6 @@ class RemoveField(FieldAddRemoveOperation):
         new_state: State,
         state_editor: BaseSchemaEditor | None = None,
     ) -> None:
-        if not state_editor:
-            return
         await self._remove_field_from_db(old_state, new_state, app_label, state_editor)
 
     async def database_backward(

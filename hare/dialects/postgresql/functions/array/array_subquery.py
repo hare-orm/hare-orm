@@ -31,7 +31,9 @@ class ArraySubquery(Subquery):
     """
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
-        DialectExpressions.raise_if_dialect_lacks(self, expression_context.dialect)
+        DialectExpressions.raise_if_dialect_lacks(
+            self, expression_context.dialect, checks_admission=expression_context.checks_dialect_admission
+        )
         selected_names = self.get_selected_names()
         if selected_names is None or len(selected_names) != 1:
             raise QueryError(

@@ -45,6 +45,11 @@ class MaterializedView(View):
             )
         object.__setattr__(self, "unique_columns", tuple(self.unique_columns))
 
+    @property
+    def has_internal_storage(self) -> bool:
+        """Whether dropping the view also drops its stored rows."""
+        return True
+
     def get_options(self) -> dict[str, Any]:
         options = super().get_options()
         if not self.with_data:

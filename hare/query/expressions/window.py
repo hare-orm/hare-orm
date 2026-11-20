@@ -136,7 +136,7 @@ class Window(CombinableExpression):
         # Deferred import: the queryset package imports this one at import time.
         from hare.query.queryset.concrete_field_paths import ConcreteFieldPaths
 
-        return ConcreteFieldPaths.get_paths(expression_context.model, target)
+        return ConcreteFieldPaths.get_paths(expression_context.binding, target)
 
     def get_window_key(self) -> tuple[Any, ...]:
         """What the window's partitions and ordering write into the SQL text - an expression by its

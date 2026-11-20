@@ -11,8 +11,10 @@ import pytest
 
 from tests.matrix import matrix_runner
 from tests.matrix.constants import RUN_REPORT_ENVIRONMENT_VARIABLE
+from tests.matrix.contract_coverage import ContractCoverage
 from tests.matrix.matrix_runner import MatrixRunner
 from tests.matrix.matrix_virtualenv import MatrixVirtualenv
+from tests.matrix.process_groups import ProcessGroups
 from tests.matrix.run_report import RunReport
 from tests.matrix.run_result import RunResult
 from tests.matrix.run_scheduler import RunScheduler
@@ -34,10 +36,8 @@ def run_spec():
     )
 
 
-@pytest.mark.parametrize(
-    ("exit_code", "allow_empty", "passed"), [(0, False, True), (5, False, False), (5, True, True), (1, True, False)]
-)
-def test_process_status_and_explicit_empty_contract_are_preserved(tmp_path, run_spec, exit_code, allow_empty, passed):
+@pytest.mark.parametrize(("exit_code", "passed"), [(0, True), (5, False), (1, False)])
+def test_process_status_and_report_details_are_preserved(tmp_path, run_spec, exit_code, passed):
     log = tmp_path / "run.log"
     log.with_suffix(".json").write_text(
         json.dumps(
@@ -50,7 +50,7 @@ def test_process_status_and_explicit_empty_contract_are_preserved(tmp_path, run_
             }
         )
     )
-    result = RunResult.read(replace(run_spec, allow_empty=allow_empty), exit_code, 0.25, log)
+    result = RunResult.read(run_spec, exit_code, 0.25, log)
     assert result.exit_code == exit_code
     assert result.passed is passed
     assert result.seed == 321
@@ -71,20 +71,57 @@ def test_zero_exit_does_not_hide_an_incomplete_report(tmp_path, run_spec, missin
 def test_report_uses_controller_outcomes_seed_and_actual_tool_versions(tmp_path, monkeypatch):
     target = tmp_path / "report.json"
     monkeypatch.setenv(RUN_REPORT_ENVIRONMENT_VARIABLE, str(target))
-    reporter = SimpleNamespace(stats={"passed": [1, 2], "error": [3], "deselected": [4], "warnings": [5]})
+    selector = "tests/example.py::test_contract"
+    monkeypatch.setattr(ContractCoverage, "get_selectors", lambda: {selector: ["rust_pg-*"]})
+    passed = SimpleNamespace(nodeid=f"{selector}[ok]")
+    broken = SimpleNamespace(nodeid=f"{selector}[teardown]")
+    skipped = SimpleNamespace(nodeid=f"{selector}[skip]", longrepr=("example.py", 1, "Skipped: unavailable"))
+    excluded = SimpleNamespace(nodeid="tests/example.py::test_other")
+    reporter = SimpleNamespace(
+        stats={"passed": [passed, broken], "error": [broken], "skipped": [skipped], "deselected": [excluded]}
+    )
     config = SimpleNamespace(
         pluginmanager=SimpleNamespace(getplugin=lambda name: reporter), getoption=lambda name, default=None: 321
     )
     session = SimpleNamespace(config=config, exitstatus=1, testscollected=3)
     RunReport.write(session)
     report = json.loads(target.read_text())
-    assert report["counts"] == {"passed": 2, "errors": 1, "deselected": 1}
+    assert report["counts"] == {"passed": 2, "errors": 1, "skipped": 1, "deselected": 1}
+    assert report["contracts"] == {
+        passed.nodeid: {"status": "passed"},
+        broken.nodeid: {"status": "error"},
+        skipped.nodeid: {"status": "skipped", "reason": "Skipped: unavailable"},
+    }
     assert report["seed"] == 321
     assert report["tool_versions"]["pytest"] == pytest.__version__
     config.workerinput = {}
     session.exitstatus = 0
     RunReport.write(session)
     assert json.loads(target.read_text())["exit_code"] == 1
+
+
+@pytest.mark.parametrize("status", [None, "skipped", "deselected", "xfailed", "passed"])
+def test_required_case_must_pass_on_its_declared_profile(tmp_path, monkeypatch, run_spec, status):
+    family = "tests/example.py::test_contract"
+    required = f"{family}[composite]"
+    monkeypatch.setattr(ContractCoverage, "get_selectors", lambda: {required: ["rust_pg-*"]})
+    log = tmp_path / "run.log"
+    outcomes = {f"{family}[scalar]": {"status": "passed"}}
+    if status is not None:
+        outcomes[required] = {"status": status}
+    log.with_suffix(".json").write_text(
+        json.dumps(
+            {"exit_code": 0, "counts": {}, "collected": 2, "seed": 321, "tool_versions": {}, "contracts": outcomes}
+        )
+    )
+    all_extras = SuiteEnvironment("all", whole_suite=True)
+    required_profile = replace(run_spec, suite="rust_pg-18", suite_environment=all_extras)
+    result = RunResult.read(required_profile, 0, 1, log)
+    assert result.passed is (status == "passed")
+    if status != "passed":
+        assert required in result.report_error
+    assert RunResult.read(replace(required_profile, suite="asyncpg-18"), 0, 1, log).passed
+    assert RunResult.read(replace(required_profile, suite_environment=run_spec.suite_environment), 0, 1, log).passed
 
 
 def test_scheduler_serializes_shared_resources_and_keeps_independent_runs_parallel(run_spec, tmp_path):
@@ -152,7 +189,11 @@ def test_profile_execution_clears_foreign_test_environment_and_keeps_exit_five(
     monkeypatch.setenv("MATRIX_PROBE", "keep")
     monkeypatch.setattr(matrix_runner, "MATRIX_LOG_DIRECTORY", tmp_path)
     monkeypatch.setattr(
-        MatrixVirtualenv, "get", lambda run: SimpleNamespace(get_python_executable=lambda: Path(sys.executable))
+        MatrixVirtualenv,
+        "get",
+        lambda _python_version, _environment, _database: SimpleNamespace(
+            get_python_executable=lambda: Path(sys.executable)
+        ),
     )
     runner = MatrixRunner([], [], [], "1", False, False)
 
@@ -168,8 +209,9 @@ def test_profile_execution_clears_foreign_test_environment_and_keeps_exit_five(
         )
         return 5
 
-    monkeypatch.setattr(runner.processes, "run", execute)
-    result = runner.execute(run_spec)
+    processes = ProcessGroups()
+    monkeypatch.setattr(processes, "run", execute)
+    result = runner.execute(run_spec, processes=processes)
     assert result.exit_code == 5
     assert not result.passed
     assert loaded_versions == ([] if sqlite_version is None else [(sqlite_version, run_spec.python_version)])
@@ -180,7 +222,8 @@ def test_selecting_profiles_does_not_require_sqlite_artifacts(monkeypatch):
         pytest.fail(f"Unexpected artifact read for unexecuted SQLite {selection.version}")
 
     monkeypatch.setattr(matrix_runner.SqliteVersionEnvironment, "get_variables", refuse_artifact_read)
-    runner = MatrixRunner(["3.14"], ["database-independent"], [], "1", False, False)
+    runner = MatrixRunner(["3.14", "3.14"], ["database-independent"], [], "1", False, False)
     runs = runner.get_runs()
     assert runs
     assert all(run.suite == "database-independent" and run.sqlite_version is None for run in runs)
+    assert len(runs) == len({run.suite_environment.name for run in runs})

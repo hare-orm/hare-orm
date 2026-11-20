@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.dialects.clickhouse.clickhouse_engine import ClickhouseEngine
 from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
@@ -52,7 +53,7 @@ def test_shadow_refuses_a_distributed_target_it_cannot_isolate(engine):
 
 @pytest.mark.asyncio
 async def test_a_failure_on_entering_drops_the_shadows_created(clickhouse_db, monkeypatch):
-    connection = Player._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Player).get_connection()
     create_shadow_database = ClickhouseShadowDatabase.create_shadow_database
 
     async def create_then_fail(self, shadow_database, database, engine_rows):
@@ -78,7 +79,7 @@ async def test_a_replica_path_naming_the_database_keeps_it_back_from_the_shadow(
     """The server fills a replica path's {database} with the shadow's name, which the shadow's Keeper path
     begins with - taking that prefix off took the database out of the path, and drift reported the table's
     options changed."""
-    shadow = ClickhouseShadowDatabase(Player._meta.connection, [])
+    shadow = ClickhouseShadowDatabase(HareContext.require_current().apps.get_queryset(Player).get_connection(), [])
     shadow.database = "sales"
     shadow.real_database_by_shadow_database = {shadow.prefix: "sales", f"{shadow.prefix}_archive": "archive"}
     engine = (

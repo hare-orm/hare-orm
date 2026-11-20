@@ -3,18 +3,19 @@ from __future__ import annotations
 from collections.abc import Collection
 from typing import TYPE_CHECKING, ClassVar, TypeVar
 
-from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
 from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
 from hare.query.statements.building.query_annotations import QueryAnnotations
 from hare.query.statements.building.query_conditions import QueryConditions
 from hare.query.statements.building.query_ctes import QueryCtes
 from hare.query.statements.building.query_grouping import QueryGrouping
 from hare.query.statements.building.row_locks import RowLocks
+from hare.query.statements.projections.derived_projection import DerivedProjection
 from hare.query.statements.select.rows_query import RowsQuery
-from hare.sql.terms.field import Field
 
 if TYPE_CHECKING:
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
+    from hare.query.statements.projections.declarations import ProjectionAliases, SelectedOutputColumn
 
 TModel = TypeVar("TModel", bound="Model")
 
@@ -26,10 +27,19 @@ class SelectQuery(RowsQuery[TModel], abstract=True):
 
     binds_expression_term_values: ClassVar[bool] = True
     plan_binds_slice: ClassVar[bool] = True
+    _result_column_aliases: dict[str, str] | None
+
+    def _get_output_columns(self) -> list[SelectedOutputColumn]:
+        """Every built SELECT cell: public name, logical path, SQL alias and value field.
+
+        Subclasses retain SQL order and include internal cells with no public identity.
+        Summaries and set-operation projections consume this same positional contract.
+        """
+        raise NotImplementedError
 
     def _get_result_column_names(self) -> tuple[str, ...]:
         """The final physical projection, or no names when a term has no declared output name."""
-        names = tuple(term.alias or (term.name if isinstance(term, Field) else None) for term in self.query._selects)
+        names = tuple(DerivedProjection.get_output_name(term) for term in self.query._selects)
         return names if all(name is not None for name in names) else ()  # type: ignore[return-value]
 
     def _build_statement(
@@ -43,13 +53,13 @@ class SelectQuery(RowsQuery[TModel], abstract=True):
         # The loaded relations' columns follow the model's own - an ordering column a plain DISTINCT
         # selects goes after them.
         self._join_loaded_relations(value_wrapper_references)
-        # Before the DISTINCT: an ordering column a plain DISTINCT selects stays selected.
-        self._prune_unselected_annotations()
         QueryConditions.get_distinct(self, self._distinct, self._distinct_on, self._orderings, self._annotations)
-        if self._limit is not None:
-            self.query._limit = self.query._wrapper_class(self._limit)
-        if self._offset is not None:
-            self.query._offset = self.query._wrapper_class(self._offset)
+        terms = self._prepare_slice_terms(self.query, self._offset)
+        limit_term, offset_term = terms
+        if limit_term is not None:
+            self.query._limit = limit_term
+        if offset_term is not None:
+            self.query._offset = offset_term
         QueryGrouping.apply_auto_group_by(self)
         group_bys = self._get_explicit_group_bys()
         if group_bys:
@@ -65,14 +75,13 @@ class SelectQuery(RowsQuery[TModel], abstract=True):
             recorded_references.extend(QueryAnnotations.get_expression_term_value_references(self))
             # A query built into another one has its slice among its values - the enclosing
             # query binds it.
-            for attribute, slice_bound_term in (("_limit", self.query._limit), ("_offset", self.query._offset)):
-                if slice_bound_term is not None:
-                    ExpressionArguments.record_literal(recorded_references, self, attribute, slice_bound_term)
+            self._record_slice_values(recorded_references, terms)
         if self.reads_rows_in_derived_table():
             self._apply_extension_calls_to_row_source()
         if self._window_filter_criterion is not None:
             # The wrapping moves the terms of the values as they are - their references still bind.
             self._wrap_query_for_window_filter()
+        self._prepare_output_columns()
         if not records_for_caller:
             self._finish_statement()
         return True
@@ -80,6 +89,13 @@ class SelectQuery(RowsQuery[TModel], abstract=True):
     def _select_columns(self) -> None:
         """Starts ``self.query`` with the columns the rows are read from."""
         raise NotImplementedError()
+
+    def _prepare_output_columns(self) -> ProjectionAliases:
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        projection = DerivedProjection.protect_column_names(self.query, model_binding.fields_db_projection.values())
+        self.query = projection.query
+        self._result_column_aliases = projection.output_aliases
+        return projection
 
     def _apply_ordering(self) -> None:
         """Orders ``self.query`` - by the names the selected columns allow."""
@@ -96,10 +112,6 @@ class SelectQuery(RowsQuery[TModel], abstract=True):
         Args:
             value_wrapper_references: The list the value references of the joins' conditions go into.
         """
-
-    def _prune_unselected_annotations(self) -> None:
-        """Drops from the SELECT list the annotations the rows don't return. Drops none by
-        default."""
 
     def _get_explicit_group_bys(self) -> tuple[str, ...]:
         """The ``.group_by()`` fields the rows are grouped by - none by default: model instances

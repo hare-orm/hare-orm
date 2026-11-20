@@ -13,7 +13,7 @@ from hare.dialects.base.types.prepared_converter import PreparedConverter
 from hare.dialects.base.types.type_mapping import TypeMapping
 
 if TYPE_CHECKING:
-    from hare.dialects.base.types.type_mapping import DbConverter, PythonConverter
+    from hare.dialects.base.types.type_mapping import ComparisonKeyFactory, DbConverter, PythonConverter
     from hare.fields.field import Field
     from hare.fields.generated_field import GeneratedField
     from hare.models import Model
@@ -31,14 +31,14 @@ class TypeRegistry:
 
     #: What each registry found for a field class through the class's bases, kept in a bucket of
     #: the registry: its mappings, nearest first, and its ``to_db``, ``to_lookup`` and ``to_python``.
-    found_mappings: ClassVar[Cache[Any]] = Cache(holds_sql=False)
+    found_mappings: ClassVar[Cache[Any]] = Cache()
     #: The mappings each registry gives a field class its column type from, nearest first.
-    found_column_type_mappings: ClassVar[Cache[Any]] = Cache(holds_sql=False)
-    found_db_converters: ClassVar[Cache[Any]] = Cache(holds_sql=False)
-    found_lookup_converters: ClassVar[Cache[Any]] = Cache(holds_sql=False)
-    found_python_converters: ClassVar[Cache[Any]] = Cache(holds_sql=False)
+    found_column_type_mappings: ClassVar[Cache[Any]] = Cache()
+    found_db_converters: ClassVar[Cache[Any]] = Cache()
+    found_lookup_converters: ClassVar[Cache[Any]] = Cache()
+    found_python_converters: ClassVar[Cache[Any]] = Cache()
     #: The native key type each registry found for a field class and its value type.
-    found_native_key_types: ClassVar[Cache[Any]] = Cache(holds_sql=False)
+    found_native_key_types: ClassVar[Cache[Any]] = Cache()
 
     def __init__(self) -> None:
         from hare.fields.generated_field import GeneratedField
@@ -207,9 +207,18 @@ class TypeRegistry:
         Returns:
             The output field of a generated field, else the field itself.
         """
-        if field.generated and isinstance(field, TypeRegistry.generated_field_class):
-            return field.output_field
+        if field.generated:
+            return TypeRegistry.generated_field_class.get_effective_field(field)
         return field
+
+    def get_comparison_key(self, field: Field[Any], *, database_only: bool = False) -> ComparisonKeyFactory | None:
+        """The dialect's equality key factory for this field, if it defines one."""
+        for mapping in self.get_mappings(type(self.get_value_field(field))):
+            if mapping.comparison_key is not None:
+                return (
+                    mapping.comparison_key if not database_only or mapping.comparison_key_requires_database else None
+                )
+        return None
 
     def holds_null(self, field: Field[Any]) -> bool:
         """Whether the dialect's column type of ``field`` holds NULL.
@@ -251,6 +260,20 @@ class TypeRegistry:
             converter = self.db_converters[field_class] = self.find_converter(field_class, "to_db")
             return converter
 
+    def _uses_default_write_entrypoints(self) -> bool:
+        return (
+            getattr(self.get_db_value, "__func__", None) is TypeRegistry.get_db_value
+            and getattr(self.get_db_converter, "__func__", None) is TypeRegistry.get_db_converter
+            and getattr(self.get_db_writer, "__func__", None) is TypeRegistry.get_db_writer
+        )
+
+    def _uses_default_read_entrypoints(self) -> bool:
+        return (
+            getattr(self.get_python_value, "__func__", None) is TypeRegistry.get_python_value
+            and getattr(self.get_python_converter, "__func__", None) is TypeRegistry.get_python_converter
+            and getattr(self.get_python_reader, "__func__", None) is TypeRegistry.get_python_reader
+        )
+
     def get_native_key_type(self, field: Field[Any]) -> type | None:
         """The type of values unchanged by both writing and reading the field. A value of exactly that
         type is its own stored and decoded key: the field writes it unchanged (possibly with native
@@ -262,12 +285,7 @@ class TypeRegistry:
         Returns:
             The type, None for a field whose values are converted.
         """
-        if (
-            getattr(self.get_db_value, "__func__", None) is not TypeRegistry.get_db_value
-            or getattr(self.get_python_value, "__func__", None) is not TypeRegistry.get_python_value
-            or getattr(self.get_db_converter, "__func__", None) is not TypeRegistry.get_db_converter
-            or getattr(self.get_python_converter, "__func__", None) is not TypeRegistry.get_python_converter
-        ):
+        if not self._uses_default_write_entrypoints() or not self._uses_default_read_entrypoints():
             return None
         field_class = type(field)
         key = (field_class, field.field_type)
@@ -290,14 +308,25 @@ class TypeRegistry:
         self.native_key_types[key] = native_type
         return native_type
 
-    def get_lookup_converter(self, field_class: type) -> DbConverter | None:
-        """The ``to_lookup`` the dialect registers for ``field_class``, or None when the field's own
-        ``to_lookup_value()`` applies."""
+    def get_lookup_converter(self, field_class: type[Field[Any]]) -> DbConverter | None:
+        """Use the registered lookup conversion, then storage for a field's default lookup.
+
+        An explicit field lookup hook retains priority over the storage fallback.
+        Direct and prepared comparisons share this choice.
+        """
         try:
-            return self.lookup_converters[field_class]
+            converter = self.lookup_converters[field_class]
         except KeyError:
-            converter = self.lookup_converters[field_class] = self.find_converter(field_class, "to_lookup")
-            return converter
+            converter = self.find_converter(field_class, "to_lookup")
+            self.lookup_converters[field_class] = converter
+        if converter is None:
+            from hare.fields.field import Field
+
+            if field_class.to_lookup_value is Field.to_lookup_value and (
+                self.get_db_converter(field_class) is not None or not self._uses_default_write_entrypoints()
+            ):
+                return PreparedConverter(self.get_db_writer)
+        return converter
 
     def get_python_converter(self, field_class: type) -> PythonConverter | None:
         """The ``to_python`` the dialect registers for ``field_class``, or None when the field's own
@@ -398,6 +427,7 @@ class TypeRegistry:
             field.to_lookup_values
             if getattr(self.get_lookup_value, "__func__", None) is TypeRegistry.get_lookup_value
             and getattr(self.get_lookup_converter, "__func__", None) is TypeRegistry.get_lookup_converter
+            and getattr(self.get_lookup_writer, "__func__", None) is TypeRegistry.get_lookup_writer
             and self.get_lookup_converter(type(field)) is None
             else None
         )
@@ -459,11 +489,7 @@ class TypeRegistry:
         converter = self.get_lookup_converter(type(field))
         if converter is None:
             return field.get_lookup_value_writer()
-        return (
-            converter.prepare(field)
-            if isinstance(converter, PreparedConverter)
-            else functools.partial(converter, field)
-        )
+        return PreparedConverter.bind(converter, field)
 
     def get_python_reader(self, field: Field[Any]) -> Callable[[Any], Any]:
         """A ``(value) -> value`` converting values read from a column of ``field``.
@@ -483,11 +509,7 @@ class TypeRegistry:
         converter = self.get_python_converter(type(field))
         if converter is None:
             return field.get_db_value_reader()
-        return (
-            converter.prepare(field)
-            if isinstance(converter, PreparedConverter)
-            else functools.partial(converter, field)
-        )
+        return PreparedConverter.bind(converter, field)
 
     def get_field_encoder(self, field: Field[Any], instance: type[Model] | None = None) -> Callable[[Any], Any]:
         """Prepare a literal's storage conversion with an optional model argument.
@@ -498,13 +520,11 @@ class TypeRegistry:
 
     def get_native_reader(self, field: Field[Any], native_types: frozenset[type]) -> Callable[[Any], Any] | None:
         """Prepare hydration, skipping conversion only when the registry's value contract permits it."""
-        if (
-            getattr(self.get_python_value, "__func__", None) is not TypeRegistry.get_python_value
-            or getattr(self.get_python_converter, "__func__", None) is not TypeRegistry.get_python_converter
-        ):
-            return TypeRegistry.get_python_reader(self, field)
-        if self.get_python_converter(type(field)) is not None:
+        if not self._uses_default_read_entrypoints():
             return self.get_python_reader(field)
+        converter = self.get_python_converter(type(field))
+        if converter is not None:
+            return PreparedConverter.bind(converter, field)
         if field.field_type in native_types and field.keeps_native_db_values:
             return None
         return field.get_db_value_reader()
@@ -525,6 +545,30 @@ class TypeRegistry:
         """Bind a prepared column comparison without retaining an execution context."""
         return TypeRegistry.get_encoder(self.get_read_column_writer(field), instance)
 
+    def get_result_literal_encoder(
+        self, field: Field[Any] | None, value: Any, instance: type[Model] | None
+    ) -> Callable[[Any], Any] | None:
+        """Encode a selected literal when the result's field has a storage conversion.
+
+        Plain fields leave literals in their inferred representation, without imposing
+        column validators on an expression result. Custom hooks and dialect conversions
+        use the same representation as column comparisons and window defaults.
+        """
+        if field is None or value is None:
+            return None
+        value_field = self.get_value_field(field)
+        unchanged_types = value_field.get_unchanged_write_types(self.get_db_converter(type(value_field)))
+        if (
+            unchanged_types is not None
+            and isinstance(value, unchanged_types)
+            and getattr(self.get_db_value, "__func__", None) is TypeRegistry.get_db_value
+            and getattr(self.get_lookup_value, "__func__", None) is TypeRegistry.get_lookup_value
+            and getattr(self.get_db_writer, "__func__", None) is TypeRegistry.get_db_writer
+            and getattr(self.get_lookup_writer, "__func__", None) is TypeRegistry.get_lookup_writer
+        ):
+            return None
+        return self.get_read_column_encoder(field, instance)
+
     @staticmethod
     def get_encoder(writer: Callable[[Any, Any], Any], instance: type[Model] | None) -> Callable[[Any], Any]:
         """Adapt a column writer to the single-value expression encoder contract."""
@@ -532,12 +576,12 @@ class TypeRegistry:
 
     def get_generated_db_converter(self, field: Field[Any]) -> Callable[[Any, Any], Any]:
         """Prepare storage conversion through the generated column's output field."""
-        return TypeRegistry.get_db_writer(self, field.output_field)  # type: ignore[attr-defined]
+        return self.get_db_writer(field.output_field)  # type: ignore[attr-defined]
 
     def get_generated_lookup_converter(self, field: Field[Any]) -> Callable[[Any, Any], Any]:
         """Prepare comparisons through the generated column's output field."""
-        return TypeRegistry.get_lookup_writer(self, field.output_field)  # type: ignore[attr-defined]
+        return self.get_lookup_writer(field.output_field)  # type: ignore[attr-defined]
 
     def get_generated_python_converter(self, field: Field[Any]) -> Callable[[Any], Any]:
         """Prepare reading through the generated column's output field."""
-        return TypeRegistry.get_python_reader(self, field.output_field)  # type: ignore[attr-defined]
+        return self.get_python_reader(field.output_field)  # type: ignore[attr-defined]

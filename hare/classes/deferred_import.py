@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+from operator import attrgetter
 from typing import Any, Generic, TypeVar
 
 TImported = TypeVar("TImported")
@@ -13,7 +14,7 @@ class DeferredImport(Generic[TImported]):
 
     Args:
         module_name: The module holding the object.
-        object_name: The object's name in it.
+        object_name: The object's attribute path in it, optionally dotted.
     """
 
     __slots__ = ("module_name", "object_name", "owner", "attribute_name")
@@ -39,6 +40,6 @@ class DeferredImport(Generic[TImported]):
         setattr(owner, name, self)
 
     def __get__(self, instance: Any, owner: type | None = None) -> TImported:
-        imported: TImported = getattr(importlib.import_module(self.module_name), self.object_name)
+        imported: TImported = attrgetter(self.object_name)(importlib.import_module(self.module_name))
         setattr(self.owner, self.attribute_name, imported)
         return imported

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Generator
+from contextlib import contextmanager
 from typing import TypeVar
 
 from hare.core.constants import RESOURCE_COMPLETION_FAILED
@@ -34,6 +35,17 @@ class ResourceCompletion:
             raise errors[0]
         if errors:
             raise BaseExceptionGroup(RESOURCE_COMPLETION_FAILED, errors)
+
+    @staticmethod
+    @contextmanager
+    def preserve_error(error: BaseException | None, message: str) -> Generator[None]:
+        """Keep an earlier failure if the caller's cleanup operation also fails."""
+        try:
+            yield
+        except BaseException as cleanup_error:
+            if error is None:
+                raise
+            raise BaseExceptionGroup(message, [error, cleanup_error]) from None
 
     @staticmethod
     async def wait(

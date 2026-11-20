@@ -13,7 +13,6 @@ from hare.core.config.app_config import AppConfig
 from hare.core.config.cli_config import CliConfig
 from hare.core.config.config_section import ConfigSection
 from hare.core.config.connection_config import ConnectionConfig
-from hare.core.config.constants import SWAPPABLE_MODEL_LABEL_PATTERN
 from hare.core.config.db_url_config import DBUrlConfig
 from hare.core.config.migrations_config import MigrationsConfig
 from hare.core.constants import (
@@ -28,7 +27,7 @@ from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
-    from typing import Self
+    from typing import Self, TextIO
 
 
 @dataclass(frozen=True)
@@ -109,11 +108,12 @@ class HareConfig(ConfigSection):
         Raises:
             ConfigurationError: The label isn't ``"app_label.ModelName"``, or its app isn't configured.
         """
-        if not isinstance(label, str) or not SWAPPABLE_MODEL_LABEL_PATTERN.fullmatch(label):
+        parts = label.split(".") if isinstance(label, str) else ()
+        if len(parts) != 2 or not all(parts):
             raise ConfigurationError(
                 f'Swappable setting {setting!r} must name a model as "app_label.ModelName", got {label!r}'
             )
-        app_label = label.split(".", 1)[0]
+        app_label, _model_name = parts
         if app_label not in self.apps:
             raise ConfigurationError(
                 f"Swappable setting {setting!r} points at {label!r}, but no app {app_label!r} is configured"
@@ -222,33 +222,27 @@ class HareConfig(ConfigSection):
                 import yaml
             except ImportError as error:
                 raise ConfigurationError(YAML_CONFIG_FILE_PACKAGE_MESSAGE) from error
-
-            try:
-                with open(config_file, encoding="utf-8") as config_stream:
-                    config = yaml.safe_load(config_stream)
-            except FileNotFoundError as error:
-                raise ConfigurationError(f"Config file not found: {config_file}") from error
-            except OSError as error:
-                raise ConfigurationError(f"Cannot read config file {config_file}: {error}") from error
-            except UnicodeDecodeError as error:
-                raise ConfigurationError(f"Config file {config_file} is not valid UTF-8: {error}") from error
-            except yaml.YAMLError as error:
-                raise ConfigurationError(f"Invalid YAML in config file {config_file}: {error}") from error
+            loader: Callable[[TextIO], Any] = yaml.safe_load
+            parse_error: type[Exception] = yaml.YAMLError
+            format_name = "YAML"
         elif extension in JSON_CONFIG_FILE_EXTENSIONS:
-            try:
-                with open(config_file, encoding="utf-8") as config_stream:
-                    config = json.load(config_stream)
-            except FileNotFoundError as error:
-                raise ConfigurationError(f"Config file not found: {config_file}") from error
-            except OSError as error:
-                raise ConfigurationError(f"Cannot read config file {config_file}: {error}") from error
-            except UnicodeDecodeError as error:
-                raise ConfigurationError(f"Config file {config_file} is not valid UTF-8: {error}") from error
-            except json.JSONDecodeError as error:
-                raise ConfigurationError(f"Invalid JSON in config file {config_file}: {error}") from error
+            loader = json.load
+            parse_error = json.JSONDecodeError
+            format_name = "JSON"
         else:
             supported = ", ".join(SUPPORTED_CONFIG_FILE_EXTENSIONS)
             raise ConfigurationError(f"Unknown config extension {extension}, only {supported} are supported")
+        try:
+            with open(config_file, encoding="utf-8") as config_stream:
+                config = loader(config_stream)
+        except FileNotFoundError as error:
+            raise ConfigurationError(f"Config file not found: {config_file}") from error
+        except OSError as error:
+            raise ConfigurationError(f"Cannot read config file {config_file}: {error}") from error
+        except UnicodeDecodeError as error:
+            raise ConfigurationError(f"Config file {config_file} is not valid UTF-8: {error}") from error
+        except parse_error as error:
+            raise ConfigurationError(f"Invalid {format_name} in config file {config_file}: {error}") from error
         return cls.from_dict(config)
 
     @classmethod

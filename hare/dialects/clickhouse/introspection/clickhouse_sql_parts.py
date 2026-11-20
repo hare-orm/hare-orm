@@ -91,42 +91,10 @@ class ClickhouseSqlParts:
         return clauses
 
     @staticmethod
-    def get_before_parentheses(sql: str) -> str:
-        """The text before the first pair of parentheses.
-
-        Args:
-            sql: The text.
-
-        Returns:
-            The text, without the spaces around it - whole when it has no parentheses.
-        """
-        open_index = next(
-            (
-                index
-                for index, character, depth in CatalogSql.get_unquoted_characters(sql)
-                if character == "(" and depth == 0
-            ),
-            len(sql),
-        )
-        return sql[:open_index].strip()
-
-    @staticmethod
     def get_parenthesised(sql: str) -> tuple[str, str]:
-        """What the first pair of parentheses holds.
-
-        Args:
-            sql: The text.
-
-        Returns:
-            The text inside the pair and the text after it; two empty texts without a pair.
-        """
-        open_index = -1
-        for index, character, depth in CatalogSql.get_unquoted_characters(sql):
-            if character == "(" and depth == 0 and open_index < 0:
-                open_index = index
-            elif character == ")" and depth == 1 and open_index >= 0:
-                return sql[open_index + 1 : index], sql[index + 1 :]
-        return "", ""
+        """The first outer pair's body and suffix, or two empty texts."""
+        _, body, suffix = CatalogSql.get_parenthesized_parts(sql)
+        return body or "", suffix
 
     @classmethod
     def get_unwrapped(cls, sql: str) -> str:

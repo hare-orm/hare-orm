@@ -17,17 +17,17 @@ from hare.exceptions import (
     ValidationError,
 )
 from hare.instrumentation.capture.change_capturing import ChangeCapturing
+from hare.instrumentation.change_events import ChangeEvents
 from hare.instrumentation.enums import RowOperation
 from hare.models.constants import WRITE_RESTORE_FAILURES_MESSAGE
-from hare.models.instances.instance_saving import InstanceSaving
 from hare.models.tenancy.tenancy import Tenancy
-from hare.models.write.declarations import WriteOutcome
 from hare.models.write.generated_keys import GeneratedKeys
 from hare.models.write.insert.insert_statement import InsertStatement
 from hare.models.write.instance_snapshot import InstanceSnapshot
 from hare.models.write.instance_values import InstanceValues
 from hare.models.write.instance_writer import InstanceWriter
 from hare.models.write.returned_values import ReturnedValues
+from hare.models.write.rollback_restores import RollbackRestores
 from hare.models.write.rules.constants import (
     BULK_CREATE_METHOD_NAME,
     BULK_CREATE_ON_CONFLICT_NAME,
@@ -62,7 +62,9 @@ from hare.sql.terms.parameters.parameterizer import Parameterizer
 from hare.sql.terms.values.literal_value import LiteralValue
 
 if TYPE_CHECKING:
+    from hare.core.hare_context import HareContext
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 TModel = TypeVar("TModel", bound="Model")
 
@@ -92,12 +94,14 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
         "_conflict_update_tenants",
         "_read_before_write",
         "_on_write_complete",
+        "_prepare_for_write",
     )
 
     def __init__(
         self,
-        model: type[TModel],
+        binding: ModelBinding,
         connection: DatabaseClient | None,
+        context: HareContext | None,
         objects: Iterable[TModel],
         batch_size: int | None = None,
         ignore_conflicts: bool = False,
@@ -111,29 +115,33 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
     ):
         # Meta.returning is a preference: inherited, it yields to use_copy or a dialect without
         # ordered RETURNING; passed explicitly, a conflict raises.
+        model: type[TModel] = binding._model  # type: ignore[assignment]
+        self._binding = binding
         returning_explicitly_requested = returning is not None
-        returning = model._meta.returning if returning is None else returning
+        returning = binding.returning if returning is None else returning
         if ignore_conflicts and update_fields:
             raise QueryError("ignore_conflicts and update_fields are mutually exclusive.")
         if on_conflict and on_conflict_constraint:
             raise QueryError("on_conflict and on_conflict_constraint are mutually exclusive.")
         on_conflict, on_conflict_constraint = BulkCreateQuery.get_primary_key_conflict_target(
-            model, on_conflict, on_conflict_constraint
+            binding, on_conflict, on_conflict_constraint
         )
         if update_fields is not None:
             update_fields = CollectionArguments.get_list(update_fields, "bulk_create() update_fields")
         if on_conflict is not None:
             on_conflict = CollectionArguments.get_list(on_conflict, "bulk_create() on_conflict")
         if update_fields is not None:
-            update_fields = RowWriteRules.get_stored_field_names(model, update_fields, BULK_CREATE_UPDATE_FIELDS_NAME)
+            update_fields = RowWriteRules.get_stored_field_names(
+                binding, update_fields, BULK_CREATE_UPDATE_FIELDS_NAME
+            )
         if on_conflict is not None:
             # An encrypted field is unique through its blind index - the conflict is on the index.
             on_conflict = [
-                model._meta.blind_index_fields.get(field_name, field_name)
-                for field_name in BulkCreateQuery.get_conflict_field_names(model, on_conflict)
+                binding.blind_index_fields.get(field_name, field_name)
+                for field_name in BulkCreateQuery.get_conflict_field_names(binding, on_conflict)
             ]
         BulkCreateQuery.check_conflict_arguments(
-            model, ignore_conflicts, update_fields, on_conflict, on_conflict_constraint, conflict_where
+            binding, ignore_conflicts, update_fields, on_conflict, on_conflict_constraint, conflict_where
         )
         if use_copy:
             returning = BulkCreateQuery.check_copy_arguments(
@@ -147,8 +155,8 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
         # known.
         BulkWriteBatches.check_batch_size(batch_size, "bulk_create")
         objects = CollectionArguments.get_list(objects, "bulk_create()")
-        BulkObjects.validate(model, objects, "bulk_create")
-        tenant_scoped = bool(model._meta.tenant_field) and not all_tenants
+        BulkObjects.validate(binding, objects, "bulk_create", context=context)
+        tenant_scoped = bool(binding.tenant_field) and not all_tenants
         # ON CONFLICT resolves against the table's physical unique constraint regardless of tenant -
         # the DO UPDATE is limited to the active tenant's rows, so a conflicting row of another
         # tenant is left untouched (and its object unwritten).
@@ -161,7 +169,7 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
                 "never appears in RETURNING, so the surviving rows can only be matched back "
                 "to their objects through them.",
             )
-        super().__init__(model)
+        super().__init__(model, binding=binding, context=context)
         self._objects = objects
         self._ignore_conflicts = ignore_conflicts
         self._batch_size = batch_size
@@ -198,18 +206,22 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
         self._inserted_objects: list[TModel] | None = None
         #: What the report reads before the rows are written - once the objects carry the values the
         #: insert writes (their tenant, async defaults, blind indexes); None for nothing.
-        self._read_before_write: Callable[[], Awaitable[None]] | None = None
+        self._read_before_write: Callable[[PreparedBulkInsert], Awaitable[None]] | None = None
+        self._prepare_for_write: Callable[[list[TModel], InstanceValues], None] | None = None
         self._on_write_complete: Callable[[DatabaseClient], None] | None = None
 
     async def _prepare_objects(self) -> None:
         """Gets the objects ready to be written: scoped to the active tenant, their async defaults
         resolved - as save() does - their relations checked and their keys handed out."""
+        from hare.models.instances.instance_saving import InstanceSaving
+
         self._prepare_object_values()
         for obj in self._objects:
             if obj._await_when_save:
                 await InstanceSaving.set_async_default_field(obj)
-        if Tenancy.has_tenant_scoped_relations(self.model):
-            await Tenancy.check_objects_relation_targets(self.model, self._objects, self._connection)
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        if Tenancy.has_tenant_scoped_relations(model_binding):
+            await Tenancy.check_objects_relation_targets(model_binding, self._objects, self._connection)
         features = self._connection.features
         if not features.supports_returning:
             for obj in self._objects:
@@ -218,18 +230,18 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
         if features.takes_keys_before_insert or not features.supports_generated_keys:
             # Keys the database hands out before the rows are written stay with the objects
             # whatever follows - a key of the series is never handed out again.
-            await GeneratedKeys.assign(self.model, self._connection, self._objects)
+            await GeneratedKeys.assign(model_binding, self._connection, self._objects)
 
     @staticmethod
     def get_primary_key_conflict_target(
-        model: type[Model], on_conflict: Iterable[str] | None, on_conflict_constraint: str | None
+        binding: ModelBinding, on_conflict: Iterable[str] | None, on_conflict_constraint: str | None
     ) -> tuple[Iterable[str] | None, str | None]:
         """The conflict target ``on_conflict_constraint="pk"`` names - the primary key's fields as
         ``on_conflict``; the constraint of a key ``WITHOUT OVERLAPS``, which a database infers from no
         columns.
 
         Args:
-            model: The model.
+            binding: The model.
             on_conflict: The conflict target's fields given.
             on_conflict_constraint: The conflict target's constraint given.
 
@@ -239,51 +251,51 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
         Raises:
             QueryError: The model has no primary key.
         """
+        model = binding._model
         if on_conflict_constraint != PRIMARY_KEY_CONFLICT_CONSTRAINT:
             return on_conflict, on_conflict_constraint
-        meta = model._meta
-        if not meta.has_primary_key:
+        if not binding.has_primary_key:
             raise QueryError(
                 f'bulk_create(on_conflict_constraint="pk") names the primary key - {model.__name__} has none'
             )
-        if not meta.pk_without_overlaps:
-            return list(meta.primary_key_attribute_names), None
+        if not binding.pk_without_overlaps:
+            return list(binding.primary_key_attribute_names), None
         return None, GeneratedNames.get_index_name(
             GeneratedNamePrefix.PRIMARY_KEY,
-            model,
-            [meta.fields_db_projection[name] for name in meta.primary_key_attribute_names],
+            binding.db_table,
+            [binding.fields_db_projection[name] for name in binding.primary_key_attribute_names],
         )
 
     @staticmethod
-    def get_no_overlap_keys(model: type[Model]) -> list[tuple[frozenset[str], str | None]]:
+    def get_no_overlap_keys(binding: ModelBinding) -> list[tuple[frozenset[str], str | None]]:
         """The keys of the model compared ``WITHOUT OVERLAPS`` - their fields, as ``on_conflict`` names
         them, and their constraint's name.
 
         Args:
-            model: The model.
+            binding: The model.
 
         Returns:
             The keys: the primary key's, then the ``UniqueConstraint(without_overlaps=True)`` ones.
         """
-        meta = model._meta
         keys: list[tuple[frozenset[str], str | None]] = []
-        if meta.pk_without_overlaps:
-            columns = [meta.fields_db_projection[name] for name in meta.primary_key_attribute_names]
+        if binding.pk_without_overlaps:
+            primary_key_names = binding.primary_key_attribute_names
+            columns = [binding.fields_db_projection[name] for name in primary_key_names]
             keys.append(
                 (
-                    frozenset(meta.primary_key_attribute_names),
-                    GeneratedNames.get_index_name(GeneratedNamePrefix.PRIMARY_KEY, model, columns),
+                    frozenset(primary_key_names),
+                    GeneratedNames.get_index_name(GeneratedNamePrefix.PRIMARY_KEY, binding.db_table, columns),
                 )
             )
-        for constraint in meta.constraints:
+        for constraint in binding.constraints:
             if isinstance(constraint, UniqueConstraint) and constraint.without_overlaps:
-                field_names = BulkCreateQuery.get_conflict_field_names(model, constraint.fields)
+                field_names = BulkCreateQuery.get_conflict_field_names(binding, constraint.fields)
                 keys.append((frozenset(field_names), constraint.name))
         return keys
 
     @staticmethod
     def check_conflict_arguments(
-        model: type[Model],
+        binding: ModelBinding,
         ignore_conflicts: bool,
         update_fields: list[str] | None,
         on_conflict: list[str] | None,
@@ -293,7 +305,7 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
         """Raises for arguments of the ON CONFLICT clause that don't go together.
 
         Args:
-            model: The model.
+            binding: The model.
             ignore_conflicts: Whether a conflicting row is skipped.
             update_fields: The fields a conflicting row is updated with.
             on_conflict: The conflict target's columns.
@@ -307,7 +319,7 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
         if not ignore_conflicts and bool(update_fields) != bool(conflict_target):
             raise QueryError("update_fields and on_conflict/on_conflict_constraint need set in same time.")
         if update_fields:
-            RowWriteRules.get(model, WriteType.CONFLICT_UPDATE, update_fields, BULK_CREATE_UPDATE_FIELDS_NAME)
+            RowWriteRules.get(binding, WriteType.CONFLICT_UPDATE, update_fields, BULK_CREATE_UPDATE_FIELDS_NAME)
         if conflict_where is not None:
             if not isinstance(conflict_where, (Q, RawSQLTerm)):
                 raise QueryError(
@@ -371,13 +383,13 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
         return False
 
     @staticmethod
-    def get_conflict_field_names(model: type[Model], names: Iterable[str]) -> list[str]:
+    def get_conflict_field_names(binding: ModelBinding, names: Iterable[str]) -> list[str]:
         """The fields holding the columns a conflict target names - a forward relation its key fields,
         ``pk`` the primary key's; a generic foreign key names none, each branch keeping its own
         uniqueness.
 
         Args:
-            model: The model inserted into.
+            binding: The model inserted into.
             names: The names as the caller gave them.
 
         Returns:
@@ -387,7 +399,7 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
             FieldError: A name is no field stored in the model's table, or a generic foreign key.
         """
         return RowWriteRules.get_stored_field_names(
-            model, names, BULK_CREATE_ON_CONFLICT_NAME, expands_generic_keys=False
+            binding, names, BULK_CREATE_ON_CONFLICT_NAME, expands_generic_keys=False
         )
 
     def _validate_dialect_dependent_options(self) -> None:
@@ -407,8 +419,9 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
                 "bulk_create() with ignore_conflicts, update_fields or on_conflict needs INSERT ... ON CONFLICT, "
                 f"which {dialect.name} doesn't have"
             )
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
         if (self._on_conflict or self._update_fields) and (
-            no_overlap_keys := BulkCreateQuery.get_no_overlap_keys(self.model)
+            no_overlap_keys := BulkCreateQuery.get_no_overlap_keys(model_binding)
         ):
             dialect.clauses.raise_if_conflict_target_unusable(
                 self.model.__name__,
@@ -427,6 +440,26 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
             if self._returning_explicitly_requested:
                 raise UnSupportedError(f"bulk_create(returning=True) needs RETURNING, which {dialect} doesn't have")
             self._returning = False
+        if self._use_copy and not dialect.features.supports_copy:
+            raise UnSupportedError(
+                f"bulk_create(use_copy=True) is not supported on {dialect} - it has no bulk load of rows."
+            )
+        if self._ignore_conflicts:
+            # The objects inserted are those RETURNING gives a row of - skipped ones have none.
+            if not dialect.features.supports_returning:
+                raise UnSupportedError(
+                    IGNORE_CONFLICTS_MATCHING_MESSAGE.format(
+                        model=self.model.__name__, reason=IGNORE_CONFLICTS_NO_RETURNING_REASON.format(dialect=dialect)
+                    )
+                )
+
+    def _validate_returning_keys(self) -> None:
+        """Check row matching after Python defaults have supplied their primary keys.
+
+        Dialect capabilities are checked before preparation. Key availability depends
+        on prepared values; previews call this only when no deferred values remain.
+        """
+        dialect = self._connection.dialect
         if (
             self._returning
             and not dialect.features.guarantees_returning_order
@@ -440,18 +473,7 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
                     "RETURNING's row order for a multi-row INSERT is not guaranteed there, so returned "
                     "rows are matched back to their objects by primary key."
                 )
-        if self._use_copy and not dialect.features.supports_copy:
-            raise UnSupportedError(
-                f"bulk_create(use_copy=True) is not supported on {dialect} - it has no bulk load of rows."
-            )
         if self._ignore_conflicts:
-            # The objects inserted are those RETURNING gives a row of - skipped ones have none.
-            if not dialect.features.supports_returning:
-                raise UnSupportedError(
-                    IGNORE_CONFLICTS_MATCHING_MESSAGE.format(
-                        model=self.model.__name__, reason=IGNORE_CONFLICTS_NO_RETURNING_REASON.format(dialect=dialect)
-                    )
-                )
             self._returning = True
         if dialect.features.copies_bulk_inserts and not (
             self._returning
@@ -465,25 +487,8 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
 
     def _get_insert_statement(self) -> InsertStatement:
         """The builder of this call's INSERTs, on the connection it runs on."""
-        return InsertStatement(self.model, self._connection)
-
-    def _filter_columns(self, omit_fields: set[str], include_generated: bool = False) -> list[str]:
-        """The columns of ``_filtered_field_names()``."""
-        return self._get_insert_statement().get_columns(self._filtered_field_names(omit_fields, include_generated))
-
-    def _filtered_field_names(self, omit_fields: set[str], include_generated: bool = False) -> list[str]:
-        """The fields an INSERT of this call writes.
-
-        Args:
-            omit_fields: Fields left to their database default.
-            include_generated: The objects carry their primary key.
-
-        Returns:
-            The field names.
-        """
-        return self._get_insert_statement().get_field_names(
-            with_primary_key=include_generated, omitted_field_names=omit_fields
-        )
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        return InsertStatement(model_binding, self._connection)
 
     def _get_fixed_parameter_count(self, db_columns: list[str]) -> int:
         """Bind parameters one multi-row ``INSERT`` of this call carries besides its rows' values -
@@ -508,9 +513,13 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
     async def _execute_bound(self) -> list[TModel]:
         query = self._get_execution_query(True)
         query._validate_dialect_dependent_options()
-        if query.model._meta.change_capture_needs is not None:
+        if query._requires_capture_transaction():
             return await WriteSteps.get_whole_run(query._connection, query._run_captured())
         return await WriteSteps.get_whole_run(query._connection, query._run_reported())
+
+    def _requires_capture_transaction(self) -> bool:
+        binding: ModelBinding = self._binding  # type: ignore[assignment]
+        return self._connection.features.supports_transactions and binding.change_capture_needs is not None
 
     async def _run_captured(self) -> list[TModel]:
         """Runs the insert of a model with ``Meta.change_capture`` and captures its rows, in one
@@ -546,21 +555,22 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
             QueryError: The model has no tenant scope, an object carries a tenant outside it, or
                 an object carries none under a scope of several values.
         """
-        primary_key_name = self.model._meta.generated_pk_field_name
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        primary_key_name = model_binding.generated_pk_field_name
         if primary_key_name is not None:
             for obj in self._objects:
                 if not obj._custom_generated_pk and getattr(obj, primary_key_name, None) is not None:
                     object.__setattr__(obj, "_custom_generated_pk", True)
         if not self._tenant_scoped:
-            if self.model._meta.tenant_field:
+            if model_binding.tenant_field:
                 # .all_tenants() widens the rows a query reads, not the rows an object points at - each
                 # object is checked under the active scope, as create() checks it.
                 TenantWriteRules.scope_objects(
-                    self.model, self._objects, "bulk_create", fills_missing=True, requires_active=False
+                    model_binding, self._objects, "bulk_create", fills_missing=True, requires_active=False
                 )
             return
         scope = TenantWriteRules.scope_objects(
-            self.model, self._objects, "bulk_create", fills_missing=True, requires_active=True
+            model_binding, self._objects, "bulk_create", fills_missing=True, requires_active=True
         )
         if self._update_fields:
             self._conflict_update_tenants = Tenancy.get_values(scope)
@@ -571,7 +581,8 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
         Returns:
             The supplied objects, or only those inserted when ``ignore_conflicts`` skips rows.
         """
-        self._writer = InstanceWriter(self.model, self._connection)
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        self._writer = InstanceWriter(model_binding, self._connection)
         given_objects = self._objects
         self._objects = list(given_objects)
         try:
@@ -596,12 +607,17 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
         # The stamps and blind indexes of the insert - one moment for every object, put back when the call
         # fails.
         stamped_values = InstanceValues()
-        snapshots = InstanceSnapshot.capture_persistence_of_all(self.model, self._objects)
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        snapshots = InstanceSnapshot.capture_persistence_of_all(model_binding, self._objects)
         returned_values = InstanceValues()
         omit_fields: set[str] = set()
         write_started = False
         try:
+            stamped_values.capture_preparation(self._objects)
+            if self._prepare_for_write is not None:
+                self._prepare_for_write(self._objects, stamped_values)
             await self._prepare_objects()
+            self._validate_returning_keys()
             self._inserted_objects = [] if ConflictClause.may_skip_conflicting_rows(self) else None
             if (
                 self._ignore_conflicts
@@ -613,19 +629,19 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
                         model=self.model.__name__, reason=IGNORE_CONFLICTS_KEYLESS_REASON
                     )
                 )
-            RowWriteRules.get(self.model, WriteType.INSERT, None, BULK_CREATE_METHOD_NAME).stamp(
+            RowWriteRules.get(model_binding, WriteType.INSERT, None, BULK_CREATE_METHOD_NAME).stamp(
                 self._objects, stamped_values
             )
-            if self._read_before_write is not None:
-                await self._read_before_write()
             prepared = PreparedBulkInsert(self)
+            if self._read_before_write is not None:
+                await self._read_before_write(prepared)
             omit_fields = prepared.omitted_fields
             # Capture before executing any batch, including the values set by RETURNING.
             returned_field_names = (
                 ReturnedRowsMatching.get_returned_field_names(self, omit_fields) if self._returning else []
             )
             returned_values.capture(self._objects, returned_field_names)
-            WriteFinalizer.register_snapshots(snapshots, self._connection)
+            RollbackRestores.register_snapshots(self._connection, snapshots)
             if prepared.bound.requires_transaction:
                 # Several statements run in one transaction - a failure leaves no row of the earlier
                 # ones.
@@ -633,7 +649,7 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
                 async with original_connection._in_transaction() as transaction_connection:
                     self._apply_connection(transaction_connection)
                     try:
-                        WriteFinalizer.register_snapshots(snapshots, transaction_connection)
+                        RollbackRestores.register_snapshots(transaction_connection, snapshots)
                         write_started = True
                         await prepared.execute(self)
                     finally:
@@ -652,13 +668,7 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
                     cleanup_errors.append(cleanup_error)
             # The rows of earlier statements were rolled back with the failed one - the objects
             # they populated go back to their pre-call state too.
-            restore_snapshots = list(snapshots)
-            restore_snapshots.extend(
-                InstanceSnapshot(obj, values) for obj, values in stamped_values.old_values.values()
-            )
-            restore_snapshots.extend(
-                InstanceSnapshot(obj, values) for obj, values in returned_values.old_values.values()
-            )
+            restore_snapshots = [*snapshots, *stamped_values.get_snapshots(), *returned_values.get_snapshots()]
             try:
                 InstanceSnapshot.restore_all(restore_snapshots)
             except BaseException as cleanup_error:
@@ -666,8 +676,14 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
             if cleanup_errors:
                 raise BaseExceptionGroup(WRITE_RESTORE_FAILURES_MESSAGE, [error, *cleanup_errors]) from None
             if isinstance(error, (ValidationError, TypeError)):
-                RowWriteRules.get(self.model, WriteType.INSERT, None, BULK_CREATE_METHOD_NAME).raise_if_unbound_values(
-                    self._objects, self._filtered_field_names(omit_fields, include_generated=True), error
+                RowWriteRules.get(
+                    model_binding, WriteType.INSERT, None, BULK_CREATE_METHOD_NAME
+                ).raise_if_unbound_values(
+                    self._objects,
+                    self._get_insert_statement().get_field_names(
+                        with_primary_key=True, omitted_field_names=omit_fields
+                    ),
+                    error,
                 )
             if self._on_conflict and self._connection.is_missing_conflict_target_error(error):
                 raise QueryError(
@@ -692,9 +708,10 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
         an unsaved object becomes unsaved again. Bulk reporting remains a single event.
         """
         written = self._objects if self._inserted_objects is None else self._inserted_objects
-        if self.model._meta.recomputed_db_fields and not self._returning:
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        if model_binding.recomputed_db_fields and not self._returning:
             ReturnedValues.leave_unloaded(
-                self.model, written, self.model._meta.recomputed_db_fields, connection=self._connection
+                model_binding, written, model_binding.recomputed_db_fields, connection=self._connection
             )
         if self._inserted_objects is not None:
             # Rows skipped as conflicting: their objects keep the state they had.
@@ -702,7 +719,7 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
             stamped_values.restore(obj for obj in self._objects if id(obj) not in written_ids)
             snapshots = [snapshot for snapshot in snapshots if id(snapshot.instance) in written_ids]
         stamped_values.keep(self._connection, written)
-        WriteFinalizer.publish_saved(snapshots, self._connection, WriteOutcome(RowOperation.INSERT, None))
+        WriteFinalizer.publish_saved(snapshots, self._connection, RowOperation.INSERT)
 
     def _prepare_preview_objects(self) -> tuple[str, ...]:
         """Copy input objects and identify values that cannot be obtained by inspection.
@@ -712,12 +729,15 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
         change default/key grouping, so no exact commands are promised for them.
         """
         self._objects = [copy(obj) for obj in self._objects]
+        if self._prepare_for_write is not None:
+            self._prepare_for_write(self._objects, InstanceValues())
         self._prepare_object_values()
-        rules = RowWriteRules.get(self.model, WriteType.INSERT, None, BULK_CREATE_METHOD_NAME)
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        rules = RowWriteRules.get(model_binding, WriteType.INSERT, None, BULK_CREATE_METHOD_NAME)
         deferred = set(rules.saved_attribute_names) if self._objects else set()
         for obj in self._objects:
             deferred.update(obj._await_when_save)
-        key_name = self.model._meta.generated_pk_field_name
+        key_name = model_binding.generated_pk_field_name
         if (
             key_name
             and self._connection.features.takes_keys_before_insert
@@ -738,19 +758,25 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
             deferred = query._prepare_preview_objects()
             if deferred:
                 return WritePreview(None, None, deferred)
-            query._validate_dialect_dependent_options()
-            query._writer = InstanceWriter(query.model, query._connection)
-            prepared = PreparedBulkInsert(query)
-            return WritePreview(prepared.bound.commands, prepared.bound.requires_transaction)
+            prepared = query._bind_preview()
+            return WritePreview(
+                prepared.bound.commands, query._requires_capture_transaction() or prepared.bound.requires_transaction
+            )
+
+    def _bind_preview(self, *, parameters_inline: bool = False) -> PreparedBulkInsert:
+        self._validate_dialect_dependent_options()
+        self._validate_returning_keys()
+        binding: ModelBinding = self._binding  # type: ignore[assignment]
+        BulkCreateReports.prepare_returned_rows(self, listened=ChangeEvents.is_observed(binding))
+        self._writer = InstanceWriter(binding, self._connection)
+        return PreparedBulkInsert(self, parameters_inline=parameters_inline)
 
     def _get_statements(self, parameters_inline: bool) -> list[tuple[str, list[Any]]]:
         """Render actual bound batches, or refuse to invent values that need execution."""
         deferred = self._prepare_preview_objects()
         if deferred:
             raise QueryError(BULK_INSERT_DEFERRED_PREVIEW_MESSAGE.format(fields=", ".join(deferred)))
-        self._validate_dialect_dependent_options()
-        self._writer = InstanceWriter(self.model, self._connection)
-        prepared = PreparedBulkInsert(self, parameters_inline=parameters_inline)
+        prepared = self._bind_preview(parameters_inline=parameters_inline)
         statements: list[tuple[str, list[Any]]] = []
         for batch in prepared.batches:
             command = batch.command

@@ -46,7 +46,7 @@ class ClickhouseSharedVariantValues:
     own reading leaves out decimals, dates and the containers of them."""
 
     #: The binary encoding of each type written, by its text.
-    type_encodings: ClassVar[Cache[bytes]] = Cache(CLICKHOUSE_BINARY_TYPE_CACHE_MAX_SIZE, holds_sql=False)
+    type_encodings: ClassVar[Cache[bytes]] = Cache(CLICKHOUSE_BINARY_TYPE_CACHE_MAX_SIZE)
 
     @staticmethod
     def get_decimal_width(precision: int) -> tuple[int, int]:

@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+from itertools import batched
 from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
 from hare.dialects.postgresql.drivers.asyncpg.asyncpg_extension_type_codecs import AsyncpgExtensionTypeCodecs
+from hare.dialects.postgresql.drivers.asyncpg.constants import (
+    ASYNCPG_DOMAIN_TYPES_BATCH_SIZE,
+    ASYNCPG_DOMAIN_TYPES_SQL,
+)
+from hare.sql.sql_context import SqlContext
 
 if TYPE_CHECKING:
     from hare.dialects.postgresql.drivers.asyncpg.client.asyncpg_client import AsyncpgClient
@@ -12,6 +18,26 @@ if TYPE_CHECKING:
 
 class AsyncpgSchemaCodecs:
     """Refreshes extension codecs on checked-out asyncpg connections after schema changes."""
+
+    @staticmethod
+    async def install(connection: asyncpg.Connection) -> frozenset[int]:
+        """Install codecs through public asyncpg APIs, including domains inside records.
+
+        Preparing an array of a domain makes asyncpg load its complete base-type graph.
+        A top-level domain value alone exposes only its base OID in row metadata and
+        leaves an anonymous record's domain OID unknown. Retain those OIDs in the same
+        schema-generation snapshot as extension codecs so dropping a domain retires it.
+        """
+        installed_oids = set(await AsyncpgExtensionTypeCodecs.install(connection))
+        domains = await connection.fetch(ASYNCPG_DOMAIN_TYPES_SQL)
+        for batch in batched(domains, ASYNCPG_DOMAIN_TYPES_BATCH_SIZE):
+            columns = []
+            for schema, name, domain_oid, array_oid in batch:
+                qualified_type = SqlContext.quote_text(schema, '"') + "." + SqlContext.quote_text(name, '"')
+                columns.append(f"NULL::{qualified_type}[]")
+                installed_oids.update((domain_oid, array_oid))
+            await connection.prepare("SELECT " + ", ".join(columns))
+        return frozenset(installed_oids)
 
     @staticmethod
     def forget_schema_connections(client: AsyncpgClient, pool: asyncpg.Pool) -> None:
@@ -47,7 +73,7 @@ class AsyncpgSchemaCodecs:
             # registry must remain unknown, so the next refresh retires it conservatively.
             snapshots.pop(key, None)
             await connection.reload_schema_state()
-            installed_oids = await AsyncpgExtensionTypeCodecs.install(connection)
+            installed_oids = await AsyncpgSchemaCodecs.install(connection)
             if previous is None or previous[1] - installed_oids:
                 retirements = client.schema_retirements.get_bucket(client)
                 if retirements.get((id(pool),)) != generation:

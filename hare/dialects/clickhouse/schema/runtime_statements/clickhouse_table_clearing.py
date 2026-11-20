@@ -8,7 +8,7 @@ from hare.dialects.base.schema.runtime_statements.table_clearing import TableCle
 
 if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class ClickhouseTableClearing(TableClearing):
@@ -22,8 +22,8 @@ class ClickhouseTableClearing(TableClearing):
         return editor.get_schema_table_sql(table_name, schema)
 
     @staticmethod
-    def get_model_target_sql(editor: BaseSchemaEditor, model: type[Model]) -> str:
-        return editor.get_storage_table_sql(model)
+    def get_model_target_sql(editor: BaseSchemaEditor, binding: ModelBinding) -> str:
+        return editor.get_storage_table_sql(binding)
 
     @staticmethod
     async def clear_tables(connection: DatabaseClient, quoted_tables: Sequence[str]) -> None:

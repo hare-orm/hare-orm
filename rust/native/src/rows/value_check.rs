@@ -36,44 +36,6 @@ pub struct ValueCheck {
 }
 
 impl ValueCheck {
-    /// None when `value` passes, else what failed.
-    pub fn get_failure<'py>(&self, value: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
-        let py = value.py();
-        let failed = match &self.check {
-            Check::Limit { limit, limit_i64, is_lower } => {
-                let compared_here = match limit_i64 {
-                    Some(limit_number) if value.is_exact_instance_of::<PyInt>() => value
-                        .extract::<i64>()
-                        .ok()
-                        .map(|number| if *is_lower { number < *limit_number } else { number > *limit_number }),
-                    _ => None,
-                };
-                match compared_here {
-                    Some(failed) => failed,
-                    None if *is_lower => value.lt(limit.bind(py))?,
-                    None => value.gt(limit.bind(py))?,
-                }
-            }
-            Check::Length { limit, is_lower } => {
-                let length = value.len()? as i64;
-                if *is_lower {
-                    length < *limit
-                } else {
-                    length > *limit
-                }
-            }
-            Check::Digits { max_digits, decimal_places } => {
-                return Self::get_digits_failure(value, *max_digits, *decimal_places);
-            }
-            Check::Pattern { pattern_method, requires_text } => {
-                (*requires_text && !value.is_instance_of::<PyString>())
-                    || pattern_method.bind(py).call1((value,))?.is_none()
-            }
-            Check::UuidVersion { version } => value.getattr(intern!(py, "version"))?.ne(version.bind(py))?,
-        };
-        Ok(failed.then(|| pyo3::types::PyBool::new(py, true).to_owned().into_any()))
-    }
-
     /// The failure of a `Decimal`'s digits - counted from `as_tuple()`: a positive exponent adds trailing
     /// zeros, a negative one past every digit adds leading zeros after the point.
     fn get_digits_failure<'py>(
@@ -184,7 +146,40 @@ impl ValueCheck {
 
     /// None when `value` passes, else what failed.
     fn failure<'py>(&self, value: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
-        self.get_failure(value)
+        let py = value.py();
+        let failed = match &self.check {
+            Check::Limit { limit, limit_i64, is_lower } => {
+                let compared_here = match limit_i64 {
+                    Some(limit_number) if value.is_exact_instance_of::<PyInt>() => value
+                        .extract::<i64>()
+                        .ok()
+                        .map(|number| if *is_lower { number < *limit_number } else { number > *limit_number }),
+                    _ => None,
+                };
+                match compared_here {
+                    Some(failed) => failed,
+                    None if *is_lower => value.lt(limit.bind(py))?,
+                    None => value.gt(limit.bind(py))?,
+                }
+            }
+            Check::Length { limit, is_lower } => {
+                let length = value.len()? as i64;
+                if *is_lower {
+                    length < *limit
+                } else {
+                    length > *limit
+                }
+            }
+            Check::Digits { max_digits, decimal_places } => {
+                return Self::get_digits_failure(value, *max_digits, *decimal_places);
+            }
+            Check::Pattern { pattern_method, requires_text } => {
+                (*requires_text && !value.is_instance_of::<PyString>())
+                    || pattern_method.bind(py).call1((value,))?.is_none()
+            }
+            Check::UuidVersion { version } => value.getattr(intern!(py, "version"))?.ne(version.bind(py))?,
+        };
+        Ok(failed.then(|| pyo3::types::PyBool::new(py, true).to_owned().into_any()))
     }
 
     /// The call that makes this check again - `pickle` and `copy` use it.

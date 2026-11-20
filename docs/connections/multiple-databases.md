@@ -23,6 +23,13 @@ query starts from one, so this covers `create`, `get`, `get_or_create`, `update_
 and `refresh_from_db`; of the relation writes (`add`, `remove`, `set`, `clear`, `create`, ...), a
 many-to-many relation's included; and of `prefetch_related_objects()`.
 
+The selected client must not belong to another `HareContext`: query and instance operations
+raise `ConfigurationError` before SQL in that case, including for equal aliases. Aliases are
+looked up in the query's or instance's original context. Transactions, independent clients and
+tenant clients from that context remain valid. For another application's database, start from
+its registry, for example `other_context.apps.get_queryset(Book)`. Standalone clients with no
+connection handler have no application ownership to conflict with.
+
 **Elsewhere**: `Transactions.atomic(using)`, `on_commit(..., using=)`, `on_rollback(..., using=)`,
 `execute_sql(..., using=)`. A client of an autonomous transaction is passed the same way:
 
@@ -59,6 +66,11 @@ opinion for the queried model. A related model whose default connection differs 
 own connection choice. The queryset of a `Prefetch("books", Book.objects.filter(...))` reads on the parent's
 connection as the plain `prefetch_related("books")` does, unless it chose one with `.using()` itself.
 
+Cascade deletion, its preview, restoration and many-to-many mutation checks use the same source-versus-target
+connection rule. Models sharing their declared default and current route retain the exact selected
+client, including its transaction and tenant namespace. A different declared default keeps the target's
+selection, even when both routers choose one alias or an independent source client uses that alias.
+
 ## <a id="routers"></a>Routers
 
 Write a **plain class** — no base class to inherit, hare dispatches to it duck-typed — with either or
@@ -67,7 +79,7 @@ both methods, each returning a **connection alias string** (or `None`):
 ```python
 class ReportingRouter:
     def db_for_read(self, model: type[Model]) -> str | None:
-        if model._meta.app == "reporting":
+        if Hare.get_context().apps.get_binding(model).app == "reporting":
             return "reporting_replica"
         return None
 
@@ -88,7 +100,10 @@ there would create a duplicate.
 Register via `Hare.init(routers=[...])` — a list of dotted-path strings
 (`"library.routers.ReportingRouter"`) or classes directly, each instantiated without arguments. Each
 `HareContext` holds its routers in a `ConnectionRouter` of its own (`context.router`), which asks them in
-turn — so the routers of different contexts never mix.
+turn — so the routers of different contexts never mix. A write through an explicit client also
+records read-after-write affinity for the application that supplied that client, even under another
+active context. It does not pin the other application's reads to its primary. Reconnecting pools
+retains the application's write history.
 
 A router chooses where queries go, not where tables are: `makemigrations`, `migrate` and `drift` work on
 the `default_connection` of each app and never ask a router. So a router routes between connections holding

@@ -19,7 +19,7 @@ LITERAL_PLAN_PART_TYPES = frozenset({PlanPartType.LITERAL, PlanPartType.VALUE_ME
 
 #: Parts described as one argument.
 ARGUMENT_PLAN_PART_TYPES = frozenset(
-    {PlanPartType.ARGUMENT, PlanPartType.ARGUMENT_METHOD, PlanPartType.ENCODED_ARGUMENT}
+    {PlanPartType.ARGUMENT, PlanPartType.SHAPE_ARGUMENT, PlanPartType.ARGUMENT_METHOD, PlanPartType.ENCODED_ARGUMENT}
 )
 
 #: Parts described by the expression they hold.

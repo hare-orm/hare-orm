@@ -8,6 +8,7 @@ import dataclasses
 import pytest
 
 from hare import fields
+from hare.core.hare_context import HareContext
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.ddl.schema_objects.materialized_view import MaterializedView
 from hare.ddl.schema_objects.view import View
@@ -28,8 +29,8 @@ from hare.migrations.operations import (
     RemoveView,
     RenameMaterializedView,
     RenameView,
+    SeparateDatabaseAndState,
 )
-from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state import State
 from tests.dialects.clickhouse.models import Sale, ShopTotal
 from tests.utils.operations import apply_operations
@@ -61,7 +62,7 @@ async def run(operation, state, editor) -> State:
 
 @pytest.mark.asyncio
 async def test_views_are_created_with_the_model_and_follow_its_rows(clickhouse_db, monkeypatch):
-    connection = Sale._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Sale).get_connection()
     assert await get_engines(connection, "sale") == {
         "sale": "MergeTree",
         "sale_totals": "MaterializedView",
@@ -99,47 +100,48 @@ async def test_views_are_created_with_the_model_and_follow_its_rows(clickhouse_d
 
 @pytest.mark.asyncio
 async def test_drift_finds_no_change_of_the_declared_views_and_a_changed_one(clickhouse_db):
-    connection = Sale._meta.connection
-    state = State()
-    for model in (Sale, ShopTotal):
-        state.models[("models", model.__name__)] = ModelState.make_from_model("models", model)
+    connection = HareContext.require_current().apps.get_queryset(Sale).get_connection()
+    state = State.from_models((Sale, ShopTotal))
 
-    async def get_view_operations():
-        drift = await detect_drift(connection, state, ["models"])
-        return [
-            (type(operation).__name__, operation.view.name)
-            for operation in drift.operations
-            if "View" in type(operation).__name__
-        ]
-
-    assert await get_view_operations() == []
+    result = await detect_drift(connection, state, ["models"])
+    assert result.operations == []
+    assert result.mismatched_objects == []
     await connection.execute_script(
         "CREATE OR REPLACE VIEW big_sales AS SELECT id, shop, amount FROM sale WHERE amount > 200;"
         "ALTER TABLE sale_totals MODIFY QUERY SELECT shop, toInt64(amount * 2) AS total FROM sale;"
         "DROP VIEW sales_by_shop;"
     )
     try:
-        assert sorted(await get_view_operations()) == [
-            ("AddMaterializedView", "sales_by_shop"),
-            ("AlterMaterializedView", "sale_totals"),
-            ("AlterView", "big_sales"),
-        ]
+        result = await detect_drift(connection, state, ["models"])
+        prepare, add_view = result.operations
+        assert isinstance(prepare, SeparateDatabaseAndState)
+        assert isinstance(add_view, AddMaterializedView)
+        assert add_view.view.name == "sales_by_shop"
+        assert {item.name for item in result.mismatched_objects} == {"big_sales", "sale_totals"}
         await connection.execute_script(
             "CREATE MATERIALIZED VIEW sales_by_shop ENGINE = SummingMergeTree ORDER BY (shop) AS "
             "SELECT shop, toInt64(sum(amount)) AS total FROM sale GROUP BY shop"
         )
         # The view of another engine than the declared one.
-        assert ("AlterMaterializedView", "sales_by_shop") in await get_view_operations()
+        result = await detect_drift(connection, state, ["models"])
+        assert result.operations == []
+        assert {item.name for item in result.mismatched_objects} == {"big_sales", "sale_totals", "sales_by_shop"}
     finally:
         editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
-        await editor.run_sqls(editor.get_model_view_drop_sqls(Sale))
-        await editor.run_sqls(editor.table_creation.get_schema_objects_after_table_sqls(Sale, safe=True))
-    assert await get_view_operations() == []
+        await editor.run_sqls(editor.get_model_view_drop_sqls(HareContext.require_current().apps.get_binding(Sale)))
+        await editor.run_sqls(
+            editor.table_creation.get_schema_objects_after_tables_sqls(
+                (HareContext.require_current().apps.get_binding(Sale),), safe=True
+            )
+        )
+    result = await detect_drift(connection, state, ["models"])
+    assert result.operations == []
+    assert result.mismatched_objects == []
 
 
 @pytest.mark.asyncio
 async def test_migrations_add_change_rename_and_remove_views(clickhouse_db):
-    connection = Sale._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Sale).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
     state = await run(
@@ -246,7 +248,7 @@ async def test_migrations_add_change_rename_and_remove_views(clickhouse_db):
         # it again wrote every row of the source a second time.
         city_weights = [("a", 50), ("b", 62), ("c", 14)]
         assert await get_rows(connection, totals_sql.format("views_city_weight")) == city_weights
-        state_before_removal = state.clone()
+        state_before_removal = state
         removal = RemoveMaterializedView("Parcel", "views_to_city")
         state = await run(removal, state, editor)
         await removal.database_backward("models", state, state_before_removal, state_editor=editor)
@@ -263,7 +265,7 @@ async def test_migrations_add_change_rename_and_remove_views(clickhouse_db):
 @pytest.mark.asyncio
 async def test_a_view_keyed_by_a_column_holding_null_is_created(clickhouse_db):
     """Its storage, sorted by the column, was refused - the server keys no nullable column by default."""
-    connection = Sale._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Sale).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
     state = await run(
@@ -294,12 +296,10 @@ async def test_a_view_keyed_by_a_column_holding_null_is_created(clickhouse_db):
 
 @pytest.mark.asyncio
 async def test_a_view_is_refreshed_on_a_schedule(clickhouse_db):
-    connection = Sale._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Sale).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
-    state = State()
-    state.models[("models", "Sale")] = ModelState.make_from_model("models", Sale)
     # The table a materialized view of Sale writes to - drift builds the models in a shadow.
-    state.models[("models", "ShopTotal")] = ModelState.make_from_model("models", ShopTotal)
+    state = State.from_models([Sale, ShopTotal], app_label="models")
     await create_sales(connection)
     snapshot = ClickhouseMaterializedView(
         "sales_snapshot",

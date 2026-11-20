@@ -16,11 +16,34 @@ prepares the complete creation, including triggers, before any command is sent. 
 Both execution and collection consume those same steps. `plan.effects` describes runtime work
 such as reading the catalog or backfilling rows, without inspecting SQL text.
 
+Before executing any step, the plan enters `editor.schema_plan_scope(plan)`. A dialect uses
+this scope to check the complete plan's runtime requirements, including nested steps, before
+an earlier sibling can change the database, and to complete resources it acquired afterwards.
+SQL collection must not read the database. SQLite disables and restores foreign-key enforcement
+for a direct replacement plan outside a transaction. It refuses replacement inside a borrowed
+transaction with enforcement enabled: changing that PRAGMA there has no effect and dropping a
+referenced table can cascade into its dependants.
+
+`constraint_checking_disabled()` yields whether this scope disabled enforcement and owes
+a compensating check. A borrowed transaction or an already disabled connection yields false;
+it must not check a caller's deferred references prematurely. Direct `Migration.apply()` and
+`unapply()` enter this scope before operation transactions. `MigrationRunner` enters it around
+its transaction and journal instead, preserving the same ownership rule.
+An atomic direct migration starts a transaction when its client is not already transactional.
+The editor records the actual transactional scope while its body runs and restores its prior
+client and flag afterwards. `SchemaTransaction` preserves the same editor state and checks an
+owned top-level transaction before commit; a nested savepoint leaves deferred checks to its caller.
+
 `SchemaRequirements` in `hare.ddl` collects extension requirements from fields, indexes,
 constraints and explicit declarations. Live schema creation and migration state use this shared
 collector; creating tables does not import the migration autodetector. `SchemaReferences` reads
 structured field references from index keys, included columns and constraint predicates. Raw SQL
 does not supply inferred dependencies and requires explicitly ordered schema operations.
+
+Schema generation, model checks and migrations normalize `Meta.indexes` entries through
+`Index.from_declaration(entry)`. An existing `Index`, including a subclass, is returned unchanged;
+an iterable of field names becomes `Index(fields=tuple(entry))`. Dialect-specific rendering remains
+in the index and schema editor hooks.
 
 `BoundIndexKey` distinguishes physical column names from prepared SQL expressions before rendering.
 A column named `lower(title)` is quoted as one identifier. Generated names use the same explicit

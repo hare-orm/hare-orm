@@ -5,10 +5,12 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.classes.class_path import ClassPath
 from hare.ddl.constants import INDEX_KEYS_REQUIRE_MODEL
+from hare.ddl.ddl_term_sql import DdlTermSql
 from hare.ddl.declared_names import DeclaredNames
 from hare.ddl.enums import GeneratedNamePrefix
 from hare.ddl.expressions.declared_expressions import DeclaredExpressions
 from hare.ddl.generated_names import GeneratedNames
+from hare.ddl.indexes.ordered_index_key import OrderedIndexKey
 from hare.declarations.declaration_values import DeclarationValues
 from hare.dialects.base.constants import SQL_DIALECT
 from hare.exceptions import ConfigurationError, UnSupportedError
@@ -24,9 +26,7 @@ if TYPE_CHECKING:
     from hare.dialects.base.features import Features
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
     from hare.fields.field import Field
-    from hare.models import Model
-from hare.ddl.ddl_term_sql import DdlTermSql
-from hare.ddl.indexes.ordered_index_key import OrderedIndexKey
+    from hare.models.model_binding import ModelBinding
 
 
 class Index:
@@ -115,13 +115,23 @@ class Index:
         self.name = name
         #: The key expressions as declared - what a migration file keeps, and what each database
         #: renders its own SQL for.
-        self.declared_expressions: tuple[Any, ...] = tuple(expressions)
+        self.declared_expressions: tuple[Any, ...] = expressions
         self.extra = ""
         self.opclasses = list(opclasses or [])
         self.unique = unique
         if include and not self.SUPPORTS_INCLUDE:
             raise UnSupportedError(f"include= is not supported by a {self.INDEX_TYPE} index.")
         self.include = list(include or [])
+
+    @staticmethod
+    def from_declaration(declaration: Index | Iterable[str]) -> Index:
+        """Read a Meta.indexes entry without copying an existing index.
+
+        An Index subclass retains its identity and options. A sequence of field names
+        constructs the same plain Index used by schema generation and migrations.
+        Conversion and constructor errors propagate without retries or added checks.
+        """
+        return declaration if isinstance(declaration, Index) else Index(fields=tuple(declaration))
 
     @staticmethod
     def is_field_key(expression: Any) -> bool:
@@ -155,9 +165,10 @@ class Index:
         for expression in self.declared_expressions:
             order = expression.order if isinstance(expression, (Ordering, OrderedIndexKey)) else Order.ASC
             nulls_first = order.nulls_first
+            ascending = order.is_ascending
             if nulls_first is None:
-                nulls_first = not order.is_ascending
-            orders.append(Order.build(order.is_ascending, nulls_first))
+                nulls_first = not ascending
+            orders.append(Order.build(ascending, nulls_first))
         return orders
 
     @staticmethod
@@ -288,18 +299,22 @@ class Index:
             name_parts.append(self.extra.strip())
         return tuple(name_parts)
 
-    def get_generated_name(self, model: type[Model]) -> str:
+    def get_generated_name(self, binding: ModelBinding) -> str:
         """The name an unnamed index gets for the supplied model binding.
 
         Args:
-            model: The indexed model.
+            binding: The indexed model.
 
         Returns:
             The generated index name.
         """
         prefix = GeneratedNamePrefix.UNIQUE_INDEX if self.unique else GeneratedNamePrefix.INDEX
         return GeneratedNames.get_index_name(
-            prefix, model, self.get_key_names(model), self.get_name_parts(), expression_keys=not bool(self.fields)
+            prefix,
+            binding.db_table,
+            self.get_key_names(binding),
+            self.get_name_parts(),
+            expression_keys=not bool(self.fields),
         )
 
     def get_index_type_sql(self) -> str:
@@ -311,26 +326,26 @@ class Index:
         """
         return self.INDEX_TYPE
 
-    def get_extra(self, model: type[Model], client: DatabaseClient) -> str:
+    def get_extra(self, binding: ModelBinding, client: DatabaseClient) -> str:
         """The ``INCLUDE``/``WITH``/``WHERE`` clauses following the indexed columns, for a table of
         ``model``.
 
         Args:
-            model: The indexed model.
+            binding: The indexed model.
             client: The client of the database the DDL runs on.
 
         Returns:
             The clauses, or ``""``.
         """
         self.raise_if_unsupported(client.dialect)
-        return self.get_include_sql(model, client) + self.extra
+        return self.get_include_sql(binding, client) + self.extra
 
-    def get_include_sql(self, model: type[Model], client: DatabaseClient) -> str:
+    def get_include_sql(self, binding: ModelBinding, client: DatabaseClient) -> str:
         """The clause of the non-key columns - none where the dialect has no non-key index
         columns, as they only make the index cover more queries.
 
         Args:
-            model: The indexed model.
+            binding: The indexed model.
             client: The client of the database the DDL runs on.
 
         Returns:
@@ -338,43 +353,42 @@ class Index:
         """
         if not self.include:
             return ""
-        columns = model._meta.get_column_names(self.include)
+        columns = binding.get_column_names(self.include)
         literals = client.dialect.literals
         return client.dialect.schema_editor_class.index_statements_class.get_index_include_sql(
             [literals.quote_identifier(column) for column in columns]
         )
 
-    def get_sql(self, schema_editor: BaseSchemaEditor, model: type[Model], safe: bool) -> str:
+    def get_sql(self, schema_editor: BaseSchemaEditor, binding: ModelBinding, safe: bool) -> str:
         """Returns the statement creating the index on a table of ``model`` - the editor's own, as
         when the index is added later.
 
         Args:
             schema_editor: The schema editor of the database the DDL runs on.
-            model: The indexed model.
+            binding: The indexed model.
             safe: Whether the index is created only when it doesn't exist yet.
 
         Returns:
             The statement.
         """
-        return schema_editor.index_statements.get_index_create_sql(model, self, safe=safe)
+        return schema_editor.index_statements.get_index_create_sql(binding, self, safe=safe)
 
-    def get_column_orders(self, model: type[Model]) -> list[str]:
+    def get_column_orders(self, binding: ModelBinding) -> list[str]:
         """The direction of each key column - a relation of several key columns takes its field's
         direction on every one of them.
 
         Args:
-            model: The indexed model.
+            binding: The indexed model.
 
         Returns:
             ``"DESC"`` or ``""`` for each column; none when no key is descending.
         """
         if not any(self.field_orders):
             return []
-        meta = model._meta
         return [
             order
             for name, order in zip(self.fields, self.field_orders, strict=True)
-            for _column_name in meta.get_column_names((name,))
+            for _column_name in binding.get_column_names((name,))
         ]
 
     def get_expression_dialect(self) -> Dialect:
@@ -385,33 +399,34 @@ class Index:
         """
         return SQL_DIALECT
 
-    def get_key_sqls(self, model: type[Model], dialect: Dialect) -> list[str]:
+    def get_key_sqls(self, binding: ModelBinding, dialect: Dialect) -> list[str]:
         """Returns the index's keys as a dialect's ``CREATE INDEX`` lists them: the column of a
         field key, the SQL the dialect renders for an expression key - so an index declared once
         is created with each database's own SQL.
 
         Args:
-            model: The indexed model.
+            binding: The indexed model.
             dialect: The dialect of the database the DDL runs on.
 
         Returns:
             One key each - a column name, ``(expression)``, or ``(expression) DESC ...``.
         """
+        model = binding._model
         if self.fields:
-            return model._meta.get_column_names(self.fields)
+            return binding.get_column_names(self.fields)
         sql_context = dialect.sql_context.copy(native_functions_only=True)
         return [
             DdlTermSql.get_sql(term, sql_context, model, declared)
             if isinstance(term, OrderedIndexKey)
             else f"({DdlTermSql.get_sql(term, sql_context, model, declared)})"
-            for term, declared in zip(self.get_key_terms(model, dialect), self.declared_expressions, strict=True)
+            for term, declared in zip(self.get_key_terms(binding, dialect), self.declared_expressions, strict=True)
         ]
 
-    def get_key_terms(self, model: type[Model], dialect: Dialect) -> list[Term]:
+    def get_key_terms(self, binding: ModelBinding, dialect: Dialect) -> list[Term]:
         """Resolves the declared key expressions against the model for a dialect.
 
         Args:
-            model: The indexed model.
+            binding: The indexed model.
             dialect: The dialect the terms render for.
 
         Returns:
@@ -420,25 +435,25 @@ class Index:
         key_terms: list[Term] = []
         for expression in self.declared_expressions:
             if isinstance(expression, Ordering) and isinstance(expression.target, str):
-                column = self.get_key_column(model, expression.target)
+                column = self.get_key_column(binding, expression.target)
                 key_terms.append(OrderedIndexKey(column, expression.order))
             elif isinstance(expression, Ordering):
-                term = DeclaredExpressions.get_term(expression.target, model, dialect)
+                term = DeclaredExpressions.get_term(expression.target, binding, dialect)
                 key_terms.append(OrderedIndexKey(term, expression.order))
-            elif type(expression) is F and expression.name in model._meta.fields_db_projection:
-                key_terms.append(self.get_key_column(model, expression.name))
+            elif type(expression) is F and expression.name in binding.fields_db_projection:
+                key_terms.append(self.get_key_column(binding, expression.name))
             elif isinstance(expression, Expression):
-                key_terms.append(DeclaredExpressions.get_term(expression, model, dialect))
+                key_terms.append(DeclaredExpressions.get_term(expression, binding, dialect))
             else:
                 key_terms.append(expression)
         return key_terms
 
     @staticmethod
-    def get_key_column(model: type[Model], field_name: str) -> HareSqlField:
+    def get_key_column(binding: ModelBinding, field_name: str) -> HareSqlField:
         """The column of a field an index key names.
 
         Args:
-            model: The indexed model.
+            binding: The indexed model.
             field_name: The field.
 
         Returns:
@@ -447,13 +462,14 @@ class Index:
         Raises:
             ConfigurationError: The name isn't a field of the model.
         """
-        column_name = model._meta.fields_db_projection.get(field_name)
+        model = binding._model
+        column_name = binding.fields_db_projection.get(field_name)
         if column_name is None:
             raise ConfigurationError(f"Index key {field_name!r} is not a field of {model.__name__}")
         # Unqualified, as an introspected index's key is - the two compare by their SQL text.
         return HareSqlField(column_name)
 
-    def get_key_names(self, model: type[Model] | None = None) -> list[str]:
+    def get_key_names(self, binding: ModelBinding | None = None) -> list[str]:
         """Describe the physical keys without changing the declaration.
 
         A model binds field references and expression trees. Without a model,
@@ -462,13 +478,13 @@ class Index:
         The naming context is independent of the database executing the index.
         """
         if self.fields:
-            return model._meta.get_column_names(self.fields) if model is not None else list(self.fields)
-        if model is None:
+            return binding.get_column_names(self.fields) if binding is not None else list(self.fields)
+        if binding is None:
             if any(isinstance(expression, (Expression, Ordering)) for expression in self.declared_expressions):
                 raise ConfigurationError(INDEX_KEYS_REQUIRE_MODEL)
             terms: Sequence[Term] = self.declared_expressions
         else:
-            terms = self.get_key_terms(model, self.get_expression_dialect())
+            terms = self.get_key_terms(binding, self.get_expression_dialect())
         return [
             term.get_sql(INDEX_KEY_SQL_CONTEXT)
             if isinstance(term, OrderedIndexKey)

@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from hare.migrations.safety.enums import MigrationRiskCode
     from hare.migrations.state.prepared_operation_states import PreparedOperationStates
     from hare.migrations.state.state import State
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 @dataclass(frozen=True)
@@ -55,6 +55,7 @@ class MigrationSafetyContext:
     large_table_rows: int
     table_row_counts: Mapping[str, int | None]
     in_separate_database_and_state: bool = False
+    operation_app_label: str | None = None
 
     @cached_property
     def schema_plan(self) -> SchemaChangePlan | None:
@@ -62,8 +63,9 @@ class MigrationSafetyContext:
         operation = self.operation
         if not isinstance(operation, (AddField, AlterField)):
             return None
-        old_model = self.get_model_before(operation.model_name)
-        new_model = self.get_model_after(operation.model_name)
+        before, after = self.state_before, self.state_after
+        old_model = self._get_binding(before, operation.model_name)
+        new_model = self._get_binding(after, operation.model_name)
         if old_model is None or new_model is None:
             return None
         if isinstance(operation, AddField):
@@ -71,8 +73,12 @@ class MigrationSafetyContext:
                 old_model, new_model, operation.name, foreign_key_not_valid=operation.not_valid
             )
         return self.schema_editor.get_alter_field_plan(
-            old_model, new_model, operation.name, self.state_after.get_models_with_tables()
+            old_model, new_model, operation.name, after.get_bindings_with_tables()
         )
+
+    def discard_schema_plan(self) -> None:
+        """Release cached bindings after one assessment scope completes."""
+        self.__dict__.pop("schema_plan", None)
 
     @property
     def state_before(self) -> State:
@@ -84,7 +90,7 @@ class MigrationSafetyContext:
         """The migration state after the operation."""
         return self.operation_states.get(self.position + 1)
 
-    def get_model_before(self, model_name: str) -> type[Model] | None:
+    def get_binding_before(self, model_name: str) -> ModelBinding | None:
         """The model as it is before the operation, None when the state has no such model.
 
         Args:
@@ -93,9 +99,9 @@ class MigrationSafetyContext:
         Returns:
             The rendered model.
         """
-        return self._get_model(self.state_before, model_name)
+        return self._get_binding(self.state_before, model_name)
 
-    def get_model_after(self, model_name: str) -> type[Model] | None:
+    def get_binding_after(self, model_name: str) -> ModelBinding | None:
         """The model as it is after the operation, None when the state has no such model.
 
         Args:
@@ -104,7 +110,7 @@ class MigrationSafetyContext:
         Returns:
             The rendered model.
         """
-        return self._get_model(self.state_after, model_name)
+        return self._get_binding(self.state_after, model_name)
 
     def get_field_before(self, model_name: str, field_name: str) -> Field[Any] | None:
         """A field of a model as it is before the operation.
@@ -116,8 +122,8 @@ class MigrationSafetyContext:
         Returns:
             The field, None when the model or the field isn't there yet.
         """
-        model = self.get_model_before(model_name)
-        return model._meta.fields_map.get(field_name) if model is not None else None
+        model = self.get_binding_before(model_name)
+        return model.fields_map.get(field_name) if model is not None else None
 
     def get_field_after(self, model_name: str, field_name: str) -> Field[Any] | None:
         """A field of a model as it is after the operation.
@@ -129,13 +135,14 @@ class MigrationSafetyContext:
         Returns:
             The field, None when the model or the field is gone.
         """
-        model = self.get_model_after(model_name)
-        return model._meta.fields_map.get(field_name) if model is not None else None
+        model = self.get_binding_after(model_name)
+        return model.fields_map.get(field_name) if model is not None else None
 
-    def _get_model(self, state: State, model_name: str) -> type[Model] | None:
-        if (self.migration.app_label, model_name) not in state.models:
+    def _get_binding(self, state: State, model_name: str) -> ModelBinding | None:
+        app_label = self.operation_app_label or self.migration.app_label
+        if (app_label, model_name) not in state.models:
             return None
-        return state.apps.get_model(f"{self.migration.app_label}.{model_name}")
+        return state.apps.get_binding(f"{app_label}.{model_name}")
 
     def may_be_large(self, model_name: str) -> bool:
         """Whether the estimate reaches ``large_table_rows`` or the row count is unknown.

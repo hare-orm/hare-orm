@@ -7,6 +7,8 @@ from operator import or_
 from types import UnionType
 from typing import TYPE_CHECKING, Annotated, Any, Union, get_args, get_origin
 
+from annotated_types import BaseMetadata
+
 from hare.contrib.frameworks.constants import CONTAINER_ORIGINS
 from hare.contrib.request_query.options.in_path import InPath
 from hare.contrib.request_query.types.text_parameter import TextParameter
@@ -43,6 +45,26 @@ class ParameterAnnotation:
             otherwise.
         """
         return list[str] if text_parameter.repeats else str
+
+    @classmethod
+    def has_text_parameter(cls, annotation: Any) -> bool:
+        """Whether any part of the annotation is decoded from a different transport type."""
+        arguments = get_args(annotation)
+        if get_origin(annotation) is Annotated and cls.get_text_parameter(arguments[1:]) is not None:
+            return True
+        return any(cls.has_text_parameter(argument) for argument in arguments)
+
+    @classmethod
+    def get_metadata(cls, annotation: Any, metadata: Any) -> list[Any]:
+        """Keep transport markers; decoded-value constraints belong to RequestQuery validation.
+
+        A comma-separated list's length is the decoded item count, not the number of URL
+        occurrences. A key tuple's length is not the length of its textual representation.
+        Ordinary parameters retain their constraints on the unchanged transport type.
+        """
+        if cls.get_text_parameter(metadata) is None and not cls.has_text_parameter(annotation):
+            return list(metadata)
+        return [item for item in metadata if not isinstance(item, BaseMetadata)]
 
     @staticmethod
     def is_in_path(field_info: FieldInfo) -> bool:
@@ -90,7 +112,9 @@ class ParameterAnnotation:
             text_parameter = cls.get_text_parameter(arguments[1:])
             if text_parameter is not None:
                 return cls.get_text_type(text_parameter)
-            return Annotated[(cls.present(arguments[0]), *arguments[1:])]
+            annotation = cls.present(arguments[0])
+            metadata = cls.get_metadata(arguments[0], arguments[1:])
+            return Annotated[(annotation, *metadata)] if metadata else annotation
         if origin in {Union, UnionType}:
             return reduce(or_, (cls.present(argument) for argument in arguments))
         if origin in CONTAINER_ORIGINS and arguments:

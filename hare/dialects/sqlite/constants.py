@@ -13,7 +13,11 @@ from hare.vectors.enums import VectorDistanceType
 
 #: The file name SQLite opens as a private in-memory database instead of a file.
 SQLITE_IN_MEMORY_FILENAME = ":memory:"
+SQLITE_STORAGE_UNOBSERVED_MESSAGE = "SQLite native storage identity was not observed; refusing an unanchored deletion"
+SQLITE_DATABASE_FILE_EXISTS_MESSAGE = "database file {filename!r} already exists"
 SQLITE_PRAGMA_RESTORE_FAILED = "SQLite operation and pragma restoration both failed"
+#: Boolean PRAGMA spellings accepted by SQLite and the connection settings.
+SQLITE_PRAGMA_ENABLED_VALUES = frozenset({"1", "on", "true", "yes"})
 
 #: Default PRAGMA values applied on connect unless overridden via connection credentials.
 SQLITE_DEFAULT_JOURNAL_MODE = "WAL"
@@ -251,9 +255,6 @@ SQLITE_TYPE_MAP: list[tuple[str, str, dict[str, Any]]] = [
     ("text", "hare.fields.data.text.TextField", {}),
 ]
 
-#: SQLite's one namespace of a plain (non-ATTACHed) database.
-SQLITE_MAIN_SCHEMA = "main"
-
 SQLITE_TABLE_EXISTS_SQL = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?"
 #: Whether a table exists in one database of the connection - ``main`` or an attached one, quoted.
 SQLITE_DATABASE_TABLE_EXISTS_SQL = "SELECT 1 FROM {database}.sqlite_master WHERE type = 'table' AND name = ?"
@@ -277,29 +278,14 @@ SQLITE_COLUMN_TYPE_SYNONYMS = {
     "FLOAT": "REAL",
 }
 
-#: The table options after the column list of a CREATE TABLE text as ``sqlite_master`` keeps it -
-#: ``WITHOUT ROWID`` and ``STRICT``, comma-separated.
-SQLITE_TABLE_OPTIONS_PATTERN = LazyPattern(
-    r"\)\s*(?P<options>(?:WITHOUT\s+ROWID|STRICT)(?:\s*,\s*(?:WITHOUT\s+ROWID|STRICT))*)\s*;?\s*$",
-    re.IGNORECASE,
-)
-
-
 #: A declared SQLite type string can carry its own size, e.g. "VARCHAR(255)" - SQLite has no
 #: separate metadata for this (its columns are dynamically typed), so the declared type string itself
 #: is the only place to read it from.
 SQLITE_SIZE_RE = LazyPattern(r"\(\s*(\d+)\s*(?:,\s*\d+\s*)?\)")
 
-SQLITE_INDEX_ON_RE = LazyPattern(rf"\bON\s+(?:{SQLITE_IDENTIFIER_PATTERN}|[\w.]+)\s*\(", re.IGNORECASE)
+SQLITE_INDEX_WHERE_RE = LazyPattern(r"WHERE\b\s*(?P<condition>.+?)\s*;?\s*$", re.IGNORECASE | re.DOTALL)
 
-SQLITE_INDEX_WHERE_RE = LazyPattern(r"^\s*WHERE\s+(?P<condition>.+?)\s*;?\s*$", re.IGNORECASE | re.DOTALL)
-
-#: An index term suffix Index(*expressions) can't carry - it wraps every term in parens.
-SQLITE_INDEX_TERM_MODIFIER_RE = LazyPattern(r"\s(?:ASC|DESC)\s*$|\bCOLLATE\b", re.IGNORECASE)
-
-SQLITE_INDEX_TERM_ORDER_RE = LazyPattern(r"\s(?P<direction>ASC|DESC)\s*$", re.IGNORECASE)
-
-SQLITE_INDEX_TERM_COLLATE_RE = LazyPattern(r"\bCOLLATE\b", re.IGNORECASE)
+SQLITE_DEFAULT_COLLATION = "binary"
 
 SQLITE_TRIGGERDEF_RE = LazyPattern(
     rf"""CREATE\s+TRIGGER\s+(?:IF\ NOT\ EXISTS\s+)?(?P<name>{SQLITE_IDENTIFIER_PATTERN})\s+
@@ -433,6 +419,7 @@ SQLITE_DATABASE_LIST_SQL = "PRAGMA database_list"
 #: A table-reading PRAGMA (``table_xinfo``, ``index_list``, ``index_info``, ``foreign_key_list``) of a
 #: database of the connection, for a quoted table or index - a PRAGMA takes no parameters.
 SQLITE_DATABASE_PRAGMA_TEMPLATE = "PRAGMA {database}.{pragma}({name})"
+SQLITE_TABLE_LIST_SQL = "PRAGMA {database}.table_list"
 
 #: The declared column types hare writes for more than one field on SQLite - inspectdb maps them to the
 #: plain field and says which other field the column may hold, by the type, lowercased.

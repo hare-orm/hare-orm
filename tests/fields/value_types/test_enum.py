@@ -4,11 +4,15 @@ from enum import Enum, IntEnum
 import pytest
 
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError, IntegrityError, ValidationError
 from hare.fields import CharEnumField, IntEnumField, IntField
 from hare.query.expressions import F
 from hare.transactions.transactions import Transactions
 from tests.shared_models import testmodels
+from tests.utils.permuted_integer_enum import PermutedIntegerEnum
+
+pytestmark = pytest.mark.usefixtures("model_conversion_context")
 
 
 class BadIntEnum1(IntEnum):
@@ -27,6 +31,33 @@ class BadIntEnumIfGenerated(IntEnum):
     python_programming = -1
     database_design = 2
     system_administration = 3
+
+
+@pytest.mark.parametrize("values", [(1, "1"), ((1, 2), "(1, 2)")])
+def test_string_enum_requires_distinct_stored_values(values):
+    labels = Enum("Labels", {"first": values[0], "second": values[1]})
+    with pytest.raises(ConfigurationError, match="distinct members with the same stored text"):
+        CharEnumField(labels)
+
+
+def test_string_enum_keeps_aliases_and_non_string_members():
+    labels = Enum("Labels", {"first": 1, "alias": 1, "second": 2})
+    declaration = CharEnumField(labels)
+    for member in labels:
+        stored = declaration.to_db_value(member, None)
+        assert declaration.to_python(stored) is member
+    assert declaration.to_python("1") is labels.alias
+
+
+@pytest.mark.database_independent
+def test_integer_enum_encoding_uses_declared_values_instead_of_member_numeric_conversion():
+    declaration = IntEnumField(PermutedIntegerEnum)
+    foreign_enum = IntEnum("ForeignCodes", {"FIRST": 1, "SECOND": 2})
+    for member in PermutedIntegerEnum:
+        assert int(member) != member.value
+        for value in (member, member.value, foreign_enum(member.value)):
+            assert declaration.to_db_value(value, None) == member.value
+            assert declaration.to_python(value) is member
 
 
 # ============================================================================
@@ -201,7 +232,7 @@ def test_an_enum_field_keeps_a_given_option(make_field, attribute_name, expected
     ],
 )
 def test_enum_value_outside_the_enum_raises_validation_error(field_name, value, error_match):
-    field = testmodels.EnumFields._meta.fields_map[field_name]
+    field = HareContext.require_current().apps.get_binding(testmodels.EnumFields).fields_map[field_name]
     with pytest.raises(ValidationError, match=error_match):
         field.to_db_value(value, testmodels.EnumFields)
 
@@ -303,7 +334,7 @@ def test_char_enum_foreign_enum_member_silently_accepted_now_raises():
     value.value's STRING LENGTH via MaxLengthValidator, never enum-type membership. A member of
     an unrelated Enum class used to be silently written to the DB with no error at the point of
     the actual mistake, only failing later - confusingly - on the next read."""
-    field = testmodels.EnumFields._meta.fields_map["currency"]
+    field = HareContext.require_current().apps.get_binding(testmodels.EnumFields).fields_map["currency"]
     with pytest.raises(ValidationError, match="'XXX' is not a valid"):
         field.to_db_value(UnrelatedStrEnum.NOT_A_CURRENCY, testmodels.EnumFields)
 
@@ -380,7 +411,9 @@ async def test_a_value_of_no_member_written_around_the_field_is_refused_by_the_d
     update, was stored and failed every read. A CHECK keeps the column to the members' values."""
     connection = db.get_connection()
     row = await testmodels.EnumFields.objects.create(service=testmodels.Service.database_design)
-    table = connection.dialect.literals.quote_identifier(testmodels.EnumFields._meta.db_table)
+    table = connection.dialect.literals.quote_identifier(
+        HareContext.require_current().apps.get_binding(testmodels.EnumFields).db_table
+    )
     for column, value in (("service", "999"), ("currency", "'XXX'")):
         with pytest.raises(IntegrityError):
             async with Transactions.atomic():

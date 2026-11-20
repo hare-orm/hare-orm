@@ -16,16 +16,18 @@ from hare.fields.relations.fields.declarations import BackwardOneToOneRelation
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.fields.relations.fields.one_to_one_field_instance import OneToOneFieldInstance
+from hare.fields.relations.relation_values import RelationValues
 from hare.fields.relations.swappable_model_reference import SwappableModelReference
 from hare.models import Model
 from hare.models.class_building.model_field_collection import ModelFieldCollection
-from hare.query.lookup_info.lookup_info_builder import LookupInfoBuilder
+from hare.models.class_building.primary_key_declaration import PrimaryKeyDeclaration
 from hare.sql.identifiers import Identifiers
 
 if TYPE_CHECKING:
     from hare.core.apps.apps import Apps
     from hare.core.apps.declarations import ModelReference, TableIdentity
     from hare.fields.field import Field
+    from hare.models.model_binding import ModelBinding
 
 
 class RelationLinking:
@@ -50,7 +52,7 @@ class RelationLinking:
             ConfigurationError: The target doesn't exist or is abstract, or is a swapped model named directly
                 instead of through ``swappable()``.
         """
-        if isinstance(reference, type) and reference._meta.abstract:
+        if isinstance(reference, type) and reference._declaration.abstract:
             # An abstract model has no primary key to relate to.
             raise ConfigurationError(
                 f"{reference.__name__} is an abstract model (Meta.abstract = True) - it can never be "
@@ -60,13 +62,16 @@ class RelationLinking:
         if (
             not isinstance(reference, SwappableModelReference)
             and apps.REJECTS_SWAPPED_RELATION_TARGETS
-            and related_model._meta.swapped is not None
+            and (related_binding := apps.get_binding(related_model)).swapped is not None
         ):
             raise ConfigurationError(
-                f"A relation points at {related_model._meta.full_name!r}, which has been swapped for "
-                f"{related_model._meta.swapped!r} by the {related_model._meta.swappable} setting - declare it "
-                f"with swappable({related_model._meta.swappable!r}) instead"
+                f"A relation points at {related_binding.full_name!r}, which has been swapped for "
+                f"{related_binding.swapped!r} by the {related_binding.swappable} "
+                f"setting - declare it "
+                f"with swappable({related_binding.swappable!r}) instead"
             )
+        if apps._preparation is not None:
+            apps._preparation.include((related_model,))
         return related_model, related_model.__name__
 
     @staticmethod
@@ -112,7 +117,8 @@ class RelationLinking:
         Raises:
             ConfigurationError: The related model or the fields pointed at are wrong.
         """
-        foreign_key_object: OneToOneFieldInstance[Any] | ForeignKeyFieldInstance[Any] = model._meta.fields_map[field]  # type: ignore[assignment]
+        model_binding = apps.get_binding(model)
+        foreign_key_object: OneToOneFieldInstance[Any] | ForeignKeyFieldInstance[Any] = model_binding.fields_map[field]  # type: ignore[assignment]
         related_model, related_model_name = RelationLinking.get_related_model(apps, foreign_key_object.model_name)
         to_field_names, related_fields = RelationLinking.get_key_targets(
             apps, model, field, foreign_key_object, related_model, related_model_name, is_one_to_one
@@ -123,34 +129,39 @@ class RelationLinking:
                 f"{model.__name__}.{field} points at {model.__name__}'s own primary key, which holds {field} - "
                 "a relation of a model to itself can't be a component of its composite primary key"
             )
-        # The first key field is what the readers of a single-column relation read.
+        source_fields, key_source_fields = RelationLinking.add_key_fields(
+            model_binding, field, foreign_key_object, related_fields, to_field_names, is_one_to_one
+        )
+        # Keep the previous target fields until add_key_fields checks whether its columns
+        # still belong to this exact graph. A changed target needs fresh conversion fields.
         foreign_key_object.to_field_instance = related_fields[0]
         foreign_key_object.to_field_names = to_field_names
         foreign_key_object.to_field_instances = tuple(related_fields)
         foreign_key_object.field_type = foreign_key_object.to_field_instance.field_type
-
-        source_fields, key_source_fields = RelationLinking.add_key_fields(
-            model, field, foreign_key_object, related_fields, to_field_names, is_one_to_one
-        )
         foreign_key_object.related_model = related_model
         foreign_key_object.source_fields = tuple(source_fields)
         foreign_key_object.db_column_names = tuple(key_source_fields)
         # The first key column is what the readers of a single-column relation read.
         foreign_key_object.source_field = source_fields[0]
         if is_one_to_one and foreign_key_object.pk:
-            model._meta.primary_key_attribute = source_fields[0]
-            LookupInfoBuilder.forget_descriptions()
-        primary_key_attribute = model._meta.primary_key_attribute
-        if isinstance(primary_key_attribute, tuple) and field in primary_key_attribute:
+            model_binding.primary_key_attribute = source_fields[0]
+        primary_key_attribute = model_binding.primary_key_attribute
+        if isinstance(primary_key_attribute, tuple) and (
+            field in primary_key_attribute or any(name in primary_key_attribute for name in source_fields)
+        ):
             # A composite primary key's relation component is the relation's key columns.
             component_names = tuple(
-                name
-                for component in primary_key_attribute
-                for name in (source_fields if component == field else [component])
+                dict.fromkeys(
+                    name
+                    for component in primary_key_attribute
+                    for name in (source_fields if component == field else [component])
+                )
             )
-            model._meta.primary_key_attribute = component_names
-            model._meta.pk_fields = tuple(model._meta.fields_map[name] for name in component_names)
-            LookupInfoBuilder.forget_descriptions()
+            model_binding.primary_key_attribute = component_names
+            model_binding.pk_fields = tuple(
+                model_binding.fields_map[PrimaryKeyDeclaration.get_component_name(model_binding.fields_map, name)]
+                for name in component_names
+            )
         foreign_key_relation = RelationLinking.get_backward_relation(
             model, foreign_key_object, source_fields, key_source_fields, is_one_to_one
         )
@@ -189,14 +200,15 @@ class RelationLinking:
                 cycle; a one-to-one primary key targets a composite key; the target's primary key
                 compares WITHOUT OVERLAPS.
         """
+        related_binding = apps.get_binding(related_model)
         if to_field := foreign_key_object.to_field:
             to_field_names: tuple[str, ...] = to_field if isinstance(to_field, tuple) else (to_field,)
             related_fields = []
             for name in to_field_names:
-                if name not in related_model._meta.fields_map:
+                if name not in related_binding.fields_map:
                     # May be the shadow column of the target's own not yet initialized relation.
                     RelationLinking.ensure_foreign_key_or_one_to_one_inited(apps, related_model)
-                related_field = related_model._meta.fields_map.get(name)
+                related_field = related_binding.fields_map.get(name)
                 if not related_field:
                     raise ConfigurationError(f"there is no field named {name!r} in model {related_model_name!r}")
                 related_fields.append(related_field)
@@ -205,36 +217,37 @@ class RelationLinking:
                     raise ConfigurationError(
                         f"field {to_field_names[0]!r} in model {related_model_name!r} is not unique"
                     )
-            elif to_field_names != related_model._meta.primary_key_attribute_names:
+            elif to_field_names != related_binding.primary_key_attribute_names:
                 # A composite to_field must be the target's whole primary key, in its order.
                 raise ConfigurationError(
                     f'{"OneToOneField" if is_one_to_one else "ForeignKeyField"} "{model.__name__}.{field}" '
                     f"to_field={to_field_names} must exactly match {related_model_name!r}'s composite "
-                    f"primary key {related_model._meta.primary_key_attribute_names} (in the same order) - an "
+                    f"primary key {related_binding.primary_key_attribute_names} (in the same order) - "
+                    f"an "
                     "arbitrary composite UniqueConstraint target isn't supported."
                 )
-        elif related_model._meta.has_composite_primary_key:
+        elif related_binding.has_composite_primary_key:
             # A component may be the key column of the target's own relation - in place once that
             # relation is set up.
             RelationLinking.ensure_foreign_key_or_one_to_one_inited(apps, related_model)
-            to_field_names = related_model._meta.primary_key_attribute  # type: ignore[assignment]
-            related_fields = list(related_model._meta.pk_fields)
+            to_field_names = related_binding.primary_key_attribute  # type: ignore[assignment]
+            related_fields = list(related_binding.pk_fields)
             foreign_key_object.to_field = to_field_names
         else:
             relation_label = "OneToOneField" if is_one_to_one else "ForeignKeyField"
-            related_model._meta.raise_if_no_primary_key(
+            related_binding.raise_if_no_primary_key(
                 f'{relation_label} "{model.__name__}.{field}" to it without to_field='
             )
-            to_field_names = (related_model._meta.primary_key_attribute,)  # type: ignore[assignment]
-            related_fields = [related_model._meta.pk]
-            foreign_key_object.to_field = related_model._meta.primary_key_attribute
+            to_field_names = (related_binding.primary_key_attribute,)  # type: ignore[assignment]
+            related_fields = [related_binding.pk]
+            foreign_key_object.to_field = related_binding.primary_key_attribute
 
         if any(isinstance(related_field, OneToOneFieldInstance) for related_field in related_fields):
             # The target (typically its OneToOneField(primary_key=True)) is itself a relation with
             # no column of its own - reference the shadow column it stores its value in instead.
             RelationLinking.ensure_foreign_key_or_one_to_one_inited(apps, related_model)
             related_fields = [
-                related_model._meta.fields_map[related_field.source_field]
+                related_binding.fields_map[related_field.source_field]
                 if isinstance(related_field, OneToOneFieldInstance) and related_field.source_field
                 else related_field
                 for related_field in related_fields
@@ -254,7 +267,7 @@ class RelationLinking:
                 "declared directly via CompositePrimaryKey, not derived from a composite O2O target"
             )
 
-        if related_model._meta.pk_without_overlaps and len(to_field_names) > 1:
+        if related_binding.pk_without_overlaps and len(to_field_names) > 1:
             raise ConfigurationError(
                 f'{"OneToOneField" if is_one_to_one else "ForeignKeyField"} "{model.__name__}.{field}" targets the '
                 f"primary key of {related_model_name!r}, which compares its range WITHOUT OVERLAPS - a foreign "
@@ -265,7 +278,7 @@ class RelationLinking:
 
     @staticmethod
     def add_key_fields(
-        model: type[Model],
+        binding: ModelBinding,
         field: str,
         foreign_key_object: OneToOneFieldInstance[Any] | ForeignKeyFieldInstance[Any],
         related_fields: list[Field[Any]],
@@ -277,7 +290,7 @@ class RelationLinking:
         key's unique constraint.
 
         Args:
-            model: The model of the relation.
+            binding: The model of the relation.
             field: The relation's name.
             foreign_key_object: The relation.
             related_fields: The referenced fields.
@@ -297,7 +310,7 @@ class RelationLinking:
         )
         if foreign_key_object.index and (
             not all(related_field.indexable for related_field in related_fields)
-            or model._meta.is_indexed_by_leading_columns(
+            or binding.is_indexed_by_leading_columns(
                 field, list(zip(shadow_names, key_source_field_names, strict=True))
             )
         ):
@@ -335,7 +348,7 @@ class RelationLinking:
                     key_foreign_key_object.default = RelationLinking.get_component_default(
                         foreign_key_object.default, position
                     )
-                    key_foreign_key_object.static_default_is_normalized = None
+                    key_foreign_key_object.get_binding().static_default_is_normalized = None
             if is_one_to_one:
                 key_foreign_key_object.pk = foreign_key_object.pk
                 # A composite one-to-one's uniqueness is one constraint over all key columns, added
@@ -344,35 +357,34 @@ class RelationLinking:
             else:
                 key_foreign_key_object.pk = False
                 key_foreign_key_object.unique = False
-            model._meta.add_field(shadow_name, key_foreign_key_object)
+            binding.add_field(shadow_name, key_foreign_key_object)
             source_fields.append(shadow_name)
             key_source_fields.append(key_source_field)
-        model._meta.place_key_columns()
+        binding.place_key_columns()
 
         if is_one_to_one and len(shadow_names) > 1:
             # The relation's own uniqueness - declared by the relation, never recorded in migration state.
             composite_unique_constraint = UniqueConstraint(fields=shadow_names)
-            if composite_unique_constraint not in model._meta.constraints:
-                model._meta.constraints = (*model._meta.constraints, composite_unique_constraint)
+            if composite_unique_constraint not in binding.constraints:
+                binding.constraints = (*binding.constraints, composite_unique_constraint)
 
         return source_fields, key_source_fields
 
     @staticmethod
-    def is_relation_uniqueness(model: type[Model], constraint: Any) -> bool:
-        """Whether a constraint of a model is the uniqueness of one of its one-to-one relations to several
-        fields - the relation's own, made and dropped with its key columns.
-
-        Args:
-            model: The model.
-            constraint: One of its ``Meta.constraints``.
-        """
+    def get_unique_relation_name(binding: ModelBinding, constraint: Any) -> str | None:
+        """The composite one-to-one relation declaring the unnamed unique constraint, if any."""
         if not isinstance(constraint, UniqueConstraint) or constraint.name or constraint.condition is not None:
-            return False
-        return any(
-            isinstance(field, OneToOneFieldInstance)
-            and len(field.source_fields) > 1
-            and tuple(field.source_fields) == tuple(constraint.fields)
-            for field in model._meta.fields_map.values()
+            return None
+        fields = tuple(constraint.fields)
+        return next(
+            (
+                name
+                for name, field in binding.fields_map.items()
+                if isinstance(field, OneToOneFieldInstance)
+                and len(source_fields := field.source_fields) > 1
+                and source_fields == fields
+            ),
+            None,
         )
 
     @staticmethod
@@ -464,20 +476,24 @@ class RelationLinking:
         Raises:
             ConfigurationError: The backward relation's name is taken on the target, or reserved.
         """
-        if model._meta.swapped is not None:
+        declaring_binding = apps.get_binding(model)
+        if declaring_binding.swapped is not None:
             # A swapped model has no table and no rows - nothing on the target points back at it,
             # and its backward accessor would clash with the one of the model swapped in.
             return
+        related_binding = apps.get_binding(related_model)
         if (backward_relation_name := foreign_key_object.related_name) is False:
             # No public accessor, but on_delete still has to reach the rows pointing back.
-            related_model._meta.add_hidden_backward_relation(f"{model._meta.full_name}.{field}", foreign_key_relation)
+            related_binding.add_hidden_backward_relation(
+                f"{declaring_binding.full_name}.{field}", foreign_key_relation
+            )
             return
         backward_relation_name = RelationLinking.get_backward_relation_name(
-            backward_relation_name, model._meta.db_table, model._meta.app, model.__name__
+            backward_relation_name, declaring_binding.db_table, declaring_binding.app, model.__name__
         )
         if foreign_key_object.related_name:
             foreign_key_object.related_name = backward_relation_name
-        existing_relation = related_model._meta.fields_map.get(backward_relation_name)  # type: ignore[arg-type]
+        existing_relation = related_binding.fields_map.get(backward_relation_name)  # type: ignore[arg-type]
         if existing_relation is not None:
             if (
                 isinstance(existing_relation, BackwardForeignKeyRelation)
@@ -486,10 +502,10 @@ class RelationLinking:
                 and existing_relation.relation_source_fields == foreign_key_relation.relation_source_fields
                 and apps.get_table_identity(
                     existing_relation.related_model,
-                    existing_relation.related_model._meta.schema,
-                    existing_relation.related_model._meta.db_table,
+                    (existing_binding := apps.get_binding(existing_relation.related_model)).schema,
+                    existing_binding.db_table,
                 )
-                == apps.get_table_identity(model, model._meta.schema, model._meta.db_table)
+                == apps.get_table_identity(model, declaring_binding.schema, declaring_binding.db_table)
             ):
                 return
             raise ConfigurationError(
@@ -498,7 +514,7 @@ class RelationLinking:
                 " concrete model a distinct backward-accessor name."
             )
         RelationLinking.check_related_name_not_reserved(related_model, backward_relation_name, model, field)  # type: ignore[arg-type]
-        related_model._meta.add_field(backward_relation_name, foreign_key_relation)  # type: ignore[arg-type]
+        related_binding.add_field(backward_relation_name, foreign_key_relation)  # type: ignore[arg-type]
 
     @staticmethod
     def check_related_name_not_reserved(
@@ -545,7 +561,7 @@ class RelationLinking:
         """
         table_holders: dict[TableIdentity, tuple[type[Model], str | None]] = {}
         for registered_model in apps.get_models_iterable():
-            meta = registered_model._meta
+            meta = apps.get_binding(registered_model)
             if meta.swapped is not None:
                 # A swapped model has no table, nor through tables of its own.
                 continue
@@ -587,13 +603,14 @@ class RelationLinking:
         Raises:
             ConfigurationError: ``through`` is taken.
         """
-        key = apps.get_table_identity(model, model._meta.schema, through)
+        declaring_binding = apps.get_binding(model)
+        key = apps.get_table_identity(model, declaring_binding.schema, through)
         holder = table_holders.get(key)
         if holder is not None and holder != (model, field):
             holder_model, holder_field_name = holder
             if holder_field_name == field and apps.get_table_identity(
-                holder_model, holder_model._meta.schema, holder_model._meta.db_table
-            ) == apps.get_table_identity(model, model._meta.schema, model._meta.db_table):
+                holder_model, (holder_binding := apps.get_binding(holder_model)).schema, holder_binding.db_table
+            ) == apps.get_table_identity(model, declaring_binding.schema, declaring_binding.db_table):
                 # The same historical field reached through another name of its source table.
                 return
             if holder_field_name is None:
@@ -621,11 +638,9 @@ class RelationLinking:
         Returns:
             The column's part of a tuple, a callable giving its part of the callable's tuple, or None.
         """
-        if default is None:
-            return None
         if callable(default):
             return partial(RelationLinking.get_called_component, default, position)
-        return default[position]
+        return RelationValues.get_default_component(default, position)
 
     @staticmethod
     def get_called_component(default: Callable[[], Any], position: int) -> Any:
@@ -638,8 +653,7 @@ class RelationLinking:
         Returns:
             The part - None when the callable gives None.
         """
-        value = default()
-        return None if value is None else value[position]
+        return RelationValues.get_default_component(default(), position)
 
     @staticmethod
     def ensure_foreign_key_or_one_to_one_inited(apps: Apps, target_model: type[Model]) -> None:
@@ -650,18 +664,17 @@ class RelationLinking:
             apps: The registry.
             target_model: The model whose forward relations are set up.
         """
-        if target_model._meta._foreign_key_or_one_to_one_inited:
+        target_binding = apps.get_binding(target_model)
+        if target_binding._foreign_key_or_one_to_one_inited:
             return
-        target_model._meta._foreign_key_or_one_to_one_inited = True
+        target_binding._foreign_key_or_one_to_one_inited = True
         # A OneToOneField primary key goes first: a relation pointing back at this model while
         # its fields are still being initialized needs its primary key column already in place.
-        one_to_one_fields = sorted(target_model._meta.one_to_one_fields)
-        primary_key_one_to_one_fields = [
-            field for field in one_to_one_fields if target_model._meta.fields_map[field].pk
-        ]
+        one_to_one_fields = sorted(target_binding.one_to_one_fields)
+        primary_key_one_to_one_fields = [field for field in one_to_one_fields if target_binding.fields_map[field].pk]
         for field in primary_key_one_to_one_fields:
             RelationLinking.init_foreign_key_or_one_to_one_field(apps, target_model, field, is_one_to_one=True)
-        for field in sorted(target_model._meta.foreign_key_fields):
+        for field in sorted(target_binding.foreign_key_fields):
             RelationLinking.init_foreign_key_or_one_to_one_field(apps, target_model, field)
         for field in one_to_one_fields:
             if field not in primary_key_one_to_one_fields:
@@ -677,12 +690,17 @@ class RelationLinking:
         Raises:
             ConfigurationError: There is no such field, or there are several.
         """
-        target_key = apps.get_table_identity(target_model, target_model._meta.schema, target_model._meta.db_table)
+        target_binding = apps.get_binding(target_model)
+        target_key = apps.get_table_identity(target_model, target_binding.schema, target_binding.db_table)
+        through_binding = apps.get_binding(through_model)
         candidates = [
             name
-            for name in through_model._meta.foreign_key_fields
-            if (related := through_model._meta.fields_map[name].related_model) is not None  # type: ignore[attr-defined]
-            and apps.get_table_identity(related, related._meta.schema, related._meta.db_table) == target_key
+            for name in through_binding.foreign_key_fields
+            if (related := through_binding.fields_map[name].related_model) is not None  # type: ignore[attr-defined]
+            and apps.get_table_identity(
+                related, (related_binding := apps.get_binding(related)).schema, related_binding.db_table
+            )
+            == target_key
         ]
         if len(candidates) != 1:
             raise ConfigurationError(
@@ -690,14 +708,15 @@ class RelationLinking:
                 f"ForeignKeyField pointing to {target_model.__name__!r} for its {side_label} side, "
                 f"found {len(candidates)}."
             )
-        through_foreign_key: ForeignKeyFieldInstance[Any] = through_model._meta.fields_map[candidates[0]]  # type: ignore[assignment]
+        through_foreign_key: ForeignKeyFieldInstance[Any] = through_binding.fields_map[candidates[0]]  # type: ignore[assignment]
         # Every M2M read/write keys a through row by the target's primary key - a to_field= on any
         # other column would store values no M2M operation can match.
-        if tuple(through_foreign_key.to_field_names) != target_model._meta.primary_key_attribute_names:
+        if through_foreign_key.to_field_names != target_binding.primary_key_attribute_names:
             raise ConfigurationError(
                 f"ManyToManyField through model {through_model.__name__!r} field {candidates[0]!r} must "
                 f"reference {target_model.__name__!r}'s primary key "
-                f"{target_model._meta.primary_key_attribute_names}, not to_field={through_foreign_key.to_field!r}."
+                f"{target_binding.primary_key_attribute_names}, not "
+                f"to_field={through_foreign_key.to_field!r}."
             )
         return through_foreign_key
 
@@ -754,18 +773,3 @@ class RelationLinking:
             return (explicit_key or Identifiers.get_within_limit(f"{base_name}{FOREIGN_KEY_COLUMN_SUFFIX}"),)
         prefix = explicit_key or base_name
         return tuple(Identifiers.get_within_limit(f"{prefix}_{name}") for name in pk_names)
-
-    @staticmethod
-    def get_relation_targets(model: type[Model]) -> set[type[Model]]:
-        """Every model ``model``'s own forward FK/O2O/M2M fields point at (itself included for a
-        self-referential relation) - the models it adds backward relations to."""
-        targets: set[type[Model]] = set()
-        meta = model._meta
-        for field_name in meta.foreign_key_fields | meta.one_to_one_fields | meta.many_to_many_fields:
-            field = meta.fields_map[field_name]
-            if isinstance(field, ManyToManyFieldInstance) and field._generated:
-                continue
-            related_model = getattr(field, "related_model", None)
-            if isinstance(related_model, type):
-                targets.add(related_model)
-        return targets

@@ -140,6 +140,13 @@ migration file keeps a queryset's projection as its SQL with its `read_columns`.
 with `ADD PROJECTION` and builds it for the stored rows with `MATERIALIZE PROJECTION`, which finishes before
 the migration goes on; it drops one with `DROP PROJECTION`.
 
+A queryset already tied to an application context or an explicit client is captured as SQL and
+`read_columns` when the projection is declared. Closing that context cannot change the declaration.
+The projection still checks that it belongs to the same Python model as its table.
+`ModelQuery()` and unbound queryset templates are compiled against the declaring table's graph.
+Recorded model-query filters use the same [capture and copying rules](../../models/schema-objects.md)
+as view declarations.
+
 Projection compilation uses a fresh SQL tree and neither reads nor publishes runnable statement
 plans. Rendering or serializing a projection leaves the source queryset unchanged; SQL and
 `read_columns` come from the same compilation. Structured projections reject `DISTINCT`, `HAVING`,

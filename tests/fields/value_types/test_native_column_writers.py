@@ -187,7 +187,7 @@ def test_a_validator_subclass_with_its_own_call_is_called_by_the_writer():
 
     assert writer("abc", None) == "abc"
     assert calls == ["abc"]
-    with pytest.raises(Exception, match="Length of 'abcd' 4 > 3"):
+    with pytest.raises(ValidationError, match="Length of 'abcd' 4 > 3"):
         writer("abcd", None)
     assert calls == ["abc", "abcd"]
 
@@ -214,7 +214,7 @@ def test_bulk_serialization_writes_through_the_columns_writers():
 
     rows = NativeModules.rows.serialize_instances([Row(1), Row(10)], [("value", field.get_db_value_writer())])
     assert rows == [[1], [10]]
-    with pytest.raises(Exception, match="less or equal to 10"):
+    with pytest.raises(ValidationError, match="less or equal to 10"):
         NativeModules.rows.serialize_instances([Row(11)], [("value", field.get_db_value_writer())])
 
 

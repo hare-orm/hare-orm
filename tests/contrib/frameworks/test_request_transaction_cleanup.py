@@ -13,10 +13,36 @@ pytestmark = [pytest.mark.database_independent, pytest.mark.asyncio]
 
 
 @pytest.mark.parametrize("failure_type", [RuntimeError, asyncio.CancelledError])
+async def test_status_extraction_failure_rolls_back_every_connection(monkeypatch, failure_type):
+    failure = failure_type("status extraction failed")
+    contexts = {
+        alias: SimpleNamespace(_context=None, __aenter__=AsyncMock(), __aexit__=AsyncMock())
+        for alias in ("first", "second")
+    }
+    monkeypatch.setattr(Transactions, "atomic", contexts.__getitem__)
+    request = RequestTransaction(tuple(contexts))
+    response = object()
+
+    def get_status_code(result):
+        assert result is response
+        raise failure
+
+    with pytest.raises(failure_type) as raised:
+        await request.run(AsyncMock(return_value=response), get_status_code)
+    assert raised.value is failure
+    assert [result.connection_alias for result in request.exits] == ["second", "first"]
+    assert all(not result.commit_requested for result in request.exits)
+    for context in contexts.values():
+        context.__aexit__.assert_awaited_once()
+        assert context.__aexit__.await_args.args[1] is failure
+
+
+@pytest.mark.parametrize("failure_type", [RuntimeError, asyncio.CancelledError])
 async def test_exit_failure_rolls_back_remaining_connections(monkeypatch, failure_type):
     failure = failure_type("exit failed")
     contexts = {
-        alias: SimpleNamespace(__aenter__=AsyncMock(), __aexit__=AsyncMock()) for alias in ("first", "second", "third")
+        alias: SimpleNamespace(_context=None, __aenter__=AsyncMock(), __aexit__=AsyncMock())
+        for alias in ("first", "second", "third")
     }
     contexts["second"].__aexit__.side_effect = failure
     monkeypatch.setattr(Transactions, "atomic", lambda alias: contexts[alias])
@@ -36,7 +62,7 @@ async def test_request_and_all_cleanup_failures_are_preserved(monkeypatch):
     request_error = LookupError("request failed")
     failures = [RuntimeError("first exit"), RuntimeError("second exit")]
     contexts = {
-        alias: SimpleNamespace(__aenter__=AsyncMock(), __aexit__=AsyncMock(side_effect=failure))
+        alias: SimpleNamespace(_context=None, __aenter__=AsyncMock(), __aexit__=AsyncMock(side_effect=failure))
         for alias, failure in zip(("first", "second"), failures, strict=True)
     }
     monkeypatch.setattr(Transactions, "atomic", lambda alias: contexts[alias])
@@ -51,7 +77,7 @@ async def test_request_and_all_cleanup_failures_are_preserved(monkeypatch):
 
 async def test_failed_second_entry_closes_first_connection(monkeypatch):
     failure = RuntimeError("cannot enter")
-    first = SimpleNamespace(__aenter__=AsyncMock(), __aexit__=AsyncMock())
+    first = SimpleNamespace(_context=None, __aenter__=AsyncMock(), __aexit__=AsyncMock())
     second = SimpleNamespace(__aenter__=AsyncMock(side_effect=failure), __aexit__=AsyncMock())
     monkeypatch.setattr(Transactions, "atomic", {"first": first, "second": second}.__getitem__)
     request = RequestTransaction(("first", "second"))
@@ -64,13 +90,13 @@ async def test_failed_second_entry_closes_first_connection(monkeypatch):
 
 async def test_repeated_cancellation_drains_active_exit_then_rolls_back_rest(monkeypatch):
     entered, release, notified = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    first = SimpleNamespace(__aenter__=AsyncMock(), __aexit__=AsyncMock())
+    first = SimpleNamespace(_context=None, __aenter__=AsyncMock(), __aexit__=AsyncMock())
 
     async def finish_second(*args):
         entered.set()
         await release.wait()
 
-    second = SimpleNamespace(__aenter__=AsyncMock(), __aexit__=AsyncMock(side_effect=finish_second))
+    second = SimpleNamespace(_context=None, __aenter__=AsyncMock(), __aexit__=AsyncMock(side_effect=finish_second))
     monkeypatch.setattr(Transactions, "atomic", {"first": first, "second": second}.__getitem__)
     request = RequestTransaction(("first", "second"))
     cancel_close = request._cancel_close
@@ -106,7 +132,7 @@ async def test_asgi_headers_follow_commit_and_body_error_does_not_close_twice(mo
     async def close(*args):
         events.append("commit")
 
-    context = SimpleNamespace(__aenter__=AsyncMock(), __aexit__=AsyncMock(side_effect=close))
+    context = SimpleNamespace(_context=None, __aenter__=AsyncMock(), __aexit__=AsyncMock(side_effect=close))
     monkeypatch.setattr(Transactions, "atomic", lambda alias: context)
 
     async def app(scope, receive, send):
@@ -126,7 +152,7 @@ async def test_asgi_headers_follow_commit_and_body_error_does_not_close_twice(mo
 
 async def test_asgi_commit_error_prevents_headers(monkeypatch):
     failure = RuntimeError("commit failed")
-    context = SimpleNamespace(__aenter__=AsyncMock(), __aexit__=AsyncMock(side_effect=failure))
+    context = SimpleNamespace(_context=None, __aenter__=AsyncMock(), __aexit__=AsyncMock(side_effect=failure))
     monkeypatch.setattr(Transactions, "atomic", lambda alias: context)
     send = AsyncMock()
 

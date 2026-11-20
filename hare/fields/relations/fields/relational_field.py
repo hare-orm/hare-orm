@@ -8,10 +8,12 @@ from hare.exceptions import (
 from hare.fields.enums import OnDelete
 from hare.fields.field import Field
 from hare.fields.relations.bound_relation import BoundRelation
+from hare.fields.relations.constants import PROTECT_DB_ON_DELETE_SQL
 from hare.fields.relations.swappable_model_reference import SwappableModelReference
 
 if TYPE_CHECKING:
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 TModel = TypeVar("TModel", bound="Model")
 
@@ -62,9 +64,21 @@ class RelationalField(Field[TModel]):
     def _get_constructor_argument_value(self, name: str) -> Any:
         """Write a declared model class as its application label; preserve swappable references."""
         value = super()._get_constructor_argument_value(name)
-        if name == "model_name" and value is not None and not isinstance(value, str) and hasattr(value, "_meta"):
-            return f"{value._meta.app}.{value.__name__}"
+        if (
+            name == "model_name"
+            and value is not None
+            and not isinstance(value, str)
+            and hasattr(value, "_declaration")
+        ):
+            binding = self.get_binding().model_binding
+            app = binding.graph.get_binding(value).app if binding is not None else value._declaration.app
+            return f"{app}.{value.__name__}" if app is not None else value
         return value
+
+    @staticmethod
+    def get_db_on_delete(on_delete: OnDelete) -> str:
+        """Return the database action backing the relation's deletion policy."""
+        return PROTECT_DB_ON_DELETE_SQL if on_delete == OnDelete.PROTECT else on_delete
 
     def get_relation_binding(self) -> BoundRelation:
         """Return the target/key state of this field's current publication."""
@@ -72,6 +86,16 @@ class RelationalField(Field[TModel]):
         if binding.relation is None:
             binding.relation = BoundRelation()
         return binding.relation
+
+    def get_related_binding(self) -> ModelBinding:
+        """The target node in this field's prepared graph, never another context's class metadata."""
+        relation = self.get_relation_binding()
+        if relation.related_binding is None:
+            source = self.get_binding().model_binding
+            if source is None or relation.related_model is None:
+                raise ConfigurationError("A relation needs a prepared model graph")
+            relation.related_binding = source.graph.get_binding(relation.related_model)
+        return relation.related_binding
 
     @property
     def related_model(self) -> type[TModel]:
@@ -104,6 +128,11 @@ class RelationalField(Field[TModel]):
     @to_field_instances.setter
     def to_field_instances(self, value: tuple[Field[Any], ...]) -> None:
         self.get_relation_binding().to_field_instances = value
+
+    @property
+    def to_column_names(self) -> tuple[str, ...]:
+        """The referenced physical columns in the key's order."""
+        return tuple(field.source_field or field.model_field_name for field in self.to_field_instances)
 
     @property
     def source_fields(self) -> tuple[str, ...]:
@@ -156,16 +185,6 @@ class RelationalField(Field[TModel]):
 
         def __set__(self, obj: object, value: Field[TModel] | TModel | None) -> None: ...
 
-    @property
-    def has_database_constraint(self) -> bool:
-        """Whether the database enforces this relation: ``db_constraint=True`` and the connection of
-        the referencing table enforces foreign keys now (``DatabaseClient.enforces_foreign_keys()``).
-        Otherwise hare runs ``on_delete`` and ``PROTECT`` itself.
-        """
-        if not self.db_constraint:
-            return False
-        return self.get_referencing_model().get_routed_connection(for_write=True).enforces_foreign_keys()
-
     def get_referencing_model(self) -> type[Model]:
         """The model whose table holds the relation's key - its database decides whether the
         relation is enforced.
@@ -211,7 +230,7 @@ class RelationalField(Field[TModel]):
         if isinstance(model_name, SwappableModelReference):
             return
         if not isinstance(model_name, str):
-            if not hasattr(model_name, "_meta"):
+            if not hasattr(model_name, "_declaration"):
                 raise ConfigurationError(
                     f"{cls.__name__}({model_name!r}) is invalid. model_name must be string or type[hare.models.Model]"
                 )

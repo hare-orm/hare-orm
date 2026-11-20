@@ -44,6 +44,12 @@ RESOURCE_COMPLETION_FAILED = "Resource release failed while its caller was cance
 INITIALIZATION_RELEASE_FAILED = "Application initialization and resource release failed"
 
 
+SWAPPABLE_SETTING_NOT_INITIALIZED_MESSAGE = (
+    "Swappable setting {setting!r} is only known after Hare.init() - initialize Hare "
+    "before importing migration files that use swappable_dependency()"
+)
+
+
 #: A scalar swappable reference cannot select several model labels.
 SWAPPABLE_SETTING_MULTIPLE_MODELS_MESSAGE = (
     "Swappable setting {setting!r} names several models - only a GenericForeignKeyField takes it"

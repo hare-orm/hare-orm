@@ -4,10 +4,30 @@ from unittest.mock import AsyncMock
 import pytest
 
 from hare.core.hare_context import HareContext
-from hare.instrumentation.declarations import QueryExecuted
+from hare.instrumentation.declarations import QueryExecuted, RowsChanged
+from hare.instrumentation.enums import RowOperation
 from hare.instrumentation.observers.observers import Observers
+from hare.models import Model
 
 pytestmark = [pytest.mark.database_independent, pytest.mark.asyncio]
+
+
+async def test_cancellation_of_the_task_delivering_events_propagates():
+    entered = asyncio.Event()
+    events = []
+
+    async def observer(event):
+        entered.set()
+        await asyncio.Event().wait()
+
+    with Observers.observing(RowsChanged, observer), Observers.observing(RowsChanged, events.append):
+        task = asyncio.create_task(Observers.deliver(RowsChanged(Model, RowOperation.INSERT, (1,), None, "default")))
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert events == []
 
 
 @pytest.mark.parametrize("cancelled_result", ["future", "coroutine"])

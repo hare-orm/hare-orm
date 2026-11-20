@@ -6,16 +6,12 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.contrib.request_query.constants import (
-    DESCENDING_PREFIX,
     EMPTY_TEXT_MATCHING_LOOKUPS,
     MISSING_FILTER_ERROR_TYPE,
 )
-from hare.contrib.request_query.declaration.filter_declaration import FilterDeclaration
 from hare.contrib.request_query.declaration.request_query_parameters import RequestQueryParameters
 from hare.contrib.request_query.enums import EachRowOnce
 from hare.contrib.request_query.exceptions import InvalidRequestQuery
-from hare.contrib.request_query.value_target import ValueTarget
-from hare.exceptions import QueryError
 from hare.models import Model
 from hare.query.expressions import Q
 from hare.query.expressions.ordering import Ordering
@@ -23,7 +19,7 @@ from hare.query.queryset import QuerySet
 
 if TYPE_CHECKING:
     from hare.contrib.request_query.request_query import OrderingItem, RequestQuery
-    from hare.query.lookup_info.ordering_info import OrderingInfo
+    from hare.contrib.request_query.value_target import ValueTarget
 
 
 ModelType = TypeVar("ModelType", bound="Model")
@@ -41,6 +37,7 @@ class RequestQueryBuilding:
         parameters are declared in.
 
         Args:
+            request_query: The request parameters and handler options used to build the queryset.
             skipped_target: The values whose own filters are left out - ``count_by()`` counts a
                 field under every filter of the request but its own.
 
@@ -88,41 +85,6 @@ class RequestQueryBuilding:
         return conditions
 
     @staticmethod
-    def get_search_condition(request_query: RequestQuery[ModelType]) -> Q | None:
-        """The condition of the request's search.
-
-        Returns:
-            The condition, None without a search or a search text.
-        """
-        search = request_query.get_declaration().search
-        return (
-            None
-            if search is None
-            else search.get_condition(RequestQueryParameters.get_parameter_values(request_query))
-        )
-
-    @staticmethod
-    def crosses_to_many(request_query: RequestQuery[ModelType], queryset: QuerySet[Any], condition: Q) -> bool:
-        """Whether a condition joins a relation to many rows - the query can then return a row more
-        than once.
-
-        Args:
-            queryset: The queryset the condition filters.
-            condition: The condition.
-
-        Returns:
-            True when a filter key of the condition or of a condition inside it crosses such a
-            relation.
-
-        Raises:
-            FieldError: A filter key names no field, relation or annotation.
-        """
-        declaration = request_query.get_declaration()
-        return any(declaration.get_lookup_info(queryset, key).crosses_to_many for key in condition.filters) or any(
-            request_query.crosses_to_many(queryset, child) for child in condition.children
-        )
-
-    @staticmethod
     async def build_queryset(
         request_query: RequestQuery[ModelType],
         method_name: str,
@@ -135,6 +97,7 @@ class RequestQueryBuilding:
         and search, the handler's ``where()``, the access condition, the latest versions.
 
         Args:
+            request_query: The request parameters and handler options used to build the queryset.
             method_name: The method asking, for the error.
             each_row_once: How to take each row once when a condition joins a relation to many
                 rows.
@@ -189,21 +152,6 @@ class RequestQueryBuilding:
         return await request_query.get_rows_once(queryset, method_name)
 
     @staticmethod
-    def is_skipped(filter_declaration: FilterDeclaration, skipped_target: ValueTarget | None) -> bool:
-        """Whether a filter is one of the left-out values' own.
-
-        Args:
-            filter_declaration: The filter.
-            skipped_target: The left-out values, None for none.
-
-        Returns:
-            True when the filter compares those values - a filter method never is.
-        """
-        if skipped_target is None or filter_declaration.lookup_info is None:
-            return False
-        return ValueTarget.of(filter_declaration.lookup_info) == skipped_target
-
-    @staticmethod
     def get_ordering(
         request_query: RequestQuery[ModelType], queryset: QuerySet[ModelType]
     ) -> tuple[OrderingItem, ...]:
@@ -213,6 +161,7 @@ class RequestQueryBuilding:
         model without a primary key gets no such fields.
 
         Args:
+            request_query: The request parameters and handler options used to build the queryset.
             queryset: The queryset being ordered.
 
         Returns:
@@ -231,52 +180,16 @@ class RequestQueryBuilding:
             items = ordering.default
         elif queryset.orderings:
             items = tuple(Ordering(field_name, order) for field_name, order in queryset.orderings)
-        elif queryset.model._meta.ordering:
-            ordering_expressions = queryset.model._meta.ordering_expressions
+        elif queryset._binding.ordering:  # type: ignore[union-attr]
+            ordering_expressions = queryset._binding.ordering_expressions  # type: ignore[union-attr]
             items = tuple(
                 Ordering(ordering_expressions.get(field_name, field_name), order)
-                for field_name, order in queryset.model._meta.ordering
+                for field_name, order in queryset._binding.ordering  # type: ignore[union-attr]
             )
         if not declaration.key_ordering_paths:
             return items
         ordered_paths = {path for item in items for path in request_query.get_ordering_info(queryset, item).paths}
         return (*items, *(path for path in declaration.key_ordering_paths if path not in ordered_paths))
-
-    @staticmethod
-    def get_ordering_name(item: OrderingItem) -> str:
-        """The name of an ordering item without its direction.
-
-        Args:
-            item: A name with ``-`` for descending, or an ordering expression.
-
-        Returns:
-            The name.
-        """
-        if not isinstance(item, Ordering):
-            return item.removeprefix(DESCENDING_PREFIX)
-        if not isinstance(item.target, str):
-            raise QueryError(
-                f"A request query orders by names - {item!r} orders by an expression; annotate it and order "
-                "by the annotation's name"
-            )
-        return item.target
-
-    @staticmethod
-    def get_ordering_info(
-        request_query: RequestQuery[ModelType], queryset: QuerySet[Any], item: OrderingItem
-    ) -> OrderingInfo:
-        """The ORM's description of one ordering item, from the class's declaration - read once
-        per name, not on every request.
-
-        Args:
-            queryset: The queryset being ordered.
-            item: The ordering item.
-
-        Returns:
-            The description: the names the query orders by (a relation's key column, ``pk``'s key
-            fields), the fields and the relations crossed.
-        """
-        return request_query.get_declaration().get_ordering_info(queryset, request_query.get_ordering_name(item))
 
     @staticmethod
     def apply_selection(
@@ -286,6 +199,7 @@ class RequestQueryBuilding:
         (with the primary key and the fields the ordering reads), and the named relations.
 
         Args:
+            request_query: The request parameters and handler options used to build the queryset.
             queryset: The queryset of the rows.
             ordering: The ordering of the rows - its own fields are loaded too.
 
@@ -309,19 +223,3 @@ class RequestQueryBuilding:
         if declaration.include is not None:
             queryset = declaration.include.apply(queryset, parameter_values, declaration.include_to_many)
         return queryset
-
-    @staticmethod
-    def get_ordered_queryset(
-        request_query: RequestQuery[ModelType], queryset: QuerySet[ModelType]
-    ) -> QuerySet[ModelType]:
-        """A queryset ordered by ``get_ordering()``, loading what the request's fields and include
-        parameters ask for.
-
-        Args:
-            queryset: The filtered queryset.
-
-        Returns:
-            The queryset.
-        """
-        ordering = request_query.get_ordering(queryset)
-        return request_query.apply_selection(queryset.order_by(*ordering), ordering)

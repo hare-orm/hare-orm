@@ -24,7 +24,7 @@ from hare.contrib.test.databases.resource_cleanup import ResourceCleanup
 from hare.contrib.test.databases.reusable_test_databases import ReusableTestDatabases
 from hare.contrib.test.databases.test_database_resource import TestDatabaseResource
 from hare.core.resource_completion import ResourceCompletion
-from hare.dialects.base.client.schema_cache_invalidation import SchemaCacheInvalidation
+from hare.dialects.base.client.client_schema import ClientSchema
 from hare.dialects.postgresql.client.postgresql_client import PostgresqlClient
 from hare.dialects.postgresql.client.transaction_pooler import TransactionPooler
 from hare.dialects.postgresql.constants import POSTGRES_SERVER_VERSION_NUMBER_SQL
@@ -82,10 +82,7 @@ class PostgresqlTestDatabase(TestDatabaseResource):
         Args:
             safe: Whether each object is created only when it doesn't exist yet.
         """
-        # Connected first, so the DDL is written for the features of the server version.
-        async with self.client.acquire_connection():
-            pass
-        schema = self.client.get_schema_sql(safe)
+        schema = await ClientSchema.build_connected_sql(self.client, safe)
         schema_key = ReusableTestSchemas.get_schema_key(schema)
         kept_test_schema, self.kept_test_schema = self.kept_test_schema, None
         if kept_test_schema is not None:
@@ -93,10 +90,7 @@ class PostgresqlTestDatabase(TestDatabaseResource):
                 self.leased_test_schema = kept_test_schema
                 return
             await self._reset_database()
-        self.client.log.debug("Creating schema: %s", schema)
-        if schema:
-            async with SchemaCacheInvalidation.run(self.client):
-                await self.client.execute_built_script(schema)
+        await ClientSchema.execute_schema(self.client, schema)
         # Only the schema a context creates first thing is kept - a later call may follow DDL of the test.
         if self.leased_test_schema is None and self.lease.keep_schema:
             self.leased_test_schema = await ReusableTestSchemas.get_kept_schema(self.client, schema_key)
@@ -108,7 +102,7 @@ class PostgresqlTestDatabase(TestDatabaseResource):
             True if pg_database has it.
         """
         async with self._server_session() as client:
-            await client._reconnect(with_db=False)
+            await client.create_connection(with_db=False)
             rows = await client.execute_dicts(POSTGRES_DATABASE_EXISTS_SQL, [client.database])
         return bool(rows)
 
@@ -173,7 +167,7 @@ class PostgresqlTestDatabase(TestDatabaseResource):
         """
         async with self._server_session() as client:
             try:
-                await client._reconnect(with_db=True)
+                await client.create_connection(with_db=True)
             except ConfigurationError:
                 return None
             await self._end_other_sessions(client)
@@ -193,7 +187,7 @@ class PostgresqlTestDatabase(TestDatabaseResource):
         """
         async with self._server_session() as client:
             try:
-                await client._reconnect(with_db=True)
+                await client.create_connection(with_db=True)
             except ConfigurationError:
                 if not await self._database_exists():
                     return False

@@ -1,5 +1,4 @@
 import asyncio
-import sys
 
 import pytest
 
@@ -41,7 +40,6 @@ async def test_nonconcurrent_get_or_create_isolated(db_truncate):
 
 
 @requires_features(supports_unique_constraints=True)
-@pytest.mark.skipif(sys.version_info < (3, 7), reason="aiocontextvars backport not handling this well")
 @pytest.mark.asyncio
 async def test_concurrent_get_or_create_isolated(db_truncate):
     """Test concurrent get_or_create."""
@@ -52,7 +50,6 @@ async def test_concurrent_get_or_create_isolated(db_truncate):
         assert una[0] == unas[0][0]
 
 
-@pytest.mark.skipif(sys.version_info < (3, 7), reason="aiocontextvars backport not handling this well")
 @requires_features(supports_transactions=True)
 @pytest.mark.asyncio
 async def test_concurrent_transactions_with_multiple_ops(db_truncate):
@@ -67,7 +64,6 @@ async def test_concurrent_transactions_with_multiple_ops(db_truncate):
     assert count == 1000
 
 
-@pytest.mark.skipif(sys.version_info < (3, 7), reason="aiocontextvars backport not handling this well")
 @requires_features(supports_transactions=True)
 @pytest.mark.asyncio
 async def test_concurrent_transactions_with_single_op(db_truncate):
@@ -82,7 +78,6 @@ async def test_concurrent_transactions_with_single_op(db_truncate):
     assert count == 100
 
 
-@pytest.mark.skipif(sys.version_info < (3, 7), reason="aiocontextvars backport not handling this well")
 @requires_features(supports_transactions=True)
 @pytest.mark.asyncio
 async def test_nested_concurrent_transactions_with_multiple_ops(db_truncate):

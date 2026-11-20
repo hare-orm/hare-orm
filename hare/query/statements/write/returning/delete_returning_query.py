@@ -11,12 +11,14 @@ from hare.models.deletion.cascade.protect_constraint_deferral import ProtectCons
 from hare.models.deletion.deletion_routes import DeletionRoutes
 from hare.models.deletion.enums import DeletionRoute
 from hare.models.write.rules.enums import WriteType
+from hare.models.write.rules.written_target_checks import WrittenTargetChecks
 from hare.query.plans.enums import PlanKeyForm
 from hare.query.plans.statement.declared_plan_slots import DeclaredPlanSlots
 from hare.query.statements.write.delete_query import DeleteQuery
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.models.model_binding import ModelBinding
     from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
     from hare.query.queryset.query_specification import QuerySpecification
     from hare.query.statements.write.returning.returned_rows import ReturnedRows
@@ -57,10 +59,12 @@ class DeleteReturningQuery(DeleteQuery):
 
     async def _execute_bound(self) -> list[Any]:
         if self._is_none:
-            return await self._return_none()
+            return []
         connection = self.get_connection(for_write=True)
+        WrittenTargetChecks.raise_if_rows_unwritable(self, connection, self._get_written_method_name())
         features = connection.features
-        route = DeletionRoutes.get(self.model, features, self.deletes_permanently)
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        route = DeletionRoutes.get(model_binding, features, self.deletes_permanently)
         # A soft delete, a cascade hare runs and an overridden delete read the rows in their
         # transaction on every database.
         if not features.supports_returning and not (
@@ -68,48 +72,40 @@ class DeleteReturningQuery(DeleteQuery):
             or self._has_overridden_delete()
         ):
             raise UnSupportedError(f"delete().returning() needs RETURNING, which {connection.dialect} doesn't have")
-        if not features.supports_returning and not self.model._meta.has_primary_key:
+        if not features.supports_returning and not model_binding.has_primary_key:
             raise UnSupportedError(
                 f"delete().returning() of {self.model.__name__} reads the rows by their keys on "
                 f"{connection.dialect} "
                 "- the model has no primary key"
             )
         if WrittenConnections.is_recording:
-            WrittenConnections.record(connection.connection_alias)
-        return await self._execute_returning(connection)
+            WrittenConnections.record(connection)
+        return await self._execute_returning(connection, route)
 
-    async def _return_none(self) -> list[Any]:
-        return []
-
-    def _returns_from_statement(self, connection: DatabaseClient) -> bool:
-        """Whether the rows come from one ``DELETE ... RETURNING`` - a hard delete the database
-        carries out alone, without an overridden delete, returning named fields or the instances of a
-        model without a primary key."""
-        return (
-            connection.features.supports_returning
-            and (not self.returned_rows.returns_instances or self.returned_rows.builds_instances_from_rows)
-            and not self._has_overridden_delete()
-            and DeletionRoutes.get(self.model, connection.features, self.deletes_permanently)
-            in (DeletionRoute.STATEMENT, DeletionRoute.PROTECT_DEFERRED)
-        )
-
-    async def _execute_returning(self, connection: DatabaseClient) -> list[Any]:
+    async def _execute_returning(self, connection: DatabaseClient, route: DeletionRoute) -> list[Any]:
         """Runs the delete and reads the rows it deleted.
 
         Returns:
             The rows - in the order the database returned them, else in the order the delete
             matched them.
         """
-        if self._returns_from_statement(connection):
+        # A plain DELETE may return named fields or instantiate rows that have no primary key.
+        if (
+            connection.features.supports_returning
+            and (not self.returned_rows.returns_instances or self.returned_rows.builds_instances_from_rows)
+            and not self._has_overridden_delete()
+            and route in (DeletionRoute.STATEMENT, DeletionRoute.PROTECT_DEFERRED)
+        ):
             with ChangeEvents.reporting_as_a_whole():
                 count, raw_rows = await self._run_statement_returning(connection)
             await self._report_deleted_rows(count, connection)
             if self.returned_rows.builds_instances_from_rows:
-                return await self.returned_rows.get_instances(connection, raw_rows)
+                return await self.returned_rows.get_instances(connection, raw_rows, context=self._context)
             return self.returned_rows.get_rows(connection.dialect.types, raw_rows)
         soft_deletes = self._deletes_softly()
         visibility = self._visibility.get_for_active_tenant()
-        if soft_deletes and not self.model._meta.has_primary_key:
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        if soft_deletes and not model_binding.has_primary_key:
             return await self._soft_delete_returning(connection)
         async with connection._in_transaction() as transaction_connection:
             deleting_query = self._get_deleting_query(transaction_connection)
@@ -117,11 +113,15 @@ class DeleteReturningQuery(DeleteQuery):
             keys = await deleting_query._get_matching_pks(
                 transaction_connection, live_only=soft_deletes and self._visibility.include_deleted
             )
-            rows = [] if soft_deletes else await self.returned_rows.read(transaction_connection, visibility, keys)
+            rows = (
+                []
+                if soft_deletes
+                else await self.returned_rows.read(transaction_connection, visibility, keys, context=self._context)
+            )
             # Reports the delete itself.
             await deleting_query
             if soft_deletes:
-                rows = await self.returned_rows.read(transaction_connection, visibility, keys)
+                rows = await self.returned_rows.read(transaction_connection, visibility, keys, context=self._context)
         return rows
 
     async def _soft_delete_returning(self, connection: DatabaseClient) -> list[Any]:
@@ -133,7 +133,8 @@ class DeleteReturningQuery(DeleteQuery):
         """
         from hare.query.statements.write.returning.update_returning_query import UpdateReturningQuery
 
-        soft_delete_field: str = self.model._meta.soft_delete_field
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        soft_delete_field: str = model_binding.soft_delete_field  # type: ignore[assignment]
         async with connection._in_transaction() as transaction_connection:
             deleting_query = self._get_deleting_query(transaction_connection)
             soft_deleting_query = UpdateReturningQuery(
@@ -173,10 +174,11 @@ class DeleteReturningQuery(DeleteQuery):
         if self._has_protected_relations():
             deleting_query = self._get_deleting_query(connection)
             await deleting_query._check_protected(await deleting_query._get_matching_pks(connection), connection)
-        if ProtectConstraintDeferral.is_needed(self.model, connection):
+        model_binding: ModelBinding = self._binding  # type: ignore[assignment]
+        if ProtectConstraintDeferral.is_needed(model_binding, connection):
             async with (
                 connection._in_transaction() as transaction_connection,
-                ProtectConstraintDeferral.defer(self.model, transaction_connection),
+                ProtectConstraintDeferral.defer(model_binding, transaction_connection),
             ):
                 return await self._run_statement_on(transaction_connection, returns_rows=True)
         return await self._run_statement_on(connection, returns_rows=True)

@@ -190,6 +190,30 @@ async def test_removed_model_option_leaves_no_follow_up_changes(project_factory,
 
 
 @pytest.mark.asyncio
+async def test_added_soft_delete_field_leaves_no_follow_up_changes(project_factory) -> None:
+    project = await project_factory()
+    project.write_models("""
+    class Item(Model):
+        id = fields.IntField(primary_key=True)
+    """)
+    await project.cli_ok("makemigrations")
+    await project.cli_ok("migrate")
+
+    project.write_models("""
+    class Item(Model):
+        id = fields.IntField(primary_key=True)
+        deleted_at = fields.DatetimeField(null=True)
+        class Meta:
+            soft_delete_field = "deleted_at"
+    """)
+    await project.cli_ok("makemigrations")
+    operations = project.get_latest_migration().operations
+    assert [type(operation) for operation in operations] == [ops.AddField, ops.AlterModelOptions]
+    await project.cli_ok("migrate")
+    await project.assert_in_sync()
+
+
+@pytest.mark.asyncio
 async def test_changed_table_description_updates_the_table_comment(project_factory) -> None:
     project = await project_factory()
     if not project.is_postgres:

@@ -61,6 +61,7 @@ FIELD_PACKAGES = (
 #: expressions' values, the other side of a relation. Every other field class is exported from FIELD_PACKAGES
 #: and has a sample.
 FIELD_CLASSES_NOT_DECLARED = {
+    "hare.fields.data.text.string_field.StringField": "the shared conversion base of string fields",
     "hare.fields.field.Field": "the base of every field",
     "hare.fields.data.containers.container_field.ContainerField": "the base of the container fields",
     "hare.fields.relations.fields.relational_field.RelationalField": "the base of the relation fields",

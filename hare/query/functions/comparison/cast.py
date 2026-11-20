@@ -20,6 +20,7 @@ from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 from hare.sql.enums import CastType
 from hare.sql.functions.cast_to import CastTo
+from hare.sql.terms.node_structure import NodeStructure
 from hare.sql.terms.term import Term
 from hare.time.zone_settings import ZoneSettings
 
@@ -86,6 +87,7 @@ class Cast(Function):
             type(self.cast_output_field),
             self.get_parameters(),
             self.cast_output_field.get_column_type_options(),
+            NodeStructure.get_key(self.cast_output_field.deconstruct()),
         )
 
     def get_function_term(self, term: Term | str, *default_values: Any) -> CastTo:

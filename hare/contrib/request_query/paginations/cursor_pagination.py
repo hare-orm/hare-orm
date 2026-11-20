@@ -10,15 +10,13 @@ from hare.contrib.request_query.paginations.constants import DEFAULT_CURSOR_PARA
 from hare.contrib.request_query.paginations.cursor import Cursor
 from hare.contrib.request_query.results.cursor_page import CursorPage
 from hare.exceptions import ConfigurationError
-from hare.fields.data.containers.container_field import ContainerField
-from hare.fields.data.json.json_field import JSONField
-from hare.fields.generated_field import GeneratedField
 from hare.query.constants import PRIMARY_KEY_ALIAS
 from hare.query.expressions.ordering import Ordering
 
 if TYPE_CHECKING:
     from hare.contrib.request_query.request_query import OrderingItem, RequestQuery
-    from hare.models import Model
+    from hare.fields.field import Field
+    from hare.models.model_binding import ModelBinding
     from hare.query.lookup_info.ordering_info import OrderingInfo
     from hare.query.queryset import QuerySet
 from hare.contrib.request_query.paginations.pagination import Pagination
@@ -47,15 +45,16 @@ class CursorPagination(Pagination):
             ParameterField(self.cursor_parameter, str | None, None, ParameterType.CURSOR),
         )
 
-    def check_model(self, owner: str, model: type[Model]) -> None:
-        if not model._meta.has_primary_key:
+    def check_model(self, owner: str, binding: ModelBinding) -> None:
+        model = binding._model
+        if not binding.has_primary_key:
             raise ConfigurationError(
                 f"{owner}: a cursor pagination needs a primary key to order equal rows by - {model.__name__} has none"
             )
 
     def check_ordering(self, owner: str, name: str, ordering_info: OrderingInfo) -> None:
         first_part = name.split("__", 1)[0]
-        if first_part != PRIMARY_KEY_ALIAS and first_part not in ordering_info.model._meta.fields_map:
+        if first_part != PRIMARY_KEY_ALIAS and first_part not in ordering_info.binding.fields_map:
             raise ConfigurationError(
                 f"{owner}.Meta.ordering: a cursor pagination can't order by the annotation {name!r}"
             )
@@ -75,8 +74,11 @@ class CursorPagination(Pagination):
         related_paths = self.get_ordering_relation_paths(request_query, queryset, ordering)
         if related_paths:
             queryset = queryset.select_related(*related_paths)
+        value_fields, accepts_null = self.get_cursor_fields(request_query, queryset, ordering)
         cursor = (
-            self.read_cursor(request_query, cursor_text, queryset, ordering, ordering_names) if cursor_text else None
+            self.read_cursor(request_query, cursor_text, ordering_names, value_fields, accepts_null)
+            if cursor_text
+            else None
         )
         backwards = cursor is not None and cursor.direction is CursorDirection.PREVIOUS
         if cursor is not None:
@@ -90,12 +92,12 @@ class CursorPagination(Pagination):
             items = rows[:limit]
             has_next, has_previous = has_more, cursor is not None
         next_cursor = (
-            Cursor(CursorDirection.NEXT, ordering_names, queryset.cursor_values(items[-1])).encode()
+            Cursor(CursorDirection.NEXT, ordering_names, queryset.cursor_values(items[-1])).encode(value_fields)
             if has_next and items
             else None
         )
         previous_cursor = (
-            Cursor(CursorDirection.PREVIOUS, ordering_names, queryset.cursor_values(items[0])).encode()
+            Cursor(CursorDirection.PREVIOUS, ordering_names, queryset.cursor_values(items[0])).encode(value_fields)
             if has_previous and items
             else None
         )
@@ -148,46 +150,37 @@ class CursorPagination(Pagination):
                     paths[relation_path] = None
         return list(paths)
 
-    def read_cursor(
-        self,
-        request_query: RequestQuery[Any],
-        cursor_text: str,
-        queryset: QuerySet[Any],
-        ordering: tuple[OrderingItem, ...],
-        ordering_names: tuple[str, ...],
-    ) -> Cursor:
-        """Reads a request's cursor against the query's ordering.
-
-        Args:
-            request_query: The request query.
-            cursor_text: The request's cursor.
-            queryset: The ordered queryset.
-            ordering: The ordering.
-            ordering_names: The ordering as text.
-
-        Returns:
-            The cursor.
-
-        Raises:
-            InvalidRequestQuery: The text isn't a cursor of this query and ordering.
-        """
-        value_types: list[Any] = []
+    @staticmethod
+    def get_cursor_fields(
+        request_query: RequestQuery[Any], queryset: QuerySet[Any], ordering: tuple[OrderingItem, ...]
+    ) -> tuple[tuple[Field[Any] | None, ...], tuple[bool, ...]]:
+        """Capture matching field conversions and NULL policy for reading and writing page boundaries."""
+        value_fields: list[Field[Any] | None] = []
         accepts_null: list[bool] = []
         for item in ordering:
             ordering_info = request_query.get_ordering_info(queryset, item)
             # A relation crossed or a path read inside the value can give NULL for a NOT NULL field.
             reads_value_directly = not ordering_info.relations and not ordering_info.transforms
             for field in ordering_info.fields:
-                value_type = None if field is None else field.field_type
-                value_field = None if field is None else GeneratedField.get_effective_field(field)
-                if isinstance(value_field, JSONField) and value_field.declared_value_type is None:
-                    value_type = None
-                elif isinstance(value_field, ContainerField):
-                    value_type = value_field.get_python_type()
-                value_types.append(value_type)
+                value_fields.append(field)
                 accepts_null.append(field is None or field.null or not reads_value_directly)
+        return tuple(value_fields), tuple(accepts_null)
+
+    def read_cursor(
+        self,
+        request_query: RequestQuery[Any],
+        cursor_text: str,
+        ordering_names: tuple[str, ...],
+        value_fields: tuple[Field[Any] | None, ...],
+        accepts_null: tuple[bool, ...],
+    ) -> Cursor:
+        """Decode a boundary with the same fields used to encode it, refusing another ordering.
+
+        Raises:
+            InvalidRequestQuery: The text or values don't fit this query and ordering.
+        """
         try:
-            cursor = Cursor.decode(cursor_text, tuple(value_types), tuple(accepts_null))
+            cursor = Cursor.decode(cursor_text, value_fields, accepts_null)
         except ValueError as error:
             raise self.refuse(self.cursor_parameter, str(error), "cursor") from error
         if cursor.ordering != ordering_names:

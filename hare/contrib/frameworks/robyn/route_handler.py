@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Awaitable, Callable
-from functools import wraps
+from functools import partial, wraps
 from http import HTTPStatus
-from typing import Any
+from typing import Any, get_type_hints
 from urllib.parse import urlencode, urlunsplit
 
 from pydantic import TypeAdapter
@@ -24,6 +24,7 @@ from hare.contrib.frameworks.robyn.constants import (
 from hare.contrib.frameworks.robyn.hare_exception_handlers import HareExceptionHandlers
 from hare.contrib.request_query.exceptions import InvalidRequestQuery
 from hare.contrib.request_query.request_query import RequestQuery
+from hare.exceptions import ConfigurationError
 
 
 class RouteHandler:
@@ -49,13 +50,38 @@ class RouteHandler:
         self.response_adapter: TypeAdapter[Any] | None = (
             None if response_model is None else TypeAdapter(response_model)
         )
-        self.signature = inspect.signature(handler)
+        self.signature = self.get_handler_signature(handler)
         self.request_queries: dict[str, type[RequestQuery[Any]]] = {
             name: parameter.annotation
             for name, parameter in self.signature.parameters.items()
             if isinstance(parameter.annotation, type) and issubclass(parameter.annotation, RequestQuery)
         }
         self.request_argument = self.get_request_argument()
+
+    @staticmethod
+    def get_handler_signature(handler: Callable[..., Any]) -> inspect.Signature:
+        """Evaluate postponed annotations once, preserving the callable's exposed signature."""
+        signature = inspect.signature(handler)
+        target = inspect.unwrap(handler)
+        while isinstance(target, partial):
+            target = inspect.unwrap(target.func)
+        if inspect.isclass(target):
+            target = target.__init__
+        elif not inspect.isfunction(target) and not inspect.ismethod(target):
+            target = target.__call__
+        try:
+            if not getattr(target, "__annotations__", None):
+                return signature
+            hints = get_type_hints(target, include_extras=True)
+        except Exception as error:
+            raise ConfigurationError(f"Cannot read annotations of route handler {handler!r}: {error}") from error
+        return signature.replace(
+            parameters=[
+                parameter.replace(annotation=hints.get(name, parameter.annotation))
+                for name, parameter in signature.parameters.items()
+            ],
+            return_annotation=hints.get("return", signature.return_annotation),
+        )
 
     def get_request_argument(self) -> str | None:
         """The handler's own parameter taking the request.

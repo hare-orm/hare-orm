@@ -1,20 +1,21 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from hare.ddl.enums import SchemaPartType
 from hare.dialects.postgresql.constants import (
     POSTGRESQL_FUNCTIONS_SQL,
     POSTGRESQL_INSPECTED_FUNCTION_PRIVILEGES_SQL,
     POSTGRESQL_INSPECTED_SEQUENCE_PRIVILEGES_SQL,
     POSTGRESQL_SCHEMA_EXISTS_SQL,
+    POSTGRESQL_SCHEMA_SEQUENCES_SQL,
     POSTGRESQL_TABLES_SQL,
     POSTGRESQL_UNIQUE_INDEX_COLUMNS_SQL,
     POSTGRESQL_VIEW_DEFINITIONS_SQL,
 )
 from hare.dialects.postgresql.introspection.constants import POSTGRESQL_TABLE_CATALOG_QUERIES
 from hare.fields.data.json.json_codec import JsonCodec
-from hare.inspectdb.enums import SchemaPartType
 from hare.inspectdb.exceptions import SchemaNotFoundError, TableNotFoundError
 from hare.inspectdb.introspection.catalog_snapshot import CatalogSnapshot
 
@@ -31,7 +32,7 @@ class PostgresqlCatalogReader:
     ) -> CatalogSnapshot:
         """Capture function overloads, views and privileges before interpreting declarations."""
         view_names = sorted(
-            set((*object_names.get(SchemaPartType.VIEW, ()), *object_names.get(SchemaPartType.MATERIALIZED_VIEW, ())))
+            {*object_names.get(SchemaPartType.VIEW, ()), *object_names.get(SchemaPartType.MATERIALIZED_VIEW, ())}
         )
         views = (
             await connection.execute_dicts(POSTGRESQL_VIEW_DEFINITIONS_SQL, [schema, view_names]) if view_names else []
@@ -43,26 +44,42 @@ class PostgresqlCatalogReader:
                 else []
             )
         function_names = sorted(set(object_names.get(SchemaPartType.FUNCTION, ())))
+        sequence_names = sorted(set(object_names.get(SchemaPartType.SEQUENCE, ())))
         functions = (
             await connection.execute_dicts(POSTGRESQL_FUNCTIONS_SQL, [schema, function_names])
             if function_names
             else []
         )
+        requested = {part_type: list(names) for part_type, names in object_names.items()}
+        sequences = (
+            await connection.execute_dicts(POSTGRESQL_SCHEMA_SEQUENCES_SQL, [schema, sequence_names])
+            if sequence_names
+            else []
+        )
+        sequence_privileges, function_privileges = await PostgresqlCatalogReader.read_object_privileges(
+            connection, schema
+        )
         return CatalogSnapshot(
             schema,
             (),
             {
-                "requested": [{"names": {part_type: list(names) for part_type, names in object_names.items()}}],
+                "requested": [{"names": requested}],
                 "views": views,
                 "functions": functions,
-                "sequence_privileges": await connection.execute_dicts(
-                    POSTGRESQL_INSPECTED_SEQUENCE_PRIVILEGES_SQL, [schema]
-                ),
-                "function_privileges": await connection.execute_dicts(
-                    POSTGRESQL_INSPECTED_FUNCTION_PRIVILEGES_SQL, [schema]
-                ),
+                "sequences": sequences,
+                "sequence_privileges": sequence_privileges,
+                "function_privileges": function_privileges,
             },
         )
+
+    @staticmethod
+    async def read_object_privileges(
+        connection: DatabaseClient, schema: str
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Read the grants on sequences and functions, in catalog order."""
+        sequence_privileges = await connection.execute_dicts(POSTGRESQL_INSPECTED_SEQUENCE_PRIVILEGES_SQL, [schema])
+        function_privileges = await connection.execute_dicts(POSTGRESQL_INSPECTED_FUNCTION_PRIVILEGES_SQL, [schema])
+        return sequence_privileges, function_privileges
 
     @staticmethod
     async def read_tables(connection: DatabaseClient, tables: list[str], schema: str) -> CatalogSnapshot:

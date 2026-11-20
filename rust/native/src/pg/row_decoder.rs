@@ -16,22 +16,61 @@ impl PgRowDecoder {
         client: &tokio_postgres::Client,
         rows: &[tokio_postgres::Row],
     ) -> Result<Vec<Vec<Value>>, DriverError> {
-        let mut forms = ServerTextForms::collecting();
         let decoders: Vec<_> = rows
             .first()
             .map_or(&[][..], |row| row.columns())
             .iter()
             .map(|column| PgColumnDecoder::new(column.type_()))
             .collect();
-        let mut decoded =
-            rows.iter().map(|row| decode_pg_row_values(row, &decoders, &mut forms)).collect::<Result<Vec<_>, _>>()?;
-        let requests = forms.take_requests();
-        if requests.is_empty() {
+        let mut field_types = Vec::new();
+        loop {
+            let mut forms = ServerTextForms::with_field_types(&field_types);
+            let mut decoded = rows
+                .iter()
+                .map(|row| decode_pg_row_values(row, &decoders, &mut forms))
+                .collect::<Result<Vec<_>, _>>()?;
+            let requests = forms.take_requests();
+            let mut missing_types: Vec<_> = requests
+                .iter()
+                .filter(|(postgres_type, _)| postgres_type.name().is_empty())
+                .map(|(postgres_type, _)| postgres_type.clone())
+                .collect();
+            if !missing_types.is_empty() {
+                missing_types.sort_unstable_by_key(Type::oid);
+                missing_types.dedup_by_key(|postgres_type| postgres_type.oid());
+                drop(requests);
+                drop(forms);
+                field_types.extend(Self::get_field_types(client, &missing_types).await?);
+                // Decode the original rows again, retaining the ordinary depth and size accounting.
+                continue;
+            }
+            if !requests.is_empty() {
+                let texts = Self::fetch_server_text_forms(client, &requests).await?;
+                ServerTextForms::supply(&mut decoded, texts)
+                    .map_err(|error| DriverError::Conversion(error.to_string()))?;
+            }
             return Ok(decoded);
         }
-        let texts = Self::fetch_server_text_forms(client, &requests).await?;
-        ServerTextForms::supply(&mut decoded, texts).map_err(|error| DriverError::Conversion(error.to_string()))?;
-        Ok(decoded)
+    }
+
+    /// Let tokio-postgres obtain domains, arrays, ranges and named composites through its type cache.
+    async fn get_field_types(client: &tokio_postgres::Client, missing: &[Type]) -> Result<Vec<Type>, DriverError> {
+        let mut field_types = Vec::with_capacity(missing.len());
+        for chunk in missing.chunks(SERVER_TEXT_FORMS_PER_QUERY) {
+            let mut sql = String::from("SELECT ");
+            for index in 1..=chunk.len() {
+                if index != 1 {
+                    sql.push(',');
+                }
+                write!(sql, "${index}").expect("writing into a String never fails");
+            }
+            let statement = client.prepare_typed(&sql, chunk).await?;
+            if statement.params().iter().any(|postgres_type| postgres_type.name().is_empty()) {
+                return Err(DriverError::Conversion("PostgreSQL did not supply a record field's type metadata".into()));
+            }
+            field_types.extend_from_slice(statement.params());
+        }
+        Ok(field_types)
     }
 
     /// Sends raw binary values back as parameters of their own type cast to text - the type's own

@@ -66,6 +66,7 @@ class ClickhouseDialect(Dialect):
         keeps_enum_columns=True,
         rewrites_correlated_exists=True,
         supports_ordered_correlated_subqueries=False,
+        keeps_exists_limit=False,
         supports_correlated_order_by=False,
         supports_correlated_group_by=False,
         supports_correlated_update=False,

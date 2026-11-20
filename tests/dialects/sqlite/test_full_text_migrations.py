@@ -67,7 +67,7 @@ class MigrationRunner:
 
 
 @pytest_asyncio.fixture
-async def runner():
+async def runner(migration_context):
     client = AiosqliteClient(file_path=":memory:", connection_alias="full_text_migrations")
     await client.create_connection(with_db=True)
     try:

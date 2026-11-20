@@ -5,6 +5,8 @@ import pytest
 import pytest_asyncio
 
 from hare.contrib.test import requires_features
+from hare.core.caching.caches import Caches
+from hare.core.hare_context import HareContext
 from hare.fields import CharField, IntField
 from hare.query.enums import Lookup
 from hare.query.expressions import Q
@@ -15,7 +17,6 @@ from hare.query.filters.lookups.lookups import Lookups
 from hare.query.filters.resolution.annotation_filters import AnnotationFilters
 from hare.query.filters.resolution.relation_filters import RelationFilters
 from hare.query.filters.resolution.to_many_filters import ToManyFilters
-from hare.query.lookup_info.lookup_info_builder import LookupInfoBuilder
 from hare.sql import Table
 from hare.sql.terms import Term
 from tests.shared_models.testmodels import CharFields, Event, Tournament
@@ -56,9 +57,15 @@ async def test_register_lookup_does_not_shadow_builtin_suffixes(db, char_fields_
 
 @pytest.mark.parametrize("model,relation_name", [(Event, "participants"), (Tournament, "events")])
 def test_relation_lookup_uses_the_encoder_builder(db, model, relation_name):
-    relation = model._meta.fields_map[relation_name]
+    relation = HareContext.require_current().apps.get_binding(model).fields_map[relation_name]
     connection = model.get_connection()
-    context = ExpressionContext(model, model._meta.basetable, {}, dialect=connection.dialect, connection=connection)
+    context = ExpressionContext(
+        HareContext.require_current().apps.get_binding(model),
+        HareContext.require_current().apps.get_binding(model).basetable,
+        {},
+        dialect=connection.dialect,
+        connection=connection,
+    )
     built = []
 
     def encode(value, instance, field, dialect):
@@ -83,9 +90,15 @@ def test_relation_lookup_uses_the_encoder_builder(db, model, relation_name):
 
 
 def test_through_table_records_the_encoder_used_to_build_its_filter(db, monkeypatch):
-    relation = Event._meta.fields_map["participants"]
+    relation = HareContext.require_current().apps.get_binding(Event).fields_map["participants"]
     connection = Event.get_connection()
-    context = ExpressionContext(Event, Event._meta.basetable, {}, dialect=connection.dialect, connection=connection)
+    context = ExpressionContext(
+        HareContext.require_current().apps.get_binding(Event),
+        HareContext.require_current().apps.get_binding(Event).basetable,
+        {},
+        dialect=connection.dialect,
+        connection=connection,
+    )
     built = []
 
     def encode(value, instance, field, dialect):
@@ -96,7 +109,7 @@ def test_through_table_records_the_encoder_used_to_build_its_filter(db, monkeypa
         return encode
 
     lookups = FieldLookups.get(relation)
-    LookupInfoBuilder.forget_descriptions()
+    Caches.forget_model_caches([context.binding])
     try:
         with monkeypatch.context() as patch:
             patch.setitem(lookups, Lookup.EXACT, lookups[Lookup.EXACT].with_changes(value_encoder_builder=build))
@@ -114,12 +127,18 @@ def test_through_table_records_the_encoder_used_to_build_its_filter(db, monkeypa
             assert reference.reference.value_encoder is encode
             assert modifier.where_criterion.right.value == 11
     finally:
-        LookupInfoBuilder.forget_descriptions()
+        Caches.forget_model_caches([context.binding])
 
 
 def test_annotation_list_records_its_selected_encoder_without_rebuilding(db):
     connection = Event.get_connection()
-    context = ExpressionContext(Event, Event._meta.basetable, {}, dialect=connection.dialect, connection=connection)
+    context = ExpressionContext(
+        HareContext.require_current().apps.get_binding(Event),
+        HareContext.require_current().apps.get_binding(Event).basetable,
+        {},
+        dialect=connection.dialect,
+        connection=connection,
+    )
     built = []
     field = IntField()
 

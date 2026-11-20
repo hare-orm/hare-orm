@@ -33,8 +33,9 @@ async def test_a_migration_of_the_models_is_applied_and_reversed_on_the_database
     migration, _ = SampleDatabase.get_written_migration(models)
     connection = contract_database.get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
-    state = await migration.apply(State(), schema_editor=editor)
-    await migration.unapply(state, schema_editor=editor)
+    state_before = State()
+    await migration.apply(state_before, schema_editor=editor)
+    await migration.unapply(state_before, schema_editor=editor)
 
 
 @pytest.mark.database_independent

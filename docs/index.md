@@ -479,7 +479,7 @@ app = HareFastAPI(hare_config=HARE_CONFIG, atomic_requests=True)   # every reque
 
 
 @app.get("/books", response_model=PageSchema[BookSchema])
-async def list_books(books: BookQuery = RequestQueryDependency.provide(BookQuery)) -> Page[Book]:
+async def list_books(books: BookQuery = app.request_query(BookQuery)) -> Page[Book]:
     return await books.page()
 ```
 

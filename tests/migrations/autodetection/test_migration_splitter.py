@@ -26,7 +26,7 @@ def make_state(**models_by_app: list[type[Model]]) -> State:
     state = State()
     for app_label, models in models_by_app.items():
         for model in models:
-            state.models[(app_label, model.__name__)] = ModelState.make_from_model(app_label, model)
+            state.models[(app_label, model.__name__)] = ModelState.make_from_declaration(app_label, model)
     return state
 
 

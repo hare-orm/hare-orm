@@ -2,7 +2,6 @@
 declared by expressions of hare and querysets: written in ClickHouse's SQL, read back as created (no drift,
 no second migration), and renamed with the fields they read - a renamed key column keeps its rows."""
 
-import os
 import textwrap
 from datetime import timedelta
 
@@ -21,6 +20,7 @@ from hare.query.functions import Sum, Trunc
 from hare.query.plans.statement.statement_plans import StatementPlans
 from tests.migrations.round_trips.test_round_trip_real_db import APP_LABEL, RoundTrip, build_live_state, build_model
 from tests.utils.cli_project_factory import project_factory  # noqa: F401
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 @pytest_asyncio.fixture
@@ -68,8 +68,9 @@ async def test_keys_and_times_to_live_of_expressions_of_hare_follow_a_rename(rou
     assert "visited_at" in keys["sorting_key"] and "visited_at" in keys["partition_key"]
     assert (await detect_drift(connection, build_live_state(visit), [APP_LABEL])).operations == []
     assert round_trip.get_pending_operations(visit) == []
-    assert ClickhouseTableOptions.get_of_dialect(visit._meta.table_options, connection.dialect).get_fixed_field_names(
-        visit
+    binding = round_trip.tracked_state.apps.get_binding(f"{APP_LABEL}.Visit")
+    assert ClickhouseTableOptions.get_of_dialect(binding.table_options, connection.dialect).get_fixed_field_names(
+        binding
     ) == frozenset({"visited_at"})
     await connection.execute_script(
         "INSERT INTO structural_visit (id, visited_at, site) VALUES (1, '2026-01-02 03:04:05', 'a')"
@@ -86,11 +87,6 @@ async def test_keys_and_times_to_live_of_expressions_of_hare_follow_a_rename(rou
     assert await connection.execute_dicts("SELECT id, toString(seen) AS seen, site FROM structural_visit") == [
         {"id": 1, "seen": "2026-01-02 03:04:05.000000", "site": "a"}
     ]
-
-
-def skip_without_clickhouse() -> None:
-    if not os.getenv("HARE_TEST_DB", "").startswith("clickhouse"):
-        pytest.skip("runs against the ClickHouse test server - make test_clickhouse")
 
 
 PROJECTION_MODELS_TEMPLATE = """
@@ -114,7 +110,7 @@ class Hit(Model):
 
 @pytest.mark.asyncio
 async def test_a_projection_of_a_queryset_of_the_model(project_factory):  # noqa: F811
-    skip_without_clickhouse()
+    DatabaseUnderTest.skip_unless_clickhouse()
     project = await project_factory()
     query = 'ModelQuery().values("site").annotate(total=Sum("{duration}"))'
     project.write_models(
@@ -146,7 +142,7 @@ async def test_a_projection_of_a_queryset_of_the_model(project_factory):  # noqa
 
 @pytest.mark.asyncio
 async def test_a_projection_keeps_every_row(project_factory):  # noqa: F811
-    skip_without_clickhouse()
+    DatabaseUnderTest.skip_unless_clickhouse()
     project = await project_factory()
     query = 'ModelQuery().filter(site="a").values("site")'
     project.write_models(textwrap.dedent(PROJECTION_MODELS_TEMPLATE.format(duration="duration", query=query)))
@@ -164,12 +160,18 @@ async def test_projection_compilation_preserves_the_queryset_and_runnable_plans(
         {"site": fields.CharField(max_length=32), "score": fields.IntField()},
     )
     await round_trip.migrate_to(declared)
-    model = round_trip.tracked_state.apps.get_model(f"{APP_LABEL}.ProjectionReading")
+    model_apps = round_trip.tracked_state.apps
+    model = model_apps.get_model(f"{APP_LABEL}.ProjectionReading")
     query = (
-        model.objects.all().using(round_trip.connection).values("site").annotate(total=Sum("score")).order_by("site")
+        model_apps.get_queryset(model)
+        .all()
+        .using(round_trip.connection)
+        .values("site")
+        .annotate(total=Sum("score"))
+        .order_by("site")
     )
     original_sql = query.sql(parameters_inline=True)
-    bucket = StatementPlans.plans.get_bucket(model)
+    bucket = StatementPlans.plans.get_bucket(model_apps.get_binding(model))
     original_plans = {key: (id(plan), plan.sql) for key, plan in bucket.items()}
     hits = StatementPlans.hits
     projection = ClickhouseProjection("by_site", query)
@@ -191,7 +193,7 @@ async def test_projection_compilation_preserves_the_queryset_and_runnable_plans(
 async def test_a_column_a_projection_reads_changes_its_type(project_factory):  # noqa: F811
     """A column a projection reads changed its type with a raw ALTER_OF_COLUMN_IS_FORBIDDEN - the
     projection is dropped before and added after."""
-    skip_without_clickhouse()
+    DatabaseUnderTest.skip_unless_clickhouse()
     project = await project_factory()
     query = 'ModelQuery().values("site").annotate(total=Sum("duration"))'
     models = textwrap.dedent(PROJECTION_MODELS_TEMPLATE.format(duration="duration", query=query))
@@ -240,7 +242,7 @@ class Hit(Model):
 async def test_a_changed_projection_leaves_no_drift(project_factory):  # noqa: F811
     """drift reported the options of a table changed after a migration changed its first projection - the
     server keeps them in the order they were added, the changed one last."""
-    skip_without_clickhouse()
+    DatabaseUnderTest.skip_unless_clickhouse()
     project = await project_factory()
     for ordering in ('"site", "id"', '"note", "site"'):
         project.write_models(textwrap.dedent(TWO_PROJECTIONS_MODELS_TEMPLATE.format(ordering=ordering)))
@@ -261,7 +263,7 @@ class Visit(Model):
 async def test_a_change_refused_before_any_statement_is_no_partial_migration(project_factory):  # noqa: F811
     """A NOT NULL change refused over a NULL row, before any statement ran, was reported as a migration
     failed partway - some of its operations perhaps landed, to be fixed by hand."""
-    skip_without_clickhouse()
+    DatabaseUnderTest.skip_unless_clickhouse()
     project = await project_factory()
     project.write_models(textwrap.dedent(NULLABLE_MODELS_TEMPLATE.format(null=True)))
     await project.cli_ok("makemigrations")
@@ -280,7 +282,7 @@ async def test_a_change_refused_before_any_statement_is_no_partial_migration(pro
 async def test_a_projection_sorts_its_rows_ascending(project_factory):  # noqa: F811
     """A projection of a queryset ordered by columns failed in migrate with a raw syntax error - its
     ORDER BY is a sorting key, which takes no direction."""
-    skip_without_clickhouse()
+    DatabaseUnderTest.skip_unless_clickhouse()
     project = await project_factory()
     query = 'ModelQuery().order_by("site", "duration")'
     project.write_models(textwrap.dedent(PROJECTION_MODELS_TEMPLATE.format(duration="duration", query=query)))

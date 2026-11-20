@@ -34,7 +34,7 @@ from hare.migrations.operations.models import (
     RenameModel,
 )
 from hare.migrations.operations.operation import Operation
-from hare.migrations.operations.partitions import AddPartition, RemovePartition
+from hare.migrations.operations.partitions import AddPartition, RemovePartition, RenamePartition
 from hare.migrations.operations.policies import (
     AddPolicy,
     AlterPolicy,
@@ -51,6 +51,7 @@ from hare.migrations.operations.schema_objects import (
 from hare.migrations.operations.schemas import CreateSchema, DropSchema
 from hare.migrations.operations.sequences import AddSequence, AlterSequence, RemoveSequence, RenameSequence
 from hare.migrations.operations.special import SeparateDatabaseAndState, SynchronizeKeySeries
+from hare.migrations.operations.special.app_operation import AppOperation
 from hare.migrations.operations.special.run_python import RunPython
 from hare.migrations.operations.special.run_sql import RunSQL
 from hare.migrations.operations.triggers import AddTrigger, AlterTrigger, RemoveTrigger, RenameTrigger
@@ -59,6 +60,7 @@ from hare.migrations.operations.views import AddView, AlterView, RemoveView, Ren
 __all__ = [
     "Operation",
     "HareOperation",
+    "AppOperation",
     "CreateModel",
     "RenameModel",
     "DeleteModel",
@@ -67,6 +69,7 @@ __all__ = [
     "AlterModelSchema",
     "AddPartition",
     "RemovePartition",
+    "RenamePartition",
     "AddField",
     "RemoveField",
     "AlterField",

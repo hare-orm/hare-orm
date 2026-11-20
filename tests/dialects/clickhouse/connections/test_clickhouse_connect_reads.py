@@ -1,20 +1,12 @@
 """HTTP reads retain values, metadata and server errors through the local Transform boundary."""
 
 import datetime
-import os
 
 import pytest
 from clickhouse_connect.driver.external import ExternalData
 
 from hare import Connections
 from hare.exceptions import OperationalError
-
-
-@pytest.fixture
-def connect_db(clickhouse_db):
-    if not os.getenv("HARE_TEST_DB", "").startswith("clickhouse+clickhouse-connect"):
-        pytest.skip("runs on the clickhouse-connect driver")
-    return clickhouse_db
 
 
 @pytest.mark.asyncio

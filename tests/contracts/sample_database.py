@@ -32,7 +32,7 @@ class SampleDatabase:
         Returns:
             Every model class defined in hare but ``Model`` itself.
         """
-        HareRegistry.get_installed_modules()
+        HareRegistry.import_installed_modules()
         shipped: set[type[Model]] = set()
         pending: list[type[Model]] = [Model]
         while pending:

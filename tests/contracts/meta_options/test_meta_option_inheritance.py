@@ -23,18 +23,20 @@ def test_a_concrete_model_gets_an_option_of_its_abstract_base_as_declared(sample
     assert MetaInheritanceModels.get_option_value(concrete, sample.option) == (
         MetaInheritanceModels.get_option_value(control, sample.option)
     )
-    assert not concrete._meta.abstract
+    assert not concrete._declaration.abstract
 
 
 @pytest.mark.parametrize("variant", list(MetaVariant))
 def test_a_table_inherited_from_the_abstract_base_is_an_explicit_table(variant):
     sample = next(sample for sample in META_OPTION_SAMPLES if sample.option == "table")
     concrete, control = MetaInheritanceModels.make(sample, variant)
-    assert concrete._meta.table_is_explicit == control._meta.table_is_explicit
+    assert bool(getattr(concrete._declaration.meta, "table", None)) == bool(
+        getattr(control._declaration.meta, "table", None)
+    )
 
 
 def test_every_option_hare_takes_is_sampled_or_named_with_why_not():
-    HareRegistry.get_installed_modules()
+    HareRegistry.import_installed_modules()
     taken = {option.value for option in ModelOption} | set(ExtensionModelOptions.names)
     sampled = {sample.option for sample in META_OPTION_SAMPLES}
     assert sorted(taken - sampled - set(META_OPTIONS_NOT_SAMPLED)) == []

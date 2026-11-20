@@ -357,7 +357,11 @@ async def test_kept_observer_errors_are_bounded_and_counted(monkeypatch):
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
-async def test_kept_observer_error_does_not_keep_the_observer_locals_alive():
+@pytest.mark.parametrize("failure", ["ordinary", "chained", "group"])
+async def test_kept_observer_error_does_not_keep_the_observer_locals_or_event_alive(failure, monkeypatch):
+    # Log capture deliberately retains LogRecord arguments; isolate the dispatcher's retention.
+    monkeypatch.setattr("hare.instrumentation.observers.observer_dispatcher.logger.disabled", True)
+
     class Payload:
         pass
 
@@ -366,16 +370,33 @@ async def test_kept_observer_error_does_not_keep_the_observer_locals_alive():
     async def bad_observer(event):
         payload = Payload()
         payload_references.append(weakref.ref(payload))
+        if failure == "chained":
+            try:
+                raise ValueError("observer cause")
+            except ValueError as cause:
+                raise RuntimeError("observer failed") from cause
+        if failure == "group":
+            raise ExceptionGroup("observer failed", [ValueError("first"), RuntimeError("second")])
         raise RuntimeError("observer failed")
 
     Observers.observe(QueryExecuted, bad_observer)
-    notify_query("SELECT 1", ["large parameter"])
+    parameter = Payload()
+    parameter_reference = weakref.ref(parameter)
+    notify_query("SELECT 1", [parameter])
+    del parameter
     await asyncio.wait(list(Observers.get_dispatcher().pending_tasks))
     gc.collect()
 
     assert payload_references[0]() is None
-    with pytest.raises(RuntimeError, match="observer failed"):
+    assert parameter_reference() is None
+    with pytest.raises(ExceptionGroup if failure == "group" else RuntimeError, match="observer failed") as caught:
         await Observers.wait_for_pending()
+    frames = []
+    current = caught.value.__traceback__
+    while current is not None:
+        frames.append(current.tb_frame.f_code.co_name)
+        current = current.tb_next
+    assert "bad_observer" in frames
 
 
 @pytest.mark.database_independent

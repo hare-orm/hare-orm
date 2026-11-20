@@ -22,6 +22,7 @@ from hare.query.scopes.row_visibility import RowVisibility
 from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset.queryset import QuerySet
 
 
@@ -52,7 +53,7 @@ class FilterArguments:
             keys.extend(q_object.filters)
             pending_q_objects += [child for child in q_object.children if isinstance(child, Q)]
         # The keys described already - the filters of a model use a few keys over and over.
-        lookup_infos = None if queryset._annotations else LookupInfoBuilder.lookup_infos.get_bucket(queryset.model)
+        lookup_infos = None if queryset._annotations else LookupInfoBuilder.lookup_infos.get_bucket(queryset._binding)
         for key in keys:
             if lookup_infos is None or key not in lookup_infos:
                 FilterArguments.check_filter_key(queryset, key, method_name)
@@ -74,18 +75,18 @@ class FilterArguments:
             The filters, and whether none of them is built and checked right away
             (``takes_pending_filters()``).
         """
-        meta = queryset.model._meta
+        meta: ModelBinding = queryset._binding  # type: ignore[assignment]
         # The keys described already - the filters of a model use a few keys over and over.
-        lookup_infos = None if queryset._annotations else LookupInfoBuilder.lookup_infos.get_bucket(queryset.model)
+        lookup_infos = None if queryset._annotations else LookupInfoBuilder.lookup_infos.get_bucket(queryset._binding)
         many_to_many_fields = meta.many_to_many_fields
         primary_key_attribute = meta.primary_key_attribute
-        # MetaInfo.has_composite_primary_key, read without the property's call.
+        # ModelBinding.has_composite_primary_key, read without the property's call.
         takes_pending = not (type(primary_key_attribute) is tuple and primary_key_attribute)
         filters: dict[str, Any] = {}
         for key, value in kwargs.items():
             if lookup_infos is None or key not in lookup_infos:
                 FilterArguments.check_filter_key(queryset, key, method_name)
-            value = filters[key] = FilterValues.get_list_lookup_value(key, FilterValues.get_detached_value(value))
+            value = filters[key] = FilterValues.get_captured_filter_value(key, value)
             if takes_pending and FilterArguments.is_built_at_call(many_to_many_fields, key, value):
                 takes_pending = False
         return filters, takes_pending
@@ -109,6 +110,7 @@ class FilterArguments:
         label = f"{queryset.model.__name__}.objects.{method_name}({key}=...)"
         name, __, rest = key.partition("__")
         annotations = queryset._annotations
+        model_binding: ModelBinding = queryset._binding  # type: ignore[assignment]
         if name in annotations:
             if isinstance(annotations[name], NamedJoin):
                 # Checked against the related model when the filter is resolved.
@@ -121,7 +123,7 @@ class FilterArguments:
                 "checked_filter",
                 key,
                 lambda: LookupInfoBuilder.get_lookup_info(
-                    queryset.model,
+                    model_binding,
                     key,
                     annotations=annotations,
                     annotation_fields=AnnotationArguments.get_annotation_output_fields(queryset)
@@ -131,7 +133,7 @@ class FilterArguments:
                 ),
             )
         else:
-            queryset.model._meta._get_lookup_info(key, label)
+            model_binding._get_lookup_info(key, label)
 
     @staticmethod
     def raise_if_not_names(queryset: QuerySet[Any, Any], names: Iterable[Any], method_name: str) -> None:
@@ -168,7 +170,7 @@ class FilterArguments:
             QueryError: A name isn't a string.
             FieldError: A path names no field of the model, or is a ``Lateral``'s name alone.
         """
-        meta = queryset.model._meta
+        meta: ModelBinding = queryset._binding  # type: ignore[assignment]
         fields_map = meta.fields_map
         annotations = queryset._annotations
         for name in names:
@@ -214,9 +216,9 @@ class FilterArguments:
         Returns:
             True when they can.
         """
-        meta = queryset.model._meta
+        meta: ModelBinding = queryset._binding  # type: ignore[assignment]
         primary_key_attribute = meta.primary_key_attribute
-        # MetaInfo.has_composite_primary_key, read without the property's call - asked on every
+        # ModelBinding.has_composite_primary_key, read without the property's call - asked on every
         # filter() and get().
         if type(primary_key_attribute) is tuple and primary_key_attribute:
             return False
@@ -263,12 +265,13 @@ class FilterArguments:
         Returns:
             True when they can.
         """
+        model_binding: ModelBinding = queryset._binding  # type: ignore[assignment]
         for condition in conditions:
             if isinstance(condition, Exists):
                 continue
             if not isinstance(condition, Q):
                 return False
-            if condition.names_generic_field(queryset.model):
+            if condition.names_generic_field(model_binding):
                 return False
             if not FilterArguments.takes_pending_condition(queryset, condition):
                 return False
@@ -287,8 +290,9 @@ class FilterArguments:
         """
         if condition.expression is not None:
             return isinstance(condition.expression, Plannable)
-        if condition.children:
-            for child in condition.children:
+        children = condition.children
+        if children:
+            for child in children:
                 if not FilterArguments.takes_pending_condition(queryset, child):
                     return False
             return True
@@ -340,9 +344,9 @@ class FilterArguments:
             right away, or a value is no plain one (a list, a None, a boolean, a query or an
             expression) - ``get()`` then filters it as usual.
         """
-        meta = queryset.model._meta
+        meta: ModelBinding = queryset._binding  # type: ignore[assignment]
         primary_key_attribute = meta.primary_key_attribute
-        # MetaInfo.has_composite_primary_key, read without the property's call: its filters are built
+        # ModelBinding.has_composite_primary_key, read without the property's call: its filters are built
         # over the key fields right away.
         if type(primary_key_attribute) is tuple and primary_key_attribute:
             return None
@@ -387,10 +391,7 @@ class FilterArguments:
                 or key.endswith(CALL_SIGNATURE_DESCRIBED_KEY_SUFFIXES)
                 or (
                     value_type not in PLAIN_VALUE_TYPES
-                    and (
-                        value_type in CALL_SIGNATURE_DESCRIBED_VALUE_TYPES
-                        or isinstance(value, (Plannable, Term, QuerySpecification, Subquery))
-                    )
+                    and (value_type in CALL_SIGNATURE_DESCRIBED_VALUE_TYPES or isinstance(value, (Plannable, Term)))
                 )
             ):
                 return None

@@ -158,7 +158,7 @@ await Branch.objects.annotate(distance=Sqrt(Power("x", 2) + Power("y", 2))).filt
 | `Chr(code)`, `Ord(text)` | the character of a code point; the first character's code point — each database's own `chr`/`ascii` (`Ord("")` is NULL on SQLite; ClickHouse's `Chr` refuses only a code point no character has, `Chr(0)` is `\x00`) |
 | `MD5`, `SHA1`, `SHA224`, `SHA256`, `SHA384`, `SHA512(text)` | the lowercase hex digest of the UTF-8 text |
 | `Trim(text)`, `Lower(text)`, `Upper(text)` | the text trimmed of spaces at both ends, in lower case, in upper case — SQLite's own `UPPER()`/`LOWER()` map the ASCII letters only (`Upper("café")` → `CAFé`), ClickHouse with `upperUTF8()`/`lowerUTF8()`, PostgreSQL by its own rules |
-| `Length(text)` | the number of characters — an `int` |
+| `Length(value)` | characters in text or bytes in a binary field, as `int` |
 | `Concat(field, *args)` | the arguments joined into one text — `CONCAT` — see [`Concat()`](#concat) |
 
 ### <a id="concat"></a>`Concat()`

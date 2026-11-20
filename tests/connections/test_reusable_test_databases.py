@@ -43,7 +43,7 @@ class PooledWidget(Model):
 
 
 def _get_postgres_template(tag: str) -> str:
-    raw_db_url = os.environ["HARE_TEST_DB"].replace("\\{", "{").replace("\\}", "}")
+    raw_db_url = DatabaseUnderTest.normalize_url_template(os.environ["HARE_TEST_DB"])
     base_url, _, database_and_query = raw_db_url.rpartition("/")
     _, question_mark, query = database_and_query.partition("?")
     return f"{base_url}/test_{tag}_{{}}{question_mark}{query}"
@@ -83,15 +83,7 @@ async def pool_template() -> AsyncGenerator[tuple[str, str]]:
         admin_client = ctx.get_connection()
         database_names = await _get_tagged_database_names(admin_client, tag)
     for database_name in database_names:
-        dropping_client = type(admin_client)(
-            connection_alias="pool_template_cleanup",
-            user=admin_client.user,
-            password=admin_client.password,
-            database=database_name,
-            host=admin_client.host,
-            port=admin_client.port,
-            transaction_pooling=admin_client.transaction_pooling,
-        )
+        dropping_client = admin_client.create_independent_client({"database": database_name})
         await dropping_client.db_delete()
 
 

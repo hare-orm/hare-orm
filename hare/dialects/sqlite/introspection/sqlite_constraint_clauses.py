@@ -38,10 +38,7 @@ class SqliteConstraintClauses:
             if len(lexemes) < 3 or lexemes[0][1].upper() != "CONSTRAINT" or lexemes[2][1].upper() != "UNIQUE":
                 continue
             position, keyword = lexemes[2]
-            columns = tuple(
-                SqliteColumnDeclarations.get_identifier(column.strip())
-                for column in CatalogSql.get_parenthesized_terms(clause[position + len(keyword) :])
-            )
+            columns = SqliteColumnDeclarations.get_parenthesized_identifiers(clause[position + len(keyword) :])
             if columns:
                 name = SqliteColumnDeclarations.get_identifier(lexemes[1][1])
                 names_by_columns.setdefault(columns, []).append(name)
@@ -59,14 +56,7 @@ class SqliteConstraintClauses:
                 if keyword.upper() != "CHECK":
                     continue
                 tail = clause[position + len(keyword) :]
-                opening = next(
-                    (
-                        offset
-                        for offset, character, _ in CatalogSql.get_unquoted_characters(tail)
-                        if not character.isspace()
-                    ),
-                    None,
-                )
+                opening = CatalogSql.get_first_unquoted_nonspace_offset(tail)
                 if opening is None or tail[opening] != "(":
                     continue
                 ordinal += 1

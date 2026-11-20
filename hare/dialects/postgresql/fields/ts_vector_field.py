@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.query.expressions.expression import Expression
     from hare.query.filters.lookups.field_lookup import FieldLookup
+    from hare.search.vector.combined_search_vector import CombinedSearchVector
 
 
 class TSVectorField(Field[str]):
@@ -45,11 +46,13 @@ class TSVectorField(Field[str]):
 
     def get_generation_expression(self) -> Expression | None:
         """Normalize either public declaration into one expression without changing its inputs."""
-        from hare.search.vector.combined_search_vector import CombinedSearchVector
-        from hare.search.vector.search_vector import SearchVector
-
         if self.expression is not None:
             return self.expression
+        if not self.source_fields:
+            return None
+
+        from hare.search.vector.search_vector import SearchVector
+
         expression: SearchVector | CombinedSearchVector | None = None
         for position, name in enumerate(self.source_fields):
             vector = SearchVector(name, weight=None if self.weights is None else self.weights[position])
@@ -57,7 +60,8 @@ class TSVectorField(Field[str]):
         return expression
 
     def get_generated_from_field_names(self) -> tuple[str, ...]:
-        return GeneratedColumn(self.get_generation_expression(), self.stored).get_field_names()
+        expression = self.get_generation_expression()
+        return () if expression is None else GeneratedColumn(expression, self.stored).get_field_names()
 
     def with_renamed_generated_from_field(self, old_name: str, new_name: str) -> Field[Any]:
         if self.expression is None:

@@ -195,7 +195,7 @@ async def test_command_timeout_bounds_a_hanging_write_and_script(client_class):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("client_class", CLIENT_CLASSES, indirect=True)
 async def test_command_timeout_does_not_disturb_a_fast_query(client_class):
-    async def fast_fetch(*args):
+    async def fast_fetch(*args, **kwargs):
         return ["row"]
 
     client = make_client_with_fake_driver(
@@ -210,7 +210,7 @@ async def test_without_command_timeout_a_slow_query_is_never_cut_off(client_clas
     """Default None: a slow query just runs to completion, exactly as before."""
     started, release = asyncio.Event(), asyncio.Event()
 
-    async def slow_fetch(*args):
+    async def slow_fetch(*args, **kwargs):
         started.set()
         await release.wait()
         return ["row"]

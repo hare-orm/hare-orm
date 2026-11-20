@@ -4,7 +4,6 @@ of a materialized view's own storage - a tuple, one key in parentheses, ``tuple(
 ClickHouse 26.7+ keeps the parentheses in its catalog, an older server drops them or reports a tuple as
 its elements - drift saw a change no migration made after migrating them."""
 
-import os
 import textwrap
 
 import pytest
@@ -25,10 +24,7 @@ def view_meta(query: str, options: str) -> str:
     )
 
 
-@pytest.fixture(autouse=True)
-def skip_without_clickhouse():
-    if not os.getenv("HARE_TEST_DB", "").startswith("clickhouse"):
-        pytest.skip("runs against the ClickHouse test server - make test_clickhouse")
+pytestmark = pytest.mark.usefixtures("skip_without_clickhouse")
 
 
 @pytest.mark.asyncio

@@ -3,8 +3,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from hare.dialects.base.clauses.enums import JoinType
 from hare.sql.builder_methods import BuilderMethods
-from hare.sql.enums import JoinType
 from hare.sql.exceptions import JoinException
 from hare.sql.sql_context import SqlContext
 

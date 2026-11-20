@@ -70,9 +70,3 @@ class PostgresqlHStoreFieldLookups:
         ):
             lookups[lookup_name] = FieldLookup(hstore_operator, value_encoder)
         return lookups
-
-    @classmethod
-    def get_lookup_names(cls) -> frozenset[str]:
-        """The names of the lookups of an hstore field - a path segment that is one of them is the
-        lookup, any other names a key."""
-        return frozenset(suffix for suffix in cls.get_lookups() if suffix)

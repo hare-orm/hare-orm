@@ -321,7 +321,9 @@ by key paths instead. `__has_key`, `__has_keys` and `__has_any_keys` find a key 
 
 A `JSONField` compared whole (`=`, `__not`, `__in`, `__not_in`) on a `JSON` column has the value cast to
 `JSON` and compared by ClickHouse, so the key order doesn't matter; `__in` compares each value so, joined
-by `OR`. A JSON column holds an object only: a compared value that is no object (a list, a string, a
+by `OR`. Comparison encoding preserves JSON types using the session settings; storage-only
+restrictions on heterogeneous arrays are not imposed on comparison objects.
+A JSON column holds an object only: a compared value that is no object (a list, a string, a
 number) raises `ValidationError`. On a `String` column of JSON text — over clickhouse-driver — the JSON
 text is compared as it was written.
 

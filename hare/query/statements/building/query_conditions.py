@@ -23,6 +23,7 @@ from hare.sql.terms.criteria.criterion import Criterion
 from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
+    from hare.models.model_binding import ModelBinding
     from hare.query.statements.awaitable_query import AwaitableQuery
 
 
@@ -63,8 +64,9 @@ class QueryConditions:
         node_modifiers: list[QueryModifier] = []
         # Built once, not once per node - every field here is identical across the whole loop, and
         # Q.get_result() never mutates a ExpressionContext (frozen dataclass) it's handed.
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
         expression_context = ExpressionContext(
-            model=query.model,
+            binding=model_binding,
             dialect=query.dialect,
             connection=query._connection,
             table=query._effective_basetable(),
@@ -77,6 +79,7 @@ class QueryConditions:
             aggregated_multi_valued_paths=aggregated_multi_valued_paths,
             visibility=query._visibility,
             window_function_filter_allowed=query.window_filter_wrapping_supported,
+            application_context=query._context,
         )
         window_filter_criterion: Criterion | None = None
         for node in query._q_objects:
@@ -105,13 +108,13 @@ class QueryConditions:
             not query.aggregate_value_is_unused or modifier.having_criterion
         ) and aggregated_multi_valued_paths.aggregate_crossings:
             for lookup in query._get_row_join_lookups():
-                aggregated_multi_valued_paths.record_lookup(query.model, lookup)
+                aggregated_multi_valued_paths.record_lookup(model_binding, lookup)
             for lookup in QueryJoins.get_non_null_filtered_lookups(query):
-                aggregated_multi_valued_paths.record_non_null_lookup(query.model, lookup)
+                aggregated_multi_valued_paths.record_non_null_lookup(model_binding, lookup)
             for lookup in query._get_group_key_lookups():
-                aggregated_multi_valued_paths.record_group_key_lookup(query.model, lookup)
+                aggregated_multi_valued_paths.record_group_key_lookup(model_binding, lookup)
             aggregated_multi_valued_paths.record_row_pinning_conditions(
-                query.model,
+                model_binding,
                 query._get_top_level_conditions_by_generation(),
                 expression_context.multi_valued_join_generations or {},
             )
@@ -163,35 +166,38 @@ class QueryConditions:
         if not distinct:
             return
         orderings = query._apply_default_ordering(orderings)
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
         if not distinct_on:
             # A plain DISTINCT (no distinct fields) - distinct_on's own
             # "leading ORDER BY fields" validation below doesn't apply here.
             QueryOrdering.include_orderbys_in_select(query)
         else:
-            if not query.dialect.features.supports_distinct_on:
+            dialect = query.dialect
+            if not dialect.features.supports_distinct_on:
                 raise UnSupportedError(
-                    f"distinct(*fields) keeps one row per combination of fields, which {query.dialect.name} has "
+                    f"distinct(*fields) keeps one row per combination of fields, which {dialect.name} has "
                     "no statement of"
                 )
             ordering_fields = [
                 path
                 for name, __ in orderings
-                for path in ((name,) if name in annotations else ConcreteFieldPaths.get_paths(query.model, name))
+                for path in ((name,) if name in annotations else ConcreteFieldPaths.get_paths(model_binding, name))
             ]
             length_ordering_fields = len(ordering_fields)
             distinct_on_ordering_fields = [
                 path
                 for name in distinct_on
-                for path in ((name,) if name in annotations else ConcreteFieldPaths.get_paths(query.model, name))
+                for path in ((name,) if name in annotations else ConcreteFieldPaths.get_paths(model_binding, name))
             ]
             context = ExpressionContext(
-                model=query.model,
+                binding=model_binding,
                 table=query._effective_basetable(),
                 annotations=annotations,
-                dialect=query.dialect,
+                dialect=dialect,
                 connection=query._connection,
                 visibility=query._visibility,
                 select_related_extra_conditions=query._select_related_extra_conditions,
+                application_context=query._context,
             )
             distinct_on_by_source_field = []
             for field_name in distinct_on_ordering_fields:

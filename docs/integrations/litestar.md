@@ -99,9 +99,9 @@ The query gets the request: `query.request`, and the addresses of a page's `next
 Litestar builds the handlers' signatures when the application is created, before its lifespan opens the
 connections. `HarePlugin` binds the models of its configuration then (`Hare.bind_models()`), so the
 parameters of [`Meta.filters`](request-queries.md#meta-filters) are in the signatures and the schema;
-with `RequestQueryDIPlugin` alone, call `Hare.bind_models()` before creating the application.
-
-Without `HarePlugin`, list `RequestQueryDIPlugin()` in `plugins`.
+with `RequestQueryDIPlugin` alone, pass the offline registry explicitly:
+`RequestQueryDIPlugin(apps=Hare.bind_models(HARE_CONFIG))` in `plugins`.
+Calling `bind_models()` without using its returned registry does not bind handler schemas.
 
 ## <a id="haredto"></a>Responses: `HareDTO`
 
@@ -136,16 +136,30 @@ A DTO of its own shapes the response as for any Litestar DTO:
 ```python
 from litestar.dto import DTOConfig
 
+from hare import Hare
 from hare.contrib.frameworks.litestar import HareDTO
+
+apps = Hare.bind_models(HARE_CONFIG)
 
 
 class BookDTO(HareDTO[Book]):
+    binding = apps.get_binding(Book)
     config = DTOConfig(exclude={"tags"}, rename_strategy="camel")
 
 
 @get("/books", return_dto=BookDTO, dependencies={"books": RequestQueryDIPlugin.provide(BookQuery)})
 async def list_books(books: NamedDependency[BookQuery]) -> Page[Book]:
     return await books.page()
+```
+
+The plugin selects an independent structural binding for each generated DTO. A custom DTO
+prepared outside an active application selects it explicitly; no connection is opened:
+
+```python
+apps = Hare.bind_models(HARE_CONFIG)
+
+class BookDTO(HareDTO[Book]):
+    binding = apps.get_binding(Book)
 ```
 
 ### <a id="related-rows"></a>Related rows
@@ -167,6 +181,7 @@ relations of related rows need a DTO of its own and the query loading them:
 
 ```python
 class BookDetailDTO(HareDTO[Book]):
+    binding = apps.get_binding(Book)
     config = DTOConfig(max_nested_depth=2)
 
 
@@ -183,6 +198,7 @@ the relations — `author.name`, `tags.id`, `author.books.title`:
 
 ```python
 class BookDTO(HareDTO[Book]):
+    binding = apps.get_binding(Book)
     config = DTOConfig(
         max_nested_depth=2,
         exclude={"author.books", "tags.id"},
@@ -205,6 +221,7 @@ sent ones on the row read from the database:
 
 ```python
 class PartialBookDTO(HareDTO[Book]):
+    binding = apps.get_binding(Book)
     config = DTOConfig(partial=True)
 
 @patch("/books/{book_id:int}", dto=PartialBookDTO)
@@ -222,6 +239,7 @@ them, and each is read-only and `null` where a row has no value for it:
 
 ```python
 class BookDTO(HareDTO[Book]):
+    binding = apps.get_binding(Book)
     config = DTOConfig(exclude={"author.books"})
     extra_fields = {"reviews_count": int, "is_new": bool}  # read from the row by name, with the type
     computed = ("title_length", "author.initials")          # synchronous properties and methods

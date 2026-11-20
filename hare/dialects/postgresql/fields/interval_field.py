@@ -26,6 +26,9 @@ class IntervalField(Field[TTimedelta]):
     holds_intervals = True
     field_type = datetime.timedelta
 
+    def get_assign_normalized_types(self) -> frozenset[type]:
+        return self._get_unchanged_assign_types(IntervalField.to_python, self.field_type)
+
     def to_python(self, value: Any) -> datetime.timedelta | None:
         if value is not None and not isinstance(value, datetime.timedelta):
             raise ValidationError(f"{self.model_field_name}: expected a timedelta, got {type(value).__name__}")

@@ -11,7 +11,7 @@ from hare.query.expressions.subqueries.exists import Exists
 from hare.query.expressions.subqueries.outer_reference import OuterReference
 
 if TYPE_CHECKING:
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset import QuerySet
 
 
@@ -43,18 +43,19 @@ class LatestVersions:
             newer_versions = newer_versions.filter(access_condition)
         return Q(~Exists(newer_versions))
 
-    def check_model(self, owner: str, model: type[Model]) -> None:
+    def check_model(self, owner: str, binding: ModelBinding) -> None:
         """Checks that the model has versions, and that its database runs the subquery telling the
         latest one - known once the model has a connection.
 
         Args:
             owner: The request query class, for the error.
-            model: The model.
+            binding: The model binding.
 
         Raises:
             ConfigurationError: The model isn't a ``VersionedModel``, or its database runs no
                 correlated subqueries.
         """
+        model = binding._model
         if not issubclass(model, VersionedModel):
             raise ConfigurationError(
                 f"{owner}.Meta.versions: {model.__name__} isn't a VersionedModel - it has no versions"

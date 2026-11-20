@@ -8,6 +8,7 @@ from hare.contrib.pydantic.messages import COLUMN_NOT_FETCHED, RELATED_ROWS_NOT_
 from hare.exceptions import NoValuesFetched
 from hare.fields.relations.relation_accessors import RelationAccessors
 from hare.models import Model
+from hare.models.model_binding import ModelBinding
 from hare.query.queryset import QuerySet
 from hare.query.queryset.single_rows.none_awaitable_type import NoneAwaitable
 
@@ -36,7 +37,9 @@ class PydanticFieldSource:
             current: Any = obj
             for segment in path:
                 model = current if isinstance(current, Model) else None
-                field = model._meta.fields_map.get(segment) if model is not None and isinstance(segment, str) else None
+                field = (
+                    model._binding.fields_map.get(segment) if model is not None and isinstance(segment, str) else None
+                )
                 try:
                     value = (
                         getattr(current, segment)
@@ -47,7 +50,7 @@ class PydanticFieldSource:
                     if field is not None and field.has_db_field:
                         missing_column = segment
                     break
-                if model is not None and isinstance(segment, str) and segment in model._meta.fetch_fields:
+                if model is not None and isinstance(segment, str) and segment in model._binding.fetch_fields:
                     if field is not None and field.is_multi_valued:  # type: ignore[attr-defined]
                         if not RelationAccessors.get_relation(model, segment)._fetched:
                             raise NoValuesFetched(RELATED_ROWS_NOT_FETCHED.format(field=segment))
@@ -61,7 +64,7 @@ class PydanticFieldSource:
 
     @classmethod
     def get_fetch_targets(
-        cls, model: type[Model], path: tuple[str | int, ...], prefix: tuple[str, ...] = ()
+        cls, binding: ModelBinding, path: tuple[str | int, ...], prefix: tuple[str, ...] = ()
     ) -> tuple[tuple[tuple[str, ...], type[Model]], ...]:
         """Map attribute paths to relation prefixes, expanding generic relation branches.
 
@@ -70,19 +73,23 @@ class PydanticFieldSource:
         Pydantic. Targets include the model reached by the last known relation so
         nested schemas can append their own fetch paths.
         """
+        model = binding._model
         if not path:
             return ((prefix, model),) if prefix else ()
         name, *remaining = path
         if isinstance(name, int):
-            return cls.get_fetch_targets(model, tuple(remaining), prefix)
-        generic = model._meta.generic_foreign_key_fields.get(name)
+            return cls.get_fetch_targets(binding, tuple(remaining), prefix)
+        generic = binding.generic_foreign_key_fields.get(name)
         if generic is not None:
             return tuple(
                 target
                 for branch in generic.branch_names
-                for target in cls.get_fetch_targets(model, (branch, *remaining), prefix)
+                for target in cls.get_fetch_targets(binding, (branch, *remaining), prefix)
             )
-        if name in model._meta.fetch_fields:
-            related = model._meta.fields_map[name].related_model  # type: ignore[attr-defined]
-            return cls.get_fetch_targets(related, tuple(remaining), (*prefix, name))
+        if name in binding.fetch_fields:
+            return cls.get_fetch_targets(
+                binding.fields_map[name].get_related_binding(),  # type: ignore[attr-defined]
+                tuple(remaining),
+                (*prefix, name),
+            )
         return ((prefix, model),) if prefix else ()

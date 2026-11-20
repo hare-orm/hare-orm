@@ -2,7 +2,6 @@
 adds the field, sets the new key and removes the old field after it - it set the key before the field it
 names existed."""
 
-import os
 import textwrap
 
 import pytest
@@ -32,10 +31,7 @@ def get_models(field: str, engine: str = "'MergeTree'") -> str:
     return textwrap.dedent(MODELS).format(field=field, engine=engine)
 
 
-@pytest.fixture(autouse=True)
-def skip_without_clickhouse():
-    if not os.getenv("HARE_TEST_DB", "").startswith("clickhouse"):
-        pytest.skip("runs against the ClickHouse test server - make test_clickhouse")
+pytestmark = pytest.mark.usefixtures("skip_without_clickhouse")
 
 
 @pytest.mark.asyncio

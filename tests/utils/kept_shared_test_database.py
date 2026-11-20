@@ -4,7 +4,8 @@ import hashlib
 import itertools
 import os
 import uuid
-from typing import Any
+from contextlib import AbstractAsyncContextManager
+from typing import TYPE_CHECKING, Any
 
 from hare.contrib.test import hare_test_context
 from hare.contrib.test.constants import REUSABLE_DATABASE_SLOT_NAMESPACE
@@ -12,6 +13,9 @@ from hare.contrib.test.databases.postgresql.reusable_test_schemas import Reusabl
 from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError
 from tests.utils.constants import PYDANTIC_REQUIREMENT
+
+if TYPE_CHECKING:
+    from hare.dialects.postgresql.client.postgresql_client import PostgresqlClient
 
 
 class KeptSharedTestDatabase:
@@ -57,6 +61,18 @@ class KeptSharedTestDatabase:
                 return database_url_template.replace("{}", f"{tag}_{database_id}", 1)
         raise AssertionError("unreachable")
 
+    @staticmethod
+    def open_context(database_url: str, modules: list[str]) -> AbstractAsyncContextManager[HareContext]:
+        """Bind the models to a prepared database without creating or dropping it."""
+        return hare_test_context(
+            modules,
+            db_url=database_url,
+            connection_label="models",
+            _create_db=False,
+            _generate_schemas=False,
+            _drop_db_on_exit=False,
+        )
+
     @classmethod
     async def take(cls, database_url: str) -> bool:
         """Takes the database at the URL as it is, its rows cleared, when it holds the schema kept in
@@ -69,16 +85,8 @@ class KeptSharedTestDatabase:
             True when the database was taken; False when it is missing or has to be created again.
         """
         try:
-            async with hare_test_context(
-                modules=cls.get_modules(),
-                db_url=database_url,
-                app_label="models",
-                connection_label="models",
-                _create_db=False,
-                _generate_schemas=False,
-                _drop_db_on_exit=False,
-            ) as context:
-                client = context.get_connection()
+            async with cls.open_context(database_url, cls.get_modules()) as context:
+                client: PostgresqlClient = context.get_connection()  # type: ignore[assignment]
                 kept_schema = await ReusableTestSchemas.read_kept_schema(client)
                 if kept_schema is None or kept_schema.schema_key != cls.get_schema_key(context):
                     return False
@@ -98,7 +106,7 @@ class KeptSharedTestDatabase:
         Args:
             context: The context of the database.
         """
-        client = context.get_connection()
+        client: PostgresqlClient = context.get_connection()  # type: ignore[assignment]
         kept_schema = await ReusableTestSchemas.get_kept_schema(client, cls.get_schema_key(context))
         await ReusableTestSchemas.write_kept_schema(client, kept_schema)
 

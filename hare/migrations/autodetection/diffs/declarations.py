@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from hare.migrations.autodetection.diffs.declared_schema_object_diff import DeclaredSchemaObjectDiff
 from hare.migrations.operations import (
@@ -23,6 +23,9 @@ from hare.migrations.operations.schema_objects.object_types.function_object_type
 from hare.migrations.operations.schema_objects.object_types.schema_object_type import SchemaObjectType
 from hare.migrations.operations.schema_objects.object_types.sequence_object_type import SequenceObjectType
 
+if TYPE_CHECKING:
+    from hare.migrations.state.model_state import ModelState
+
 
 class DictionaryDiff(DeclaredSchemaObjectDiff):
     """The dictionary operations of a model."""
@@ -44,6 +47,16 @@ class FunctionDiff(DeclaredSchemaObjectDiff):
     alter_operation_class: ClassVar[type[HareOperation] | None] = AlterFunction
     remove_operation_class: ClassVar[type[HareOperation]] = RemoveFunction
     rename_operation_class: ClassVar[type[HareOperation] | None] = RenameFunction
+
+    @staticmethod
+    def replaces_function(old_state: ModelState, new_state: ModelState) -> bool:
+        """Whether an existing name needs a new physical function under that name."""
+        old_functions = {function.name: function for function in FunctionObjectType.get_objects(old_state)}
+        return any(
+            not old.can_replace_in_place(function)
+            for function in FunctionObjectType.get_objects(new_state)
+            if (old := old_functions.get(function.name)) is not None
+        )
 
 
 class SequenceDiff(DeclaredSchemaObjectDiff):

@@ -61,7 +61,7 @@ class AlterModelOptions(HareOperation):
         written_options: dict[str, Any] = {}
         for key, value in options.items():
             if key == ModelOption.INDEXES:
-                value = [entry if isinstance(entry, Index) else Index(fields=tuple(entry)) for entry in value]
+                value = [Index.from_declaration(entry) for entry in value]
             elif key == ModelOption.CONSTRAINTS:
                 value = list(value)
             written_options[str(key)] = value
@@ -102,14 +102,14 @@ class AlterModelOptions(HareOperation):
     def raise_if_unsupported(
         self, app_label: str, old_state: State, new_state: State, schema_editor: BaseSchemaEditor
     ) -> None:
-        old_model = old_state.apps.get_model(f"{app_label}.{self.name}")
-        new_model = new_state.apps.get_model(f"{app_label}.{self.name}")
-        if old_model._meta.managed is False or new_model._meta.managed is False:
+        new_binding = new_state.apps.get_binding(f"{app_label}.{self.name}")
+        old_binding = old_state.apps.get_binding(f"{app_label}.{self.name}")
+        if old_binding.managed is False or new_binding.managed is False:
             return
         dialect = schema_editor.client.dialect
-        new_table_options = new_model._meta.get_table_options(dialect)
-        if new_table_options is not None and old_model._meta.get_table_options(dialect) != new_table_options:
-            new_table_options.raise_if_unsupported(new_model, schema_editor.client.features)
+        new_table_options = new_binding.get_table_options(dialect)
+        if new_table_options is not None and old_binding.get_table_options(dialect) != new_table_options:
+            new_table_options.raise_if_unsupported(new_binding, schema_editor.client.features)
 
     async def _apply_table_changes(
         self,
@@ -130,22 +130,30 @@ class AlterModelOptions(HareOperation):
         """
         if not state_editor:
             return
-        old_model = old_state.apps.get_model(f"{app_label}.{self.name}")
-        new_model = new_state.apps.get_model(f"{app_label}.{self.name}")
-        if old_model._meta.managed is False or new_model._meta.managed is False:
+        old_binding = old_state.apps.get_binding(f"{app_label}.{self.name}")
+        if old_binding.managed is False:
+            return
+        new_binding = new_state.apps.get_binding(f"{app_label}.{self.name}")
+        if new_binding.managed is False:
             return
         dialect = state_editor.client.dialect
-        old_table_options = old_model._meta.get_table_options(dialect)
-        new_table_options = new_model._meta.get_table_options(dialect)
+        old_table_options = old_binding.get_table_options(dialect)
+        new_table_options = new_binding.get_table_options(dialect)
         plan = (
-            state_editor.table_partitions.get_alter_table_options_plan(old_model, new_model)
+            state_editor.table_partitions.get_alter_table_options_plan(
+                old_binding,
+                new_binding,
+            )
             if old_table_options != new_table_options
             else SchemaChangePlan(())
         )
-        if (old_model._meta.table_description or "") != (
-            new_model._meta.table_description or ""
+        if (old_binding.table_description or "") != (
+            new_binding.table_description or ""
         ) and SchemaEffect.REPLACE_TABLE not in plan.effects:
-            comments = state_editor.table_comments.get_table_comment_plan(old_model, new_model)
+            comments = state_editor.table_comments.get_table_comment_plan(
+                old_binding,
+                new_binding,
+            )
             plan = SchemaChangePlan((*plan.steps, *comments.steps), before=plan.before, after=plan.after)
         await plan.execute(state_editor)
 

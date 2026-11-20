@@ -17,7 +17,7 @@ pytestmark = [pytest.mark.database_independent, pytest.mark.asyncio]
 @pytest.mark.parametrize("failure_type", [LookupError, asyncio.CancelledError])
 async def test_partial_task_start_rolls_back_and_restores_scopes(monkeypatch, failure_type):
     failure = failure_type("cannot open second connection")
-    first = SimpleNamespace(__aenter__=AsyncMock(), __aexit__=AsyncMock())
+    first = SimpleNamespace(_context=None, __aenter__=AsyncMock(), __aexit__=AsyncMock())
     second = SimpleNamespace(__aenter__=AsyncMock(side_effect=failure), __aexit__=AsyncMock())
     monkeypatch.setattr(Transactions, "atomic", {"first": first, "second": second}.__getitem__)
     middleware = HareTaskiqMiddleware(atomic_tasks=("first", "second"))
@@ -52,8 +52,8 @@ async def test_task_completion_cancellation_drains_exits_before_restoring_scopes
         exits.append(("second", exception_type))
 
     contexts = {
-        "first": SimpleNamespace(__aenter__=AsyncMock(), __aexit__=exit_first),
-        "second": SimpleNamespace(__aenter__=AsyncMock(), __aexit__=exit_second),
+        "first": SimpleNamespace(_context=None, __aenter__=AsyncMock(), __aexit__=exit_first),
+        "second": SimpleNamespace(_context=None, __aenter__=AsyncMock(), __aexit__=exit_second),
     }
     monkeypatch.setattr(Transactions, "atomic", contexts.__getitem__)
     monkeypatch.setattr(TransactionGroup, "_cancel_close", record_cancel)

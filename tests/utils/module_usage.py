@@ -15,7 +15,6 @@ class ModuleUsage:
     """
 
     def __init__(self, root: Path) -> None:
-        self.root = root
         self.trees = {path: ast.parse(path.read_text(encoding="utf-8")) for path in sorted(root.rglob("*.py"))}
         self.modules = {
             path: ".".join(path.relative_to(root.parent).with_suffix("").parts).removesuffix(".__init__")

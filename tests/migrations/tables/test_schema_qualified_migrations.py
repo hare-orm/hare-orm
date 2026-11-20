@@ -15,13 +15,12 @@ from typing import Any
 import pytest
 
 from hare import fields
+from hare.core.apps.model_binding_graph import ModelBindingGraph
 from hare.ddl import DatabaseFunction, DatabaseSequence, MaterializedView, RawSQLTerm, View
 from hare.ddl.enums import TriggerEvent
 from hare.ddl.indexes import Index
 from hare.ddl.schema_objects.trigger import Trigger
 from hare.dialects.base.constants import SQL_DIALECT
-from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-from hare.dialects.base.schema.tables.table_comments import TableComments
 from hare.dialects.postgresql.schema.postgresql_schema_editor import PostgresqlSchemaEditor
 from hare.dialects.sqlite.schema.sqlite_schema_editor import SqliteSchemaEditor
 from hare.fields.relations.fields import ForeignKeyFieldInstance
@@ -38,21 +37,24 @@ from hare.migrations.state.state import State
 from hare.migrations.state.state_apps import StateApps
 from hare.migrations.writer import MigrationWriter
 from hare.models import Model
+from hare.models.model_binding import ModelBinding
 from hare.query.expressions import ExpressionContext, Q
 from hare.query.lookup_info.lookup_paths import LookupPaths
 from hare.query.queryset.relations.many_to_many_relation import ManyToManyRelation
 from hare.sql import Table
 from tests.utils.fake_client import FakeClient
 from tests.utils.operations import apply_operations
+from tests.utils.schema_editor import TestSchemaEditor
 
 pytestmark = pytest.mark.database_independent
 
 
-def init_apps(*models: type[Model]) -> None:
+def init_apps(*models: type[Model]) -> StateApps:
     apps = StateApps()
     for model in models:
         apps.register_model("models", model)
     apps.init_relations()
+    return apps
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +62,7 @@ def init_apps(*models: type[Model]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_schema_models() -> tuple[type[Model], type[Model], type[Model], type[Model]]:
+def _make_schema_models() -> tuple[ModelBinding, ModelBinding, ModelBinding, ModelBinding]:
     """Build models with Meta.schema='custom' for testing."""
 
     class SchemaCategory(Model):
@@ -103,30 +105,19 @@ def _make_schema_models() -> tuple[type[Model], type[Model], type[Model], type[M
             table = "product"
             schema = "custom"
 
-    init_apps(SchemaCategory, SchemaProduct)
-    init_apps(SchemaTag, SchemaProductWithTags)
-    return SchemaCategory, SchemaProduct, SchemaTag, SchemaProductWithTags
+    categories = init_apps(SchemaCategory, SchemaProduct)
+    tags = init_apps(SchemaTag, SchemaProductWithTags)
+    return (
+        categories.get_binding(SchemaCategory),
+        categories.get_binding(SchemaProduct),
+        tags.get_binding(SchemaTag),
+        tags.get_binding(SchemaProductWithTags),
+    )
 
 
 # ---------------------------------------------------------------------------
 # 1. Schema-qualified DDL per dialect
 # ---------------------------------------------------------------------------
-
-
-class TestEditorTableComments(TableComments):
-    __test__ = False
-
-    def get_table_comment_sql(self, table: str, comment: str) -> str:
-        return ""
-
-    def get_column_comment_sql(self, table: str, column: str, comment: str) -> str:
-        return ""
-
-
-class _TestEditor(BaseSchemaEditor):
-    table_comments_class = TestEditorTableComments
-
-    """Minimal concrete editor for tests (base ANSI SQL dialect)."""
 
 
 @pytest.mark.parametrize(
@@ -140,7 +131,7 @@ class _TestEditor(BaseSchemaEditor):
 async def test_base_editor_qualifies_the_table_with_its_schema(method_name, expected) -> None:
     SchemaCategory, *_ = _make_schema_models()
     client = FakeClient("sql")
-    editor = _TestEditor(client)
+    editor = TestSchemaEditor(client)
 
     await getattr(editor, method_name)(SchemaCategory)
 
@@ -152,6 +143,8 @@ async def test_base_editor_qualifies_the_table_with_its_schema(method_name, expe
 async def test_base_create_model_without_schema() -> None:
     """Without Meta.schema, output is unchanged (backward compatible)."""
 
+    declaration_graph = ModelBindingGraph()
+
     class PlainWidget(Model):
         id = fields.IntField(primary_key=True)
         name = fields.TextField()
@@ -161,8 +154,8 @@ async def test_base_create_model_without_schema() -> None:
             table = "widget"
 
     client = FakeClient("sql")
-    editor = _TestEditor(client)
-    await editor.create_model(PlainWidget)
+    editor = TestSchemaEditor(client)
+    await editor.create_model(declaration_graph.include(PlainWidget))
 
     sql = client.executed[0]
     assert 'CREATE TABLE "widget"' in sql
@@ -174,7 +167,7 @@ async def test_base_fk_references_qualified() -> None:
     """FK REFERENCES uses schema-qualified target table."""
     _, SchemaProduct, *_ = _make_schema_models()
     client = FakeClient("sql")
-    editor = _TestEditor(client)
+    editor = TestSchemaEditor(client)
 
     await editor.create_model(SchemaProduct)
 
@@ -187,7 +180,7 @@ async def test_base_m2m_table_qualified() -> None:
     """M2M through table is schema-qualified."""
     *_, SchemaTag, SchemaProductWithTags = _make_schema_models()
     client = FakeClient("sql")
-    editor = _TestEditor(client)
+    editor = TestSchemaEditor(client)
 
     await editor.create_model(SchemaProductWithTags)
 
@@ -200,7 +193,7 @@ async def test_base_add_field_qualified() -> None:
     """ALTER TABLE ADD COLUMN uses schema-qualified name."""
     SchemaCategory, *_ = _make_schema_models()
     client = FakeClient("sql")
-    editor = _TestEditor(client)
+    editor = TestSchemaEditor(client)
 
     await editor.add_field(SchemaCategory, SchemaCategory, "name")
 
@@ -214,7 +207,7 @@ async def test_base_rename_table_qualified() -> None:
     in its schema, and RENAME TO takes no schema."""
     SchemaCategory, *_ = _make_schema_models()
     client = FakeClient("sql")
-    editor = _TestEditor(client)
+    editor = TestSchemaEditor(client)
 
     await editor.rename_table(SchemaCategory, "category", "categories")
 
@@ -231,7 +224,7 @@ async def test_base_remove_index_qualified() -> None:
     models in two tenant schemas)."""
     SchemaCategory, *_ = _make_schema_models()
     client = FakeClient("sql")
-    editor = _TestEditor(client)
+    editor = TestSchemaEditor(client)
 
     await editor.remove_index(SchemaCategory, Index(fields=("name",), name="my_named_idx"))
 
@@ -246,7 +239,7 @@ async def test_base_rename_index_qualified() -> None:
     across schemas, only rename it within its current one)."""
     SchemaCategory, *_ = _make_schema_models()
     client = FakeClient("sql")
-    editor = _TestEditor(client)
+    editor = TestSchemaEditor(client)
 
     await editor.rename_index(
         SchemaCategory,
@@ -316,7 +309,7 @@ async def test_create_schema_noop_for_base(empty_state: State) -> None:
     CreateSchema - create_schema/drop_schema no longer exist on it at all, so the operation's own
     isinstance(state_editor, SchemaAndExtensionSupportMixin) guard is what skips the call."""
     client = FakeClient("sqlite")
-    editor = _TestEditor(client)
+    editor = TestSchemaEditor(client)
 
     op = CreateSchema(schema_name="custom")
     await apply_operations("models", empty_state, op, schema_editor=editor)
@@ -327,7 +320,7 @@ async def test_create_schema_noop_for_base(empty_state: State) -> None:
 @pytest.mark.asyncio
 async def test_create_schema_and_drop_schema_noop_for_real_sqlite_editor(empty_state: State) -> None:
     """Same no-op guarantee as test_create_schema_noop_for_base, but against the REAL
-    SqliteSchemaEditor production class (not the generic _TestEditor fake) - confirms
+    SqliteSchemaEditor production class (not the generic TestSchemaEditor fake) - confirms
     SchemaAndExtensionSupportMixin genuinely isn't mixed into it (create_schema/drop_schema don't
     exist on it at all) and that CreateSchema/DropSchema's own isinstance guard correctly skips
     calling them instead of raising AttributeError."""
@@ -543,7 +536,7 @@ def test_writer_schema_with_create_model() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_m2m_models_with_schema() -> tuple[type[Model], type[Model]]:
+def _make_m2m_models_with_schema() -> tuple[ModelBinding, ModelBinding]:
     """Build M2M models with Meta.schema for through_schema testing."""
 
     class STag(Model):
@@ -567,21 +560,21 @@ def _make_m2m_models_with_schema() -> tuple[type[Model], type[Model]]:
             table = "article"
             schema = "catalog"
 
-    init_apps(STag, SArticle)
-    return STag, SArticle
+    apps = init_apps(STag, SArticle)
+    return apps.get_binding(STag), apps.get_binding(SArticle)
 
 
 def test_through_schema_set_on_forward_m2m_field() -> None:
     """Forward M2M field gets through_schema from declaring model."""
     _, SArticle = _make_m2m_models_with_schema()
-    field: ManyToManyFieldInstance = SArticle._meta.fields_map["tags"]
+    field: ManyToManyFieldInstance = SArticle.fields_map["tags"]
     assert field.through_schema == "catalog"
 
 
 def test_through_schema_set_on_backward_m2m_field() -> None:
     """Backward (auto-generated) M2M field gets through_schema from declaring model."""
     STag, _ = _make_m2m_models_with_schema()
-    field: ManyToManyFieldInstance = STag._meta.fields_map["articles"]
+    field: ManyToManyFieldInstance = STag.fields_map["articles"]
     assert field._generated is True
     assert field.through_schema == "catalog"
 
@@ -604,8 +597,8 @@ def test_through_schema_none_without_schema() -> None:
             app = "models"
             table = "plain_b"
 
-    init_apps(PlainA, PlainB)
-    field: ManyToManyFieldInstance = PlainB._meta.fields_map["a_items"]
+    apps = init_apps(PlainA, PlainB)
+    field: ManyToManyFieldInstance = apps.get_binding(PlainB).fields_map["a_items"]
     assert field.through_schema is None
 
 
@@ -616,7 +609,11 @@ def test_m2m_lookup_joins_the_through_table_in_its_schema(filter_key: str) -> No
     value = [1] if filter_key.endswith("in") else 1
     modifier = Q(**{filter_key: value}).get_result(
         ExpressionContext(
-            model=SArticle, table=SArticle._meta.basetable, annotations={}, dialect=SQL_DIALECT, connection=None
+            binding=SArticle,
+            table=SArticle.basetable,
+            annotations={},
+            dialect=SQL_DIALECT,
+            connection=None,
         )
     )
 
@@ -637,7 +634,7 @@ def test_m2m_lookup_joins_the_through_table_in_its_schema(filter_key: str) -> No
 def test_get_joins_for_an_m2m_field_includes_schema(model_index, table_name, field_name) -> None:
     """LookupPaths.get_joins_for_related_field() creates the through Table with the schema."""
     model_class = _make_m2m_models_with_schema()[model_index]
-    field: ManyToManyFieldInstance = model_class._meta.fields_map[field_name]
+    field: ManyToManyFieldInstance = model_class.fields_map[field_name]
 
     base_table = Table(table_name, schema="catalog")
     joins = LookupPaths.get_joins_for_related_field(base_table, field, field_name)
@@ -650,7 +647,8 @@ def test_get_joins_for_an_m2m_field_includes_schema(model_index, table_name, fie
 
 
 @pytest.mark.asyncio
-async def test_moving_a_model_to_another_schema_moves_the_objects_it_declares():
+@pytest.mark.parametrize("sequence_owner", [None, "id"], ids=["unowned", "owned"])
+async def test_moving_a_model_to_another_schema_moves_the_objects_it_declares(sequence_owner):
     """AlterModelSchema moves the table and what the model declares in its schema with it: views,
     materialized views, functions, sequences and the functions of its triggers."""
     client = FakeClient("postgresql", inline_comment=False)
@@ -666,7 +664,7 @@ async def test_moving_a_model_to_another_schema_moves_the_objects_it_declares():
         "functions": [
             DatabaseFunction("ledger_count", returns="integer", body=RawSQLTerm("SELECT 1"), arguments=("integer",))
         ],
-        "sequences": [DatabaseSequence("ledger_number")],
+        "sequences": [DatabaseSequence("ledger_number", owned_by=sequence_owner)],
         "triggers": [Trigger(name="ledger_touch", on=TriggerEvent.UPDATE, body=RawSQLTerm("RETURN NEW;"))],
     }
     state = await apply_operations(
@@ -682,6 +680,6 @@ async def test_moving_a_model_to_another_schema_moves_the_objects_it_declares():
         'ALTER VIEW "old_space"."ledger_paid" SET SCHEMA "new_space";',
         'ALTER MATERIALIZED VIEW "old_space"."ledger_totals" SET SCHEMA "new_space";',
         'ALTER FUNCTION "old_space"."ledger_count"(integer) SET SCHEMA "new_space";',
-        'ALTER SEQUENCE "old_space"."ledger_number" SET SCHEMA "new_space";',
+        *(['ALTER SEQUENCE "old_space"."ledger_number" SET SCHEMA "new_space";'] if sequence_owner is None else []),
         'ALTER FUNCTION "old_space"."ledger_touch_fn"() SET SCHEMA "new_space";',
     ]

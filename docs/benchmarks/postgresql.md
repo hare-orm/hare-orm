@@ -92,6 +92,9 @@ run to the worst.
   whether it has come by decides the query plan — with a parallel scan or without.
 - Before a load test, concurrent workers run every operation of the load, untimed. This warms the
   operations without guaranteeing preparation on each physical connection.
+- For hare, tortoise-orm and yara-orm, query entry points are obtained after ORM initialization,
+  outside the cold-start timer. Scenarios measure queries of an initialized application, without
+  rebinding templates declared before initialization.
 - Most scenarios repeat 3–5 times; their median counts and all samples are retained. Before each
   bulk insert or `get_or_create()` repetition, that scenario's rows are cleared outside the timer.
   Sequential inserts accumulate rows until the next group; updates reuse the changed rows. Deletes,

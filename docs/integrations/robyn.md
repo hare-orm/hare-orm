@@ -114,6 +114,10 @@ The OpenAPI schema (`HareOpenAPI`, the application's by default) lists each para
 query parameter, a path parameter for one marked `InPath()` — with its type, limits, enum and
 description.
 
+Parameter names follow Pydantic's validation aliases and model configuration. `AliasChoices`
+documents the first accepted input name; its alternatives remain accepted by request parsing.
+A serialization alias does not rename an input parameter.
+
 ## <a id="responses"></a>Responses
 
 A route's response — a row, a list, a page — is validated with its `response_model` from its attributes

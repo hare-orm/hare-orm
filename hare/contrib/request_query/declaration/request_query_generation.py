@@ -17,6 +17,7 @@ class RequestQueryGeneration:
     declaration cache affects future construction, never a published Pydantic class.
     """
 
+    revision: int
     schema: type[RequestQuery[Any]]
     declaration: RequestQueryDeclaration | None
     options: tuple[RequestOption, ...]

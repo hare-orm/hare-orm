@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 from mypy.nodes import ARG_NAMED, ARG_STAR2, CallExpr, Expression, MemberExpr, RefExpr, StrExpr
 from mypy.typeops import make_simplified_union
-from mypy.types import Instance, NoneType, Type, TypedDictType, get_proper_type
+from mypy.types import AnyType, Instance, NoneType, Type, TypedDictType, get_proper_type
 
 from hare.contrib.mypy.constants import (
     ANNOTATION_TYPE_RULES,
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from mypy.plugin import MethodContext, Plugin
 
     from hare.contrib.mypy.model_registry import ModelRegistry
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class AnnotationTypes:
@@ -86,12 +86,11 @@ class AnnotationTypes:
             The type.
         """
         mypy_types = MypyTypes(self.plugin, method_context.api, self.model_registry)
-        queryset_arguments = mypy_types.get_queryset_arguments(method_context.type)
-        call = method_context.context
+        queryset_call = mypy_types.get_queryset_call(method_context.type, method_context.context)
         return_type = get_proper_type(method_context.default_return_type)
-        if queryset_arguments is None or not isinstance(call, CallExpr) or not isinstance(return_type, Instance):
+        if queryset_call is None or not isinstance(return_type, Instance):
             return method_context.default_return_type
-        model, queryset_type = queryset_arguments
+        model, queryset_type, call = queryset_call
         annotations = self.get_annotations(method_context.type, queryset_type)
         if annotations is None:
             return method_context.default_return_type
@@ -157,12 +156,12 @@ class AnnotationTypes:
         return queryset.copy_with_extra_attr(HIDDEN_ANNOTATIONS_ATTRIBUTE, annotations)
 
     @staticmethod
-    def get_expression_type(mypy_types: MypyTypes, model: type[Model], expression: Expression) -> Type:
+    def get_expression_type(mypy_types: MypyTypes, binding: ModelBinding, expression: Expression) -> Type:
         """The type of an annotation's value by its expression.
 
         Args:
             mypy_types: The types of the call.
-            model: The queryset's model.
+            binding: The queryset's model.
             expression: The expression.
 
         Returns:
@@ -177,15 +176,33 @@ class AnnotationTypes:
             return mypy_types.api.named_generic_type(BOOL_FULLNAME, [])
         if rule is AnnotationTypeRule.ARGUMENT_TYPE and expression.args:
             return mypy_types.api.get_expression_type(expression.args[0])
+        if rule is AnnotationTypeRule.NULL_PROPAGATING_INT and expression.args:
+            argument = expression.args[0]
+            argument_type = (
+                AnnotationTypes.get_path_type(mypy_types, binding, argument.value)
+                if isinstance(argument, StrExpr)
+                else AnnotationTypes.get_expression_type(mypy_types, binding, argument)
+            )
+            result = mypy_types.api.named_generic_type(INT_FULLNAME, [])
+            if isinstance(get_proper_type(argument_type), (AnyType, NoneType)) or (
+                MypyTypes.without_none(argument_type) != argument_type
+            ):
+                return make_simplified_union([result, NoneType()])
+            return result
         if rule in {AnnotationTypeRule.PATH_VALUE, AnnotationTypeRule.OPTIONAL_PATH_VALUE} and expression.args:
             path = expression.args[0]
             if not isinstance(path, StrExpr):
                 return mypy_types.any()
-            try:
-                path_type = mypy_types.get_selected_value_type(model._meta.get_lookup_info(path.value))
-            except HareError:
-                return mypy_types.any()
+            path_type = AnnotationTypes.get_path_type(mypy_types, binding, path.value)
             if rule is AnnotationTypeRule.OPTIONAL_PATH_VALUE:
                 return make_simplified_union([path_type, NoneType()])
             return path_type
         return mypy_types.any()
+
+    @staticmethod
+    def get_path_type(mypy_types: MypyTypes, binding: ModelBinding, path: str) -> Type:
+        """The selected field type, including nullability from the relations along the path."""
+        try:
+            return mypy_types.get_selected_value_type(binding.get_lookup_info(path))
+        except HareError:
+            return mypy_types.any()

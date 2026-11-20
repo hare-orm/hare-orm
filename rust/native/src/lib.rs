@@ -36,38 +36,37 @@ const DEFAULT_WORKER_THREADS: usize = 4;
 #[cfg(unix)]
 const WORKER_THREADS_VARIABLE: &str = "TOKIO_WORKER_THREADS";
 
-/// Adds `submodule` to `parent` and to `sys.modules`, so both `from rust.native import pg` and
-/// `import rust.native.pg` find it.
-fn add_submodule(parent: &Bound<'_, PyModule>, submodule: &Bound<'_, PyModule>) -> PyResult<()> {
+/// Registers exports under their final module name before publishing the module. Both imports and
+/// pickle must find an exported callable by the qualified name it receives during registration.
+fn add_submodule<'py>(
+    parent: &Bound<'py, PyModule>,
+    name: &str,
+    register: impl FnOnce(&Bound<'py, PyModule>) -> PyResult<()>,
+) -> PyResult<()> {
     let py = parent.py();
-    parent.add_submodule(submodule)?;
-    let qualified_name = format!("{}.{}", parent.name()?, submodule.name()?);
-    submodule.setattr("__name__", &qualified_name)?;
+    let qualified_name = format!("{}.{}", parent.name()?, name);
+    let submodule = PyModule::new(py, &qualified_name)?;
+    register(&submodule)?;
+    parent.add_submodule(&submodule)?;
     let modules = py.import("sys")?.getattr("modules")?.cast_into::<PyDict>()?;
-    modules.set_item(qualified_name, submodule)?;
+    modules.set_item(qualified_name, &submodule)?;
     Ok(())
 }
 
 #[pymodule]
-fn native(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
+fn native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     #[cfg(unix)]
-    register_driver(py, module)?;
-    let rows_module = PyModule::new(py, "rows")?;
-    rows::register(&rows_module)?;
-    add_submodule(module, &rows_module)?;
-    let sqlite_functions_module = PyModule::new(py, "sqlite_functions")?;
-    sqlite_functions::register(&sqlite_functions_module)?;
-    add_submodule(module, &sqlite_functions_module)?;
-    let clock_module = PyModule::new(py, "clock")?;
-    clock::register(&clock_module)?;
-    add_submodule(module, &clock_module)?;
+    register_driver(module)?;
+    add_submodule(module, "rows", rows::register)?;
+    add_submodule(module, "sqlite_functions", sqlite_functions::register)?;
+    add_submodule(module, "clock", clock::register)?;
     Ok(())
 }
 
 /// Adds the PostgreSQL driver - `pg` and `pool` - with the runtime its queries run on.
 #[cfg(unix)]
-fn register_driver(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
+fn register_driver(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();
     if std::env::var_os(WORKER_THREADS_VARIABLE).is_none() {
@@ -75,11 +74,7 @@ fn register_driver(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()>
         runtime.worker_threads(DEFAULT_WORKER_THREADS.min(cores));
     }
     pyo3_async_runtimes::tokio::init(runtime);
-    let pg_module = PyModule::new(py, "pg")?;
-    pg::register(py, &pg_module)?;
-    add_submodule(module, &pg_module)?;
-    let pool_module = PyModule::new(py, "pool")?;
-    pool::register(&pool_module)?;
-    add_submodule(module, &pool_module)?;
+    add_submodule(module, "pg", pg::register)?;
+    add_submodule(module, "pool", pool::register)?;
     Ok(())
 }

@@ -1,7 +1,6 @@
 """An enum field's column on ClickHouse is an Enum8/Enum16 of its members: a member added to the enum or
 removed from it is a change of the column's type the migration makes, not of its comment alone."""
 
-import os
 import textwrap
 
 import pytest
@@ -31,10 +30,7 @@ def get_models(color_members: str, size_members: str) -> str:
     return textwrap.dedent(MODELS).format(color_members=color_members, size_members=size_members)
 
 
-@pytest.fixture(autouse=True)
-def skip_without_clickhouse():
-    if not os.getenv("HARE_TEST_DB", "").startswith("clickhouse"):
-        pytest.skip("runs against the ClickHouse test server - make test_clickhouse")
+pytestmark = pytest.mark.usefixtures("skip_without_clickhouse")
 
 
 @pytest.mark.asyncio

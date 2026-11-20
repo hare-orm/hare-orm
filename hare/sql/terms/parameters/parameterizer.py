@@ -54,25 +54,23 @@ class Parameterizer:
         Returns:
             The parameter placeholder.
         """
-        if reuse and source is not None:
-            source_and_index = self.indexes_by_source_id.get(id(source))
-            if source_and_index is not None:
-                index = source_and_index[1]
-                return (
-                    Parameter(self.placeholder_factory(index)) if self.placeholder_factory else Parameter(index=index)
-                )
-        # An enum member binds as its value, the same one its literal would render.
-        while isinstance(value, Enum):
-            value = value.value
-        self._add_value(value, source)
-        index = len(self.values)
-        if source is not None and source.sensitive:
-            self.hide_last_value()
-        if reuse and source is not None:
-            self.indexes_by_source_id[id(source)] = (source, index)
-        if self.placeholder_factory:
-            return Parameter(self.placeholder_factory(index))
-        return Parameter(index=index)
+        if (
+            reuse
+            and source is not None
+            and (source_and_index := self.indexes_by_source_id.get(id(source))) is not None
+        ):
+            index = source_and_index[1]
+        else:
+            # An enum member binds as its value, the same one its literal would render.
+            while isinstance(value, Enum):
+                value = value.value
+            self._add_value(value, source)
+            index = len(self.values)
+            if source is not None and source.sensitive:
+                self.hide_last_value()
+            if reuse and source is not None:
+                self.indexes_by_source_id[id(source)] = (source, index)
+        return Parameter(self.placeholder_factory(index)) if self.placeholder_factory else Parameter(index=index)
 
     def hide_last_value(self) -> None:
         """Keeps the parameter just added from being shown - the values become a

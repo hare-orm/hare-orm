@@ -13,6 +13,7 @@ import pytest
 from hare import Connections, fields
 from hare.contrib.test import requires_features
 from hare.core.connections.connection_handler import ConnectionHandler
+from hare.core.hare_context import HareContext
 from hare.ddl import (
     DatabaseFunction,
     DatabaseSequence,
@@ -32,6 +33,7 @@ from hare.exceptions import ConfigurationError, UnSupportedError
 from hare.migrations.autodetection.operation_generator import OperationGenerator
 from hare.migrations.autodetection.rename_questions import RenameQuestions
 from hare.migrations.exceptions import IncompatibleStateError
+from hare.migrations.execution.migration_runner import MigrationRunner
 from hare.migrations.migration import Migration
 from hare.migrations.operations import (
     AddFunction,
@@ -69,6 +71,7 @@ from hare.models.enums import ModelOption
 from hare.query.expressions import Q
 from hare.query.queryset import ModelQuery
 from tests.utils.fake_client import FakeClient
+from tests.utils.migration_source import MigrationSource
 
 TABLE = "schema_migration_invoice"
 READER_ROLE = "hare_schema_object_reader"
@@ -135,6 +138,117 @@ def get_types(operations: list[Any]) -> list[str]:
 
 
 # Declarations
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("qualified", [False, True])
+def test_view_operations_keep_independent_dependencies_for_the_same_names_in_two_schemas(qualified):
+    with_views = State()
+    without_views = State()
+    dependencies = {"Alpha": ("alpha", "picked", "tail"), "Beta": ("beta", "tail", "picked")}
+    for model, (schema, source, dependent) in dependencies.items():
+        definition = {"schema": schema, "table": "entry"}
+        views = [
+            View(
+                dependent,
+                query=RawSQLTerm(f"SELECT id FROM {schema}.{source}"),
+                read_columns=[(f"{schema}.{source}" if qualified else source, "id")],
+            ),
+            View(source, query=RawSQLTerm(f"SELECT id FROM {schema}.entry")),
+        ]
+        CreateModel(model, fields=get_fields(), options={**definition, "views": views}).state_forward(
+            "models", with_views
+        )
+        CreateModel(model, fields=get_fields(), options=definition).state_forward("models", without_views)
+
+    added = [
+        (operation.model_name, operation.view.name)
+        for operation in OperationGenerator(without_views, with_views).generate()
+        if isinstance(operation, AddView)
+    ]
+    removed = [
+        (operation.model_name, operation.name)
+        for operation in OperationGenerator(with_views, without_views).generate()
+        if isinstance(operation, RemoveView)
+    ]
+    for model, (_, source, dependent) in dependencies.items():
+        assert added.index((model, source)) < added.index((model, dependent))
+        assert removed.index((model, dependent)) < removed.index((model, source))
+
+
+@pytest.mark.database_independent
+def test_schema_generation_orders_views_across_bindings():
+    state = State()
+    CreateModel(
+        "Reader",
+        fields=get_fields(),
+        options={
+            "schema": "readers",
+            "views": [
+                View(
+                    "total",
+                    RawSQLTerm("SELECT amount FROM source.amounts"),
+                    read_columns=[("source.amounts", "amount")],
+                )
+            ],
+        },
+    ).state_forward("models", state)
+    CreateModel(
+        "Source",
+        fields=get_fields(),
+        options={
+            "schema": "source",
+            "table": "entries",
+            "views": [View("amounts", RawSQLTerm("SELECT amount FROM source.entries"))],
+        },
+    ).state_forward("models", state)
+    bindings = [state.apps.get_binding("models.Reader"), state.apps.get_binding("models.Source")]
+    client = FakeClient("postgresql")
+    editor = client.dialect.schema_editor_class(client, collect_sql=True)
+    sql = editor.table_creation.get_create_schema_sql(safe=False, models=bindings)
+    assert sql.index('CREATE VIEW "source"."amounts"') < sql.index('CREATE VIEW "readers"."total"')
+
+
+@pytest.mark.database_independent
+def test_a_cross_schema_view_is_rebuilt_for_the_column_it_reads():
+    previous = State()
+    changed = State()
+    for name, schema, declaration in (
+        (
+            "Alpha",
+            "alpha",
+            View("local", RawSQLTerm("SELECT amount FROM alpha.entry"), read_columns=[("entry", "amount")]),
+        ),
+        (
+            "Beta",
+            "beta",
+            View("local", RawSQLTerm("SELECT amount FROM beta.entry"), read_columns=[("entry", "amount")]),
+        ),
+    ):
+        views = [declaration]
+        if schema == "beta":
+            views.append(
+                View("remote", RawSQLTerm("SELECT amount FROM alpha.entry"), read_columns=[("alpha.entry", "amount")])
+            )
+        for state, field in (
+            (previous, fields.IntField()),
+            (changed, fields.BigIntField() if schema == "alpha" else fields.IntField()),
+        ):
+            CreateModel(
+                name,
+                fields=[("id", fields.IntField(primary_key=True)), ("amount", field)],
+                options={"schema": schema, "table": "entry", "views": views},
+            ).state_forward("models", state)
+
+    operations = OperationGenerator(previous, changed).generate()
+    assert {(op.model_name, op.name) for op in operations if isinstance(op, RemoveView)} == {
+        ("Alpha", "local"),
+        ("Beta", "remote"),
+    }
+    assert {(op.model_name, op.view.name) for op in operations if isinstance(op, AddView)} == {
+        ("Alpha", "local"),
+        ("Beta", "remote"),
+    }
 
 
 @pytest.mark.parametrize(
@@ -422,26 +536,35 @@ def test_a_policy_reading_a_changed_column_is_dropped_before_the_change_and_crea
 async def test_function_defaults_only_appear_in_create_declarations(argument, identity):
     function = DatabaseFunction("read_value", "text", RawSQLTerm("SELECT 'value'"), arguments=(argument,))
     state = get_state(functions=[function])
-    model = state.apps.get_model("models.Invoice")
+    state.apps.get_model("models.Invoice")
     client = FakeClient("postgresql")
     editor = client.dialect.schema_editor_class(client, collect_sql=True)
     assert PostgresqlFunctionArguments.get_identity(function.arguments) == (identity,)
-    assert argument in editor.database_functions.get_function_create_sqls(model, function)[0]
-    await editor.database_functions.drop_database_function(model, function)
+    assert (
+        argument
+        in editor.database_functions.get_function_create_sqls(state.apps.get_binding("models.Invoice"), function)[0]
+    )
+    await editor.database_functions.drop_database_function(state.apps.get_binding("models.Invoice"), function)
     assert f"({identity})" in editor.collected_sql[-1]
     grant = Grant(
         privileges=(Privilege.EXECUTE,), roles=("reader",), on=GrantTarget.FUNCTION, object_name=function.name
     )
-    assert f"({identity})" in editor.grants.get_grant_sqls(model, grant)[0]
+    assert f"({identity})" in editor.grants.get_grant_sqls(state.apps.get_binding("models.Invoice"), grant)[0]
     renamed = DatabaseFunction("renamed_value", function.returns, function.body, arguments=function.arguments)
-    await editor.database_functions.rename_database_function(model, function, renamed)
+    await editor.database_functions.rename_database_function(
+        state.apps.get_binding("models.Invoice"), function, renamed
+    )
     assert f"({identity})" in editor.collected_sql[-1]
-    await editor.database_functions.get_schema_move_plan(model, function, None, "library").execute(editor)
+    await editor.database_functions.get_schema_move_plan(
+        state.apps.get_binding("models.Invoice"), function, None, "library"
+    ).execute(editor)
     assert f"({identity})" in editor.collected_sql[-1]
     for new_argument in (identity, identity + " DEFAULT 'changed'"):
         changed = DatabaseFunction(function.name, function.returns, function.body, arguments=(new_argument,))
         editor.collected_sql.clear()
-        await editor.database_functions.alter_database_function(model, function, changed)
+        await editor.database_functions.alter_database_function(
+            state.apps.get_binding("models.Invoice"), function, changed
+        )
         assert len(editor.collected_sql) == 2
         assert "DROP FUNCTION" in editor.collected_sql[0]
         assert f"({identity})" in editor.collected_sql[0]
@@ -463,7 +586,7 @@ async def test_function_defaults_only_appear_in_create_declarations(argument, id
 async def test_replacement_compiles_before_removing_the_existing_object(
     monkeypatch, dialect, part_name, compiler, operation
 ):
-    model = get_state().apps.get_model("models.Invoice")
+    binding = get_state().apps.get_binding("models.Invoice")
     client = FakeClient(dialect)
     editor = client.dialect.schema_editor_class(client, collect_sql=True)
     part = getattr(editor, part_name)
@@ -481,7 +604,7 @@ async def test_replacement_compiles_before_removing_the_existing_object(
 
     monkeypatch.setattr(type(part), compiler, refuse)
     with pytest.raises(ConfigurationError) as raised:
-        await getattr(part, operation)(model, old, new)
+        await getattr(part, operation)(binding, old, new)
     assert raised.value is failure
     assert editor.collected_sql == []
 
@@ -489,12 +612,14 @@ async def test_replacement_compiles_before_removing_the_existing_object(
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_sequence_owner_is_checked_before_changing_sequence_parameters():
-    model = get_state().apps.get_model("models.Invoice")
+    get_state().apps.get_model("models.Invoice")
     client = FakeClient("postgresql")
     editor = client.dialect.schema_editor_class(client, collect_sql=True)
     with pytest.raises(ConfigurationError, match="missing"):
         await editor.sequences.alter_sequence(
-            model, DatabaseSequence("book_number"), DatabaseSequence("book_number", increment=10, owned_by="missing")
+            get_state().apps.get_binding("models.Invoice"),
+            DatabaseSequence("book_number"),
+            DatabaseSequence("book_number", increment=10, owned_by="missing"),
         )
     assert editor.collected_sql == []
 
@@ -526,7 +651,7 @@ def test_a_view_reading_a_materialized_view_is_created_after_it(queryset_depende
         ).state_forward("models", state)
         over_totals = View(
             over_totals.name,
-            query=state.apps.get_model("models.Totals").objects.values("total").using(FakeClient("postgresql")),
+            query=state.apps.get_queryset("models.Totals", using=FakeClient("postgresql")).values("total"),
         )
     operations = OperationGenerator(
         get_state(), get_state(views=[over_totals], materialized_views=[totals])
@@ -536,16 +661,25 @@ def test_a_view_reading_a_materialized_view_is_created_after_it(queryset_depende
     plain = View("schema_migration_plain", query=RawSQLTerm(f"SELECT id FROM {TABLE}"))
     ordered = ViewCreationOrder.get_ordered([plain, over_totals, totals], lambda view: view)
     assert ordered == [plain, totals, over_totals]
-    model = get_state(views=[over_totals], materialized_views=[totals]).apps.get_model("models.Invoice")
+    get_state(views=[over_totals], materialized_views=[totals]).apps.get_model("models.Invoice")
     client = FakeClient(dialect)
     editor = client.dialect.schema_editor_class(client)
-    drops = editor.get_model_view_drop_sqls(model)
+    drops = editor.get_model_view_drop_sqls(
+        get_state(views=[over_totals], materialized_views=[totals]).apps.get_binding("models.Invoice")
+    )
     assert len(drops) == 2
     assert over_totals.name in drops[0]
     assert totals.name in drops[1]
-    assert [step.sql for step in editor.get_delete_model_plan(model).steps[:2]] == drops
+    assert [
+        step.sql
+        for step in editor.get_delete_model_plan(
+            get_state(views=[over_totals], materialized_views=[totals]).apps.get_binding("models.Invoice")
+        ).steps[:2]
+    ] == drops
     if dialect == "postgresql":
-        rebuild_drops = editor.table_rebuild.get_table_dependent_drop_sqls(model)
+        rebuild_drops = editor.table_rebuild.get_table_dependent_drop_sqls(
+            get_state(views=[over_totals], materialized_views=[totals]).apps.get_binding("models.Invoice")
+        )
         assert over_totals.name in rebuild_drops[0]
         assert totals.name in rebuild_drops[1]
 
@@ -603,6 +737,72 @@ def test_turning_row_level_security_off_and_dropping_functions_and_sequences_las
     assert operations[0].row_level_security is None
 
 
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("moves_sequence", [False, True], ids=["remove", "change-owner"])
+async def test_a_sequence_is_detached_before_removing_its_former_owner(db_isolated_no_schema, moves_sequence):
+    old = get_state(sequences=[SEQUENCE])
+    sequence = DatabaseSequence(SEQUENCE.name, start=100, increment=2, owned_by="amount")
+    new = get_state(
+        [entry for entry in get_fields() if entry[0] != "number"], sequences=[sequence] if moves_sequence else []
+    )
+    connection = db_isolated_no_schema.get_connection("models")
+    runner = MigrationRunner(connection)
+    empty = State()
+    initial = Migration("initial", "models", operations=OperationGenerator(empty, old).generate())
+    before = await runner.apply(initial, empty)
+    counter = f"SELECT nextval('{SEQUENCE.name}') AS value"
+    assert await connection.execute_dicts(counter) == [{"value": 100}]
+    operations = OperationGenerator(before, new).generate()
+    assert get_types(operations) == ["AlterSequence" if moves_sequence else "RemoveSequence", "RemoveField"]
+    migration = Migration("remove_owner", "models", operations=operations)
+    after = await runner.apply(migration, before)
+    assert not OperationGenerator(after, new).generate()
+    if moves_sequence:
+        assert await connection.execute_dicts(counter) == [{"value": 102}]
+    else:
+        assert await connection.execute_dicts(f"SELECT to_regclass('{SEQUENCE.name}')::text AS name") == [
+            {"name": None}
+        ]
+    await runner.unapply(migration, state_before=before)
+    assert await connection.execute_dicts(
+        f"SELECT pg_get_serial_sequence('{TABLE}', 'number') IS NOT NULL AS owns_sequence"
+    ) == [{"owns_sequence": True}]
+
+
+@requires_features(supports_database_functions=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changes_field", (False, True), ids=("function-only", "with-field"))
+async def test_function_replacement_detaches_its_changed_view(db_isolated_no_schema, changes_field):
+    old_function = DatabaseFunction("adjust", returns="integer", body=RawSQLTerm("SELECT 1"), language="sql")
+    new_function = DatabaseFunction("adjust", returns="bigint", body=RawSQLTerm("SELECT 2::bigint"), language="sql")
+    old_view = View("adjusted", query=RawSQLTerm("SELECT adjust() AS amount"))
+    new_view = View("adjusted", query=RawSQLTerm("SELECT adjust() + 1 AS amount"))
+    old = get_state(functions=[old_function], views=[old_view])
+    model_fields = get_fields_with_amount(fields.BigIntField()) if changes_field else get_fields()
+    new = get_state(model_fields, functions=[new_function], views=[new_view])
+    expected = ["AlterField", "RemoveFunction", "AddFunction"] if changes_field else ["AlterFunction"]
+    connection = db_isolated_no_schema.get_connection("models")
+    runner = MigrationRunner(connection)
+    empty = State()
+    before = await runner.apply(
+        Migration("initial", "models", operations=OperationGenerator(empty, old).generate()), empty
+    )
+    operations = OperationGenerator(before, new).generate()
+    assert get_types(operations) == ["RemoveView", *expected, "AddView"]
+    migration = Migration("replace_function", "models", operations=operations)
+    # Keep the wire type stable across DDL while checking the actual type of the view column.
+    select = "SELECT amount::bigint AS amount, pg_typeof(amount)::text AS column_type FROM adjusted"
+    assert await connection.execute_dicts(select) == [{"amount": 1, "column_type": "integer"}]
+    after = await runner.apply(migration, before)
+    assert not OperationGenerator(after, new).generate()
+    assert await connection.execute_dicts(select) == [{"amount": 3, "column_type": "bigint"}]
+    await runner.unapply(migration, state_before=before)
+    assert await connection.execute_dicts(select) == [{"amount": 1, "column_type": "integer"}]
+    await runner.apply(migration, before)
+    assert await connection.execute_dicts(select) == [{"amount": 3, "column_type": "bigint"}]
+
+
 # Writer and state
 
 
@@ -648,9 +848,7 @@ def get_all_operations() -> list[Any]:
 def test_the_operations_are_written_and_read_back():
     operations = get_all_operations()
     source = MigrationWriter("0001_initial", "models", operations).as_string()
-    namespace: dict[str, Any] = {}
-    exec(compile(source, "<migration>", "exec"), namespace)  # noqa: S102 - the test's own text
-    read_back = namespace["Migration"]("0001_initial", "models").operations
+    read_back = MigrationSource.load(source, "0001_initial", "models").operations
     assert [operation.deconstruct() for operation in read_back] == [
         operation.deconstruct() for operation in operations
     ]
@@ -679,8 +877,8 @@ def test_the_operations_change_the_models_state():
     assert options[ModelOption.POLICIES] == (POLICY,)
     assert options[ModelOption.GRANTS] == (TABLE_GRANT,)
     model = state.apps.get_model("models.Invoice")
-    assert model._meta.views == (VIEW,)
-    assert model._meta.row_level_security == RowLevelSecurity.ENABLED
+    assert state.apps.get_binding(model).views == (VIEW,)
+    assert state.apps.get_binding(model).row_level_security == RowLevelSecurity.ENABLED
 
     new_view = View(VIEW.name, query=RawSQLTerm("SELECT 2"))
     AlterView("Invoice", new_view).state_forward("models", state)
@@ -726,7 +924,12 @@ async def test_a_view_of_a_queryset_is_kept_and_written_as_its_sql(db_simple):
     assert declared.models[("models", "Invoice")].options[ModelOption.VIEWS] == (kept,)
     assert OperationGenerator(state, declared).generate() == []
     model_query_view = View("tournament_names", query=ModelQuery().filter(name="cup").values("id", "name"))
-    assert model_query_view.for_model(Tournament).with_sql_query() == kept
+    assert (
+        model_query_view.for_binding(HareContext.require_current().apps.get_binding(Tournament)).with_sql_query(
+            Tournament.get_connection()
+        )
+        == kept
+    )
 
 
 def test_a_view_query_is_never_a_callable():
@@ -734,15 +937,19 @@ def test_a_view_query_is_never_a_callable():
         View("v", query=lambda: 1)
 
 
-def test_a_model_query_is_made_on_the_model_declaring_it():
+def test_a_model_query_is_made_on_the_model_declaring_it(db):
     from tests.shared_models.testmodels import Tournament
 
     with pytest.raises(ConfigurationError, match="model whose Meta declares it"):
         View("v", query=ModelQuery().filter(name="cup")).get_query_sql()
     with pytest.raises(ConfigurationError, match="isn't a method of its queryset"):
-        View("v", query=ModelQuery().no_such_method()).for_model(Tournament).get_query_sql()
+        View("v", query=ModelQuery().no_such_method()).for_binding(
+            HareContext.require_current().apps.get_binding(Tournament)
+        ).get_query_sql()
     with pytest.raises(ConfigurationError, match="must end in a queryset"):
-        View("v", query=ModelQuery().filter(name="cup").exists()).for_model(Tournament).get_query_sql()
+        View("v", query=ModelQuery().filter(name="cup").exists()).for_binding(
+            HareContext.require_current().apps.get_binding(Tournament)
+        ).get_query_sql()
 
 
 def test_read_columns_are_pairs_of_names():
@@ -865,7 +1072,7 @@ async def test_every_operation_is_applied_and_unapplied_on_postgresql(db_simple)
     empty = State()
     try:
         initial = get_create_migration()
-        state = await initial.apply(empty.clone(), schema_editor=get_editor())
+        state = await initial.apply(empty, schema_editor=get_editor())
         assert await catalog.get_views() == [VIEW.name]
         assert await catalog.get_materialized_views() == [MATERIALIZED_VIEW.name]
         assert await catalog.get_functions() == ["schema_migration_tenant() integer"]
@@ -921,7 +1128,7 @@ async def test_every_operation_is_applied_and_unapplied_on_postgresql(db_simple)
             RenameSequence("Invoice", SEQUENCE.name, "schema_migration_renamed_number"),
             RenamePolicy("Invoice", POLICY.name, "schema_migration_renamed_rows"),
         )
-        before_changed = state.clone()
+        before_changed = state
         state = await changed.apply(state, schema_editor=get_editor())
         assert await catalog.get_views() == ["schema_migration_renamed_paid"]
         assert "tenant_id" in await catalog.get_view_definition("schema_migration_renamed_paid")
@@ -967,7 +1174,7 @@ async def test_every_operation_is_applied_and_unapplied_on_postgresql(db_simple)
                 Grant((Privilege.EXECUTE,), (READER_ROLE,), on=GrantTarget.FUNCTION, object_name=plain_function.name),
             ),
         )
-        before_plain = state.clone()
+        before_plain = state
         state = await plain.apply(state, schema_editor=get_editor())
         retyped = make_migration(
             "0004_retyped",
@@ -976,7 +1183,7 @@ async def test_every_operation_is_applied_and_unapplied_on_postgresql(db_simple)
                 DatabaseFunction(plain_function.name, returns="bigint", body=RawSQLTerm("SELECT 2"), language="sql"),
             ),
         )
-        before_retyped = state.clone()
+        before_retyped = state
         state = await retyped.apply(state, schema_editor=get_editor())
         assert await catalog.get_functions() == [
             "schema_migration_plain() bigint",
@@ -1012,7 +1219,7 @@ async def test_every_operation_is_applied_and_unapplied_on_postgresql(db_simple)
             RemoveFunction("Invoice", FUNCTION.name),
             RemoveSequence("Invoice", SEQUENCE.name),
         )
-        before_removed = state.clone()
+        before_removed = state
         state = await removed.apply(state, schema_editor=get_editor())
         assert await catalog.get_views() == []
         assert await catalog.get_materialized_views() == []
@@ -1074,17 +1281,23 @@ async def test_the_autodetected_operations_run_and_drop_the_readers_of_a_removed
     try:
         full = get_state(**get_full_options())
         initial = make_migration("0001_initial", *OperationGenerator(empty, full).generate())
-        state = await initial.apply(empty.clone(), schema_editor=get_editor())
+        state = await initial.apply(empty, schema_editor=get_editor())
         assert await catalog.get_views() == [VIEW.name]
         assert len(await catalog.get_policies()) == 2
+        assert OperationGenerator(state, full).generate() == []
+        await catalog.connection.execute_script(
+            f"INSERT INTO {TABLE} (id, tenant_id, amount, paid) VALUES (1, 1, 5, true), (2, 1, 8, false)"
+        )
+        assert await catalog.connection.execute_dicts(f"SELECT id, amount FROM {VIEW.name} ORDER BY id") == [
+            {"id": 1, "amount": 5}
+        ]
         without_paid = [(name, field) for name, field in get_fields() if name != "paid"]
         options = get_full_options()
         options["views"] = [View(VIEW.name, query=RawSQLTerm(f"SELECT id, amount FROM {TABLE}"))]
         options["policies"] = [POLICY]
         options["grants"] = [TABLE_GRANT, VIEW_GRANT, SEQUENCE_GRANT, FUNCTION_GRANT]
-        changed = make_migration(
-            "0002_without_paid", *OperationGenerator(full, get_state(without_paid, **options)).generate()
-        )
+        desired = get_state(without_paid, **options)
+        changed = make_migration("0002_without_paid", *OperationGenerator(full, desired).generate())
         assert get_types(changed.operations) == [
             "RemoveGrant",
             "RemovePolicy",
@@ -1092,9 +1305,14 @@ async def test_the_autodetected_operations_run_and_drop_the_readers_of_a_removed
             "RemoveField",
             "AddView",
         ]
-        before_changed = state.clone()
+        before_changed = state
         state = await changed.apply(state, schema_editor=get_editor())
+        assert OperationGenerator(state, desired).generate() == []
         assert "paid" not in await catalog.get_view_definition(VIEW.name)
+        assert await catalog.connection.execute_dicts(f"SELECT id, amount FROM {VIEW.name} ORDER BY id") == [
+            {"id": 1, "amount": 5},
+            {"id": 2, "amount": 8},
+        ]
         rows = await catalog.connection.execute_dicts(
             f"SELECT has_table_privilege('{READER_ROLE}', '{VIEW.name}', 'SELECT') AS view_select"
         )
@@ -1125,7 +1343,7 @@ async def test_a_rebuilt_table_gets_its_objects_back(db_simple):
         )
         editor = get_editor()
         await editor.table_rebuild.get_rebuild_plan(
-            state.apps.get_model("models.Invoice"), state.apps.get_model("models.Invoice")
+            state.apps.get_binding("models.Invoice"), state.apps.get_binding("models.Invoice")
         ).execute(editor)
         assert await catalog.get_views() == [VIEW.name]
         assert await catalog.get_materialized_views() == [MATERIALIZED_VIEW.name]
@@ -1195,15 +1413,15 @@ async def test_postgresql_refuses_what_it_cant_do_before_any_sql(db_simple):
             "0002_refresh",
             AddMaterializedView("Invoice", view_without_index),
             RefreshMaterializedView("Invoice", view_without_index.name, concurrently=True),
-        ).apply(state.clone(), schema_editor=editor, collect_sql=True)
+        ).apply(state, schema_editor=editor, collect_sql=True)
     with pytest.raises(ConfigurationError, match="declares no view named 'missing'"):
         await make_migration(
             "0003_grant", AddGrant("Invoice", Grant((Privilege.SELECT,), ("r",), on="view", object_name="missing"))
-        ).apply(state.clone(), schema_editor=editor, collect_sql=True)
+        ).apply(state, schema_editor=editor, collect_sql=True)
     with pytest.raises(ConfigurationError, match="names 'missing', which is no column field"):
         await make_migration(
             "0004_sequence", AddSequence("Invoice", DatabaseSequence("schema_migration_s", owned_by="missing"))
-        ).apply(state.clone(), schema_editor=editor, collect_sql=True)
+        ).apply(state, schema_editor=editor, collect_sql=True)
 
 
 @requires_features(supports_views=False)

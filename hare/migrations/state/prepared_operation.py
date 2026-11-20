@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from hare.migrations.state.state_snapshot import StateSnapshot
+
 if TYPE_CHECKING:
     from hare.migrations.operations.operation import Operation
     from hare.migrations.state.prepared_operation_states import PreparedOperationStates
@@ -11,15 +13,21 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class PreparedOperation:
-    """An operation and independent snapshots of both sides of its change.
+    """A detached operation and private declarations of both boundaries.
 
-    Separate database/state declarations retain both child sequences. The state
-    sequence determines ``after``; database children start from ``before`` and
-    never replace the migration's declared state.
+    A consumer materializes the states it needs. Rendered classes are owned by that
+    consumer, never by every operation in the retained preparation tree.
     """
 
     operation: Operation
-    before: State
-    after: State
-    state_operations: PreparedOperationStates | None = None
+    before_snapshot: StateSnapshot
+    after_snapshot: StateSnapshot
     database_operations: PreparedOperationStates | None = None
+
+    @property
+    def before(self) -> State:
+        return self.before_snapshot.materialize()
+
+    @property
+    def after(self) -> State:
+        return self.after_snapshot.materialize()

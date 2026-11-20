@@ -5,6 +5,7 @@ import pytest
 
 from hare.contrib.outbox import OutboxMessage, OutboxWakeup
 from hare.contrib.test import capture_queries, requires_features
+from hare.core.hare_context import HareContext
 from hare.core.resource_completion import ResourceCompletion
 from hare.exceptions import ValidationError
 from hare.transactions.transactions import Transactions
@@ -56,7 +57,9 @@ async def test_the_events_given_back_are_the_rows_written(db_outbox):
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_enqueue_many_uses_the_explicit_independent_client(db_outbox):
-    client = DemoOutboxEvent._meta.connection.create_independent_client()
+    client = (
+        HareContext.require_current().apps.get_queryset(DemoOutboxEvent).get_connection().create_independent_client()
+    )
     wakeup = RecordingWakeup()
     try:
         events = await DemoOutboxEvent.enqueue_many(
@@ -102,7 +105,9 @@ async def test_a_stored_or_repeated_key_gives_the_event_stored_under_it(db_outbo
         wakeup=wakeup,
     )
 
-    assert [event.id for event in events] == [stored.id, events[1].id, events[1].id]
+    assert events[0].id == stored.id
+    assert events[1].id != stored.id
+    assert events[2].id == events[1].id
     assert [event.payload for event in events] == [{"n": 0}, {"n": 2}, {"n": 2}]
     assert await DemoOutboxEvent.objects.count() == 2
     assert wakeup.written == [{"widget.created"}]

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from hare.cli.hare_cli import HareCLI
 from hare.cli.plugins.cli_command_registry import CLICommandRegistry
 from tests.utils.cli_commands import CliCommands
 from tests.utils.project_sources import ProjectSources
@@ -33,6 +34,20 @@ from hare.models import Model
 class {name}(Model):
     id = fields.IntField(primary_key=True)
 """
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("command", ["heads", "shell"])
+def test_hare_orm_from_pyproject_requires_a_configuration_reference(tmp_path, monkeypatch, capsys, command):
+    monkeypatch.delenv("HARE_ORM", raising=False)
+    (tmp_path / "pyproject.toml").write_text("[tool.hare]\nhare_orm = true\n", encoding="utf-8")
+    _use_project(tmp_path, monkeypatch)
+
+    assert HareCLI.run_cli([command]) == 1
+
+    error = capsys.readouterr().err
+    assert "[tool.hare] hare_orm must name a configuration module variable or file" in error
+    assert "Traceback" not in error
 
 
 @pytest.mark.asyncio

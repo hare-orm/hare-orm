@@ -4,6 +4,7 @@ runs and the failed one never changes its rows later."""
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.dialects.clickhouse.clauses.clickhouse_query_clauses import ClickhouseQueryClauses
 from hare.dialects.clickhouse.enums import ClickhouseClause
 from hare.exceptions import OperationalError
@@ -89,8 +90,8 @@ async def test_a_delete_by_keys_of_a_union(clickhouse_db):
 @pytest.mark.asyncio
 async def test_a_failed_mutation_leaves_the_table_writable(clickhouse_db):
     await Account.objects.create(id=1, owner="a", balance=1)
-    connection = Account._meta.connection
-    recovery = connection.get_write_recovery(Account._meta.basetable)
+    connection = HareContext.require_current().apps.get_queryset(Account).get_connection()
+    recovery = connection.get_write_recovery(HareContext.require_current().apps.get_binding(Account).basetable)
 
     with pytest.raises(OperationalError):
         await connection.execute_script(
@@ -112,6 +113,11 @@ async def test_a_failed_mutation_leaves_the_table_writable(clickhouse_db):
 async def test_a_failed_statement_names_the_error_without_the_servers_stack_trace(clickhouse_db):
     """The native protocol's error text carried the server's multi-line stack trace."""
     with pytest.raises(OperationalError) as error:
-        await Account._meta.connection.execute("SELECT throwIf(1, 'failed on purpose')")
+        await (
+            HareContext.require_current()
+            .apps.get_queryset(Account)
+            .get_connection()
+            .execute("SELECT throwIf(1, 'failed on purpose')")
+        )
     assert "failed on purpose" in str(error.value)
     assert "Stack trace" not in str(error.value)

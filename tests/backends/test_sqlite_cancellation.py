@@ -6,6 +6,7 @@ import asyncio
 import pytest
 
 from hare.contrib.test import requires_features
+from hare.core.hare_context import HareContext
 from hare.core.resource_completion import ResourceCompletion
 from hare.transactions.transactions import Transactions
 from tests.shared_models.testmodels import Tournament
@@ -22,7 +23,7 @@ LONG_SQLITE_QUERY = (
 @pytest.mark.asyncio
 async def test_cancelled_query_is_interrupted(db_truncate):
     """Cancel one statement executing in SQLite and two queued behind its connection lock."""
-    connection = Tournament._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Tournament).get_connection()
     await Tournament.objects.count()
     async with asyncio.timeout(WAIT_DEADLINE_SECONDS):
         async with SqliteProgressSignal(connection._connection) as progress:
@@ -46,7 +47,7 @@ async def test_cancelled_query_is_interrupted(db_truncate):
 @requires_features(dialect="sqlite")
 @pytest.mark.asyncio
 async def test_cancelled_query_inside_a_transaction_is_interrupted(db_truncate):
-    connection = Tournament._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Tournament).get_connection()
     await Tournament.objects.count()
     progress = SqliteProgressSignal(connection._connection)
 
@@ -83,7 +84,9 @@ async def test_query_timeout_releases_the_sqlite_connection(db_truncate, in_tran
                 await Tournament.objects.create(name="rolled back")
                 await transaction.execute(LONG_SQLITE_QUERY)
         else:
-            await Tournament._meta.connection.execute(LONG_SQLITE_QUERY)
+            await (
+                HareContext.require_current().apps.get_queryset(Tournament).get_connection().execute(LONG_SQLITE_QUERY)
+            )
 
     async with asyncio.timeout(WAIT_DEADLINE_SECONDS):
         with pytest.raises(TimeoutError):

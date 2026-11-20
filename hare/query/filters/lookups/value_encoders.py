@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from hare.exceptions import UnSupportedError, ValidationError
 from hare.fields.constants import NULL_BYTE_MESSAGE
 from hare.fields.data.constants import INT64_MAX, INT64_MIN
+from hare.query.constants import PRIMARY_KEY_ALIAS
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
@@ -26,12 +27,21 @@ class ValueEncoders:
         if encoder is ValueEncoders.encode_list:
             return partial(encoder, convert=types.get_lookup_values_writer(field))
         if encoder is ValueEncoders.encode_related_value or encoder is ValueEncoders.encode_related_list:
-            key_field = field.related_model._meta.pk  # type: ignore[attr-defined]
+            key_field = field.get_related_binding().pk  # type: ignore[attr-defined]
             return partial(encoder, writer=types.get_db_writer(key_field))
         if encoder is ValueEncoders.encode_composite_pk or encoder is ValueEncoders.encode_composite_related_list:
-            fields = field.related_model._meta.pk_fields  # type: ignore[attr-defined]
+            fields = field.get_related_binding().pk_fields  # type: ignore[attr-defined]
             return partial(encoder, writers=tuple(types.get_db_writer(column) for column in fields))
         return encoder
+
+    @staticmethod
+    def check_list_values(values: Any, field: Field[Any]) -> None:
+        """Require the supported containers of a list lookup."""
+        if not isinstance(values, (list, tuple, set)):
+            raise UnSupportedError(
+                f"{field.model_field_name}: expected a list/tuple/set of values for this lookup, got "
+                f"{field.get_value_for_message(values)}"
+            )
 
     @staticmethod
     def encode_list(
@@ -49,11 +59,7 @@ class ValueEncoders:
         Raises:
             UnSupportedError: ``values`` isn't a list, tuple or set.
         """
-        if not isinstance(values, (list, tuple, set)):
-            raise UnSupportedError(
-                f"{field.model_field_name}: expected a list/tuple/set of values for this lookup, got "
-                f"{field.get_value_for_message(values)}"
-            )
+        ValueEncoders.check_list_values(values, field)
         convert = dialect.types.get_lookup_values_writer(field) if convert is None else convert
         return convert(list(values), obj)
 
@@ -74,12 +80,13 @@ class ValueEncoders:
             obj: The model the filter is built for.
             field: The relation.
             dialect: The dialect the query runs on.
+            writer: The prepared writer for converting the key before it is bound.
 
         Returns:
             The value to bind.
         """
         if writer is None:
-            writer = dialect.types.get_db_writer(field.related_model._meta.pk)  # type: ignore[attr-defined]
+            writer = dialect.types.get_db_writer(field.get_related_binding().pk)  # type: ignore[attr-defined]
         return writer(value, obj)
 
     @staticmethod
@@ -104,8 +111,8 @@ class ValueEncoders:
                 "itself is empty."
             )
         if writer is None:
-            writer = dialect.types.get_db_writer(field.related_model._meta.pk)  # type: ignore[attr-defined]
-        return [writer(getattr(element, "pk", element), obj) for element in values]
+            writer = dialect.types.get_db_writer(field.get_related_binding().pk)  # type: ignore[attr-defined]
+        return [writer(getattr(element, PRIMARY_KEY_ALIAS, element), obj) for element in values]
 
     @staticmethod
     def encode_composite_pk(
@@ -123,8 +130,8 @@ class ValueEncoders:
         Raises:
             UnSupportedError: ``value``'s raw tuple doesn't have one element per key field.
         """
-        pk_fields = field.related_model._meta.pk_fields  # type: ignore[attr-defined]
-        raw = getattr(value, "pk", value)
+        pk_fields = field.get_related_binding().pk_fields  # type: ignore[attr-defined]
+        raw = getattr(value, PRIMARY_KEY_ALIAS, value)
         if not isinstance(raw, tuple) or len(raw) != len(pk_fields):
             raise UnSupportedError(
                 f"expected a {len(pk_fields)}-tuple primary key (or an instance with one), got {raw!r}."
@@ -155,7 +162,7 @@ class ValueEncoders:
                 "use __isnull=/__not_isnull= to filter on whether the relation itself is empty."
             )
         if writers is None:
-            writers = tuple(dialect.types.get_db_writer(column) for column in field.related_model._meta.pk_fields)  # type: ignore[attr-defined]
+            writers = tuple(dialect.types.get_db_writer(column) for column in field.get_related_binding().pk_fields)  # type: ignore[attr-defined]
         return [ValueEncoders.encode_composite_pk(element, obj, field, dialect, writers=writers) for element in values]
 
     @staticmethod

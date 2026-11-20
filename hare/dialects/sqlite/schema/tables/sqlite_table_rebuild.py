@@ -33,7 +33,7 @@ from hare.time.zone_settings import ZoneSettings
 
 if TYPE_CHECKING:
     from hare.dialects.sqlite.schema.sqlite_schema_editor import SqliteSchemaEditor
-    from hare.models.model import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class SqliteTableRebuild(TableRebuild):
@@ -99,6 +99,7 @@ class SqliteTableRebuild(TableRebuild):
         steps: list[SchemaStep] = []
         if keeps_sequence:
             sequence_table_names = {
+                "sequence_table": self.editor.qualify_table_name("sqlite_sequence", schema),
                 "old_table": self.editor.client.dialect.literals.get_string_literal_sql(table_name),
                 "new_table": self.editor.client.dialect.literals.get_string_literal_sql(rebuilt_table_name),
             }
@@ -112,14 +113,16 @@ class SqliteTableRebuild(TableRebuild):
 
     def get_rebuild_plan(
         self,
-        old_model: type[Model],
-        new_model: type[Model],
+        old_binding: ModelBinding,
+        new_binding: ModelBinding,
         altered_fields: Sequence[tuple[Field[Any], Field[Any]]] = (),
     ) -> SchemaChangePlan:
         """Rebuilds the table - an index kept in a table of its own is dropped first and created
         again with the indexes, filled from the rebuilt table: its triggers go with the old table."""
-        plan = super().get_rebuild_plan(old_model, new_model, altered_fields)
-        drops = self.editor.get_separate_index_drop_plan(old_model, self.editor.get_separate_table_indexes(old_model))
+        plan = super().get_rebuild_plan(old_binding, new_binding, altered_fields)
+        drops = self.editor.get_separate_index_drop_plan(
+            old_binding, self.editor.get_separate_table_indexes(old_binding)
+        )
         return SchemaChangePlan((*drops.steps, *plan.steps), before=plan.before, after=plan.after)
 
     def uses_autoincrement(self, fields: Iterable[Field[Any]]) -> bool:

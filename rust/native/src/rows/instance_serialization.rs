@@ -33,7 +33,6 @@ pub fn serialize_instances<'py>(
     let mut row_values = Vec::with_capacity(columns.len());
     for instance in instances.try_iter()? {
         let instance = instance?;
-        row_values.clear();
         for (name, writer) in &columns {
             let value = instance.getattr(name)?;
             row_values.push(match writer {
@@ -41,7 +40,7 @@ pub fn serialize_instances<'py>(
                 ColumnWriter::Python(writer) => writer.call1((&value, &instance))?,
             });
         }
-        rows.append(PyList::new(py, &row_values)?)?;
+        rows.append(PyList::new(py, row_values.drain(..))?)?;
     }
     Ok(rows)
 }

@@ -1,9 +1,5 @@
-"""A model not bound yet refuses to describe a filter key or an ordering name with a
-ConfigurationError naming the fix; Model._meta.is_bound tells whether it's bound, and once
-Hare.bind_models() binds it every description works - through a queryset made before
-binding too.
-
-The check runs in a fresh interpreter - in the test process the models were bound long before.
+"""A fresh interpreter checks that lookup and ordering descriptions require a model binding. Offline preparation
+enables explicit registry queries while the original queryset template remains unbound.
 """
 
 import json
@@ -19,6 +15,7 @@ DESCRIBE_UNBOUND_SCRIPT = textwrap.dedent(
     """
     import json
     from hare import Hare
+    from hare.core.apps.model_binding_graph import ModelBindingGraph
     from hare.core.config import HareConfig
     from hare.dialects.dialect_registry import DialectRegistry
     from hare.exceptions import ConfigurationError
@@ -29,21 +26,25 @@ DESCRIBE_UNBOUND_SCRIPT = textwrap.dedent(
     orderings = ["name", "-tournament", "tournament__name"]
     paths = ["name", "tournament", "tournament__name"]
     queryset = Event.objects.all()
+    template = queryset
+    graph = ModelBindingGraph()
+    event_binding = graph.include(Event)
+    tournament_binding = graph.include(Tournament)
 
     def get_calls():
         calls = {}
         for key in keys:
-            calls[f"meta.get_lookup_info({key})"] = lambda key=key: Event._meta.get_lookup_info(key)
+            calls[f"meta.get_lookup_info({key})"] = lambda key=key: event_binding.get_lookup_info(key)
             calls[f"queryset.get_lookup_info({key})"] = lambda key=key: queryset.get_lookup_info(key)
         for name in orderings:
-            calls[f"meta.get_ordering_info({name})"] = lambda name=name: Event._meta.get_ordering_info(name)
+            calls[f"meta.get_ordering_info({name})"] = lambda name=name: event_binding.get_ordering_info(name)
             calls[f"queryset.get_ordering_info({name})"] = lambda name=name: queryset.get_ordering_info(name)
         for path in paths:
-            calls[f"meta.get_lookups({path})"] = lambda path=path: Event._meta.get_lookups(path, dialect)
+            calls[f"meta.get_lookups({path})"] = lambda path=path: event_binding.get_lookups(path, dialect)
             calls[f"queryset.get_lookups({path})"] = lambda path=path: queryset.get_lookups(path, dialect)
         return calls
 
-    result = {"bound_before": [Event._meta.is_bound, Tournament._meta.is_bound], "before": {}}
+    result = {"bound_before": [event_binding.is_bound, tournament_binding.is_bound], "before": {}}
     for name, call in get_calls().items():
         try:
             call()
@@ -54,18 +55,22 @@ DESCRIBE_UNBOUND_SCRIPT = textwrap.dedent(
         else:
             result["before"][name] = "described"
 
-    Hare.bind_models(
+    apps = Hare.bind_models(
         HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": ["tests.shared_models.testmodels"]})
     )
-    result["bound_after"] = [Event._meta.is_bound, Tournament._meta.is_bound]
+    event_binding = apps.get_binding(Event)
+    tournament_binding = apps.get_binding(Tournament)
+    queryset = apps.get_queryset(Event)
+    assert template._binding is None
+    result["bound_after"] = [event_binding.is_bound, tournament_binding.is_bound]
     result["after"] = {name: type(call()).__name__ for name, call in get_calls().items()}
-    result["tournament__name"] = Event._meta.get_lookup_info("tournament__name").field.model_field_name
+    result["tournament__name"] = event_binding.get_lookup_info("tournament__name").field.model_field_name
     result["participants__in"] = queryset.get_lookup_info("participants__in").value_shape.value
     result["ordering"] = [
-        [field.model_field_name for field in Event._meta.get_ordering_info("-tournament").fields],
-        Event._meta.get_ordering_info("-tournament").descending,
+        [field.model_field_name for field in event_binding.get_ordering_info("-tournament").fields],
+        event_binding.get_ordering_info("-tournament").descending,
     ]
-    result["name_lookups"] = sorted(Event._meta.get_lookups("name", dialect))[:3]
+    result["name_lookups"] = sorted(event_binding.get_lookups("name", dialect))[:3]
     print(json.dumps(result, sort_keys=True))
     """
 )

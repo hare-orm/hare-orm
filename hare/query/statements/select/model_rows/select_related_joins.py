@@ -9,6 +9,7 @@ from hare.query.statements.building.query_joins import QueryJoins
 
 if TYPE_CHECKING:
     from hare.models import Model
+    from hare.models.model_binding import ModelBinding
     from hare.query.statements.select.model_rows_query import ModelRowsQuery
 
 
@@ -31,19 +32,21 @@ class SelectRelatedJoins:
             value_wrapper_references: Receives the values' references while a plan is recorded.
 
         """
-        fields = LookupPaths.expand_expression(query.model, lookup_expression)
+        model_binding: ModelBinding = query._binding  # type: ignore[assignment]
+        lookup_path, last_field = LookupPaths.get_expression_path(model_binding, lookup_expression)
+        fields = (*lookup_path.relations, last_field)
         extra_condition = query._select_related_extra_conditions.get(lookup_expression)
         model: type[Model] = query.model
-        table = query.model._meta.basetable
+        table = model_binding.basetable
         path: tuple[str | None, ...] = (None,)
         for index, field in enumerate(fields):
-            field = field
-            path = path + (field.model_field_name,)
+            relation_name = field.model_field_name
+            path = path + (relation_name,)
             is_last_field = index == len(fields) - 1
             table = QueryJoins.join_table_by_field(
                 query,
                 table,
-                field.model_field_name,
+                relation_name,
                 field,  # type: ignore[arg-type]
                 extra_condition if is_last_field else None,
                 value_wrapper_references=value_wrapper_references,
@@ -62,26 +65,30 @@ class SelectRelatedJoins:
                 model = field.related_model  # type: ignore[attr-defined]
                 continue
 
-            related_fields = field.related_model._meta.db_fields  # type: ignore[attr-defined]
+            related_binding = field.get_related_binding()  # type: ignore[attr-defined]
+            related_fields = related_binding.db_fields
+            related_model = field.related_model  # type: ignore[attr-defined]
             append_item = (
-                field.related_model,  # type: ignore[attr-defined]
+                related_model,
                 len(related_fields),
-                field.model_field_name,
+                relation_name,
                 model,
                 path,
             )
-            model = field.related_model  # type: ignore[attr-defined]
+            model = related_model
             if append_item in query._select_related_positions:
                 # An earlier path already selects this hop - select_related("a", "a__b") walks
                 # "a" twice; its columns are in the row once.
                 continue
             query._select_related_positions.append(append_item)
-            related_projection_reverse = field.related_model._meta.fields_db_projection_reverse  # type: ignore[attr-defined]
+            related_projection_reverse = related_binding.fields_db_projection_reverse
             table_name = table.get_table_name() if related_fields else ""
             query.query = query.query.select(
                 *[
                     table[related_field].as_(
-                        LookupPaths.safe_select_label(table_name, related_projection_reverse[related_field])
+                        LookupPaths.safe_select_label(
+                            table_name, related_projection_reverse[related_field], query._annotations
+                        )
                     )
                     for related_field in related_fields
                 ]

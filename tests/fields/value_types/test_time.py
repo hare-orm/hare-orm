@@ -8,13 +8,22 @@ import pytest
 
 from hare import fields
 from hare.contrib import test
+from hare.core.hare_context import HareContext
 from hare.dialects.sqlite.constants import SQLITE_DIALECT
-from hare.exceptions import ConfigurationError, FieldError, NonExistentTimeError, ValidationError
+from hare.exceptions import (
+    ConfigurationError,
+    FieldError,
+    NonExistentTimeError,
+    QueryError,
+    UnSupportedError,
+    ValidationError,
+)
 from hare.models.write.instance_values import InstanceValues
 from hare.models.write.rules.enums import WriteType
 from hare.models.write.rules.row_write_rules import RowWriteRules
 from hare.query.expressions import F
 from hare.query.filters import FieldLookups
+from hare.query.filters.lookups.date_part_lookups import DatePartLookups
 from hare.sql.constants import DEFAULT_SQL_CONTEXT
 from hare.sql.terms import Field as SqlField
 from hare.time import UTC, Timezone, ZoneInfo
@@ -22,6 +31,75 @@ from hare.time.system_zone import SystemZone
 from hare.time.zone_names import ZoneNames
 from tests.shared_models import testmodels
 from tests.utils.timezone_context import override_timezone
+
+pytestmark = pytest.mark.usefixtures("model_conversion_context")
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("value", ["24:00", "T24:00", "240000", "T240000", "24:00:00.000000", "T24:00:00.000000"])
+def test_end_of_day_text_is_refused_by_time_fields_and_derived_time_lookups(value):
+    with pytest.raises(ValidationError, match="the end of a day"):
+        fields.TimeField().to_python(value)
+    with pytest.raises(UnSupportedError):
+        DatePartLookups.get_time("time", value)
+    assert DatePartLookups.get_time("time", "T00:00") == time(0)
+
+
+@pytest.mark.database_independent
+@pytest.mark.requires("pytz")
+@pytest.mark.parametrize(
+    "zone_name,day,first_time",
+    [
+        ("America/Santiago", date(2024, 9, 8), time(1)),
+        ("America/Havana", date(2024, 3, 10), time(1)),
+        ("America/Sao_Paulo", date(2018, 11, 4), time(1)),
+        ("America/Toronto", date(1919, 3, 31), time(0, 30)),
+    ],
+)
+def test_pytz_day_start_is_the_first_real_clock_time_of_the_requested_day(zone_name, day, first_time):
+    import pytz
+
+    actual = Timezone.get_start_of_day(day, pytz.timezone(zone_name))
+    assert actual.replace(tzinfo=None) == datetime.combine(day, first_time)
+    assert actual.astimezone(UTC) == Timezone.get_start_of_day(day, ZoneInfo(zone_name)).astimezone(UTC)
+
+
+@pytest.mark.database_independent
+def test_day_start_is_the_end_of_a_gap_that_started_the_previous_day():
+    zone = "America/Toronto"
+    first = Timezone.get_start_of_day(date(1919, 3, 31), zone)
+
+    assert first.astimezone(UTC) == datetime(1919, 3, 31, 4, 30, tzinfo=UTC)
+    assert first.replace(tzinfo=None) == datetime(1919, 3, 31, 0, 30)
+    assert (first.astimezone(UTC) - timedelta(microseconds=1)).astimezone(ZoneInfo(zone)).date() == date(1919, 3, 30)
+
+
+@pytest.mark.database_independent
+@pytest.mark.requires("pytz")
+@pytest.mark.parametrize("is_dst", [None, True, False])
+@pytest.mark.parametrize(
+    "zone_name,wall_time",
+    [
+        ("Europe/Berlin", datetime(2024, 3, 31, 2, 30)),
+        ("America/Santiago", datetime(2024, 9, 8, 0, 30)),
+        ("America/New_York", datetime(2024, 3, 10, 2, 30)),
+    ],
+)
+def test_pytz_make_aware_rejects_gap_wall_clocks_with_the_hare_error(zone_name, wall_time, is_dst):
+    import pytz
+
+    with pytest.raises(NonExistentTimeError):
+        Timezone.make_aware(wall_time, pytz.timezone(zone_name), is_dst=is_dst)
+
+
+@pytest.mark.database_independent
+@pytest.mark.requires("pytz")
+def test_pytz_make_aware_rejects_an_already_aware_input_with_the_hare_error():
+    import pytz
+
+    with pytest.raises(QueryError):
+        Timezone.make_aware(datetime(2024, 1, 1, tzinfo=UTC), pytz.timezone("Europe/Berlin"))
+
 
 # ============================================================================
 # TestEmpty -> test_empty_*
@@ -305,8 +383,10 @@ async def test_datetime_field_to_db_value_normalizes_aware_value_when_use_tz_fal
     read, that method's own symmetric handling normalizes it anyway, so the DB round-trip alone
     can't tell a fixed to_db_value from a broken one)."""
     with override_timezone(use_timezone=False):
-        field = testmodels.DatetimeFields._meta.fields_map["datetime"]
-        types = testmodels.DatetimeFields._meta.connection.dialect.types
+        field = HareContext.require_current().apps.get_binding(testmodels.DatetimeFields).fields_map["datetime"]
+        types = (
+            HareContext.require_current().apps.get_queryset(testmodels.DatetimeFields).get_connection().dialect.types
+        )
         aware_dt = datetime(2021, 2, 2, 12, 30, 0, tzinfo=dt_timezone.utc)
         result = types.get_db_value(field, aware_dt, testmodels.DatetimeFields)
         if types.get_db_converter(type(field)) is not None:
@@ -326,7 +406,7 @@ def test_datetime_field_to_python_value_epoch_int_preserves_the_instant_when_use
     which - unlike construction - doesn't route through from_db_value at write time, so a raw
     epoch int can genuinely land in the column and get read back through this exact path."""
     with override_timezone(use_timezone=True, timezone="America/New_York"):
-        field = testmodels.DatetimeFields._meta.fields_map["datetime"]
+        field = HareContext.require_current().apps.get_binding(testmodels.DatetimeFields).fields_map["datetime"]
         epoch = 1700000000
         result = field.from_db_value(epoch)
         assert result is not None
@@ -337,7 +417,7 @@ def test_datetime_field_to_python_value_epoch_int_preserves_the_instant_when_use
 def test_time_field_to_db_value_normalizes_aware_value_when_use_tz_false():
     """Same gap as DatetimeField above, for TimeField.to_db_value."""
     with override_timezone(use_timezone=False):
-        field = testmodels.TimeFields._meta.fields_map["time"]
+        field = HareContext.require_current().apps.get_binding(testmodels.TimeFields).fields_map["time"]
         aware_t = time(12, 30, 0, tzinfo=dt_timezone.utc)
         result = field.to_db_value(aware_t, testmodels.TimeFields)
         assert Timezone.is_naive(result), f"Expected naive, got {result} with tzinfo={result.tzinfo}"
@@ -358,7 +438,7 @@ def test_time_field_to_db_value_parses_raw_string():
     covered by the sibling test above) - just confirms the string gets parsed instead of
     crashing before any aware/naive branch is even reached."""
     with override_timezone(use_timezone=False):
-        field = testmodels.TimeFields._meta.fields_map["time"]
+        field = HareContext.require_current().apps.get_binding(testmodels.TimeFields).fields_map["time"]
         result = field.to_db_value("12:30:00", testmodels.TimeFields)
         assert result == time(12, 30, 0)
 
@@ -370,7 +450,7 @@ def test_time_field_to_db_value_wraps_malformed_string():
     class as Date/DatetimeField's own parse_datetime() calls and the base Field's
     field_type() coercion - all fixed the same way in this session."""
     with override_timezone(use_timezone=False):
-        field = testmodels.TimeFields._meta.fields_map["time"]
+        field = HareContext.require_current().apps.get_binding(testmodels.TimeFields).fields_map["time"]
         with pytest.raises(ValidationError):
             field.to_db_value("not-a-time-string", testmodels.TimeFields)
 
@@ -401,9 +481,9 @@ def test_time_field_auto_now_stamps_local_wall_clock_not_utc():
     tz = "Europe/Moscow"
     with override_timezone(use_timezone=True, timezone=tz):
         utc_now = Timezone.now()
-        RowWriteRules.get(testmodels.TimeFields, WriteType.INSERT, None, "create()").stamp(
-            (instance,), InstanceValues()
-        )
+        RowWriteRules.get(
+            HareContext.require_current().apps.get_binding(testmodels.TimeFields), WriteType.INSERT, None, "create()"
+        ).stamp((instance,), InstanceValues())
 
         stamped = instance.time_auto
         # A fixed offset carrying the zone's offset, NOT the named zone itself: a bare time has
@@ -781,7 +861,7 @@ async def test_date_field_year_filter_not_affected_by_configured_zone(db):
     gone through a real Hare.init() at least once in this worker.
     """
     model = testmodels.DateFields
-    field_lookup = FieldLookups.get(model._meta.fields_map["date"])["year"]
+    field_lookup = FieldLookups.get(HareContext.require_current().apps.get_binding(model).fields_map["date"])["year"]
     with override_timezone(use_timezone=True, timezone="Europe/Berlin"):
         term = SqlField("date")
         criterion = field_lookup.operator(term, 2024)
@@ -795,7 +875,7 @@ def test_date_field_has_no_time_of_day_extraction_suffixes(db):
     model = testmodels.DateFields
     for suffix in ("hour", "minute", "second", "microsecond"):
         with pytest.raises(KeyError):
-            FieldLookups.get(model._meta.fields_map["date"])[suffix]
+            FieldLookups.get(HareContext.require_current().apps.get_binding(model).fields_map["date"])[suffix]
 
 
 def test_time_field_has_no_calendar_extraction_suffixes(db):
@@ -804,7 +884,7 @@ def test_time_field_has_no_calendar_extraction_suffixes(db):
     model = testmodels.TimeFields
     for suffix in ("year", "quarter", "month", "week", "day"):
         with pytest.raises(KeyError):
-            FieldLookups.get(model._meta.fields_map["time"])[suffix]
+            FieldLookups.get(HareContext.require_current().apps.get_binding(model).fields_map["time"])[suffix]
 
 
 @pytest.mark.parametrize(
@@ -835,7 +915,7 @@ def test_non_date_time_field_has_no_extraction_suffixes_at_all(db):
     model = testmodels.IntFields
     for suffix in ("year", "quarter", "month", "week", "day", "hour", "minute", "second", "microsecond"):
         with pytest.raises(KeyError):
-            FieldLookups.get(model._meta.fields_map["intnum"])[suffix]
+            FieldLookups.get(HareContext.require_current().apps.get_binding(model).fields_map["intnum"])[suffix]
 
 
 # ============================================================================
@@ -853,7 +933,7 @@ def test_time_field_named_zone_is_stored_as_a_fixed_offset():
     write failed, auto_now or not. Only UTC happened to work, since ZoneInfo('UTC') reports its
     offset even with no date - which is why the whole suite, running in UTC, never caught it.
     """
-    field = testmodels.TimeFields._meta.fields_map["time"]
+    field = HareContext.require_current().apps.get_binding(testmodels.TimeFields).fields_map["time"]
     with override_timezone(use_timezone=True, timezone="Europe/Moscow"):
         stored = field.to_db_value(time(12, 30, 45), testmodels.TimeFields)
 
@@ -1309,7 +1389,12 @@ def test_time_field_auto_now_uses_standard_offset_in_summer():
     summer_moment = datetime(2024, 7, 15, 16, 0, tzinfo=UTC)
     with override_timezone(use_timezone=True, timezone="America/New_York"):
         stamped = fields.TimeField.get_auto_now_value(summer_moment)
-        naive_written = testmodels.TimeFields._meta.fields_map["time"].from_db_value(time(12, 0))
+        naive_written = (
+            HareContext.require_current()
+            .apps.get_binding(testmodels.TimeFields)
+            .fields_map["time"]
+            .from_db_value(time(12, 0))
+        )
     assert stamped == time(12, 0, tzinfo=dt_timezone(timedelta(hours=-5)))
     assert stamped == naive_written
 
@@ -1410,14 +1495,14 @@ async def test_an_epoch_is_no_moment_given(db):
         obj.datetime = value
         with pytest.raises(ValidationError, match="expected a datetime"):
             await obj.save()
-    field = model._meta.fields_map["datetime"]
+    field = HareContext.require_current().apps.get_binding(model).fields_map["datetime"]
     assert field.from_db_value(EPOCH_SECONDS) == datetime.fromtimestamp(EPOCH_SECONDS, tz=UTC)
 
 
 @pytest.mark.asyncio
 async def test_datetime_field_to_db_value_refuses_an_epoch_with_use_tz_false(db):
-    field = testmodels.DatetimeFields._meta.fields_map["datetime"]
-    types = testmodels.DatetimeFields._meta.connection.dialect.types
+    field = HareContext.require_current().apps.get_binding(testmodels.DatetimeFields).fields_map["datetime"]
+    types = HareContext.require_current().apps.get_queryset(testmodels.DatetimeFields).get_connection().dialect.types
     with override_timezone(use_timezone=False), pytest.raises(ValidationError, match="expected a datetime"):
         types.get_db_value(field, EPOCH_SECONDS, testmodels.DatetimeFields)
 
@@ -1438,7 +1523,7 @@ async def test_datetime_max_round_trips_in_non_utc_zone(db):
 
 @pytest.mark.database_independent
 def test_datetime_field_to_python_value_reads_naive_max_as_utc():
-    field = testmodels.DatetimeFields._meta.fields_map["datetime"]
+    field = HareContext.require_current().apps.get_binding(testmodels.DatetimeFields).fields_map["datetime"]
     with override_timezone(use_timezone=True, timezone="America/New_York"):
         assert field.from_db_value(datetime.max) == datetime.max.replace(tzinfo=UTC)
     with override_timezone(use_timezone=True, timezone="Asia/Tokyo"):
@@ -1496,7 +1581,7 @@ async def test_date_field_rejects_non_date_on_every_write_path(db, value):
 
 @pytest.mark.asyncio
 async def test_datetime_field_out_of_range_epoch_is_a_validation_error(db):
-    field = testmodels.DatetimeFields._meta.fields_map["datetime"]
+    field = HareContext.require_current().apps.get_binding(testmodels.DatetimeFields).fields_map["datetime"]
     with pytest.raises(ValidationError, match="out of the supported datetime range"):
         field.from_db_value(10**12)
 

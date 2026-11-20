@@ -1,30 +1,36 @@
 """Compare positional and named model hydration of native PostgreSQL rows."""
 
+from __future__ import annotations
+
 import datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.models.instances.dirty_fields import DirtyFields
 from hare.native.native_modules import NativeModules
 from hare.query.rows.model_rows.model_columns import ModelColumns
 from tests.utils.database_under_test import DatabaseUnderTest
 from tests.utils.model_rows_queries import get_model_rows_query
 
+if TYPE_CHECKING:
+    from hare.query.rows.native.hydration_layout import HydrationEntry
+
 
 class PgResultReading:
     """The reading of a model query's PgResult, compared with the reading of its PgRow objects."""
 
     @staticmethod
-    async def fetch_result(model: type[Any]) -> tuple[Any, Any, list[str]]:
-        """The model's rows as the driver returned them, their reader and the read attribute names.
+    async def fetch_result(model: type[Any]) -> tuple[Any, tuple[HydrationEntry, ...], bool]:
+        """The driver's rows, their decode plan and whether the model projection is partial.
 
         Args:
             model: The model.
 
         Returns:
-            The result, the reader and the names - skips the test off rust_pg.
+            The result, its decode plan and the projection flag. Skips the test off rust_pg.
         """
         if DatabaseUnderTest.get_driver().name != "postgresql":
             pytest.skip("reads the rows of a rust_pg connection")
@@ -36,13 +42,9 @@ class PgResultReading:
         _, rows = await compiler._connection.execute(sql, values)
         if not isinstance(rows, pg.PgResult):
             pytest.skip("reads the rows of a rust_pg connection")
-        reader = ModelColumns(
-            model,
-            compiler._decode_plan,
-            tuple(range(len(compiler._decode_plan))),
-            compiler._decode_plan_is_partial,
-        )
-        return rows, reader, [name for name, *_ in compiler._decode_plan]
+        decode_plan = compiler._decode_plan
+        assert decode_plan is not None
+        return rows, decode_plan, compiler._decode_plan_is_partial
 
     @staticmethod
     def assert_same_value(where: str, result_value: Any, row_value: Any) -> None:
@@ -77,17 +79,21 @@ class PgResultReading:
             create_kwargs_list: The keyword arguments of each row.
         """
         await model.objects.bulk_create([model(**kwargs) for kwargs in create_kwargs_list])
-        rows, reader, names = await PgResultReading.fetch_result(model)
-        named_reader = ModelColumns(
-            model, reader.entries, tuple(model._meta.fields_db_projection[name] for name in names), reader.is_partial
+        rows, entries, is_partial = await PgResultReading.fetch_result(model)
+        context = HareContext.require_current()
+        binding = context.apps.get_binding(model)
+        reader = ModelColumns.from_entries(binding, entries, tuple(range(len(entries))), is_partial)
+        names = [name for name, *_ in entries]
+        named_reader = ModelColumns.from_entries(
+            binding, entries, tuple(binding.fields_db_projection[name] for name in names), is_partial
         )
+        positional_rows, _ = rows.positional()
         from_result = NativeModules.rows.ModelResultLayout([reader], ()).read_batch(
-            rows, 0, len(rows), None, DirtyFields.snapshot_dirty_fields
+            positional_rows, 0, len(positional_rows), None, context, DirtyFields.snapshot_dirty_fields
         )
         from_row_objects = NativeModules.rows.ModelResultLayout([named_reader], ()).read_batch(
-            rows, 0, len(rows), None, DirtyFields.snapshot_dirty_fields
+            rows, 0, len(rows), None, context, DirtyFields.snapshot_dirty_fields
         )
-        assert len(from_result) == len(from_row_objects)
         for result_instance, row_instance in zip(from_result, from_row_objects, strict=True):
             for name in names:
                 PgResultReading.assert_same_value(

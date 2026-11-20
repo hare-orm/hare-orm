@@ -10,6 +10,7 @@ from hare.inspectdb.generation.model_source_builder import ModelSourceBuilder
 
 if TYPE_CHECKING:
     from hare.inspectdb.introspection.table_info import TableInfo
+    from hare.models import Model
 
 
 class ModelSourceGenerator:
@@ -23,6 +24,8 @@ class ModelSourceGenerator:
         foreign_key_target_overrides: dict[str, str] | None = None,
         skip_many_to_many_through_tables: bool = True,
         class_name: str | None = None,
+        target_tables: tuple[TableInfo, ...] = (),
+        target_models: dict[str, type[Model]] | None = None,
     ) -> str:
         """Renders one table's Python model source.
 
@@ -40,6 +43,8 @@ class ModelSourceGenerator:
                 shape is skipped with a NOTE comment (the default) or rendered as an explicit model.
                 The shape alone does not establish that ManyToManyField preserves its constraints.
             class_name: The generated class name - defaults to ``ModelNaming.get_class_name()``.
+            target_tables: Complete related table layouts.
+            target_models: Existing classes by full model reference.
 
         Returns:
             The source.
@@ -47,6 +52,12 @@ class ModelSourceGenerator:
         return ModelSourceBuilder(
             table,
             ModelGenerationOptions(
-                dialect, app_label, foreign_key_target_overrides, skip_many_to_many_through_tables, class_name
+                dialect,
+                app_label,
+                foreign_key_target_overrides,
+                skip_many_to_many_through_tables,
+                class_name,
+                target_tables=target_tables,
+                target_models=target_models,
             ),
         ).build()

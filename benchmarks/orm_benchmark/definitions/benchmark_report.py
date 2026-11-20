@@ -61,8 +61,10 @@ class BenchmarkReport:
         cls, targets: list[Target], runs: dict[str, list[dict[str, Any]]], size: str, seed: int, release: str | None
     ) -> BenchmarkReport:
         """Capture declarations and aggregate process summaries while retaining every sample."""
-        first_run = next(iter(runs.values()))[0]
-        databases = [database for database in DATABASES if any(target.database == database.key for target in targets)]
+        first_runs = next(iter(runs.values()))
+        first_run = first_runs[0]
+        database_keys = {target.database for target in targets}
+        databases = [database for database in DATABASES if database.key in database_keys]
         descriptions = []
         for database in databases:
             description = asdict(database)
@@ -74,7 +76,7 @@ class BenchmarkReport:
             "generated": datetime.now(UTC).strftime("%Y-%m-%d"),
             "size": size,
             "seed": seed,
-            "runs": len(next(iter(runs.values()))),
+            "runs": len(first_runs),
             "environment": first_run["environment"],
             "hare_release": release,
             "definitions": {"databases": descriptions, "targets": [asdict(target) for target in targets]},
@@ -101,16 +103,17 @@ class BenchmarkReport:
         for target in targets:
             target_runs = runs[target.key]
             database = next(database for database in databases if database.key == target.database)
+            first_target_run = target_runs[0]
             database_data = data["databases"].setdefault(
                 database.key,
                 {
-                    "server": target_runs[0]["server"],
+                    "server": first_target_run["server"],
                     "rows": counts["events" if database.key == "clickhouse" else "rows"],
                     "drivers": {},
                     "targets": {},
                 },
             )
-            database_data["drivers"].update(target_runs[0]["drivers"])
+            database_data["drivers"].update(first_target_run["drivers"])
             names = dict.fromkeys(scenario.key for group in database.groups for scenario in group.scenarios)
             for run in target_runs:
                 names.update(dict.fromkeys(run["results"]))
@@ -137,8 +140,8 @@ class BenchmarkReport:
                 scenarios[name] = result
             database_data["targets"][target.key] = {
                 "name": target.name,
-                "version": target_runs[0]["version"],
-                "python": target_runs[0]["environment"]["python"],
+                "version": first_target_run["version"],
+                "python": first_target_run["environment"]["python"],
                 "scenarios": scenarios,
                 "processes": [{key: value for key, value in run.items() if key != "results"} for run in target_runs],
             }
@@ -156,11 +159,13 @@ class BenchmarkReport:
         return [target for target in self.targets.values() if target.database == database.key]
 
     @staticmethod
-    def get_scenarios(database: Database) -> list[Scenario]:
+    def get_scenarios(database: Database, group: ScenarioGroup | None = None) -> list[Scenario]:
+        """The scenarios shown for a database or one of its groups, in declaration order."""
+        groups = database.groups if group is None else (group,)
         return [
             scenario
-            for group in database.groups
-            for scenario in group.scenarios
+            for scenario_group in groups
+            for scenario in scenario_group.scenarios
             if scenario.key not in database.excluded_scenarios
         ]
 
@@ -196,23 +201,24 @@ class BenchmarkReport:
 
     def get_baseline_drivers(self, database: Database) -> list[Target]:
         drivers = [
-            target
+            (target, latency)
             for target in self.get_targets(database)
             if target.distribution == self.conditions["baseline_distribution"]
-            and math.isfinite(self.get_geometric_mean_time(target))
+            and math.isfinite(latency := self.get_geometric_mean_time(target))
         ]
-        return sorted(drivers, key=self.get_geometric_mean_time)
+        return [target for target, _latency in sorted(drivers, key=lambda driver: driver[1])]
 
     def get_baseline(self, database: Database) -> Target | None:
         drivers = self.get_baseline_drivers(database)
         return drivers[0] if drivers else None
 
     def get_load_tests(self, database: Database) -> list[str]:
+        load_tests = self.conditions["load_tests"]
+        if not load_tests:
+            return []
+        targets = self.get_targets(database)
         return [
             name
-            for name in self.conditions["load_tests"]
-            if any(
-                self.get_median(target, f"{name}_throughput_ops_per_sec") is not None
-                for target in self.get_targets(database)
-            )
+            for name in load_tests
+            if any(self.get_median(target, f"{name}_throughput_ops_per_sec") is not None for target in targets)
         ]

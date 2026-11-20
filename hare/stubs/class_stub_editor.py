@@ -6,7 +6,7 @@ from textwrap import dedent
 import libcst as cst
 
 
-class ClassStubEditor:
+class ClassStubEditor(cst.CSTTransformer):
     """Replace direct class members in stubgen output using its Python syntax tree.
 
     Other module statements, nested classes, decorators and comments are preserved.
@@ -14,17 +14,22 @@ class ClassStubEditor:
     only decides which generated declarations replace a model's members.
     """
 
-    @classmethod
-    def update(cls, source: str, declarations: Mapping[str, Mapping[str, str]]) -> str:
-        module = cst.parse_module(source)
-        return module.with_changes(
-            body=[
-                cls.update_class(statement, declarations[statement.name.value])
-                if isinstance(statement, cst.ClassDef) and statement.name.value in declarations
-                else statement
-                for statement in module.body
-            ]
-        ).code
+    def __init__(self, declarations: Mapping[str, Mapping[str, str]]) -> None:
+        self.declarations = declarations
+        self.class_path: list[str] = []
+
+    def visit_ClassDef(self, node: cst.ClassDef) -> None:
+        self.class_path.append(node.name.value)
+
+    def leave_ClassDef(self, original_node: cst.ClassDef, updated_node: cst.ClassDef) -> cst.ClassDef:
+        """Match the model's complete class path without rewriting names in another scope."""
+        name = ".".join(self.class_path)
+        self.class_path.pop()
+        return self.update_class(updated_node, self.declarations.get(name, {}))
+
+    def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
+        # A local class is not a module class reachable through its qualified attribute path.
+        return False
 
     @classmethod
     def update_class(cls, node: cst.ClassDef, declarations: Mapping[str, str]) -> cst.ClassDef:

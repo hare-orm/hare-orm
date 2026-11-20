@@ -2,6 +2,7 @@
 
 import pytest
 
+from hare.core.hare_context import HareContext
 from hare.ddl.conditions.constraint_condition import ConstraintCondition
 from hare.ddl.constraints import CheckConstraint, UniqueConstraint
 from hare.ddl.indexes import PartialIndex
@@ -81,7 +82,7 @@ async def test_q_conditions_unapply(round_trip: RoundTrip) -> None:
     table = "q_stock_back"
     plain_model = build_stock_model(table)
     await round_trip.migrate_to(plain_model)
-    before = round_trip.tracked_state.clone()
+    before = round_trip.tracked_state
     conditioned_model = build_stock_model(table, **CONDITIONED_OPTIONS)
     operations = round_trip.get_pending_operations(conditioned_model)
     await round_trip.apply(operations)
@@ -183,7 +184,11 @@ def test_empty_condition_is_rejected(db) -> None:
     from tests.shared_models.testmodels import Tournament
 
     with pytest.raises(ConfigurationError, match="can't be empty"):
-        ConstraintCondition.get_sql(Q(), Tournament, Tournament._meta.connection)
+        ConstraintCondition.get_sql(
+            Q(),
+            HareContext.require_current().apps.get_binding(Tournament),
+            HareContext.require_current().apps.get_queryset(Tournament).get_connection(),
+        )
 
 
 @pytest.mark.asyncio
@@ -203,14 +208,10 @@ async def test_sqlite_condition_needing_a_hare_function_is_rejected(round_trip: 
 
 @pytest.mark.asyncio
 async def test_generated_schema_enforces_q_conditions_without_drift() -> None:
-    import os
-    import uuid
-
     from hare.contrib.test.isolated_contexts import hare_test_context
     from hare.migrations.drift import detect_drift_for_alias
 
-    raw_db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:").replace("\\{", "{").replace("\\}", "}")
-    db_url = raw_db_url.format(uuid.uuid4().hex) if "{}" in raw_db_url else raw_db_url
+    db_url = DatabaseUnderTest.get_fresh_url()
     async with hare_test_context(["tests.queries.filtering.q_condition_models"], db_url=db_url) as context:
         from tests.queries.filtering.q_condition_models import Batch
 

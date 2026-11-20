@@ -6,6 +6,7 @@ from __future__ import annotations
 import pytest
 
 from hare.contrib.test import capture_queries, requires_features
+from hare.core.hare_context import HareContext
 from hare.exceptions import QueryError, UnSupportedError
 from hare.query.enums import TableSampleMethod
 from hare.query.functions import Count, Sum
@@ -168,8 +169,15 @@ async def test_queryset_factory_options_are_not_used_to_infer_join_scope(
         calls.append(named_call)
         return make_scope_queryset()
 
-    monkeypatch.setattr(OwnerScopedSecret._meta.manager, "get_queryset", factory)
-    assert RowScopes.of(OwnerScopedSecret).get_condition(RowVisibility.DEFAULT) is not None
+    monkeypatch.setattr(
+        HareContext.require_current().apps.get_binding(OwnerScopedSecret).manager, "get_queryset", factory
+    )
+    assert (
+        RowScopes.of(HareContext.require_current().apps.get_binding(OwnerScopedSecret)).get_condition(
+            RowVisibility.DEFAULT
+        )
+        is not None
+    )
     assert calls == []
 
 

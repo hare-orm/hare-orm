@@ -38,7 +38,9 @@ class Observers:
     ) -> Generator[None]: ...
 
     @classmethod
-    def is_observed(cls, event_type: type, model: type[Model] | None = None) -> bool: ...
+    def is_observed(
+        cls, event_type: type, model: type[Model] | None = None, *, binding: ModelBinding | None = None
+    ) -> bool: ...
 
     @classmethod
     def wrap_queries(cls, wrapper: QueryWrapper) -> None: ...
@@ -74,6 +76,9 @@ Observers.unobserve(QueryExecuted, count_query)
 callback again changes nothing for `QueryExecuted`/`TransactionEvent`; for `RowsChanged` it adds the
 models (see [Which models an observer hears](#which-models)). `unobserve()` of a callback that isn't
 registered does nothing.
+
+`is_observed(event_type, model)` checks whether an observer matches a model. Supply `binding=`
+when matching app-qualified subscriptions for a model bound to a specific registry.
 
 How an observer runs depends on the event and on whether it is a plain function or an `async def`:
 
@@ -176,6 +181,8 @@ Every background observer's exception is logged when it happens. The exceptions 
 call are also re-raised here — one on its own, several as an `ExceptionGroup`. Only the **100** most
 recent are kept (the group's message counts the older ones), and they are kept without the local
 variables of their traceback frames, so an observer that keeps failing can't grow memory without bound.
+The retained traceback preserves the callback's frames and excludes the internal dispatch frame
+that would otherwise retain the event and its query parameters.
 
 ## <a id="query-wrappers"></a>Wrapping every query: `QueryWrapper`
 
@@ -296,7 +303,7 @@ A `RowsChanged`:
 | `model` | The model whose rows changed. |
 | `operation` | `RowOperation.INSERT`, `UPDATE` or `DELETE` (`from hare.instrumentation import RowOperation`). |
 | `pks` | The primary keys of the changed rows; `None` when the ORM doesn't name them — see [below](#unnamed-pks). |
-| `fields` | The fields written. `None` when it isn't known: an insert, a `save()` without `update_fields`. |
+| `fields` | The fields the caller named, excluding automatic stamps, blind indexes and version bumps. `None` when the event has no explicit field list. |
 | `connection_alias` | The connection the write ran on. |
 
 ### <a id="unnamed-pks"></a>When pks is None
@@ -324,12 +331,12 @@ A row is named once, however many times it was given.
   it is removed. An observer of every model can't drop one model — `QueryError`, and it stays as it is:
   unobserve it without models to remove it.
 - A model is given by its class, its `"app.Model"` label or a `swappable()` setting
-  (`models=["library.Loan"]`). A class hears that class; a label hears the model registered under it in any
-  context, a model registered again while the application runs (`Hare.register_live_models()`) included —
-  that is a new class, so an observer of the old class doesn't hear it. A label is looked up in the
-  current context when one is set up, else when a context binds its models: a label naming no model
-  raises `ConfigurationError` there. `models=` for `QueryExecuted`/`TransactionEvent`, which aren't about a
-  model, is a `QueryError`.
+  (`models=["library.Loan"]`). A class hears that Python class and its subclasses; a label hears the
+  model registered under it in any context, including live registrations. Re-registering the same class
+  creates a new binding, while existing instances keep their earlier binding. Process-wide labels match
+  each event's originating binding; independent contexts need not contain those models. Context-local
+  labels are checked against their registry when available, or during its setup. Giving `models=` for
+  `QueryExecuted`/`TransactionEvent`, which aren't about a model, raises `QueryError`.
 - `Observers.is_observed(RowsChanged, Loan)` — whether any observer hears `Loan`. When none does, no
   event of a change of `Loan` is built or sent.
 
@@ -356,6 +363,9 @@ A row is named once, however many times it was given.
   observer listens. Both need the rows back from the statement (`RETURNING`) and a primary key: on a
   database without `RETURNING`, through `COPY`, or for a model without a primary key every row comes as
   an insert — plus, for an upsert, one update event of the `update_fields`.
+- `merge()` reports the actions that changed rows on PostgreSQL 17 and later, even when the
+  caller only asks for a count. PostgreSQL 15 and 16 report an affected-row count. If it is
+  positive, observers receive a notification for each action the branches could have taken.
 - The rows `on_delete` reached (whether the ORM or the database does it):
   - `CASCADE` — as deletes;
   - `SET_NULL` / `SET_DEFAULT` — as updates of the foreign key's field.

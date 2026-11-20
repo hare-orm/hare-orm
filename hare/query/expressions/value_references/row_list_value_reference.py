@@ -53,7 +53,7 @@ class RowListValueReference:
         fields = self.fields
         converters = self.converters
         instance_class = self.instance_class
-        expression_class = (ExpressionArguments.expression_classes or ExpressionArguments.get_expression_classes())[0]
+        expression_class = ExpressionArguments.expression_class
         unbound_classes = (expression_class, Term)
         for row, row_term in zip(value, row_terms, strict=True):
             if instance_class is not None and isinstance(row, instance_class):

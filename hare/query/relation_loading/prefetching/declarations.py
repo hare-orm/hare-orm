@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -65,15 +64,13 @@ class ManyToManyPrefetchJob:
         related_queryset: The related rows' queryset.
         result: Detached attachments for the enclosing plan.
         through_connection: The already selected client of the through table.
-        rows_strategy: The query strategy chosen by the plan.
     """
 
     prefetcher: Prefetcher
-    objs: Iterable[Model]
+    objs: tuple[Model, ...]
     field: str
     field_object: ManyToManyFieldInstance[Any]
     to_attribute: str | None
     related_queryset: QuerySet[Any]
     result: PrefetchResult
     through_connection: DatabaseClient
-    rows_strategy: PrefetchRowsStrategy

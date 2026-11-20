@@ -4,11 +4,91 @@ import pytest
 from pydantic import Field
 
 from hare import Hare, Model, fields
-from hare.contrib.request_query import NoFilter, RequestQuery
+from hare.contrib.request_query import CommaSeparated, KeyColumns, NoFilter, RequestQuery
 
 
 class ParameterBook(Model):
     id = fields.IntField(primary_key=True)
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "framework",
+    [
+        pytest.param("fastapi", marks=pytest.mark.requires("fastapi", "http")),
+        pytest.param("litestar", marks=pytest.mark.requires("litestar")),
+    ],
+)
+async def test_text_parameter_bounds_apply_after_decoding(framework):
+    context = await Hare.init(
+        {
+            "connections": {"default": "sqlite+aiosqlite://:memory:"},
+            "apps": {"defaults": {"models": [__name__], "default_connection": "default"}},
+        },
+        connect=False,
+    )
+    try:
+
+        class BoundedQuery(RequestQuery[ParameterBook]):
+            ids: Annotated[CommaSeparated[int], NoFilter()] = Field(min_length=3, max_length=3)
+            words: Annotated[CommaSeparated[str], NoFilter()] = Field(min_length=2, max_length=2)
+            key: Annotated[KeyColumns[int, int], NoFilter()] = Field(min_length=2, max_length=2)
+            optional: Annotated[CommaSeparated[int] | None, NoFilter()] = Field(default=None, min_length=3)
+
+            class Meta:
+                queryset = ParameterBook.objects.all()
+                pagination = None
+
+        expected = {"ids": [1, 2, 3], "words": ["a", "b"], "key": [1, 2], "optional": None}
+        combined = "ids=1,2,3&words=a,b&key=1,2"
+        assert BoundedQuery.from_query_string(combined).model_dump(mode="json") == expected
+        if framework == "fastapi":
+            from fastapi import FastAPI
+            from fastapi.testclient import TestClient
+
+            from hare.contrib.frameworks.fastapi import HareExceptionHandlers, RequestQueryDependency
+
+            app = FastAPI(exception_handlers=HareExceptionHandlers.get_handlers())
+
+            @app.get("/bounded")
+            async def fast_bounded(query: BoundedQuery = RequestQueryDependency.provide(BoundedQuery)):
+                return query.model_dump(mode="json")
+
+            invalid_status = 422
+        else:
+            from litestar import Litestar, get
+            from litestar.di import NamedDependency
+            from litestar.testing import TestClient
+
+            from hare.contrib.frameworks.litestar import HareExceptionHandlers, RequestQueryDIPlugin
+
+            @get("/bounded", dependencies={"bounded": RequestQueryDIPlugin.provide(BoundedQuery)})
+            async def star_bounded(bounded: NamedDependency[BoundedQuery]) -> dict:
+                return bounded.model_dump(mode="json")
+
+            app = Litestar(
+                [star_bounded],
+                plugins=[RequestQueryDIPlugin()],
+                exception_handlers=HareExceptionHandlers.get_handlers(),
+            )
+            invalid_status = 400
+        with TestClient(app) as client:
+            for parameters in (combined, "ids=1&ids=2&ids=3&words=a&words=b&key=1,2"):
+                response = client.get("/bounded?" + parameters)
+                assert (response.status_code, response.json()) == (200, expected)
+            response = client.get("/bounded?" + combined + "&optional=4,5,6")
+            assert (response.status_code, response.json()) == (200, {**expected, "optional": [4, 5, 6]})
+            for parameters in (
+                combined.replace("1,2,3", "1,2"),
+                combined.replace("a,b", "a"),
+                combined.replace("key=1,2", "key=1"),
+                combined + "&optional=4,5",
+            ):
+                assert client.get("/bounded?" + parameters).status_code == invalid_status
+    finally:
+        await Hare.close_connections()
+        context.__exit__(None, None, None)
 
 
 @pytest.mark.database_independent

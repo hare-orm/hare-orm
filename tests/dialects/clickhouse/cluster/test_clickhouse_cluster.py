@@ -8,6 +8,7 @@ import secrets
 import pytest
 
 from hare import fields
+from hare.core.hare_context import HareContext
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
 from hare.dialects.clickhouse.clickhouse_engine import ClickhouseEngine
@@ -16,7 +17,7 @@ from hare.dialects.clickhouse.functions import DictGet
 from hare.dialects.clickhouse.introspection.clickhouse_sql_parts import ClickhouseSqlParts
 from hare.dialects.clickhouse.schema_objects.clickhouse_dictionary import ClickhouseDictionary
 from hare.dialects.clickhouse.schema_objects.clickhouse_materialized_view import ClickhouseMaterializedView
-from hare.exceptions import ConfigurationError, OperationalError, UnSupportedError
+from hare.exceptions import ConfigurationError, IntegrityError, OperationalError, UnSupportedError
 from hare.migrations.loading.recorder.migration_recorder import MigrationRecorder
 from hare.migrations.operations import AddField, AddMaterializedView, AlterModelOptions, CreateModel, DeleteModel
 from hare.migrations.state.state import State
@@ -47,7 +48,7 @@ def test_a_distributed_table_is_checked():
 
 @pytest.mark.asyncio
 async def test_a_distributed_table_spreads_its_rows_and_changes_them_where_they_are(clickhouse_cluster_db):
-    connection = Visit._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Visit).get_connection()
     await Visit.objects.bulk_create([Visit(id=number, site="ab"[number % 2], duration=number) for number in range(10)])
     assert await Visit.objects.count() == 10
     # Each server holds a part of the rows.
@@ -75,7 +76,7 @@ async def test_a_distributed_table_joins_and_reads_subqueries_of_the_rows_of_eve
     """A read of a Distributed table runs on every shard - a table it joins and a subquery of its IN are
     read once, GLOBAL, and sent to them: the rows of another shard, and of a table kept on the server
     the query is sent to, are all seen."""
-    connection = Visit._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Visit).get_connection()
     await Visit.objects.bulk_create([Visit(id=number, site="a") for number in range(1, 9)])
     await Click.objects.bulk_create([Click(id=number, visit_id=(number % 8) + 1) for number in range(1, 17)])
     shards = await connection.execute_dicts(
@@ -140,7 +141,7 @@ async def test_a_change_of_distributed_rows_reads_only_distributed_tables(clickh
 
 @pytest.mark.asyncio
 async def test_a_replicated_table_is_kept_on_every_server(clickhouse_cluster_db):
-    connection = Site._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Site).get_connection()
     await Site.objects.bulk_create([Site(name="a", owner="ann"), Site(name="b", owner="bob")])
     await Site.objects.filter(name="a").update(owner="amy")
     # A bulk update reads its rows' keys as a subquery of their own values - one a replicated table
@@ -156,7 +157,7 @@ async def test_a_replicated_table_is_kept_on_every_server(clickhouse_cluster_db)
 
 @pytest.mark.asyncio
 async def test_migrations_change_the_schema_on_every_server(clickhouse_cluster_db):
-    connection = Visit._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Visit).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
     distributed = ClickhouseTableOptions(distributed_over="order_local", sharding_key=RawSQLTerm("id"))
@@ -226,7 +227,7 @@ async def test_migrations_change_the_schema_on_every_server(clickhouse_cluster_d
 
 @pytest.mark.asyncio
 async def test_a_table_of_scattered_rows_is_not_remade(clickhouse_cluster_db):
-    connection = Visit._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Visit).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
     state = await apply_operations(
@@ -259,7 +260,7 @@ async def test_a_replicated_table_of_rows_per_shard_is_not_remade(clickhouse_clu
     """A replicated table counted as complete on every server - on a cluster of several shards whose
     replica path names the shard each shard keeps rows of its own, and a remake would copy the rows of
     the one it runs on."""
-    connection = Visit._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Visit).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
     state = await apply_operations(
@@ -297,7 +298,7 @@ async def test_a_table_of_a_replica_path_naming_no_uuid_is_not_remade(clickhouse
     """A remade table is created beside the old one: on a replica path naming no {uuid} it took the old one's
     path - the server refused it, the migration failing halfway - while a path naming {uuid} is the new
     table's own."""
-    connection = Visit._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Visit).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     # A dropped table leaves its Keeper path for a while - each run takes paths of its own.
     run = secrets.token_hex(4)
@@ -352,7 +353,7 @@ async def test_a_table_of_a_replica_path_naming_no_uuid_is_not_remade(clickhouse
 async def test_a_materialized_view_filled_on_a_cluster_reads_distributed_tables(clickhouse_cluster_db):
     """A view's fill runs on the server the connection is to: reading a table keeping rows of each server's own,
     it took the rows of that server alone, with no error."""
-    connection = Visit._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Visit).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     await Visit.objects.bulk_create([Visit(id=number, site="a", duration=number) for number in range(1, 11)])
     state = State()
@@ -405,7 +406,7 @@ async def test_a_materialized_view_filled_on_a_cluster_reads_distributed_tables(
 async def test_a_dictionary_is_named_in_its_database_on_every_server(clickhouse_cluster_db):
     """A bare dictionary name was looked up in the default database of the shards a distributed table's
     query runs on, and of the servers a reload ran on - "Dictionary not found"."""
-    connection = Visit._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Visit).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     await Site.objects.create(name="a", owner="amy")
     await Visit.objects.bulk_create([Visit(id=number, site="a") for number in range(1, 9)])
@@ -415,7 +416,9 @@ async def test_a_dictionary_is_named_in_its_database_on_every_server(clickhouse_
         "LIFETIME(0)"
     )
     try:
-        await editor.dictionaries.reload_dictionary(Site, ClickhouseDictionary("site_owners", ("name",), ("owner",)))
+        await editor.dictionaries.reload_dictionary(
+            clickhouse_cluster_db.apps.get_binding(Site), ClickhouseDictionary("site_owners", ("name",), ("owner",))
+        )
         owners = await Visit.objects.annotate(
             site_owner=DictGet("site_owners", "owner", "site", output_field=fields.CharField(max_length=50))
         ).values_list("site_owner", flat=True)
@@ -426,7 +429,7 @@ async def test_a_dictionary_is_named_in_its_database_on_every_server(clickhouse_
 
 @pytest.mark.asyncio
 async def test_the_journal_of_migrations_is_read_on_every_server(clickhouse_cluster_db):
-    connection = Visit._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Visit).get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     recorder = MigrationRecorder(connection, table_name="hare_cluster_migrations")
     await recorder.ensure_schema(editor)
@@ -453,7 +456,7 @@ async def test_the_journal_of_migrations_is_read_on_every_server(clickhouse_clus
 
 @pytest.mark.asyncio
 async def test_a_replicated_database_replicates_the_schema_itself(clickhouse_cluster_db):
-    connection = Visit._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Visit).get_connection()
     database = f"{connection.database}_replicated"
     await connection.execute_script(
         f'CREATE DATABASE "{database}" ON CLUSTER hare_sharded '
@@ -499,28 +502,84 @@ async def test_drift_reads_a_distributed_and_a_replicated_table(clickhouse_clust
     a ReplicatedMergeTree declared without arguments differed from the ones the server gave it."""
     from hare.migrations.autodetection.migration_autodetector import MigrationAutodetector
     from hare.migrations.drift import detect_drift
+    from hare.migrations.migration import Migration
 
-    connection = Visit._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Visit).get_connection()
     state = MigrationAutodetector(
         clickhouse_cluster_db.apps, {"models": {"models": [], "default_connection": "models"}}
     ).current_state()
 
-    async def get_drift():
-        result = await detect_drift(connection, state, ["models"])
-        return (
-            sorted(f"{type(operation).__name__} {getattr(operation, 'name', '')}" for operation in result.operations),
-            [(mismatch.table, mismatch.column) for mismatch in result.mismatched_columns],
-            result.untracked_tables,
-        )
-
-    assert await get_drift() == ([], [], [])
+    assert not (await detect_drift(connection, state, ["models"])).has_drift
+    await Visit.objects.create(id=1, site="a", duration=11)
+    catalog_query = (
+        "SELECT hostName() AS host, type FROM clusterAllReplicas('hare_sharded', system.columns) "
+        "WHERE database = currentDatabase() AND table = 'visit_local' AND name = 'duration' ORDER BY host"
+    )
     on_cluster = " ON CLUSTER hare_sharded"
     await connection.execute_script(f"ALTER TABLE visit_local{on_cluster} MODIFY COLUMN duration Int64")
     try:
-        assert await get_drift() == (["AlterField duration"], [], [])
+        assert [row["type"] for row in await connection.execute_dicts(catalog_query)] == ["Int64", "Int64"]
+        drift = await detect_drift(connection, state, ["models"])
+        assert drift.has_drift
+        migration = Migration("repair_duration", "models", operations=drift.operations_by_app["models"])
+        migration.atomic = False
+        editor = connection.dialect.schema_editor_class(connection, atomic=False, collect_sql=False)
+        await migration.apply(state, schema_editor=editor)
+        assert [row["type"] for row in await connection.execute_dicts(catalog_query)] == ["Int32", "Int32"]
+        assert await connection.execute_dicts("SELECT id, duration FROM visit") == [{"id": 1, "duration": 11}]
     finally:
         await connection.execute_script(f"ALTER TABLE visit_local{on_cluster} MODIFY COLUMN duration Int32")
-    assert await get_drift() == ([], [], [])
+    assert not (await detect_drift(connection, state, ["models"])).has_drift
+
+
+@pytest.mark.asyncio
+async def test_distributed_column_can_be_made_required_again_after_becoming_nullable(clickhouse_cluster_db):
+    from hare.migrations.execution.migration_runner import MigrationRunner
+    from hare.migrations.migration import Migration
+    from hare.migrations.operations import AlterField
+
+    connection = HareContext.require_current().apps.get_queryset(Visit).get_connection()
+    runner = MigrationRunner(connection)
+    initial = CreateModel(
+        "Order",
+        [("id", fields.BigIntField(primary_key=True, generated=False)), ("total", fields.IntField())],
+        {
+            "table": "audit_order",
+            "table_options": [
+                ClickhouseTableOptions(distributed_over="audit_order_local", sharding_key=RawSQLTerm("id"))
+            ],
+        },
+    )
+    create_order = Migration("create_order", "models", operations=[initial])
+    empty = State()
+    state = await runner.apply(create_order, empty)
+    migration = Migration(
+        "make_total_optional", "models", operations=[AlterField("Order", "total", fields.IntField(null=True))]
+    )
+    catalog = (
+        "SELECT type FROM clusterAllReplicas('hare_sharded', system.columns) "
+        "WHERE database = currentDatabase() AND table IN ('audit_order', 'audit_order_local') AND name = 'total'"
+    )
+    try:
+        await connection.execute_script("INSERT INTO audit_order VALUES (1, 11), (2, 23)")
+        await runner.apply(migration, state)
+        assert [row["type"] for row in await connection.execute_dicts(catalog)] == ["Nullable(Int32)"] * 4
+        await connection.execute_script("INSERT INTO audit_order VALUES (3, NULL)")
+        assert await connection.execute_dicts("SELECT total FROM audit_order WHERE id = 3") == [{"total": None}]
+        with pytest.raises(IntegrityError, match="holds NULL"):
+            await runner.unapply(migration, state)
+        assert [row["type"] for row in await connection.execute_dicts(catalog)] == ["Nullable(Int32)"] * 4
+        await connection.execute_script(
+            "DELETE FROM audit_order_local ON CLUSTER hare_sharded WHERE id = 3 SETTINGS lightweight_deletes_sync = 2"
+        )
+        await runner.unapply(migration, state)
+        assert [row["type"] for row in await connection.execute_dicts(catalog)] == ["Int32"] * 4
+        assert await connection.execute_dicts("SELECT id, total FROM audit_order ORDER BY id") == [
+            {"id": 1, "total": 11},
+            {"id": 2, "total": 23},
+        ]
+    finally:
+        await runner.unapply(create_order, empty)
 
 
 @pytest.mark.asyncio
@@ -571,7 +630,7 @@ async def test_generate_schemas_refuses_a_distributed_table_over_unreplicated_ta
 
 @pytest.mark.asyncio
 async def test_a_script_of_the_user_runs_as_written_and_one_hare_builds_on_every_server(clickhouse_cluster_db):
-    connection = Visit._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Visit).get_connection()
 
     async def get_servers_of_table(table_name):
         rows = await connection.execute_dicts(
@@ -607,7 +666,7 @@ async def test_a_distributed_table_of_another_database_spreads_and_changes_its_r
     from hare import Hare
     from hare.models import Model
 
-    connection = Visit._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Visit).get_connection()
     database = f"{connection.database}_other"
     await connection.execute_script(f'CREATE DATABASE IF NOT EXISTS "{database}" ON CLUSTER hare_sharded')
     registered = []
@@ -628,7 +687,9 @@ async def test_a_distributed_table_of_another_database_spreads_and_changes_its_r
 
         Hare.register_live_models([OtherVisit], app_label="other_models", connection_alias="models")
         registered.append(OtherVisit)
-        await connection.dialect.schema_editor_class(connection).create_model(OtherVisit)
+        await connection.dialect.schema_editor_class(connection).create_model(
+            HareContext.require_current().apps.get_binding(OtherVisit)
+        )
         # A table of the local table's name in the connection's database is no part of it.
         await connection.execute_script(
             'CREATE TABLE "other_visit_local" ON CLUSTER hare_sharded (id Int64) ENGINE = MergeTree ORDER BY id'
@@ -655,7 +716,7 @@ async def test_a_statement_failing_on_one_server_names_the_server_s_error(clickh
     """Over HTTP the server broke its response off after the status of the server that succeeded - the
     error read as an unfinished response, its text lost. The servers of the test cluster replicate one
     shard: the second one adds the column the first one's replication already added."""
-    connection = Site._meta.connection
+    connection = HareContext.require_current().apps.get_queryset(Site).get_connection()
     await connection.execute_script(
         'CREATE TABLE "replicated_twice" ON CLUSTER hare_sharded (id Int64) ENGINE = ReplicatedMergeTree ORDER BY id'
     )

@@ -9,6 +9,12 @@ compares.
 A value is taken as it is at the call: a list or set given to `filter()`, `exclude()` or `Q()` is copied,
 and a dict whole, so changing it before the query runs changes no query — the same for the values of
 `update()`, its lists copied whole too. Subclasses of these containers follow the same snapshot rules.
+The write captures literals inside expressions, including `CASE` branches.
+
+For filter literals wrapped in `Value(...)`, capture happens after unwrapping: mutable
+containers are copied and membership iterables are consumed once when `filter()`, `exclude()`
+or `Q()` is called. Repeating a queryset does not reread the original iterable. This does not
+unwrap `Value(None)` or a `Value` containing an expression, which retain their SQL semantics.
 
 ## <a id="generic-set"></a>The generic set of every ordinary field
 
@@ -503,6 +509,13 @@ a text, otherwise `QueryError` is raised — except
 `null` and no `a` at all; `not_in` drops them). A digit path segment is an object key or an array index;
 as an index it only matches inside an array, never a scalar. A negative index counts from the array's end
 (`{"scores__-1": 30}`, also `F("data__scores__-1")`).
+
+Numeric segments keep their exact spelling as object keys: `"01"`, `"001"` and `"-0"` differ
+from `"1"` and `"0"`. Inside an array they still mean integer indices (`"01"` means `1`,
+`"-0"` means `0`). On SQLite, paths with
+a quote in a label use hare's registered path function, as numeric segments do; key-presence
+lookups remain native SQLite expressions and can be used in `CHECK` constraints. An empty
+`has_keys` list tests the selected node's existence, not the existence of its root document.
 
 `exact`/`not`/`in`/`not_in` on the whole column compare as the database does. PostgreSQL compares `jsonb`
 values, so key order, whitespace and `1` vs `1.0` don't matter. SQLite compares the stored text, so key

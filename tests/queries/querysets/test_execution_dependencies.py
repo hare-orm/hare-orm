@@ -52,15 +52,15 @@ async def test_dependency_values_are_reused_only_inside_the_execution():
         condition.get_plan_description(PlanContext.EMPTY)
 
     async def read_nested():
-        nested = QueryExecution()
+        nested = QueryExecution(None)
         await nested.prepare(declaration)
         return QueryExecution.get_condition(dependency).filters["id"]
 
-    first = QueryExecution()
+    first = QueryExecution(None)
     await first.prepare(declaration)
     assert await first.call(read_nested) == 1
     assert dependency.calls == 1
-    second = QueryExecution()
+    second = QueryExecution(None)
     await second.prepare(declaration)
     assert await second.call(read_nested) == 2
     assert await first.call(read_nested) == 1
@@ -93,7 +93,7 @@ async def test_iterator_holds_inputs_without_leaking_context_and_closes_in_anoth
 
 @pytest.mark.asyncio
 async def test_cancelled_execution_restores_context():
-    execution = QueryExecution()
+    execution = QueryExecution(None)
     started = asyncio.Event()
     blocked = asyncio.Event()
 
@@ -115,16 +115,16 @@ async def test_empty_declaration_does_not_load_dependencies():
     declaration = QuerySet(Tournament)
     declaration._is_none = True
     declaration._execution_dependencies = (dependency,)
-    execution = QueryExecution()
+    execution = QueryExecution(None)
     await execution.prepare(declaration)
     assert dependency.calls == 0
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("empty_first", [True, False])
-async def test_empty_and_nonempty_queries_share_only_loaded_dependency_values(empty_first):
+async def test_empty_and_nonempty_queries_share_only_loaded_dependency_values(db, empty_first):
     dependency = FilterDependency()
-    declaration = QuerySet(Tournament)
+    declaration = Tournament.objects.all()
     declaration._execution_dependencies = (dependency,)
     empty = declaration.none()
     specifications = (empty, declaration) if empty_first else (declaration, empty)
@@ -142,12 +142,14 @@ async def test_nested_execution_loads_a_dependency_skipped_by_an_empty_parent():
     dependency = FilterDependency()
     declaration = QuerySet(Tournament)
     declaration._execution_dependencies = (dependency,)
-    execution = QueryExecution()
-    await execution.prepare(declaration.none())
+    execution = QueryExecution(None)
+    empty = copy(declaration)
+    empty._is_none = True
+    await execution.prepare(empty)
 
     async def read_nested():
         assert QueryExecution.get_condition(dependency).filters == {}
-        nested = QueryExecution()
+        nested = QueryExecution(None)
         await nested.prepare(declaration)
         return await nested.call(read_condition)
 
@@ -165,11 +167,11 @@ async def test_nested_dependency_copy_on_write_does_not_modify_parent():
     first, second = FilterDependency(), FilterDependency()
     declaration = QuerySet(Tournament)
     declaration._execution_dependencies = (first,)
-    parent = QueryExecution()
+    parent = QueryExecution(None)
     await parent.prepare(declaration)
 
     async def nested():
-        child = QueryExecution()
+        child = QueryExecution(None)
         assert child.conditions is parent.conditions
         declaration._execution_dependencies = (second,)
         await child.call(lambda: child.prepare(declaration))
@@ -189,10 +191,10 @@ def test_nested_execution_restores_each_inherited_binding_after_a_callback_error
         RowScopeBinding.current,
     )
     original = tuple(variable.get() for variable in variables)
-    with QueryExecution():
+    with QueryExecution(None):
         inherited = tuple(variable.get() for variable in variables)
         with pytest.raises(ValueError, match="callback failed"):
-            with QueryExecution():
+            with QueryExecution(None):
                 for variable in variables:
                     variable.set(object())
                 raise ValueError("callback failed")

@@ -10,6 +10,7 @@ from hare.sql.order import Order
 
 if TYPE_CHECKING:
     from hare.fields.field import Field
+    from hare.models.model_binding import ModelBinding
     from hare.query.queryset.queryset import QuerySet
 
 
@@ -44,7 +45,8 @@ class DateLists:
         Raises:
             FieldError: See ``dates()``.
         """
-        field = queryset.model._meta.fields_map.get(field_name)
+        model_binding: ModelBinding = queryset._binding  # type: ignore[assignment]
+        field = model_binding.fields_map.get(field_name)
         if field is not None:
             field = GeneratedField.get_effective_field(field)
         if not isinstance(field, field_classes):

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, TypeGuard
+from typing import TYPE_CHECKING, Any
 
 from hare.core.log import logger
 from hare.ddl.raw_sql_term import RawSQLTerm
@@ -8,9 +8,9 @@ from hare.dialects.base.literals.constants import SQL_NULL_BYTE
 from hare.exceptions import ConfigurationError
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.fields.relations.swappable_model_reference import SwappableModelReference
+from hare.migrations.constants import RELATION_FIELDS
 from hare.migrations.exceptions import IncompatibleStateError
 from hare.migrations.operations.constants import (
-    DIRECT_RELATION_FIELDS,
     MISSING_MODEL_MESSAGE,
     UNUSABLE_MODEL_NAME_MESSAGE,
 )
@@ -84,7 +84,7 @@ class HareOperation(Operation):
             The label.
         """
         if isinstance(model_reference, type) and issubclass(model_reference, Model):
-            return f"{model_reference._meta.app or app_label}.{model_reference.__name__}".lower()
+            return f"{model_reference._declaration.app or app_label}.{model_reference.__name__}".lower()
         reference_app_label, _, model_name = str(model_reference).rpartition(".")
         return f"{reference_app_label or app_label}.{model_name}".lower()
 
@@ -104,7 +104,7 @@ class HareOperation(Operation):
         """
         labels = {HareOperation.get_model_label(model_name, app_label) for model_name in model_names}
         for field in fields:
-            if not isinstance(field, DIRECT_RELATION_FIELDS):
+            if not isinstance(field, RELATION_FIELDS):
                 continue
             targets: list[Any] = [field.model_name]
             if isinstance(field, ManyToManyFieldInstance) and field.through_model is not None:
@@ -127,27 +127,6 @@ class HareOperation(Operation):
             await state_editor.schemas.create_schema(schema_name)
         else:
             await state_editor.schemas.drop_schema(schema_name)
-
-    @staticmethod
-    def _runs_enum_types(
-        state_editor: BaseSchemaEditor | None, operation_description: str
-    ) -> TypeGuard[BaseSchemaEditor]:
-        """Whether an ``ENUM`` type operation runs on the migration's database - not without an editor,
-        nor on a database without ``ENUM`` types: a migration file runs on any database, and such a
-        database has no field of one.
-
-        Args:
-            state_editor: The migration's schema editor.
-            operation_description: What the skipped operation does, for the warning.
-        """
-        if not state_editor:
-            return False
-        if not state_editor.client.features.supports_enum_types:
-            logger.warning(
-                "Skipping %s on %s - it has no ENUM types.", operation_description, state_editor.client.dialect
-            )
-            return False
-        return True
 
     @staticmethod
     async def _toggle_extension(extension_name: str, create: bool, state_editor: BaseSchemaEditor | None) -> None:

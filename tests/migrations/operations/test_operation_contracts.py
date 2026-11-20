@@ -131,19 +131,11 @@ def test_an_operation_running_sql_against_any_table_may_touch_any_model(operatio
 @pytest.mark.database_independent
 def test_the_effect_of_an_operation():
     state = get_item_state()
-    assert (
-        PlainOperation()
-        .get_effect(APP_LABEL, state, SQLITE.schema_editor_class(FakeClient("sqlite"), collect_sql=True))
-        .loses_data
-        is False
-    )
-    dropped = DeleteModel("Item").get_effect(
-        APP_LABEL, state, SQLITE.schema_editor_class(FakeClient("sqlite"), collect_sql=True)
-    )
+    editor = SQLITE.schema_editor_class(FakeClient("sqlite"), collect_sql=True)
+    assert PlainOperation().get_effect(APP_LABEL, state, state, editor).loses_data is False
+    dropped = DeleteModel("Item").get_effect(APP_LABEL, state, State(), editor)
     assert (dropped.loses_data, dropped.reason) == (True, "drops the table of Item with its rows")
-    state_only = DeleteModel("Item", state_only=True).get_effect(
-        APP_LABEL, state, SQLITE.schema_editor_class(FakeClient("sqlite"), collect_sql=True)
-    )
+    state_only = DeleteModel("Item", state_only=True).get_effect(APP_LABEL, state, State(), editor)
     assert state_only.loses_data is False
 
 
@@ -192,7 +184,11 @@ async def test_a_safe_not_null_alteration_going_back_makes_the_column_nullable_a
 
     async def alter_field(old_model, new_model, field_name):
         altered.append(
-            (old_model._meta.fields_map[field_name].null, new_model._meta.fields_map[field_name].null, field_name)
+            (
+                old_model.fields_map[field_name].null,
+                new_model.fields_map[field_name].null,
+                field_name,
+            )
         )
 
     # Going back, the state after the operation is left for the one before it.

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -20,9 +20,9 @@ class ConnectionToken:
     _handler: ConnectionHandler
     _alias: str
     _previous: ConnectionToken | None
-    _used: bool = field(default=False)
     #: The client set() put in place for ``_alias``.
-    _new_value: DatabaseClient | None = field(default=None)
+    _new_value: DatabaseClient
+    _used: bool = False
 
     def reset(self) -> None:
         """Restores the connection storage through the handler that issued this token - which

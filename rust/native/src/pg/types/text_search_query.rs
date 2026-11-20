@@ -4,7 +4,6 @@ use crate::pg::decode_context::PgDecodeContext;
 use crate::pg::value::BoxError;
 use crate::pg::wire_reader::PgWireReader;
 use std::fmt::Write as _;
-use tokio_postgres::types::{FromSql, Type};
 
 enum TsQueryNode {
     Operand { lexeme: String, weight: u8, prefix: bool },
@@ -174,21 +173,13 @@ impl PgTsQueryText {
     }
 }
 
-impl<'a> FromSql<'a> for PgTsQueryText {
-    fn from_sql(_ty: &Type, raw: &'a [u8]) -> Result<Self, BoxError> {
-        Self::decode(raw, &mut PgDecodeContext::new(raw.len()))
-    }
-
-    fn accepts(postgres_type: &Type) -> bool {
-        *postgres_type == Type::TSQUERY
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use tokio_postgres::types::{FromSql, Type};
+    fn decode(raw: &[u8]) -> Result<PgTsQueryText, BoxError> {
+        PgTsQueryText::decode(raw, &mut PgDecodeContext::new(raw.len()))
+    }
 
     #[test]
     fn deep_negation_reads_renders_and_drops_without_recursion() {
@@ -198,13 +189,13 @@ mod tests {
             raw.extend_from_slice(&[2, 1]);
         }
         tsquery_operand(&mut raw, "cat", 0, false);
-        let text = PgTsQueryText::from_sql(&Type::TSQUERY, &raw).unwrap().0;
+        let text = decode(&raw).unwrap().0;
         assert_eq!(text, format!("{}'cat'", "!".repeat(depth as usize)));
     }
 
     #[test]
     fn empty_query_rejects_trailing_bytes() {
-        assert!(PgTsQueryText::from_sql(&Type::TSQUERY, &[0, 0, 0, 0, 1]).is_err());
+        assert!(decode(&[0, 0, 0, 0, 1]).is_err());
     }
 
     fn tsquery_operand(out: &mut Vec<u8>, lexeme: &str, weight: u8, prefix: bool) {
@@ -219,7 +210,7 @@ mod tests {
     fn tsquery_decodes_real_captured_wire_bytes_matching_asyncpgs_text_output() {
         // plainto_tsquery('english', 'fat cats') as rust_pg received it.
         let raw = b"\x00\x00\x00\x03\x02\x02\x01\x00\x00cat\x00\x01\x00\x00fat\x00";
-        assert_eq!(PgTsQueryText::from_sql(&Type::TSQUERY, raw).expect("must decode").0, "'fat' & 'cat'");
+        assert_eq!(decode(raw).expect("must decode").0, "'fat' & 'cat'");
     }
 
     #[test]
@@ -232,10 +223,7 @@ mod tests {
         tsquery_operand(&mut raw, "dog", 0, false);
         tsquery_operand(&mut raw, "cat", 0b1100, true);
         tsquery_operand(&mut raw, "fat", 0, false);
-        assert_eq!(
-            PgTsQueryText::from_sql(&Type::TSQUERY, &raw).expect("must decode").0,
-            "'fat' & ( 'cat':*AB | !'dog' )"
-        );
+        assert_eq!(decode(&raw).expect("must decode").0, "'fat' & ( 'cat':*AB | !'dog' )");
 
         // A phrase operator as the right operand of another one keeps its parentheses.
         let mut raw = 5i32.to_be_bytes().to_vec();
@@ -244,21 +232,21 @@ mod tests {
         tsquery_operand(&mut raw, "c", 0, false);
         tsquery_operand(&mut raw, "b", 0, false);
         tsquery_operand(&mut raw, "a", 0, false);
-        assert_eq!(PgTsQueryText::from_sql(&Type::TSQUERY, &raw).expect("must decode").0, "'a' <-> ( 'b' <-> 'c' )");
+        assert_eq!(decode(&raw).expect("must decode").0, "'a' <-> ( 'b' <-> 'c' )");
 
         let mut raw = 3i32.to_be_bytes().to_vec();
         raw.extend_from_slice(&[2, 4, 0, 2]);
         tsquery_operand(&mut raw, "b", 0, false);
         tsquery_operand(&mut raw, "a", 0, false);
-        assert_eq!(PgTsQueryText::from_sql(&Type::TSQUERY, &raw).expect("must decode").0, "'a' <2> 'b'");
+        assert_eq!(decode(&raw).expect("must decode").0, "'a' <2> 'b'");
     }
 
     #[test]
     fn tsquery_escapes_quote_and_backslash_and_decodes_an_empty_query() {
         let mut raw = 1i32.to_be_bytes().to_vec();
         tsquery_operand(&mut raw, "it's\\", 0, false);
-        assert_eq!(PgTsQueryText::from_sql(&Type::TSQUERY, &raw).expect("must decode").0, "'it''s\\\\'");
-        assert_eq!(PgTsQueryText::from_sql(&Type::TSQUERY, &0i32.to_be_bytes()).expect("must decode").0, "");
+        assert_eq!(decode(&raw).expect("must decode").0, "'it''s\\\\'");
+        assert_eq!(decode(&0i32.to_be_bytes()).expect("must decode").0, "");
     }
 
     #[test]
@@ -267,12 +255,12 @@ mod tests {
         let mut raw = 2i32.to_be_bytes().to_vec();
         raw.extend_from_slice(&[2, 2]);
         tsquery_operand(&mut raw, "a", 0, false);
-        assert!(PgTsQueryText::from_sql(&Type::TSQUERY, &raw).is_err());
+        assert!(decode(&raw).is_err());
         // An unterminated lexeme.
         let mut raw = 1i32.to_be_bytes().to_vec();
         raw.extend_from_slice(&[1, 0, 0]);
         raw.extend_from_slice(b"abc");
-        assert!(PgTsQueryText::from_sql(&Type::TSQUERY, &raw).is_err());
-        assert!(PgTsQueryText::from_sql(&Type::TSQUERY, &[0, 0]).is_err());
+        assert!(decode(&raw).is_err());
+        assert!(decode(&[0, 0]).is_err());
     }
 }

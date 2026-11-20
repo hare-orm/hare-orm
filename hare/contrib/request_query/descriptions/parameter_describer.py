@@ -214,15 +214,15 @@ class ParameterDescriber:
             return None
         relation = lookup_info.relations[-1]
         related_model = relation.related_model  # type: ignore[attr-defined]
-        related_meta = related_model._meta
+        related_meta = relation.get_related_binding()  # type: ignore[attr-defined]
         key_fields = related_meta.pk_fields
         compared = lookup_info.field if isinstance(lookup_info.field, tuple) else (lookup_info.field,)
         return RelationDescription(
             path=LOOKUP_SEPARATOR.join(item.model_field_name for item in lookup_info.relations),
             model=related_model,
-            key_fields=tuple(related_meta.primary_key_attribute_names),
+            key_fields=related_meta.primary_key_attribute_names,
             to_many=relation.relation_type in TO_MANY_RELATION_TYPES,
-            compares_key=related_meta.has_primary_key and tuple(compared) == tuple(key_fields),
+            compares_key=related_meta.has_primary_key and tuple(compared) == key_fields,
         )
 
     @staticmethod

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Sequence
 from copy import copy
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hare.ddl.constraints.unique_constraint import UniqueConstraint
 from hare.ddl.indexes.index import Index
@@ -31,9 +32,14 @@ from hare.migrations.operations import (
     RemoveIndex,
     RenameField,
 )
+from hare.migrations.operations.dependencies.relation_dependencies import RelationDependencies
 from hare.migrations.operations.schema_objects.object_types.index_object_type import IndexObjectType
 from hare.migrations.state.model_state import ModelState
 from hare.models.enums import ModelOption
+from hare.query.key_columns import KeyColumns
+
+if TYPE_CHECKING:
+    from hare.migrations.state.state import State
 
 
 class StateModelDiff:
@@ -41,11 +47,17 @@ class StateModelDiff:
     schema objects and fields."""
 
     def __init__(
-        self, old_state: ModelState, new_state: ModelState, rename_questions: RenameQuestions | None = None
+        self,
+        old_state: ModelState,
+        new_state: ModelState,
+        rename_questions: RenameQuestions | None = None,
+        *,
+        schema_states: tuple[State, State] | None = None,
     ) -> None:
         self.old_state = old_state
         self.new_state = new_state
         self.rename_questions = rename_questions or RenameQuestions()
+        self.schema_states = schema_states
         #: Populated by generate_operations() - collects StateFieldDiff.warnings (see its own
         #: docstring) for this one model.
         self.warnings: list[str] = []
@@ -102,7 +114,7 @@ class StateModelDiff:
         return model_state.options
 
     def get_state_before_field_removals(
-        self, field_operations: list[HareOperation]
+        self, field_operations: Sequence[HareOperation]
     ) -> tuple[ModelState, list[HareOperation]]:
         """Detach declared dependencies before dropping columns, using their original selectors.
 
@@ -110,7 +122,23 @@ class StateModelDiff:
         surviving declarations after the fields are added. This also handles renamed objects
         and dependencies expressed in structured conditions or index expressions.
         """
-        removed_names = {operation.name for operation in field_operations if isinstance(operation, RemoveField)}
+        if self.schema_states is None:
+            from hare.migrations.state.migration_environment import MigrationEnvironment
+            from hare.migrations.state.state import State
+
+            source_state = State(
+                models={(self.old_state.app, self.old_state.name): self.old_state}, environment=MigrationEnvironment()
+            )
+        else:
+            source_state = self.schema_states[0]
+        removed_names = {
+            attribute
+            for operation in field_operations
+            if isinstance(operation, RemoveField)
+            for attribute in RelationDependencies.get_field_attribute_names(
+                self.old_state.app, operation.name, self.old_state.fields.get(operation.name), source_state
+            )
+        }
         if not removed_names:
             return self.old_state, []
         state = self.old_state.clone()
@@ -161,8 +189,10 @@ class StateModelDiff:
         return operation
 
     @staticmethod
-    def get_changed_columns(model_state: ModelState, field_operations: list[HareOperation]) -> set[tuple[str, str]]:
-        """The columns of a model's table its field operations change, ``(table, column)`` each.
+    def get_changed_columns(
+        model_state: ModelState, field_operations: list[HareOperation]
+    ) -> set[tuple[str | None, str, str]]:
+        """The columns of a model's table its field operations change, ``(schema, table, column)`` each.
 
         Args:
             model_state: The model's state before the operations.
@@ -171,8 +201,9 @@ class StateModelDiff:
         Returns:
             The columns, by their names before the change.
         """
-        table = model_state.table or model_state.name.lower()
-        changed_columns: set[tuple[str, str]] = set()
+        table = model_state.db_table
+        schema = model_state.options.get(ModelOption.SCHEMA)
+        changed_columns: set[tuple[str | None, str, str]] = set()
         for operation in field_operations:
             if isinstance(operation, RenameField):
                 field_name = operation.old_name
@@ -183,40 +214,41 @@ class StateModelDiff:
             field = model_state.fields.get(field_name)
             column = ModelState.get_field_db_column(field_name, field) if field is not None else None
             if column is not None:
-                changed_columns.add((table, column))
+                changed_columns.add((schema, table, column))
         return changed_columns
 
-    def _pk_rename_operation(self, field_operations: list[HareOperation]) -> RenameField | None:
-        """The ``RenameField`` among ``field_operations`` that explains the primary key's name change -
-        for a composite key, the one component renamed.
+    def check_primary_key_change(self, previous_key: str | tuple[str, ...]) -> None:
+        """Refuse a changed key after all applicable field renames have updated its names."""
+        if self.new_state.options.get(ModelOption.MANAGED) is False or previous_key == self.new_state.pk_field_name:
+            return
+        if self.schema_states is not None:
+            before, after = self.schema_states
+            old_binding = before.apps.get_binding(f"{self.old_state.app}.{self.old_state.name}")
+            new_binding = after.apps.get_binding(f"{self.new_state.app}.{self.new_state.name}")
+            if KeyColumns.get_source_columns(old_binding) == KeyColumns.get_source_columns(new_binding):
+                return
+        old_key, new_key = (
+            repr(key) if key else "no primary key" for key in (previous_key, self.new_state.pk_field_name)
+        )
+        raise ConfigurationError(
+            f"Changing the primary key of model {self.new_state.name} ({old_key} -> {new_key}) "
+            "is not supported by migration autodetection. A rename of a key field is a "
+            f"RenameField(model_name={self.new_state.name!r}, old_name=..., new_name=...) written by "
+            "hand - makemigrations finds a rename only of a field otherwise left as it was; any other "
+            "change needs a hand-written RunSQL migration (drop the old PRIMARY KEY constraint, add "
+            "the new one)."
+        )
 
-        Returns:
-            The operation, None when the change isn't a plain rename.
+    def generate_operations(self, *, check_primary_key: bool = True) -> list[HareOperation]:
+        """Generate operations, deferring the key check only for the project-wide rename preview.
+
+        The generator checks keys after all models' renames have updated incoming relations.
+        Standalone model diffs check their local rename result immediately.
         """
-        old_pk = self.old_state.pk_field_name
-        new_pk = self.new_state.pk_field_name
-        if isinstance(old_pk, tuple) != isinstance(new_pk, tuple):
-            return None
-        if isinstance(old_pk, tuple):
-            if not isinstance(new_pk, tuple) or len(old_pk) != len(new_pk):
-                return None
-            renamed_positions = [
-                (old_name, new_name) for old_name, new_name in zip(old_pk, new_pk, strict=True) if old_name != new_name
-            ]
-            if len(renamed_positions) != 1:
-                return None
-            old_pk, new_pk = renamed_positions[0]
-        for operation in field_operations:
-            if isinstance(operation, RenameField) and operation.old_name == old_pk and operation.new_name == new_pk:
-                return operation
-        return None
-
-    def generate_operations(self) -> list[HareOperation]:
-        """The operations taking the model from its old state to its new one, kept in ``operations``."""
-        self.operations = self._get_operations()
+        self.operations = self._get_operations(check_primary_key=check_primary_key)
         return self.operations
 
-    def _get_operations(self) -> list[HareOperation]:
+    def _get_operations(self, *, check_primary_key: bool) -> list[HareOperation]:
         if self.old_state == self.new_state:
             return []
 
@@ -229,7 +261,9 @@ class StateModelDiff:
                 return []
             return [AlterModelOptions(name=self.new_state.name, options=new_options)]
 
-        field_diff = StateFieldDiff(self.old_state, self.new_state, self.rename_questions)
+        field_diff = StateFieldDiff(
+            self.old_state, self.new_state, self.rename_questions, schema_states=self.schema_states
+        )
         field_operations = field_diff.generate_operations()
         self.field_operations = list(field_operations)
         comparison_state, dependent_removals = self.get_state_before_field_removals(field_operations)
@@ -237,24 +271,8 @@ class StateModelDiff:
         self.warnings.extend(field_diff.warnings)
         self.data_loss_warnings.extend(field_diff.data_loss_warnings)
 
-        if (
-            self.old_state.pk_field_name != self.new_state.pk_field_name
-            and self._pk_rename_operation(field_operations) is None
-        ):
-            # Changing which fields make up the primary key has no operation - rejected. A plain
-            # rename of the key field was handled above.
-            old_key, new_key = (
-                repr(key) if key else "no primary key"
-                for key in (self.old_state.pk_field_name, self.new_state.pk_field_name)
-            )
-            raise ConfigurationError(
-                f"Changing the primary key of model {self.new_state.name} ({old_key} -> {new_key}) "
-                "is not supported by migration autodetection. A rename of a key field is a "
-                f"RenameField(model_name={self.new_state.name!r}, old_name=..., new_name=...) written by "
-                "hand - makemigrations finds a rename only of a field otherwise left as it was; any other "
-                "change needs a hand-written RunSQL migration (drop the old PRIMARY KEY constraint, add "
-                "the new one)."
-            )
+        if check_primary_key:
+            self.check_primary_key_change(self.old_state_after_renames.pk_field_name)
 
         if self.old_state.options.get(ModelOption.PK_WITHOUT_OVERLAPS, False) != self.new_state.options.get(
             ModelOption.PK_WITHOUT_OVERLAPS, False
@@ -278,11 +296,14 @@ class StateModelDiff:
         table_operations: list[HareOperation] = []
         # Migration state leaves the table unresolved ("") for a model without Meta.table - the
         # default name is used.
-        old_table = self.old_state.table or self.old_state.name.lower()
-        new_table = self.new_state.table or self.new_state.name.lower()
-        if old_table != new_table:
-            # A Meta.table change has its own operation - AlterModelOptions touches no database.
-            table_operations.append(AlterModelTable(name=self.new_state.name, table=new_table))
+        old_table = self.old_state.db_table
+        new_table = self.new_state.db_table
+        old_explicit = ModelState.is_table_explicit(self.old_state.options)
+        new_explicit = ModelState.is_table_explicit(self.new_state.options)
+        if (old_table, old_explicit) != (new_table, new_explicit):
+            table_operations.append(
+                AlterModelTable(name=self.new_state.name, table=new_table if new_explicit else None)
+            )
         old_schema = self.old_state.options.get(ModelOption.SCHEMA)
         new_schema = self.new_state.options.get(ModelOption.SCHEMA)
         if old_schema != new_schema:
@@ -333,7 +354,7 @@ class StateModelDiff:
             options_during_field_changes = dict(options_during_field_changes)
             for option in moved_field_options:
                 if option in old_options:
-                    options_during_field_changes[option] = old_options[option]
+                    options_during_field_changes[str(option)] = old_options[option]
                 else:
                     options_during_field_changes.pop(option, None)
         if field_operations and (

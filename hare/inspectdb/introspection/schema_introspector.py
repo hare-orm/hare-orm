@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import keyword
 from collections.abc import Collection, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import sqlparse
 
+from hare.ddl.enums import SchemaPartType
 from hare.fields.db_defaults.now import Now
 from hare.fields.db_defaults.sql_default import SqlDefault
 from hare.inspectdb.constants import (
@@ -14,13 +14,13 @@ from hare.inspectdb.constants import (
     INT_LITERAL_RE,
     QUOTED_STRING_RE,
 )
-from hare.inspectdb.enums import SchemaPartType
 from hare.inspectdb.generation.model_naming import ModelNaming
 from hare.inspectdb.introspection.catalog_sql import CatalogSql
 from hare.inspectdb.introspection.column_info import ColumnInfo
 from hare.inspectdb.introspection.schema_part import SchemaPart
 from hare.inspectdb.introspection.table_info import TableInfo
 from hare.inspectdb.introspection.table_parts import TableParts
+from hare.models.class_building.model_field_collection import ModelFieldCollection
 
 if TYPE_CHECKING:
     from hare.ddl.indexes.index import Index
@@ -204,6 +204,7 @@ class SchemaIntrospector:
             return None
         target_to_local = dict(zip(target_columns, local_columns, strict=True))
         ordered_local_columns = [target_to_local[pk_column] for pk_column in target_pk_columns]
+        reserved_names = ModelFieldCollection.get_reserved_field_names()
         field_name: str | None = None
         for local_column, pk_column in zip(ordered_local_columns, target_pk_columns, strict=True):
             # Assumed: the target's attribute for a key column is its safe identifier.
@@ -212,7 +213,7 @@ class SchemaIntrospector:
             if not local_column.endswith(suffix):
                 return None
             candidate = local_column[: -len(suffix)]
-            if not candidate or not candidate.isidentifier() or keyword.iskeyword(candidate):
+            if candidate != ModelNaming.get_field_name(candidate) or candidate in reserved_names:
                 return None
             if field_name is None:
                 field_name = candidate
@@ -312,19 +313,17 @@ class SchemaIntrospector:
         return set()
 
     @classmethod
-    async def fetch_enum_types(
-        cls, connection: DatabaseClient, default_schema: str
-    ) -> dict[tuple[str | None, str], EnumType]:
-        """Reads the ``ENUM`` types of the database, whatever column is of them - none by default.
+    async def fetch_enum_types(cls, connection: DatabaseClient, schema: str) -> list[EnumType]:
+        """Read the declared ``ENUM`` types of one physical schema, including unused types.
 
         Args:
             connection: The connection.
-            default_schema: The connection's default schema - its types are found without a schema too.
+            schema: The schema to read.
 
         Returns:
-            Each type by its schema and name.
+            The types, with their schema set.
         """
-        return {}
+        return []
 
     @classmethod
     async def fetch_views(cls, connection: DatabaseClient, schema: str) -> list[tuple[str, bool, tuple[str, ...]]]:
@@ -444,9 +443,7 @@ class SchemaIntrospector:
         parts = cls.get_table_parts(snapshot, cls.get_table_infos(snapshot, connection.dialect))
         enum_types = await cls.fetch_enum_types(connection, schema)
         parts.extend(
-            SchemaPart.of(SchemaPartType.ENUM_TYPE, "", name, enum_type)
-            for (type_schema, name), enum_type in enum_types.items()
-            if type_schema in (None, schema)
+            SchemaPart.of(SchemaPartType.ENUM_TYPE, "", enum_type.name, enum_type) for enum_type in enum_types
         )
         parts.extend(await cls.fetch_object_parts(connection, schema, object_names))
         return parts

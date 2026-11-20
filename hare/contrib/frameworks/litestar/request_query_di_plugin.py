@@ -20,6 +20,8 @@ from hare.contrib.request_query.request_query import RequestQuery
 if TYPE_CHECKING:
     from pydantic.fields import FieldInfo
 
+    from hare.core.apps import Apps
+
 
 class RequestQueryDIPlugin(DIPlugin):
     """Lets Litestar build a ``RequestQuery`` subclass as a dependency: each of its parameters is a
@@ -37,11 +39,14 @@ class RequestQueryDIPlugin(DIPlugin):
     otherwise take a request query as a plain pydantic model.
     """
 
+    def __init__(self, *, apps: Apps | None = None) -> None:
+        self.apps = apps
+
     def has_typed_init(self, type_: Any) -> bool:
         return isinstance(type_, type) and issubclass(type_, RequestQuery)
 
     def get_typed_init(self, type_: Any) -> tuple[inspect.Signature, dict[str, Any]]:
-        schema = type_.prepare_parameters()
+        schema = type_.prepare_parameters(apps=self.apps)
         annotations: dict[str, Any] = {}
         parameters = []
         for name, field_info in schema.model_fields.items():
@@ -79,7 +84,7 @@ class RequestQueryDIPlugin(DIPlugin):
             dataclasses.replace(item, description=field_info.description)
             if isinstance(item, ParameterKwarg) and item.description is None
             else item
-            for item in field_info.metadata
+            for item in ParameterAnnotation.get_metadata(field_info.annotation, field_info.metadata)
         ]
         if not any(isinstance(item, ParameterKwarg) for item in metadata):
             parameter_type = PathParameter if ParameterAnnotation.is_in_path(field_info) else QueryParameter

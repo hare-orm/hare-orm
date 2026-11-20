@@ -126,11 +126,12 @@ def temporary_databases():
     context.__aexit__ = AsyncMock()
     context.init = AsyncMock()
     context.generate_schemas = AsyncMock()
+    context._connections = context.connections
     context.connections.close_all = AsyncMock()
     clients = {
         name: SimpleNamespace(
             connection_alias=name,
-            db_create=AsyncMock(),
+            db_create_exclusive=AsyncMock(),
             db_delete=AsyncMock(),
             close=AsyncMock(),
             generate_schema=AsyncMock(),
@@ -147,7 +148,7 @@ async def test_partial_database_creation_releases_only_acquired_resources(tempor
     temporary, clients = temporary_databases
     original = RuntimeError("creation failed")
     release_error = ValueError("release failed")
-    clients["second"].db_create.side_effect = original
+    clients["second"].db_create_exclusive.side_effect = original
     clients["first"].db_delete.side_effect = release_error
     with pytest.raises(ExceptionGroup) as captured:
         async with temporary:
@@ -155,9 +156,31 @@ async def test_partial_database_creation_releases_only_acquired_resources(tempor
     assert captured.value.exceptions == (original, release_error)
     clients["first"].db_delete.assert_awaited_once()
     clients["second"].db_delete.assert_not_awaited()
-    clients["third"].db_create.assert_not_awaited()
+    clients["third"].db_create_exclusive.assert_not_awaited()
     clients["third"].db_delete.assert_not_awaited()
     temporary.context.__aexit__.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_database_creation_waits_to_register_release(temporary_databases):
+    temporary, clients = temporary_databases
+    created, finish = asyncio.Event(), asyncio.Event()
+
+    async def create():
+        created.set()
+        await finish.wait()
+
+    clients["first"].db_create_exclusive.side_effect = create
+    task = asyncio.create_task(temporary.__aenter__())
+    await created.wait()
+    task.cancel()
+    finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    clients["first"].db_delete.assert_awaited_once()
+    clients["second"].db_create_exclusive.assert_not_awaited()
+    clients["second"].db_delete.assert_not_awaited()
 
 
 @pytest.mark.asyncio

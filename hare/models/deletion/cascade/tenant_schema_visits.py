@@ -15,7 +15,7 @@ from hare.query.scopes.row_scope_binding import RowScopeBinding
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.models import Model
+    from hare.models.model_binding import ModelBinding
 
 
 class TenantSchemaVisits:
@@ -23,12 +23,12 @@ class TenantSchemaVisits:
     it runs in - each visited in turn inside its transaction, which then runs in that schema."""
 
     @staticmethod
-    def visits_schemas(model: type[Model], connection: DatabaseClient | None, *, leaves_constrained: bool) -> bool:
+    def visits_schemas(binding: ModelBinding, connection: DatabaseClient | None, *, leaves_constrained: bool) -> bool:
         """Whether a delete or a restore of ``model`` rows on ``connection`` visits the other tenant
         schemas.
 
         Args:
-            model: The model of the root rows.
+            binding: The model of the root rows.
             connection: The connection it runs on.
             leaves_constrained: Whether it is a hard delete leaving the relations the database
                 enforces to it - visiting only for the work the database's own cascade doesn't do.
@@ -42,9 +42,9 @@ class TenantSchemaVisits:
             and connection.is_transaction_client
             and connection.tenant_schema_template is not None
             and (
-                DeletionGraph.has_tenant_schema_work(model)
+                DeletionGraph.has_tenant_schema_work(binding)
                 if leaves_constrained
-                else DeletionGraph.reaches_tenant_schema_models(model)
+                else DeletionGraph.reaches_tenant_schema_models(binding)
             )
         )
 

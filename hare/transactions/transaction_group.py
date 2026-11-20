@@ -7,6 +7,7 @@ from types import TracebackType
 from typing import TYPE_CHECKING
 
 from hare.core.resource_completion import ResourceCompletion
+from hare.transactions.enums import TransactionOutcome
 from hare.transactions.messages import TRANSACTION_GROUP_CLOSE_FAILED
 from hare.transactions.transaction_group_exit import TransactionGroupExit
 from hare.transactions.transactions import Transactions
@@ -30,6 +31,15 @@ class TransactionGroup:
         self.close_task: asyncio.Task[None] | None = None
         self.close_reason: BaseException | None = None
         self.exits: list[TransactionGroupExit] = []
+
+    @property
+    def rolled_back(self) -> bool:
+        """Every requested transaction has a confirmed rollback, with no committed participant."""
+        return (
+            bool(self.exits)
+            and len(self.exits) == len(self.connection_aliases)
+            and all(result.outcome is TransactionOutcome.ROLLED_BACK for result in self.exits)
+        )
 
     async def begin(self) -> None:
         """Opens a transaction on each connection.
@@ -113,4 +123,9 @@ class TransactionGroup:
             failure = error
             raise
         finally:
-            self.exits.append(TransactionGroupExit(connection_alias, reason is None, failure))
+            outcome = (
+                context._context.client.transaction_state.outcome
+                if context._context is not None
+                else TransactionOutcome.UNKNOWN
+            )
+            self.exits.append(TransactionGroupExit(connection_alias, reason is None, failure, outcome))
