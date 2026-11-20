@@ -40,8 +40,11 @@ async def test_generated_enum_checks_reject_nonmembers_on_insert_and_update(
     connection = contract_database.get_connection(CONTRACT_CONNECTION)
     if connection.features.keeps_enum_columns:
         pytest.skip("Native enum columns enforce membership without a CHECK")
-    if not stored and not connection.features.supports_virtual_generated_columns:
-        pytest.skip("Virtual generated columns are not available on this server")
+    if not stored:
+        async with connection.acquire_connection():
+            pass
+        if not connection.features.supports_virtual_generated_columns:
+            pytest.skip("Virtual generated columns are not available on this server")
     is_integer = enum_type is Level
     source_field = (
         fields.IntField(null=nullable, source_field="Source Value")

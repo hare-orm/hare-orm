@@ -89,15 +89,15 @@ class SqliteJsonRenderers(JsonRenderers):
 
     @staticmethod
     def needs_path_function(path: list[str | int]) -> bool:
-        """Numeric segments and quoted labels cannot use SQLite's native path grammar."""
-        return any(JsonFilterParser.is_index_segment(part) or '"' in str(part) for part in path)
+        """Paths that need dynamic indexing or labels the supported SQLite versions cannot quote."""
+        return any(part == "" or JsonFilterParser.is_index_segment(part) or '"' in str(part) for part in path)
 
     @staticmethod
     def get_json_path_function_sql(column_sql: str, path: list[str | int], mode: str, sql_context: SqlContext) -> str:
         """A path walked by hare's function when native JSON path syntax cannot express it.
 
         A digit segment is an object's key or an array's index, whichever the value at that
-        point is. Labels containing a quote also retain their exact spelling.
+        point is. Empty labels and labels containing a quote also retain their exact spelling.
 
         Args:
             column_sql: The JSON column.

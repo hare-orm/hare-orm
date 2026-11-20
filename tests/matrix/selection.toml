@@ -157,10 +157,10 @@
 "tests/cli/migration_round_trips/test_to_field_relations.py" = { requires = [], cells = [] }
 "tests/cli/test_cli.py" = { requires = [], cells = ["clickhouse-driver", "ipython", "yaml"] }
 "tests/cli/test_cli_checkmigrations.py" = { requires = [], cells = [] }
-"tests/cli/test_cli_config_errors.py" = { requires = [], cells = ["pyright"] }
+"tests/cli/test_cli_config_errors.py" = { requires = [], cells = ["ipython", "pyright"] }
 "tests/cli/test_cli_migration_errors.py" = { requires = [], cells = [] }
 "tests/cli/test_cli_migration_scope.py" = { requires = [], cells = [] }
-"tests/cli/test_cli_plugins.py" = { requires = [], cells = [] }
+"tests/cli/test_cli_plugins.py" = { requires = [], cells = ["pyright"] }
 "tests/cli/test_cli_rename_questions.py" = { requires = [], cells = [] }
 "tests/cli/test_cli_squash_round_trips.py" = { requires = [], cells = [] }
 "tests/cli/test_colors.py" = { requires = [], cells = [] }

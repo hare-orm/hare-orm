@@ -37,7 +37,7 @@ class {name}(Model):
 
 
 @pytest.mark.database_independent
-@pytest.mark.parametrize("command", ["heads", "shell"])
+@pytest.mark.parametrize("command", ["heads", pytest.param("shell", marks=pytest.mark.requires("ipython"))])
 def test_hare_orm_from_pyproject_requires_a_configuration_reference(tmp_path, monkeypatch, capsys, command):
     monkeypatch.delenv("HARE_ORM", raising=False)
     (tmp_path / "pyproject.toml").write_text("[tool.hare]\nhare_orm = true\n", encoding="utf-8")

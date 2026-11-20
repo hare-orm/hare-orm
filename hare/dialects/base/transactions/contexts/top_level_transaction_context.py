@@ -36,6 +36,8 @@ class TopLevelTransactionContext(TransactionContext):
             connections = Connections.current()
             self.client.connection_handler = connections
         await self.client._take_transaction_resources()
+        # The first checkout can open the parent and discover version-dependent features.
+        self.client.features = self.client._parent.features
         # Set before BEGIN, so the current task sees the transaction's client from the start.
         application = connections.application
         self.token = connections.set(self.connection_alias, self.client)

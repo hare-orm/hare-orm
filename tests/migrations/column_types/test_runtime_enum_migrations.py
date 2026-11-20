@@ -17,6 +17,7 @@ from hare.ddl.constraints import CheckConstraint
 from hare.declarations.declaration_value_serializer import DeclarationValueSerializer
 from hare.declarations.import_manager import ImportManager
 from hare.declarations.runtime_enums import RuntimeEnums
+from hare.exceptions import UnSupportedError
 from hare.migrations import MigrationRunner
 from hare.migrations.autodetection.operation_generator import OperationGenerator
 from hare.migrations.exceptions import FieldNarrowingDataLossError
@@ -96,29 +97,33 @@ async def test_generated_array_output_narrowing_checks_nested_enum_members(
         connection = context.connections.get_main("main")
         runner = MigrationRunner(connection)
         old_output, new_output = array_field(OriginalSize, old_class), array_field(KeptSize, new_class)
-        state = await runner.apply(
-            Migration(
-                "create_record",
-                "arrays",
-                operations=[
-                    CreateModel(
-                        "Record",
-                        [
-                            ("id", fields.IntField(primary_key=True, generated=False)),
-                            ("input", array_field(OriginalSize, old_class)),
-                            (
-                                "member",
-                                fields.GeneratedField(
-                                    F("input"), old_output, stored=stored, source_field="computed member"
-                                ),
+        creation = Migration(
+            "create_record",
+            "arrays",
+            operations=[
+                CreateModel(
+                    "Record",
+                    [
+                        ("id", fields.IntField(primary_key=True, generated=False)),
+                        ("input", array_field(OriginalSize, old_class)),
+                        (
+                            "member",
+                            fields.GeneratedField(
+                                F("input"), old_output, stored=stored, source_field="computed member"
                             ),
-                        ],
-                        options={"table": "generated_array_members"},
-                    )
-                ],
-            ),
-            State(default_connections={"arrays": "main"}),
+                        ),
+                    ],
+                    options={"table": "generated_array_members"},
+                )
+            ],
         )
+        initial = State(default_connections={"arrays": "main"})
+        if not stored and await DatabaseUnderTest.get_postgresql_server_version() < (18,):
+            # The runner's first checkout discovers the server version before rendering the DDL.
+            with pytest.raises(UnSupportedError, match="only supports STORED generated columns"):
+                await runner.apply(creation, initial)
+            return
+        state = await runner.apply(creation, initial)
         value = [1, 2 if invalid else 1, None]
         if depth == 2:
             value = [value]

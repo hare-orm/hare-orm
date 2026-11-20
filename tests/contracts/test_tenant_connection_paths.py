@@ -153,6 +153,7 @@ async def test_a_selected_tenant_client_keeps_working(tenant_connection):
     connection, _, has_template, _ = tenant_connection
     if not has_template:
         pytest.skip("this control needs a configured tenant schema")
+    await DatabaseUnderTest.skip_if_the_pooler_loses_the_search_path()
     await TenantSchemas.create("alpha", connection.connection_alias)
     with Tenancy.scope("alpha"):
         client = SchemaNote.get_connection()

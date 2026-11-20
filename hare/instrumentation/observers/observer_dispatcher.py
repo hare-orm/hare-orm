@@ -133,6 +133,8 @@ class ObserverDispatcher:
             if error_traceback is not None:
                 error.__traceback__ = error_traceback.tb_next
             self.keep_error(error)
+            # A callback's frame can still reach this frame through f_back on Python 3.12.
+            del observer, result, event, error_traceback
 
     def keep_error(self, error: Exception) -> None:
         """Keeps an observer's exception for ``wait_for_pending()``, dropping the oldest kept one

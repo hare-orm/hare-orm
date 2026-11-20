@@ -193,6 +193,7 @@ async def test_discovery_and_execution_share_a_config_with_one_pass_model_module
 
 
 @pytest.mark.database_independent
+@pytest.mark.requires("pyright")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("composite", [False, True], ids=["scalar", "composite"])
 async def test_stubs_keeps_raw_config_model_generators_through_discovery(tmp_path, monkeypatch, composite):
@@ -223,6 +224,7 @@ async def test_stubs_keeps_raw_config_model_generators_through_discovery(tmp_pat
 
 
 @pytest.mark.database_independent
+@pytest.mark.requires("pyright")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("composite", [False, True], ids=["scalar", "composite"])
 @pytest.mark.parametrize("secondary_exists", [False, True], ids=["missing-alias", "other-rows"])

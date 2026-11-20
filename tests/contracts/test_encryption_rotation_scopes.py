@@ -98,6 +98,7 @@ async def test_rotation_expands_only_its_model_scope_and_restores_it(
 async def test_rotation_on_a_selected_schema_keeps_the_other_tenants_ciphertext():
     if DatabaseUnderTest.get_dialect().name != "postgresql":
         pytest.skip("The scenario creates two PostgreSQL tenant schemas")
+    await DatabaseUnderTest.skip_if_the_pooler_loses_the_search_path()
 
     class Note(Model):
         number = fields.IntField(primary_key=True, generated=False)
