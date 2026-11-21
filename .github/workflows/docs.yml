@@ -46,7 +46,11 @@ jobs:
       - name: Install dependencies
         run: make deps
       - name: Build rust.native for the documentation hooks
-        run: make build_native
+        run: |
+          wheel_directory=$(mktemp -d)
+          poetry run maturin build --release --locked --auditwheel skip --manifest-path rust/native/Cargo.toml \
+            --interpreter "$(poetry env info --executable)" --out "$wheel_directory"
+          poetry run python .github/scripts/extract_native_extensions.py "$wheel_directory"
       - name: Build docs
         run: make _docs
       - uses: actions/configure-pages@v6
